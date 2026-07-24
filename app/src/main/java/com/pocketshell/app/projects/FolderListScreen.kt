@@ -75,6 +75,8 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
+import com.pocketshell.uikit.components.AgentKindBadge
+import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.components.Kebab
@@ -85,9 +87,7 @@ import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
-import com.pocketshell.uikit.components.AgentStateChip
 import com.pocketshell.uikit.components.SpinnerSize
-import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -1624,8 +1624,8 @@ internal fun flatSessionFolderLabel(
  *  - leading: [StatusDot] — green when attached or an agent is live, amber idle.
  *  - title: the session name.
  *  - subtitle: the session's folder label (`bodyMono` muted, via [ListRow]).
- *  - trailing: agent-type [Badge] — purple for Claude/Codex/OpenCode, grey for
- *    Shell.
+ *  - trailing: compact agent-kind monogram — purple for Claude/Codex/OpenCode,
+ *    grey for Shell.
  */
 @Composable
 private fun FlatSessionRow(
@@ -2442,54 +2442,21 @@ private fun WorkspaceSessionWindowRow(
 }
 
 /**
- * Right-aligned agent-type pill on a session row — issue #478. Mockup colours:
- * Codex/Claude/OpenCode = purple (`agentAccent`), Shell = grey/neutral. The
- * short label is just the agent/shell name (no activity word — that lives in
- * the secondary line via [sessionKindLabel]).
+ * Right-aligned compact agent-kind monogram on a session row — issues
+ * #478/#1701. The full label remains its accessibility description.
  */
 @Composable
 private fun AgentTypeBadge(
     session: FolderSessionEntry,
     modifier: Modifier = Modifier,
 ) {
-    AgentTypeBadge(
+    AgentKindBadge(
+        monogram = sessionBadgeMonogram(session),
         label = sessionBadgeLabel(session),
         isAgent = session.agentKind.isAgent(),
         modifier = modifier,
     )
 }
-
-@Composable
-private fun AgentTypeBadge(
-    label: String,
-    isAgent: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val semantic = LocalPocketShellSemantic.current
-    val fg = if (isAgent) semantic.agentAccent else PocketShellColors.TextSecondary
-    val bg = if (isAgent) {
-        semantic.agentAccent.copy(alpha = 0.16f)
-    } else {
-        PocketShellColors.SurfaceElev.copy(alpha = 0.72f)
-    }
-    Box(
-        modifier = modifier
-            .widthIn(max = SessionBadgeMaxWidth)
-            .background(bg, RoundedCornerShape(6.dp))
-            .padding(horizontal = PocketShellDensity.chipPadH, vertical = PocketShellDensity.chipPadV),
-    ) {
-        Text(
-            text = label,
-            color = fg,
-            style = PocketShellType.labelMono,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
-private val SessionBadgeMaxWidth = 84.dp
 
 private val ProfileChipMaxWidth = 70.dp
 

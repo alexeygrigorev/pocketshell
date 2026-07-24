@@ -18,8 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketshell.uikit.components.Badge
-import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.AgentKindBadge
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.model.ConnectionStatus
@@ -100,7 +99,11 @@ internal fun HostDetailProfiledSessionTreeRender() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     ProfileChipMirror(label = "Z.AI")
                     Spacer(modifier = Modifier.width(4.dp))
-                    Badge(label = "Claude", role = BadgeRole.Agent)
+                    AgentKindBadge(
+                        monogram = "CL",
+                        label = "Claude",
+                        isAgent = true,
+                    )
                 }
             },
             onClick = {},
@@ -116,7 +119,13 @@ internal fun HostDetailProfiledSessionTreeRender() {
         ListRow(
             title = "git-default-app",
             leading = { StatusDot(status = ConnectionStatus.Connected) },
-            trailing = { Badge(label = "Claude", role = BadgeRole.Agent) },
+            trailing = {
+                AgentKindBadge(
+                    monogram = "CL",
+                    label = "Claude",
+                    isAgent = true,
+                )
+            },
             onClick = {},
             modifier = Modifier
                 .background(
@@ -145,7 +154,13 @@ internal fun HostDetailMultiWindowAgentTreeRender() {
         ListRow(
             title = "git-pocketshell-c",
             leading = { StatusDot(status = ConnectionStatus.Connected) },
-            trailing = { Badge(label = "Claude", role = BadgeRole.Agent) },
+            trailing = {
+                AgentKindBadge(
+                    monogram = "CL",
+                    label = "Claude",
+                    isAgent = true,
+                )
+            },
             onClick = {},
             modifier = Modifier
                 .background(

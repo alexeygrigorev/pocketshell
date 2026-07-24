@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.unit.dp
@@ -38,9 +39,9 @@ import java.io.FileOutputStream
  * under the real [PocketShellTheme] and captures an authoritative `*-viewport.png`
  * per known state.
  *
- * It asserts, on-device, that:
- *  - Waiting / Working / Idle each render their chip label on the host card, and
- *  - Unknown renders NO chip ("absent, not wrong") — the label is absent.
+ * It asserts, on-device, that Waiting / Working / Idle each render an accessible
+ * compact icon on the host card while the visible text words are gone, and that
+ * Unknown renders NO icon ("absent, not wrong").
  *
  * The captured PNGs let the reviewer compare the on-device chip against the
  * design language (Waiting=amber, Working=accent, Idle=neutral) on the real
@@ -94,17 +95,17 @@ class AgentStateChipHostCardScreenshotTest {
         }
         compose.waitForIdle()
 
-        // On-device chip presence for the three known states.
-        compose.onNodeWithText("Waiting").assertIsDisplayed()
-        compose.onNodeWithText("Working").assertIsDisplayed()
-        compose.onNodeWithText("Idle").assertIsDisplayed()
+        // On-device icon presence for the three known states. The full words
+        // remain accessible descriptions, never width-consuming visible text.
+        compose.onNodeWithContentDescription("Waiting").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Working").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Idle").assertIsDisplayed()
+        compose.onNodeWithText("Waiting").assertDoesNotExist()
+        compose.onNodeWithText("Working").assertDoesNotExist()
+        compose.onNodeWithText("Idle").assertDoesNotExist()
         // "absent, not wrong": the quiet host is rendered but shows NO chip —
-        // each of the three chip labels appears exactly ONCE (one per known
-        // host), so there is no stray fourth chip on the Unknown host.
+        // there is no state description or visible fallback on that card.
         compose.onNodeWithText("quiet-host").assertIsDisplayed()
-        compose.onNodeWithText("Waiting").assertExists()
-        compose.onNodeWithText("Working").assertExists()
-        compose.onNodeWithText("Idle").assertExists()
 
         // Authoritative compose-content capture: the full-device
         // `uiAutomation.takeScreenshot()` does NOT include the compose test-host

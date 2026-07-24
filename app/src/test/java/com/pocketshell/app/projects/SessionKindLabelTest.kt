@@ -118,6 +118,36 @@ class SessionKindLabelTest {
         }
     }
 
+    // --- #1701: rendered badges use compact, distinct monograms while their
+    //     full labels remain available to accessibility semantics. ---
+
+    @Test
+    fun badgeMonogramIsCompactPerAgentGlyph() {
+        assertEquals("CL", sessionBadgeMonogram(entry(SessionAgentKind.Claude)))
+        assertEquals("CX", sessionBadgeMonogram(entry(SessionAgentKind.Codex)))
+        assertEquals("OC", sessionBadgeMonogram(entry(SessionAgentKind.OpenCode)))
+    }
+
+    @Test
+    fun badgeMonogramForShellAndExitedIsSh() {
+        assertEquals("SH", sessionBadgeMonogram(entry(SessionAgentKind.Shell)))
+        assertEquals("SH", sessionBadgeMonogram(entry(SessionAgentKind.Exited)))
+    }
+
+    @Test
+    fun badgeMonogramDistinguishesClaudeFromCodex() {
+        val claude = sessionBadgeMonogram(entry(SessionAgentKind.Claude))
+        val codex = sessionBadgeMonogram(entry(SessionAgentKind.Codex))
+        assertEquals(false, claude == codex)
+    }
+
+    @Test
+    fun badgeMonogramIsShortForEveryKind() {
+        SessionAgentKind.entries.forEach { kind ->
+            assertEquals(true, sessionBadgeMonogram(entry(kind)).length <= 2)
+        }
+    }
+
     // --- #858: the profile chip label compresses the recorded profile to its
     //     distinguishing provider part for the tree chip. ---
 

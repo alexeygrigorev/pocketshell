@@ -236,6 +236,17 @@ internal fun sessionBadgeLabel(session: FolderSessionEntry): String = when (sess
     SessionAgentKind.Unknown -> "Unknown"
 }
 
+internal fun sessionBadgeMonogram(session: FolderSessionEntry): String = when (session.agentKind) {
+    SessionAgentKind.Claude -> "CL"
+    SessionAgentKind.Codex -> "CX"
+    SessionAgentKind.OpenCode -> "OC"
+    SessionAgentKind.Probing -> "…"
+    SessionAgentKind.Exited,
+    SessionAgentKind.Shell,
+    -> "SH"
+    SessionAgentKind.Unknown -> "?"
+}
+
 internal fun sessionKindLabel(session: FolderSessionEntry): String = when (session.agentKind) {
     SessionAgentKind.Claude -> "Claude · ${agentStateLabel(session)}"
     SessionAgentKind.Codex -> "Codex · ${agentStateLabel(session)}"

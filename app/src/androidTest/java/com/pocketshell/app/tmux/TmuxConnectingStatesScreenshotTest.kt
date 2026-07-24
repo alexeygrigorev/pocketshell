@@ -9,6 +9,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -33,6 +36,8 @@ import com.pocketshell.core.connection.sessionSurfaceState
 import com.pocketshell.core.connection.showsCalmFailure
 import com.pocketshell.core.connection.showsCenteredLoader
 import com.pocketshell.core.connection.surfaceOwnsPrimary
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
+import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -91,6 +96,122 @@ class TmuxConnectingStatesScreenshotTest {
         reveal: RevealState,
         status: TmuxSessionViewModel.ConnectionStatus,
     ): SessionSurfaceState = sessionSurfaceState(reveal, connectionPhaseOf(status), sid)
+
+    /**
+     * Issue #1684 / #750 recurrence 5: the primary "Attaching…" indicator must
+     * have one screen-level mount whose bounds do not change as a stale pager
+     * page gives way to the attaching surface.
+     *
+     * This composes both REAL production sites that existed on the reported
+     * path: [TmuxTerminalPager]'s non-target-pane mask and the screen-level
+     * [SwitchingLoadingPlaceholder]. The screen-level mount is intentionally
+     * present for both phases, as required by the fused [SessionSurfaceState]
+     * contract. Before the fix, the pager also mounts another labelled
+     * [SwitchingLoadingPlaceholder] in its shorter, vertically-unbounded page:
+     * two semantic nodes with different bounds expose the same top-to-centre
+     * relocation seen on-device. After the fix the pager is a neutral mask, so
+     * exactly one node remains at identical bounds in both frames.
+     */
+    @Test
+    fun connectingToAttaching_keepsOneStableIndicatorMount_issue1684() {
+        val midAttach = mutableStateOf(false)
+        val stalePane = TmuxPaneState(
+            paneId = "%1684",
+            windowId = "@1684",
+            sessionId = "\$1684",
+            title = "previous-session",
+            terminalState = TerminalSurfaceState(),
+        )
+
+        compose.setContent {
+            val pagerState = rememberPagerState(pageCount = { 1 })
+            val panes = remember { listOf(stalePane) }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(PocketShellColors.Background)
+                    .padding(top = 24.dp)
+                    .testTag(SCREENSHOT_ROOT_TAG),
+            ) {
+                ConsolidatedTopChrome(
+                    sessionName = "git-dap",
+                    onBack = {},
+                    onMore = {},
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                ) {
+                    SessionSurfaceReconnectWrapper(
+                        pullToReconnectActive = true,
+                        isReconnecting = true,
+                        onReconnect = {},
+                        surfaceShowsCenteredLoader = true,
+                        showReconnectButton = false,
+                    ) {
+                        if (!midAttach.value) {
+                            TmuxTerminalPager(
+                                unifiedPanes = panes,
+                                pagerState = pagerState,
+                                sessionName = "git-dap",
+                                terminalKeyboardMode = TerminalKeyboardMode.RawCommand,
+                                engineCommands = emptySet(),
+                                isAgentPane = false,
+                                // Force the real non-target-pane masking branch.
+                                sessionNameForUnifiedPane = { "previous-session" },
+                                onTerminalSizeChanged = { _, _ -> },
+                                onSurfaceError = { _, _ -> },
+                                onRecreateSurface = {},
+                                onUrlTap = {},
+                                onFilePathTap = { _, _ -> },
+                                onEngineCommandTap = {},
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(PocketShellColors.Background),
+                            )
+                        }
+                    }
+                    // The one stable screen-level mount required for both
+                    // Connecting and Attaching.
+                    SwitchingLoadingPlaceholder()
+                }
+            }
+        }
+
+        compose.waitForIdle()
+        val earlyNodes = compose
+            .onAllNodesWithText("Attaching…", useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        captureFullDevice(File(artifactDir(), "issue-1684-early-connect.png"))
+        assertEquals(
+            "early connect must expose exactly one primary Attaching indicator",
+            1,
+            earlyNodes.size,
+        )
+        val earlyBounds = earlyNodes.single().boundsInRoot
+
+        compose.runOnIdle { midAttach.value = true }
+        compose.waitForIdle()
+        val attachNodes = compose
+            .onAllNodesWithText("Attaching…", useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        captureFullDevice(File(artifactDir(), "issue-1684-mid-attach.png"))
+        assertEquals(
+            "mid attach must expose exactly one primary Attaching indicator",
+            1,
+            attachNodes.size,
+        )
+        assertEquals(
+            "Connecting → Attaching must keep the indicator at one stable mount",
+            earlyBounds,
+            attachNodes.single().boundsInRoot,
+        )
+        assertIndeterminateIndicatorCount(1)
+    }
 
     @Test
     fun captureWaitingForPanesConnectingState() {

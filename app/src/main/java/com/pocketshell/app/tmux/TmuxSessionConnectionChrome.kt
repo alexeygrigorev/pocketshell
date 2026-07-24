@@ -777,12 +777,10 @@ internal fun SessionFailureBand(
 }
 
 /**
- * Issue #661: full-surface loading state shown IN PLACE OF the terminal while a
- * cross-session switch attaches the new session. The leaving session's frame is
- * never painted here — the surface is a neutral background with a compact
- * "Attaching…" indicator — so the user never sees the previous session's
- * content for even one frame. The VM ([TmuxSessionViewModel.switchHidesTerminal])
- * reveals the real terminal the instant the new session's panes are seeded.
+ * Issue #661/#1684: the primary full-surface loading overlay while a
+ * cross-session switch attaches the new session. It is mounted exactly once in
+ * the fixed screen-level surface slot; pager pages and swap-latch content use
+ * [SessionSurfaceMaskPlaceholder] and can never relocate this indicator.
  */
 @Composable
 internal fun SwitchingLoadingPlaceholder() {

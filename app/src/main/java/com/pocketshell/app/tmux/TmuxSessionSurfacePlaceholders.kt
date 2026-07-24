@@ -27,6 +27,24 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 
 /**
+ * Issue #1684: an opaque, semantics-free mask for a terminal surface that must
+ * not paint yet (stale non-target pager page, attach hold content, or the
+ * one-frame terminal swap latch).
+ *
+ * This is deliberately NOT loading chrome. The one labelled primary loader is
+ * mounted at the fixed screen-level overlay slot in [TmuxSessionScreen], so a
+ * child measured in pager/scroll geometry cannot relocate that indicator.
+ */
+@Composable
+internal fun SessionSurfaceMaskPlaceholder() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(color = PocketShellColors.Background),
+    )
+}
+
+/**
  * Issue #778: lightweight Conversation-tab placeholder shown when the user has
  * tapped Conversation on a presumed-agent pane (#716) before live agent
  * detection has landed (`detection == null`). It honours the tap — the view

@@ -1187,9 +1187,9 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
         if (surfaceCalmFailure) {
             RevealFailurePlaceholder()
         } else if (terminalHeld) {
-            SwitchingLoadingPlaceholder()
+            SessionSurfaceMaskPlaceholder()
         } else if (deferTerminalAttachForSwap) {
-            SwitchingLoadingPlaceholder()
+            SessionSurfaceMaskPlaceholder()
         } else if (showConversation &&
             visibleConversation != null &&
             visibleConversation.events.isEmpty() &&
@@ -1301,7 +1301,7 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
                 },
             )
         } else if (unifiedPanes.isEmpty()) {
-            EmptyPanesPlaceholder()
+            SessionSurfaceMaskPlaceholder()
         }
 
         val activeTuiCommandNotice = tuiCommandNotice
@@ -1339,6 +1339,19 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
             showReconnectButton = surfaceReconnectButtonVisible(surfaceState),
             content = surfaceContent,
         )
+        // Issue #1684 / #750 recurrence 5: the primary loading indicator has
+        // exactly ONE fixed screen-level mount, outside the reconnect wrapper's
+        // vertically-unbounded scroll geometry. Connecting, Attaching and
+        // Reattaching therefore keep identical bounds instead of moving from a
+        // short pager page near the toolbar to the full-surface center. The
+        // content branches above and TmuxTerminalPager paint neutral masks only.
+        if (surfaceCenteredLoader) {
+            if (terminalHeld) {
+                SwitchingLoadingPlaceholder()
+            } else {
+                EmptyPanesPlaceholder()
+            }
+        }
     }
 
     // Assistant review sits above the input band.

@@ -136,13 +136,17 @@ internal fun TmuxTerminalPager(
         // non-target session must never paint its terminal surface OR
         // its `SessionBoundaryDivider` (the stray mid-pane label bearing
         // the leaving session's name was the maintainer's
-        // wrong-session-on-switch symptom). Render the loading
-        // placeholder for a non-target pane instead, so a late frame
-        // from the previous session can never bleed into the shown pane.
+        // wrong-session-on-switch symptom). Render a NEUTRAL mask for a
+        // non-target pane instead, so a late frame from the previous session
+        // can never bleed into the shown pane. Issue #1684: this page must not
+        // mount the primary "Attaching…" indicator — the single fixed
+        // screen-level overlay owns that connection chrome. A labelled loader
+        // here was measured inside the pager's shorter/unbounded geometry and
+        // jumped to the screen centre when the surface hold took over.
         val paneIsForTarget = paneSession == null ||
             paneSession == sessionName
         if (!paneIsForTarget) {
-            SwitchingLoadingPlaceholder()
+            SessionSurfaceMaskPlaceholder()
             return@HorizontalPager
         }
         val prevSession = unifiedPanes.getOrNull(pageIndex - 1)

@@ -27,6 +27,7 @@ import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.composer.LocalAttachmentSidecarRef
 import com.pocketshell.app.composer.PromptAttachmentStager
+import com.pocketshell.app.composer.retainedRemoteAttachmentNames
 import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.networkDiagnosticFields
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -9063,6 +9064,8 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionName: String,
         client: TmuxClient,
         session: SshSession? = null,
+        tmuxSessionId: String? = null,
+        sessionCreated: Long? = null,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -9074,24 +9077,12 @@ public class TmuxSessionViewModel @Inject constructor(
             passphrase = null,
             sessionName = sessionName,
             startDirectory = null,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = sessionCreated,
         )
-        // Issue #1085 (F2) test isolation: tear the OLD connection down
-        // SYNCHRONOUSLY for this test seam. `closeCurrentConnection`'s
-        // production caller (`onCleared`) defers the slow detach/close off the
-        // Main thread (the F2 fix), but callers of this synchronous seam assert
-        // the replaced client is closed the instant the seam returns (e.g.
-        // `replacingClientClosesOldClientAndUpdatesRegistry` checks
-        // `oldClient.closed`). `deferTeardown = false` runs the same teardown
-        // body inline so the seam keeps its synchronous contract — independent
-        // of whichever teardown scope a test injected.
+        // #1085: this synchronous test seam must close the replaced client before returning.
         closeCurrentConnection(deferTeardown = false)
-        // Issue #178: tests for the same-host fast-switch path need a
-        // way to inject a live `SshSession` into the VM so a follow-up
-        // `connect()` to the same host re-uses it instead of going
-        // through the SSH-handshake path (which requires a real
-        // network). Production callers go through `runConnect` /
-        // `runFastSessionSwitch` — those wire the session ref
-        // themselves.
+        // #178: inject a live session so same-host switch tests reuse it without a handshake.
         if (session != null) {
             sessionRef = session
         }
@@ -13517,6 +13508,9 @@ public class TmuxSessionViewModel @Inject constructor(
             null -> "tmux-session"
             else -> "host-${originTarget.hostId}-${originTarget.sessionName}"
         }
+        val queueSessionKey = originTarget?.let {
+            tmuxTargetSessionId(it.hostId, it.sessionName, it.tmuxSessionId, it.sessionCreated).value
+        }
         // Issue #451: the system file picker backgrounds the app while the
         // user selects a file. Attach now behaves like Send: on a
         // not-currently-live session it lazily connects-then-uploads instead
@@ -13554,18 +13548,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 ),
             )
         }
-        // Issue #1072: OWN the upload as a [viewModelScope] job so a connection
-        // teardown ([closeCurrentConnectionAndJoin]) can cancel-and-join it BEFORE
-        // it drops the transport, instead of leaving a free-floating writer blocked
-        // on the dying `-CC` session that races teardown and wedges reconnect. We
-        // run it in viewModelScope (a SupervisorJob) rather than the caller's
-        // screen scope so a screen recomposition does not abandon the upload, and
-        // the VM stays the single owner that the reconnect ladder coordinates with.
+        // #1072: the VM owns the upload so teardown can cancel-and-join it
+        // before dropping the transport; screen recomposition cannot orphan it.
         val stager = PromptAttachmentStager(
             resolver = context.contentResolver,
             cacheDir = context.cacheDir,
         )
-        val uploadDeferred = viewModelScope.async { stager.stage(session, scopeKey, uris) }
+        val uploadDeferred = viewModelScope.async {
+            stager.stage(session, scopeKey, uris) { remoteDir ->
+                outboundQueueStore.retainedRemoteAttachmentNames(queueSessionKey, remoteDir)
+            }
+        }
         attachmentUploadJob = uploadDeferred
         val result = try {
             uploadDeferred.await()

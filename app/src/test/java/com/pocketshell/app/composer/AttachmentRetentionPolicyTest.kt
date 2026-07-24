@@ -67,6 +67,42 @@ class AttachmentRetentionPolicyTest {
     }
 
     @Test
+    fun retainedNameSurvivesIndependentTtlDeletionWhileUnreferencedPeerIsDeleted() {
+        val now = 10_000_000_000L
+        val plan = AttachmentRetentionPolicy().plan(
+            entries = listOf(
+                file("referenced.txt", now - days(8)),
+                file("unreferenced.txt", now - days(8)),
+            ),
+            nowMillis = now,
+            retainedNames = setOf("referenced.txt"),
+        )
+
+        assertEquals(listOf("unreferenced.txt"), plan.delete.map { it.name })
+    }
+
+    @Test
+    fun retainedNameSurvivesNewestCapWhileUnreferencedPeerIsDeleted() {
+        val now = 10_000_000_000L
+        val policy = AttachmentRetentionPolicy(
+            ttlMillis = days(7),
+            keepNewest = 1,
+            protectNewestMillis = days(1),
+        )
+        val plan = policy.plan(
+            entries = listOf(
+                file("fresh.txt", now - hours(1)),
+                file("referenced.txt", now - days(2)),
+                file("unreferenced.txt", now - days(2)),
+            ),
+            nowMillis = now,
+            retainedNames = setOf("referenced.txt"),
+        )
+
+        assertEquals(listOf("unreferenced.txt"), plan.delete.map { it.name })
+    }
+
+    @Test
     fun entriesWithoutMtimeAndNonFilesAreNeverDeleted() {
         val now = 10_000_000_000L
         val plan = AttachmentRetentionPolicy().plan(

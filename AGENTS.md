@@ -120,6 +120,11 @@ found` until these explicit paths have been tried:
 - SDK root from `local.properties`: `/home/alexey/Android/Sdk`
 - Available local AVD: `test`
 
+The canonical `scripts/full-jvm-gate.sh` does not depend on ignored
+`local.properties`. It validates `ANDROID_HOME` and/or `ANDROID_SDK_ROOT` (both
+must resolve to the same complete SDK), then checks the standard Linux local and
+hosted-runner locations documented in `process.md`.
+
 Before claiming a mobile flow cannot be checked, run:
 
 ```bash
@@ -390,7 +395,7 @@ are looking at before proposing a fix:
   **#882 miss (2026-06-21):** a recording-timer `while(recording){delay(50)}`
   coroutine left active spun `advanceUntilIdle` forever under `runTest` virtual
   time → the CI Unit job (`./gradlew test --no-daemon`, whole suite, 35-min cap;
-  local repros use `scripts/cgroup-run.sh -- ./gradlew test --no-daemon`)
+  canonical forced local repros use `scripts/full-jvm-gate.sh`)
   hit its timeout and `main` went red, but every gate ran the filtered subset and
   never saw it. Mandatory especially when a change adds a coroutine loop / ticker /
   new `runTest` test. A CI job that ends with "timed out after N minutes" + all

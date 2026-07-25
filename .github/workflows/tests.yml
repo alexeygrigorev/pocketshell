@@ -248,6 +248,18 @@ jobs:
           scripts/check-release-emulator-memory-budget.sh --self-test
           scripts/check-release-emulator-memory-budget.sh
 
+      # Issue #1761: the local forced full-JVM gate hit Kotlin compiler OOM when
+      # Worker API sessions overlapped inside the 8 GiB scope. Keep its complete
+      # `test --rerun-tasks` graph on the proven single-worker / split-heap
+      # profile, and reject missing, duplicated, or conflicting resource flags.
+      # The 119-check direct / 118-check authenticated nested fake matrix also
+      # proves local/GitHub Android SDK discovery, fail-closed invalid roots,
+      # and stripping of hosted toolchain/profile variables before the guard.
+      - name: Forced full-JVM resource-profile guard (issue #1761)
+        run: |
+          scripts/full-jvm-gate.sh --profile-guard-self-test
+          scripts/full-jvm-gate.sh --profile-guard-check
+
       # Issue #1646: the executed-test-count guard's OWN red->green self-test.
       # Proves — with synthetic result XML + synthetic Gradle console output, no
       # Gradle, no Android SDK, no emulator — that the guard FAILS a vacuous run

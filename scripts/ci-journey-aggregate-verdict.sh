@@ -3,14 +3,11 @@
 # overall verdict so `main`'s emulator-level health is readable at a glance and
 # an all-infra flake run does NOT fire a false red-CI email.
 #
-# Background: the heavy `Emulator journey subset` job on `main` flakes constantly
-# from host-CPU starvation on 2–4 vCPU hosted runners. The per-shard classify
-# step already annotates a console-storm shard as `EMULATOR INFRA UNAVAILABLE`,
-# but before this each storm-classified shard STILL exited 1 (red) with no
-# rollup — three independent red checks with no aggregated verdict, so the
-# maintainer could not read main's health and got red-CI email spam. This helper
-# is the aggregation: it reads the one-word verdict token each shard now writes
-# and emits the single overall verdict.
+# Background: per-shard infra aborts used to exit 1 (red) with no rollup —
+# three independent red checks with no aggregated verdict, so the maintainer
+# could not read main's health and got red-CI email spam. This helper is the
+# aggregation: it reads the one-word verdict token each shard now writes and
+# emits the single overall verdict.
 #
 # Usage:
 #   ci-journey-aggregate-verdict.sh [VERDICT_DIR]
@@ -27,15 +24,15 @@
 #
 # Verdict / exit code:
 #   CLEAN   every shard reported CLEAN (and none are missing). exit 0.
-#   RED     at least one shard reported RED (a genuine HEALTHY-console journey
-#           failure, or the #835 budget-timeout hard-red), OR a present token
-#           file held an unrecognised value (fail-closed — corruption must not
-#           silently pass). exit 1 — the run goes red.
+#   RED     at least one shard reported RED (a genuine journey failure, or the
+#           #835 budget-timeout hard-red), OR a present token file held an
+#           unrecognised value (fail-closed — corruption must not silently
+#           pass). exit 1 — the run goes red.
 #   RE-RUN  no RED shard, but at least one INFRA shard and/or a missing shard:
-#           every failing/absent shard was environmental (console storm / #470
-#           cancel / #771 never-booted / not reported). A re-run signal, NOT a
-#           product regression, so it exits 0 (neutral) with a ::warning — no
-#           false red-CI email.
+#           every failing/absent shard was environmental (#470 cancel / #771
+#           never-booted / retry budget denied / not reported). A re-run signal,
+#           NOT a product regression, so it exits 0 (neutral) with a ::warning —
+#           no false red-CI email.
 #
 # The verdict is printed as `AGGREGATE_VERDICT=<verdict>` and appended to
 # $GITHUB_STEP_SUMMARY when that env var is set, so the rollup is readable in the
@@ -119,7 +116,7 @@ fi
 
 # No RED; some shard was environmental (INFRA) or did not report (MISSING).
 if (( have_infra > 0 || missing > 0 )); then
-  echo "::warning title=Emulator journey verdict — RE-RUN (environmental)::No genuine journey failure, but ${have_infra} shard(s) hit an environmental infra abort (console storm / #470 cancel / #771 never-booted) and ${missing} shard(s) did not report. This is a re-run signal, NOT a product regression — the run stays green so main-health is readable and no false red-CI email fires. Re-run the emulator-journey job."
+  echo "::warning title=Emulator journey verdict — RE-RUN (environmental)::No genuine journey failure, but ${have_infra} shard(s) hit an environmental infra abort (#470 cancel / #771 never-booted / retry budget denied) and ${missing} shard(s) did not report. This is a re-run signal, NOT a product regression — the run stays green so main-health is readable and no false red-CI email fires. Re-run the emulator-journey job."
   emit_summary "RE-RUN" "${have_infra} infra shard(s) + ${missing} missing shard(s), no genuine failure — re-run"
   echo "AGGREGATE_VERDICT=RE-RUN"
   exit 0

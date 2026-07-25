@@ -63,8 +63,8 @@ run_agg "$d" 3
   || { printf '%s\n' "$AGG_OUT"; fail "(a) all-green expected CLEAN/exit0, got $AGG_VERDICT/exit$AGG_RC"; }
 pass "(a) all shards CLEAN -> CLEAN (green, exit 0)"
 
-# (b) all-infra-storm -> RE-RUN (exit 0, NOT red). This is the #1458 core: a
-#     console-storm run must NOT fire a false red-CI email.
+# (b) all-infra -> RE-RUN (exit 0, NOT red). Environmental aborts must not fire
+#     a false red-CI email when no shard carries genuine RED evidence.
 d="$(make_dir all-infra)"
 write_shard "$d" 0 INFRA; write_shard "$d" 1 INFRA; write_shard "$d" 2 INFRA
 run_agg "$d" 3
@@ -74,7 +74,7 @@ grep -q '::warning' <<<"$AGG_OUT" \
   || fail "(b) an all-infra RE-RUN must emit a ::warning (re-run signal), not silence"
 grep -q '::error' <<<"$AGG_OUT" \
   && fail "(b) an all-infra RE-RUN must NOT emit a ::error (that would fire a false red-CI email)"
-pass "(b) all shards INFRA-storm -> RE-RUN (neutral green, exit 0, no false red)"
+pass "(b) all shards INFRA -> RE-RUN (neutral green, exit 0, no false red)"
 
 # (c) one real journey failure + infra elsewhere -> RED (exit 1). The
 #     load-bearing property: a genuine regression is NEVER masked by infra.

@@ -137,7 +137,7 @@ upload_line="$(grep -n 'name: Upload shard verdict token' "$WORKFLOW" | cut -d: 
 pass "denied path skips retry, then reaches classifier and shard-token upload"
 
 # The new INFRA path must not soften the two pre-existing hard-red meanings:
-# a healthy-console genuine first failure and a #835 suite-budget timeout.
+# a genuine first failure and a #835 suite-budget timeout.
 # shellcheck disable=SC2016 # Literal workflow shell expressions, not test vars.
 first_failure_line="$(grep -Fn 'if [[ "${first_failure:-false}" == "true" ]]' "$WORKFLOW" | cut -d: -f1)"
 # shellcheck disable=SC2016

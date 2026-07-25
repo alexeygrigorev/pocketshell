@@ -194,7 +194,7 @@ jobs:
       # aggregate verdict (scripts/ci-journey-aggregate-verdict.sh) + the
       # per-shard token-writing / aggregation wiring in tests.yml. Proves the
       # load-bearing property WITHOUT an emulator: all-green -> CLEAN,
-      # all-infra-storm -> RE-RUN (neutral, no false red email), and a genuine
+      # all-infra -> RE-RUN (neutral, no false red email), and a genuine
       # journey failure -> RED (never masked). Cheap (< 5 s), no emulator.
       - name: CI journey aggregate-verdict guard (issue #1458)
         run: |
@@ -938,10 +938,9 @@ jobs:
           force-avd-creation: true
           disable-animations: true
           # Issue #1458: `-memory 6144` raises the guest RAM from the pixel_7 AVD
-          # hwconfig default (2048 MB) to 6 GB so the swiftshader render pipeline
-          # + Gradle connected-test + 3 Docker fixtures stop starving the guest
-          # (the `Failed to start Emulator console` storm signature). ubuntu-latest
-          # gives ~16 GB host RAM, so 6 GB guest leaves comfortable host headroom.
+          # hwconfig default (2048 MB) to 6 GB, leaving the render pipeline and
+          # connected journeys enough guest headroom while Docker fixtures run.
+          # ubuntu-latest gives ~16 GB host RAM, so 6 GB leaves host headroom.
           emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
           emulator-boot-timeout: 900
           script: scripts/ci-journey-suite.sh
@@ -1062,10 +1061,9 @@ jobs:
           force-avd-creation: true
           disable-animations: true
           # Issue #1458: `-memory 6144` raises the guest RAM from the pixel_7 AVD
-          # hwconfig default (2048 MB) to 6 GB so the swiftshader render pipeline
-          # + Gradle connected-test + 3 Docker fixtures stop starving the guest
-          # (the `Failed to start Emulator console` storm signature). ubuntu-latest
-          # gives ~16 GB host RAM, so 6 GB guest leaves comfortable host headroom.
+          # hwconfig default (2048 MB) to 6 GB, leaving the render pipeline and
+          # connected journeys enough guest headroom while Docker fixtures run.
+          # ubuntu-latest gives ~16 GB host RAM, so 6 GB leaves host headroom.
           emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
           emulator-boot-timeout: 900
           script: scripts/ci-journey-suite.sh
@@ -1100,9 +1098,9 @@ jobs:
       # Genuine journey failures still keep the job RED (exit 1), so a real test
       # regression cannot hide behind an "infra" message.
       # Issue #1458 (AGGREGATION): this per-shard classify step is now
-      # `continue-on-error` so a single shard's infra abort (console storm / #470
-      # cancel / #771 never-booted) can NEVER fail the whole `Tests` workflow on
-      # its own and fire a false red-CI email. Instead, EVERY branch below writes
+      # `continue-on-error` so a single shard's infra abort (#470 cancel / #771
+      # never-booted) can NEVER fail the whole `Tests` workflow on its own and
+      # fire a false red-CI email. Instead, EVERY branch below writes
       # a one-word per-shard VERDICT TOKEN (CLEAN | INFRA | RED) to
       # artifacts/ci-journey/shard-verdict.txt, which is uploaded per shard and
       # rolled up by the downstream `emulator-journey-verdict` aggregation job
@@ -1110,9 +1108,9 @@ jobs:
       # ::warning annotations + red step marker are PRESERVED for forensics; the
       # exit codes below are UNCHANGED (genuine failures still exit 1 at the step
       # level, visible in the log), but the AGGREGATION job — not this step — is
-      # what turns the run red. RED (a HEALTHY-console genuine journey failure or
-      # the #835 budget timeout) still produces an aggregate RED, so a real
-      # regression is never masked.
+      # what turns the run red. RED (a genuine journey failure or the #835 budget
+      # timeout) still produces an aggregate RED, so a real regression is never
+      # masked.
       - name: Classify emulator-journey result (infra-abort vs test-failure)
         if: always()
         continue-on-error: true
@@ -1129,32 +1127,12 @@ jobs:
           retry_required_ms="${{ steps.journey_retry_budget.outputs.retry_required_ms }}"
           summary="artifacts/ci-journey/summary.md"
           # Issue #1458: record this shard's verdict token for the aggregation
-          # job. CLEAN = passed; INFRA = environmental (storm / #470 cancel /
-          # #771 never-booted) re-run signal; RED = genuine journey failure or
-          # #835 budget timeout. Written in EVERY branch before its exit.
+          # job. CLEAN = passed; INFRA = environmental (#470 cancel / #771
+          # never-booted) re-run signal; RED = genuine journey failure or #835
+          # budget timeout. Written in EVERY branch before its exit.
           verdict_file="artifacts/ci-journey/shard-verdict.txt"
           mkdir -p "$(dirname "$verdict_file")"
           write_verdict() { printf '%s\n' "$1" > "$verdict_file"; echo "SHARD_VERDICT=$1 (shard ${{ matrix.shard }})"; }
-          # Issue #1458: count the `Failed to start Emulator console` storm from
-          # the durable journey-console capture (teed by run_bounded). On a
-          # CPU/RAM-starved swiftshader AVD this ddmlib line repeats ~100×/shard
-          # and is the signature of a DEGRADED emulator, NOT a product defect. A
-          # storm makes the whole run's JOURNEY_FAILED verdict untrustworthy, so
-          # it is routed to an INFRA-ABORT (re-run) BELOW — but ONLY where a
-          # genuine test-failure would otherwise be reported. A HEALTHY-console
-          # JOURNEY_FAILED (low/zero count) STAYS a genuine red: masking a real
-          # regression behind "infra" is the #657/#844 flake-masks-real trap, the
-          # exact inverse of what this guard exists to prevent. The #835 timeout
-          # and #771 never-booted branches are intentionally NOT gated by the
-          # storm — their behavior is unchanged.
-          console_log="artifacts/ci-journey/journey-console.log"
-          console_storm_threshold=25
-          console_storm_count=0
-          if [[ -f "$console_log" ]]; then
-            console_storm_count="$(grep -c 'Failed to start Emulator console' "$console_log" 2>/dev/null || true)"
-          fi
-          [[ "$console_storm_count" =~ ^[0-9]+$ ]] || console_storm_count=0
-          echo "console-storm 'Failed to start Emulator console' count: $console_storm_count (INFRA-ABORT threshold: >= $console_storm_threshold)"
           echo "first attempt outcome:  $first"
           echo "retry attempt outcome:  ${retry:-<skipped>}"
           echo "first attempt conclusion:  $first_concl"
@@ -1175,11 +1153,6 @@ jobs:
             exit 0
           fi
           if [[ "${first_failure:-false}" == "true" ]]; then
-            if (( console_storm_count >= console_storm_threshold )); then
-              echo "::error title=EMULATOR INFRA UNAVAILABLE / degraded — console storm (${console_storm_count}× 'Failed to start Emulator console')::The first cold boot wrote a JOURNEY_FAILED summary, but the emulator console failed to start ${console_storm_count} times (>= ${console_storm_threshold}) — the signature of a CPU/RAM-starved swiftshader AVD (issue #1458). A JOURNEY_FAILED read off a DEGRADED emulator is NOT a trustworthy product verdict, so this is an infra abort (a re-run signal, same class as the never-booted #771 branch), NOT a genuine regression. A real regression on a HEALTHY console shows a low console-storm count and stays red."
-              write_verdict INFRA
-              exit 1
-            fi
             echo "::error title=Emulator journey FAILED — first attempt genuine failure::The first cold boot wrote a JOURNEY_FAILED / Failed BOTH attempts summary, and the retry did not pass cleanly. Refusing to downgrade this run to advisory timeout even if the retry overwrote summary.md with a timeout-only artifact."
             write_verdict RED
             exit 1
@@ -1195,8 +1168,8 @@ jobs:
           # absolute job wall for a complete retry. Do not start a cold boot that
           # GitHub will cancel at 95m; emit typed INFRA evidence now so classifier,
           # logs, shard-token upload, and teardown can reach terminal completion.
-          # Healthy-console first_failure and #835 first_timeout branches above
-          # retain their existing RED semantics.
+          # Genuine first_failure and #835 first_timeout branches above retain
+          # their existing RED semantics.
           if [[ "${retry_allowed:-false}" != "true" ]]; then
             echo "::warning title=Emulator journey retry skipped — insufficient remaining job wall::The first attempt did not produce a clean verdict, but a complete fresh-cold-boot retry no longer fits before the absolute 95-minute job deadline (reason=${retry_reason:-missing_decision}, remaining=${retry_remaining_ms:-0}ms, required=${retry_required_ms:-5400000}ms). The retry was not started; this shard is typed INFRA so aggregation requests RE-RUN, while classifier and artifacts retain time to finish (issue #1458)."
             write_verdict INFRA
@@ -1213,17 +1186,6 @@ jobs:
           fi
           # Both attempts failed — classify from the suite's own summary artifact.
           if [[ -f "$summary" ]] && grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$summary"; then
-            # Issue #1458: before reading this as a genuine regression, gate on the
-            # console storm. If the emulator was storming (>= threshold), the
-            # JOURNEY_FAILED was produced on a DEGRADED emulator and is an infra
-            # abort (re-run), NOT a product verdict. A HEALTHY-console
-            # JOURNEY_FAILED (count below threshold) falls through to the genuine
-            # test-failure verdict below — a real regression is NEVER swallowed.
-            if (( console_storm_count >= console_storm_threshold )); then
-              echo "::error title=EMULATOR INFRA UNAVAILABLE / degraded — console storm (${console_storm_count}× 'Failed to start Emulator console')::A load-bearing journey class failed on both cold-boot attempts, but the emulator console failed to start ${console_storm_count} times (>= ${console_storm_threshold}) — the signature of a CPU/RAM-starved swiftshader AVD (issue #1458). A both-attempts JOURNEY_FAILED read off a DEGRADED emulator is NOT a trustworthy product verdict; this is an infra abort (a re-run signal, same class as the never-booted #771 branch), NOT a genuine test regression. A real regression on a HEALTHY console shows a low console-storm count and stays red."
-              write_verdict INFRA
-              exit 1
-            fi
             # The emulator booted and the suite ran to a verdict: a journey class
             # failed twice. This is a GENUINE test failure (app-code regression),
             # NOT the #771 emulator-infra abort.
@@ -1331,17 +1293,15 @@ jobs:
   # into ONE overall verdict so `main`'s emulator-level health is readable at a
   # glance and an all-infra flake run does NOT fire a false red-CI email.
   #
-  # The research spike on #1458 found the heavy journey job flakes constantly
-  # from host-CPU starvation on 2–4 vCPU hosted runners: each console-storm shard
-  # was classified as `EMULATOR INFRA UNAVAILABLE` but STILL exited 1 (red) with
-  # no rollup, so three independent red checks left main-health unreadable and
-  # spammed red-CI email. The per-shard classify step is now `continue-on-error`
-  # and records a CLEAN | INFRA | RED token; this job consumes those tokens:
+  # Per-shard infra aborts used to exit 1 with no rollup, so three independent
+  # red checks could leave main-health unreadable and spam red-CI email. The
+  # per-shard classify step is now `continue-on-error` and records a
+  # CLEAN | INFRA | RED token; this job consumes those tokens:
   #   * every shard CLEAN            -> CLEAN  (green)
   #   * no RED, at least one INFRA   -> RE-RUN (neutral green + ::warning; the
   #                                    failures were environmental, re-run)
-  #   * any shard RED (a HEALTHY-console genuine journey failure or the #835
-  #     budget timeout)              -> RED    (exit 1, the run goes red)
+  #   * any shard RED (a genuine journey failure or the #835 budget timeout)
+  #                                    -> RED    (exit 1, the run goes red)
   # A genuine journey assertion failure therefore STILL turns the run red — the
   # aggregation never masks a real regression (the #657/#844 flake-masks-real
   # trap's inverse). Per-shard logs/annotations stay intact for forensics.

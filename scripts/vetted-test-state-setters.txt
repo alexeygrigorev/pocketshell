@@ -16,11 +16,11 @@
 # state the real path GENUINELY reaches (the #780 model — the injection only makes
 # a real-but-nondeterministic on-device state deterministic on the fast x86 AVD).
 # The SEAM1 detector in check-test-validity.sh HARD-FAILS a connected test that
-# calls a production-defined state-injection seam (force*ForTest / *Override*ForTest
-# / set*ActiveForTest) that is NOT listed here and has no inline
-# `// SEAM_JUSTIFIED:` opt-out. That forces the reviewer to write down, for every
-# NEW synthetic connected proof, WHY the real path reaches the injected state —
-# the exact judgement that was skipped for alt-buffer.
+# calls or assigns a production-defined state-injection seam (force*ForTest /
+# *Override*ForTest / set*ActiveForTest) that is NOT listed here and has no
+# inline `// SEAM_JUSTIFIED:` opt-out. That forces the reviewer to write down,
+# for every NEW synthetic connected proof, WHY the real path reaches the
+# injected state — the exact judgement that was skipped for alt-buffer.
 #
 # FORMAT (enforced): one entry per line
 #     <seamName>  # <one-line real-path-reachability justification>
@@ -42,3 +42,7 @@ forceTreeStaleForTest  # FolderListViewModel: wraps the EXACT production call tr
 forceAttachingStateForTest  # TmuxSessionViewModel: sets ConnectionState.Attaching, the EXACT state a same-host fast switch (runFastSessionSwitch/fastSwitchSessionForTest) holds before the Live flip; the real path reaches Attaching on every same-host switch.
 setRenderDrainBackloggedOverrideForTest  # TerminalSurfaceState: the seam's own doc confirms the maintainer's on-device freeze DOES drive the drain-backlogged state under a heavy Codex burst + IME amplifier; only the fast CI/dev x86 AVD never backlogs, so the override makes that real on-device state deterministic (textbook #780).
 forceInlineReconnectingStatusKeepingClientForTest  # TmuxSessionViewModel: sets _connectionState=Reconnecting WHILE the real clientRef stays live+writable — the EXACT #1680/#1610 mobile-storm false-disconnect the maintainer hit (inline enum flaps to not-Connected while the -CC transport is genuinely writable). Issue1686QueueDrainWireOracleDockerTest drives it over a REAL SSH `-CC` connection to the agents fixture, so the wire is genuinely alive; only the enum flap is made deterministic on the fast AVD (textbook #780). Real path reaches this on any storm/probe-timeout that flaps the status without killing the socket.
+forceTransportProvenAliveForTest  # BOTH production owners are vetted: TmuxSessionViewModel and ForwardingController pin the same live SshSession keepalive oracle; real traffic makes it true inside the keepalive window, while no/aged-out/dead transport makes it false, so assignments only make both real liveness verdicts deterministic without inventing a third state.
+forceLivenessProbeDeadForTest  # TmuxSessionViewModel: makes the bounded tmux control-channel probe return dead; a real half-open/dead channel reaches the same false probe result, while the assignment removes the wall-clock/network nondeterminism needed to reproduce that state on the healthy agents fixture.
+forceCleanOutageForTest  # TmuxSessionViewModel: makes passive-reattach and fresh-transport attempts fail during a bounded recoverable outage; real clean EOF followed by FIN/connection-refused reaches those same failures, and clearing the assignment models the real link returning before the reconnect ladder expires.
+forceUnrecoverableHostForTest  # TmuxSessionViewModel: makes every reconnect-triggered reattach/fresh dial fail until the bounded ladder exhausts; a dead sshd, blackholed port, or network cut lasting past the ladder reaches that same Unreachable path, while cold initial attach remains real.

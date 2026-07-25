@@ -10,14 +10,15 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -133,15 +134,39 @@ class TerminalSurfaceStateInputRoutingTest {
             remoteStdin = RecordingOutputStream(),
         )
         val observedSideChannelChunks = AtomicInteger(0)
+        // Registration alone does not prove this runBlocking collector has
+        // executed. Ack a reference-identity probe without letting it satisfy
+        // the later burst-only non-vacuity count or enter the 60s slow path.
+        val subscriptionProbe = ByteArray(0)
+        val probeObserved = CompletableDeferred<Unit>()
+        val firstBurstChunkObserved = CompletableDeferred<Unit>()
         val slowCollector = launch {
-            state.output.collect {
-                observedSideChannelChunks.incrementAndGet()
-                delay(60_000)
+            state.output.collect { chunk ->
+                if (chunk === subscriptionProbe) {
+                    probeObserved.complete(Unit)
+                } else {
+                    observedSideChannelChunks.incrementAndGet()
+                    firstBurstChunkObserved.complete(Unit)
+                    delay(60_000)
+                }
             }
         }
-        yield()
 
         try {
+            withTimeout(2_000) {
+                stdout.subscriptionCount.first { it > 0 }
+            }
+            val probeSender = launch {
+                while (!probeObserved.isCompleted) {
+                    state.emitOutputForTesting(subscriptionProbe)
+                    delay(1)
+                }
+            }
+            try {
+                withTimeout(2_000) { probeObserved.await() }
+            } finally {
+                probeSender.cancelAndJoin()
+            }
             val chunks = issue576FragmentedAnsiBurstChunks()
             val emittedBytes = chunks.sumOf { it.size }
             assertTrue(
@@ -175,12 +200,16 @@ class TerminalSurfaceStateInputRoutingTest {
             // end marker reaches the emulator before asserting on the transcript.
             repeat(64) { shadowOf(Looper.getMainLooper()).idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS) }
             assertTrue(
-                "slow side-channel collector should prove at least one output subscriber was active",
-                observedSideChannelChunks.get() > 0,
-            )
-            assertTrue(
                 "terminal emulator should still render the end marker from the burst",
                 state.renderedTranscriptForTesting().contains(ISSUE_576_DONE_MARKER),
+            )
+            val burstObservedWithinDeadline = withTimeoutOrNull(2_000) {
+                firstBurstChunkObserved.await()
+                true
+            } ?: false
+            assertTrue(
+                "slow side-channel collector should prove at least one burst chunk was observed",
+                burstObservedWithinDeadline && observedSideChannelChunks.get() > 0,
             )
         } finally {
             slowCollector.cancel()

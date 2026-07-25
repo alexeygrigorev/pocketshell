@@ -4,6 +4,7 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -15,6 +16,18 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
+
+/** Identity-complete observation exposed only to the #1739 connected-test hook. */
+internal data class AgentSubmitCaptureObservation(
+    val captureId: Long,
+    val response: CommandResponse,
+    val scrollbackLines: Int,
+    val timeoutMs: Long,
+    val paneId: String,
+    val clientHash: Int,
+    val generation: Long,
+    val session: String,
+)
 
 /**
  * Issue #1739 synthetic-injection seam for connected emulator proof.
@@ -30,9 +43,11 @@ import kotlinx.coroutines.withContext
  * production; one-shot ownership/reset belongs to the test.
  */
 internal object AgentSubmitCaptureSeams {
+    private val captureIds = AtomicLong()
+
     @Volatile
     var afterRealCapture:
-        (suspend (response: CommandResponse, scrollbackLines: Int) -> Unit)? = null
+        (suspend (observation: AgentSubmitCaptureObservation) -> Unit)? = null
 
     /**
      * Mutation oracle for the original #1739 defect. When armed by the hard
@@ -43,12 +58,14 @@ internal object AgentSubmitCaptureSeams {
     @Volatile
     var structuredChildMutation: Boolean = false
 
-    suspend fun invokeAfterRealCapture(response: CommandResponse, scrollbackLines: Int) {
+    suspend fun invokeAfterRealCapture(observation: AgentSubmitCaptureObservation) {
         val hook = afterRealCapture ?: return
         withContext(Dispatchers.IO) {
-            hook(response, scrollbackLines)
+            hook(observation)
         }
     }
+
+    fun nextCaptureId(): Long = captureIds.incrementAndGet()
 
     fun reset() {
         afterRealCapture = null
@@ -158,9 +175,11 @@ private suspend fun captureAgentPaneWithDeadlineInScope(
     if (identity.client.disconnected.value) return AgentPaneCaptureResult(AgentPaneCaptureStatus.Disconnected)
 
     val startedAtMs = nowMs()
+    val captureId = AgentSubmitCaptureSeams.nextCaptureId()
     DiagnosticEvents.record(
         "action",
         "agent_submit_capture",
+        "captureId" to captureId,
         "pane" to paneId,
         "result" to "started",
         "clientHash" to System.identityHashCode(identity.client),
@@ -171,7 +190,18 @@ private suspend fun captureAgentPaneWithDeadlineInScope(
     )
     val capture = scope.async(start = CoroutineStart.UNDISPATCHED) {
         identity.client.capturePaneTextViaExec(paneId, timeoutMs, scrollbackLines).also {
-            AgentSubmitCaptureSeams.invokeAfterRealCapture(it, scrollbackLines)
+            AgentSubmitCaptureSeams.invokeAfterRealCapture(
+                AgentSubmitCaptureObservation(
+                    captureId = captureId,
+                    response = it,
+                    scrollbackLines = scrollbackLines,
+                    timeoutMs = timeoutMs,
+                    paneId = paneId,
+                    clientHash = System.identityHashCode(identity.client),
+                    generation = identity.generation,
+                    session = identity.target?.sessionName ?: "test",
+                ),
+            )
         }
     }
     val result = try {
@@ -195,6 +225,7 @@ private suspend fun captureAgentPaneWithDeadlineInScope(
     DiagnosticEvents.record(
         "action",
         "agent_submit_capture",
+        "captureId" to captureId,
         "pane" to paneId,
         "result" to result.status.name,
         "clientHash" to System.identityHashCode(identity.client),

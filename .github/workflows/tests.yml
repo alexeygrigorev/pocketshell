@@ -201,6 +201,15 @@ jobs:
           chmod +x scripts/test-ci-journey-aggregate-verdict.sh
           scripts/test-ci-journey-aggregate-verdict.sh
 
+      # Issue #1458: the 95-minute emulator job must not start a second cold boot
+      # when the first attempt has already consumed the wall needed for a full
+      # retry plus classifier/artifact teardown. Deterministic millisecond
+      # boundary fixtures cover allowed/denied and malformed-clock paths.
+      - name: CI journey cold-boot retry-budget guard (issue #1458)
+        run: |
+          chmod +x scripts/ci-journey-retry-budget.sh scripts/test-ci-journey-retry-budget.sh
+          scripts/test-ci-journey-retry-budget.sh
+
       # Issue #1293: fast, JVM-free fixture test for the nightly-fault per-phase
       # test-report preservation helper (scripts/lib/nightly-phase-reports.sh).
       # The nightly-fault suite runs each phase as a separate connected-test
@@ -534,6 +543,12 @@ jobs:
     timeout-minutes: 95
 
     steps:
+      # Issue #1458: capture the job wall clock before setup so the later retry
+      # decision uses one absolute 95-minute deadline. A per-step/suite timer
+      # would miss setup + first cold-boot time and recreate the cancellation.
+      - name: Record emulator-journey job start
+        run: echo "JOURNEY_JOB_START_EPOCH_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+
       - name: Checkout
         uses: actions/checkout@v6
 
@@ -993,13 +1008,31 @@ jobs:
             echo "No Android connected-test output directories existed after the first attempt." > "$snapshot/android-test-outputs-missing.txt"
           fi
 
+      # Issue #1458: the first attempt can consume 50–62 minutes, leaving too
+      # little of the absolute 95-minute job wall for an unconditional second
+      # cold boot. Require the full documented retry reserve:
+      #   900s shutdown/cold-boot/readiness + 4200s selected suite
+      #   + 300s classifier/log/artifact/teardown = 5400s.
+      # Missing/malformed job-start evidence fails safe to retry_allowed=false;
+      # the classifier then writes typed INFRA evidence instead of letting
+      # GitHub cancel the matrix child before artifacts can upload.
+      - name: Check remaining job wall before journey retry
+        id: journey_retry_budget
+        if: always()
+        run: |
+          chmod +x scripts/ci-journey-retry-budget.sh
+          scripts/ci-journey-retry-budget.sh \
+            "${JOURNEY_JOB_START_EPOCH_MS:-}" \
+            "$(date +%s%3N)" | tee -a "$GITHUB_OUTPUT"
+
       # Infra-retry-once: runs if the first bringup failed with a boot/adb abort
       # or a genuine test failure. It is deliberately skipped for a pure
-      # suite-budget timeout because the first cold boot already consumed the
-      # available job budget and wrote the classifier artifact.
+      # suite-budget timeout, and whenever the absolute job deadline cannot fit
+      # a complete retry plus teardown. Genuine first-attempt failure evidence
+      # remains authoritative in the classifier even when retry is denied.
       - name: Retry journey subset on a fresh cold-booted emulator
         id: journey_retry
-        if: steps.journey.outcome == 'failure' && steps.journey_summary.outputs.first_timeout != 'true'
+        if: steps.journey.outcome == 'failure' && steps.journey_summary.outputs.first_timeout != 'true' && steps.journey_retry_budget.outputs.retry_allowed == 'true'
         continue-on-error: true
         # Issue #771: same v2.37.0 pin as the first attempt (see note above).
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
@@ -1078,6 +1111,10 @@ jobs:
           retry_concl="${{ steps.journey_retry.conclusion }}"
           first_timeout="${{ steps.journey_summary.outputs.first_timeout }}"
           first_failure="${{ steps.journey_summary.outputs.first_failure }}"
+          retry_allowed="${{ steps.journey_retry_budget.outputs.retry_allowed }}"
+          retry_reason="${{ steps.journey_retry_budget.outputs.retry_reason }}"
+          retry_remaining_ms="${{ steps.journey_retry_budget.outputs.retry_remaining_ms }}"
+          retry_required_ms="${{ steps.journey_retry_budget.outputs.retry_required_ms }}"
           summary="artifacts/ci-journey/summary.md"
           # Issue #1458: record this shard's verdict token for the aggregation
           # job. CLEAN = passed; INFRA = environmental (storm / #470 cancel /
@@ -1112,6 +1149,9 @@ jobs:
           echo "retry attempt conclusion:  ${retry_concl:-<skipped>}"
           echo "first summary timeout-only: ${first_timeout:-false}"
           echo "first summary genuine failure: ${first_failure:-false}"
+          echo "cold-boot retry allowed: ${retry_allowed:-false}"
+          echo "cold-boot retry reason: ${retry_reason:-missing_decision}"
+          echo "cold-boot retry remaining/required: ${retry_remaining_ms:-0}/${retry_required_ms:-5400000}ms"
           if [[ "$first" == "success" ]]; then
             echo "Emulator journey passed on the first cold boot."
             write_verdict CLEAN
@@ -1137,6 +1177,17 @@ jobs:
             echo "::error title=Emulator journey TIMEOUT — load-bearing classes cut short (#835/#470)::The journey suite booted and ran, but exhausted its own 4200s time budget before every load-bearing class reached a verdict (issue #835 / #470). This is now a HARD RED durable guard (#835 REOPENED, D31): a budget timeout means a load-bearing class was silently cut short, which used to be masked as advisory-green. The retry is skipped because a budget timeout is deterministic. Either the enumeration stall has returned or the selection no longer fits the budget — investigate; do NOT treat as a flake. Class(es) cut short / not run:"
             [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
             write_verdict RED
+            exit 1
+          fi
+          # Issue #1458: no trustworthy first-attempt verdict and insufficient
+          # absolute job wall for a complete retry. Do not start a cold boot that
+          # GitHub will cancel at 95m; emit typed INFRA evidence now so classifier,
+          # logs, shard-token upload, and teardown can reach terminal completion.
+          # Healthy-console first_failure and #835 first_timeout branches above
+          # retain their existing RED semantics.
+          if [[ "${retry_allowed:-false}" != "true" ]]; then
+            echo "::warning title=Emulator journey retry skipped — insufficient remaining job wall::The first attempt did not produce a clean verdict, but a complete fresh-cold-boot retry no longer fits before the absolute 95-minute job deadline (reason=${retry_reason:-missing_decision}, remaining=${retry_remaining_ms:-0}ms, required=${retry_required_ms:-5400000}ms). The retry was not started; this shard is typed INFRA so aggregation requests RE-RUN, while classifier and artifacts retain time to finish (issue #1458)."
+            write_verdict INFRA
             exit 1
           fi
           # If a cold-boot attempt was cancelled, do not trust summary.md for a

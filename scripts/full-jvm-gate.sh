@@ -33,7 +33,7 @@ EXPECTED_SCOPE_RUNNER_SHA256 = (
     "39406248dd3de35f3b6f5c47ba1ca4c6462b296b0a4995192160b8db5d61761d"
 )
 EXPECTED_PROFILE_GUARD_SHA256 = (
-    "3a0731b57cd63f57ef8ca230aeea6739a8b5a781aa97047ce57a158318b6a386"
+    "8f50616bfe7bf3a47802dc51932624aa99e097d8700944ff38f7ec98528a0f9a"
 )
 GRADLE_ARGS = (
     "test",
@@ -219,47 +219,54 @@ while arguments:
     )
     raise SystemExit(2)
 
-unsafe_names = sorted(
-    name
-    for name in os.environ
-    if (
-        name in REJECTED_ENVIRONMENT
-        and not (name == "BASH_ENV" and os.environ[name] == trusted_bash_env)
-    )
-    or any(name.startswith(prefix) for prefix in REJECTED_PREFIXES)
-)
-if unsafe_names:
-    sys.stderr.write(
-        "FAIL: unsafe inherited environment for the full JVM gate: "
-        + ", ".join(unsafe_names)
-        + "\n"
-    )
-    raise SystemExit(2)
-
-try:
-    android_sdk = discover_android_sdk(initial_environment, identity.pw_dir)
-except SdkValidationError as error:
-    sys.stderr.write(f"FAIL: invalid Android SDK configuration: {error}\n")
-    raise SystemExit(2) from error
-
-runtime_directory = f"/run/user/{identity.pw_uid}"
 clean_environment = {
-    "ANDROID_HOME": str(android_sdk),
-    "ANDROID_SDK_ROOT": str(android_sdk),
-    "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_directory}/bus",
     "HOME": identity.pw_dir,
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
     "LOGNAME": identity.pw_name,
     "PATH": MINIMAL_PATH,
-    "POCKETSHELL_TEST_MEM": MEMORY_LIMIT,
     "TMPDIR": "/tmp",
     "USER": identity.pw_name,
-    "XDG_RUNTIME_DIR": runtime_directory,
 }
-# Exact hosted CI=true authorizes only the cgroup-free guard modes above. It is
-# deliberately omitted from this child allowlist, so neither the verified guard
-# nor cgroup-run can observe CI fallback semantics.
+# Exact hosted CI=true authorizes only the cgroup-free guard modes above. Those
+# modes authenticate repository bytes, not the hosted runner's toolchain. Their
+# child receives only the fixed minimal map above. CI, JAVA_HOME, GRADLE_HOME,
+# and every build/profile override channel are deliberately ignored and stripped.
+if profile_guard_arguments is None:
+    unsafe_names = sorted(
+        name
+        for name in os.environ
+        if (
+            name in REJECTED_ENVIRONMENT
+            and not (name == "BASH_ENV" and os.environ[name] == trusted_bash_env)
+        )
+        or any(name.startswith(prefix) for prefix in REJECTED_PREFIXES)
+    )
+    if unsafe_names:
+        sys.stderr.write(
+            "FAIL: unsafe inherited environment for the full JVM gate: "
+            + ", ".join(unsafe_names)
+            + "\n"
+        )
+        raise SystemExit(2)
+
+    try:
+        android_sdk = discover_android_sdk(initial_environment, identity.pw_dir)
+    except SdkValidationError as error:
+        sys.stderr.write(f"FAIL: invalid Android SDK configuration: {error}\n")
+        raise SystemExit(2) from error
+
+    runtime_directory = f"/run/user/{identity.pw_uid}"
+    clean_environment.update(
+        {
+            "ANDROID_HOME": str(android_sdk),
+            "ANDROID_SDK_ROOT": str(android_sdk),
+            "DBUS_SESSION_BUS_ADDRESS": f"unix:path={runtime_directory}/bus",
+            "POCKETSHELL_TEST_MEM": MEMORY_LIMIT,
+            "XDG_RUNTIME_DIR": runtime_directory,
+        }
+    )
+
 entrypoint = Path(__file__).resolve()
 profile_guard = root_dir / "scripts" / "check-full-jvm-gate-profile.sh"
 try:

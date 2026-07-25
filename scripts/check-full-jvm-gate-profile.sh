@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_ENTRYPOINT = ROOT_DIR / "scripts" / "full-jvm-gate.sh"
 EXPECTED_ENTRYPOINT_SHA256 = (
-    "2d1b800245b56573835553e61fbb3193a21f53ff9a3729df9def61d81a31a1e9"
+    "12d8d268b708814eb54e037002c167b122c0be86125d5d8796d900c393336a23"
 )
 EXPECTED_CGROUP_RUNNER_SHA256 = (
     "6e4ce5f99cf4a6666aa9ac0c097776fb2bd4b87b2cc01744ddd06e4fee114b20"
@@ -176,6 +176,7 @@ def write_paired_fixture(
     sdk_root: Path,
     runner_digest: str,
     replacements: tuple[tuple[str, str], ...] = (),
+    guard_replacements: tuple[tuple[str, str], ...] = (),
 ) -> None:
     paired_entrypoint, substitutions = re.subn(
         r"^JAVA_SEARCH_ROOTS = .*?$",
@@ -214,6 +215,10 @@ def write_paired_fixture(
             EXPECTED_CGROUP_RUNNER_SHA256,
             runner_digest,
         )
+    for old, new in guard_replacements:
+        if paired_guard.count(old) != 1:
+            fail(f"paired guard replacement target was not unique: {old!r}")
+        paired_guard = paired_guard.replace(old, new)
     paired_guard_digest = hashlib.sha256(paired_guard.encode()).hexdigest()
     paired_entrypoint, guard_digest_substitutions = re.subn(
         r'(?<=EXPECTED_PROFILE_GUARD_SHA256 = \(\n    ")[0-9a-f]{64}'
@@ -288,6 +293,7 @@ def self_test(
         fake_aapt2 = fake_sdk_root / "build-tools" / "35.0.0" / "aapt2"
         fake_aapt2.write_text("#!/bin/dash\nexit 0\n")
         fake_aapt2.chmod(0o755)
+        guard_environment_capture = fixture_root / "guard-environment.bin"
         write_paired_fixture(
             entrypoint.read_text(),
             Path(__file__).read_text(),
@@ -296,6 +302,14 @@ def self_test(
             fake_java_home,
             fake_sdk_root,
             fake_runner_digest,
+            guard_replacements=(
+                (
+                    'if any(name.strip().lower() == "ci" for name in os.environ):\n',
+                    f"Path({str(guard_environment_capture)!r}).write_bytes("
+                    'Path("/proc/self/environ").read_bytes())\n'
+                    'if any(name.strip().lower() == "ci" for name in os.environ):\n',
+                ),
+            ),
         )
 
         result = run_entrypoint(
@@ -537,18 +551,30 @@ def self_test(
         checks += 1
 
         outer_oracle.unlink(missing_ok=True)
+        captured_hosted_environment = {
+            "CI": "true",
+            "GRADLE_HOME": "/opt/hostedtoolcache/gradle/current",
+            "JAVA_HOME": "/opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17/x64",
+            "JAVA_HOME_17_X64": (
+                "/opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17/x64"
+            ),
+            "MAVEN_ARGS": "-ntp",
+        }
         hosted_check_result = run_entrypoint(
             copied_entrypoint,
             fixture_scripts,
             arguments=("--profile-guard-check",),
-            additions={"CI": "true"},
+            additions=captured_hosted_environment,
         )
         if (
             hosted_check_result.returncode != 0
             or outer_oracle.exists()
             or hosted_check_result.stdout.splitlines().count(guard_pass_line) != 1
         ):
-            fail("exact hosted CI=true did not run one authenticated guard check")
+            fail(
+                "captured hosted toolchain environment did not run one "
+                "authenticated guard check"
+            )
         checks += 1
 
         if include_workflow_self_test:
@@ -557,7 +583,7 @@ def self_test(
                 copied_entrypoint,
                 fixture_scripts,
                 arguments=("--profile-guard-self-test",),
-                additions={"CI": "true"},
+                additions=captured_hosted_environment,
             )
             if (
                 hosted_self_test_result.returncode != 0
@@ -569,6 +595,54 @@ def self_test(
                     "exact hosted CI=true did not run the authenticated guard self-test"
                 )
             checks += 1
+
+        hosted_override_environment = {
+            **captured_hosted_environment,
+            "ACTIONS_CACHE_URL": "https://hosted.invalid/cache",
+            "ANDROID_HOME": "/definitely/not-an-sdk",
+            "BASH_ENV": "/definitely/not-sourced",
+            "GITHUB_ACTIONS": "true",
+            "GITHUB_WORKFLOW": "Tests",
+            "GRADLE_OPTS": "-Dorg.gradle.jvmargs=-Xmx12g",
+            "JAVA_TOOL_OPTIONS": "-Xmx12g",
+            "KOTLIN_DAEMON_JVM_OPTIONS": "-Xmx12g",
+            "ORG_GRADLE_PROJECT_org.gradle.workers.max": "99",
+            "POCKETSHELL_TEST_MEM": "99G",
+            "PYTHONPATH": "/definitely/not-imported",
+            "RUNNER_OS": "Linux",
+        }
+        outer_oracle.unlink(missing_ok=True)
+        hosted_override_result = run_entrypoint(
+            copied_entrypoint,
+            fixture_scripts,
+            arguments=("--profile-guard-check",),
+            additions=hosted_override_environment,
+        )
+        expected_guard_environment = {
+            "HOME": pwd.getpwuid(os.getuid()).pw_dir,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "LOGNAME": pwd.getpwuid(os.getuid()).pw_name,
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+            "TMPDIR": "/tmp",
+            "USER": pwd.getpwuid(os.getuid()).pw_name,
+        }
+        actual_guard_environment = dict(
+            item.decode().split("=", 1)
+            for item in guard_environment_capture.read_bytes().split(b"\0")
+            if item
+        )
+        if (
+            hosted_override_result.returncode != 0
+            or outer_oracle.exists()
+            or hosted_override_result.stdout.splitlines().count(guard_pass_line) != 1
+            or actual_guard_environment != expected_guard_environment
+        ):
+            fail(
+                "hosted metadata/profile overrides affected or leaked into "
+                "the authenticated guard"
+            )
+        checks += 1
 
         assert_rejected_before_cgroup(
             "full gate under hosted CI=true",
@@ -786,8 +860,8 @@ def self_test(
             ),
             (
                 "alternate environment helper",
-                "\nunsafe_names = sorted(\n",
-                "\nos.environ = {}\nunsafe_names = sorted(\n",
+                "\n    unsafe_names = sorted(\n",
+                "\n    os.environ = {}\n    unsafe_names = sorted(\n",
             ),
             (
                 "exec alias",

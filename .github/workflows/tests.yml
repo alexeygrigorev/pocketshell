@@ -252,8 +252,9 @@ jobs:
       # Worker API sessions overlapped inside the 8 GiB scope. Keep its complete
       # `test --rerun-tasks` graph on the proven single-worker / split-heap
       # profile, and reject missing, duplicated, or conflicting resource flags.
-      # The 118-check direct / 117-check authenticated nested fake matrix also
-      # proves local/GitHub Android SDK discovery and fail-closed invalid roots.
+      # The 119-check direct / 118-check authenticated nested fake matrix also
+      # proves local/GitHub Android SDK discovery, fail-closed invalid roots,
+      # and stripping of hosted toolchain/profile variables before the guard.
       - name: Forced full-JVM resource-profile guard (issue #1761)
         run: |
           scripts/full-jvm-gate.sh --profile-guard-self-test

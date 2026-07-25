@@ -402,8 +402,12 @@ Minimum pre-push gate:
   the complete `./gradlew test --rerun-tasks` graph inside the repository's
   8 GiB cgroup with the guarded single-worker / split-heap profile. Do not
   append filters, exclusions, or ad-hoc Gradle flags. The authenticated
-  guard-only CI modes accept only exact `CI=true` and strip it before preflight;
-  the full local gate still requires `CI` to be unset. SDK discovery accepts
+  guard-only CI modes accept only exact `CI=true`, then replace the hosted
+  runner's environment with a fixed minimal map before preflight. Normal hosted
+  toolchain metadata such as `GRADLE_HOME`/`JAVA_HOME`, and even outer build
+  override channels, are neither trusted nor forwarded. The full local gate
+  still requires `CI` to be unset and retains strict rejection of those override
+  channels. SDK discovery accepts
   `ANDROID_HOME` and/or `ANDROID_SDK_ROOT` only when their absolute real paths
   agree and contain executable `platform-tools/adb`, the Android 35 platform,
   and executable Build Tools 35.0.0. With neither variable set, the only

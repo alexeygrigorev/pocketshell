@@ -3,6 +3,8 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.composer.InMemoryOutboundQueueStore
 import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.composer.OutboundState
+import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.RecordedDiagnosticEvent
 import com.pocketshell.app.diagnostics.RecordingDiagnosticEventSink
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -30,11 +32,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -78,6 +82,9 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
             "echo issue1739_agent_ack_line1\necho issue1739_agent_ack_exactly_once"
         private const val MARKER = "issue1739_agent_ack_exactly_once"
         private const val CALLER_BOUND_MS = 5_000L
+        private const val DIAGNOSTIC_SETTLE_TIMEOUT_MS = 5_000L
+        private const val DIAGNOSTIC_POLL_INTERVAL_MS = 20L
+        private val TERMINAL_ACK_TIMEOUT_RESULTS = setOf("ack_timeout", "capture_timeout")
 
         private val projectRoot: Path by lazy { findProjectRoot() }
 
@@ -156,6 +163,58 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
         } finally {
             AgentSubmitCaptureSeams.reset()
             stopDocker()
+        }
+    }
+
+    @Test
+    fun immediateOuterAckTimeoutWaitsForDetachedCaptureTerminalWithoutRace() = runBlocking {
+        val diagnostics = installRecordingDiagnosticSink()
+        val paneId = "%outer"
+        val identityFields = arrayOf(
+            "pane" to paneId,
+            "clientHash" to 1739,
+            "generation" to 42L,
+            "session" to "outer-wins",
+        )
+        DiagnosticEvents.record(
+            "action",
+            "agent_submit_capture",
+            *identityFields,
+            "result" to "started",
+        )
+        DiagnosticEvents.record(
+            "action",
+            "agent_submit_ack",
+            *identityFields,
+            "result" to "ack_timeout",
+        )
+        val detachedCapture = launch {
+            delay(50)
+            DiagnosticEvents.record(
+                "action",
+                "agent_submit_capture",
+                *identityFields,
+                "result" to "TimedOut",
+            )
+        }
+        try {
+            assertFalse(
+                "outer ack completion must precede the detached capture terminal",
+                diagnostics.eventsNamed("agent_submit_capture")
+                    .any { it.fields["result"] == "TimedOut" },
+            )
+
+            val evidence = awaitDetachedTimeoutDiagnostics(diagnostics, paneId)
+
+            assertEquals("ack_timeout", evidence.ack.fields["result"])
+            assertEquals("TimedOut", evidence.capture.fields["result"])
+            println(
+                "ISSUE1739_OUTER_WINS ack=${evidence.ack.fields["result"]} " +
+                    "capture=${evidence.capture.fields["result"]}",
+            )
+        } finally {
+            detachedCapture.join()
+            diagnostics.close()
         }
     }
 
@@ -274,17 +333,12 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
             assertEquals(0, client.submitEnterCommands())
             assertEquals(OutboundState.InFlight, queue.item(row.id)?.state)
             assertTrue(queue.item(row.id)?.wireAttempted == true)
-            val captureDiagnostics = diagnostics.eventsNamed("agent_submit_capture")
+            val timeoutDiagnostics = awaitDetachedTimeoutDiagnostics(diagnostics, paneId)
+            assertEquals("TimedOut", timeoutDiagnostics.capture.fields["result"])
             assertTrue(
-                "diagnostics must prove the caller deadline won over wedged cleanup: " +
-                    captureDiagnostics,
-                captureDiagnostics.any { it.fields["result"] == "TimedOut" },
-            )
-            val ackDiagnostics = diagnostics.eventsNamed("agent_submit_ack")
-            assertTrue(
-                "diagnostics must classify the ambiguous attempt without blind Enter: " +
-                    ackDiagnostics,
-                ackDiagnostics.any { it.fields["result"] == "capture_timeout" },
+                "the equal outer/inner 800ms deadlines may race, but must end in a " +
+                    "no-Enter timeout: ${timeoutDiagnostics.ack}",
+                timeoutDiagnostics.ack.fields["result"] in TERMINAL_ACK_TIMEOUT_RESULTS,
             )
 
             // Let the invalidated cleanup finish. Recovery uses the SAME durable
@@ -352,6 +406,51 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
             scope.cancel()
         }
     }
+
+    private data class AgentSubmitTimeoutDiagnostics(
+        val capture: RecordedDiagnosticEvent,
+        val ack: RecordedDiagnosticEvent,
+    )
+
+    private suspend fun awaitDetachedTimeoutDiagnostics(
+        diagnostics: RecordingDiagnosticEventSink,
+        paneId: String,
+        timeoutMs: Long = DIAGNOSTIC_SETTLE_TIMEOUT_MS,
+    ): AgentSubmitTimeoutDiagnostics {
+        var matched: AgentSubmitTimeoutDiagnostics? = null
+        withTimeoutOrNull(timeoutMs) {
+            while (matched == null) {
+                val captures = diagnostics.eventsNamed("agent_submit_capture")
+                    .filter {
+                        it.fields["pane"] == paneId &&
+                            it.fields["result"] == AgentPaneCaptureStatus.TimedOut.name
+                    }
+                val acks = diagnostics.eventsNamed("agent_submit_ack")
+                    .filter {
+                        it.fields["pane"] == paneId &&
+                            it.fields["result"] in TERMINAL_ACK_TIMEOUT_RESULTS
+                    }
+                matched = captures.firstNotNullOfOrNull { capture ->
+                    acks.firstOrNull { ack -> sameAttemptIdentity(capture, ack) }
+                        ?.let { ack -> AgentSubmitTimeoutDiagnostics(capture, ack) }
+                }
+                if (matched == null) delay(DIAGNOSTIC_POLL_INTERVAL_MS)
+            }
+        }
+        return checkNotNull(matched) {
+            "Timed out after ${timeoutMs}ms waiting for same-attempt detached capture " +
+                "TimedOut and terminal ack in $TERMINAL_ACK_TIMEOUT_RESULTS for pane=$paneId; " +
+                "capture=${diagnostics.eventsNamed("agent_submit_capture")} " +
+                "ack=${diagnostics.eventsNamed("agent_submit_ack")}"
+        }
+    }
+
+    private fun sameAttemptIdentity(
+        capture: RecordedDiagnosticEvent,
+        ack: RecordedDiagnosticEvent,
+    ): Boolean =
+        listOf("pane", "clientHash", "generation", "session")
+            .all { field -> capture.fields[field] == ack.fields[field] }
 
     private suspend fun connect(): SshSession = SshConnection.connect(
         host = sshHost,

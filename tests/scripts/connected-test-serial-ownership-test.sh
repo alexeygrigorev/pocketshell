@@ -149,9 +149,30 @@ case "${1:-}" in
     if [[ "${FAKE_KILL_HOLDER_ON_UNINSTALL_RUN_ID:-}" == "$FAKE_RUN_ID" ]]; then
       holder="${POCKETSHELL_POOL_HOLDER_PID:-${POCKETSHELL_AVD_LOCK_HOLDER_PID:-}}"
       [[ "$holder" =~ ^[0-9]+$ ]] || exit 96
+      printf '%s\n' "$$" > "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-pid"
+      if [[ "${FAKE_IGNORE_UNINSTALL_TERM_RUN_ID:-}" == "$FAKE_RUN_ID" ]]; then
+        trap '' TERM INT
+      else
+        trap 'touch "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-terminated"; exit 143' TERM INT
+      fi
+      # Publish the deterministic test boundary only after signal handling is
+      # installed. Previously the fake killed the ownership sentinel and
+      # published its marker first; the wrapper could then TERM this shell
+      # before the trap existed. The child was correctly gone, but the missing
+      # trap-only marker falsely failed the complete Gradle gate (#1737
+      # recurrence). The PID assertion below is the authoritative process-death
+      # proof; this marker synchronizes the intended TERM-vs-KILL branch.
+      touch "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-handler-ready"
+      if [[ "${FAKE_PAUSE_AFTER_UNINSTALL_OWNERSHIP_LOSS_RUN_ID:-}" == "$FAKE_RUN_ID" ]]; then
+        touch "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-handler-window"
+      fi
       kill -KILL "$holder" 2>/dev/null || true
       touch "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-holder-killed"
-      trap 'touch "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-terminated"; exit 143' TERM INT
+      if [[ "${FAKE_PAUSE_AFTER_UNINSTALL_OWNERSHIP_LOSS_RUN_ID:-}" == "$FAKE_RUN_ID" ]]; then
+        while [[ ! -e "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-handler-continue" ]]; do
+          sleep 0.02
+        done
+      fi
       while [[ ! -e "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.uninstall-continue" ]]; do
         sleep 0.02
       done
@@ -384,6 +405,8 @@ start_cleanup() {
     FAKE_DEVICE_STATE="$sandbox/device-state" \
     FAKE_RUN_ID="$run_id" \
     FAKE_KILL_HOLDER_ON_UNINSTALL_RUN_ID="${FAKE_KILL_HOLDER_ON_UNINSTALL_RUN_ID:-}" \
+    FAKE_PAUSE_AFTER_UNINSTALL_OWNERSHIP_LOSS_RUN_ID="${FAKE_PAUSE_AFTER_UNINSTALL_OWNERSHIP_LOSS_RUN_ID:-}" \
+    FAKE_IGNORE_UNINSTALL_TERM_RUN_ID="${FAKE_IGNORE_UNINSTALL_TERM_RUN_ID:-}" \
     bash "$root/scripts/connected-test.sh" --cleanup-suffixes \
       > "$sandbox/$run_id.out" 2> "$sandbox/$run_id.err" &
   WRAPPER_PID="$!"
@@ -688,32 +711,37 @@ holder_loss_at_gradle_boundary_fails_before_mutation() {
     || fail "ownership-loss correction left a stale flock behind"
 }
 
-holder_loss_at_cleanup_boundary_fails_before_uninstall() {
-  local sandbox="$1"
+assert_holder_loss_at_cleanup_boundary_fails_closed() {
+  local sandbox="$1" run_id="$2" ignore_term="$3"
   make_sandbox "$sandbox"
   printf 'com.pocketshell.app.i1737stale\n' \
     > "$sandbox/device-state/packages-emulator-5554"
 
-  local cleanup_pid contender_pid cleanup_rc
-  FAKE_KILL_HOLDER_ON_UNINSTALL_RUN_ID=cleanup \
-    start_cleanup "$sandbox" cleanup
+  local cleanup_pid contender_pid cleanup_rc ignore_term_run_id=""
+  if [[ "$ignore_term" == "1" ]]; then
+    ignore_term_run_id="$run_id"
+  fi
+  FAKE_KILL_HOLDER_ON_UNINSTALL_RUN_ID="$run_id" \
+    FAKE_PAUSE_AFTER_UNINSTALL_OWNERSHIP_LOSS_RUN_ID="$run_id" \
+    FAKE_IGNORE_UNINSTALL_TERM_RUN_ID="$ignore_term_run_id" \
+    start_cleanup "$sandbox" "$run_id"
   cleanup_pid="$WRAPPER_PID"
-  wait_for_file "$sandbox/device-state/cleanup.uninstall-holder-killed" 10 \
+  wait_for_file "$sandbox/device-state/$run_id.uninstall-handler-window" 10 \
     || { kill_group "$cleanup_pid"; fail "cleanup holder-loss hook never reached the pre-uninstall boundary"; }
 
-  start_wrapper "$sandbox" pool contender i1737cleanupcontender
+  start_wrapper "$sandbox" pool contender "i1737${run_id}contender"
   contender_pid="$WRAPPER_PID"
 
   local waited=0
   while kill -0 "$cleanup_pid" 2>/dev/null; do
     if [[ -e "$sandbox/device-state/contender.started" ]]; then
-      touch "$sandbox/device-state/cleanup.uninstall-continue"
+      touch "$sandbox/device-state/$run_id.uninstall-continue"
       kill_group "$cleanup_pid"
       kill_group "$contender_pid"
       fail "contender entered while ownership-losing cleanup wrapper was still live"
     fi
     (( waited++ >= 200 )) && {
-      touch "$sandbox/device-state/cleanup.uninstall-continue"
+      touch "$sandbox/device-state/$run_id.uninstall-continue"
       kill_group "$cleanup_pid"
       kill_group "$contender_pid"
       fail "cleanup wrapper did not terminate within the ownership-loss bound"
@@ -726,11 +754,20 @@ holder_loss_at_cleanup_boundary_fails_before_uninstall() {
   cleanup_rc=$?
   set -e
   [[ "$cleanup_rc" != "0" ]] || fail "ownership-losing cleanup unexpectedly succeeded"
-  grep -q 'lost emulator ownership' "$sandbox/cleanup.err" \
+  grep -q 'lost emulator ownership' "$sandbox/$run_id.err" \
     || fail "cleanup ownership loss lacked a clear diagnostic"
-  [[ -e "$sandbox/device-state/cleanup.uninstall-terminated" ]] \
-    || fail "wrapper did not terminate adb before the ownership-losing uninstall"
-  ! grep -q '^cleanup adb-uninstall ' "$sandbox/device-state/events" 2>/dev/null \
+  local uninstall_pid
+  uninstall_pid="$(<"$sandbox/device-state/$run_id.uninstall-pid")"
+  ! kill -0 "$uninstall_pid" 2>/dev/null \
+    || fail "ownership-losing adb uninstall process remained alive after wrapper exit"
+  if [[ "$ignore_term" == "1" ]]; then
+    [[ ! -e "$sandbox/device-state/$run_id.uninstall-terminated" ]] \
+      || fail "TERM-ignoring adb unexpectedly ran the graceful termination trap"
+  else
+    [[ -e "$sandbox/device-state/$run_id.uninstall-terminated" ]] \
+      || fail "wrapper did not terminate adb before the ownership-losing uninstall"
+  fi
+  ! grep -q "^$run_id adb-uninstall " "$sandbox/device-state/events" 2>/dev/null \
     || fail "cleanup uninstalled a package after helper loss"
 
   wait_for_file "$sandbox/device-state/contender.started" 10 \
@@ -742,6 +779,14 @@ holder_loss_at_cleanup_boundary_fails_before_uninstall() {
     || fail "cleanup ownership loss allowed overlapping mutation"
   flock -n "$sandbox/locks/avd-lock-emulator-5554" true \
     || fail "cleanup ownership loss left a stale flock"
+}
+
+holder_loss_at_cleanup_boundary_fails_before_uninstall() {
+  assert_holder_loss_at_cleanup_boundary_fails_closed "$1" cleanup 0
+}
+
+holder_loss_at_cleanup_boundary_escalates_term_ignoring_uninstall() {
+  assert_holder_loss_at_cleanup_boundary_fails_closed "$1" cleanupignore 1
 }
 
 hard_killed_wrapper_leaves_no_descendant_flock() {
@@ -972,6 +1017,7 @@ CASES=(
   lost_holder_fails_closed_and_stale_lock_recovers
   holder_loss_at_gradle_boundary_fails_before_mutation
   holder_loss_at_cleanup_boundary_fails_before_uninstall
+  holder_loss_at_cleanup_boundary_escalates_term_ignoring_uninstall
   hard_killed_wrapper_leaves_no_descendant_flock
   hard_killed_pool_setup_leaves_no_descendant_flock
   hard_killed_agents_docker_up_leaves_no_descendant_flock

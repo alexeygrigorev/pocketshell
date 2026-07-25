@@ -36,8 +36,10 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxClient
 import com.termux.view.TerminalView
 import dagger.hilt.android.EntryPointAccessors
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -52,6 +54,7 @@ import org.junit.rules.TestRule
 import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * ISSUE #875 (Angle C) — SAME-SSID WIFI REASSOCIATION ON STABLE WIFI MUST NOT
@@ -143,6 +146,7 @@ class StableWifiNoSpuriousReconnectE2eTest {
         }
         diagnostics?.close()
         diagnostics = null
+        runCatching { terminalNetworkObserver().ignoreRealNetworkCallbacksForTest = false }
         clearLastSessionPrefs()
         seededKey?.let { key ->
             runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }
@@ -249,15 +253,25 @@ class StableWifiNoSpuriousReconnectE2eTest {
         // is part of the initial attach, not a reconnect) so the "stable wifi"
         // precondition genuinely holds before we drive the flip.
         waitForNoSwitchingOverlay("pre-flip attach settle")
+        waitForConnectSuccessDiagnostic("pre-flip attach settle")
         captureViewport("issue981-01-attached")
         diagnostics!!.clear()
+
+        val vm = currentViewModel()
+        val delayedProbeClient = DelayedAnsweredProbeTmuxClient(
+            delegate = requireNotNull(vm.liveTmuxClientForSendOrNullForTest()) {
+                "expected the live real TmuxClient after the stable attach"
+            },
+        )
+        vm.attachClient(delayedProbeClient)
+        val observer = terminalNetworkObserver()
+        observer.ignoreRealNetworkCallbacksForTest = true
 
         // Pin the live transport as PROVEN ALIVE (the #974 case: a real -CC link
         // whose keepalive saw inbound bytes within the ride-through window). HARD
         // synthetic inject (#780) — no skip — so the gate is exercised on CI too.
-        currentViewModel().forceTransportProvenAliveForTest = true
+        vm.forceTransportProvenAliveForTest = true
         try {
-            val observer = terminalNetworkObserver()
             // Seed a baseline pure-WIFI identity so the next snapshot is a genuine
             // transport-CHANGING flip (different identity → emits past #875).
             observer.emitSyntheticSnapshotForTest(
@@ -291,22 +305,56 @@ class StableWifiNoSpuriousReconnectE2eTest {
             // teardown also bumps the connect-attempt counter. A transient "Attaching…"
             // recomposition is NOT the symptom (no socket was torn down) — the redial
             // diagnostic + connect attempt are, so those are the load-bearing watch.
-            watchNoReconnectDiagnostics("during proven-alive handoff", WATCH_NO_RECONNECT_MS)
+            val decisionWaitStartedAtMs = SystemClock.elapsedRealtime()
+            val suppressedAlive = waitForProvenAliveHandoffDecision(
+                label = "during proven-alive handoff",
+                reason = "issue981-transient-wifi-cellular-flip",
+            )
+            recordTiming(
+                "issue1767_handoff_decision_wait_ms",
+                SystemClock.elapsedRealtime() - decisionWaitStartedAtMs,
+            )
 
-            // LOAD-BEARING #1 (the always-available authoritative proof): ZERO redial
-            // diagnostics. `network_reconnect_start` is the loud signal the redial path
-            // records — it fires on BASE and is absent with the gate.
-            assertNoReconnectDiagnostics("after proven-alive handoff")
-            // LOAD-BEARING #2 (positive control, G6 — the gate actually FIRED, not a
-            // vacuous pass): the suppress decision was recorded with the proven-alive
-            // cause. This proves the #981 gate — not the detector — rode it through.
-            val suppressedAlive = diagnostics!!.eventsNamed("network_reconnect_skip")
-                .filter { it.fields["cause"] == "transport_proven_alive" }
+            // LOAD-BEARING #1: the bounded wait continuously forbids the loud
+            // `network_reconnect_start` signal while waiting for exactly one terminal
+            // handoff decision. A reconnect therefore fails immediately rather than
+            // being hidden by the longer positive-control budget.
+            assertNoReconnectDiagnostics("after proven-alive handoff decision")
+            // LOAD-BEARING #2 (positive control, G6): exact reason-bound fields prove
+            // the #981 gate — not the detector or an unrelated skip — rode it through.
+            assertEquals("network_observer", suppressedAlive.fields["source"])
+            assertEquals("network-reconnect", suppressedAlive.fields["trigger"])
+            assertEquals("transport_proven_alive", suppressedAlive.fields["cause"])
+            assertEquals(
+                "network_handoff_transport_alive",
+                suppressedAlive.fields["classification"],
+            )
+            assertEquals(false, suppressedAlive.fields["reconnect"])
+            assertEquals(true, suppressedAlive.fields["probeConfirmed"])
+            assertEquals(true, suppressedAlive.fields["realValidatedIdentityChange"])
+            assertEquals(
+                "the handoff must start exactly one answered-round-trip probe",
+                1,
+                delayedProbeClient.answeredProbeStarts.get(),
+            )
+            assertEquals(
+                "the handoff must complete exactly one answered-round-trip probe",
+                1,
+                delayedProbeClient.answeredProbeCompletions.get(),
+            )
             assertTrue(
-                "expected the #981 liveness gate to record a transport_proven_alive " +
-                    "suppress for the emitted WIFI→CELLULAR flip (proves the gate fired, " +
-                    "not a vacuous pass); skips=${diagnostics!!.eventsNamed("network_reconnect_skip")}",
-                suppressedAlive.isNotEmpty(),
+                "the deterministic answered probe delay must be observed; " +
+                    "durationMs=${delayedProbeClient.answeredProbeDurationMs}",
+                delayedProbeClient.answeredProbeDurationMs >= ANSWERED_PROBE_DELAY_MS,
+            )
+            assertTrue(
+                "the answered probe must still finish inside the production budget; " +
+                    "durationMs=${delayedProbeClient.answeredProbeDurationMs}",
+                delayedProbeClient.answeredProbeDurationMs < RESTORE_LIVENESS_PROBE_BUDGET_MS,
+            )
+            recordTiming(
+                "issue1767_answered_probe_duration_ms",
+                delayedProbeClient.answeredProbeDurationMs,
             )
             // LOAD-BEARING #3: the session settles back to a steady Connected state with
             // the viewport painted and NO lingering reconnect band — the user is never
@@ -317,7 +365,8 @@ class StableWifiNoSpuriousReconnectE2eTest {
             assertNoVisibleReconnect("after proven-alive handoff")
             captureViewport("issue981-02-after-proven-alive-handoff")
         } finally {
-            currentViewModel().forceTransportProvenAliveForTest = null
+            vm.forceTransportProvenAliveForTest = null
+            observer.ignoreRealNetworkCallbacksForTest = false
         }
 
         writeTimings()
@@ -329,6 +378,38 @@ class StableWifiNoSpuriousReconnectE2eTest {
             vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
         }
         return vm
+    }
+
+    /**
+     * Issue #1767 deterministic race fixture: delay only the network-transition
+     * answered probe beyond the old 2-second test read while keeping it inside the
+     * production 5-second budget. Periodic probes delegate without any delay.
+     */
+    private class DelayedAnsweredProbeTmuxClient(
+        private val delegate: TmuxClient,
+    ) : TmuxClient by delegate {
+        val answeredProbeStarts = AtomicInteger(0)
+        val answeredProbeCompletions = AtomicInteger(0)
+
+        @Volatile
+        var answeredProbeDurationMs: Long = -1L
+            private set
+
+        override suspend fun probeLiveness(requireAnsweredRoundTrip: Boolean): Boolean {
+            if (!requireAnsweredRoundTrip) {
+                return delegate.probeLiveness(requireAnsweredRoundTrip = false)
+            }
+
+            answeredProbeStarts.incrementAndGet()
+            val startedAtMs = SystemClock.elapsedRealtime()
+            return try {
+                delay(ANSWERED_PROBE_DELAY_MS)
+                delegate.probeLiveness(requireAnsweredRoundTrip = true)
+            } finally {
+                answeredProbeDurationMs = SystemClock.elapsedRealtime() - startedAtMs
+                answeredProbeCompletions.incrementAndGet()
+            }
+        }
     }
 
     /**
@@ -351,6 +432,23 @@ class StableWifiNoSpuriousReconnectE2eTest {
             compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .size,
+        )
+    }
+
+    /**
+     * The projected controller can report Connected just before the inline attach
+     * path records its terminal success. The network reducer still ignores handoffs
+     * during that narrow gap, so wait for the production connect-success milestone
+     * before clearing diagnostics and driving the synthetic handoff.
+     */
+    private fun waitForConnectSuccessDiagnostic(label: String) {
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            diagnostics!!.eventsNamed("connect_success").isNotEmpty()
+        }
+        assertTrue(
+            "expected the production connect-success milestone before $label; " +
+                "events=${diagnostics!!.events}",
+            diagnostics!!.eventsNamed("connect_success").isNotEmpty(),
         )
     }
 
@@ -498,19 +596,33 @@ class StableWifiNoSpuriousReconnectE2eTest {
     }
 
     /**
-     * Issue #981: watch the AUTHORITATIVE redial diagnostics across the window. The
-     * teardown+redial path records `network_reconnect_start` the instant it fires
-     * (on BASE, the moment the emitted flip reaches the VM hook). A stable session
-     * riding the flip through records NONE — this is the load-bearing no-reconnect
-     * watch (a transient "Attaching…" recomposition with no socket teardown is not
-     * the #974 symptom; the redial diagnostic is).
+     * Issue #1767: production gives the asynchronous answered probe five seconds.
+     * Wait for the reason-bound terminal decision for that full budget plus a small
+     * scheduling margin, checking the authoritative reconnect signal every 100ms.
      */
-    private fun watchNoReconnectDiagnostics(label: String, durationMs: Long) {
-        val deadline = SystemClock.elapsedRealtime() + durationMs
+    private fun waitForProvenAliveHandoffDecision(
+        label: String,
+        reason: String,
+    ): RecordedDiagnosticEvent {
+        val deadline = SystemClock.elapsedRealtime() + HANDOFF_DECISION_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
             assertNoReconnectDiagnostics(label)
+            val matches = diagnostics!!.eventsNamed("network_reconnect_skip")
+                .filter { it.fields["reason"] == reason }
+            assertTrue(
+                "expected at most one terminal handoff decision for reason=$reason; " +
+                    "matches=$matches",
+                matches.size <= 1,
+            )
+            matches.singleOrNull()?.let { return it }
             SystemClock.sleep(100)
         }
+        assertTrue(
+            "timed out after ${HANDOFF_DECISION_TIMEOUT_MS}ms waiting for the terminal " +
+                "handoff decision for reason=$reason; events=${diagnostics!!.events}",
+            false,
+        )
+        error("unreachable")
     }
 
     /**
@@ -687,6 +799,10 @@ class StableWifiNoSpuriousReconnectE2eTest {
         const val READY_MARKER: String = "ISSUE875C-WIFI-READY"
 
         const val WATCH_NO_RECONNECT_MS: Long = 2_000L
+        const val ANSWERED_PROBE_DELAY_MS: Long = 2_500L
+        const val RESTORE_LIVENESS_PROBE_BUDGET_MS: Long = 5_000L
+        const val HANDOFF_DECISION_TIMEOUT_MS: Long =
+            RESTORE_LIVENESS_PROBE_BUDGET_MS + 2_000L
 
         val HOST_ROW_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L

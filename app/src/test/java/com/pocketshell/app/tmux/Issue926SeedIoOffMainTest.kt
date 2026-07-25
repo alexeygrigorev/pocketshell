@@ -17,11 +17,12 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -89,17 +90,133 @@ class Issue926SeedIoOffMainTest {
 
     @After
     fun tearDown() {
-        runBlocking(mainDispatcher) {
-            for (vm in createdVms) {
-                runCatching { vm.setProcessForegroundForClearedForTest(false) }
-                runCatching { vm.clearForTest() }
+        var cleanupFailure: Throwable? = null
+        var teardownPhase = TeardownPhase.MAIN_INSTALLED
+
+        // Keep cleanup exception-safe: every phase must run even if an earlier
+        // phase fails. Re-throw the first teardown failure after global Main and
+        // both executors are safe, with later cleanup failures suppressed. JUnit
+        // then preserves a test-body failure alongside this @After failure.
+        fun captureCleanupFailure(block: () -> Unit) {
+            try {
+                block()
+            } catch (failure: Throwable) {
+                val firstFailure = cleanupFailure
+                if (firstFailure == null) {
+                    cleanupFailure = failure
+                } else if (firstFailure !== failure) {
+                    firstFailure.addSuppressed(failure)
+                }
             }
         }
-        Dispatchers.resetMain()
-        leaseScope.cancel()
-        factoryScope.cancel()
-        mainExecutor.shutdownNow()
-        seedIoExecutor.shutdownNow()
+
+        // Couple the phase transition and the global reset in one helper so a
+        // future edit cannot move resetMain() ahead of the VM drain while
+        // leaving an unrelated sentinel behind. A moved helper call hard-fails
+        // before touching the global Main delegate.
+        fun resetMainAfterVmDrain() {
+            check(teardownPhase == TeardownPhase.VM_DRAIN_COMPLETE) {
+                "Issue #1355: resetMain() cannot start before the #926 VM drain completes " +
+                    "(phase=$teardownPhase)"
+            }
+            teardownPhase = TeardownPhase.MAIN_RESET_STARTED
+            try {
+                Dispatchers.resetMain()
+            } finally {
+                teardownPhase = TeardownPhase.MAIN_RESET_COMPLETE
+            }
+        }
+
+        // Issue #1355 recurrence: clear every standalone fixture VM while the
+        // installed Main dispatcher is stable. clearForTest() invokes onCleared
+        // directly and therefore does not perform ViewModel.clear()'s automatic
+        // viewModelScope cancellation.
+        createdVms.asReversed().forEach { vm ->
+            captureCleanupFailure {
+                runBlocking(mainDispatcher) {
+                    vm.setProcessForegroundForClearedForTest(false)
+                }
+            }
+            captureCleanupFailure {
+                runBlocking(mainDispatcher) {
+                    vm.clearForTest()
+                }
+            }
+        }
+
+        // Cancel the VM-owned viewModelScope/bridgeScope roots before draining
+        // the test-owned collaborators that can hand work back to those roots.
+        createdVms.forEach { vm ->
+            captureCleanupFailure { vm.cancelOwnScopesForTest() }
+        }
+
+        // A bare scope.cancel() only requests cancellation. Join both real-IO
+        // roots while Main remains installed so no completion can touch Main
+        // after resetMain().
+        listOf(
+            "leaseScope" to leaseScope,
+            "factoryScope" to factoryScope,
+        ).forEach { (name, scope) ->
+            captureCleanupFailure {
+                runBlocking {
+                    withTimeout(TEARDOWN_DRAIN_TIMEOUT_MS) {
+                        requireNotNull(scope.coroutineContext[Job]) {
+                            "Issue #1355: $name must have an owned root Job"
+                        }.cancelAndJoin()
+                    }
+                }
+            }
+        }
+
+        // Completion handlers can enqueue one final bridgeScope child while the
+        // real-IO roots unwind. Re-cancel and poll every VM to a generous
+        // wall-clock deadline. The zero-child assertion is load-bearing: moving
+        // resetMain() above this drain or omitting VM cancellation is a
+        // deterministic RED instead of the old intermittent global-Main race.
+        captureCleanupFailure {
+            check(teardownPhase == TeardownPhase.MAIN_INSTALLED) {
+                "Issue #1355: VM drain must run while Main is still installed " +
+                    "(phase=$teardownPhase)"
+            }
+            try {
+                val deadlineNanos =
+                    System.nanoTime() + TEARDOWN_DRAIN_TIMEOUT_MS * NANOS_PER_MILLISECOND
+                while (true) {
+                    createdVms.forEach { it.cancelOwnScopesForTest() }
+                    val activeChildren =
+                        createdVms.sumOf { it.activeOwnScopeChildCountForTest() }
+                    if (activeChildren == 0) break
+                    if (System.nanoTime() >= deadlineNanos) {
+                        throw AssertionError(
+                            "Issue #1355: $activeChildren TmuxSessionViewModel coroutine(s) " +
+                                "did not quiesce within ${TEARDOWN_DRAIN_TIMEOUT_MS}ms; " +
+                                "resetting Dispatchers.Main now would recreate the " +
+                                "TestMainDispatcher:72 race",
+                        )
+                    }
+                    Thread.sleep(1)
+                }
+                assertEquals(
+                    "Issue #1355: every standalone #926 VM must be quiescent before resetMain()",
+                    0,
+                    createdVms.sumOf { it.activeOwnScopeChildCountForTest() },
+                )
+            } finally {
+                // "Complete" means the bounded drain phase returned or
+                // hard-failed. The separate zero-child assertion above remains
+                // the behavioral invariant; this transition lets exception-safe
+                // cleanup reset global Main after recording that failure.
+                teardownPhase = TeardownPhase.VM_DRAIN_COMPLETE
+            }
+        }
+
+        // These global/shared resources are intentionally last. Even a drain
+        // failure must not strand Main or threads for the next test class.
+        captureCleanupFailure { resetMainAfterVmDrain() }
+        captureCleanupFailure { mainExecutor.shutdownNow() }
+        captureCleanupFailure { seedIoExecutor.shutdownNow() }
+
+        cleanupFailure?.let { throw it }
     }
 
     private fun connectVm(client: FakeTmuxClient): TmuxSessionViewModel {
@@ -390,5 +507,14 @@ class Issue926SeedIoOffMainTest {
         const val MAIN_THREAD_NAME = "issue926-main"
         const val SEED_IO_THREAD_NAME = "issue926-seed-io"
         const val MAIN_PROBE_BUDGET_MS = 1_000L
+        const val TEARDOWN_DRAIN_TIMEOUT_MS = 30_000L
+        const val NANOS_PER_MILLISECOND = 1_000_000L
+    }
+
+    private enum class TeardownPhase {
+        MAIN_INSTALLED,
+        VM_DRAIN_COMPLETE,
+        MAIN_RESET_STARTED,
+        MAIN_RESET_COMPLETE,
     }
 }

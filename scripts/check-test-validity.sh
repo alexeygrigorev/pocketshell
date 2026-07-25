@@ -87,14 +87,15 @@
 #       a plain grep could not catch because the discriminator is semantic
 #       (*can the real path produce this state at all?*). The #848 audit's fix
 #       (option b) is a VETTED-SEAM REGISTRY: the detector matches the narrow,
-#       highest-signal state-INJECTION shape a connected test calls — force*ForTest,
-#       *Override*ForTest, set*ActiveForTest — resolves it to its production
-#       `fun ...ForTest(` definition in src/main (so test-double helpers are
-#       ignored), and HARD-FAILS when that seam is neither registry-listed nor
-#       carries an inline `// SEAM_JUSTIFIED:` opt-out. Registering a seam requires
-#       writing a one-line real-path-reachability justification — the exact
-#       judgement that was skipped for alt-buffer. Config/dispatcher/timeout knob
-#       setters, exact-production-call wrappers (clearAgentDetectionForPaneForTest),
+#       highest-signal state-INJECTION shape a connected test calls or assigns —
+#       force*ForTest, *Override*ForTest, set*ActiveForTest — resolves it to its
+#       matching production `fun ...ForTest(` or `var ...ForTest` definition in
+#       src/main (so test-double helpers/properties are ignored), and HARD-FAILS
+#       when that seam is neither registry-listed nor carries an inline
+#       `// SEAM_JUSTIFIED:` opt-out. Registering a seam requires writing a
+#       one-line real-path-reachability justification — the exact judgement that
+#       was skipped for alt-buffer. Config/dispatcher/timeout knob setters,
+#       exact-production-call wrappers (clearAgentDetectionForPaneForTest),
 #       lifecycle gates (setProcessStartedForTest) and read-only accessors are NOT
 #       injection-shape, so they are deliberately out of scope (precision over
 #       recall — a noisy guard gets disabled). Self-test:
@@ -173,8 +174,9 @@ CI_JOURNEY_SUITE="scripts/ci-journey-suite.sh"
 # #1430: the vetted state-injection seam registry (SEAM1). Overridable via the
 # VETTED_SEAM_REGISTRY env var so the self-test can point at a temp registry.
 VETTED_SEAM_REGISTRY="${VETTED_SEAM_REGISTRY:-scripts/vetted-test-state-setters.txt}"
-# Production source roots where a `fun ...ForTest(` DEFINITION makes a seam a
-# genuine production seam (vs a test-double helper of the same name).
+# Production source roots where a matching `fun ...ForTest(` / `var ...ForTest`
+# DEFINITION makes a seam a genuine production seam (vs a test-double helper or
+# property of the same name).
 PROD_SRC_ROOTS=(app/src/main)
 while IFS= read -r d; do
   [[ -d "$d" ]] && PROD_SRC_ROOTS+=("$d")
@@ -916,41 +918,348 @@ scan_timing1() {
 # registry. See the header block for the full rationale (the #1158 alt-buffer
 # cheat class). Deliberately conservative (precision over recall):
 #
-#   (1) the CALL must be the state-injection SHAPE — force*ForTest,
-#       *Override*ForTest, or set*ActiveForTest — the narrow, highest-signal shape
-#       the alt-buffer cheat took (forceActivePaneAltBufferForTest). Plain config
-#       setters, exact-production-call wrappers, lifecycle gates and read
-#       accessors are out of scope.
-#   (2) the seam must be PRODUCTION-defined (`fun <name>ForTest(` under
-#       app/src/main or shared/*/src/main), so a test-double helper of the same
-#       name is ignored — the cheat class is specifically a production seam.
+#   (1) the CALL or PROPERTY ASSIGNMENT must use the state-injection SHAPE —
+#       force*ForTest, *Override*ForTest, or set*ActiveForTest — the narrow,
+#       highest-signal shape the alt-buffer cheat took
+#       (forceActivePaneAltBufferForTest). Plain config setters,
+#       exact-production-call wrappers, lifecycle gates and read accessors are
+#       out of scope.
+#   (2) the occurrence must match its PRODUCTION definition kind
+#       (`fun <name>ForTest(` for calls, `var <name>ForTest` for assignments,
+#       under app/src/main or shared/*/src/main), so test-double helpers and
+#       properties of the same name are ignored — the cheat class is
+#       specifically a production seam.
 #   (3) VETTED — the seam name is listed in scripts/vetted-test-state-setters.txt
-#       (each with a written real-path-reachability justification), OR the call
-#       carries an inline `// SEAM_JUSTIFIED:` opt-out (on the call line or the
-#       line directly above). Otherwise it is a NEW hard-fail.
+#       (each with a written real-path-reachability justification), OR the call /
+#       assignment carries an inline `// SEAM_JUSTIFIED:` opt-out (on its line or
+#       the line directly above). Otherwise it is a NEW hard-fail.
 # --------------------------------------------------------------------------
 declare -a SEAM1_NEW=()
-declare -a SEAM1_VETTED=()          # call-site records that resolved to a vetted seam
+declare -a SEAM1_VETTED=()          # occurrences that resolved to a vetted seam
 declare -a SEAM1_REGISTRY_NAMES=()  # the bare seam names parsed from the registry
 declare -a SEAM1_JUSTIFIED=()
 declare -a SEAM1_REGISTRY_ERRORS=()
 declare -a SEAM1_STALE_REGISTRY=()
 declare -A SEAM1_VETTED_SEEN=()
 declare -A PROD_SEAM_DEFINED=()
+declare -A PROD_CALL_SEAM_DEFINED=()
+declare -A PROD_PROPERTY_SEAM_DEFINED=()
+SEAM1_LEX_DIR=""
 
-# The state-injection call shape (the alt-buffer cheat's shape).
+cleanup_seam1_lex_dir() {
+  [[ -z "${SEAM1_LEX_DIR:-}" ]] || rm -rf -- "$SEAM1_LEX_DIR"
+}
+trap cleanup_seam1_lex_dir EXIT
+
+# The high-signal state-injection name shape (the alt-buffer cheat's shape).
 SEAM1_INJECTION_SHAPE='(force[A-Za-z]*ForTest|[a-z][A-Za-z]*Override[A-Za-z]*ForTest|set[A-Za-z]*ActiveForTest)'
+SEAM1_CALL_PATTERN="$SEAM1_INJECTION_SHAPE[[:space:]]*\\("
+# Consume one non-'=' RHS character (or accept end-of-line) so `==` comparisons
+# are not mistaken for assignments. The consumed character is discarded when
+# the seam name is extracted below.
+SEAM1_ASSIGNMENT_PATTERN="$SEAM1_INJECTION_SHAPE[[:space:]]*=[[:space:]]*([^=]|$)"
 
-# Build the set of production-defined `*ForTest` seam names once.
+# Produce line-aligned CODE and COMMENT views of a Kotlin source file. Strings,
+# chars, and comments become spaces in the CODE view; only real `//` / `/* */`
+# comment text survives in the COMMENT view. Keeping column/newline positions
+# stable lets the grep-sized SEAM1 rules remain cheap while preventing raw text
+# in docs, strings, or trailing comments from becoming code or justification.
+#
+# This intentionally handles Kotlin's nested block comments, multiline raw
+# strings, and nested string-template contexts. Literal template segments and
+# nested strings stay masked, but `${...}` bodies re-enter executable Kotlin:
+# a lambda/block inside an interpolation can legally assign a production seam
+# and must fail closed just like the same statement outside a string.
+sanitize_kotlin_source() {
+  local source="$1" code_out="$2" comment_out="$3"
+  : > "$code_out"
+  : > "$comment_out"
+  awk -v code_out="$code_out" -v comment_out="$comment_out" '
+    function blanks(n, s) {
+      s = ""
+      while (n-- > 0) s = s " "
+      return s
+    }
+    function push_mode(value) {
+      mode_depth++
+      mode[mode_depth] = value
+    }
+    function pop_mode() {
+      if (mode_depth > 1) {
+        delete mode[mode_depth]
+        delete template_brace_depth[mode_depth]
+        mode_depth--
+      }
+    }
+    BEGIN {
+      mode_depth = 1
+      mode[mode_depth] = "code"
+      block_depth = 0
+      single_quote = sprintf("%c", 39)
+    }
+    {
+      line = $0
+      code = ""
+      comment = ""
+      i = 1
+      while (i <= length(line)) {
+        one = substr(line, i, 1)
+        two = substr(line, i, 2)
+        three = substr(line, i, 3)
+        current_mode = mode[mode_depth]
+
+        if (current_mode == "block_comment") {
+          if (two == "/*") {
+            block_depth++
+            code = code "  "
+            comment = comment two
+            i += 2
+          } else if (two == "*/") {
+            block_depth--
+            code = code "  "
+            comment = comment two
+            i += 2
+            if (block_depth == 0) pop_mode()
+          } else {
+            code = code " "
+            comment = comment one
+            i++
+          }
+          continue
+        }
+
+        if (current_mode == "raw_string") {
+          if (three == "\"\"\"") {
+            code = code "   "
+            comment = comment "   "
+            pop_mode()
+            i += 3
+          } else if (two == "${") {
+            # `$` belongs to the template delimiter; `{` opens executable code.
+            code = code " {"
+            comment = comment "  "
+            push_mode("template_code")
+            template_brace_depth[mode_depth] = 1
+            i += 2
+          } else {
+            code = code " "
+            comment = comment " "
+            i++
+          }
+          continue
+        }
+
+        if (current_mode == "string") {
+          if (one == "\\") {
+            width = (i < length(line)) ? 2 : 1
+            code = code blanks(width)
+            comment = comment blanks(width)
+            i += width
+          } else if (two == "${") {
+            code = code " {"
+            comment = comment "  "
+            push_mode("template_code")
+            template_brace_depth[mode_depth] = 1
+            i += 2
+          } else {
+            code = code " "
+            comment = comment " "
+            if (one == "\"") pop_mode()
+            i++
+          }
+          continue
+        }
+
+        if (current_mode == "char") {
+          if (one == "\\") {
+            width = (i < length(line)) ? 2 : 1
+            code = code blanks(width)
+            comment = comment blanks(width)
+            i += width
+          } else {
+            code = code " "
+            comment = comment " "
+            if (one == single_quote) pop_mode()
+            i++
+          }
+          continue
+        }
+
+        if (two == "//") {
+          rest = substr(line, i)
+          code = code blanks(length(rest))
+          comment = comment rest
+          i = length(line) + 1
+        } else if (two == "/*") {
+          block_depth = 1
+          push_mode("block_comment")
+          code = code "  "
+          comment = comment two
+          i += 2
+        } else if (three == "\"\"\"") {
+          push_mode("raw_string")
+          code = code "   "
+          comment = comment "   "
+          i += 3
+        } else if (one == "\"") {
+          push_mode("string")
+          code = code " "
+          comment = comment " "
+          i++
+        } else if (one == single_quote) {
+          push_mode("char")
+          code = code " "
+          comment = comment " "
+          i++
+        } else if (current_mode == "template_code" && one == "{") {
+          template_brace_depth[mode_depth]++
+          code = code one
+          comment = comment " "
+          i++
+        } else if (current_mode == "template_code" && one == "}") {
+          template_brace_depth[mode_depth]--
+          code = code one
+          comment = comment " "
+          i++
+          if (template_brace_depth[mode_depth] == 0) pop_mode()
+        } else {
+          code = code one
+          comment = comment " "
+          i++
+        }
+      }
+      # Ordinary strings/chars cannot cross a physical source line. Invalid
+      # unterminated literals must not mask the rest of the file; template-code,
+      # raw-string, and block-comment contexts legitimately persist.
+      while (mode_depth > 1 &&
+             (mode[mode_depth] == "string" || mode[mode_depth] == "char")) {
+        pop_mode()
+      }
+      print code >> code_out
+      print comment >> comment_out
+    }
+  ' "$source"
+}
+
+# Mask Kotlin named-argument/default-parameter names in an already-sanitized
+# CODE view. Kotlin assignments are statements, so a bare `name =` at the start
+# of a parenthesized argument/parameter slot is not a property write. A brace
+# nested inside the parentheses starts a lambda body, where a real unqualified
+# property assignment is legal and must remain visible.
+mask_kotlin_named_arguments() {
+  local code_in="$1" code_out="$2"
+  awk '
+    function blanks(n, s) {
+      s = ""
+      while (n-- > 0) s = s " "
+      return s
+    }
+    function is_identifier_start(ch) {
+      return ch ~ /[A-Za-z_]/
+    }
+    function is_identifier_part(ch) {
+      return ch ~ /[A-Za-z0-9_]/
+    }
+    function is_injection_name(name) {
+      return name ~ /^force[A-Za-z]*ForTest$/ ||
+             name ~ /^[a-z][A-Za-z]*Override[A-Za-z]*ForTest$/ ||
+             name ~ /^set[A-Za-z]*ActiveForTest$/
+    }
+    {
+      line = $0
+      out = line
+      i = 1
+      while (i <= length(line)) {
+        ch = substr(line, i, 1)
+        if (is_identifier_start(ch)) {
+          start = i
+          i++
+          while (i <= length(line) &&
+                 is_identifier_part(substr(line, i, 1))) i++
+          name = substr(line, start, i - start)
+          next_nonspace = i
+          while (next_nonspace <= length(line) &&
+                 substr(line, next_nonspace, 1) ~ /[[:space:]]/) next_nonspace++
+          is_single_equals = (substr(line, next_nonspace, 1) == "=" &&
+                              substr(line, next_nonspace + 1, 1) != "=")
+          is_argument_slot = (paren_depth > 0 &&
+                              brace_depth == paren_brace_depth[paren_depth] &&
+                              !paren_slot_has_code[paren_depth])
+          if (is_injection_name(name) && is_single_equals && is_argument_slot) {
+            out = substr(out, 1, start - 1) blanks(length(name)) substr(out, i)
+          }
+          if (paren_depth > 0 &&
+              brace_depth == paren_brace_depth[paren_depth]) {
+            paren_slot_has_code[paren_depth] = 1
+          }
+          continue
+        }
+
+        if (ch == "(") {
+          paren_depth++
+          paren_brace_depth[paren_depth] = brace_depth
+          paren_slot_has_code[paren_depth] = 0
+        } else if (ch == ")") {
+          delete paren_brace_depth[paren_depth]
+          delete paren_slot_has_code[paren_depth]
+          if (paren_depth > 0) paren_depth--
+          if (paren_depth > 0 &&
+              brace_depth == paren_brace_depth[paren_depth]) {
+            paren_slot_has_code[paren_depth] = 1
+          }
+        } else if (ch == "{") {
+          brace_depth++
+        } else if (ch == "}") {
+          if (brace_depth > 0) brace_depth--
+        } else if (ch == "," &&
+                   paren_depth > 0 &&
+                   brace_depth == paren_brace_depth[paren_depth]) {
+          paren_slot_has_code[paren_depth] = 0
+        } else if (ch !~ /[[:space:]]/ &&
+                   paren_depth > 0 &&
+                   brace_depth == paren_brace_depth[paren_depth]) {
+          paren_slot_has_code[paren_depth] = 1
+        }
+        i++
+      }
+      print out
+    }
+  ' "$code_in" > "$code_out"
+}
+
+# Build the sets of production-defined `*ForTest` function and property seam
+# names once. Keeping the definition kinds separate prevents a function name in
+# a named argument from being treated as a property assignment (and vice versa).
 build_prod_seam_set() {
-  local r name
-  for r in "${PROD_SRC_ROOTS[@]}"; do
-    [[ -d "$r" ]] || continue
-    while IFS= read -r name; do
-      [[ -n "$name" ]] && PROD_SEAM_DEFINED["$name"]=1
-    done < <(grep -rhoE 'fun[[:space:]]+[A-Za-z_]+ForTest[[:space:]]*\(' "$r" 2>/dev/null \
-             | sed -E 's/fun[[:space:]]+//; s/[[:space:]]*\($//')
-  done
+  local file line name code_file comment_file file_index=0
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    file_index=$((file_index + 1))
+    code_file="$SEAM1_LEX_DIR/prod-$file_index.code"
+    comment_file="$SEAM1_LEX_DIR/prod-$file_index.comments"
+    sanitize_kotlin_source "$file" "$code_file" "$comment_file"
+    while IFS= read -r line; do
+      while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        name="${name#fun}"
+        name="${name#"${name%%[![:space:]]*}"}"
+        PROD_CALL_SEAM_DEFINED["$name"]=1
+        PROD_SEAM_DEFINED["$name"]=1
+      done < <(grep -oE 'fun[[:space:]]+[A-Za-z_]+ForTest' <<< "$line" 2>/dev/null || true)
+      while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        name="${name#var}"
+        name="${name#"${name%%[![:space:]]*}"}"
+        PROD_PROPERTY_SEAM_DEFINED["$name"]=1
+        PROD_SEAM_DEFINED["$name"]=1
+      done < <(grep -oE 'var[[:space:]]+[A-Za-z_]+ForTest' <<< "$line" 2>/dev/null || true)
+    done < <(grep -E '(fun|var)[[:space:]]+[A-Za-z_]+ForTest' "$code_file" 2>/dev/null || true)
+  done < <(
+    for r in "${PROD_SRC_ROOTS[@]}"; do
+      [[ -d "$r" ]] || continue
+      grep -rlE 'ForTest' "$r" --include='*.kt' 2>/dev/null || true
+    done | sort -u
+  )
 }
 
 # Parse the registry: each data line is `<seamName>  # <justification>`. A data
@@ -990,35 +1299,62 @@ parse_vetted_seam_registry() {
 }
 
 scan_seam1() {
+  SEAM1_LEX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-seam1-lex.XXXXXX")" || {
+    SEAM1_REGISTRY_ERRORS+=("could not create SEAM1 lexical scratch directory")
+    return
+  }
   build_prod_seam_set
   parse_vetted_seam_registry
 
-  local file lineno text prev seam
+  local file lineno text occurrence kind seam
+  local code_file comment_file masked_file file_index=0
+  local current_comment previous_comment
   for file in "${ANDROID_TEST_FILES[@]}"; do
     [[ -z "$file" ]] && continue
-    grep -Eq "$SEAM1_INJECTION_SHAPE[[:space:]]*\(" "$file" || continue
+    grep -Eq "$SEAM1_INJECTION_SHAPE" "$file" || continue
+    file_index=$((file_index + 1))
+    code_file="$SEAM1_LEX_DIR/android-$file_index.code"
+    comment_file="$SEAM1_LEX_DIR/android-$file_index.comments"
+    masked_file="$SEAM1_LEX_DIR/android-$file_index.masked"
+    sanitize_kotlin_source "$file" "$code_file" "$comment_file"
+    mask_kotlin_named_arguments "$code_file" "$masked_file"
+    grep -Eq "$SEAM1_CALL_PATTERN|$SEAM1_ASSIGNMENT_PATTERN" "$masked_file" || continue
     while IFS= read -r lineno; do
       [[ -z "$lineno" ]] && continue
-      text="$(sed -n "${lineno}p" "$file")"
-      is_code_line "$text" || continue
-      # Every injection-shape seam name called on this line.
-      while IFS= read -r seam; do
-        [[ -z "$seam" ]] && continue
-        # (2) only PRODUCTION-defined seams are the cheat class.
-        [[ -n "${PROD_SEAM_DEFINED[$seam]:-}" ]] || continue
-        # Inline opt-out on the call line or the line directly above.
-        prev="$(sed -n "$((lineno - 1))p" "$file")"
-        if printf '%s\n%s' "$prev" "$text" | grep -q 'SEAM_JUSTIFIED:'; then
-          SEAM1_JUSTIFIED+=("$file:$lineno ($seam)")
+      text="$(sed -n "${lineno}p" "$masked_file")"
+      # Every injection-shape call / assignment on this line, tagged with its
+      # syntax kind so it must resolve to the matching production definition.
+      while IFS= read -r occurrence; do
+        [[ -z "$occurrence" ]] && continue
+        kind="${occurrence%%:*}"
+        seam="${occurrence#*:}"
+        case "$kind" in
+          call) [[ -n "${PROD_CALL_SEAM_DEFINED[$seam]:-}" ]] || continue ;;
+          assignment) [[ -n "${PROD_PROPERTY_SEAM_DEFINED[$seam]:-}" ]] || continue ;;
+          *) continue ;;
+        esac
+        # Opt out only through a REAL source comment on the occurrence line or
+        # directly above it. Marker text in a string literal is not authority.
+        previous_comment="$(sed -n "$((lineno - 1))p" "$comment_file")"
+        current_comment="$(sed -n "${lineno}p" "$comment_file")"
+        if printf '%s\n%s' "$previous_comment" "$current_comment" | grep -q 'SEAM_JUSTIFIED:'; then
+          SEAM1_JUSTIFIED+=("$file:$lineno ($seam; $kind)")
           continue
         fi
         if [[ -n "${SEAM1_VETTED_SEEN[$seam]:-}" ]]; then
-          SEAM1_VETTED+=("$file:$lineno ($seam)")
+          SEAM1_VETTED+=("$file:$lineno ($seam; $kind)")
         else
-          SEAM1_NEW+=("$file:$lineno ($seam)")
+          SEAM1_NEW+=("$file:$lineno ($seam; $kind)")
         fi
-      done < <(grep -oE "$SEAM1_INJECTION_SHAPE[[:space:]]*\(" <<< "$text" | sed -E 's/[[:space:]]*\($//' | sort -u)
-    done < <(grep -nE "$SEAM1_INJECTION_SHAPE[[:space:]]*\(" "$file" | cut -d: -f1)
+      done < <(
+        grep -oE "$SEAM1_CALL_PATTERN" <<< "$text" \
+          | sed -E 's/[[:space:]]*\($//' \
+          | sed 's/^/call:/'
+        grep -oE "$SEAM1_ASSIGNMENT_PATTERN" <<< "$text" \
+          | sed -E 's/[[:space:]]*=.*$//' \
+          | sed 's/^/assignment:/'
+      )
+    done < <(grep -nE "$SEAM1_CALL_PATTERN|$SEAM1_ASSIGNMENT_PATTERN" "$masked_file" | cut -d: -f1 | sort -nu)
   done
 
   # Registry hygiene: a vetted seam that is no longer production-defined anywhere
@@ -1029,6 +1365,9 @@ scan_seam1() {
     [[ -z "$v" ]] && continue
     [[ -n "${PROD_SEAM_DEFINED[$v]:-}" ]] || SEAM1_STALE_REGISTRY+=("$v -> not defined in any src/main")
   done
+
+  cleanup_seam1_lex_dir
+  SEAM1_LEX_DIR=""
 }
 
 # --------------------------------------------------------------------------
@@ -1177,8 +1516,8 @@ print_list "TIMING1 — NEW bare Thread.sleep(N) before a load-bearing assert, n
 print_list "TIMING1 — NEW runTest over a real dispatcher/thread without a pinned seam or bounded pump [advisory]" "${TIMING1_FINDINGS[@]:-}"
 print_list "TIMING1 — KNOWN baseline (real-dispatcher/thread runTest catalogued; seam adoption is per-test follow-up) [advisory]" "${TIMING1_KNOWN[@]:-}"
 print_list "TIMING1 — JUSTIFIED (opted out via // JUSTIFIED:) [advisory]" "${TIMING1_JUSTIFIED[@]:-}"
-print_list "SEAM1 — NEW connected-test assertion driven by an UNVETTED production state-injection seam (force*/Override*/set*Active*ForTest not in the registry) [HARD FAIL]" "${SEAM1_NEW[@]:-}"
-print_list "SEAM1 — VETTED connected-test state-injection seam call (registry-listed) [advisory]" "${SEAM1_VETTED[@]:-}"
+print_list "SEAM1 — NEW connected-test assertion driven by an UNVETTED production state-injection seam call/assignment (force*/Override*/set*Active*ForTest not in the registry) [HARD FAIL]" "${SEAM1_NEW[@]:-}"
+print_list "SEAM1 — VETTED connected-test state-injection seam call/assignment (registry-listed) [advisory]" "${SEAM1_VETTED[@]:-}"
 print_list "SEAM1 — JUSTIFIED (opted out via // SEAM_JUSTIFIED:) [advisory]" "${SEAM1_JUSTIFIED[@]:-}"
 print_list "SEAM1 — REGISTRY error (a registry line has no '# justification') [HARD FAIL]" "${SEAM1_REGISTRY_ERRORS[@]:-}"
 print_list "SEAM1 — STALE registry entry (seam no longer defined in any src/main) [advisory NOTE]" "${SEAM1_STALE_REGISTRY[@]:-}"
@@ -1216,10 +1555,12 @@ echo "        expression body. Change  fun x() = runBlocking { … }  to"
 echo "        fun x() { runBlocking { … } }  (the block body is always Unit; the"
 echo "        expression-body value that made the method non-void is discarded)."
 echo " SEAM1  a connected test must not drive an assertion from a state-injection"
-echo "        seam (force*/Override*/set*Active*ForTest) whose injected state the"
-echo "        real path may never reach, unless the seam is vetted with a written"
+echo "        seam call/assignment (force*/Override*/set*Active*ForTest) whose"
+echo "        injected state the real path may never reach, unless the seam is"
+echo "        vetted with a written"
 echo "        real-path-reachability reason in $VETTED_SEAM_REGISTRY"
-echo "        (or the call carries an inline // SEAM_JUSTIFIED: opt-out). This is"
+echo "        (or the call/assignment carries an inline // SEAM_JUSTIFIED:"
+echo "        opt-out). This is"
 echo "        the #1158 forceActivePaneAltBufferForTest cheat class (#1430/#848)."
 echo "--------------------------------------------------------------"
 
@@ -1246,7 +1587,7 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, unvetted connected-test state-injection seam (a force*/Override*/set*Active*ForTest seam driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
   echo
   echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1 + TIMING1 + SEAM1 + V1)."
   exit 1

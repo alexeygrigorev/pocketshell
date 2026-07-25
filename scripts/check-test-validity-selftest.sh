@@ -34,20 +34,118 @@ SRC_FIX_DIR="app/src/main/java/com/pocketshell/app/$FIX_TAG"
 # TIMING1 is scoped to the connection/terminal roots, so its fixtures must live
 # under one of those dirs (here: the app tmux JVM test root).
 TIMING_FIX_DIR="app/src/test/java/com/pocketshell/app/tmux/$FIX_TAG"
+TMP_REG=""
+CLEANUP_SIBLING_TAG=""
 
 # Remove ONLY this invocation's own (PID-suffixed) fixture dirs, so a concurrent
-# sibling self-test (different PID) is never disturbed.
+# sibling self-test (different PID) is never disturbed. Also remove this
+# invocation's unique temporary registry if an interrupt arrives mid-check.
 cleanup() {
   rm -rf "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR"
+  [[ -z "${TMP_REG:-}" ]] || rm -f -- "$TMP_REG"
+  if [[ -n "${CLEANUP_SIBLING_TAG:-}" ]]; then
+    rm -rf \
+      "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+      "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+      "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+      "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG"
+  fi
+}
+exit_from_signal() {
+  local status="$1"
+  cleanup
+  trap - EXIT INT TERM
+  exit "$status"
 }
 trap cleanup EXIT
+trap 'exit_from_signal 130' INT
+trap 'exit_from_signal 143' TERM
 cleanup
 mkdir -p "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR"
+
+# Internal child mode for the deterministic SIGTERM cleanup regression below.
+# It creates only its normal PID-scoped fixtures, then waits to be terminated.
+if [[ "${1:-}" == "--sigterm-cleanup-probe" ]]; then
+  # Exercise the explicit signal path independently of the normal-completion
+  # EXIT fallback. Before #1758 installed INT/TERM handlers this deterministically
+  # left all four directories behind, matching the reviewer interruption.
+  trap - EXIT
+  while true; do
+    sleep 1
+  done
+fi
 
 PASS=0
 FAIL=0
 note_pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 note_fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
+
+run_sigterm_cleanup_regression() {
+  local probe_pid probe_rc=0 attempt probe_ready=0 own_removed=0 sibling_preserved=0
+  local probe_tag
+  CLEANUP_SIBLING_TAG="selftest_9$$"
+  mkdir -p \
+    "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+    "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+    "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG"
+
+  "$REPO_ROOT/scripts/check-test-validity-selftest.sh" --sigterm-cleanup-probe &
+  probe_pid=$!
+  probe_tag="selftest_$probe_pid"
+
+  for attempt in {1..100}; do
+    if [[ -d "app/src/test/java/com/pocketshell/app/$probe_tag" &&
+          -d "app/src/androidTest/java/com/pocketshell/app/$probe_tag" &&
+          -d "app/src/main/java/com/pocketshell/app/$probe_tag" &&
+          -d "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" ]]; then
+      probe_ready=1
+      break
+    fi
+    kill -0 "$probe_pid" 2>/dev/null || break
+    sleep 0.05
+  done
+
+  kill -TERM "$probe_pid" 2>/dev/null || true
+  wait "$probe_pid" || probe_rc=$?
+
+  if [[ "$probe_ready" -eq 1 &&
+        "$probe_rc" -eq 143 &&
+        ! -e "app/src/test/java/com/pocketshell/app/$probe_tag" &&
+        ! -e "app/src/androidTest/java/com/pocketshell/app/$probe_tag" &&
+        ! -e "app/src/main/java/com/pocketshell/app/$probe_tag" &&
+        ! -e "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" ]]; then
+    own_removed=1
+  fi
+  if [[ -d "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
+        -d "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
+        -d "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
+        -d "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" ]]; then
+    sibling_preserved=1
+  fi
+
+  if [[ "$own_removed" -eq 1 ]]; then
+    note_pass "SIGTERM exits 143 and removes the interrupted run's PID-scoped fixtures"
+  else
+    note_fail "SIGTERM cleanup (ready=$probe_ready exit=$probe_rc own_removed=$own_removed)"
+  fi
+  if [[ "$sibling_preserved" -eq 1 ]]; then
+    note_pass "SIGTERM cleanup preserves a sibling invocation's fixture directories"
+  else
+    note_fail "SIGTERM cleanup removed or damaged sibling fixture directories"
+  fi
+
+  rm -rf \
+    "app/src/test/java/com/pocketshell/app/$probe_tag" \
+    "app/src/androidTest/java/com/pocketshell/app/$probe_tag" \
+    "app/src/main/java/com/pocketshell/app/$probe_tag" \
+    "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" \
+    "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+    "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+    "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
+    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG"
+  CLEANUP_SIBLING_TAG=""
+}
 
 # Assert a path appears (mode=present) or does not appear (mode=absent) as a
 # FINDING in the named report section. `section` is a substring of the section
@@ -117,6 +215,10 @@ assert_exit() {
 echo "=============================================================="
 echo " Self-test: scripts/check-test-validity.sh (#850 detectors)"
 echo "=============================================================="
+
+echo
+echo "[cleanup] SIGTERM removes only the interrupted invocation's fixtures"
+run_sigterm_cleanup_regression
 
 # --------------------------------------------------------------------------
 # C1 — assumeFalse(isRunningOnCi()) outside a fault class.
@@ -450,6 +552,22 @@ class Seam1ProdSeam {
     // A production state-injection seam of the #1158 alt-buffer shape: it forces
     // a runtime flag the real seed path never sets on its own.
     fun forceActivePaneAltBufferForTest(active: Boolean) { /* injects unreachable state */ }
+
+    // Property-shaped counterpart: assigning this can mask the same real-path
+    // failure as the call-shaped seam above.
+    var forceSyntheticTransportAliveForTest: Boolean? = null
+
+    // These definitions prove call/property resolution stays kind-specific.
+    fun forceFunctionKindOnlyForTest(active: Boolean) {}
+    var forcePropertyKindOnlyForTest: Boolean = false
+
+    // Production test knob outside the deliberately narrow injection-name
+    // shape. SEAM1 must not broaden to every ForTest property.
+    var passiveTimeoutForTest: Long = 0L
+
+    // Lexical decoys are not production definitions.
+    val stringDefinitionDecoy = "var forceStringDefinitionOnlyForTest: Boolean = false"
+    val commentDefinitionDecoy = 1 /* var forceCommentDefinitionOnlyForTest: Boolean = false */
 }
 KT
 
@@ -505,15 +623,298 @@ class Seam1GoodLocalHelperTest {
 }
 KT
 
+# BAD property assignment: production-defined, injection-shaped, and unvetted.
+cat > "$ANDROID_FIX_DIR/Seam1BadPropertyAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadPropertyAssignmentTest {
+    fun transportLooksAlive() {
+        seam.forceSyntheticTransportAliveForTest = true
+        assertTrue(transportLooksAliveNow())
+    }
+    private val seam = Seam1ProdSeam()
+    private fun transportLooksAliveNow() = true
+    private fun assertTrue(b: Boolean) {}
+}
+KT
+
+# GOOD-4 (vetted property): this production property is registry-listed with
+# real-path reasons for both of its production owners.
+cat > "$ANDROID_FIX_DIR/Seam1GoodVettedPropertyAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodVettedPropertyAssignmentTest {
+    fun transportRideThrough() {
+        controller.forceTransportProvenAliveForTest = true
+    }
+    private val controller = FakeController()
+    class FakeController { var forceTransportProvenAliveForTest: Boolean? = null }
+}
+KT
+
+# GOOD-5 (inline-justified property): assignment-line opt-out semantics are the
+# same as call-line semantics.
+cat > "$ANDROID_FIX_DIR/Seam1GoodJustifiedPropertyAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodJustifiedPropertyAssignmentTest {
+    fun oneOffPropertyPin() {
+        seam.forceSyntheticTransportAliveForTest = true // SEAM_JUSTIFIED: selftest one-off reachable state
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+# GOOD-6 (test-local property): injection-shaped assignment with no production
+# definition must remain outside SEAM1.
+cat > "$ANDROID_FIX_DIR/Seam1GoodLocalPropertyAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodLocalPropertyAssignmentTest {
+    fun usesLocalProperty() {
+        forceLocalOnlyPropertyForTest = true
+    }
+    private var forceLocalOnlyPropertyForTest: Boolean = false
+}
+KT
+
+# GOOD-7 (non-injection property): production ForTest configuration knobs stay
+# outside the deliberately narrow force*/Override*/set*Active* shape.
+cat > "$ANDROID_FIX_DIR/Seam1GoodNonInjectionPropertyAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodNonInjectionPropertyAssignmentTest {
+    fun shortensTimeout() {
+        seam.passiveTimeoutForTest = 10L
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+# GOOD-8 (property read/comparison): a high-signal property name by itself is
+# not an assignment; in particular, `==` must not trip the assignment matcher.
+cat > "$ANDROID_FIX_DIR/Seam1GoodPropertyComparisonTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodPropertyComparisonTest {
+    fun readsInjectedState() {
+        assertTrue(seam.forceSyntheticTransportAliveForTest == true)
+    }
+    private val seam = Seam1ProdSeam()
+    private fun assertTrue(b: Boolean) {}
+}
+KT
+
+# GOOD-9 (named arguments): a production property name used as an inline or
+# multiline Kotlin named argument is not a write to that property.
+cat > "$ANDROID_FIX_DIR/Seam1GoodNamedArgumentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodNamedArgumentTest {
+    fun configuresFake() {
+        configure(forceSyntheticTransportAliveForTest = true)
+        configure(
+            other = false,
+            forceSyntheticTransportAliveForTest /* argument docs */ = true,
+        )
+    }
+    private fun configure(
+        other: Boolean = false,
+        forceSyntheticTransportAliveForTest: Boolean,
+    ) {}
+}
+KT
+
+# GOOD-10 (non-code assignment text): strings, raw strings, line comments, and
+# trailing comments must not be classified as property writes.
+cat > "$ANDROID_FIX_DIR/Seam1GoodNonCodeAssignmentTextTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodNonCodeAssignmentTextTest {
+    fun documentsTheSeam() {
+        val ordinary = "forceSyntheticTransportAliveForTest = true"
+        val raw = """forceSyntheticTransportAliveForTest = true"""
+        val ordinaryNested = "value=${"forceSyntheticTransportAliveForTest = true"}"
+        val rawNested = """value=${"forceSyntheticTransportAliveForTest = true"}"""
+        // forceSyntheticTransportAliveForTest = true
+        doWork() // forceSyntheticTransportAliveForTest = true
+        require(
+            ordinary.isNotBlank() &&
+                raw.isNotBlank() &&
+                ordinaryNested.isNotBlank() &&
+                rawNested.isNotBlank(),
+        )
+    }
+    private fun doWork() {}
+}
+KT
+
+# GOOD-11 (fake production definitions): these injection-shaped writes resolve
+# only to `var ...ForTest` text inside a production string/comment, never to a
+# real production property, so the production-defined filter must ignore them.
+cat > "$ANDROID_FIX_DIR/Seam1GoodFakeProductionDefinitionTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodFakeProductionDefinitionTest {
+    fun usesTestDoubleProperties() {
+        fake.forceStringDefinitionOnlyForTest = true
+        fake.forceCommentDefinitionOnlyForTest = true
+    }
+    private val fake = Fake()
+    class Fake {
+        var forceStringDefinitionOnlyForTest: Boolean = false
+        var forceCommentDefinitionOnlyForTest: Boolean = false
+    }
+}
+KT
+
+# GOOD-12 (definition-kind separation): a production function is not enough to
+# make assignment syntax a property seam, and a production property is not
+# enough to make call syntax a function seam.
+cat > "$ANDROID_FIX_DIR/Seam1GoodDefinitionKindSeparationTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodDefinitionKindSeparationTest {
+    fun mismatchedSyntaxStaysOutOfScope() {
+        fake.forceFunctionKindOnlyForTest = true
+        fake.forcePropertyKindOnlyForTest(true)
+    }
+    private val fake = Fake()
+    class Fake {
+        var forceFunctionKindOnlyForTest: Boolean = false
+        fun forcePropertyKindOnlyForTest(active: Boolean) {}
+    }
+}
+KT
+
+# GOOD-13 (real preceding comment): an actual source comment directly above an
+# occurrence remains a valid opt-out.
+cat > "$ANDROID_FIX_DIR/Seam1GoodPrecedingCommentJustificationTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1GoodPrecedingCommentJustificationTest {
+    fun oneOffPropertyPin() {
+        // SEAM_JUSTIFIED: selftest real preceding source comment
+        seam.forceSyntheticTransportAliveForTest = true
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+# BAD: a block comment between the property name and `=` is legal Kotlin and
+# must not hide a real production assignment.
+cat > "$ANDROID_FIX_DIR/Seam1BadBlockCommentAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadBlockCommentAssignmentTest {
+    fun transportLooksAlive() {
+        seam.forceSyntheticTransportAliveForTest /* deterministic input */ = true
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+# BAD: preserve detection when the assignment line ends at `=` and the RHS is
+# on the next line.
+cat > "$ANDROID_FIX_DIR/Seam1BadMultilineRhsAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadMultilineRhsAssignmentTest {
+    fun transportLooksAlive() {
+        seam.forceSyntheticTransportAliveForTest =
+            true
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+# BAD: marker text in ordinary and raw strings is not a source-comment opt-out,
+# whether it is on the occurrence line or directly above it.
+cat > "$ANDROID_FIX_DIR/Seam1BadInlineStringJustificationTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadInlineStringJustificationTest {
+    fun transportLooksAlive() {
+        val reason = "SEAM_JUSTIFIED: not a comment"; seam.forceSyntheticTransportAliveForTest = true
+        require(reason.isNotBlank())
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+cat > "$ANDROID_FIX_DIR/Seam1BadPrecedingStringJustificationTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadPrecedingStringJustificationTest {
+    fun transportLooksAlive() {
+        val reason = """SEAM_JUSTIFIED: still not a comment"""
+        seam.forceSyntheticTransportAliveForTest = true
+        require(reason.isNotBlank())
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+cat > "$ANDROID_FIX_DIR/Seam1BadOrdinaryTemplateAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadOrdinaryTemplateAssignmentTest {
+    fun executesAssignment() {
+        val result = "${run { seam.forceSyntheticTransportAliveForTest = true; Unit }}"
+        require(result.isNotBlank())
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
+cat > "$ANDROID_FIX_DIR/Seam1BadRawTemplateAssignmentTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class Seam1BadRawTemplateAssignmentTest {
+    fun executesAssignment() {
+        val result = """${run { seam.forceSyntheticTransportAliveForTest = false; Unit }}"""
+        require(result.isNotBlank())
+    }
+    private val seam = Seam1ProdSeam()
+}
+KT
+
 assert_report present "Seam1BadAltBufferCheatTest.kt" "SEAM1 — NEW" "SEAM1 fires on an unvetted production state-injection seam (reconstructs the #1158 alt-buffer cheat)"
 assert_report absent  "Seam1GoodVettedTest.kt" "SEAM1 — NEW" "SEAM1 spares a registry-vetted seam (forceTreeStaleForTest)"
 assert_report absent  "Seam1GoodJustifiedTest.kt" "SEAM1 — NEW" "SEAM1 spares a // SEAM_JUSTIFIED: opt-out"
 assert_report absent  "Seam1GoodLocalHelperTest.kt" "SEAM1 — NEW" "SEAM1 ignores a non-production test-double helper of the same shape"
+assert_report present "Seam1BadPropertyAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 fires on an unvetted production property assignment"
+assert_report absent  "Seam1GoodVettedPropertyAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 spares a registry-vetted production property assignment"
+assert_report absent  "Seam1GoodJustifiedPropertyAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 spares an inline // SEAM_JUSTIFIED: property assignment"
+assert_report absent  "Seam1GoodLocalPropertyAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 ignores a property defined only in test code"
+assert_report absent  "Seam1GoodNonInjectionPropertyAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 keeps non-injection ForTest properties outside its high-signal shape"
+assert_report absent  "Seam1GoodPropertyComparisonTest.kt" "SEAM1 — NEW" "SEAM1 does not mistake a property comparison for an assignment"
+assert_report absent  "Seam1GoodNamedArgumentTest.kt" "SEAM1 — NEW" "SEAM1 does not mistake Kotlin named arguments for property assignments"
+assert_report absent  "Seam1GoodNonCodeAssignmentTextTest.kt" "SEAM1 — NEW" "SEAM1 ignores assignment-shaped text in strings and comments"
+assert_report absent  "Seam1GoodFakeProductionDefinitionTest.kt" "SEAM1 — NEW" "SEAM1 ignores production definitions that exist only in strings or comments"
+assert_report absent  "Seam1GoodDefinitionKindSeparationTest.kt" "SEAM1 — NEW" "SEAM1 keeps function-call and property-assignment definition kinds separate"
+assert_report absent  "Seam1GoodPrecedingCommentJustificationTest.kt" "SEAM1 — NEW" "SEAM1 accepts a real source comment directly above an assignment"
+assert_report present "Seam1BadBlockCommentAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 detects a property assignment split from '=' by a block comment"
+assert_report present "Seam1BadMultilineRhsAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 preserves multiline-RHS property assignment detection"
+assert_report present "Seam1BadInlineStringJustificationTest.kt" "SEAM1 — NEW" "SEAM1 rejects a same-line string-literal justification spoof"
+assert_report present "Seam1BadPrecedingStringJustificationTest.kt" "SEAM1 — NEW" "SEAM1 rejects a preceding-line string-literal justification spoof"
+assert_report present "Seam1BadOrdinaryTemplateAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 detects an executable assignment inside an ordinary string template"
+assert_report present "Seam1BadRawTemplateAssignmentTest.kt" "SEAM1 — NEW" "SEAM1 detects an executable assignment inside a raw string template"
 assert_exit 1 "SEAM1 unvetted production state-injection seam hard-fails the guard"
 
-# Remove the BAD SEAM1 caller so the registry-error and clean-state checks below
-# are not confounded by its hard-fail.
-rm -f "$ANDROID_FIX_DIR/Seam1BadAltBufferCheatTest.kt"
+# Remove the BAD SEAM1 calls and assignments so the registry-error and
+# clean-state checks below are not confounded by their hard-fails.
+rm -f \
+  "$ANDROID_FIX_DIR/Seam1BadAltBufferCheatTest.kt" \
+  "$ANDROID_FIX_DIR/Seam1BadPropertyAssignmentTest.kt" \
+  "$ANDROID_FIX_DIR/Seam1BadBlockCommentAssignmentTest.kt" \
+  "$ANDROID_FIX_DIR/Seam1BadMultilineRhsAssignmentTest.kt" \
+  "$ANDROID_FIX_DIR/Seam1BadInlineStringJustificationTest.kt" \
+  "$ANDROID_FIX_DIR/Seam1BadPrecedingStringJustificationTest.kt" \
+  "$ANDROID_FIX_DIR/Seam1BadOrdinaryTemplateAssignmentTest.kt" \
+  "$ANDROID_FIX_DIR/Seam1BadRawTemplateAssignmentTest.kt"
+
+# --------------------------------------------------------------------------
+# SEAM1 stale-registry hygiene remains advisory: a justified name that no
+# longer has any real production definition is surfaced but does not hard-fail.
+# --------------------------------------------------------------------------
+echo
+echo "[SEAM1] stale registry entry remains visible and advisory"
+
+TMP_REG="$(mktemp)"
+cat "scripts/vetted-test-state-setters.txt" > "$TMP_REG"
+printf '\nforceRemovedGhostForTest  # selftest stale entry; no production definition exists\n' >> "$TMP_REG"
+export VETTED_SEAM_REGISTRY="$TMP_REG"
+
+assert_report present "forceRemovedGhostForTest" "SEAM1 — STALE registry entry" "SEAM1 reports a registry name with no real production definition as stale"
+assert_exit 0 "SEAM1 stale registry entry remains advisory"
+
+unset VETTED_SEAM_REGISTRY
+rm -f "$TMP_REG"
+TMP_REG=""
 
 # --------------------------------------------------------------------------
 # SEAM1 registry hygiene — a registry line with no `# justification` is a hard
@@ -535,6 +936,7 @@ assert_exit 1 "SEAM1 un-justified registry line hard-fails the guard"
 
 unset VETTED_SEAM_REGISTRY
 rm -f "$TMP_REG"
+TMP_REG=""
 
 # --------------------------------------------------------------------------
 # Clean state: only corrective/advisory fixtures remain -> guard must PASS.

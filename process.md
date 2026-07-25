@@ -398,9 +398,21 @@ Minimum pre-push gate:
   still reject headless proof that only exercises plumbing (the assertion must be
   on the symptom-defining signal on the real transport, never on a seam/lambda
   having fired — the #1693 round-1 failure).
-- **The gate command is `./gradlew test`, NOT `:app:testDebugUnitTest`. The CI
-  `Unit tests` job runs BOTH variants, and `:app:testReleaseUnitTest` is a
-  required check.** The v0.4.37 #1633 merge went red on `main` at
+- **The canonical forced local gate is `scripts/full-jvm-gate.sh`, which runs
+  the complete `./gradlew test --rerun-tasks` graph inside the repository's
+  8 GiB cgroup with the guarded single-worker / split-heap profile. Do not
+  append filters, exclusions, or ad-hoc Gradle flags. The authenticated
+  guard-only CI modes accept only exact `CI=true` and strip it before preflight;
+  the full local gate still requires `CI` to be unset. SDK discovery accepts
+  `ANDROID_HOME` and/or `ANDROID_SDK_ROOT` only when their absolute real paths
+  agree and contain executable `platform-tools/adb`, the Android 35 platform,
+  and executable Build Tools 35.0.0. With neither variable set, the only
+  fallbacks are the standard Linux `$HOME/Android/Sdk` and hosted-runner
+  `/usr/local/lib/android/sdk` locations, in that order. The gate exports both
+  SDK variables at the one canonical real path; it never creates
+  `local.properties`. The CI `Unit tests` job runs BOTH variants, and
+  `:app:testReleaseUnitTest` is a required check.** The
+  v0.4.37 #1633 merge went red on `main` at
   `:app:testReleaseUnitTest` while the orchestrator's integration gate — which
   ran only `:app:testDebugUnitTest` — was green at 3906/0. The debug variant is
   not a proxy for the required check. Run the task CI runs.

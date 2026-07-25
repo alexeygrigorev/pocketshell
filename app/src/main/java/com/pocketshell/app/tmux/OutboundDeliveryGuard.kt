@@ -5,6 +5,7 @@ import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.OutboundWireAttemptDurableStore
 import com.pocketshell.app.composer.asWireAttemptDurableStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
@@ -83,6 +84,24 @@ internal object OutboundDeliverySeams {
 }
 
 /**
+ * Exact durable queue identity for one composer-owned send.
+ *
+ * [rowId] is [PromptComposerViewModel.SendRequest.outboundQueueItemId]; it is
+ * deliberately separate from pane/payload and from the volatile delivery token.
+ * Both fields are required so a `%0` retry in session A can never stamp or read
+ * an identical `%0` payload row in session B.
+ */
+internal data class DurableOutboundRowIdentity(
+    val sessionKey: String,
+    val rowId: String,
+) {
+    init {
+        require(sessionKey.isNotBlank()) { "durable outbound session key must not be blank" }
+        require(rowId.isNotBlank()) { "durable outbound row id must not be blank" }
+    }
+}
+
+/**
  * Composer-lane verify-before-resend gate: null when this (pane, payload) has no
  * ambiguous prior wire attempt (the common first-send case — no probe cost);
  * otherwise the probe's verdict, recorded to diagnostics.
@@ -93,8 +112,10 @@ internal suspend fun verifyBeforeAgentResend(
     paneId: String,
     sendToken: String,
     payload: String,
+    durableRow: DurableOutboundRowIdentity? = null,
+    capturePane: OutboundPaneCapture? = null,
 ): DeliveryProbeOutcome? {
-    if (!ledger.hasAmbiguousAttempt(paneId, sendToken, payload)) return null
+    if (!ledger.hasAmbiguousAttempt(paneId, sendToken, payload, durableRow)) return null
     // Issue #1577: compare the CURRENT needle count against the pre-send baseline
     // captured at the first wire attempt. `AlreadyLanded` requires the count to have
     // INCREASED (our paste actually added an occurrence) — so a payload that was
@@ -104,16 +125,29 @@ internal suspend fun verifyBeforeAgentResend(
     // capture) is UNTRUSTWORTHY — it CANNOT distinguish "landed" from a permanent
     // footer occurrence, so it must NEVER resolve `AlreadyLanded` (which would submit
     // a bare Enter and silently drop the payload). [probeOutboundPayloadAlreadyLanded]
-    // reports `NotLanded` for a null baseline instead, so the caller does a REAL gated
-    // resend that records a fresh baseline (self-healing), never a bare Enter.
-    val baseline = ledger.needleBaseline(paneId, sendToken, payload)
-    val outcome = probeOutboundPayloadAlreadyLanded(client, paneId, payload, baseline)
+    // reports `Unknown` unless an independent collapsed-chip baseline proves a
+    // multiline paste landed, so neither a blind resend nor a blind Enter follows.
+    val baseline = ledger.needleBaseline(paneId, sendToken, payload, durableRow)
+    val collapsedMarkerBaseline =
+        ledger.collapsedMarkerBaseline(paneId, sendToken, payload, durableRow)
+    val outcome = probeOutboundPayloadAlreadyLanded(
+        client = client,
+        paneId = paneId,
+        payload = payload,
+        baselineCount = baseline,
+        collapsedMarkerBaselineCount = collapsedMarkerBaseline,
+        capturePane = capturePane,
+    )
     DiagnosticEvents.record(
         "action",
         "outbound_verify_before_resend",
         "pane" to paneId,
         "outcome" to outcome.name,
         "baseline" to (baseline?.toString() ?: "none"),
+        "collapsedMarkerBaseline" to (collapsedMarkerBaseline?.toString() ?: "none"),
+        "sendToken" to sendToken,
+        "durableSession" to (durableRow?.sessionKey ?: "none"),
+        "durableRowId" to (durableRow?.rowId ?: "none"),
     )
     return outcome
 }
@@ -161,6 +195,7 @@ internal suspend fun deliverRawInputWithGuard(
     bytes: ByteArray,
     localRenderText: String,
     sendToken: String,
+    durableRow: DurableOutboundRowIdentity? = null,
     send: suspend (TmuxClient, String, ByteArray) -> Unit,
     submitEnter: suspend (TmuxClient, String) -> Unit,
     afterDelivered: suspend (TmuxClient, String, ByteArray) -> Unit,
@@ -181,7 +216,16 @@ internal suspend fun deliverRawInputWithGuard(
             afterDelivered(client, paneId, bytes)
         }
     }
-    when (verifyBeforeAgentResend(ledger, client, paneId, sendToken, payload)) {
+    when (
+        verifyBeforeAgentResend(
+            ledger,
+            client,
+            paneId,
+            sendToken,
+            payload,
+            durableRow = durableRow,
+        )
+    ) {
         DeliveryProbeOutcome.AlreadyLanded -> return runCatching {
             // Issue #1586 (H1b): the payload TEXT landed but the ambiguous cut may have
             // dropped its terminating submit — do NOT drop the delivery silently.
@@ -201,7 +245,14 @@ internal suspend fun deliverRawInputWithGuard(
         DeliveryProbeOutcome.NotLanded, null -> Unit
     }
     return runCatching {
-        ledger.recordWireAttemptWithBaseline(client, paneId, sendToken, payload, localRenderText)
+        ledger.recordWireAttemptWithBaseline(
+            client,
+            paneId,
+            sendToken,
+            payload,
+            localRenderText,
+            durableRow = durableRow,
+        )
         send(client, paneId, bytes)
         ledger.clear(paneId, sendToken)
         afterDelivered(client, paneId, bytes)
@@ -210,6 +261,15 @@ internal suspend fun deliverRawInputWithGuard(
 
 /** Bounded round-trip for a verify-before-resend `capture-pane` probe. */
 internal const val OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS: Long = 4_000L
+
+/**
+ * Optional VM-owned capture boundary. The agent lane supplies an implementation
+ * that is caller-bounded even when SSH exec cancellation enters non-cancellable
+ * teardown, and rejects results from a superseded runtime. Other lanes retain
+ * the TmuxClient's ordinary bounded capture by leaving this null.
+ */
+internal typealias OutboundPaneCapture =
+    suspend (paneId: String, timeoutMs: Long, scrollbackLines: Int) -> CommandResponse?
 
 /**
  * Issue #1587 (H2): how many lines of scrollback the verify-before-resend probe
@@ -272,15 +332,13 @@ internal class OutboundDeliveryLedger(
     // wire attempt, keyed the same way. Bounded alongside [entries]. Backed durably
     // so a VM-clear-rebuilt ledger reads it back (via [needleBaseline]).
     private val baselines = HashMap<String, Int>()
+    private val collapsedMarkerBaselines = HashMap<String, Int>()
 
     // Issue #1529: the VOLATILE identity is the per-send-attempt token (pane + token),
     // NOT the payload. Two DISTINCT user sends of identical bytes get distinct tokens, so
     // the guard dedups only a RETRY of the SAME attempt (same token) and never suppresses
-    // a second intentional send. The DURABLE fallback stays keyed on (pane, payload): a
-    // durable row that survives a VM-clear is re-dispatched by its retry lane, and the
-    // #961 coalesce-on-enqueue invariant means at most ONE un-delivered row exists per
-    // (pane, payload), so a payload-scoped durable lookup can never conflate two distinct
-    // durable sends (they would have coalesced into one row / one token).
+    // a second intentional send. Issue #1739: the DURABLE fallback is the exact
+    // session+row id; pane ids and payload bytes are never durable identities.
     private fun key(paneId: String, sendToken: String): String = "$paneId|$sendToken"
 
     fun recordWireAttempt(
@@ -288,6 +346,8 @@ internal class OutboundDeliveryLedger(
         sendToken: String,
         payload: String,
         baselineCount: Int? = null,
+        collapsedMarkerBaselineCount: Int? = null,
+        durableRow: DurableOutboundRowIdentity? = null,
     ): Unit = synchronized(lock) {
         val key = key(paneId, sendToken)
         entries.remove(key)
@@ -297,15 +357,30 @@ internal class OutboundDeliveryLedger(
         if (baselineCount != null && key !in baselines) {
             baselines[key] = baselineCount
         }
+        if (
+            collapsedMarkerBaselineCount != null &&
+            key !in collapsedMarkerBaselines
+        ) {
+            collapsedMarkerBaselines[key] = collapsedMarkerBaselineCount
+        }
         while (entries.size > maxEntries) {
             val evicted = entries.first()
             entries.remove(evicted)
             baselines.remove(evicted)
+            collapsedMarkerBaselines.remove(evicted)
         }
         // Issue #1541: also persist on the durable row so the attempt survives a
         // VM-clear / back-navigation, not only this live VM. Issue #1577: the
         // baseline rides the same durable row.
-        durable?.recordWireAttempt(paneId, payload, System.currentTimeMillis(), baselineCount)
+        durableRow?.let { row ->
+            durable?.recordWireAttempt(
+                row.sessionKey,
+                row.rowId,
+                System.currentTimeMillis(),
+                baselineCount,
+                collapsedMarkerBaselineCount,
+            )
+        }
     }
 
     fun clear(paneId: String, sendToken: String): Unit = synchronized(lock) {
@@ -315,13 +390,17 @@ internal class OutboundDeliveryLedger(
         val key = key(paneId, sendToken)
         entries.remove(key)
         baselines.remove(key)
+        collapsedMarkerBaselines.remove(key)
     }
 
-    fun hasAmbiguousAttempt(paneId: String, sendToken: String, payload: String): Boolean = synchronized(lock) {
-        // Issue #1541: the durable flag makes a back-nav-rebuilt ledger (empty
-        // in-memory set) still see a prior wire attempt (payload-scoped — the durable
-        // row is re-dispatched under its own token, and coalescing bounds it to one row).
-        key(paneId, sendToken) in entries || durable?.hasWireAttempt(paneId, payload) == true
+    fun hasAmbiguousAttempt(
+        paneId: String,
+        sendToken: String,
+        payload: String,
+        durableRow: DurableOutboundRowIdentity? = null,
+    ): Boolean = synchronized(lock) {
+        key(paneId, sendToken) in entries ||
+            durableRow?.let { durable?.hasWireAttempt(it.sessionKey, it.rowId) } == true
     }
 
     /**
@@ -330,8 +409,26 @@ internal class OutboundDeliveryLedger(
      * ledger). `null` when none was captured; the caller then falls back to
      * presence-only verification.
      */
-    fun needleBaseline(paneId: String, sendToken: String, payload: String): Int? = synchronized(lock) {
-        baselines[key(paneId, sendToken)] ?: durable?.wireNeedleBaseline(paneId, payload)
+    fun needleBaseline(
+        paneId: String,
+        sendToken: String,
+        payload: String,
+        durableRow: DurableOutboundRowIdentity? = null,
+    ): Int? = synchronized(lock) {
+        baselines[key(paneId, sendToken)]
+            ?: durableRow?.let { durable?.wireNeedleBaseline(it.sessionKey, it.rowId) }
+    }
+
+    fun collapsedMarkerBaseline(
+        paneId: String,
+        sendToken: String,
+        payload: String,
+        durableRow: DurableOutboundRowIdentity? = null,
+    ): Int? = synchronized(lock) {
+        collapsedMarkerBaselines[key(paneId, sendToken)]
+            ?: durableRow?.let {
+                durable?.wireCollapsedMarkerBaseline(it.sessionKey, it.rowId)
+            }
     }
 }
 
@@ -370,31 +467,80 @@ internal suspend fun probeOutboundPayloadAlreadyLanded(
     paneId: String,
     payload: String,
     baselineCount: Int? = null,
+    collapsedMarkerBaselineCount: Int? = null,
+    capturePane: OutboundPaneCapture? = null,
 ): DeliveryProbeOutcome {
     val needle = agentSubmitAckNeedle(payload) ?: return DeliveryProbeOutcome.Unknown
-    // Issue #1577b: kill the presence-only fallback. A null baseline cannot tell "our
-    // paste landed" from a payload that was ALREADY on the pane (a Codex `Goal blocked
-    // (/goal resume)` footer), so a presence match would false-`AlreadyLanded` → a
-    // silent bare-Enter drop. Resolve `NotLanded` so the caller does a REAL gated
-    // resend (which records a fresh baseline), never a bare Enter — deliver-safe.
-    if (baselineCount == null) return DeliveryProbeOutcome.NotLanded
-    val response = try {
+    val multiline = agentSubmitPayloadIsMultiLine(payload)
+    // A missing literal baseline cannot prove either "landed" or "not landed".
+    // For multiline sends, however, the independently persisted visible-chip
+    // baseline remains trustworthy and can still prove an increase. With neither
+    // baseline, fail closed as Unknown: never duplicate-paste and never blind Enter.
+    if (baselineCount == null && (!multiline || collapsedMarkerBaselineCount == null)) {
+        return DeliveryProbeOutcome.Unknown
+    }
+    val response = if (baselineCount != null) try {
         // Issue #1587 (H2): bounded scrollback so a landed-then-scrolled-off payload
         // is still found (else NotLanded ⇒ duplicate paste on retry).
-        client.capturePaneTextViaExec(
+        capturePane?.invoke(
             paneId,
-            timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
-            scrollbackLines = OUTBOUND_PROBE_SCROLLBACK_LINES,
-        )
+            OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+            OUTBOUND_PROBE_SCROLLBACK_LINES,
+        ) ?: if (capturePane == null) {
+            client.capturePaneTextViaExec(
+                paneId,
+                timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+                scrollbackLines = OUTBOUND_PROBE_SCROLLBACK_LINES,
+            )
+        } else {
+            return DeliveryProbeOutcome.Unknown
+        }
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Throwable) {
+        return DeliveryProbeOutcome.Unknown
+    } else {
+        null
+    }
+    if (response?.isError == true) return DeliveryProbeOutcome.Unknown
+    if (response != null && baselineCount != null) {
+        // Issue #1577: a captured baseline demands the count INCREASE.
+        val count = agentSubmitVisibleTextNeedleCount(response.output, needle)
+        if (count > baselineCount) return DeliveryProbeOutcome.AlreadyLanded
+    }
+    if (!multiline) return DeliveryProbeOutcome.NotLanded
+
+    // Claude's collapsed-paste chip is generic (it carries no payload identity).
+    // Compare it only in the VISIBLE viewport, whose pre-paste count the send
+    // persisted. Reusing the scrollback capture above could see an older chip
+    // outside that baseline and false-authorize Enter. If neither literal nor a
+    // visible chip increase proves delivery, multiline remains Unknown: it may
+    // have collapsed and scrolled away, so "not seen ⇒ resend" would duplicate.
+    val markerBaseline = collapsedMarkerBaselineCount ?: return DeliveryProbeOutcome.Unknown
+    val visibleResponse = try {
+        capturePane?.invoke(paneId, OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS, 0)
+            ?: if (capturePane == null) {
+                client.capturePaneTextViaExec(
+                    paneId,
+                    timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+                    scrollbackLines = 0,
+                )
+            } else {
+                return DeliveryProbeOutcome.Unknown
+            }
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Throwable) {
         return DeliveryProbeOutcome.Unknown
     }
-    if (response.isError) return DeliveryProbeOutcome.Unknown
-    // Issue #1577: a captured baseline demands the count INCREASE (our paste landed).
-    val count = agentSubmitVisibleTextNeedleCount(response.output, needle)
-    return if (count > baselineCount) DeliveryProbeOutcome.AlreadyLanded else DeliveryProbeOutcome.NotLanded
+    if (visibleResponse.isError) return DeliveryProbeOutcome.Unknown
+    return if (
+        agentSubmitCollapsedPasteMarkerCount(visibleResponse.output) > markerBaseline
+    ) {
+        DeliveryProbeOutcome.AlreadyLanded
+    } else {
+        DeliveryProbeOutcome.Unknown
+    }
 }
 
 /**
@@ -408,17 +554,26 @@ internal suspend fun captureNeedleBaseline(
     client: TmuxClient,
     paneId: String,
     payload: String,
+    capturePane: OutboundPaneCapture? = null,
 ): Int? {
     val needle = agentSubmitAckNeedle(payload) ?: return null
     val response = try {
         // Issue #1587 (H2): the baseline snapshot MUST scope over the SAME bounded
         // scrollback the probe uses ([probeOutboundPayloadAlreadyLanded]) so the
         // count comparison is meaningful (a pre-existing occurrence is in both).
-        client.capturePaneTextViaExec(
+        capturePane?.invoke(
             paneId,
-            timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
-            scrollbackLines = OUTBOUND_PROBE_SCROLLBACK_LINES,
-        )
+            OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+            OUTBOUND_PROBE_SCROLLBACK_LINES,
+        ) ?: if (capturePane == null) {
+            client.capturePaneTextViaExec(
+                paneId,
+                timeoutMs = OUTBOUND_DELIVERY_PROBE_TIMEOUT_MS,
+                scrollbackLines = OUTBOUND_PROBE_SCROLLBACK_LINES,
+            )
+        } else {
+            return null
+        }
     } catch (cancelled: CancellationException) {
         throw cancelled
     } catch (_: Throwable) {
@@ -450,17 +605,38 @@ internal suspend fun OutboundDeliveryLedger.recordWireAttemptWithBaseline(
     sendToken: String,
     payload: String,
     localRenderText: String,
+    collapsedMarkerBaselineCount: Int? = null,
+    durableRow: DurableOutboundRowIdentity? = null,
+    capturePane: OutboundPaneCapture? = null,
 ) {
-    if (needleBaseline(paneId, sendToken, payload) != null) {
+    if (needleBaseline(paneId, sendToken, payload, durableRow) != null) {
         // A prior push already captured the pre-send baseline; keep it (idempotent).
-        recordWireAttempt(paneId, sendToken, payload, null)
+        recordWireAttempt(
+            paneId,
+            sendToken,
+            payload,
+            baselineCount = null,
+            collapsedMarkerBaselineCount = collapsedMarkerBaselineCount,
+            durableRow = durableRow,
+        )
         return
     }
     val needle = agentSubmitAckNeedle(payload)
     val alreadyVisible = needle != null &&
         agentSubmitVisibleTextNeedleCount(listOf(localRenderText), needle) > 0
-    val baseline = if (alreadyVisible) captureNeedleBaseline(client, paneId, payload) else 0
-    recordWireAttempt(paneId, sendToken, payload, baseline)
+    val baseline = if (alreadyVisible) {
+        captureNeedleBaseline(client, paneId, payload, capturePane)
+    } else {
+        0
+    }
+    recordWireAttempt(
+        paneId,
+        sendToken,
+        payload,
+        baselineCount = baseline,
+        collapsedMarkerBaselineCount = collapsedMarkerBaselineCount,
+        durableRow = durableRow,
+    )
 }
 
 internal suspend fun probeNeedleAlreadyLanded(

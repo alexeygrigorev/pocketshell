@@ -123,6 +123,7 @@ internal suspend fun sendBracketedPaste(
     client: TmuxClient,
     paneId: String?,
     bytes: ByteArray,
+    beforeCommit: suspend () -> Unit = {},
 ) {
     if (bytes.isEmpty()) return
     val bufferName = pasteBufferNameFor(paneId)
@@ -141,6 +142,10 @@ internal suspend fun sendBracketedPaste(
             .throwIfTmuxError("fill paste buffer for pane ${paneId ?: "(active)"}")
     }
     // THE commit point: one exec, all-or-nothing server-side.
+    // Issue #1739: callers that own a durable delivery ledger record the
+    // ambiguous wire attempt only here. A failed set-buffer fill cannot have
+    // touched the pane, so it must remain definitively safe to refill/retry.
+    beforeCommit()
     val target = if (paneId != null) " -t $paneId" else ""
     client.sendKeysViaExec("paste-buffer -d -r -b $bufferName$target")
         .throwIfTmuxError("paste buffer into pane ${paneId ?: "(active)"}")

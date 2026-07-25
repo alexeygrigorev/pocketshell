@@ -50,10 +50,10 @@ class OutboundQueueStoreWireAttemptTest {
     @Test
     fun freshlyEnqueuedRowHasNoWireAttempt() {
         val store = InMemoryOutboundQueueStore()
-        store.enqueue("sessA", "hello", paneId = "%0")
+        val row = store.enqueue("sessA", "hello", paneId = "%0")
         assertFalse(
             "a queued-but-never-sent row has no wire attempt (a fresh send must not verify)",
-            store.hasWireAttempt("%0", "hello"),
+            store.hasWireAttempt("sessA", row.id),
         )
     }
 
@@ -71,7 +71,7 @@ class OutboundQueueStoreWireAttemptTest {
         val claimed = store.claimNext("sessA")!!
         assertEquals(OutboundState.InFlight, claimed.state)
         assertFalse("claiming must NOT set the durable wire-attempt flag (#1577)", claimed.wireAttempted)
-        assertFalse(store.hasWireAttempt("%0", "deploy now"))
+        assertFalse(store.hasWireAttempt("sessA", row.id))
     }
 
     @Test
@@ -82,7 +82,7 @@ class OutboundQueueStoreWireAttemptTest {
         val row = store.enqueue("sessA", "restart pool", paneId = "%0")
         val updated = store.markInFlight(row.id)!!
         assertFalse(updated.wireAttempted)
-        assertFalse(store.hasWireAttempt("%0", "restart pool"))
+        assertFalse(store.hasWireAttempt("sessA", row.id))
     }
 
     @Test
@@ -92,29 +92,35 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "deploy now", paneId = "%0")
         store.claim(row.id) // InFlight, but no flag yet (#1577)
-        assertFalse(store.hasWireAttempt("%0", "deploy now"))
+        assertFalse(store.hasWireAttempt("sessA", row.id))
 
-        val pushed = store.markWireAttempted("%0", "deploy now", baselineCount = 0)!!
+        val pushed = store.markWireAttempted(
+            "sessA",
+            row.id,
+            baselineCount = 0,
+            collapsedMarkerBaselineCount = 2,
+        )!!
         assertTrue("the wire push sets the durable flag", pushed.wireAttempted)
         assertNotNull(pushed.wireAttemptedAtMs)
         assertEquals(0, pushed.wireNeedleBaselineCount)
-        assertTrue(store.hasWireAttempt("%0", "deploy now"))
-        assertEquals(0, store.wireNeedleBaseline("%0", "deploy now"))
+        assertEquals(2, pushed.wireCollapsedMarkerBaselineCount)
+        assertTrue(store.hasWireAttempt("sessA", row.id))
+        assertEquals(0, store.wireNeedleBaseline("sessA", row.id))
+        assertEquals(2, store.wireCollapsedMarkerBaseline("sessA", row.id))
     }
 
     @Test
-    fun markWireAttemptedMatchesByPaneAndPayloadNotId() {
+    fun markWireAttemptedRequiresExactSessionAndRowId() {
         val store = InMemoryOutboundQueueStore()
-        store.enqueue("sessA", "ship the notes", paneId = "%0")
-        // The ledger keys by pane + payload (it does not know the durable id).
-        val marked = store.markWireAttempted("%0", "ship the notes")
-        assertNotNull("markWireAttempted must locate the row by pane + payload", marked)
+        val row = store.enqueue("sessA", "ship the notes", paneId = "%0")
+        val marked = store.markWireAttempted("sessA", row.id)
+        assertNotNull("markWireAttempted must locate the exact durable row", marked)
         assertTrue(marked!!.wireAttempted)
-        assertTrue(store.hasWireAttempt("%0", "ship the notes"))
-        // A different pane / different payload does not match.
-        assertFalse(store.hasWireAttempt("%1", "ship the notes"))
-        assertFalse(store.hasWireAttempt("%0", "something else"))
-        assertNull(store.markWireAttempted("%9", "no such row"))
+        assertTrue(store.hasWireAttempt("sessA", row.id))
+        assertFalse(store.hasWireAttempt("sessB", row.id))
+        assertFalse(store.hasWireAttempt("sessA", "no-such-row"))
+        assertNull(store.markWireAttempted("sessB", row.id))
+        assertNull(store.markWireAttempted("sessA", "no-such-row"))
     }
 
     @Test
@@ -123,13 +129,13 @@ class OutboundQueueStoreWireAttemptTest {
         val row = store.enqueue("sessA", "deferred payload", paneId = "%0")
         store.markInFlight(row.id)
         // Issue #1577: the flag is set at the wire push, not the claim.
-        store.markWireAttempted("%0", "deferred payload")
+        store.markWireAttempted("sessA", row.id)
         // The drop-failure path defers the row back to Queued (issue #987) — the
         // wire attempt MUST persist so the re-flush verifies before re-pasting.
         val requeued = store.requeueForRetry(row.id)!!
         assertEquals(OutboundState.Queued, requeued.state)
         assertTrue("a requeued row keeps its durable wire attempt", requeued.wireAttempted)
-        assertTrue(store.hasWireAttempt("%0", "deferred payload"))
+        assertTrue(store.hasWireAttempt("sessA", row.id))
     }
 
     @Test
@@ -137,11 +143,11 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "stale payload", paneId = "%0", createdAtMs = 1_000L)
         store.markInFlight(row.id)
-        store.markWireAttempted("%0", "stale payload") // #1577: flag set at the wire push
+        store.markWireAttempted("sessA", row.id) // #1577: flag set at the wire push
         val requeued = store.requeueStaleInFlight("sessA", cutoffMs = Long.MAX_VALUE)
         assertEquals(1, requeued.size)
         assertTrue("a stale-recovered row keeps its durable wire attempt", requeued.single().wireAttempted)
-        assertTrue(store.hasWireAttempt("%0", "stale payload"))
+        assertTrue(store.hasWireAttempt("sessA", row.id))
     }
 
     @Test
@@ -149,13 +155,13 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "delivered payload", paneId = "%0")
         store.markInFlight(row.id)
-        store.markWireAttempted("%0", "delivered payload") // #1577: flag set at the wire push
-        assertTrue(store.hasWireAttempt("%0", "delivered payload"))
+        store.markWireAttempted("sessA", row.id) // #1577: flag set at the wire push
+        assertTrue(store.hasWireAttempt("sessA", row.id))
         assertTrue(store.markDelivered(row.id))
         assertFalse(
             "a delivered+pruned row leaves no wire attempt — a deliberate identical " +
                 "re-send after delivery is a normal full send, not a verify",
-            store.hasWireAttempt("%0", "delivered payload"),
+            store.hasWireAttempt("sessA", row.id),
         )
     }
 
@@ -164,16 +170,16 @@ class OutboundQueueStoreWireAttemptTest {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "cancel me", paneId = "%0")
         store.markInFlight(row.id)
-        store.markWireAttempted("%0", "cancel me") // #1577: flag set at the wire push
-        assertTrue(store.hasWireAttempt("%0", "cancel me"))
+        store.markWireAttempted("sessA", row.id) // #1577: flag set at the wire push
+        assertTrue(store.hasWireAttempt("sessA", row.id))
         assertTrue(store.remove(row.id))
-        assertFalse(store.hasWireAttempt("%0", "cancel me"))
+        assertFalse(store.hasWireAttempt("sessA", row.id))
 
         val other = store.enqueue("sessA", "clear me", paneId = "%0")
         store.markInFlight(other.id)
-        store.markWireAttempted("%0", "clear me")
+        store.markWireAttempted("sessA", other.id)
         store.clearSession("sessA")
-        assertFalse(store.hasWireAttempt("%0", "clear me"))
+        assertFalse(store.hasWireAttempt("sessA", other.id))
     }
 
     // ---------------------------------------------------------- durable / restart
@@ -190,14 +196,14 @@ class OutboundQueueStoreWireAttemptTest {
         val first = SharedPrefsOutboundQueueStore(context)
         val row = first.enqueue("sessA", "survive the restart", paneId = "%0")
         first.markInFlight(row.id)
-        first.markWireAttempted("%0", "survive the restart") // #1577: pushed to the wire → durable flag persisted
+        first.markWireAttempted("sessA", row.id) // #1577: pushed to the wire → durable flag persisted
 
         // A brand-new store over the same on-disk prefs = the fresh process / the
         // VM-clear-rebuilt ledger's durable backing.
         val afterRestart = SharedPrefsOutboundQueueStore(context)
         assertTrue(
             "the rebuilt ledger must still see the prior wire attempt (durable flag)",
-            afterRestart.hasWireAttempt("%0", "survive the restart"),
+            afterRestart.hasWireAttempt("sessA", row.id),
         )
         assertTrue(afterRestart.item(row.id)!!.wireAttempted)
     }
@@ -213,7 +219,7 @@ class OutboundQueueStoreWireAttemptTest {
         val first = SharedPrefsOutboundQueueStore(context)
         val row = first.enqueue("sessA", "delivered but prune lost", paneId = "%0")
         first.markInFlight(row.id)
-        first.markWireAttempted("%0", "delivered but prune lost") // #1577: flag set at the wire push
+        first.markWireAttempted("sessA", row.id) // #1577: flag set at the wire push
         // markDelivered() is NEVER persisted (its apply() was lost) — the InFlight
         // row survives the restart with the flag intact.
         val afterRestart = SharedPrefsOutboundQueueStore(context)
@@ -221,7 +227,7 @@ class OutboundQueueStoreWireAttemptTest {
         assertTrue(
             "a delivered row whose prune was lost still carries the wire attempt, so " +
                 "the rebuilt ledger verifies instead of re-pasting",
-            afterRestart.hasWireAttempt("%0", "delivered but prune lost"),
+            afterRestart.hasWireAttempt("sessA", row.id),
         )
     }
 
@@ -229,11 +235,36 @@ class OutboundQueueStoreWireAttemptTest {
     @Test
     fun asWireAttemptDurableStoreDelegatesToTheRow() {
         val store = InMemoryOutboundQueueStore()
-        store.enqueue("sessA", "adapter payload", paneId = "%0")
+        val row = store.enqueue("sessA", "adapter payload", paneId = "%0")
         val durable = store.asWireAttemptDurableStore()
-        assertFalse(durable.hasWireAttempt("%0", "adapter payload"))
-        durable.recordWireAttempt("%0", "adapter payload", atMs = 123L)
-        assertTrue(durable.hasWireAttempt("%0", "adapter payload"))
-        assertTrue(store.item(store.itemsFor("sessA").single().id)!!.wireAttempted)
+        assertFalse(durable.hasWireAttempt("sessA", row.id))
+        durable.recordWireAttempt("sessA", row.id, atMs = 123L)
+        assertTrue(durable.hasWireAttempt("sessA", row.id))
+        assertTrue(store.item(row.id)!!.wireAttempted)
+    }
+
+    @Test
+    fun identicalPaneAndPayloadAcrossSessionsNeverCrossStampOrRead() {
+        val store = SharedPrefsOutboundQueueStore(context)
+        store.clearSession("session-a")
+        store.clearSession("session-b")
+        val rowA = store.enqueue("session-a", "identical payload", paneId = "%0")
+        val rowB = store.enqueue("session-b", "identical payload", paneId = "%0")
+
+        store.markWireAttempted(
+            sessionKey = "session-a",
+            itemId = rowA.id,
+            baselineCount = 3,
+            collapsedMarkerBaselineCount = 1,
+        )
+
+        val rebuilt = SharedPrefsOutboundQueueStore(context)
+        assertTrue(rebuilt.hasWireAttempt("session-a", rowA.id))
+        assertEquals(3, rebuilt.wireNeedleBaseline("session-a", rowA.id))
+        assertEquals(1, rebuilt.wireCollapsedMarkerBaseline("session-a", rowA.id))
+        assertFalse("session B's identical row must remain fresh", rebuilt.hasWireAttempt("session-b", rowB.id))
+        assertNull(rebuilt.wireNeedleBaseline("session-b", rowB.id))
+        assertNull(rebuilt.wireCollapsedMarkerBaseline("session-b", rowB.id))
+        assertFalse("a row id cannot be read through the wrong session", rebuilt.hasWireAttempt("session-b", rowA.id))
     }
 }

@@ -194,7 +194,7 @@ class PartialBlackPaneHealTest {
 
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
-        neutralizeSubmitAckGate(vm, client)
+        neutralizeSubmitAckGate(vm, client, "hello agent")
 
         // The send succeeds; the agent then overpaints the pane to partial-black
         // (a `clear`+one-line redraw) — the maintainer's "sent a message -> black".
@@ -247,7 +247,7 @@ class PartialBlackPaneHealTest {
 
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
-        neutralizeSubmitAckGate(vm, client)
+        neutralizeSubmitAckGate(vm, client, "ls -la")
 
         // A clear-only overpaint wipes the pane FULLY black.
         pane.terminalState.appendRemoteOutput(CLEAR_ONLY.toByteArray(Charsets.US_ASCII))
@@ -290,7 +290,7 @@ class PartialBlackPaneHealTest {
 
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
-        neutralizeSubmitAckGate(vm, client)
+        neutralizeSubmitAckGate(vm, client, "another prompt")
 
         // A normal multi-line agent response: a DENSE viewport (well over half the 40 rows
         // live) -> neither blank, nor partial-black, nor sparse-half-black
@@ -445,7 +445,7 @@ class PartialBlackPaneHealTest {
 
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
-        neutralizeSubmitAckGate(vm, client)
+        neutralizeSubmitAckGate(vm, client, WITH_ATTACHMENT_PAYLOAD)
 
         // The send's overpaint leaves the pane HALF-black (>3 live lines, large black band).
         overpaintAltScreenHalfBlack(pane)
@@ -500,7 +500,11 @@ class PartialBlackPaneHealTest {
 
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
-        neutralizeSubmitAckGate(vm, client)
+        neutralizeSubmitAckGate(
+            vm,
+            client,
+            "first line of the prompt\nsecond line of the prompt",
+        )
 
         overpaintAltScreenHalfBlack(pane)
         assertFalse(pane.terminalState.visibleScreenIsPartiallyBlank())
@@ -718,17 +722,25 @@ class PartialBlackPaneHealTest {
         sentCommands.count { it.startsWith("capture-pane") && it.contains(" -e") }
 
     /**
-     * Neutralize the #869 submit-ack gate so its `capture-pane -p -t` poll does not
-     * consume the heal's queued recovery frame or skew the heal-capture count: set a
-     * zero floor + a single-poll timeout, and queue ONE dummy ack frame (no needle
-     * match -> the poll misses and falls through immediately). The heal's
-     * `capture-pane -p -e` frame stays separately queued for the heal to consume.
+     * Satisfy the #869 submit-ack gate with real ingestion evidence so its
+     * `capture-pane -p -t` poll does not consume the heal's queued recovery frame
+     * or skew the heal-capture count. Issue #1739 deliberately removed the old
+     * no-match fallback because it blindly submitted Enter.
      */
-    private fun neutralizeSubmitAckGate(vm: TmuxSessionViewModel, client: FakeTmuxClient) {
+    private fun neutralizeSubmitAckGate(
+        vm: TmuxSessionViewModel,
+        client: FakeTmuxClient,
+        payload: String,
+    ) {
         vm.setAgentSubmitEnterDelayForTest(0)
         vm.setAgentSubmitAckTimeoutForTest(AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
+        val ackOutput = if (agentSubmitPayloadIsMultiLine(payload)) {
+            listOf("[Pasted text #1 +2 lines]")
+        } else {
+            listOf("> $payload")
+        }
         client.capturePaneResponses.addLast(
-            CommandResponse(number = 50L, output = listOf("ack-poll-no-match"), isError = false),
+            CommandResponse(number = 50L, output = ackOutput, isError = false),
         )
     }
 

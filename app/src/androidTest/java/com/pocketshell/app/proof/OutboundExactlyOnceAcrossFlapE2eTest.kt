@@ -1,5 +1,8 @@
 package com.pocketshell.app.proof
 
+import android.graphics.Bitmap
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -17,15 +20,20 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
+import com.pocketshell.app.composer.OutboundState
+import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.OutboundDeliverySeams
+import com.pocketshell.app.tmux.AgentSubmitCaptureSeams
 import com.pocketshell.app.tmux.PasteChunkSeams
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -34,7 +42,14 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
 import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -121,6 +136,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     private lateinit var fixtureKey: String
     private lateinit var hostRowTag: String
     private var diagnostics: RecordingDiagnosticSink? = null
+    private var issue1739CaptureCleanupGate: CompletableDeferred<Unit>? = null
     private val timings = mutableListOf<String>()
 
     private suspend fun seedBeforeLaunch() {
@@ -138,6 +154,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
         OutboundDeliverySeams.failInputSendResultLostOnce = false
         PasteChunkSeams.reset()
+        AgentSubmitCaptureSeams.reset()
     }
 
     @After
@@ -145,6 +162,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
         OutboundDeliverySeams.failInputSendResultLostOnce = false
         PasteChunkSeams.reset()
+        AgentSubmitCaptureSeams.reset()
+        issue1739CaptureCleanupGate?.complete(Unit)
+        issue1739CaptureCleanupGate = null
         diagnostics?.close()
         diagnostics = null
         clearLastSessionPrefs()
@@ -267,6 +287,329 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
         writeTimings()
     } }
+
+    /**
+     * Issue #1739 harness guard: the synthetic parked cleanup must model the
+     * real SSH path's threading. `RealSshSession.exec` performs physical channel
+     * close writes on the dedicated `TransportDispatcher` thread (and owns
+     * detached teardown on Dispatchers.IO), never by blocking Android Main.
+     *
+     * This narrow launch-owned proof parks cleanup after one REAL capture,
+     * proves the cancellation continuation is off Main, posts a Main heartbeat,
+     * and observes the bounded ack diagnostic while the cleanup gate is STILL
+     * closed. It prevents the full reconnect journey from manufacturing an ANR
+     * in its test seam and mistaking that harness artifact for product behavior.
+     */
+    @Test
+    fun parkedAckCleanupIsOffMainWhileHeartbeatAndBoundedDiagnosticContinue() {
+        runBlocking<Unit> {
+            attachSeededTmuxSession(hostRowTag)
+            waitForVisibleTerminal("initial attach") { it.contains(FAKE_AGENT_READY) }
+            waitForConnected("initial attach")
+            val viewModel = currentViewModel()
+            viewModel.setAgentSubmitEnterDelayForTest(0)
+            waitForDetectionBound(viewModel)
+            openConversationTab(viewModel)
+
+            val cleanupGate = CompletableDeferred<Unit>()
+            issue1739CaptureCleanupGate = cleanupGate
+            val captureObserved = AtomicBoolean(false)
+            val cleanupParked = AtomicBoolean(false)
+            val cleanupRanOnMain = AtomicReference<Boolean>()
+            AgentSubmitCaptureSeams.afterRealCapture = { response, scrollbackLines ->
+                if (
+                    scrollbackLines == 0 &&
+                    response.output.any { it.contains("[Pasted text #") } &&
+                    captureObserved.compareAndSet(false, true)
+                ) {
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } catch (cancelled: CancellationException) {
+                        cleanupRanOnMain.set(Looper.myLooper() == Looper.getMainLooper())
+                        cleanupParked.set(true)
+                        withContext(NonCancellable) { cleanupGate.await() }
+                        throw cancelled
+                    }
+                }
+            }
+
+            val nonce = SystemClock.elapsedRealtime().toString().takeLast(6)
+            openComposerAndSend("issue1739 heartbeat $nonce\nissue1739 parked cleanup $nonce")
+            waitUntilWall(ACK_CAPTURE_OBSERVED_TIMEOUT_MS, "real ack capture") {
+                captureObserved.get()
+            }
+            waitForIssue1739Boundary(ACK_BOUNDED_RESULT_TIMEOUT_MS, "off-Main cleanup park") {
+                cleanupParked.get()
+            }
+            assertEquals(
+                "the synthetic NonCancellable cleanup must resume off Android Main, " +
+                    "matching RealSshSession/TransportDispatcher threading",
+                false,
+                cleanupRanOnMain.get(),
+            )
+
+            val mainHeartbeat = AtomicBoolean(false)
+            Handler(Looper.getMainLooper()).post { mainHeartbeat.set(true) }
+            waitForIssue1739Boundary(
+                MAIN_HEARTBEAT_TIMEOUT_MS,
+                "Main heartbeat during parked cleanup",
+            ) {
+                mainHeartbeat.get()
+            }
+            waitForIssue1739Boundary(ACK_BOUNDED_RESULT_TIMEOUT_MS, "bounded ack diagnostic") {
+                diagnostics!!.eventsNamed("agent_submit_ack").any {
+                    it.fields["result"] == "capture_timeout" ||
+                        it.fields["result"] == "ack_timeout"
+                }
+            }
+            assertFalse(
+                "the ack deadline and Main heartbeat must win while cleanup remains parked",
+                cleanupGate.isCompleted,
+            )
+
+            cleanupGate.complete(Unit)
+            AgentSubmitCaptureSeams.reset()
+        }
+    }
+
+    /**
+     * Issue #1739: launch-owned reproduction of the preserved post-reconnect
+     * multiline AgentPayload wedge. A REAL capture first proves the bracketed
+     * paste reached the fake-Claude pane as its collapsed chip; only its
+     * cancellation cleanup is then parked in NonCancellable state. The 800ms
+     * caller boundary must fail/requeue without blind Enter, and the SAME
+     * durable token must verify the landed chip and complete Enter-only.
+     */
+    @Test
+    fun postReconnectAckCleanupIsBoundedAndSameTokenRetrySubmitsExactlyOnce() {
+        runBlocking<Unit> {
+            attachSeededTmuxSession(hostRowTag)
+            waitForVisibleTerminal("initial attach") { it.contains(FAKE_AGENT_READY) }
+            waitForConnected("initial attach")
+            val viewModel = currentViewModel()
+            viewModel.setAgentSubmitEnterDelayForTest(0)
+            waitForDetectionBound(viewModel)
+            openConversationTab(viewModel)
+
+            // First reproduce the prerequisite faithfully: a cut of the live
+            // worker/runtime, followed by a REAL fresh-client reconnect.
+            val clientBeforeCut = viewModel.currentClientIdentityForTest()
+            assertTrue(
+                "precondition: the live worker cut must arm",
+                viewModel.triggerCleanPassiveDropForTest(),
+            )
+            val clientAfterCut = waitForFreshClient(clientBeforeCut)
+            recordTiming("issue1739_reconnected_client", clientAfterCut.toLong())
+
+            val cleanupGate = CompletableDeferred<Unit>()
+            issue1739CaptureCleanupGate = cleanupGate
+            val captureObserved = AtomicBoolean(false)
+            val firstRealCapture = AtomicReference("")
+            AgentSubmitCaptureSeams.afterRealCapture = { response, scrollbackLines ->
+                if (
+                    scrollbackLines == 0 &&
+                    response.output.any { it.contains("[Pasted text #") } &&
+                    captureObserved.compareAndSet(false, true)
+                ) {
+                    firstRealCapture.set(response.output.joinToString("\n"))
+                    try {
+                        CompletableDeferred<Unit>().await()
+                    } catch (cancelled: CancellationException) {
+                        withContext(NonCancellable) { cleanupGate.await() }
+                        throw cancelled
+                    }
+                }
+            }
+
+            val nonce = SystemClock.elapsedRealtime().toString().takeLast(6)
+            val payload =
+                "issue1739 first line $nonce\nissue1739 exact once marker $nonce"
+            val payloadStripped = payload.filterNot { it.isWhitespace() }
+            val store = SharedPrefsOutboundQueueStore(
+                InstrumentationRegistry.getInstrumentation().targetContext,
+            )
+            val sessionKey = requireNotNull(viewModel.currentTargetSessionKeyForTest()) {
+                "the connected VM must expose its exact durable queue session key"
+            }
+
+            val tappedAtMs = SystemClock.elapsedRealtime()
+            openComposerAndSend(payload)
+            waitUntilWall(ACK_CAPTURE_OBSERVED_TIMEOUT_MS, "real ack capture after paste") {
+                captureObserved.get()
+            }
+
+            // Authoritative intermediate evidence, while the first ack capture
+            // is still parked: one durable InFlight row, wire attempted, real
+            // collapsed paste visible, and NO submission/Enter.
+            val inFlightRows = store.itemsFor(sessionKey)
+            assertEquals(
+                "the real composer must own exactly one durable row during the wedged ack; " +
+                    "rows=$inFlightRows",
+                1,
+                inFlightRows.size,
+            )
+            val row = inFlightRows.single()
+            assertEquals(
+                "the row must still be InFlight while the real capture cleanup is parked",
+                OutboundState.InFlight,
+                row.state,
+            )
+            assertTrue("the real bracketed paste commit must be durable", row.wireAttempted)
+            val firstCapture = firstRealCapture.get()
+            assertTrue(
+                "real pane evidence must contain Claude's collapsed multiline-paste chip; " +
+                    "capture=$firstCapture",
+                firstCapture.contains("[Pasted text #"),
+            )
+            assertFalse(
+                "Enter must not be sent while paste acknowledgement is unproven; " +
+                    "capture=$firstCapture",
+                firstCapture.contains("FAKE-AGENT SUBMITTED:"),
+            )
+            writeText("issue1739-first-real-capture.txt", firstCapture)
+            val paneId = requireNotNull(row.paneId) {
+                "the durable AgentPayload row must retain its pane identity"
+            }
+            openTerminalTab(viewModel, paneId)
+            val pendingViewportText = waitForVisibleTerminal(
+                "issue1739 pasted but not submitted viewport",
+            ) {
+                it.contains("[Pasted text #") && !it.contains("FAKE-AGENT SUBMITTED:")
+            }
+            captureLiveTerminalViewport(
+                "issue1739-paste-pending-viewport",
+                pendingViewportText,
+                viewModel,
+                paneId,
+            )
+
+            // The detached boundary must win at ~800ms even though cleanup
+            // remains NonCancellable. The normal composer dispatcher requeues
+            // the SAME row, whose auto-flush verifies the visible chip.
+            waitForIssue1739Boundary(
+                ACK_BOUNDED_RESULT_TIMEOUT_MS,
+                "bounded capture/ack failure",
+            ) {
+                diagnostics!!.eventsNamed("agent_submit_ack")
+                    .any {
+                        it.fields["result"] == "capture_timeout" ||
+                            it.fields["result"] == "ack_timeout"
+                    }
+            }
+            recordTiming(
+                "issue1739_capture_timeout_after_tap_ms",
+                SystemClock.elapsedRealtime() - tappedAtMs,
+            )
+            // The outer ack deadline and its single inner capture both use the
+            // same documented 800ms bound. Either may win the scheduler race:
+            // inner-first records `capture_timeout`; outer-first records
+            // `ack_timeout`. Both carry the immutable runtime identity and both
+            // are the same bounded/no-Enter outcome.
+            val boundedAck = diagnostics!!.eventsNamed("agent_submit_ack")
+                .firstOrNull {
+                    it.fields["result"] == "capture_timeout" ||
+                        it.fields["result"] == "ack_timeout"
+                }
+            assertTrue(
+                "timeout diagnostics must bind to the fresh current client; " +
+                    "clientAfterCut=$clientAfterCut event=$boundedAck",
+                boundedAck != null &&
+                    boundedAck.fields["clientHash"] == clientAfterCut &&
+                    boundedAck.fields["currentClientHash"] == clientAfterCut &&
+                    boundedAck.fields["generation"] ==
+                    boundedAck.fields["currentGeneration"],
+            )
+            cleanupGate.complete(Unit)
+            AgentSubmitCaptureSeams.reset()
+
+            val submitted = waitForIssue1739RetrySubmission(
+                "same-token Enter-only retry submission",
+                SUBMIT_AFTER_FLAP_TIMEOUT_MS,
+                verified = {
+                    diagnostics!!.eventsNamed("outbound_verify_before_resend").any {
+                        it.fields["sendToken"] == row.id &&
+                            it.fields["outcome"] == "AlreadyLanded"
+                    }
+                },
+            ) {
+                val stripped = it.filterNot { ch -> ch.isWhitespace() }
+                stripped.contains(FAKE_AGENT_SUBMITTED_STRIPPED + payloadStripped)
+            }
+            recordTiming(
+                "issue1739_submitted_after_tap_ms",
+                SystemClock.elapsedRealtime() - tappedAtMs,
+            )
+            val settled = waitForStableSidecarCapture()
+            writeText("issue1739-final-raw-transcript.txt", settled)
+            val settledStripped = settled.filterNot { it.isWhitespace() }
+            assertEquals(
+                "the multiline payload must occur exactly once in the real submitted " +
+                    "transcript; capture=$settled",
+                1,
+                countOccurrences(settledStripped, payloadStripped),
+            )
+            assertEquals(
+                "Enter must submit exactly once; capture=$settled",
+                1,
+                countOccurrences(
+                    settledStripped,
+                    FAKE_AGENT_SUBMITTED_STRIPPED + payloadStripped,
+                ),
+            )
+            assertInputBoxEmpty("after issue1739 same-token retry", submitted)
+            assertTrue(
+                "the SAME durable row/token must be Sent and pruned; id=${row.id} " +
+                    "remaining=${store.itemsFor(sessionKey)}",
+                store.item(row.id) == null && store.itemsFor(sessionKey).isEmpty(),
+            )
+            writeText(
+                "issue1739-row-prune.txt",
+                "session=$sessionKey\nrowId=${row.id}\nitem=null\nsessionItems=0\n",
+            )
+            val verifies = diagnostics!!.eventsNamed("outbound_verify_before_resend")
+            assertTrue(
+                "the retry must verify the SAME durable token as AlreadyLanded; " +
+                    "row=${row.id} events=$verifies",
+                verifies.any {
+                    it.fields["sendToken"] == row.id &&
+                        it.fields["outcome"] == "AlreadyLanded"
+                },
+            )
+            assertEquals(
+                "only one collapsed-paste commit may reach the live pane; capture=$settled",
+                1,
+                Regex("""\[Pasted text #\d+ \+\d+ lines?]""")
+                    .findAll(firstCapture)
+                    .count(),
+            )
+            assertEquals(
+                "the fresh reconnect client must remain live after retry",
+                clientAfterCut,
+                currentViewModel().currentClientIdentityForTest(),
+            )
+            val finalViewportText = waitForVisibleTerminal(
+                "issue1739 final one-submission viewport",
+            ) {
+                val stripped = it.filterNot { ch -> ch.isWhitespace() }
+                stripped.contains(FAKE_AGENT_SUBMITTED_STRIPPED + payloadStripped)
+            }
+            openTerminalTab(viewModel, paneId)
+            captureLiveTerminalViewport(
+                "issue1739-final-submitted-viewport",
+                finalViewportText,
+                viewModel,
+                paneId,
+            )
+            writeText(
+                "issue1739-diagnostics.txt",
+                diagnostics!!.events.joinToString("\n") {
+                    "${it.category}/${it.name} ${it.fields}"
+                },
+            )
+            captureArtifacts("issue1739-live-input")
+            writeTimings()
+        }
+    }
 
     /**
      * Issue #1636 — the PAYLOAD-INTEGRITY limb, against the REAL tmux server.
@@ -703,6 +1046,101 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
     }
 
+    private fun waitForFreshClient(previousClient: Int?): Int {
+        var current: Int? = null
+        waitUntilWall(CONNECTED_TIMEOUT_MS, "fresh client after worker cut") {
+            current = currentViewModel().currentClientIdentityForTest()
+            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected &&
+                current != null &&
+                current != previousClient
+        }
+        return requireNotNull(current)
+    }
+
+    private fun waitUntilWall(
+        timeoutMs: Long,
+        label: String,
+        predicate: () -> Boolean,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (predicate()) return
+            SystemClock.sleep(20)
+        }
+        assertTrue("$label did not resolve within ${timeoutMs}ms", predicate())
+    }
+
+    /**
+     * Issue #1739 connected-test pump.
+     *
+     * [createAndroidComposeRule] installs a [kotlinx.coroutines.test.TestDispatcher]
+     * for app Main/viewModelScope. A raw [SystemClock.sleep] loop advances wall
+     * time but leaves that virtual scheduler frozen, so the production 800ms
+     * `withTimeoutOrNull` cannot fire and the synthetic cleanup is never
+     * cancelled. Advance only this journey's Compose Main clock in small steps
+     * while retaining the hard wall-clock deadline. The wall bound is the
+     * load-bearing anti-hang assertion; scheduler advancement only lets the
+     * launch-owned harness model time actually passing on a normal device.
+     */
+    private fun waitForIssue1739Boundary(
+        timeoutMs: Long,
+        label: String,
+        predicate: () -> Boolean,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (predicate()) return
+            compose.mainClock.advanceTimeBy(ISSUE1739_MAIN_CLOCK_STEP_MS)
+            SystemClock.sleep(ISSUE1739_MAIN_CLOCK_STEP_MS)
+        }
+        assertTrue(
+            "$label did not resolve within ${timeoutMs}ms while advancing " +
+                "Compose Main by ${ISSUE1739_MAIN_CLOCK_STEP_MS}ms steps",
+            predicate(),
+        )
+    }
+
+    /**
+     * Issue #1739 post-failure redispatch pump.
+     *
+     * The production auto-flush correctly suppresses an immediate retry, then
+     * wakes after `OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS` on app Main. Under
+     * [createAndroidComposeRule] that delay is virtual, just like the ack
+     * deadline above. Poll the REAL server-side pane and SAME-token diagnostic
+     * while advancing the Compose Main clock in bounded 20ms steps. This keeps
+     * the real queue/backoff/auto-flush path load-bearing—no direct send call,
+     * no production delay override—and retains an independent hard wall bound.
+     */
+    private fun waitForIssue1739RetrySubmission(
+        label: String,
+        timeoutMs: Long,
+        verified: () -> Boolean,
+        submitted: (String) -> Boolean,
+    ): String {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var last = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            last = runBlocking { sidecarCapturePane() }
+            if (verified() && submitted(last)) return last
+
+            var tick = 0
+            while (
+                tick < ISSUE1739_MAIN_CLOCK_STEPS_PER_SIDECAR_POLL &&
+                SystemClock.elapsedRealtime() < deadline
+            ) {
+                compose.mainClock.advanceTimeBy(ISSUE1739_MAIN_CLOCK_STEP_MS)
+                SystemClock.sleep(ISSUE1739_MAIN_CLOCK_STEP_MS)
+                tick += 1
+            }
+        }
+        assertTrue(
+            "$label did not resolve within ${timeoutMs}ms while driving the real " +
+                "auto-flush; verified=${verified()} capture:\n$last",
+            verified() && submitted(last),
+        )
+        return last
+    }
+
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
         var status: TmuxSessionViewModel.ConnectionStatus =
             TmuxSessionViewModel.ConnectionStatus.Idle
@@ -865,6 +1303,76 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         writeText("$name-visible-terminal.txt", visibleTerminalText())
     }
 
+    /**
+     * Authoritative #1739 evidence: capture the active app window while the
+     * Terminal tab is visibly backed by a live [TerminalView]. The PNG is taken
+     * during the test, before activity teardown, and copied by the connected-test
+     * additional-output collector together with its exact terminal text.
+     */
+    private fun captureLiveTerminalViewport(
+        name: String,
+        visibleText: String,
+        viewModel: TmuxSessionViewModel,
+        paneId: String,
+    ): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        check(viewModel.agentConversations.value[paneId]?.selectedTab == SessionTab.Terminal) {
+            "$name requires Terminal to be the authoritative selected tab"
+        }
+        check(hasNode(TMUX_TERMINAL_TAB_TAG) && !hasNode(TMUX_CONVERSATION_PANE_TAG)) {
+            "$name requires the real Terminal tab UI with no Conversation surface visible"
+        }
+        instrumentation.waitForIdleSync()
+        var terminalIsLiveAndShown = false
+        compose.activityRule.scenario.onActivity { activity ->
+            val terminal = activity.window.decorView.findTerminalView()
+            terminalIsLiveAndShown =
+                terminal != null &&
+                terminal.isShown &&
+                terminal.width > 0 &&
+                terminal.height > 0 &&
+                terminal.currentSession != null
+        }
+        check(terminalIsLiveAndShown) {
+            "$name requires a visible live TerminalView before viewport capture"
+        }
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "UiAutomation returned no screenshot for $name"
+        }
+        check(bitmap.width == 1080 && bitmap.height == 2400) {
+            "$name must be the reviewer-required 1080x2400 viewport; " +
+                "got ${bitmap.width}x${bitmap.height}"
+        }
+        val file = artifactFile("$name.png")
+        FileOutputStream(file).use { stream ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+                "failed to encode ${file.absolutePath}"
+            }
+        }
+        bitmap.recycle()
+        writeText("$name-visible-terminal.txt", visibleText)
+        println("ISSUE1739_LIVE_VIEWPORT ${file.absolutePath}")
+        return file
+    }
+
+    private fun openTerminalTab(viewModel: TmuxSessionViewModel, paneId: String) {
+        compose.activityRule.scenario.onActivity {
+            viewModel.selectSessionTab(paneId, SessionTab.Terminal)
+        }
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            viewModel.agentConversations.value[paneId]?.selectedTab == SessionTab.Terminal
+        }
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            viewModel.agentConversations.value[paneId]?.selectedTab == SessionTab.Terminal &&
+                hasNode(TMUX_TERMINAL_TAB_TAG) &&
+                !hasNode(TMUX_CONVERSATION_PANE_TAG)
+        }
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
     private fun writeText(name: String, text: String): File {
         val file = artifactFile(name)
         file.writeText(text)
@@ -923,6 +1431,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 10_000L
         val CONNECTED_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 90_000L else 45_000L
+        const val ACK_CAPTURE_OBSERVED_TIMEOUT_MS: Long = 5_000L
+        const val ACK_BOUNDED_RESULT_TIMEOUT_MS: Long = 5_000L
+        const val MAIN_HEARTBEAT_TIMEOUT_MS: Long = 2_000L
+        const val ISSUE1739_MAIN_CLOCK_STEP_MS: Long = 20L
+        const val ISSUE1739_MAIN_CLOCK_STEPS_PER_SIDECAR_POLL: Int = 10
         val DEFERRAL_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 30_000L
 

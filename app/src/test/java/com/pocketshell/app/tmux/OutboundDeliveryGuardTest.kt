@@ -338,19 +338,44 @@ class OutboundDeliveryGuardTest {
         )
     }
 
+    @Test
+    fun multilineCollapsedChipIncreaseResolvesAlreadyLandedForEnterOnlyRetry() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "first line\nsecond line\nthird line"
+        val token = "collapsed-reconnect"
+        ledger.recordWireAttempt(
+            paneId,
+            token,
+            payload,
+            baselineCount = 0,
+            collapsedMarkerBaselineCount = 0,
+        )
+        val client = captureShowing("> [Pasted text #1 +2 lines]")
+
+        val outcome = verifyBeforeAgentResend(ledger, client, paneId, token, payload)
+
+        assertEquals(
+            "Claude's collapsed chip is the only pane proof for multiline payloads; " +
+                "its count increase must authorize Enter-only recovery, never a duplicate paste",
+            DeliveryProbeOutcome.AlreadyLanded,
+            outcome,
+        )
+    }
+
     /**
      * Issue #1577b: a NULL baseline (a legacy pre-baseline row, or a failed baseline
      * capture) is UNTRUSTWORTHY — a presence-only check would false-`AlreadyLanded` on
      * a permanent Codex `Goal blocked (/goal resume)` footer and submit a bare Enter,
      * silently dropping the payload (the reopened #1577 symptom). The kill-the-presence-
-     * fallback fix resolves `NotLanded` instead, so the caller does a REAL gated resend
-     * (which records a fresh baseline), never a bare Enter.
+     * fallback fix resolves `Unknown`, so the caller does neither a blind resend nor
+     * a bare Enter.
      *
      * RED on base: the presence-only fallback (`count >= 1`) matched the footer ⇒
-     * AlreadyLanded. GREEN: null baseline ⇒ NotLanded (deliver-safe).
+     * AlreadyLanded. GREEN: null baseline ⇒ Unknown (ambiguity-safe).
      */
     @Test
-    fun nullBaselineUntrustworthyFlagResolvesNotLandedNotBareEnter() = runTest {
+    fun nullBaselineUntrustworthyFlagResolvesUnknownNotBareEnter() = runTest {
         val ledger = OutboundDeliveryLedger()
         val paneId = "%0"
         val payload = "/goal resume"
@@ -364,8 +389,37 @@ class OutboundDeliveryGuardTest {
         assertEquals(
             "a null-baseline (untrustworthy) flag whose payload is already on the pane must NOT " +
                 "resolve AlreadyLanded (that submits a bare Enter and silently drops the send) — " +
-                "it must be NotLanded so the caller does a real gated resend",
-            DeliveryProbeOutcome.NotLanded,
+                "it must stay Unknown so the caller performs no unauthorized wire action",
+            DeliveryProbeOutcome.Unknown,
+            outcome,
+        )
+    }
+
+    @Test
+    fun nullLiteralBaselineStillUsesDurableMultilineCollapsedMarkerEvidence() = runTest {
+        val ledger = OutboundDeliveryLedger()
+        val paneId = "%0"
+        val payload = "first line\nsecond line\nthird line"
+        val token = "legacy-multiline-row"
+        ledger.recordWireAttempt(
+            paneId,
+            token,
+            payload,
+            baselineCount = null,
+            collapsedMarkerBaselineCount = 0,
+        )
+
+        val outcome = verifyBeforeAgentResend(
+            ledger,
+            captureShowing("> [Pasted text #1 +2 lines]"),
+            paneId,
+            token,
+            payload,
+        )
+
+        assertEquals(
+            "a null literal baseline must not discard independent collapsed-marker evidence",
+            DeliveryProbeOutcome.AlreadyLanded,
             outcome,
         )
     }
@@ -402,13 +456,26 @@ class OutboundDeliveryGuardTest {
     fun rebuiltLedgerConsultsDurableFlagAfterVmClear() {
         val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
         // The composer enqueued the row that the VM is delivering.
-        store.enqueue("sessA", "durable payload", paneId = "%0")
+        val row = store.enqueue("sessA", "durable payload", paneId = "%0")
+        val durableRow = DurableOutboundRowIdentity("sessA", row.id)
         val durable = store.asWireAttemptDurableStore()
 
         // VM #1's ledger records the wire attempt (right before the paste).
         val ledger1 = OutboundDeliveryLedger(durable = durable)
-        ledger1.recordWireAttempt("%0", "durable payload", "durable payload")
-        assertTrue(ledger1.hasAmbiguousAttempt("%0", "durable payload", "durable payload"))
+        ledger1.recordWireAttempt(
+            "%0",
+            row.id,
+            "durable payload",
+            durableRow = durableRow,
+        )
+        assertTrue(
+            ledger1.hasAmbiguousAttempt(
+                "%0",
+                row.id,
+                "durable payload",
+                durableRow,
+            ),
+        )
 
         // Back-navigation clears the VM: its volatile ledger dies. A base ledger
         // with NO durable backing has no memory of the attempt (the P9 bug).
@@ -425,7 +492,7 @@ class OutboundDeliveryGuardTest {
         assertTrue(
             "GREEN (fix): the durable `wireAttempted` flag makes the rebuilt ledger " +
                 "verify-before-resend instead of blindly re-pasting",
-            rebuilt.hasAmbiguousAttempt("%0", "durable payload", "durable payload"),
+            rebuilt.hasAmbiguousAttempt("%0", row.id, "durable payload", durableRow),
         )
     }
 
@@ -450,18 +517,19 @@ class OutboundDeliveryGuardTest {
     @Test
     fun clearKeepsDurableRowFlagForAsYetUnackedRow() {
         val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
-        store.enqueue("sessA", "unacked payload", paneId = "%0")
+        val row = store.enqueue("sessA", "unacked payload", paneId = "%0")
+        val durableRow = DurableOutboundRowIdentity("sessA", row.id)
         val durable = store.asWireAttemptDurableStore()
         val ledger = OutboundDeliveryLedger(durable = durable)
-        ledger.recordWireAttempt("%0", "unacked payload", "unacked payload")
-        ledger.clear("%0", "unacked payload")
+        ledger.recordWireAttempt("%0", row.id, "unacked payload", durableRow = durableRow)
+        ledger.clear("%0", row.id)
 
         assertTrue(
             "clear() drops only the volatile entry; the durable row flag persists so " +
                 "a rebuilt ledger still verifies",
-            ledger.hasAmbiguousAttempt("%0", "unacked payload", "unacked payload"),
+            ledger.hasAmbiguousAttempt("%0", row.id, "unacked payload", durableRow),
         )
-        assertTrue(store.hasWireAttempt("%0", "unacked payload"))
+        assertTrue(store.hasWireAttempt("sessA", row.id))
     }
 
     /**
@@ -492,12 +560,12 @@ class OutboundDeliveryGuardTest {
         )
         assertFalse(
             "the claim alone must NOT record a wire attempt (#1577)",
-            store.hasWireAttempt(paneId, payload),
+            store.hasWireAttempt("sessA", row.id),
         )
-        store.markWireAttempted(paneId, payload, baselineCount = 0) // the actual wire push (#1577b: records a baseline)
+        store.markWireAttempted("sessA", row.id, baselineCount = 0)
         assertTrue(
             "the wire push must durably record the wire attempt on the row",
-            store.hasWireAttempt(paneId, payload),
+            store.hasWireAttempt("sessA", row.id),
         )
 
         // VM churn / process death: the volatile ledger dies. A ledger REBUILT with
@@ -512,7 +580,14 @@ class OutboundDeliveryGuardTest {
         // claim-stamped flag → verify → the pane shows the payload → AlreadyLanded,
         // so the send path submits Enter only and never re-pastes (occurrence 1).
         val rebuilt = OutboundDeliveryLedger(durable = store.asWireAttemptDurableStore())
-        val outcome = verifyBeforeAgentResend(rebuilt, captureShowing("$ $payload"), paneId, payload, payload)
+        val outcome = verifyBeforeAgentResend(
+            rebuilt,
+            captureShowing("$ $payload"),
+            paneId,
+            row.id,
+            payload,
+            DurableOutboundRowIdentity("sessA", row.id),
+        )
         assertEquals(
             "an orphaned InFlight row that actually landed must verify AlreadyLanded (occurrence 1)",
             DeliveryProbeOutcome.AlreadyLanded,
@@ -747,15 +822,21 @@ class OutboundDeliveryGuardTest {
     @Test
     fun outboundDeliveryLedgerForThreadsTheExactInjectedStoreNotASecondInstance() {
         val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
-        store.enqueue("sessA", "single-store payload", paneId = "%0")
+        val row = store.enqueue("sessA", "single-store payload", paneId = "%0")
+        val durableRow = DurableOutboundRowIdentity("sessA", row.id)
         val ledger = outboundDeliveryLedgerFor(store)
 
-        ledger.recordWireAttempt("%0", "single-store payload", "single-store payload")
+        ledger.recordWireAttempt(
+            "%0",
+            row.id,
+            "single-store payload",
+            durableRow = durableRow,
+        )
 
         assertTrue(
             "the wire attempt recorded via the ledger must be visible through the SAME store " +
                 "instance the orphan sweep reads (one lock — no lost-update race)",
-            store.hasWireAttempt("%0", "single-store payload"),
+            store.hasWireAttempt("sessA", row.id),
         )
     }
 

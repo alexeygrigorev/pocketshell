@@ -1,5 +1,9 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
+import com.pocketshell.core.agents.AgentKind
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -107,5 +111,64 @@ class AgentSubmitAckTest {
                 listOf("[Pasted text #1 +3 lines]", "[Pasted text #2 +9 lines]"),
             ),
         )
+    }
+
+    @Test
+    fun outerAckTimeoutKeepsAttemptIdentityAndReportsChangedCurrentIdentity() = runTest {
+        val diagnostics = installRecordingDiagnosticSink()
+        try {
+            val attemptClient = FakeTmuxClient()
+            val replacementClient = FakeTmuxClient()
+            val attemptGeneration = 7L
+            var currentClient = attemptClient
+            var currentGeneration = attemptGeneration
+            val identity = AgentSendRuntimeIdentity(
+                client = attemptClient,
+                generation = attemptGeneration,
+                target = TmuxSessionViewModel.ConnectionTarget(
+                    hostId = 1L,
+                    hostName = "docker",
+                    host = "127.0.0.1",
+                    port = 2222,
+                    user = "testuser",
+                    keyPath = "/tmp/test-key",
+                    passphrase = null,
+                    sessionName = "issue1739-outer-timeout",
+                    startDirectory = null,
+                ),
+            )
+
+            val failure = runCatching {
+                awaitAgentPasteIngested(
+                    identity = identity,
+                    paneId = "%0",
+                    payload = "issue1739 outer timeout",
+                    agent = AgentKind.ClaudeCode,
+                    configuredFloorMs = 0L,
+                    ackTimeoutMs = 100L,
+                    baselineNeedleCount = 0,
+                    collapsedMarkerBaseline = 0,
+                    capture = { _, _ ->
+                        currentClient = replacementClient
+                        currentGeneration = 8L
+                        delay(1_000L)
+                        AgentPaneCaptureResult(AgentPaneCaptureStatus.Failed)
+                    },
+                    currentClientHash = { System.identityHashCode(currentClient) },
+                    currentGeneration = { currentGeneration },
+                )
+            }.exceptionOrNull()
+
+            assertTrue(failure is IllegalStateException)
+            val event = diagnostics.eventsNamed("agent_submit_ack").single()
+            assertEquals("ack_timeout", event.fields["result"])
+            assertEquals(System.identityHashCode(attemptClient), event.fields["clientHash"])
+            assertEquals(attemptGeneration, event.fields["generation"])
+            assertEquals("issue1739-outer-timeout", event.fields["session"])
+            assertEquals(System.identityHashCode(replacementClient), event.fields["currentClientHash"])
+            assertEquals(8L, event.fields["currentGeneration"])
+        } finally {
+            diagnostics.close()
+        }
     }
 }

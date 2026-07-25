@@ -41,7 +41,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
-import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.composer.PromptComposerSendDispatcher
 import com.pocketshell.app.conversation.ConversationImageViewModel
 import com.pocketshell.app.conversation.LocalConversationImageLoader
@@ -1728,39 +1727,36 @@ private fun TmuxSessionSheetsRegion(
     }
 
     val composerSendHandler: suspend (PromptComposerViewModel.SendRequest) -> Boolean = { request ->
-        val target = request.sendTarget
-        if (target.sessionKey.isNotBlank() && target.sessionKey != targetSessionId.value) {
-            false
-        } else {
-            val paneId = target.paneId.ifBlank { surfacePane?.paneId.orEmpty() }
-            val sent = if (paneId.isBlank()) {
-                false
-            } else when (target.route) {
-                OutboundRoute.AgentConversation ->
-                    tmuxAgentConversationSendResult(
-                        request.text,
-                        target.agentKind,
-                        { t, k -> viewModel.sendAgentPayloadToPaneResult(paneId, t, k).isSuccess },
-                        { t -> viewModel.sendToAgentPaneResult(paneId, t).isSuccess },
-                    ) { onTuiCommandNoticeChange(it) }
-                OutboundRoute.AgentPayload ->
-                    tmuxComposerAgentKindFromToken(target.agentKind)?.let { agentKind ->
-                        viewModel.sendAgentPayloadToPaneResult(
-                            paneId,
-                            request.text,
-                            agentKind,
-                        ).isSuccess
-                    } ?: false
-                OutboundRoute.RawBytes -> {
-                    val payload = if (request.withEnter) request.text + "\r" else request.text
-                    viewModel.writeInputToPaneResult(
-                        paneId,
-                        payload.toByteArray(Charsets.UTF_8),
-                    ).isSuccess
-                }
-            }
-            sent
-        }
+        tmuxComposerSendResult(
+            request = request,
+            targetSessionId = targetSessionId.value,
+            fallbackPaneId = surfacePane?.paneId.orEmpty(),
+            sendAgentPayload = { paneId, text, agentKind, sendToken, durableRow ->
+                viewModel.sendAgentPayloadToPaneResult(
+                    paneId,
+                    text,
+                    agentKind,
+                    sendToken,
+                    durableRow,
+                ).isSuccess
+            },
+            sendToAgent = { paneId, text, sendToken, durableRow ->
+                viewModel.sendToAgentPaneResult(
+                    paneId,
+                    text,
+                    sendToken,
+                    durableRow,
+                ).isSuccess
+            },
+            sendRawBytes = { paneId, bytes, sendToken, durableRow ->
+                viewModel.writeInputToPaneResult(
+                    paneId,
+                    bytes,
+                    sendToken,
+                    durableRow,
+                ).isSuccess
+            },
+        ) { onTuiCommandNoticeChange(it) }
     }
     PromptComposerSendDispatcher(
         viewModel = promptComposerViewModel,

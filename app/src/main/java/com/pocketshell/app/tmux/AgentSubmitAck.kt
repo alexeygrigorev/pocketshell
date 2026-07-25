@@ -1,5 +1,61 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClient
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
+
+/**
+ * Issue #1739 synthetic-injection seam for connected emulator proof.
+ *
+ * The hook runs only AFTER a real `capture-pane` response returns from the real
+ * sshj/tmux transport. Tests can then model the production cancellation-cleanup
+ * wedge without replacing the transport or its pane evidence. [invokeAfterRealCapture]
+ * pins the synthetic teardown to [Dispatchers.IO], matching the real
+ * `RealSshSession.exec` cancellation path: channel-close writes run on the
+ * dedicated `TransportDispatcher` worker while the cancelling coroutine waits
+ * off Main. A test must never park this seam on Android Main, because that would
+ * manufacture an ANR which the real transport path does not have. Null in
+ * production; one-shot ownership/reset belongs to the test.
+ */
+internal object AgentSubmitCaptureSeams {
+    @Volatile
+    var afterRealCapture:
+        (suspend (response: CommandResponse, scrollbackLines: Int) -> Unit)? = null
+
+    /**
+     * Mutation oracle for the original #1739 defect. When armed by the hard
+     * integration gate, the capture becomes a structured child of the bounded
+     * caller; its non-cancellable transport cleanup can therefore hold the
+     * caller past the deadline. Production and ordinary tests leave this false.
+     */
+    @Volatile
+    var structuredChildMutation: Boolean = false
+
+    suspend fun invokeAfterRealCapture(response: CommandResponse, scrollbackLines: Int) {
+        val hook = afterRealCapture ?: return
+        withContext(Dispatchers.IO) {
+            hook(response, scrollbackLines)
+        }
+    }
+
+    fun reset() {
+        afterRealCapture = null
+        structuredChildMutation = false
+    }
+}
+
 /**
  * Issue #869: ack-gate the submit Enter on the pasted composer text actually
  * landing in the agent's input, rather than relying only on a blind fixed sleep.
@@ -12,9 +68,9 @@ internal const val AGENT_SUBMIT_ACK_POLL_INTERVAL_MS: Long = 40L
  * send, so every normal multi-line message paid the FULL 2s window plus the
  * fallback floor before the submit Enter ("takes too long to send even when the
  * connection is okay"). With the collapsed-paste chip now recognised the ack
- * fires in ~1 RTT on the happy path, so the window only bounds the genuine
- * needle-miss fallback; 800ms is comfortably above a real high-latency capture
- * round-trip while keeping a truly unrecognised render from feeling frozen.
+ * fires in ~1 RTT on the happy path. Issue #1739 makes the 800ms window a hard
+ * no-blind-Enter boundary: a genuinely unrecognised render remains retryable,
+ * and verify-before-resend later decides whether Enter-only is safe.
  */
 internal const val AGENT_SUBMIT_ACK_TIMEOUT_MS: Long = 800L
 
@@ -23,6 +79,259 @@ internal const val AGENT_SUBMIT_ACK_TIMEOUT_MS: Long = 800L
  * the ack needle matches against `capture-pane`.
  */
 internal const val AGENT_SUBMIT_ACK_NEEDLE_TAIL_CHARS: Int = 24
+
+/** Immutable authority snapshot for one agent-send attempt. */
+internal data class AgentSendRuntimeIdentity(
+    val client: TmuxClient,
+    val generation: Long,
+    val target: TmuxSessionViewModel.ConnectionTarget?,
+)
+
+internal enum class AgentPaneCaptureStatus {
+    Captured,
+    TimedOut,
+    Failed,
+    Disconnected,
+    StaleRuntime,
+}
+
+internal data class AgentPaneCaptureResult(
+    val status: AgentPaneCaptureStatus,
+    val response: CommandResponse? = null,
+)
+
+/**
+ * Caller-bounded capture for #1739. The capture is a VM-scope sibling, so the
+ * caller's deadline never joins a cancelled SSH exec's non-cancellable cleanup.
+ */
+internal suspend fun captureAgentPaneWithDeadline(
+    scope: CoroutineScope,
+    identity: AgentSendRuntimeIdentity,
+    paneId: String,
+    timeoutMs: Long,
+    scrollbackLines: Int,
+    isCurrent: (AgentSendRuntimeIdentity, String) -> Boolean,
+    nowMs: () -> Long,
+    currentClientHash: () -> Int?,
+    currentGeneration: () -> Long,
+): AgentPaneCaptureResult =
+    if (AgentSubmitCaptureSeams.structuredChildMutation) {
+        coroutineScope {
+            captureAgentPaneWithDeadlineInScope(
+                scope = this,
+                identity = identity,
+                paneId = paneId,
+                timeoutMs = timeoutMs,
+                scrollbackLines = scrollbackLines,
+                isCurrent = isCurrent,
+                nowMs = nowMs,
+                currentClientHash = currentClientHash,
+                currentGeneration = currentGeneration,
+            )
+        }
+    } else {
+        captureAgentPaneWithDeadlineInScope(
+            scope = scope,
+            identity = identity,
+            paneId = paneId,
+            timeoutMs = timeoutMs,
+            scrollbackLines = scrollbackLines,
+            isCurrent = isCurrent,
+            nowMs = nowMs,
+            currentClientHash = currentClientHash,
+            currentGeneration = currentGeneration,
+        )
+    }
+
+private suspend fun captureAgentPaneWithDeadlineInScope(
+    scope: CoroutineScope,
+    identity: AgentSendRuntimeIdentity,
+    paneId: String,
+    timeoutMs: Long,
+    scrollbackLines: Int,
+    isCurrent: (AgentSendRuntimeIdentity, String) -> Boolean,
+    nowMs: () -> Long,
+    currentClientHash: () -> Int?,
+    currentGeneration: () -> Long,
+): AgentPaneCaptureResult {
+    if (!isCurrent(identity, paneId)) return AgentPaneCaptureResult(AgentPaneCaptureStatus.StaleRuntime)
+    if (identity.client.disconnected.value) return AgentPaneCaptureResult(AgentPaneCaptureStatus.Disconnected)
+
+    val startedAtMs = nowMs()
+    DiagnosticEvents.record(
+        "action",
+        "agent_submit_capture",
+        "pane" to paneId,
+        "result" to "started",
+        "clientHash" to System.identityHashCode(identity.client),
+        "generation" to identity.generation,
+        "session" to (identity.target?.sessionName ?: "test"),
+        "timeoutMs" to timeoutMs,
+        "scrollbackLines" to scrollbackLines,
+    )
+    val capture = scope.async(start = CoroutineStart.UNDISPATCHED) {
+        identity.client.capturePaneTextViaExec(paneId, timeoutMs, scrollbackLines).also {
+            AgentSubmitCaptureSeams.invokeAfterRealCapture(it, scrollbackLines)
+        }
+    }
+    val result = try {
+        val response = withTimeoutOrNull(timeoutMs.coerceAtLeast(1L)) { capture.await() }
+        when {
+            response == null -> AgentPaneCaptureResult(AgentPaneCaptureStatus.TimedOut)
+            !isCurrent(identity, paneId) -> AgentPaneCaptureResult(AgentPaneCaptureStatus.StaleRuntime)
+            identity.client.disconnected.value -> AgentPaneCaptureResult(AgentPaneCaptureStatus.Disconnected)
+            else -> AgentPaneCaptureResult(AgentPaneCaptureStatus.Captured, response)
+        }
+    } catch (cancelled: CancellationException) {
+        if (!currentCoroutineContext().isActive) throw cancelled
+        AgentPaneCaptureResult(AgentPaneCaptureStatus.Failed)
+    } catch (_: Throwable) {
+        AgentPaneCaptureResult(AgentPaneCaptureStatus.Failed)
+    } finally {
+        if (!capture.isCompleted) {
+            capture.cancel(CancellationException("agent submit capture deadline/scope ended"))
+        }
+    }
+    DiagnosticEvents.record(
+        "action",
+        "agent_submit_capture",
+        "pane" to paneId,
+        "result" to result.status.name,
+        "clientHash" to System.identityHashCode(identity.client),
+        "currentClientHash" to currentClientHash(),
+        "generation" to identity.generation,
+        "currentGeneration" to currentGeneration(),
+        "session" to (identity.target?.sessionName ?: "test"),
+        "elapsedMs" to (nowMs() - startedAtMs),
+    )
+    return result
+}
+
+/**
+ * Ack-gate Enter on proof from the exact current runtime. Any timeout, failed
+ * capture, disconnect, or stale binding fails without blind Enter.
+ */
+internal suspend fun awaitAgentPasteIngested(
+    identity: AgentSendRuntimeIdentity,
+    paneId: String,
+    payload: String,
+    agent: AgentKind,
+    configuredFloorMs: Long,
+    ackTimeoutMs: Long,
+    baselineNeedleCount: Int,
+    collapsedMarkerBaseline: Int,
+    capture: suspend (timeoutMs: Long, scrollbackLines: Int) -> AgentPaneCaptureResult,
+    currentClientHash: () -> Int?,
+    currentGeneration: () -> Long,
+) {
+    val floorMs = if (agent == AgentKind.Codex) {
+        maxOf(configuredFloorMs, CODEX_AGENT_SUBMIT_DELAY_MS)
+    } else {
+        configuredFloorMs
+    }
+    val needle = agentSubmitAckNeedle(payload)
+    if (needle == null) {
+        if (floorMs > 0L) delay(floorMs)
+        return
+    }
+
+    val multiline = agentSubmitPayloadIsMultiLine(payload)
+    var polls = 0
+    var terminalResult = "ack_timeout"
+    val observed = withTimeoutOrNull(ackTimeoutMs.coerceAtLeast(1L)) {
+        while (true) {
+            val pane = capture(ackTimeoutMs, 0)
+            when (pane.status) {
+                AgentPaneCaptureStatus.Captured -> {
+                    if (
+                        pane.response?.let {
+                            agentPaneShowsPayload(
+                                it,
+                                needle,
+                                baselineNeedleCount,
+                                multiline,
+                                collapsedMarkerBaseline,
+                            )
+                        } == true
+                    ) {
+                        recordAgentSubmitAck(
+                            identity = identity,
+                            paneId = paneId,
+                            result = "ack_observed",
+                            polls = polls,
+                            currentClientHash = currentClientHash,
+                            currentGeneration = currentGeneration,
+                        )
+                        return@withTimeoutOrNull true
+                    }
+                }
+                AgentPaneCaptureStatus.TimedOut -> {
+                    terminalResult = "capture_timeout"
+                    return@withTimeoutOrNull false
+                }
+                AgentPaneCaptureStatus.Failed -> Unit
+                AgentPaneCaptureStatus.Disconnected -> {
+                    terminalResult = "disconnected"
+                    return@withTimeoutOrNull false
+                }
+                AgentPaneCaptureStatus.StaleRuntime -> {
+                    terminalResult = "stale_runtime"
+                    return@withTimeoutOrNull false
+                }
+            }
+            polls += 1
+            delay(AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
+        }
+    } == true
+    if (observed) return
+
+    recordAgentSubmitAck(
+        identity = identity,
+        paneId = paneId,
+        result = terminalResult,
+        polls = polls,
+        currentClientHash = currentClientHash,
+        currentGeneration = currentGeneration,
+    )
+    throw IllegalStateException("Agent paste acknowledgement was not proven ($terminalResult); kept queued.")
+}
+
+private fun recordAgentSubmitAck(
+    identity: AgentSendRuntimeIdentity,
+    paneId: String,
+    result: String,
+    polls: Int,
+    currentClientHash: () -> Int?,
+    currentGeneration: () -> Long,
+) {
+    DiagnosticEvents.record(
+        "action",
+        "agent_submit_ack",
+        "pane" to paneId,
+        "result" to result,
+        "polls" to polls,
+        "clientHash" to System.identityHashCode(identity.client),
+        "currentClientHash" to currentClientHash(),
+        "generation" to identity.generation,
+        "currentGeneration" to currentGeneration(),
+        "session" to (identity.target?.sessionName ?: "test"),
+    )
+}
+
+private fun agentPaneShowsPayload(
+    response: CommandResponse,
+    needle: String,
+    baselineNeedleCount: Int,
+    payloadIsMultiLine: Boolean,
+    collapsedMarkerBaseline: Int,
+): Boolean {
+    if (response.isError) return false
+    return agentSubmitVisibleTextNeedleCount(response.output, needle) > baselineNeedleCount ||
+        (
+            payloadIsMultiLine &&
+                agentSubmitCollapsedPasteMarkerCount(response.output) > collapsedMarkerBaseline
+            )
+}
 
 internal fun agentSubmitAckNeedle(payload: String): String? {
     val lastLine = payload

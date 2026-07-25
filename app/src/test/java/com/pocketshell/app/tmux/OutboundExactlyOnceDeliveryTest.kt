@@ -165,7 +165,9 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
     @Test
     fun resendRepastesInFullWhenProbeShowsPayloadNeverLanded() = runTest(scheduler) {
         val client = FakeTmuxClient()
-        // The pane never shows the payload (it did NOT land).
+        // The first literal command fails before the pane accepts it. On retry,
+        // the verify capture shows a bare prompt, then the ack capture proves
+        // the re-paste landed.
         client.defaultCaptureResponse = CommandResponse(
             number = 0L,
             output = listOf("$ "),
@@ -173,12 +175,22 @@ class OutboundExactlyOnceDeliveryTest : TmuxSessionViewModelTestBase() {
         )
         val vm = newConnectedVm(client)
 
-        client.throwOnCommandPrefix = "send-keys -t %0 Enter"
+        client.throwOnCommandPrefix = "send-keys -l -t %0"
         client.throwOnCommandRemaining = 1
         val first = async { vm.sendAgentPayloadToPaneResult("%0", "restart the worker pool", AgentKind.ClaudeCode, "s-restart") }
         advanceUntilIdle()
         assertTrue(first.await().isFailure)
 
+        client.capturePaneResponses.addLast(
+            CommandResponse(number = 0L, output = listOf("$ "), isError = false),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 0L,
+                output = listOf("> restart the worker pool"),
+                isError = false,
+            ),
+        )
         val second = async { vm.sendAgentPayloadToPaneResult("%0", "restart the worker pool", AgentKind.ClaudeCode, "s-restart") }
         advanceUntilIdle()
         assertTrue(second.await().isSuccess)

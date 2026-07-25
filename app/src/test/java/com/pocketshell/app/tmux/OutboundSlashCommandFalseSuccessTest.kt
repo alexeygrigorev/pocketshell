@@ -97,12 +97,21 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
         val store = SharedPrefsOutboundQueueStore(context)
         val row = store.enqueue("sessGoal", payload, paneId = "%0", route = OutboundRoute.AgentPayload)
         store.markInFlight(row.id)
+        val durableRow = DurableOutboundRowIdentity("sessGoal", row.id)
 
         // The Codex pane permanently advertises the command it wants sent.
         val client = clientShowing("gpt-5.6-sol medium · Context 42% · Goal blocked (/goal resume)")
         val vm = newDurableConnectedVm(client)
 
-        val result = async { vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.Codex) }
+        val result = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.Codex,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue("the send reports success either way (the drop is silent)", result.await().isSuccess)
 
@@ -125,11 +134,19 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
         val store = SharedPrefsOutboundQueueStore(context)
         val row = store.enqueue("sessEcho", payload, paneId = "%0", route = OutboundRoute.AgentConversation)
         store.markInFlight(row.id)
+        val durableRow = DurableOutboundRowIdentity("sessEcho", row.id)
 
         val client = clientShowing("Goal blocked (/goal resume)")
         val vm = newDurableConnectedVm(client)
 
-        val result = async { vm.sendToAgentPaneResult("%0", payload) }
+        val result = async {
+            vm.sendToAgentPaneResult(
+                "%0",
+                payload,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue(result.await().isSuccess)
 
@@ -151,12 +168,21 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
         val store = SharedPrefsOutboundQueueStore(context)
         val row = store.enqueue("sessOk", payload, paneId = "%0", route = OutboundRoute.AgentPayload)
         store.markInFlight(row.id)
+        val durableRow = DurableOutboundRowIdentity("sessOk", row.id)
 
         // "ok" is already visible (e.g. echoed in the transcript / a prior line).
         val client = clientShowing("> ok, running the smoke suite")
         val vm = newDurableConnectedVm(client)
 
-        val result = async { vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.Codex) }
+        val result = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.Codex,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue(result.await().isSuccess)
 
@@ -180,6 +206,7 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
         val store = SharedPrefsOutboundQueueStore(context)
         val row = store.enqueue("sessDedupe", payload, paneId = "%0", route = OutboundRoute.AgentPayload)
         store.markInFlight(row.id)
+        val durableRow = DurableOutboundRowIdentity("sessDedupe", row.id)
 
         // The unit VM has no attached emulator render, so the pre-send baseline is 0
         // (the payload is not on the local render) and NO baseline capture round-trip
@@ -191,14 +218,30 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
         // Attempt 1: the paste lands, the submit Enter's exec result is lost.
         client.throwOnCommandPrefix = "send-keys -t %0 Enter"
         client.throwOnCommandRemaining = 1
-        val first = async { vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.Codex) }
+        val first = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.Codex,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue("attempt 1 must surface the ambiguous failure", first.await().isFailure)
         assertEquals("attempt 1 pastes exactly once", 1, client.literalPasteCount(payload))
 
         // The resend (reconnect auto-flush / manual retry) probes: count (1) exceeds
         // the baseline (0) ⇒ AlreadyLanded ⇒ Enter-only, NO second paste.
-        val second = async { vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.Codex) }
+        val second = async {
+            vm.sendAgentPayloadToPaneResult(
+                "%0",
+                payload,
+                AgentKind.Codex,
+                sendToken = row.id,
+                durableRow = durableRow,
+            )
+        }
         advanceUntilIdle()
         assertTrue("the verified resend must succeed", second.await().isSuccess)
         assertEquals(

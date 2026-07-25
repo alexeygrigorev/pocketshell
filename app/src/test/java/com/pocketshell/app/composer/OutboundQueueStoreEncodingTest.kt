@@ -183,11 +183,13 @@ class OutboundQueueStoreEncodingTest {
                 wireAttempted = true,
                 wireAttemptedAtMs = 1_700_000_009_000,
                 wireNeedleBaselineCount = 1,
+                wireCollapsedMarkerBaselineCount = 2,
             ),
         )
         val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
         assertEquals(items, decoded)
         assertEquals(1, decoded.single().wireNeedleBaselineCount)
+        assertEquals(2, decoded.single().wireCollapsedMarkerBaselineCount)
     }
 
     @Test

@@ -480,13 +480,9 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #869: monotonic millisecond clock used by the submit ack-gate to
-     * (a) measure each `capture-pane` round-trip (the RTT addend) and (b) bound
-     * the needle-miss FALLBACK floor. Defaults to the device monotonic clock.
-     * Unit tests override it to read the `runTest` virtual scheduler time so the
-     * RTT measurement is deterministic under virtual time — `SystemClock`
-     * reads a constant 0 there, which would make every measured RTT zero and
-     * the fallback-floor top-up impossible to assert.
+     * Monotonic millisecond clock used by submit diagnostics. Defaults to the
+     * device monotonic clock; tests may bind it to their virtual scheduler so
+     * bounded-capture elapsed evidence is deterministic.
      */
     @Volatile
     private var agentSubmitMonotonicMsForTest: (() -> Long)? = null
@@ -500,14 +496,8 @@ public class TmuxSessionViewModel @Inject constructor(
         agentSubmitMonotonicMsForTest?.invoke() ?: SystemClock.elapsedRealtime()
 
     /**
-     * Issue #869: test override for the submit ack-gate POLL window
-     * ([AGENT_SUBMIT_ACK_TIMEOUT_MS]). Production polls the full 2s window, but
-     * the needle-miss FALLBACK FLOOR is a SEPARATE invariant (Enter never fires
-     * before `FALLBACK_FLOOR + measuredRtt`) that must hold even if the poll
-     * window is shorter than the floor. A test sets a SHORT poll window so the
-     * floor — not the incidental poll-loop duration — is the binding constraint,
-     * proving the floor genuinely gates the Enter (red→green). Null ⇒ production
-     * default.
+     * Test override for the submit ack-gate hard deadline
+     * ([AGENT_SUBMIT_ACK_TIMEOUT_MS]). Null uses the production default.
      */
     @Volatile
     private var agentSubmitAckTimeoutMsOverrideForTest: Long? = null
@@ -1297,6 +1287,27 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun currentClientIdentityForTest(): Int? =
         clientRef?.let { System.identityHashCode(it) }
+
+    internal fun currentConnectGenerationForTest(): Long = connectGeneration
+
+    /**
+     * Issue #1739 narrow authority-loss seam: swap only the selected session
+     * identity while retaining the exact same control client and generation.
+     * This exercises the target limb of [AgentSendRuntimeIdentity] independently
+     * from the already-covered reconnect/client-replacement limbs.
+     */
+    internal fun swapActiveSessionTargetForTest(sessionName: String) {
+        val current = checkNotNull(activeTarget) { "a live target is required" }
+        activeTarget = current.copy(
+            sessionName = sessionName,
+            tmuxSessionId = null,
+            sessionCreated = null,
+        )
+    }
+
+    /** Issue #1739 journey seam: the exact durable composer/queue session key. */
+    internal fun currentTargetSessionKeyForTest(): String? =
+        activeTarget?.let { revealController.sessionId(it).value }
 
     /**
      * Issue #1072 test seam — own an attachment upload through the EXACT production
@@ -13963,12 +13974,14 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         text: String,
         sendToken: String? = null,
+        durableRow: DurableOutboundRowIdentity? = null,
     ): Result<Unit> =
         sendToAgentPaneResult(
             paneId = paneId,
             text = text,
             keepFailedOptimisticOnDeliveryFailure = false,
             sendToken = sendToken,
+            durableRow = durableRow,
         )
 
     private suspend fun sendToAgentPaneResult(
@@ -13976,6 +13989,7 @@ public class TmuxSessionViewModel @Inject constructor(
         text: String,
         keepFailedOptimisticOnDeliveryFailure: Boolean,
         sendToken: String? = null,
+        durableRow: DurableOutboundRowIdentity? = null,
     ): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
@@ -14011,7 +14025,13 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         appendAgentEvents(paneId, listOf(optimistic))
         // Issue #1529: a fresh direct send keys on its optimistic turn id; a retry passes a STABLE token.
-        val result = sendAgentPayloadToPaneResult(paneId, payload, detection.agent, sendToken ?: optimisticId)
+        val result = sendAgentPayloadToPaneResult(
+            paneId,
+            payload,
+            detection.agent,
+            sendToken ?: optimisticId,
+            durableRow,
+        )
         if (result.isFailure) {
             if (keepFailedOptimisticOnDeliveryFailure) {
                 markOptimisticSendFailed(paneId, optimisticId)
@@ -14081,10 +14101,18 @@ public class TmuxSessionViewModel @Inject constructor(
         payload: String,
         agent: AgentKind,
         sendToken: String = newOutboundDeliveryToken(),
+        durableRow: DurableOutboundRowIdentity? = null,
     ): Result<Unit> {
         val client = awaitLiveTmuxClientForSend()
             ?: return Result.failure(IllegalStateException("Session is disconnected."))
-        return sendAgentPayloadToPaneResult(client, paneId, payload, agent, sendToken)
+        return sendAgentPayloadToPaneResult(
+            client,
+            paneId,
+            payload,
+            agent,
+            sendToken,
+            durableRow,
+        )
     }
 
     // Issue #1526 S1 / #1541 / #1587: verify-before-resend ledger, durable-backed by
@@ -14102,54 +14130,200 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
+    private fun snapshotAgentSendRuntime(client: TmuxClient): AgentSendRuntimeIdentity =
+        AgentSendRuntimeIdentity(
+            client = client,
+            generation = connectGeneration,
+            target = activeTarget,
+        )
+
+    private fun isCurrentAgentSendRuntime(
+        identity: AgentSendRuntimeIdentity,
+        paneId: String,
+    ): Boolean {
+        if (clientRef !== identity.client || connectGeneration != identity.generation) return false
+        val currentTarget = activeTarget
+        val targetMatches = if (identity.target == null) {
+            // Narrow unit-test attach seam: production sends always have a target.
+            currentTarget == null
+        } else {
+            currentTarget != null && sameSessionIdentity(currentTarget, identity.target)
+        }
+        if (!targetMatches) return false
+
+        // Pane ids are only unique inside a tmux server/session. Once a runtime
+        // has enumerated any pane, an unknown pane is foreign/stale and cannot
+        // authorize a submit. The empty-set allowance preserves the narrow test
+        // seam before pane enumeration; the client/session guard still applies.
+        val hasKnownPanes = paneRows.isNotEmpty() || _agentConversations.value.isNotEmpty()
+        return !hasKnownPanes ||
+            paneRows.containsKey(paneId) ||
+            _agentConversations.value.containsKey(paneId)
+    }
+
+    private suspend fun captureAgentPaneBounded(
+        identity: AgentSendRuntimeIdentity,
+        paneId: String,
+        timeoutMs: Long,
+        scrollbackLines: Int,
+    ): AgentPaneCaptureResult = captureAgentPaneWithDeadline(
+        scope = bridgeScope,
+        identity = identity,
+        paneId = paneId,
+        timeoutMs = timeoutMs,
+        scrollbackLines = scrollbackLines,
+        isCurrent = ::isCurrentAgentSendRuntime,
+        nowMs = ::agentSubmitNowMs,
+        currentClientHash = { clientRef?.let { System.identityHashCode(it) } },
+        currentGeneration = { connectGeneration },
+    )
+
     private suspend fun sendAgentPayloadToPaneResult(
         client: TmuxClient,
         paneId: String,
         payload: String,
         agent: AgentKind,
         sendToken: String,
+        durableRow: DurableOutboundRowIdentity?,
     ): Result<Unit> {
         val payloadBytes = payload.toByteArray(Charsets.UTF_8)
+        val runtimeIdentity = snapshotAgentSendRuntime(client)
         if (client.disconnected.value) {
             return Result.failure(IllegalStateException("Tmux client is disconnected."))
+        }
+        if (!isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
+            return Result.failure(IllegalStateException("Agent send target is stale or foreign."))
+        }
+        val boundedCapture: OutboundPaneCapture = { capturePaneId, timeoutMs, scrollbackLines ->
+            captureAgentPaneBounded(
+                identity = runtimeIdentity,
+                paneId = capturePaneId,
+                timeoutMs = timeoutMs,
+                scrollbackLines = scrollbackLines,
+            ).takeIf { it.status == AgentPaneCaptureStatus.Captured }?.response
         }
         // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt for THIS send —
         // keyed by the #1529 [sendToken], NOT the payload, so two distinct identical sends
         // never false-dedup — the paste may have run server-side (audit A1/A2). Probe (#869
         // needle, #1577 baseline): landed ⇒ Enter ONLY; unknown ⇒ fail; else full send.
-        when (verifyBeforeAgentResend(outboundDeliveryLedger, client, paneId, sendToken, payload)) {
-            DeliveryProbeOutcome.AlreadyLanded -> return runCatching {
+        when (
+            verifyBeforeAgentResend(
+                outboundDeliveryLedger,
+                client,
+                paneId,
+                sendToken,
+                payload,
+                durableRow = durableRow,
+                capturePane = boundedCapture,
+            )
+        ) {
+            DeliveryProbeOutcome.AlreadyLanded -> return try {
+                check(isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
+                    "Agent send runtime changed after verify-before-resend."
+                }
+                check(!client.disconnected.value) {
+                    "Tmux client disconnected after verify-before-resend."
+                }
                 sendNamedKeyToPane(client, paneId, "Enter")
                     .throwIfTmuxError("submit previously pasted agent input")
                 outboundDeliveryLedger.clear(paneId, sendToken)
                 requestReconcile(client, paneId, ReconcileReason.Send)
+                Result.success(Unit)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                Result.failure(failure)
             }
             DeliveryProbeOutcome.Unknown -> return Result.failure(
                 IllegalStateException("Prior send outcome unknown; kept queued without resend."),
             )
             DeliveryProbeOutcome.NotLanded, null -> Unit
         }
-        return runCatching {
+        return try {
+            check(isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
+                "Agent send target changed before delivery."
+            }
             ensurePaneAcceptsInput(client, paneId)
-            outboundDeliveryLedger.recordWireAttemptWithBaseline(client, paneId, sendToken, payload, localRenderTextForPane(paneId))
-            // Issue #1577b: the pre-paste needle baseline the ack gate compares against
-            // (Codex's permanent `(/goal resume)` footer occupies it, so the ack fires
-            // only on OUR paste adding an occurrence, never on the footer).
-            val ackBaseline = outboundDeliveryLedger.needleBaseline(paneId, sendToken, payload) ?: 0
-            // Issue #1687: pre-paste count of the collapsed-paste chip, so a chip already
-            // on the pane can't false-confirm OUR multi-line send (see the ack gate).
+            // Issue #1739: Claude collapses multiline input to a chip and never
+            // echoes the body. Persist its pre-paste count alongside the literal
+            // needle baseline so a reconnect retry can prove the chip increased
+            // and safely complete Enter-only without a duplicate paste.
             val collapsedMarkerBaseline = if (agentSubmitPayloadIsMultiLine(payload)) {
                 agentSubmitCollapsedPasteMarkerCount(listOf(localRenderTextForPane(paneId)))
             } else {
-                0
+                null
             }
+            val recordWireAttempt: suspend () -> Unit = {
+                outboundDeliveryLedger.recordWireAttemptWithBaseline(
+                    client,
+                    paneId,
+                    sendToken,
+                    payload,
+                    localRenderTextForPane(paneId),
+                    collapsedMarkerBaselineCount = collapsedMarkerBaseline,
+                    durableRow = durableRow,
+                    capturePane = boundedCapture,
+                )
+            }
+            // Issue #1577b: the pre-paste needle baseline the ack gate compares against
+            // (Codex's permanent `(/goal resume)` footer occupies it, so the ack fires
+            // only on OUR paste adding an occurrence, never on the footer).
+            // Issue #1687: pre-paste count of the collapsed-paste chip, so a chip already
+            // on the pane can't false-confirm OUR multi-line send (see the ack gate).
             if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || BracketedPaste.containsLineBreak(payloadBytes)) {
-                sendBracketedPaste(client, paneId, payloadBytes)
+                // Issue #1739: set-buffer only fills a private tmux buffer. Record
+                // ambiguity after the complete fill, immediately before the one
+                // paste-buffer command that can touch the pane.
+                sendBracketedPaste(
+                    client = client,
+                    paneId = paneId,
+                    bytes = payloadBytes,
+                    beforeCommit = recordWireAttempt,
+                )
             } else if (payload.isNotEmpty()) {
+                // A literal send has no separate fill/commit boundary: its one
+                // command can touch the pane, so record immediately before it.
+                recordWireAttempt()
                 sendLiteralTextKeys(client, paneId, payload)
                     .throwIfTmuxError("type agent input into pane $paneId")
             }
-            awaitAgentPasteIngestedBeforeSubmit(client, paneId, payload, agent, ackBaseline, collapsedMarkerBaseline)
+            val ackBaseline = outboundDeliveryLedger.needleBaseline(
+                paneId,
+                sendToken,
+                payload,
+                durableRow,
+            ) ?: 0
+            val configuredAckFloorMs = (
+                agentSubmitEnterDelayMsOverrideForTest
+                    ?: settingsRepository?.settings?.value?.agentSubmitEnterDelayMs
+                    ?: com.pocketshell.app.settings.AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS
+                ).toLong()
+            awaitAgentPasteIngested(
+                identity = runtimeIdentity,
+                paneId = paneId,
+                payload = payload,
+                agent = agent,
+                configuredFloorMs = configuredAckFloorMs,
+                ackTimeoutMs = agentSubmitAckTimeoutMsOverrideForTest ?: AGENT_SUBMIT_ACK_TIMEOUT_MS,
+                baselineNeedleCount = ackBaseline,
+                collapsedMarkerBaseline = collapsedMarkerBaseline ?: 0,
+                capture = { timeoutMs, scrollbackLines ->
+                    captureAgentPaneBounded(
+                        identity = runtimeIdentity,
+                        paneId = paneId,
+                        timeoutMs = timeoutMs,
+                        scrollbackLines = scrollbackLines,
+                    )
+                },
+                currentClientHash = { clientRef?.let { System.identityHashCode(it) } },
+                currentGeneration = { connectGeneration },
+            )
+            check(isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
+                "Agent send target changed after paste acknowledgement."
+            }
+            check(!client.disconnected.value) {
+                "Tmux client disconnected after paste acknowledgement."
+            }
             consumeSendResultLostSeamForTest()
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
@@ -14157,6 +14331,11 @@ public class TmuxSessionViewModel @Inject constructor(
             // Issue #941/#1353 R4: after the submit Enter a full-screen agent TUI can overpaint
             // the active pane partial-black; a guarded heal EVENT re-checks and re-seeds.
             requestReconcile(client, paneId, ReconcileReason.Send)
+            Result.success(Unit)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            Result.failure(failure)
         }
     }
 
@@ -14221,152 +14400,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
             }
         }
-    }
-
-    /**
-     * Issue #869: ack-gate the submit Enter on the pasted text actually landing in the
-     * agent's input (not the pre-#869 blind sleep that raced ingestion). Polls
-     * `capture-pane -p` and presses Enter the INSTANT a capture CONFIRMS the paste
-     * (RTT-adaptive). Bounded by [AGENT_SUBMIT_ACK_TIMEOUT_MS]; a needle miss holds the
-     * Enter to `max(minFloor, FALLBACK_FLOOR + measuredRtt)`, never a hung Send.
-     *
-     * Issue #1687: the confirming capture IS the ingestion evidence, so the happy path
-     * submits the moment it lands with NO pre-capture floor. The old
-     * #526/[CODEX_AGENT_SUBMIT_DELAY_MS] "minimum", paid BEFORE the first capture on
-     * EVERY send (150ms, 250ms Codex), was a flat per-send latency tax; it is gone. The
-     * floor now applies only where there is no ack: a bare-Enter payload and the
-     * needle-miss fallback.
-     *
-     * Issue #1577b: COUNT-BASELINE-aware. [baselineNeedleCount] is the needle's
-     * pre-paste count; the ack fires only on an INCREASE, never on mere presence — so a
-     * Codex `(/goal resume)` footer already on the pane can't fire Enter early (the
-     * swallowed-CR bug). Issue #1687: [collapsedMarkerBaseline] is the same for Claude
-     * Code's `[Pasted text #N +M lines]` chip — a collapsed multi-line paste never
-     * echoes its body, so the ack ALSO confirms on that chip's increase (see
-     * [agentSubmitCollapsedPasteMarkerCount]) instead of stalling to the full timeout.
-     */
-    private suspend fun awaitAgentPasteIngestedBeforeSubmit(
-        client: TmuxClient,
-        paneId: String,
-        payload: String,
-        agent: AgentKind,
-        baselineNeedleCount: Int,
-        collapsedMarkerBaseline: Int,
-    ) {
-        val configured = agentSubmitEnterDelayMsOverrideForTest
-            ?: settingsRepository?.settings?.value?.agentSubmitEnterDelayMs
-            ?: com.pocketshell.app.settings.AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS
-        val minFloorMs = if (agent == AgentKind.Codex) {
-            maxOf(configured.toLong(), CODEX_AGENT_SUBMIT_DELAY_MS)
-        } else {
-            configured.toLong()
-        }
-
-        val gateStartMs = agentSubmitNowMs()
-
-        // An empty payload (bare-Enter submit) has nothing to confirm — honour the
-        // floor and return so we never poll for a missing needle.
-        val ackNeedle = agentSubmitAckNeedle(payload)
-        if (ackNeedle == null) {
-            if (minFloorMs > 0L) delay(minFloorMs)
-            return
-        }
-
-        // Issue #1687: NO pre-capture floor — the ack poll starts immediately and Enter
-        // fires on the confirming capture (~1 RTT), not a flat 150/250ms per-send tax.
-        val payloadIsMultiLine = agentSubmitPayloadIsMultiLine(payload)
-
-        val ackTimeoutMs = agentSubmitAckTimeoutMsOverrideForTest ?: AGENT_SUBMIT_ACK_TIMEOUT_MS
-        var poll = 0
-        // Longest single `capture-pane` round-trip — the RTT addend for the fallback floor (#869).
-        var maxCaptureRttMs = 0L
-        var disconnectedDuringAck = false
-        val ackObserved = withTimeoutOrNull(ackTimeoutMs.coerceAtLeast(1L)) {
-            while (true) {
-                if (client.disconnected.value) {
-                    disconnectedDuringAck = true
-                    return@withTimeoutOrNull false
-                }
-                val captureStartMs = agentSubmitNowMs()
-                val visible = agentPaneShowsPayload(
-                    client,
-                    paneId,
-                    ackNeedle,
-                    baselineNeedleCount,
-                    payloadIsMultiLine,
-                    collapsedMarkerBaseline,
-                )
-                maxCaptureRttMs = maxOf(maxCaptureRttMs, agentSubmitNowMs() - captureStartMs)
-                if (visible) {
-                    // The paste is visible in the pane — the agent has ingested it.
-                    // Press Enter now (caller does the send-keys Enter).
-                    DiagnosticEvents.record(
-                        "action",
-                        "agent_submit_ack",
-                        "pane" to paneId,
-                        "result" to "ack_observed",
-                        "polls" to poll,
-                    )
-                    return@withTimeoutOrNull true
-                }
-                poll += 1
-                delay(AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
-            }
-        } == true
-        if (disconnectedDuringAck) return
-        if (ackObserved) return
-
-        // Codex input-freeze follow-up: the ack timeout bounds the WHOLE capture loop,
-        // not just the poll count — a single stuck `capture-pane` used to park this
-        // coroutine past the timeout, freezing Codex sends. On timeout, keep the #869
-        // fallback floor, then let the caller send Enter rather than blocking forever.
-        val fallbackFloorMs = maxOf(
-            minFloorMs,
-            com.pocketshell.app.settings.AppSettings.AGENT_SUBMIT_ACK_FALLBACK_FLOOR_MS +
-                maxCaptureRttMs,
-        )
-        val elapsedMs = agentSubmitNowMs() - gateStartMs
-        val remainingMs = fallbackFloorMs - elapsedMs
-        if (remainingMs > 0L) delay(remainingMs)
-        DiagnosticEvents.record(
-            "action",
-            "agent_submit_ack",
-            "pane" to paneId,
-            "result" to "fallback_floor",
-            "polls" to poll,
-            "fallbackFloorMs" to fallbackFloorMs,
-        )
-    }
-
-    /**
-     * Issue #869/#1577b: `capture-pane -p` the pane and report whether OUR paste landed
-     * — the [needle]'s whitespace-stripped occurrence count now EXCEEDS
-     * [baselineNeedleCount]. Both sides are whitespace-stripped so a wrapped input box
-     * still matches. A count INCREASE (not presence) is required so a payload already on
-     * the pane (a Codex `(/goal resume)` footer) can't false-confirm. A failed/empty
-     * capture is "not yet visible"; best-effort, never throws.
-     *
-     * Issue #1687: a collapsed multi-line paste ([payloadIsMultiLine]) never echoes its
-     * body, so it is EQUALLY confirmed when the `[Pasted text #N +M lines]` chip count
-     * rises above [collapsedMarkerBaseline] — the fix for the per-multi-line-send stall.
-     */
-    private suspend fun agentPaneShowsPayload(
-        client: TmuxClient,
-        paneId: String,
-        needle: String,
-        baselineNeedleCount: Int,
-        payloadIsMultiLine: Boolean,
-        collapsedMarkerBaseline: Int,
-    ): Boolean {
-        val response = runCatching {
-            client.capturePaneTextViaExec(paneId)
-        }.getOrNull() ?: return false
-        if (response.isError) return false
-        if (agentSubmitVisibleTextNeedleCount(response.output, needle) > baselineNeedleCount) {
-            return true
-        }
-        return payloadIsMultiLine &&
-            agentSubmitCollapsedPasteMarkerCount(response.output) > collapsedMarkerBaseline
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
@@ -15310,13 +15343,14 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         bytes: ByteArray,
         sendToken: String = newOutboundDeliveryToken(),
+        durableRow: DurableOutboundRowIdentity? = null,
     ): Result<Unit> {
         if (bytes.isEmpty()) return Result.success(Unit)
         val client = awaitLiveTmuxClientForSend()
         if (client == null) {
             return Result.failure(IllegalStateException("Session is disconnected."))
         }
-        return writeInputToPaneResult(client, paneId, bytes, sendToken)
+        return writeInputToPaneResult(client, paneId, bytes, sendToken, durableRow)
     }
 
     // Issue #1586: RawBytes lane rides the verify-before-resend ledger (H1b); #1529: per-send token.
@@ -15325,6 +15359,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         bytes: ByteArray,
         sendToken: String,
+        durableRow: DurableOutboundRowIdentity? = null,
     ): Result<Unit> = deliverRawInputWithGuard(
         ledger = outboundDeliveryLedger,
         client = client,
@@ -15332,6 +15367,7 @@ public class TmuxSessionViewModel @Inject constructor(
         bytes = bytes,
         localRenderText = localRenderTextForPane(paneId),
         sendToken = sendToken,
+        durableRow = durableRow,
         send = { c, p, b -> sendInputBytesToPane(c, p, b) },
         // Issue #1586 (H1b): AlreadyLanded -> Enter-only submit.
         submitEnter = { c, p ->

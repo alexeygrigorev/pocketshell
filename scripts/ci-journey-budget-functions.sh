@@ -65,30 +65,16 @@ run_bounded() {
   to_pid=$!
 
   exec {rfd}<"$fifo"
-  # Issue #1458: tee every streamed line to a DURABLE capture file so the
-  # workflow "Classify emulator-journey result" step can count the
-  # `Failed to start Emulator console` storm (a CPU/RAM-starved swiftshader
-  # symptom, ~100×/shard) AFTER this emulator step has ended and its stdout is
-  # gone. Live streaming (the `printf` to stdout) is UNCHANGED. The fd is opened
-  # in append mode ONCE per class attempt (cheap) and only when
-  # JOURNEY_CONSOLE_LOG is set + openable, so the budget self-test and any
-  # non-CI caller that leaves it unset behave exactly as before.
-  local cfd=-1
-  if [[ -n "${JOURNEY_CONSOLE_LOG:-}" ]]; then
-    exec {cfd}>>"$JOURNEY_CONSOLE_LOG" || cfd=-1
-  fi
   read_rc=0
   while :; do
     if IFS= read -r -t "$no_output" -u "$rfd" line; then
       printf '%s\n' "$line"
-      (( cfd >= 0 )) && printf '%s\n' "$line" >&"$cfd"
     else
       read_rc=$?
       break
     fi
   done
   exec {rfd}<&-
-  (( cfd >= 0 )) && exec {cfd}>&-
 
   if (( read_rc > 128 )); then
     echo "JOURNEY_NO_OUTPUT_WATCHDOG: no output for ${no_output}s — hard-killing wedged connectedDebugAndroidTest (issue #1056)" >&2
@@ -124,11 +110,9 @@ run_class() {
     return 124
   fi
   attempt_start=$SECONDS
-  # Issue #1458: --max-workers=2 (parity with the Unit job) caps Gradle's worker
-  # fan-out so it stops fighting the swiftshader emulator + KVM + Docker fixtures
-  # for the 2–4 host vCPUs — the CPU starvation that triggers the
-  # `Failed to start Emulator console` storm. The Gradle DAEMON is still reused
-  # (no --no-daemon), preserving the #835 budget-fit.
+  # Issue #1458: --max-workers=2 (parity with the Unit job) bounds Gradle's
+  # worker fan-out while the emulator and Docker fixtures share the runner. The
+  # Gradle DAEMON is still reused (no --no-daemon), preserving the #835 budget-fit.
   run_bounded "$cap" \
     "$GRADLEW" :app:connectedDebugAndroidTest \
     --max-workers=2 \
@@ -167,9 +151,9 @@ run_ct_class() {
     return 124
   fi
   attempt_start=$SECONDS
-  # Issue #1458: --max-workers=2 (parity with the Unit job + run_class) caps
-  # Gradle's worker fan-out so it stops starving the swiftshader emulator of host
-  # vCPUs (the `Failed to start Emulator console` storm). Daemon still reused.
+  # Issue #1458: --max-workers=2 (parity with the Unit job + run_class) bounds
+  # Gradle's worker fan-out while the proof shares the runner with the emulator.
+  # Daemon reuse is preserved for the #835 budget fit.
   run_bounded "$cap" \
     "$GRADLEW" :shared:core-terminal:connectedDebugAndroidTest \
     --max-workers=2 \

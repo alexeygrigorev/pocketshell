@@ -170,35 +170,21 @@ pass "(pre) #835 right-sized budget arithmetic pinned (${job_cap_secs}s job - ${
 pass "(pre) first-attempt diagnostics are preserved before emulator retry"
 
 # ---------------------------------------------------------------------------
-# Issue #1458 workflow-parity pins: the real workflow classifier must count the
-# `Failed to start Emulator console` storm from the durable journey-console
-# capture and route a STORMING JOURNEY_FAILED to an INFRA-ABORT. Pin the
-# load-bearing pieces so the classify() mirror above cannot silently drift from
-# the workflow, and so a regression that drops the storm gate trips this test.
-grep -q 'journey-console.log' "$WORKFLOW" \
-  || fail "(pre-1458) tests.yml classifier must read the durable journey-console.log capture"
-grep -q "Failed to start Emulator console" "$WORKFLOW" \
-  || fail "(pre-1458) tests.yml classifier must count the 'Failed to start Emulator console' storm signature"
-grep -q 'console_storm_threshold=25' "$WORKFLOW" \
-  || fail "(pre-1458) tests.yml classifier must use the 25-storm INFRA-ABORT threshold"
-grep -q 'console_storm_count >= console_storm_threshold' "$WORKFLOW" \
-  || fail "(pre-1458) tests.yml classifier must gate the genuine-failure verdict on the storm count"
-grep -q 'EMULATOR INFRA UNAVAILABLE / degraded' "$WORKFLOW" \
-  || fail "(pre-1458) tests.yml storm branch must emit a distinct degraded-emulator INFRA-ABORT title"
-# The suite must define + truncate the console capture and route it through
-# run_bounded's tee.
-grep -q 'JOURNEY_CONSOLE_LOG' "$REAL_SUITE" \
-  || fail "(pre-1458) ci-journey-suite.sh must define the durable JOURNEY_CONSOLE_LOG capture"
-grep -q 'JOURNEY_CONSOLE_LOG' "$SCRIPT_DIR/ci-journey-budget-functions.sh" \
-  || fail "(pre-1458) run_bounded (ci-journey-budget-functions.sh) must tee to JOURNEY_CONSOLE_LOG"
-# The storm gate must be a genuine-failure gate ONLY: the #835 timeout ::error
-# lines must NOT be preceded by a storm re-route (already asserted unchanged by
-# the (pre) timeout-exit walk above; here we assert the storm branch sits inside
-# a JOURNEY_FAILED/first_failure context, not the timeout context).
-storm_gate_count="$(grep -c 'console_storm_count >= console_storm_threshold' "$WORKFLOW" || true)"
-[[ "$storm_gate_count" -eq 2 ]] \
-  || fail "(pre-1458) expected exactly 2 storm gates (first_failure + both-failed JOURNEY_FAILED), found $storm_gate_count"
-pass "(pre-1458) console-storm INFRA-ABORT classifier is wired into the workflow + suite + run_bounded"
+# Issue #1458 hard-cut + mutation guard: raw emulator-console warning counts are
+# ordinary per-connected-invocation output, not an infra signal. The workflow
+# must not count them or downgrade JOURNEY_FAILED, and the classifier-only
+# capture plumbing must stay deleted. Reintroducing count>=25 -> INFRA trips
+# these assertions before the behavioural fixture below can pass vacuously.
+if grep -qE \
+  'journey-console\.log|Failed to start Emulator console|console_(storm|warning)_(count|threshold)|EMULATOR INFRA UNAVAILABLE / degraded' \
+  "$WORKFLOW"; then
+  fail "(pre-1458) tests.yml reintroduced raw emulator-console warning classification"
+fi
+if grep -q 'JOURNEY_CONSOLE_LOG' \
+  "$REAL_SUITE" "$SCRIPT_DIR/ci-journey-budget-functions.sh"; then
+  fail "(pre-1458) obsolete classifier-only JOURNEY_CONSOLE_LOG plumbing was reintroduced"
+fi
+pass "(pre-1458) raw console-count classifier + classifier-only capture plumbing are absent"
 
 # ---------------------------------------------------------------------------
 # Build a sandbox "repo root": a copy of the suite script + a stub gradlew that
@@ -298,11 +284,6 @@ classify() {
   local retry_concl="${5:-failure}"
   local first_timeout="${6:-}"
   local first_failure="${7:-false}"
-  # Issue #1458: the count of `Failed to start Emulator console` storms from the
-  # durable journey-console capture. >= threshold => the emulator was DEGRADED and
-  # any JOURNEY_FAILED read is an INFRA-ABORT (re-run), NOT a product verdict.
-  local console_storm_count="${8:-0}"
-  local console_storm_threshold=25
   if [[ -z "$first_timeout" ]]; then
     first_timeout="false"
     if [[ -f "$s" ]] \
@@ -318,11 +299,6 @@ classify() {
     echo "PASS_RETRY"; return
   fi
   if [[ "$first_failure" == "true" ]]; then
-    # #1458: a first-attempt JOURNEY_FAILED off a STORMING (degraded) emulator is
-    # an infra abort (re-run); a healthy-console one stays a genuine red.
-    if (( console_storm_count >= console_storm_threshold )); then
-      echo "INFRA_CONSOLE_STORM"; return
-    fi
     echo "FIRST_GENUINE_FAILURE"; return
   fi
   if [[ "$first_timeout" == "true" ]]; then
@@ -334,11 +310,6 @@ classify() {
     echo "STEP_CANCELLED"; return
   fi
   if [[ -f "$s" ]] && grep -qE 'JOURNEY_FAILED|Failed BOTH attempts' "$s"; then
-    # #1458: a both-attempts JOURNEY_FAILED off a STORMING (degraded) emulator is
-    # an infra abort (re-run); a healthy-console one stays a genuine red.
-    if (( console_storm_count >= console_storm_threshold )); then
-      echo "INFRA_CONSOLE_STORM"; return
-    fi
     echo "GENUINE_FAILURE"; return
   fi
   if [[ -f "$s" ]] && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$s"; then
@@ -408,14 +379,11 @@ overwrite_verdict="$(classify "$retry_timeout_summary" failure failure failure f
 pass "(h) first genuine failure remains red when retry overwrites summary with timeout-only content"
 
 # ---------------------------------------------------------------------------
-# Issue #1458: console-storm INFRA-ABORT classifier. A CPU/RAM-starved
-# swiftshader AVD storms `Failed to start Emulator console` ~100×/shard and
-# produces a JOURNEY_FAILED summary that is NOT a real regression — it made
-# `main`'s emulator-level health unreadable. The classifier must route a
-# STORMING run's genuine-failure reading to an INFRA-ABORT (re-run), while a
-# HEALTHY-console JOURNEY_FAILED STAYS a genuine red — masking a real regression
-# behind "infra" is the #657/#844 flake-masks-real trap this guard must NOT hit.
-echo "== #1458 console-storm INFRA-ABORT classifier =="
+# Issue #1458: raw ddmlib warning cardinality cannot classify emulator health.
+# Historical and current runs show one optional warning per separate connected
+# Gradle invocation, including completed Starting -> Finished blocks. Genuine
+# JOURNEY_FAILED evidence therefore stays RED at every warning count.
+echo "== #1458 raw console-warning count never masks JOURNEY_FAILED =="
 storm_summary="$SANDBOX/storm-summary.md"
 printf '%s\n' \
   '# Per-push CI journey suite — summary' \
@@ -423,69 +391,78 @@ printf '%s\n' \
   '- `com.pocketshell.app.proof.Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest`' \
   > "$storm_summary"
 
-# (p1) STORM: both attempts failed with a JOURNEY_FAILED summary AND the console
-#      stormed (104×, the run-29081790650 forensic count) -> INFRA_CONSOLE_STORM
-#      (re-run), NOT a genuine product verdict.
-storm_verdict="$(classify "$storm_summary" failure failure failure failure false false 104)"
-[[ "$storm_verdict" == "INFRA_CONSOLE_STORM" ]] \
-  || fail "(p1) storming JOURNEY_FAILED routed to '$storm_verdict', expected INFRA_CONSOLE_STORM"
-verdict_is_red "$storm_verdict" \
-  || fail "(p1) INFRA_CONSOLE_STORM must still exit the job non-zero (a re-run signal, like #771)"
-pass "(p1) storming (104×) JOURNEY_FAILED -> INFRA_CONSOLE_STORM re-run signal"
+# (p0) REGRESSION FIXTURE: ddmlib may emit one optional emulator-console warning
+# for each separate connected Gradle invocation. Thirty ordinary completed
+# invocations therefore produce >=30 warnings without proving emulator
+# degradation. A genuine JOURNEY_FAILED beside this warning -> Starting ->
+# Finished transcript must remain a genuine RED; raw warning cardinality is not
+# an infra classifier.
+ordinary_invocations_log="$SANDBOX/ordinary-connected-invocations.log"
+for i in {1..30}; do
+  printf '%s\n' \
+    "WARNING | Failed to start Emulator console for 5554" \
+    "Starting 1 tests on emulator-5554 (invocation $i)" \
+    "Finished 1 tests on emulator-5554 (invocation $i)"
+done > "$ordinary_invocations_log"
 
-# (p2) THE #1 ACCEPTANCE CRITERION: a HEALTHY console (below threshold) with the
-#      SAME JOURNEY_FAILED summary MUST stay a genuine red — a real regression is
-#      NEVER swallowed behind "infra" (the #657/#844 flake-masks-real inverse).
-healthy_verdict="$(classify "$storm_summary" failure failure failure failure false false 3)"
-[[ "$healthy_verdict" == "GENUINE_FAILURE" ]] \
-  || fail "(p2) healthy-console JOURNEY_FAILED routed to '$healthy_verdict', expected GENUINE_FAILURE (a real regression must NOT be masked)"
-verdict_is_red "$healthy_verdict" \
-  || fail "(p2) healthy-console genuine failure must stay red"
-pass "(p2) healthy-console (3×) JOURNEY_FAILED -> GENUINE_FAILURE (real regression NOT masked)"
+awk '
+  NR % 3 == 1 && $0 !~ /Failed to start Emulator console for 5554/ { bad=1 }
+  NR % 3 == 2 && $0 !~ /^Starting / { bad=1 }
+  NR % 3 == 0 && $0 !~ /^Finished / { bad=1 }
+  END { exit(bad || NR != 90) }
+' "$ordinary_invocations_log" \
+  || fail "(p0) malformed regression fixture: expected 30 warning -> Starting -> Finished blocks"
+ordinary_warning_count="$(grep -c 'Failed to start Emulator console' "$ordinary_invocations_log" || true)"
+[[ "$ordinary_warning_count" -eq 30 ]] \
+  || fail "(p0) regression fixture warning count is $ordinary_warning_count, expected 30"
+ordinary_verdict="$(classify "$storm_summary" failure failure failure failure false false "$ordinary_warning_count")"
+[[ "$ordinary_verdict" == "GENUINE_FAILURE" ]] \
+  || fail "(p0) 30 ordinary completed Gradle invocations plus JOURNEY_FAILED routed to '$ordinary_verdict'; raw per-invocation console warnings must never downgrade a genuine failure to INFRA"
+pass "(p0) 30 warning -> Starting -> Finished blocks + JOURNEY_FAILED stay GENUINE_FAILURE"
 
-# (p3) boundary: exactly 25 storms -> INFRA (>= threshold); 24 -> genuine red.
-[[ "$(classify "$storm_summary" failure failure failure failure false false 25)" == "INFRA_CONSOLE_STORM" ]] \
-  || fail "(p3) 25 storms (== threshold) must route to INFRA_CONSOLE_STORM"
-[[ "$(classify "$storm_summary" failure failure failure failure false false 24)" == "GENUINE_FAILURE" ]] \
-  || fail "(p3) 24 storms (< threshold) must stay GENUINE_FAILURE"
-[[ "$(classify "$storm_summary" failure failure failure failure false false 0)" == "GENUINE_FAILURE" ]] \
-  || fail "(p3) 0 storms (healthy) must stay GENUINE_FAILURE"
-pass "(p3) threshold boundary: >=25 INFRA-abort, <25 genuine red"
+# (p1) Mutation-sensitive behavioural boundary: counts on both sides of the old
+# threshold, and the historic 104-warning count, all produce the same genuine
+# failure. Reintroducing >=25 -> INFRA changes at least three of these outcomes.
+for warning_count in 0 24 25 30 104; do
+  count_verdict="$(classify "$storm_summary" failure failure failure failure false false "$warning_count")"
+  [[ "$count_verdict" == "GENUINE_FAILURE" ]] \
+    || fail "(p1) warning count $warning_count routed JOURNEY_FAILED to '$count_verdict', expected GENUINE_FAILURE"
+  verdict_is_red "$count_verdict" \
+    || fail "(p1) warning count $warning_count made a genuine failure green"
+done
+pass "(p1) warning counts 0/24/25/30/104 all keep JOURNEY_FAILED genuinely red"
 
-# (p4) first-attempt genuine failure: storm -> INFRA (re-run); healthy console ->
-#      FIRST_GENUINE_FAILURE (stays red).
-[[ "$(classify "$storm_summary" failure failure failure failure false true 104)" == "INFRA_CONSOLE_STORM" ]] \
-  || fail "(p4) storming first_failure must route to INFRA_CONSOLE_STORM"
-[[ "$(classify "$storm_summary" failure failure failure failure false true 3)" == "FIRST_GENUINE_FAILURE" ]] \
-  || fail "(p4) healthy-console first_failure must stay FIRST_GENUINE_FAILURE"
-pass "(p4) first_failure: storm -> INFRA re-run, healthy -> genuine red"
+# (p2) Captured first-attempt failure evidence must likewise stay RED regardless
+# of raw warning count; retry summary overwrite semantics remain unchanged.
+for warning_count in 0 25 104; do
+  first_failure_verdict="$(classify "$storm_summary" failure failure failure failure false true "$warning_count")"
+  [[ "$first_failure_verdict" == "FIRST_GENUINE_FAILURE" ]] \
+    || fail "(p2) warning count $warning_count routed first_failure to '$first_failure_verdict', expected FIRST_GENUINE_FAILURE"
+done
+pass "(p2) raw warning counts never mask captured first-attempt failure evidence"
 
-# (p5) a storming run that nonetheless PASSED (first or retry success) stays
-#      GREEN — the storm gate never masks a real pass into a re-run.
-[[ "$(classify "$storm_summary" success failure failure failure false false 104)" == "PASS_FIRST" ]] \
-  || fail "(p5) storming first-pass must stay PASS_FIRST (green)"
-[[ "$(classify "$storm_summary" failure success failure failure false false 104)" == "PASS_RETRY" ]] \
-  || fail "(p5) storming retry-pass must stay PASS_RETRY (green)"
-pass "(p5) storm never masks a genuine PASS into a re-run"
-
-# (p6) a storm must NOT preempt the #835 timeout / #771 no-summary branches —
-#      their behavior is intentionally unchanged even with a high storm count.
-storm_timeout_summary="$SANDBOX/storm-timeout-summary.md"
+# (p3) Pass, #835 timeout, cancellation, and #771 no-summary ordering is
+# unchanged by removal of the raw-count classifier.
+[[ "$(classify "$storm_summary" success failure)" == "PASS_FIRST" ]] \
+  || fail "(p3) first-attempt pass no longer routes to PASS_FIRST"
+[[ "$(classify "$storm_summary" failure success)" == "PASS_RETRY" ]] \
+  || fail "(p3) retry pass no longer routes to PASS_RETRY"
+timeout_summary="$SANDBOX/timeout-summary.md"
 printf '%s\n' \
   '# Per-push CI journey suite — summary' \
   'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
   '- `com.pocketshell.app.TimedOutClass`' \
-  > "$storm_timeout_summary"
-[[ "$(classify "$storm_timeout_summary" failure failure failure failure true false 104)" == "FIRST_TIMEOUT_RED" ]] \
-  || fail "(p6) a storming first-attempt budget timeout must STAY FIRST_TIMEOUT_RED (#835 unchanged)"
-[[ "$(classify "$storm_timeout_summary" failure failure failure failure false false 104)" == "JOURNEY_TIMEOUT_RED" ]] \
-  || fail "(p6) a storming both-failed budget timeout must STAY JOURNEY_TIMEOUT_RED (#835 unchanged)"
-[[ "$(classify "$storm_timeout_summary" failure failure cancelled failure false false 104)" == "STEP_CANCELLED" ]] \
-  || fail "(p6) a storming cancelled attempt must STAY STEP_CANCELLED"
-missing_storm_summary="$SANDBOX/does-not-exist-storm-summary.md"
-[[ "$(classify "$missing_storm_summary" failure failure failure failure false false 104)" == "INFRA_UNAVAILABLE" ]] \
-  || fail "(p6) a storming no-summary run must STAY INFRA_UNAVAILABLE (#771 unchanged)"
-pass "(p6) storm does not preempt the #835 timeout / cancelled / #771 no-summary branches"
+  > "$timeout_summary"
+[[ "$(classify "$timeout_summary" failure failure failure failure true)" == "FIRST_TIMEOUT_RED" ]] \
+  || fail "(p3) first-attempt budget timeout must stay FIRST_TIMEOUT_RED (#835)"
+[[ "$(classify "$timeout_summary" failure failure failure failure false)" == "JOURNEY_TIMEOUT_RED" ]] \
+  || fail "(p3) both-failed budget timeout must stay JOURNEY_TIMEOUT_RED (#835)"
+[[ "$(classify "$timeout_summary" failure failure cancelled failure false)" == "STEP_CANCELLED" ]] \
+  || fail "(p3) cancelled attempt must stay STEP_CANCELLED"
+missing_summary="$SANDBOX/does-not-exist-summary.md"
+[[ "$(classify "$missing_summary" failure failure)" == "INFRA_UNAVAILABLE" ]] \
+  || fail "(p3) no-summary run must stay INFRA_UNAVAILABLE (#771)"
+pass "(p3) pass / #835 timeout / cancellation / #771 no-summary semantics preserved"
 
 # ---------------------------------------------------------------------------
 # Issue #918: if the per-class `timeout` kills a Gradle invocation, the next
@@ -1060,60 +1037,6 @@ summary_ct="$SANDBOX/artifacts/ci-journey/summary.md"
 grep -qE 'output-burst-IME ANR proof.*\*\*FAIL\*\*' "$summary_ct" \
   || { cat "$summary_ct"; fail "(m) the hung #796 proof must surface as FAIL in the summary (classifiable red, not a cancel)"; }
 pass "(m) core-terminal proofs are timeout-bounded — a hung proof yields a classifiable summary, never a job-cap cancel"
-
-# ---------------------------------------------------------------------------
-# Issue #1458 (AC1): drive the REAL suite with a gradle stub that emits the
-# `Failed to start Emulator console` storm signature and prove run_bounded TEES
-# it to a DURABLE console log the workflow classifier reads AFTER the emulator
-# step ends — while KEEPING live streaming intact (the tee must not break it).
-echo "== #1458 run_bounded tees journey console output to a durable log =="
-cat > "$SANDBOX/gradlew" <<'STUB'
-#!/usr/bin/env bash
-set -u
-[[ "${1:-}" == "--stop" ]] && exit 0
-# Emit the degraded-swiftshader console-storm signature, then a normal task line,
-# then a passing exit — models a storming-but-"passing" run so the tee capture is
-# what proves the storm is durably recorded (not the summary verdict).
-for i in 1 2 3 4 5; do echo "Failed to start Emulator console for 5554"; done
-echo "> Task :app:connectedDebugAndroidTest done"
-exit 0
-STUB
-chmod +x "$SANDBOX/gradlew"
-
-out_tee="$SANDBOX/run-console-tee.log"
-set +e
-PATH="$STUBBIN:$PATH" \
-  JOURNEY_STEP_BUDGET_SECS=600 \
-  JOURNEY_CLASS_TIMEOUT_SECS=60 \
-  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_tee" 2>&1
-rc_tee=$?
-set -e
-
-# The tee must not break a run: this storming-but-"passing" stub exits 0, so the
-# suite must still exit 0 (the durable capture is a side channel, never a gate).
-[[ "$rc_tee" -eq 0 ]] \
-  || { sed -n '1,40p' "$out_tee"; fail "(q0) the #1458 tee broke a passing run (rc=$rc_tee)"; }
-console_log="$SANDBOX/artifacts/ci-journey/journey-console.log"
-[[ -f "$console_log" ]] \
-  || { sed -n '1,40p' "$out_tee"; fail "(q1) run_bounded did not create the durable console log $console_log"; }
-tee_count="$(grep -c 'Failed to start Emulator console' "$console_log" || true)"
-# Each of the many journey + core-terminal classes invokes the stub (5 storm
-# lines each), so the durable count is comfortably above the 25 INFRA-ABORT
-# threshold — this is exactly what the workflow classifier would count.
-(( tee_count >= 25 )) \
-  || { sed -n '1,20p' "$console_log"; fail "(q1) durable console log captured $tee_count storm lines, expected >= 25 (the classifier could not see the storm)"; }
-pass "(q1) run_bounded tees the storm to a durable log the classifier reads (count=$tee_count)"
-
-# (q2) live streaming is UNCHANGED: the storm lines also reached stdout.
-grep -q 'Failed to start Emulator console' "$out_tee" \
-  || { sed -n '1,40p' "$out_tee"; fail "(q2) storm lines were not streamed live — the #1458 tee broke live streaming"; }
-pass "(q2) live streaming intact — storm lines reach stdout AND the durable log"
-
-# (q3) end-to-end: feed the REAL classify() mirror the durable count from this
-# simulated run alongside a JOURNEY_FAILED summary -> INFRA_CONSOLE_STORM.
-[[ "$(classify "$storm_summary" failure failure failure failure false false "$tee_count")" == "INFRA_CONSOLE_STORM" ]] \
-  || fail "(q3) the durably-captured storm count ($tee_count) did not classify a JOURNEY_FAILED as INFRA_CONSOLE_STORM"
-pass "(q3) durable count from a real suite run drives the classifier to INFRA_CONSOLE_STORM"
 
 echo
 echo "ALL TESTS PASSED"

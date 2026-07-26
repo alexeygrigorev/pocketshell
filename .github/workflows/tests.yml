@@ -232,6 +232,15 @@ jobs:
           chmod +x scripts/ci-journey-retry-budget.sh scripts/test-ci-journey-retry-budget.sh
           scripts/test-ci-journey-retry-budget.sh
 
+      # Issue #1781: fast, JVM-free artifact packaging fixture. Proves the
+      # first-cold-boot preservation scan keeps real module Android outputs and
+      # canonical per-attempt evidence without recursively nesting
+      # artifacts/ci-journey or artifacts/ci-journey-attempt-1.
+      - name: CI journey artifact packaging guard (issue #1781)
+        run: |
+          chmod +x scripts/ci-journey-preserve-android-outputs.sh scripts/test-ci-journey-artifact-packaging.sh
+          scripts/test-ci-journey-artifact-packaging.sh
+
       # Issue #1293: fast, JVM-free fixture test for the nightly-fault per-phase
       # test-report preservation helper (scripts/lib/nightly-phase-reports.sh).
       # The nightly-fault suite runs each phase as a separate connected-test
@@ -1026,20 +1035,7 @@ jobs:
             echo "artifacts/ci-journey/summary.md was missing after the first attempt." > "$snapshot/summary-missing.txt"
           fi
 
-          shopt -s globstar nullglob
-          copied_android_outputs=0
-          for path in **/build/reports/androidTests \
-                      **/build/outputs/androidTest-results \
-                      **/build/outputs/connected_android_test_additional_output; do
-            [[ -e "$path" ]] || continue
-            dest="$snapshot/android-test-outputs/$path"
-            mkdir -p "$(dirname "$dest")"
-            cp -a "$path" "$dest"
-            copied_android_outputs=1
-          done
-          if [[ "$copied_android_outputs" -eq 0 ]]; then
-            echo "No Android connected-test output directories existed after the first attempt." > "$snapshot/android-test-outputs-missing.txt"
-          fi
+          scripts/ci-journey-preserve-android-outputs.sh "$snapshot"
 
       # Issue #1458: the first attempt can consume 50–62 minutes, leaving too
       # little of the absolute 95-minute job wall for an unconditional second

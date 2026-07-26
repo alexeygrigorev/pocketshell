@@ -37,7 +37,7 @@ APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS="${APP_WALKTHROUGH_TRANSPORT_RECOVER
 # rendering defect can never be masked into an infinite reboot loop.
 APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS="${APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS:-2}"
 APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS="${APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS:-300}"
-ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS="${ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS:-3}"
+LEGACY_V1_DB_MIGRATION_ATTEMPTS="${LEGACY_V1_DB_MIGRATION_ATTEMPTS:-3}"
 CORE_TERMINAL_CONNECTED_ATTEMPTS="${CORE_TERMINAL_CONNECTED_ATTEMPTS:-2}"
 PRE_RELEASE_MANAGE_EMULATOR="${PRE_RELEASE_MANAGE_EMULATOR:-0}"
 PRE_RELEASE_EMULATOR_START_ARGS="${PRE_RELEASE_EMULATOR_START_ARGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save}"
@@ -110,7 +110,7 @@ Runs the local APK pre-release-confidence gate:
   - compile/unit checks
   - deterministic Docker agent target
   - emulator readiness with explicit Android SDK paths
-  - #261 stale Room DB launch sanity using an explicit cold-reset setup
+  - shipped-v1 + #261 marker Room migration with post-launch data validation
   - focused connected walkthrough tests using an explicit cold-reset package setup
   - debug APK build and data-preserving update install sanity
 
@@ -136,7 +136,7 @@ Environment overrides:
   APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS=3
   APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS=2
   APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS=300
-  ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS=3
+  LEGACY_V1_DB_MIGRATION_ATTEMPTS=3
   CORE_TERMINAL_CONNECTED_ATTEMPTS=2
   PRE_RELEASE_MANAGE_EMULATOR=0
   PRE_RELEASE_EMULATOR_START_ARGS="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save"
@@ -167,6 +167,11 @@ fi
 
 source "$ROOT_DIR/scripts/lib/app-version.sh"
 APP_VERSION_NAME="$(pocketshell_app_version_name "$ROOT_DIR")"
+APP_DATABASE_SCHEMA_VERSION="$(
+  sed -nE \
+    's/^const val APP_DATABASE_SCHEMA_VERSION = ([0-9]+)$/\1/p' \
+    "$ROOT_DIR/shared/core-storage/src/main/java/com/pocketshell/core/storage/AppDatabase.kt"
+)"
 export POCKETSHELL_AGENT_FIXTURE_VERSION="$APP_VERSION_NAME"
 
 SUMMARY_PATH="$RUN_DIR/summary.txt"
@@ -181,12 +186,12 @@ FAILURE_LOGCAT_PATH=""
 EMULATOR_SERIAL="unknown"
 APP_WALKTHROUGH_INSTALL_STATUS="not_run"
 FINAL_INSTALL_STATUS="not_run"
-ISSUE_261_STALE_DB_STATUS="not_run"
+LEGACY_V1_DB_MIGRATION_STATUS="not_run"
 # Issue #1314: step 12 (core-terminal burst proof) runs non-fatally so a slow-AVD
 # timing red no longer front-gates the #1302 journey; its captured result is
 # folded into the final verdict after the downstream stages run.
 CONNECTED_TERMINAL_INPUT_STATUS="not_run"
-ISSUE_261_STALE_DB_LOGCAT="$RUN_DIR/issue-261-stale-db-launch-logcat.log"
+LEGACY_V1_DB_MIGRATION_LOGCAT="$RUN_DIR/legacy-v1-db-migration-logcat.log"
 STEP_NAMES=()
 STEP_STATUSES=()
 STEP_LOGS=()
@@ -227,10 +232,10 @@ set_focused_status() {
   local i
   for i in "${!FOCUSED_SELECTORS[@]}"; do
     if [[ "${FOCUSED_SELECTORS[$i]}" == "$selector" ]]; then
-      FOCUSED_STATUSES[$i]="$status"
-      [[ -n "$log_file" ]] && FOCUSED_LOGS[$i]="$log_file"
-      [[ -n "$diagnostics_file" ]] && FOCUSED_DIAGNOSTICS[$i]="$diagnostics_file"
-      [[ -n "$logcat_file" ]] && FOCUSED_LOGCATS[$i]="$logcat_file"
+      FOCUSED_STATUSES[i]="$status"
+      [[ -n "$log_file" ]] && FOCUSED_LOGS[i]="$log_file"
+      [[ -n "$diagnostics_file" ]] && FOCUSED_DIAGNOSTICS[i]="$diagnostics_file"
+      [[ -n "$logcat_file" ]] && FOCUSED_LOGCATS[i]="$logcat_file"
       return 0
     fi
   done
@@ -274,8 +279,8 @@ write_summary() {
     printf 'Connected core-terminal burst proof (step 12, non-fatal — issue #1314): %s\n' "$CONNECTED_TERMINAL_INPUT_STATUS"
     printf 'Focused app cold-reset APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
     printf 'Final data-preserving update install status: %s\n' "$FINAL_INSTALL_STATUS"
-    printf 'Issue #261 cold-reset stale DB launch status: %s\n' "$ISSUE_261_STALE_DB_STATUS"
-    printf 'Issue #261 stale DB logcat: %s\n' "$ISSUE_261_STALE_DB_LOGCAT"
+    printf 'Legacy v1 database migration status: %s\n' "$LEGACY_V1_DB_MIGRATION_STATUS"
+    printf 'Legacy v1 database migration logcat: %s\n' "$LEGACY_V1_DB_MIGRATION_LOGCAT"
     if [[ "$GATE_RESULT" != "PASS" ]]; then
       printf 'Failing step: %s\n' "${FAILING_STEP:-unknown}"
       printf 'Failure message: %s\n' "${FAILURE_MESSAGE:-unknown}"
@@ -369,7 +374,7 @@ run_step() {
   elapsed_seconds=$((end_seconds - start_seconds))
 
   if [[ "$status" -eq 0 ]]; then
-    STEP_STATUSES[$step_array_index]="passed"
+    STEP_STATUSES[step_array_index]="passed"
     printf 'PASS: %s (%ss)\n' "$name" "$elapsed_seconds"
     case "$name" in
       cold-reset-install-app-walkthrough-apks)
@@ -378,12 +383,12 @@ run_step() {
       update-install-debug-apk)
         FINAL_INSTALL_STATUS="passed"
         ;;
-      cold-reset-issue-261-stale-db-launch)
-        ISSUE_261_STALE_DB_STATUS="passed"
+      migrate-legacy-v1-databases)
+        LEGACY_V1_DB_MIGRATION_STATUS="passed"
         ;;
     esac
   else
-    STEP_STATUSES[$step_array_index]="failed"
+    STEP_STATUSES[step_array_index]="failed"
     FAILING_STEP="$name"
     FAILING_LOG_PATH="$log_file"
     FAILURE_MESSAGE="step '$name' failed with status $status"
@@ -400,9 +405,9 @@ run_step() {
       update-install-debug-apk)
         FINAL_INSTALL_STATUS="failed"
         ;;
-      cold-reset-issue-261-stale-db-launch)
-        ISSUE_261_STALE_DB_STATUS="failed"
-        FAILURE_LOGCAT_PATH="$ISSUE_261_STALE_DB_LOGCAT"
+      migrate-legacy-v1-databases)
+        LEGACY_V1_DB_MIGRATION_STATUS="failed"
+        FAILURE_LOGCAT_PATH="$LEGACY_V1_DB_MIGRATION_LOGCAT"
         ;;
     esac
   fi
@@ -877,13 +882,15 @@ exit 1
 QUIESCE_SCRIPT
 }
 
-cold_reset_issue_261_stale_db_launch_script() {
-  cat <<ISSUE261_SCRIPT
+legacy_v1_database_migration_script() {
+  cat <<LEGACY_V1_SCRIPT
 set -euo pipefail
 
-stale_db_host='$RUN_DIR/issue-261-stale-pocketshell.db'
-stale_db_device='/data/local/tmp/issue-261-stale-pocketshell.db'
-logcat_file='$ISSUE_261_STALE_DB_LOGCAT'
+tagged_db_host='$RUN_DIR/tagged-v030-pocketshell.db'
+marker_db_host='$RUN_DIR/issue-261-marker-pocketshell.db'
+staged_db_device='/data/local/tmp/legacy-v1-pocketshell.db'
+logcat_file='$LEGACY_V1_DB_MIGRATION_LOGCAT'
+expected_schema_version='$APP_DATABASE_SCHEMA_VERSION'
 
 wait_package_manager_idle() {
   '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
@@ -902,7 +909,7 @@ install_or_fallback_uninstall() {
     return 0
   fi
   if printf '%s\n' "\$output" | grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE'; then
-    printf 'COLD-RESET: uninstall fallback for incompatible app package before stale DB setup\n'
+    printf 'LEGACY-V1: uninstall fallback for incompatible app package before migration setup\n'
     '$ADB' uninstall com.pocketshell.app >/dev/null 2>&1 || true
     wait_package_manager_idle
     '$ADB' install -r -d -t '$APK_PATH'
@@ -927,7 +934,7 @@ logcat_has_adb_transport_drop_markers() {
 }
 
 should_retry_launch_attempt() {
-  [ "\$attempt" -lt '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS' ] || return 1
+  [ "\$attempt" -lt '$LEGACY_V1_DB_MIGRATION_ATTEMPTS' ] || return 1
   ! logcat_has_app_crash_signature "\$attempt_logcat_file" || return 1
   if [ "\$start_status" -ne 0 ] && {
     adb_output_has_transport_drop_markers "\$start_output" || logcat_has_adb_transport_drop_markers "\$attempt_logcat_file"
@@ -942,117 +949,450 @@ should_retry_launch_attempt() {
   return 1
 }
 
-'$PYTHON3' - "\$stale_db_host" <<'PY'
+'$PYTHON3' - "\$tagged_db_host" "\$marker_db_host" <<'PY'
 import sqlite3
 import sys
 from pathlib import Path
 
-database_path = sys.argv[1]
-if Path(database_path).exists():
-    Path(database_path).unlink()
-connection = sqlite3.connect(database_path)
+tagged_path = Path(sys.argv[1])
+marker_path = Path(sys.argv[2])
+for path in (tagged_path, marker_path):
+    path.unlink(missing_ok=True)
+
+tagged = sqlite3.connect(tagged_path)
 try:
-    connection.execute("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
-    connection.execute(
+    tagged.executescript(
+        """
+        PRAGMA journal_mode=WAL;
+        PRAGMA foreign_keys=OFF;
+        CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT);
+        CREATE TABLE ssh_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            name TEXT NOT NULL,
+            privateKeyPath TEXT NOT NULL,
+            hasPassphrase INTEGER NOT NULL,
+            createdAt INTEGER NOT NULL
+        );
+        CREATE TABLE hosts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            name TEXT NOT NULL,
+            hostname TEXT NOT NULL,
+            port INTEGER NOT NULL,
+            username TEXT NOT NULL,
+            keyId INTEGER NOT NULL,
+            maxAutoPort INTEGER NOT NULL,
+            skipPortsBelow INTEGER NOT NULL,
+            scanIntervalSec INTEGER NOT NULL,
+            enabled INTEGER NOT NULL,
+            createdAt INTEGER NOT NULL,
+            lastConnectedAt INTEGER,
+            tmuxInstalled INTEGER,
+            lastBootstrapAt INTEGER,
+            pocketshellInstalled INTEGER,
+            pocketshellLastDetectedAt INTEGER,
+            usageCommandOverride TEXT,
+            pathOverride TEXT,
+            FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+        );
+        CREATE INDEX index_hosts_keyId ON hosts(keyId);
+        CREATE TABLE port_remappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            hostId INTEGER NOT NULL,
+            remotePort INTEGER NOT NULL,
+            localPort INTEGER NOT NULL,
+            FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+        );
+        CREATE INDEX index_port_remappings_hostId ON port_remappings(hostId);
+        CREATE UNIQUE INDEX index_port_remappings_hostId_remotePort
+            ON port_remappings(hostId, remotePort);
+        CREATE TABLE port_usage (
+            hostId INTEGER NOT NULL,
+            remotePort INTEGER NOT NULL,
+            clickCount INTEGER NOT NULL,
+            totalBytes INTEGER NOT NULL,
+            lastUsedAt INTEGER NOT NULL,
+            PRIMARY KEY(hostId, remotePort),
+            FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+        );
+        CREATE INDEX index_port_usage_hostId ON port_usage(hostId);
+        CREATE TABLE project_roots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            hostId INTEGER NOT NULL,
+            label TEXT NOT NULL,
+            path TEXT NOT NULL,
+            createdAt INTEGER NOT NULL,
+            FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+        );
+        CREATE INDEX index_project_roots_hostId ON project_roots(hostId);
+        CREATE UNIQUE INDEX index_project_roots_hostId_path ON project_roots(hostId, path);
+        CREATE TABLE sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            hostId INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            lastSeenAt INTEGER NOT NULL,
+            tags TEXT,
+            FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+        );
+        CREATE INDEX index_sessions_hostId ON sessions(hostId);
+        CREATE UNIQUE INDEX index_sessions_hostId_name ON sessions(hostId, name);
+        CREATE TABLE snippets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            hostId INTEGER NOT NULL,
+            label TEXT,
+            body TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+        );
+        CREATE INDEX index_snippets_hostId ON snippets(hostId);
+        CREATE TABLE agent_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            paneRef TEXT NOT NULL,
+            agent TEXT NOT NULL,
+            jsonlPath TEXT,
+            detectedAt INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX index_agent_sessions_paneRef ON agent_sessions(paneRef);
+        CREATE TABLE ai_api_call_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+            timestampMillis INTEGER NOT NULL,
+            provider TEXT NOT NULL,
+            feature TEXT NOT NULL,
+            inputUnits INTEGER NOT NULL,
+            outputUnits INTEGER NOT NULL,
+            unitCostUsdMillicents INTEGER NOT NULL,
+            computedCostUsdMillicents INTEGER NOT NULL,
+            metadataJson TEXT
+        );
+        CREATE INDEX index_ai_api_call_log_timestampMillis ON ai_api_call_log(timestampMillis);
+        CREATE INDEX index_ai_api_call_log_provider_feature ON ai_api_call_log(provider, feature);
+        CREATE TABLE pending_transcriptions (
+            id TEXT NOT NULL,
+            audioPath TEXT NOT NULL,
+            recordingTimestampMs INTEGER NOT NULL,
+            destinationContext TEXT NOT NULL,
+            retryCount INTEGER NOT NULL,
+            lastErrorMessage TEXT,
+            audioByteSize INTEGER NOT NULL,
+            createdAtMs INTEGER NOT NULL,
+            PRIMARY KEY(id)
+        );
+        CREATE INDEX index_pending_transcriptions_recordingTimestampMs
+            ON pending_transcriptions(recordingTimestampMs);
+
+        INSERT INTO room_master_table(id, identity_hash)
+            VALUES(42, '5c2d470ba861de091b4dad454b282704');
+        INSERT INTO ssh_keys(id, name, privateKeyPath, hasPassphrase, createdAt)
+            VALUES(300, 'gate-v030-key', '/keys/gate-v030', 1, 3000);
+        INSERT INTO hosts(
+            id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+            scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+            lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+            usageCommandOverride, pathOverride
+        ) VALUES(
+            301, 'gate-v030-host', 'v030.example.com', 2230, 'alexey', 300,
+            13000, 1300, 10, 1, 3001, 3002, 1, 3003, 1, 3004,
+            'gate-usage-v030', '/opt/gate-v030/bin'
+        );
+        INSERT INTO port_remappings(id, hostId, remotePort, localPort)
+            VALUES(302, 301, 4300, 14300);
+        INSERT INTO port_usage(hostId, remotePort, clickCount, totalBytes, lastUsedAt)
+            VALUES(301, 4300, 7, 1747, 3005);
+        INSERT INTO project_roots(id, hostId, label, path, createdAt)
+            VALUES(304, 301, 'gate-root', '/srv/gate-v030', 3006);
+        INSERT INTO snippets(id, hostId, label, body, kind)
+            VALUES(303, 301, 'gate-snippet', 'echo gate-v030-preserved', 'command');
+        INSERT INTO ai_api_call_log(
+            id, timestampMillis, provider, feature, inputUnits, outputUnits,
+            unitCostUsdMillicents, computedCostUsdMillicents, metadataJson
+        ) VALUES(305, 3007, 'openai', 'whisper', 17, 47, 10, 174, '{"layout":"v030"}');
+        INSERT INTO pending_transcriptions(
+            id, audioPath, recordingTimestampMs, destinationContext, retryCount,
+            lastErrorMessage, audioByteSize, createdAtMs
+        ) VALUES(
+            'gate-v030-pending', '/audio/gate-v030.wav', 3008,
+            'composer', 1, 'offline', 1747, 3009
+        );
+        PRAGMA user_version = 1;
+        """
+    )
+    for stub_table in ("sessions", "agent_sessions"):
+        if tagged.execute(f"SELECT COUNT(*) FROM {stub_table}").fetchone()[0] != 0:
+            raise SystemExit(f"tagged-v030 fixture: {stub_table} must be empty")
+    room_metadata = tagged.execute(
+        "SELECT id, identity_hash FROM room_master_table ORDER BY id"
+    ).fetchall()
+    if room_metadata != [(42, "5c2d470ba861de091b4dad454b282704")]:
+        raise SystemExit(
+            f"tagged-v030 fixture: unexpected Room metadata {room_metadata!r}"
+        )
+    tagged.commit()
+finally:
+    tagged.close()
+
+marker = sqlite3.connect(marker_path)
+try:
+    if marker.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
+        raise SystemExit("issue-261 marker fixture failed to enter WAL mode")
+    marker.execute("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
+    marker.execute(
         "INSERT INTO room_master_table (id, identity_hash) VALUES(42, ?)",
         ("4a479a15dfcab2d576e00c7ce10ac581",),
     )
-    connection.execute("CREATE TABLE stale_issue_261_marker (id INTEGER PRIMARY KEY)")
-    connection.execute("PRAGMA user_version = 1")
-    connection.commit()
+    marker.execute("CREATE TABLE stale_issue_261_marker (id INTEGER PRIMARY KEY)")
+    if marker.execute("SELECT COUNT(*) FROM stale_issue_261_marker").fetchone()[0] != 0:
+        raise SystemExit("issue-261 marker fixture must be data-free")
+    marker.execute("PRAGMA user_version = 1")
+    marker.commit()
+finally:
+    marker.close()
+PY
+
+rm -f "\$logcat_file"
+
+run_migration_scenario() {
+  scenario="\$1"
+  source_db="\$2"
+  migrated_db_dir_host='$RUN_DIR/migrated-'"\$scenario"'-database'
+  migrated_db_host="\$migrated_db_dir_host/pocketshell.db"
+
+  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+  install_or_fallback_uninstall
+  printf 'LEGACY-V1: clearing app data before injecting %s fixture\n' "\$scenario"
+  '$ADB' shell pm clear com.pocketshell.app
+  wait_package_manager_idle
+  '$ADB' push "\$source_db" "\$staged_db_device"
+  '$ADB' shell run-as com.pocketshell.app sh -c "'mkdir -p databases && cp \$staged_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
+  '$ADB' shell rm -f "\$staged_db_device" >/dev/null 2>&1 || true
+
+  for attempt in \$(seq 1 '$LEGACY_V1_DB_MIGRATION_ATTEMPTS'); do
+    attempt_logcat_file='$RUN_DIR/legacy-v1-'"\$scenario"'-attempt'"\$attempt"'.log'
+    rm -f "\$attempt_logcat_file"
+    '$ADB' logcat -c || true
+    '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+
+    set +e
+    start_output=\$('$ADB' shell am start -W -n com.pocketshell.app/.MainActivity 2>&1)
+    start_status=\$?
+    set -e
+    printf '%s\n' "\$start_output"
+
+    if [ "\$start_status" -eq 0 ]; then
+      sleep 5
+    else
+      sleep 2
+    fi
+
+    set +e
+    pid_output=\$('$ADB' shell pidof com.pocketshell.app 2>&1)
+    pid_status=\$?
+    set -e
+    pid=""
+    if [ "\$pid_status" -eq 0 ]; then
+      pid=\$(printf '%s\n' "\$pid_output" | tr -d '\r' | awk '/^[[:space:]]*[0-9]+[[:space:]]*$/ { print \$1; exit }')
+    fi
+    '$ADB' logcat -d -v time -t 5000 > "\$attempt_logcat_file" 2>&1 || true
+    {
+      printf '\n===== %s attempt %s =====\n' "\$scenario" "\$attempt"
+      cat "\$attempt_logcat_file"
+    } >> "\$logcat_file"
+
+    if logcat_has_app_crash_signature "\$attempt_logcat_file"; then
+      printf 'Crash signature found after launching the %s legacy-v1 fixture.\n' "\$scenario" >&2
+      grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell' "\$attempt_logcat_file" >&2 || true
+      exit 1
+    fi
+
+    if [ "\$start_status" -ne 0 ]; then
+      if should_retry_launch_attempt; then
+        printf 'Legacy-v1 %s launch was interrupted by adb transport on attempt %s; retrying.\n' "\$scenario" "\$attempt" >&2
+        '$ADB' reconnect >/dev/null 2>&1 || true
+        '$ADB' wait-for-device >/dev/null 2>&1 || true
+        sleep 2
+        continue
+      fi
+      printf 'Launching PocketShell with the %s legacy-v1 fixture failed with status %s.\n' "\$scenario" "\$start_status" >&2
+      printf '%s\n' "\$start_output" >&2
+      exit "\$start_status"
+    fi
+
+    if [ -z "\$pid" ]; then
+      if should_retry_launch_attempt; then
+        printf 'Legacy-v1 %s pid check was interrupted by adb transport on attempt %s; retrying.\n' "\$scenario" "\$attempt" >&2
+        '$ADB' reconnect >/dev/null 2>&1 || true
+        '$ADB' wait-for-device >/dev/null 2>&1 || true
+        sleep 2
+        continue
+      fi
+      printf 'PocketShell process was not alive after the %s legacy-v1 migration.\n' "\$scenario" >&2
+      exit 1
+    fi
+
+    break
+  done
+
+  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+  '$ADB' shell sync >/dev/null 2>&1 || true
+  mkdir -p "\$migrated_db_dir_host"
+  rm -f \
+    "\$migrated_db_dir_host/pocketshell.db" \
+    "\$migrated_db_dir_host/pocketshell.db-wal" \
+    "\$migrated_db_dir_host/pocketshell.db-shm"
+  for suffix in '' '-wal' '-shm'; do
+    pulled_file="\$migrated_db_dir_host/pocketshell.db\$suffix"
+    set +e
+    '$ADB' exec-out run-as com.pocketshell.app \
+      cat "databases/pocketshell.db\$suffix" > "\$pulled_file" 2>/dev/null
+    pull_status=\$?
+    set -e
+    if [ -z "\$suffix" ]; then
+      if [ "\$pull_status" -ne 0 ] || [ ! -s "\$pulled_file" ]; then
+        printf 'Migrated database pull was empty for %s.\n' "\$scenario" >&2
+        exit 1
+      fi
+    elif [ "\$pull_status" -ne 0 ] || [ ! -s "\$pulled_file" ]; then
+      rm -f "\$pulled_file"
+    fi
+  done
+  if [ ! -s "\$migrated_db_host" ]; then
+    printf 'Migrated database pull was empty for %s.\n' "\$scenario" >&2
+    exit 1
+  fi
+  printf 'LEGACY-V1: pulled authoritative stopped-app SQLite bundle for %s:' "\$scenario"
+  for bundle_file in "\$migrated_db_dir_host"/pocketshell.db*; do
+    printf ' %s' "\$(basename "\$bundle_file")"
+  done
+  printf '\n'
+
+  '$PYTHON3' - "\$migrated_db_host" "\$scenario" "\$expected_schema_version" <<'PY'
+import sqlite3
+import sys
+
+database_path, scenario, expected_version = sys.argv[1], sys.argv[2], int(sys.argv[3])
+connection = sqlite3.connect(f"file:{database_path}?mode=ro", uri=True)
+try:
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    if version != expected_version:
+        raise SystemExit(f"{scenario}: expected schema v{expected_version}, found v{version}")
+    tables = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    if "sessions" in tables or "agent_sessions" in tables:
+        raise SystemExit(f"{scenario}: v17 session stubs were not removed")
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise SystemExit(f"{scenario}: foreign-key validation failed")
+
+    if scenario == "tagged-v030":
+        expected = [
+            (
+                """
+                SELECT id, name, privateKeyPath, hasPassphrase, createdAt, fingerprint
+                FROM ssh_keys WHERE id = 300
+                """,
+                (300, "gate-v030-key", "/keys/gate-v030", 1, 3000, ""),
+            ),
+            (
+                """
+                SELECT id, name, hostname, port, username, keyId, maxAutoPort,
+                       skipPortsBelow, scanIntervalSec, enabled, createdAt,
+                       lastConnectedAt, tmuxInstalled, lastBootstrapAt,
+                       pocketshellInstalled, pocketshellLastDetectedAt,
+                       pocketshellCliVersion, pocketshellExpectedCliVersion,
+                       pocketshellVersionCompatible, pocketshellDaemonRunning,
+                       pocketshellDaemonEnabled, usageCommandOverride
+                FROM hosts WHERE id = 301
+                """,
+                (
+                    301, "gate-v030-host", "v030.example.com", 2230, "alexey", 300,
+                    13000, 1300, 10, 1, 3001, 3002, 1, 3003, 1, 3004,
+                    None, None, None, None, None, "gate-usage-v030",
+                ),
+            ),
+            (
+                "SELECT id, hostId, remotePort, localPort FROM port_remappings WHERE id = 302",
+                (302, 301, 4300, 14300),
+            ),
+            (
+                "SELECT id, hostId, label, body, kind FROM snippets WHERE id = 303",
+                (303, 301, "gate-snippet", "echo gate-v030-preserved", "command"),
+            ),
+            (
+                "SELECT id, hostId, label, path, createdAt FROM project_roots WHERE id = 304",
+                (304, 301, "gate-root", "/srv/gate-v030", 3006),
+            ),
+            (
+                """
+                SELECT id, timestampMillis, provider, feature, inputUnits, outputUnits,
+                       unitCostUsdMillicents, computedCostUsdMillicents, metadataJson
+                FROM ai_api_call_log WHERE id = 305
+                """,
+                (305, 3007, "openai", "whisper", 17, 47, 10, 174, '{"layout":"v030"}'),
+            ),
+            (
+                """
+                SELECT hostId, remotePort, clickCount, totalBytes, lastUsedAt
+                FROM port_usage WHERE hostId = 301 AND remotePort = 4300
+                """,
+                (301, 4300, 7, 1747, 3005),
+            ),
+            (
+                """
+                SELECT id, audioPath, recordingTimestampMs, destinationContext,
+                       retryCount, lastErrorMessage, audioByteSize, createdAtMs
+                FROM pending_transcriptions WHERE id = 'gate-v030-pending'
+                """,
+                (
+                    "gate-v030-pending", "/audio/gate-v030.wav", 3008,
+                    "composer", 1, "offline", 1747, 3009,
+                ),
+            ),
+        ]
+        for query, wanted in expected:
+            row = connection.execute(query).fetchone()
+            if row != wanted:
+                raise SystemExit(
+                    f"{scenario}: sentinel mismatch for {query!r}; expected {wanted!r}, got {row!r}"
+                )
+        host_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(hosts)")
+        }
+        if "pathOverride" in host_columns:
+            raise SystemExit(f"{scenario}: dropped pathOverride column unexpectedly survived")
+        for table_name in (
+            "ssh_keys",
+            "hosts",
+            "port_remappings",
+            "snippets",
+            "project_roots",
+            "ai_api_call_log",
+            "port_usage",
+            "pending_transcriptions",
+        ):
+            count = connection.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            if count != 1:
+                raise SystemExit(
+                    f"{scenario}: expected exactly one writer-backed sentinel in "
+                    f"{table_name}, found {count}"
+                )
+    elif scenario == "issue-261-marker":
+        if "stale_issue_261_marker" in tables:
+            raise SystemExit(f"{scenario}: legacy marker still exists after migration")
+        if "hosts" not in tables:
+            raise SystemExit(f"{scenario}: current hosts table was not created")
+    else:
+        raise SystemExit(f"unknown validation scenario: {scenario}")
 finally:
     connection.close()
 PY
 
-'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-install_or_fallback_uninstall
-printf 'COLD-RESET: clearing app data before injecting stale Room DB\n'
-'$ADB' shell pm clear com.pocketshell.app
-wait_package_manager_idle
-'$ADB' push "\$stale_db_host" "\$stale_db_device"
-'$ADB' shell run-as com.pocketshell.app sh -c "'mkdir -p databases && cp \$stale_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
-'$ADB' shell rm -f "\$stale_db_device" >/dev/null 2>&1 || true
+  printf 'LEGACY-V1: %s migrated to schema v%s with post-launch data validation; pid was %s\n' \
+    "\$scenario" "\$expected_schema_version" "\$pid"
+}
 
-for attempt in \$(seq 1 '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS'); do
-  attempt_logcat_file="\$logcat_file"
-  if [ "\$attempt" -lt '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS' ]; then
-    attempt_logcat_file="\$logcat_file.attempt\$attempt"
-  fi
-  rm -f "\$attempt_logcat_file"
-  '$ADB' logcat -c || true
-  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-
-  set +e
-  start_output=\$('$ADB' shell am start -W -n com.pocketshell.app/.MainActivity 2>&1)
-  start_status=\$?
-  set -e
-  printf '%s\n' "\$start_output"
-
-  if [ "\$start_status" -eq 0 ]; then
-    sleep 5
-  else
-    sleep 2
-  fi
-
-  set +e
-  pid_output=\$('$ADB' shell pidof com.pocketshell.app 2>&1)
-  pid_status=\$?
-  set -e
-  pid=""
-  if [ "\$pid_status" -eq 0 ]; then
-    pid=\$(printf '%s\n' "\$pid_output" | tr -d '\r' | awk '/^[[:space:]]*[0-9]+[[:space:]]*$/ { print \$1; exit }')
-  fi
-  '$ADB' logcat -d -v time -t 5000 > "\$attempt_logcat_file" 2>&1 || true
-
-  if logcat_has_app_crash_signature "\$attempt_logcat_file"; then
-    cp "\$attempt_logcat_file" "\$logcat_file" 2>/dev/null || true
-    printf 'Crash signature found after launching with the #261 stale Room DB.\n' >&2
-    grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell' "\$logcat_file" >&2 || true
-    exit 1
-  fi
-
-  if [ "\$start_status" -ne 0 ]; then
-    if should_retry_launch_attempt; then
-      printf 'Issue #261 stale DB launch was interrupted by adb transport on attempt %s; retrying.\n' "\$attempt" >&2
-      '$ADB' reconnect >/dev/null 2>&1 || true
-      '$ADB' wait-for-device >/dev/null 2>&1 || true
-      sleep 2
-      continue
-    fi
-    cp "\$attempt_logcat_file" "\$logcat_file" 2>/dev/null || true
-    printf 'Launching PocketShell with the #261 stale Room DB failed with status %s.\n' "\$start_status" >&2
-    printf '%s\n' "\$start_output" >&2
-    grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell|adbd|connection terminated|offline|read failed' "\$logcat_file" >&2 || true
-    exit "\$start_status"
-  fi
-
-  if [ -z "\$pid" ]; then
-    if should_retry_launch_attempt; then
-      printf 'Issue #261 stale DB pid check was interrupted by adb transport on attempt %s; retrying.\n' "\$attempt" >&2
-      '$ADB' reconnect >/dev/null 2>&1 || true
-      '$ADB' wait-for-device >/dev/null 2>&1 || true
-      sleep 2
-      continue
-    fi
-    cp "\$attempt_logcat_file" "\$logcat_file" 2>/dev/null || true
-    printf 'PocketShell process was not alive after launching with the #261 stale Room DB.\n' >&2
-    if [ "\$pid_status" -ne 0 ]; then
-      printf '%s\n' "\$pid_output" >&2
-    fi
-    grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell|adbd|connection terminated|offline|read failed' "\$logcat_file" >&2 || true
-    exit 1
-  fi
-
-  if [ "\$attempt_logcat_file" != "\$logcat_file" ]; then
-    cp "\$attempt_logcat_file" "\$logcat_file"
-  fi
-  break
-done
-
-'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-printf 'COLD-RESET: issue #261 stale Room DB launch survived with pid %s\n' "\$pid"
-printf 'Logcat artifact: %s\n' "\$logcat_file"
-ISSUE261_SCRIPT
+run_migration_scenario "tagged-v030" "\$tagged_db_host"
+run_migration_scenario "issue-261-marker" "\$marker_db_host"
+printf 'Legacy-v1 migration logcat artifact: %s\n' "\$logcat_file"
+LEGACY_V1_SCRIPT
 }
 
 safe_step_name() {
@@ -1313,20 +1653,24 @@ printf 'AVD: %s\n' "$AVD_NAME"
 printf 'App versionName: %s\n' "$APP_VERSION_NAME"
 printf 'Gradle user home: %s\n' "$GRADLE_USER_HOME"
 printf 'Gradle flags: %s\n' "$GRADLE_FLAGS"
+read -r -a GRADLE_ARGS <<< "$GRADLE_FLAGS"
 printf 'Manage emulator during readiness: %s\n' "$PRE_RELEASE_MANAGE_EMULATOR"
 
 require_executable "$ADB" "adb"
 require_executable "$EMULATOR" "emulator"
 require_command_or_executable "$PYTHON3" "python3"
 
+if ! [[ "$APP_DATABASE_SCHEMA_VERSION" =~ ^[1-9][0-9]*$ ]]; then
+  fail "Could not read APP_DATABASE_SCHEMA_VERSION from AppDatabase.kt"
+fi
 if ! [[ "$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   fail "APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS must be a positive integer"
 fi
 if ! [[ "$APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
   fail "APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS must be a non-negative integer"
 fi
-if ! [[ "$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
-  fail "ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS must be a positive integer"
+if ! [[ "$LEGACY_V1_DB_MIGRATION_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  fail "LEGACY_V1_DB_MIGRATION_ATTEMPTS must be a positive integer"
 fi
 if ! [[ "$APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS" =~ ^[0-9]+$ ]]; then
   fail "APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS must be a non-negative integer"
@@ -1411,12 +1755,12 @@ fi
 
 run_step "build-app-test-apks" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-build-app-test-apks" -- \
-  ./gradlew $GRADLE_FLAGS :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+  ./gradlew "${GRADLE_ARGS[@]}" :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 [[ -f "$TEST_APK_PATH" ]] || fail "Android test APK artifact was not created at $TEST_APK_PATH"
 
-ISSUE_261_STALE_DB_STATUS="running"
-run_bash_step "cold-reset-issue-261-stale-db-launch" "$(cold_reset_issue_261_stale_db_launch_script)"
+LEGACY_V1_DB_MIGRATION_STATUS="running"
+run_bash_step "migrate-legacy-v1-databases" "$(legacy_v1_database_migration_script)"
 
 run_bash_step "cold-reset-app-packages-before-app-walkthrough" "$(cold_reset_app_packages_script)"
 run_bash_step "cold-reset-install-app-walkthrough-apks" "$(cold_reset_install_app_walkthrough_apks_script)"
@@ -1446,7 +1790,7 @@ done
 
 run_step "build-debug-apk" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-build-debug-apk" -- \
-  ./gradlew $GRADLE_FLAGS :app:assembleDebug --stacktrace
+  ./gradlew "${GRADLE_ARGS[@]}" :app:assembleDebug --stacktrace
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 
 run_step "update-install-debug-apk" "$ROOT_DIR/scripts/install-update-apk.sh" "$APK_PATH"

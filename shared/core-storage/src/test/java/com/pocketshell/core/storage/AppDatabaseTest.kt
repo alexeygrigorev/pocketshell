@@ -252,32 +252,27 @@ class AppDatabaseTest {
     }
 
     @Test
-    fun missingMigrationFailsWithoutDestroyingLegacyRows() {
-        val databaseName = "missing-migration-${System.nanoTime()}.db"
+    fun exactIssue261MarkerMigratesToCurrentSchema() {
+        val databaseName = "issue-261-marker-${System.nanoTime()}.db"
         seedStaleIdentityDatabase(databaseName, version = LEGACY_CRASH_SCHEMA_VERSION)
 
-        assertThrows(IllegalStateException::class.java) {
-            val staleDb = openOnDiskDatabase(databaseName)
-            try {
-                staleDb.openHelper.writableDatabase.query("SELECT 1").close()
-            } finally {
-                staleDb.close()
-            }
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+        } finally {
+            migratedDb.close()
         }
 
-        assertTableExists(databaseName, "stale_issue_261_marker")
+        assertEquals(APP_DATABASE_SCHEMA_VERSION, readSchemaVersion(databaseName))
+        assertTableMissing(databaseName, "stale_issue_261_marker")
+        assertTableExists(databaseName, "hosts")
         context.deleteDatabase(databaseName)
     }
 
     @Test
-    fun destructiveFallbackVersionsDoNotOverlapSupportedMigrationStarts() {
+    fun versionOneHasNonDestructiveMigrationStart() {
         val supportedMigrationStarts = APP_DATABASE_MIGRATIONS.map { it.startVersion }.toSet()
-
-        assertTrue(
-            APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS.none {
-                it in supportedMigrationStarts
-            },
-        )
+        assertTrue(1 in supportedMigrationStarts)
     }
 
     // --- Issue #932 (#928 D2/D9 P5): full migration-chain completeness. The
@@ -338,15 +333,11 @@ class AppDatabaseTest {
     fun legacyRecoveryVersionsHaveNonDestructiveMigrationStarts() {
         val supportedMigrationStarts = APP_DATABASE_MIGRATIONS.map { it.startVersion }.toSet()
 
-        for (version in listOf(2, 3, 4, 5, 6, 7, 9)) {
+        for (version in listOf(1, 2, 3, 4, 5, 6, 7, 9)) {
             assertTrue(
                 "Legacy schema v$version must recover through APP_DATABASE_MIGRATIONS, " +
-                    "not the destructive fallback allowlist",
+                    "without destructive fallback",
                 version in supportedMigrationStarts,
-            )
-            assertTrue(
-                "Legacy schema v$version must not be destructively allowlisted",
-                version !in APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS.toSet(),
             )
         }
     }
@@ -364,7 +355,6 @@ class AppDatabaseTest {
     fun everySupportedStartVersionMigratesToCurrentPreservingRows() = runTest {
         val supportedStartVersions = APP_DATABASE_MIGRATIONS
             .map { it.startVersion }
-            .filter { it !in APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS.toSet() }
             .sorted()
 
         // Sanity: the sweep must actually exercise every start version in the
@@ -400,7 +390,7 @@ class AppDatabaseTest {
                 val key = migratedDb.sshKeyDao().getById(1)
                 assertNotNull("ssh_key row lost migrating from v$startVersion", key)
 
-                if (startVersion in 2..7 || startVersion == 9) {
+                if (startVersion in 1..7 || startVersion == 9) {
                     val snippets = migratedDb.snippetDao().getByHostId(1).first()
                     assertEquals(
                         "Snippet row lost migrating from legacy v$startVersion",
@@ -504,6 +494,10 @@ class AppDatabaseTest {
      * v8+ uses the post-reset preservation ladder.
      */
     private fun buildSchemaLadderUpTo(db: SQLiteDatabase, targetVersion: Int) {
+        if (targetVersion == 1) {
+            createLegacyVersionOneSchema(db)
+            return
+        }
         if (targetVersion in 2..7) {
             createLegacySchemaUpTo(db, targetVersion)
             return
@@ -538,7 +532,7 @@ class AppDatabaseTest {
     }
 
     private fun insertHostRowForVersion(db: SQLiteDatabase, version: Int) {
-        if (version in 2..7 || version == 9) {
+        if (version in 1..7 || version == 9) {
             insertLegacyHostRowForVersion(db, version)
         } else if (version == 8) {
             db.execSQL(
@@ -606,6 +600,13 @@ class AppDatabaseTest {
 
     private fun createLegacyVersionOneSchema(db: SQLiteDatabase) {
         db.execSQL("PRAGMA foreign_keys=OFF")
+        db.execSQL("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
+        db.execSQL(
+            """
+            INSERT INTO room_master_table(id, identity_hash)
+            VALUES(42, '4f9cdd46489198fdda4b34e6b682d56d')
+            """.trimIndent(),
+        )
         db.execSQL(
             """
             CREATE TABLE ssh_keys (
@@ -811,6 +812,17 @@ class AppDatabaseTest {
         )
 
         when (version) {
+            1 -> db.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt
+                ) VALUES(
+                    1, 'host-v$version', 'h.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102
+                )
+                """.trimIndent(),
+            )
             2, 3 -> db.execSQL(
                 """
                 INSERT INTO hosts(
@@ -1389,6 +1401,20 @@ class AppDatabaseTest {
                 arrayOf(tableName),
             ).use { cursor ->
                 assertTrue(cursor.moveToFirst())
+            }
+        }
+    }
+
+    private fun readSchemaVersion(databaseName: String): Int {
+        val sqlite = SQLiteDatabase.openDatabase(
+            context.getDatabasePath(databaseName).path,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        )
+        return sqlite.use {
+            it.rawQuery("PRAGMA user_version", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                cursor.getInt(0)
             }
         }
     }

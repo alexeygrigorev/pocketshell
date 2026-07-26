@@ -1012,6 +1012,15 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
                 "reattached pane — never a permanent black on a live transport.",
             pane.terminalState.visibleScreenIsBlank(),
         )
+        // Issue #966: the fixture intentionally returns empty captures before recovery.
+        // Empty is now correctly UNVERIFIED and keeps the lifetime watcher hot, so letting
+        // runTest auto-drain it would spin virtual time forever. Quiesce the owned watcher
+        // explicitly after the load-bearing heal assertion.
+        vm.pauseActivePaneStaleRenderWatchdogForTest()
+        assertFalse(
+            "test teardown must not leave a self-rearming unverified watcher for runTest",
+            vm.staleRenderWatchdogJobForTest()?.isActive == true,
+        )
     }
 
     @Test
@@ -1100,6 +1109,11 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             "Issue #1177 (:8319): the stale-render heal must repaint the black " +
                 "reattached pane — never a permanent black on a live transport.",
             pane.terminalState.visibleScreenIsBlank(),
+        )
+        vm.pauseActivePaneStaleRenderWatchdogForTest()
+        assertFalse(
+            "test teardown must not leave a self-rearming unverified watcher for runTest",
+            vm.staleRenderWatchdogJobForTest()?.isActive == true,
         )
     }
 

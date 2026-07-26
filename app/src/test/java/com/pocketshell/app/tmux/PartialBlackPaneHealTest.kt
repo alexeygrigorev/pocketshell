@@ -27,6 +27,7 @@ import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -85,6 +86,121 @@ class PartialBlackPaneHealTest {
 
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val createdVms = mutableListOf<TmuxSessionViewModel>()
+
+    @Test
+    fun issue966ManualInjectionRejectsAnUnequalVisibleEmulatorOwner() = runVmTest {
+        val vm = connectVm(FakeTmuxClient().withSinglePaneRow("work", "%owner"))
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        val settled = vm.activePaneRenderOwnerSnapshotForTest()
+        assertTrue("precondition: owner must be settled", settled.attachResizeSeedSettled)
+
+        val mismatch = settled.copy(
+            emulatorIdentity = requireNotNull(settled.emulatorIdentity) + 1,
+        )
+        assertThrows(IllegalStateException::class.java) {
+            vm.appendToActivePaneRenderModelForTest("stale".toByteArray(), mismatch)
+        }
+    }
+
+    @Test
+    fun issue966ManualInjectionRejectsAnUnequalVisibleTerminalSessionOwner() = runVmTest {
+        val vm = connectVm(FakeTmuxClient().withSinglePaneRow("work", "%session-owner"))
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        val settled = vm.activePaneRenderOwnerSnapshotForTest()
+        assertTrue("precondition: owner must be settled", settled.attachResizeSeedSettled)
+
+        val mismatch = settled.copy(
+            terminalSessionIdentity = requireNotNull(settled.terminalSessionIdentity) + 1,
+        )
+        assertThrows(IllegalStateException::class.java) {
+            vm.appendToActivePaneRenderModelForTest("stale".toByteArray(), mismatch)
+        }
+    }
+
+    @Test
+    fun issue966ManualInjectionRejectsInjectionBeforeResizeSettlement() = runVmTest {
+        val vm = connectVm(FakeTmuxClient().withSinglePaneRow("work", "%unsettled"))
+        val unsettled = vm.activePaneRenderOwnerSnapshotForTest()
+        assertFalse("precondition: no measured/applied grid yet", unsettled.attachResizeSeedSettled)
+
+        assertThrows(IllegalStateException::class.java) {
+            vm.appendToActivePaneRenderModelForTest("stale".toByteArray(), unsettled)
+        }
+    }
+
+    @Test
+    fun issue966ManualProofRejectsQueuedNoOpResizeHealUntilCompletion() = runVmTest {
+        val vm = connectVm(FakeTmuxClient().withSinglePaneRow("work", "%queued-heal"))
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        val settled = vm.activePaneRenderOwnerSnapshotForTest()
+        assertTrue("precondition: owner must be settled", settled.attachResizeSeedSettled)
+
+        val stale = vm.appendToActivePaneRenderModelForTest(
+            "\u001b[2J\u001b[Hstatus".toByteArray(),
+            settled,
+        )
+        assertTrue("precondition: synthetic frame is suspect", stale.renderLooksSuspect)
+        assertTrue(vm.triggerSameDimensionResizeHealForTest())
+
+        val queued = vm.activePaneRenderOwnerSnapshotForTest()
+        assertEquals(1, queued.automaticHealOperationsInFlight)
+        assertTrue(queued.automaticHealActivityEpoch > settled.automaticHealActivityEpoch)
+        assertFalse("a queued automatic heal is not settled", queued.attachResizeSeedSettled)
+        assertThrows(IllegalStateException::class.java) {
+            vm.appendToActivePaneRenderModelForTest("must reject".toByteArray(), stale)
+        }
+
+        advanceUntilIdle()
+        val completed = vm.activePaneRenderOwnerSnapshotForTest()
+        assertEquals(0, completed.automaticHealOperationsInFlight)
+        assertEquals(queued.automaticHealActivityEpoch, completed.automaticHealActivityEpoch)
+        assertTrue("proof may settle only after automatic heal completion", completed.attachResizeSeedSettled)
+    }
+
+    @Test
+    fun issue966ManualOwnerRatchetRejectsCompletedAutomaticHealAba() = runVmTest {
+        val vm = connectVm(FakeTmuxClient().withSinglePaneRow("work", "%heal-aba"))
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        val settled = vm.activePaneRenderOwnerSnapshotForTest()
+        assertTrue("precondition: owner must be settled", settled.attachResizeSeedSettled)
+
+        vm.completeAutomaticRenderHealActivityCycleForTest()
+        val laterIdle = vm.activePaneRenderOwnerSnapshotForTest()
+        assertEquals(0, laterIdle.automaticHealOperationsInFlight)
+        assertTrue(laterIdle.attachResizeSeedSettled)
+        assertTrue(laterIdle.automaticHealActivityEpoch > settled.automaticHealActivityEpoch)
+
+        assertThrows(IllegalStateException::class.java) {
+            vm.appendToActivePaneRenderModelForTest("must reject ABA".toByteArray(), settled)
+        }
+    }
+
+    @Test
+    fun issue966InjectionRejectsCompletedAutomaticHealBeforePostInjectionSnapshot() = runVmTest {
+        val vm = connectVm(FakeTmuxClient().withSinglePaneRow("work", "%heal-mid-injection"))
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        val settled = vm.activePaneRenderOwnerSnapshotForTest()
+        assertTrue("precondition: owner must be settled", settled.attachResizeSeedSettled)
+        var activityBetweenInjectionAndSnapshot: ActivePaneRenderOwnerSnapshotForTest? = null
+
+        val rejected = assertThrows(IllegalStateException::class.java) {
+            vm.appendToActivePaneRenderModelForTest("stale".toByteArray(), settled) {
+                vm.completeAutomaticRenderHealActivityCycleForTest()
+                activityBetweenInjectionAndSnapshot = vm.activePaneRenderOwnerSnapshotForTest()
+            }
+        }
+
+        val completed = requireNotNull(activityBetweenInjectionAndSnapshot)
+        assertEquals(settled.modelMutationEpoch + 1L, completed.modelMutationEpoch)
+        assertEquals(0, completed.automaticHealOperationsInFlight)
+        assertTrue(completed.automaticHealActivityEpoch > settled.automaticHealActivityEpoch)
+        assertTrue(rejected.message.orEmpty().contains("automatic render heal raced injection"))
+    }
 
     @After
     fun tearDown() {
@@ -359,16 +475,23 @@ class PartialBlackPaneHealTest {
             CommandResponse(number = 99L, output = SPARSE_AGENT_FRAME, isError = false),
         )
         val healCapturesBefore = client.healCaptureCount()
+        val staleRenderedNonBlankChars = pane.terminalState.renderedNonBlankCharCount()
 
         // THE REAL PATH: one steady-state stale-render watchdog tick over the active pane.
-        val healed = vm.healActivePaneIfStaleRenderForTest()
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
         advanceUntilIdle()
 
+        assertEquals(HealAttemptReason.DivergenceApplied, result.reason)
+        assertEquals(
+            "diagnostics retain the stale pre-apply viewport rather than the healed frame",
+            staleRenderedNonBlankChars,
+            result.stats.renderedNonBlankChars,
+        )
         assertEquals(
             "REGRESSION (#1138): the steady-state watchdog must heal a partial-black " +
                 "alt-screen agent pane. On base the divergence-only predicate skipped it.",
             HealOutcome.Healed,
-            healed,
+            result.outcome,
         )
         assertTrue(
             "the watchdog issued a heal capture-pane",
@@ -408,15 +531,21 @@ class PartialBlackPaneHealTest {
             CommandResponse(number = 98L, output = listOf(" Working 7  esc to interrupt"), isError = false),
         )
 
-        val healed = vm.healActivePaneIfStaleRenderForTest()
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
         advanceUntilIdle()
 
+        assertEquals(
+            "Healthy is reserved for a successful nonempty authoritative capture whose " +
+                "lost-frame predicate returned false",
+            HealAttemptReason.AuthoritativeCaptureMatched,
+            result.reason,
+        )
         assertEquals(
             "OVER-HEAL GUARD (#1138/#807): when tmux's alt-screen capture is ALSO near-empty " +
                 "there is no lost frame to restore — the watchdog reads the pane HEALTHY and " +
                 "must NOT heal",
             HealOutcome.Healthy,
-            healed,
+            result.outcome,
         )
         assertTrue(
             "the pane is left untouched (still partial-black) — no reseed-thrash on a " +

@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.OutputStream
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.ceil
 
 enum class TerminalRawInputPolicy {
@@ -97,6 +98,7 @@ class TerminalSurfaceState(
     public constructor() : this(Dispatchers.IO)
 
     private var _session: TerminalSession? by mutableStateOf(null)
+    private val renderModelMutationEpoch = AtomicLong(0L)
 
     /**
      * Backing flow for [output]. Replay = 0 — bytes are only delivered to
@@ -387,6 +389,7 @@ class TerminalSurfaceState(
     fun attach(session: TerminalSession) {
         if (_session === session) return
         _session = session
+        renderModelMutationEpoch.incrementAndGet()
     }
 
     /**
@@ -395,6 +398,7 @@ class TerminalSurfaceState(
      * it; this method only severs the state-holder ↔ session link.
      */
     fun detach() {
+        if (_session != null) renderModelMutationEpoch.incrementAndGet()
         _session = null
     }
 
@@ -433,6 +437,7 @@ class TerminalSurfaceState(
             // surface, or a re-seed) this is just an ordinary feed plus an
             // already-open-gate no-op.
             activeBridge.seedThenOpenGate(clean)
+            renderModelMutationEpoch.incrementAndGet()
             _output.tryEmit(clean)
             bufferTick.value = bufferTick.value + 1
         }
@@ -1434,6 +1439,7 @@ class TerminalSurfaceState(
                             }
                             if (clean.isNotEmpty()) {
                                 newBridge.feedBytes(clean)
+                                renderModelMutationEpoch.incrementAndGet()
                                 _output.tryEmit(clean)
                                 // Tick the buffer signal so debounced consumers of
                                 // [flowOfMatches] re-run the detector. Cheap: just a
@@ -1462,6 +1468,49 @@ class TerminalSurfaceState(
         }
         producerJob = job
         return job
+    }
+
+    /**
+     * Issue #966 connected-proof seam. This is an identity-bearing snapshot of the
+     * exact emulator model owned by this state, plus a monotonic epoch for every
+     * accepted producer/seed/rebind mutation. It adds no production control flow.
+     */
+    @androidx.annotation.VisibleForTesting
+    public data class RenderModelOwnerSnapshot(
+        val stateIdentity: Int,
+        val sessionIdentity: Int?,
+        val emulatorIdentity: Int?,
+        val mutationEpoch: Long,
+        val drainBacklogged: Boolean,
+    )
+
+    @androidx.annotation.VisibleForTesting
+    public fun renderModelOwnerSnapshotForTesting(): RenderModelOwnerSnapshot {
+        val activeBridge = bridge
+        val activeSession = activeBridge?.session ?: _session
+        val activeEmulator = activeBridge?.emulator ?: activeSession?.emulator
+        return RenderModelOwnerSnapshot(
+            stateIdentity = System.identityHashCode(this),
+            sessionIdentity = activeSession?.let(System::identityHashCode),
+            emulatorIdentity = activeEmulator?.let(System::identityHashCode),
+            mutationEpoch = renderModelMutationEpoch.get(),
+            drainBacklogged = renderDrainBacklogged(),
+        )
+    }
+
+    /**
+     * Issue #966 connected-proof seam: inject into this state's exact active model.
+     * The caller must first bind this owner to the visible TerminalView and retain
+     * the returned epoch through the pre-call oracle; any late producer/reseed then
+     * changes the epoch and hard-fails the proof.
+     */
+    @androidx.annotation.VisibleForTesting
+    public fun appendDirectlyToRenderModelForTesting(bytes: ByteArray): RenderModelOwnerSnapshot {
+        val emulator = bridge?.emulator ?: _session?.emulator
+            ?: error("no active emulator model")
+        emulator.append(bytes, bytes.size)
+        renderModelMutationEpoch.incrementAndGet()
+        return renderModelOwnerSnapshotForTesting()
     }
 
     /**

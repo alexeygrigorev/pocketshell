@@ -39,14 +39,28 @@
 #     proving the composer Send actually submitted the line (the maintainer's
 #     "when I click Send it's not really sending" symptom), not left it unsent.
 #
-# It deliberately does NOT use the alternate screen (no smcup): keeping the
-# transcript in the main buffer means `capture-pane -p` reads the input box and
-# the submitted markers directly, which is what the ack-gate + the test inspect.
+# The DEFAULT mode deliberately does NOT use the alternate screen (no smcup):
+# keeping its transcript in the main buffer means `capture-pane -p` reads the
+# input box and submitted markers directly, which is what the ack-gate + the
+# existing tests inspect.
+#
+# Issue #1769 adds one opt-in render mode for the #1153 render-heal journey:
+# `POCKETSHELL_FAKE_AGENT_RENDER_MODE=issue1153-incremental`. Its INITIAL render
+# paints the dense ISSUE1153 frame into the upper rows. Later paste/submit
+# renders touch ONLY three lower rows, preserving that authoritative upper frame
+# in tmux without streaming a full-screen redraw that could itself repair the
+# journey's synthetic local-only black band. The default mode remains byte-for-
+# byte behaviour-compatible with the #869/#1526/#1687 journeys above.
 set -u
 
 PROMPT_PREFIX="> "
 SUBMIT_PREFIX="FAKE-AGENT SUBMITTED: "
 READY_MARKER="FAKE-AGENT-READY"
+RENDER_MODE="${POCKETSHELL_FAKE_AGENT_RENDER_MODE:-default}"
+ISSUE1153_RENDER_MODE="issue1153-incremental"
+ISSUE1153_FRAME_MARKER="ISSUE1153-FRAME"
+ISSUE1153_FRAME_ROWS=20
+issue1153_full_render_count=0
 
 old_tty="$(stty -g 2>/dev/null || true)"
 
@@ -73,6 +87,7 @@ stty -echo -icanon -icrnl min 1 time 0 2>/dev/null || true
 buffer=""
 submit_buffer=""
 last_submitted=""
+last_submitted_display=""
 # Issue #1687: session-relative paste counter, mirroring Claude Code's `#N`.
 paste_counter=0
 
@@ -82,7 +97,7 @@ paste_counter=0
 # buffer wraps (a partial `\033[J` leaves stale wrapped rows above the cursor).
 # The terminal wraps the buffer when it exceeds the pane width, producing the
 # reflowed input box the #869 needle must survive.
-render() {
+render_default() {
   printf '\033[H\033[2J'
   printf '%s\r\n' "$READY_MARKER"
   if [ -n "$last_submitted" ]; then
@@ -91,7 +106,63 @@ render() {
   printf '%s%s' "$PROMPT_PREFIX" "$buffer"
 }
 
-render
+# Initial #1769 frame: the SAME dense marker shape the journey previously
+# printed from its inert sleep pane, plus the real fake-agent input surface in
+# the lower rows. Enter the alternate buffer just like the old #1153 fixture.
+render_issue1153_initial() {
+  issue1153_full_render_count=$((issue1153_full_render_count + 1))
+  printf '\033[?1049h\033[H\033[2J'
+  row=1
+  while [ "$row" -le "$ISSUE1153_FRAME_ROWS" ]; do
+    # Keep every logical row narrower than the smallest journey viewport. This
+    # avoids manufacturing a soft-wrap mismatch in the #966 line-hash oracle:
+    # the fixture is proving missing ROWS, not terminal reflow.
+    printf '\033[%d;1H%s row %d render %d' \
+      "$row" "$ISSUE1153_FRAME_MARKER" "$row" "$issue1153_full_render_count"
+    row=$((row + 1))
+  done
+  render_issue1153_incremental
+}
+
+# Later #1769 renders MUST NOT clear/home or repaint the upper frame. Resolve the
+# current PTY height on each render (the app may resize after attach), reserve
+# the bottom three rows, and update only those rows. `last_submitted_display`
+# retains Claude's collapsed multi-line chip instead of printing the real body,
+# so a multi-line submit can never scroll/repaint the upper frame.
+render_issue1153_incremental() {
+  size="$(stty size 2>/dev/null || printf '40 80')"
+  rows="${size%% *}"
+  case "$rows" in
+    ''|*[!0-9]*) rows=40 ;;
+  esac
+  if [ "$rows" -lt $((ISSUE1153_FRAME_ROWS + 3)) ]; then
+    rows=$((ISSUE1153_FRAME_ROWS + 3))
+  fi
+  ready_row=$((rows - 2))
+  submitted_row=$((rows - 1))
+  prompt_row="$rows"
+
+  printf '\033[%d;1H\033[2K%s' "$ready_row" "$READY_MARKER"
+  printf '\033[%d;1H\033[2K' "$submitted_row"
+  if [ -n "$last_submitted_display" ]; then
+    printf '%s%s' "$SUBMIT_PREFIX" "$last_submitted_display"
+  fi
+  printf '\033[%d;1H\033[2K%s%s' "$prompt_row" "$PROMPT_PREFIX" "$buffer"
+}
+
+render() {
+  if [ "$RENDER_MODE" = "$ISSUE1153_RENDER_MODE" ]; then
+    render_issue1153_incremental
+  else
+    render_default
+  fi
+}
+
+if [ "$RENDER_MODE" = "$ISSUE1153_RENDER_MODE" ]; then
+  render_issue1153_initial
+else
+  render_default
+fi
 
 # Bash ANSI-C quoting ($'...') preserves the control byte EXACTLY. Command
 # substitution `$(printf '\r')` would strip the trailing CR, leaving an empty
@@ -172,7 +243,7 @@ handle_esc() {
       # Extra-line count = number of newlines, matching Claude Code's `+M`.
       extra=$(printf '%s' "$PASTE_BODY" | tr -cd "$LF" | wc -c | tr -d ' ')
       paste_counter=$((paste_counter + 1))
-      buffer="$buffer[Pasted text #$paste_counter +$extra lines]"
+      buffer="${buffer}[Pasted text #$paste_counter +$extra lines]"
       submit_buffer="$submit_buffer$PASTE_BODY"
     else
       buffer="$buffer$PASTE_BODY"
@@ -195,6 +266,7 @@ process_byte() {
       # submitted text is the REAL content (submit_buffer), so a #1687 collapsed
       # paste still lands its real multi-line body.
       last_submitted="$submit_buffer"
+      last_submitted_display="$buffer"
       buffer=""
       submit_buffer=""
       dirty=1

@@ -18,6 +18,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
@@ -33,8 +34,11 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -59,10 +63,12 @@ import java.io.File
  * ## What this journey PROVES (D33 / G10 — real path, guaranteed-live transport)
  *
  * Seed a tmux session running a FULL-screen frame, attach, then:
- *  1. Inject the >3-line HALF-BLACK overpaint (clear + a handful of live lines, NO frame marker)
- *     straight into the SAME live emulator the app renders — the REMOTE tmux grid keeps the full
- *     frame, so the transport is GUARANTEED LIVE.
- *  2. Drive the REAL production send path with a WITH-ATTACHMENT (multi-line) payload.
+ *  1. Drive the REAL production send path with a WITH-ATTACHMENT (multi-line) payload against an
+ *     acknowledgement-capable agent pane, and prove the observed ack belongs to this exact live
+ *     pane/client/session/generation.
+ *  2. Before the Send reconcile's bounded settle ticks, inject the >3-line HALF-BLACK overpaint
+ *     (clear + a handful of live lines, NO frame marker) straight into the SAME live emulator the
+ *     app renders — the REMOTE tmux grid keeps the full frame, so the transport is GUARANTEED LIVE.
  *  3. Assert the SEND heal REPAINTS the visible render to MATCH tmux's authoritative `capture-pane`
  *     (the marker re-renders across the upper rows AND the render is no longer a lost-frame vs the
  *     capture — [TerminalSurfaceState.visibleRenderLostFrameVsCapture] goes TRUE→FALSE across the
@@ -81,11 +87,12 @@ import java.io.File
  * `shortPromptDoesNotThrashHeal`). So the final acceptance compares visible-vs-capture, not a
  * viewport-relative row-fraction that a legitimate restored frame fails on a tall CI viewport.
  *
- * The steady-state stale-render watchdog is DISABLED for the run
- * ([TmuxSessionViewModel.setStaleRenderWatchdogAutoArmEnabledForTest] false BEFORE attach), so ONLY
- * the immediate SEND heal can green the pane — proving the fix is on the send path, not a slow
- * background watchdog tick. The half-black is injected SYNTHETICALLY (the CI swiftshader AVD can't
- * run a real agent redraw) and the load-bearing assertions HARD-fail otherwise — no
+ * The steady-state stale-render watchdog is PAUSED for the run
+ * ([TmuxSessionViewModel.pauseActivePaneStaleRenderWatchdogForTest] disables future auto-arms and
+ * cancels/joins the attach-owned loop), so ONLY the immediate SEND heal can green the pane —
+ * proving the fix is on the send path, not a slow background watchdog tick. The half-black is
+ * injected SYNTHETICALLY (the CI swiftshader AVD can't run a real agent redraw) and the
+ * load-bearing assertions HARD-fail otherwise — no
  * `Assume.assumeFalse(isRunningOnCi())` self-skip (the #780/#1138 model).
  *
  * Runs on the per-PR emulator-journey job once wired into `scripts/ci-journey-suite.sh`.
@@ -105,6 +112,7 @@ class SendWithAttachmentStaysVisibleE2eTest {
 
     private lateinit var fixtureKey: String
     private lateinit var hostRowTag: String
+    private var diagnostics: RecordingDiagnosticSink? = null
 
     private suspend fun seedBeforeLaunch() {
         BackgroundGraceTestOverride.setForTest(null)
@@ -115,8 +123,15 @@ class SendWithAttachmentStaysVisibleE2eTest {
         hostRowTag = seedDockerHost(key)
     }
 
+    @Before
+    fun setUp() {
+        diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+    }
+
     @After
     fun tearDown() {
+        diagnostics?.close()
+        diagnostics = null
         BackgroundGraceTestOverride.setForTest(null)
         if (::fixtureKey.isInitialized) {
             runCatching { runBlocking { cleanupRemoteTmuxSession(fixtureKey) } }
@@ -127,23 +142,37 @@ class SendWithAttachmentStaysVisibleE2eTest {
     fun sendWithAttachmentHealsHalfBlackActivePane() { runBlocking {
         attachSeededTmuxSession(hostRowTag)
 
-        // Disable the steady-state stale-render watchdog for the run BEFORE the pane streams, so
-        // ONLY the immediate send heal can green a half-black pane (a clean discriminator).
-        disableStaleRenderWatchdog()
+        // Atomically disable future auto-arms AND cancel/join the watchdog that attach already
+        // started. Once this returns, ONLY the immediate send heal can green a half-black pane.
+        pauseAndProveStaleRenderWatchdogQuiescent()
 
         // Baseline: the full frame is on screen and the session is Connected.
         waitForVisibleTerminal("initial full frame") { frameRowCount(it) >= MIN_RESTORED_FRAME_ROWS }
         waitForConnected("initial attach")
         capturePaintedRows("issue1153-00-attached")
 
-        // tmux's AUTHORITATIVE grid (via `capture-pane -p`) — the full frame. The test NEVER mutates
-        // the REMOTE session (the half-black is injected LOCAL-only), so this authoritative capture
-        // holds the full frame throughout and is the ground truth the send heal must repaint back to.
+        // tmux's AUTHORITATIVE grid (via `capture-pane -p`) — the full frame. The half-black is
+        // injected LOCAL-only, and the opt-in fake agent updates only its lower input rows, so the
+        // REMOTE upper frame remains intact throughout and is the ground truth the send heal must
+        // repaint back to.
         val authoritativeCapture = captureRemoteTmuxPane()
         assertTrue(
             "sanity: tmux's authoritative capture must hold the full frame marker; capture:\n$authoritativeCapture",
             authoritativeCapture.contains(FRAME_MARKER),
         )
+
+        // Keep the activity RESUMED across the send + heal window so a loaded CI emulator's
+        // spurious onStop cannot park/clear the runtime mid-send (the runtime the heal runs on
+        // must stay alive through drive+assert).
+        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+
+        // ===== Drive the REAL production send path with a WITH-ATTACHMENT (multi-line) payload. =====
+        // Issue #1769: #1739 made missing acknowledgement authoritative. Snapshot the exact live
+        // pane/runtime BEFORE the send, clear diagnostics, and require the one resulting ack to
+        // bind to that same pane, target session, client, and generation. There is no durable queue
+        // row in this direct VM call; the TmuxPaneState is the authoritative current row.
+        val ackAuthority = snapshotAckAuthority()
+        diagnostics!!.clear()
 
         // ===== Inject the >3-line HALF-BLACK overpaint on the LIVE, retained emulator. =====
         // Clear + a handful of live lines (NO frame marker), leaving a large black band. The
@@ -161,12 +190,19 @@ class SendWithAttachmentStaysVisibleE2eTest {
                 append("$esc[$row;1H$HALF_BLACK_MARKER live line $line after send overpaint")
             }
         }
-        feedFrameToEmulator(halfBlack)
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        capturePaintedRows("issue1153-01-half-black")
+        val sendAndInject = driveAcknowledgedSendThenInject(
+            authority = ackAuthority,
+            halfBlack = halfBlack,
+            authoritativeCapture = authoritativeCapture,
+        )
+        val ackEvent = sendAndInject.ack
+        val injected = sendAndInject.halfBlack
+        // Written before the heal oracle so the disabled-heal mutation still proves ack stayed
+        // green while the load-bearing final render assertion went red.
+        writeAckAuthority(ackAuthority, ackEvent)
 
         // ----- Symptom precondition: the injected pane is the >3-line HALF-BLACK send state. -----
-        val afterInject = visibleTerminalText()
+        val afterInject = injected.visibleText
         assertFalse(
             "the injected half-black must have WIPED the full frame (marker gone from the visible " +
                 "grid); visible:\n$afterInject",
@@ -180,14 +216,14 @@ class SendWithAttachmentStaysVisibleE2eTest {
         assertFalse(
             "precondition (#1153 RED gap): the pane is NOT the ≤3-line partial-black the pre-#1153 " +
                 "send heal covered",
-            activePanePartiallyBlank(),
+            injected.partiallyBlank,
         )
         // The cheap send-heal pre-check flags the half-black as worth paying for the authoritative
         // `capture-pane` diff (a >3-line half-black is at/under the 0.5 live-fraction cost-gate).
         assertTrue(
             "precondition: the send-heal pre-check must flag the half-black render as sparse enough " +
                 "to pay for the authoritative capture diff",
-            activePaneLooksSparse(),
+            injected.looksSparse,
         )
         // LOAD-BEARING precondition (RED): the injected half-black render is a genuine LOST FRAME
         // vs tmux's authoritative capture — tmux holds MATERIALLY MORE than the render shows. This
@@ -196,25 +232,16 @@ class SendWithAttachmentStaysVisibleE2eTest {
         assertTrue(
             "precondition: the half-black render must be a LOST FRAME vs tmux's authoritative " +
                 "capture (tmux holds materially more than the render shows)",
-            activePaneLostFrameVsCapture(authoritativeCapture),
+            injected.lostFrameVsCapture,
         )
 
         // ----- DISCRIMINATOR: the transport is GUARANTEED LIVE (a render bug, not a drop). -----
         assertTrue(
-            "the transport must stay Connected with a half-black render, observed=${currentConnectionStatus()}",
-            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+            "the transport must stay Connected with a half-black render, observed=${injected.connectionStatus}",
+            injected.connectionStatus is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
-        assertFalse("the tmux client must NOT be disconnected", clientDisconnected())
+        assertFalse("the tmux client must NOT be disconnected", injected.clientDisconnected)
         assertNoVisibleReconnect("half-black (no reconnect surface)")
-
-        // Keep the activity RESUMED across the send + heal window so a loaded CI emulator's
-        // spurious onStop cannot park/clear the runtime mid-send (the runtime the heal runs on
-        // must stay alive through drive+assert).
-        runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
-
-        // ===== Drive the REAL production send path with a WITH-ATTACHMENT (multi-line) payload. =====
-        val sendResult = driveWithAttachmentSend()
-        assertTrue("the with-attachment send itself must succeed", sendResult)
 
         // ----- GREEN: the SEND heal must restore the FULL frame (the upper black band repainted). -----
         val visibleAfter = waitForVisibleTerminal(
@@ -251,60 +278,229 @@ class SendWithAttachmentStaysVisibleE2eTest {
                 "observed=${currentConnectionStatus()}",
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
-        writeSummary()
+        writeSummary(ackAuthority, ackEvent)
     } }
 
     // ---------------------------------------------------------------- Drive the send
 
     /**
-     * Drive the REAL production send path with a WITH-ATTACHMENT (multi-line) payload. Neutralizes
-     * the #869 submit-ack gate (against the idle fixture the paste never echoes, so the ack never
-     * matches) so the send returns promptly, then the internal
-     * [TmuxSessionViewModel.sendAgentPayloadToPaneResult] runs — including scheduling the post-send
-     * overpaint heal this journey exercises.
+     * Drive the REAL production send path with a WITH-ATTACHMENT (multi-line) payload. The opt-in
+     * fake-agent fixture emits the established collapsed-paste chip, so the #1739 authoritative
+     * ack gate must observe the exact current runtime before this returns success and schedules the
+     * post-send overpaint heal this journey exercises.
      */
-    private fun driveWithAttachmentSend(): Boolean {
-        var ok = false
+    private suspend fun driveAcknowledgedSendThenInject(
+        authority: AckAuthoritySnapshot,
+        halfBlack: String,
+        authoritativeCapture: String,
+    ): AcknowledgedSendAndInjection {
+        var sendVm: TmuxSessionViewModel? = null
+        var sendPaneId: String? = null
+        var sendView: TerminalView? = null
         compose.activityRule.scenario.onActivity { activity ->
             val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
             val paneId = vm.panes.value.firstOrNull()?.paneId ?: return@onActivity
+            check(paneId == authority.paneId) {
+                "active pane changed before send: expected=${authority.paneId} actual=$paneId"
+            }
             vm.setAgentSubmitEnterDelayForTest(0)
             vm.setAgentSubmitAckTimeoutForTest(ACK_TIMEOUT_MS)
-            ok = runBlocking {
-                vm.sendAgentPayloadToPaneResult(paneId, WITH_ATTACHMENT_PAYLOAD, AgentKind.Codex).isSuccess
+            sendVm = vm
+            sendPaneId = paneId
+            sendView = checkNotNull(activity.window.decorView.findTerminalView()) {
+                "expected the live TerminalView before send"
             }
         }
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        return ok
+        val vm = checkNotNull(sendVm) { "expected a live ViewModel before send" }
+        val paneId = checkNotNull(sendPaneId) { "expected an active pane before send" }
+        val view = checkNotNull(sendView) { "expected a retained TerminalView before send" }
+
+        // The production acknowledgement capture is owned by bridgeScope (Android Main). Invoke
+        // the suspending send from the instrumentation coroutine so Main remains free to complete
+        // that capture; runBlocking inside onActivity would deterministically starve the exact ack.
+        val result = vm.sendAgentPayloadToPaneResult(
+            paneId,
+            WITH_ATTACHMENT_PAYLOAD,
+            AgentKind.Codex,
+        )
+        assertTrue(
+            "the with-attachment send itself must succeed through an observed acknowledgement; " +
+                "failure=${result.exceptionOrNull()}",
+            result.isSuccess,
+        )
+        val postSendCapture = captureRemoteTmuxPane()
+        assertTrue(
+            "the opt-in fake agent must retain its one initial full frame after send; a later " +
+                "fixture-owned full redraw could mask the production Send heal.\n$postSendCapture",
+            postSendCapture.contains(INITIAL_FULL_RENDER_SENTINEL),
+        )
+
+        var outcome: AcknowledgedSendAndInjection? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            val currentVm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            check(currentVm === vm) {
+                "activity/ViewModel changed between exact acknowledgement and injection"
+            }
+            val ack = assertExactlyCurrentAckObserved(authority, vm)
+            // Back on Android Main immediately after the send returns: the Send reconcile has a
+            // delayed first tick on this dispatcher, so the synthetic overpaint lands only AFTER
+            // success + exact-current ack and BEFORE that tick. No fixed sleep participates.
+            val injected = injectHalfBlackAndSnapshot(
+                activity = activity,
+                vm = vm,
+                view = view,
+                frame = halfBlack,
+                authoritativeCapture = authoritativeCapture,
+            )
+            outcome = AcknowledgedSendAndInjection(ack = ack, halfBlack = injected)
+        }
+        val captured = checkNotNull(outcome) {
+            "expected to send, acknowledge, and inject on the live activity"
+        }
+        writeBitmap("issue1153-01-half-black-viewport", captured.halfBlack.bitmap)
+        captured.halfBlack.bitmap.recycle()
+        writeText("issue1153-01-half-black-visible-terminal.txt", captured.halfBlack.visibleText)
+        return captured
     }
 
-    private fun disableStaleRenderWatchdog() {
+    private data class AcknowledgedSendAndInjection(
+        val ack: RecordedDiagnosticEvent,
+        val halfBlack: HalfBlackSnapshot,
+    )
+
+    private data class AckAuthoritySnapshot(
+        val paneRow: com.pocketshell.app.tmux.TmuxPaneState,
+        val paneId: String,
+        val paneSessionId: String,
+        val targetSessionName: String,
+        val clientHash: Int,
+        val generation: Long,
+    )
+
+    private fun snapshotAckAuthority(): AckAuthoritySnapshot {
+        var snapshot: AckAuthoritySnapshot? = null
         compose.activityRule.scenario.onActivity { activity ->
-            ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-                .setStaleRenderWatchdogAutoArmEnabledForTest(false)
+            val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            snapshot = snapshotAckAuthority(vm)
+        }
+        return checkNotNull(snapshot).also {
+            assertEquals(
+                "fixture sanity: the current target must be the seeded render-heal session",
+                SESSION_NAME,
+                it.targetSessionName,
+            )
         }
     }
 
-    private fun activePanePartiallyBlank(): Boolean {
-        var hit = false
-        compose.activityRule.scenario.onActivity { activity ->
-            hit = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-                .panes.value.firstOrNull()
-                ?.terminalState
-                ?.visibleScreenIsPartiallyBlank() ?: false
+    private fun snapshotAckAuthority(vm: TmuxSessionViewModel): AckAuthoritySnapshot {
+        val pane = checkNotNull(vm.panes.value.firstOrNull()) {
+            "expected the acknowledged send to have a current pane row"
         }
-        return hit
+        val runtime = checkNotNull(vm.currentRuntimeGuardForTest()) {
+            "expected the acknowledged send to have a current live runtime"
+        }
+        return AckAuthoritySnapshot(
+            paneRow = pane,
+            paneId = pane.paneId,
+            paneSessionId = pane.sessionId,
+            targetSessionName = runtime.target.sessionName,
+            clientHash = System.identityHashCode(runtime.client),
+            generation = runtime.generation,
+        )
     }
 
-    private fun activePaneLooksSparse(): Boolean {
-        var hit = false
+    private fun assertExactlyCurrentAckObserved(
+        before: AckAuthoritySnapshot,
+        vm: TmuxSessionViewModel,
+    ): RecordedDiagnosticEvent {
+        val acks = diagnostics!!.eventsNamed("agent_submit_ack")
+        assertEquals(
+            "the with-attachment send must emit exactly one authoritative agent_submit_ack; " +
+                "events=$acks",
+            1,
+            acks.size,
+        )
+        val ack = acks.single()
+        assertEquals(
+            "the one ack must be observed, never timeout/fallback",
+            "ack_observed",
+            ack.fields["result"],
+        )
+        assertEquals("the ack must belong to the snapshotted pane row", before.paneId, ack.fields["pane"])
+        assertEquals(
+            "the ack must belong to the snapshotted target session",
+            before.targetSessionName,
+            ack.fields["session"],
+        )
+        assertEquals("the ack must use the snapshotted client", before.clientHash, ack.fields["clientHash"])
+        assertEquals(
+            "the ack current client must still be the snapshotted client",
+            before.clientHash,
+            ack.fields["currentClientHash"],
+        )
+        assertEquals("the ack must use the snapshotted generation", before.generation, ack.fields["generation"])
+        assertEquals(
+            "the ack current generation must still be the snapshotted generation",
+            before.generation,
+            ack.fields["currentGeneration"],
+        )
+
+        val after = snapshotAckAuthority(vm)
+        assertSame(
+            "the acknowledged send must leave the exact active pane row authoritative",
+            before.paneRow,
+            after.paneRow,
+        )
+        assertEquals("the acknowledged send must retain the active pane id", before.paneId, after.paneId)
+        assertEquals(
+            "the acknowledged send must retain the active pane's tmux session id",
+            before.paneSessionId,
+            after.paneSessionId,
+        )
+        assertEquals(
+            "the acknowledged send must retain the target session",
+            before.targetSessionName,
+            after.targetSessionName,
+        )
+        assertEquals("the acknowledged send must retain the live client", before.clientHash, after.clientHash)
+        assertEquals(
+            "the acknowledged send must retain the connect generation",
+            before.generation,
+            after.generation,
+        )
+        return ack
+    }
+
+    private suspend fun pauseAndProveStaleRenderWatchdogQuiescent() {
+        var vm: TmuxSessionViewModel? = null
         compose.activityRule.scenario.onActivity { activity ->
-            hit = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-                .panes.value.firstOrNull()
-                ?.terminalState
-                ?.renderLooksSuspect() ?: false
+            vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
         }
-        return hit
+        val currentVm = checkNotNull(vm) { "expected a live ViewModel before pausing watchdog" }
+        currentVm.pauseActivePaneStaleRenderWatchdogForTest()
+        val currentJob = currentVm.staleRenderWatchdogJobForTest()
+        assertFalse(
+            "the attach-owned stale-render watchdog must be inactive before the send mutation window",
+            currentJob?.isActive == true,
+        )
+        assertTrue(
+            "the attach-owned stale-render watchdog must be fully joined before the send mutation window",
+            currentJob == null || currentJob.isCompleted,
+        )
+        writeText(
+            "issue1769-watchdog-quiescence.txt",
+            buildString {
+                appendLine("issue=1769")
+                appendLine("seam=pauseActivePaneStaleRenderWatchdogForTest")
+                appendLine("future_auto_arm=false")
+                appendLine("current_job_present=${currentJob != null}")
+                appendLine("current_job_active=${currentJob?.isActive ?: false}")
+                appendLine("current_job_completed=${currentJob?.isCompleted ?: true}")
+                appendLine("current_job_cancelled=${currentJob?.isCancelled ?: false}")
+                appendLine("automatic_watchdog_quiescent=true")
+                appendLine("sole_heal_owner=ReconcileReason.Send")
+            },
+        )
     }
 
     /**
@@ -326,30 +522,68 @@ class SendWithAttachmentStaysVisibleE2eTest {
         return hit
     }
 
-    private fun clientDisconnected(): Boolean {
-        var disconnected = false
-        compose.activityRule.scenario.onActivity { activity ->
-            disconnected = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-                .clientDisconnectedForTest()
-        }
-        return disconnected
-    }
-
     // ---------------------------------------------------------------- Emulator feed
 
-    private fun feedFrameToEmulator(frame: String) {
+    /**
+     * Append the synthetic overpaint and snapshot every load-bearing precondition before releasing
+     * Android Main. The Send reconcile also runs on Main and begins after a 350 ms settle delay;
+     * taking one atomic snapshot prevents a contended emulator from letting that legitimate heal
+     * run between six separate test-thread reads and erasing the RED precondition evidence.
+     */
+    private fun injectHalfBlackAndSnapshot(
+        activity: MainActivity,
+        vm: TmuxSessionViewModel,
+        view: TerminalView,
+        frame: String,
+        authoritativeCapture: String,
+    ): HalfBlackSnapshot {
         val bytes = frame.toByteArray(Charsets.UTF_8)
-        var fed = false
-        compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            val emulator = view.mEmulator ?: return@onActivity
-            emulator.append(bytes, bytes.size)
-            view.invalidate()
-            fed = true
+        val pane = checkNotNull(vm.panes.value.firstOrNull()) {
+            "expected a current pane for the half-black injection"
         }
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        assertTrue("expected to feed the half-black frame to the live emulator", fed)
+        check(view.isAttachedToWindow && view.rootView === activity.window.decorView.rootView) {
+            "expected the pre-send TerminalView to remain attached through exact acknowledgement"
+        }
+        val emulator = checkNotNull(view.mEmulator) {
+            "expected the retained live emulator for the half-black injection"
+        }
+        val beforeAppend = emulator.screen.visibleScreenText
+        emulator.append(bytes, bytes.size)
+        view.invalidate()
+        val afterAppend = emulator.screen.visibleScreenText
+        check(afterAppend.contains(HALF_BLACK_MARKER)) {
+            "half-black bytes did not land in the retained emulator: " +
+                "rows=${emulator.mRows} columns=${emulator.mColumns} " +
+                "before=${beforeAppend.take(200)} after=${afterAppend.take(200)}"
+        }
+
+        check(view.width > 0 && view.height > 0) {
+            "expected non-zero TerminalView bounds for the half-black artifact"
+        }
+        val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also {
+            view.draw(Canvas(it))
+        }
+        return HalfBlackSnapshot(
+            visibleText = afterAppend,
+            partiallyBlank = pane.terminalState.visibleScreenIsPartiallyBlank(),
+            looksSparse = pane.terminalState.renderLooksSuspect(),
+            lostFrameVsCapture =
+                pane.terminalState.visibleRenderLostFrameVsCapture(authoritativeCapture),
+            connectionStatus = vm.connectionStatus.value,
+            clientDisconnected = vm.clientDisconnectedForTest(),
+            bitmap = bitmap,
+        )
     }
+
+    private data class HalfBlackSnapshot(
+        val visibleText: String,
+        val partiallyBlank: Boolean,
+        val looksSparse: Boolean,
+        val lostFrameVsCapture: Boolean,
+        val connectionStatus: TmuxSessionViewModel.ConnectionStatus,
+        val clientDisconnected: Boolean,
+        val bitmap: Bitmap,
+    )
 
     // ---------------------------------------------------------------- Render capture
 
@@ -474,7 +708,7 @@ class SendWithAttachmentStaysVisibleE2eTest {
         var text = ""
         compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
-                .findTerminalView()?.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+                .findTerminalView()?.currentSession?.emulator?.screen?.visibleScreenText.orEmpty()
         }
         return text
     }
@@ -536,25 +770,22 @@ class SendWithAttachmentStaysVisibleE2eTest {
     }
 
     /**
-     * Seed a tmux session running a FULL-screen frame: ~20 marker rows the app renders on attach
-     * (dense enough that tmux's authoritative `capture-pane` holds MATERIALLY MORE than the
-     * injected half-black band, so the send heal has a real frame to restore).
+     * Seed the real acknowledgement-capable fake-agent in its opt-in #1769 incremental mode.
+     * Its initial render paints ~20 marker rows (dense enough that tmux's authoritative
+     * `capture-pane` holds MATERIALLY MORE than the injected half-black band), while later
+     * paste/submit renders touch only the lower input rows and can never self-heal the upper band.
      */
     private suspend fun seedFullFrameSession(key: String) {
-        val e = "\\033"
-        val frame = buildString {
-            append("$e[?1049h")   // enter alternate screen buffer
-            append("$e[2J$e[H")   // clear + home
-            for (row in 1..FULL_FRAME_ROWS) {
-                append("$e[$row;1H$FRAME_MARKER row $row : real agent conversation content here padding")
-            }
-        }
-        val payload = "printf '$frame'; while true; do sleep 3600; done"
+        val payload =
+            "POCKETSHELL_FAKE_AGENT_RENDER_MODE=$FAKE_AGENT_RENDER_MODE " +
+                "exec /usr/local/bin/pocketshell-fake-agent"
         val script = buildString {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
-            appendLine("tmux new-session -d -s ${shellQuote(SESSION_NAME)} ${shellQuote(payload)}")
-            appendLine("sleep 2")
+            appendLine(
+                "tmux new-session -d -s ${shellQuote(SESSION_NAME)} -x 80 -y 40 " +
+                    shellQuote(payload),
+            )
             appendLine("tmux list-sessions")
         }
         val result = SshConnection.connect(
@@ -632,20 +863,57 @@ class SendWithAttachmentStaysVisibleE2eTest {
         return file
     }
 
-    private fun writeSummary(): File =
+    private fun writeAckAuthority(
+        authority: AckAuthoritySnapshot,
+        ack: RecordedDiagnosticEvent,
+    ): File =
+        writeText(
+            "issue1769-ack-authority.txt",
+            buildString {
+                appendLine("issue=1769")
+                appendLine("pane=${authority.paneId}")
+                appendLine("pane_session_id=${authority.paneSessionId}")
+                appendLine("target_session=${authority.targetSessionName}")
+                appendLine("client_hash=${authority.clientHash}")
+                appendLine("generation=${authority.generation}")
+                appendLine("ack_name=${ack.name}")
+                appendLine("ack_fields=${ack.fields}")
+                appendLine("ack_exact_current_runtime=true")
+            },
+        )
+
+    private fun writeSummary(
+        authority: AckAuthoritySnapshot,
+        ack: RecordedDiagnosticEvent,
+    ): File =
         writeText(
             "issue1153-summary.txt",
             buildString {
                 appendLine("test=SendWithAttachmentStaysVisibleE2eTest")
                 appendLine("issue=1153")
-                appendLine("fixture=tests/docker agents ($DEFAULT_HOST:$DEFAULT_PORT), full-screen frame")
+                appendLine("fixture_correction_issue=1769")
+                appendLine(
+                    "fixture=tests/docker agents ($DEFAULT_HOST:$DEFAULT_PORT), " +
+                        "ack-capable incremental fake-agent",
+                )
                 appendLine("running_on_ci=${TerminalTestTimeouts.isRunningOnCi()}")
                 appendLine("session=$SESSION_NAME")
                 appendLine("frame_marker=$FRAME_MARKER")
-                appendLine("watchdog=disabled (only the SEND heal can green the pane)")
+                appendLine("ack_pane=${authority.paneId}")
+                appendLine("ack_pane_session_id=${authority.paneSessionId}")
+                appendLine("ack_target_session=${authority.targetSessionName}")
+                appendLine("ack_client_hash=${authority.clientHash}")
+                appendLine("ack_generation=${authority.generation}")
+                appendLine("ack_result=${ack.fields["result"]}")
+                appendLine("ack_exact_current_runtime=true")
                 appendLine(
-                    "scenario=attach a full-screen frame, inject a >3-line HALF-BLACK overpaint on " +
-                        "the LIVE emulator, drive a REAL with-attachment (multi-line) send, assert " +
+                    "watchdog=paused+joined before mutation " +
+                        "(only the SEND heal can green the pane)",
+                )
+                appendLine(
+                    "scenario=attach a full-screen agent frame, drive a REAL acknowledged " +
+                        "with-attachment (multi-line) send, inject a >3-line HALF-BLACK overpaint " +
+                        "on the LIVE emulator before the Send settle ticks, assert " +
                         "the SEND heal restores the full frame with the transport still Connected",
                 )
                 appendLine(
@@ -682,21 +950,20 @@ class SendWithAttachmentStaysVisibleE2eTest {
         const val DEVICE_DIR_NAME: String = "issue1153-send-with-attachment-half-black"
         const val SESSION_NAME: String = "issue1153-send-halfblack"
         const val FRAME_MARKER: String = "ISSUE1153-FRAME"
+        const val INITIAL_FULL_RENDER_SENTINEL: String = "ISSUE1153-FRAME row 1 render 1"
         const val HALF_BLACK_MARKER: String = "ISSUE1153-HALFBLACK"
+        const val FAKE_AGENT_RENDER_MODE: String = "issue1153-incremental"
 
         // NOTE: DEFAULT_HOST / DEFAULT_PORT / DEFAULT_USER are the pool-aware package-level vals
         // from AndroidSshTestFixtures.kt (backed by the `agentsPort` instrumentation arg), NOT
         // hardcoded here — so this journey runs correctly under both single-lane (2222) and
         // `--pool` (self-allocated fixture port) modes.
 
-        // A dense full-screen frame so tmux holds materially more than the injected half-black band.
-        const val FULL_FRAME_ROWS: Int = 20
-
         // >3 live lines (so NOT the ≤3-line partial-black) yet a small fraction of any real phone
         // viewport (≥ ~24 rows) — the >3-line half-black band the pre-#1153 heal missed.
         const val HALF_BLACK_LIVE_LINES: Int = 6
 
-        // Rows between successive live lines (a blank row between each) so `transcriptText`
+        // Rows between successive live lines (a blank row between each) so visible-screen text
         // cannot fold adjacent short lines into one logical line, and the gaps form the band.
         const val HALF_BLACK_ROW_STRIDE: Int = 2
 

@@ -57,12 +57,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.layout.findRootCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -100,6 +104,10 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -405,7 +413,11 @@ public fun PromptComposerSheet(
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
-        modifier = modifier,
+        // Issue #1744: measure Material's real Surface and move a settled partial
+        // anchor only when that Surface crosses this modal root's exact IME
+        // boundary. The policy owns only expansions it initiated, so a
+        // user-expanded sheet is never collapsed when the keyboard hides.
+        modifier = modifier.composerImeAnchorPolicy(sheetState),
         // Issue #682: the composer is a CONTENT-HEIGHT (wrap-content) sheet that
         // sits directly above the soft keyboard, like a normal chat composer.
         //
@@ -549,6 +561,107 @@ public fun PromptComposerSheet(
                 java.util.Arrays.fill(key, ' ')
                 showApiKeyDialog = false
             },
+        )
+    }
+}
+
+/**
+ * Keeps a saturated partial composer above its modal root's exact IME boundary.
+ *
+ * Material appends its anchored translation after the caller modifier. That
+ * means [onGloballyPositioned] gives us the real Surface height and root size,
+ * while [SheetState.requireOffset] is the authoritative displayed Surface top.
+ * Combining those values avoids both a device-specific offset and the stale
+ * local coordinates that originally hid the 28 px #1744 overlap.
+ *
+ * The effect is stable for the lifetime of [sheetState]. Its snapshot collector
+ * serializes Material animations instead of restarting (and cancelling) them
+ * whenever `currentValue` / `targetValue` changes during an animation.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+private fun Modifier.composerImeAnchorPolicy(
+    sheetState: SheetState,
+): Modifier = composed {
+    val density = LocalDensity.current
+    val imeInsets = WindowInsets.ime
+    var geometry by remember(sheetState) {
+        mutableStateOf<ComposerModalSurfaceGeometry?>(null)
+    }
+    var autoExpandedFromPartial by remember(sheetState) { mutableStateOf(false) }
+    var preservePreImeExpanded by remember(sheetState) { mutableStateOf(false) }
+
+    LaunchedEffect(sheetState, density) {
+        snapshotFlow {
+            val imeBottomPx = imeInsets.getBottom(density)
+            val surfaceTopPx = runCatching { sheetState.requireOffset() }.getOrNull()
+            ComposerImeAnchorSnapshot(
+                imeVisible = imeBottomPx > 0,
+                overlapsKeyboard = composerModalSurfaceOverlapsIme(
+                    geometry = geometry,
+                    surfaceTopPx = surfaceTopPx,
+                    imeBottomPx = imeBottomPx,
+                ),
+                currentValue = sheetState.currentValue,
+                targetValue = sheetState.targetValue,
+                hasPartiallyExpandedState = sheetState.hasPartiallyExpandedState,
+                autoExpandedFromPartial = autoExpandedFromPartial,
+            )
+        }.collect { snapshot ->
+            preservePreImeExpanded = updateComposerPreImeExpanded(
+                previous = preservePreImeExpanded,
+                snapshot = snapshot,
+            )
+            when (decideComposerImeAnchorAction(snapshot)) {
+                ComposerImeAnchorAction.None -> Unit
+                ComposerImeAnchorAction.ExpandFromPartial -> {
+                    try {
+                        // Isolate Material's mutation job from this long-lived
+                        // collector. A user drag cancels only this supervised
+                        // animation, leaving the collector active; composition
+                        // disposal still cancels both scopes.
+                        supervisorScope { sheetState.expand() }
+                        autoExpandedFromPartial = composerImeOwnsExpansionAfter(
+                            ComposerImeExpansionOutcome.Completed,
+                            preservePreImeExpanded = preservePreImeExpanded,
+                        )
+                    } catch (cancelled: CancellationException) {
+                        val effectDisposed = !currentCoroutineContext().isActive
+                        autoExpandedFromPartial = composerImeOwnsExpansionAfter(
+                            if (effectDisposed) {
+                                ComposerImeExpansionOutcome.EffectDisposed
+                            } else {
+                                ComposerImeExpansionOutcome.InterruptedByUser
+                            },
+                            preservePreImeExpanded = preservePreImeExpanded,
+                        )
+                        // Material's mutation mutex cancels expand() when a
+                        // user drag wins. Continue observing that user-owned
+                        // result, but never swallow real effect disposal.
+                        if (effectDisposed) throw cancelled
+                    }
+                }
+                ComposerImeAnchorAction.RestorePartial -> {
+                    // Release ownership before animating down. If a user's
+                    // gesture supersedes this animation, their resulting
+                    // expanded state remains user-owned.
+                    autoExpandedFromPartial = false
+                    try {
+                        supervisorScope { sheetState.partialExpand() }
+                    } catch (cancelled: CancellationException) {
+                        if (!currentCoroutineContext().isActive) throw cancelled
+                    }
+                }
+                ComposerImeAnchorAction.ReleaseOwnership -> {
+                    autoExpandedFromPartial = false
+                }
+            }
+        }
+    }
+
+    onGloballyPositioned { coordinates ->
+        geometry = ComposerModalSurfaceGeometry(
+            rootBottomPx = coordinates.findRootCoordinates().size.height,
+            surfaceHeightPx = coordinates.size.height,
         )
     }
 }

@@ -83,3 +83,21 @@ dependencies {
     testImplementation(libs.compose.ui.test.junit4)
     testImplementation(libs.junit)
 }
+
+// Issue #1766: DesignRenders writes build/renders/*.png as direct test side
+// effects, outside Gradle's declared task outputs. A differently filtered prior
+// invocation can therefore restore testDebugUnitTest FROM-CACHE / UP-TO-DATE
+// while the newly requested PNG does not exist. scripts/render.sh opts into
+// this property so only the render test task executes fresh; --tests still
+// selects one method, and compilation/resources/ordinary unit-test runs retain
+// their normal incremental and build-cache behavior.
+val forceDesignRender = providers.gradleProperty("pocketshell.forceDesignRender")
+    .map { it == "true" }
+    .orElse(false)
+
+tasks.withType<Test>().configureEach {
+    if (name == "testDebugUnitTest") {
+        outputs.upToDateWhen { !forceDesignRender.get() }
+        outputs.cacheIf { !forceDesignRender.get() }
+    }
+}

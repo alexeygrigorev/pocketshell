@@ -358,6 +358,7 @@ data class AppSettings(
         const val BACKGROUND_GRACE_1_MINUTE_MS: Long = 60_000L
         const val BACKGROUND_GRACE_5_MINUTES_MS: Long = 5 * 60_000L
         const val BACKGROUND_GRACE_10_MINUTES_MS: Long = 10 * 60_000L
+        const val MAX_BACKGROUND_GRACE_MILLIS: Long = BACKGROUND_GRACE_10_MINUTES_MS
 
         /**
          * Issue #1159 (maintainer directive 2026-07-01): the background grace window
@@ -377,7 +378,7 @@ data class AppSettings(
             BackgroundGraceOption(BACKGROUND_GRACE_90_SECONDS_MS, "90 sec"),
             BackgroundGraceOption(BACKGROUND_GRACE_1_MINUTE_MS, "1 min"),
             BackgroundGraceOption(BACKGROUND_GRACE_5_MINUTES_MS, "5 min"),
-            BackgroundGraceOption(BACKGROUND_GRACE_10_MINUTES_MS, "10 min"),
+            BackgroundGraceOption(MAX_BACKGROUND_GRACE_MILLIS, "10 min"),
         )
     }
 }

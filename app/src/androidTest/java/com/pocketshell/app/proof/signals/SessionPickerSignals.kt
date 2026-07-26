@@ -1,6 +1,7 @@
 package com.pocketshell.app.proof.signals
 
 import android.os.SystemClock
+import android.util.Log
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsMatcher
@@ -9,6 +10,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.performClick
+import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_RETRY_TAG
 import org.junit.Assert.assertTrue
@@ -31,6 +33,7 @@ import org.junit.Assert.assertTrue
  * path it happens to be grouped under.
  */
 private const val FOLDER_HEADER_CLICK_TAG_PREFIX: String = "folder-list:header-click:"
+private const val SESSION_PICKER_SIGNALS_LOG_TAG: String = "SessionPickerSignals"
 
 /**
  * Issue #470 (blocker #2): generous default upper bound for the
@@ -72,6 +75,16 @@ const val SESSION_PICKER_DEFAULT_TIMEOUT_MS: Long = 45_000L
  * swallowing the whole budget.
  */
 const val SESSION_PICKER_STALL_REPOKE_CEILING_MS: Long = 20_000L
+
+/**
+ * Issue #470 recurrence: total bound for navigating FolderList host detail
+ * back to the host list and reopening the same host during a stall re-poke.
+ *
+ * This is deliberately shorter than the picker wait's stall sub-deadline. A
+ * failed navigation must stop at the failing stage with diagnostic node
+ * counts, not consume another full picker timeout.
+ */
+const val SESSION_PICKER_REPOKE_NAVIGATION_TIMEOUT_MS: Long = 10_000L
 
 /**
  * Issue #470 (blocker #2): a deterministic readiness wait for the host's
@@ -264,6 +277,94 @@ fun waitForSessionInPicker(
             "(blocker #2 / infra #470), not the test's assertion path.",
         false,
     )
+}
+
+/**
+ * Re-trigger one host's FolderList enumeration from a stalled host-detail
+ * screen.
+ *
+ * The host detail belongs to FolderList, so its reachable Back affordance is
+ * [FOLDER_LIST_BACK_TAG]. Terminal-detail back tags do not exist here. Each
+ * transition is bounded and verified against the real semantic destination:
+ *
+ *  1. FolderList Back is reachable and clicked.
+ *  2. The requested host row is reachable on the host list and clicked.
+ *  3. FolderList Back is reachable again, proving the same host detail was
+ *     reopened before [waitForSessionInPicker] resumes polling.
+ *
+ * No failure is swallowed. A broken transition fails at its own bounded stage
+ * with node counts and elapsed time, instead of returning to the outer picker
+ * wait and being misreported as a `list-sessions` stall.
+ */
+fun repokeSessionPickerFromHostRow(
+    rule: ComposeTestRule,
+    hostRowTag: String,
+    timeoutMs: Long = SESSION_PICKER_REPOKE_NAVIGATION_TIMEOUT_MS,
+    onStateNote: (String) -> Unit = {},
+) {
+    require(timeoutMs > 0L) { "repoke navigation timeout must be positive" }
+    val startedAt = SystemClock.elapsedRealtime()
+    val deadline = startedAt + timeoutMs
+
+    fun nodeCount(tag: String): Int =
+        rule.onAllNodesWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+
+    fun fail(stage: String, cause: Throwable?): Nothing {
+        val elapsed = SystemClock.elapsedRealtime() - startedAt
+        throw AssertionError(
+            "session-picker stall re-poke failed at stage=$stage after ${elapsed}ms: " +
+                "folder_back_nodes=" +
+                "${runCatching { nodeCount(FOLDER_LIST_BACK_TAG) }.getOrDefault(-1)} " +
+                "host_row_tag=$hostRowTag host_row_nodes=" +
+                "${runCatching { nodeCount(hostRowTag) }.getOrDefault(-1)} " +
+                "error_panel_nodes=" +
+                "${runCatching { nodeCount(FOLDER_LIST_ERROR_TAG) }.getOrDefault(-1)}",
+            cause,
+        )
+    }
+
+    fun awaitTag(tag: String, stage: String) {
+        val remainingMs = deadline - SystemClock.elapsedRealtime()
+        if (remainingMs <= 0L) fail(stage, null)
+        try {
+            rule.waitUntil(timeoutMillis = remainingMs) {
+                runCatching { nodeCount(tag) }.getOrDefault(0) > 0
+            }
+        } catch (cause: Throwable) {
+            fail(stage, cause)
+        }
+    }
+
+    fun clickTag(tag: String, stage: String) {
+        try {
+            rule.onAllNodesWithTag(tag, useUnmergedTree = true).onFirst().performClick()
+        } catch (cause: Throwable) {
+            fail(stage, cause)
+        }
+    }
+
+    awaitTag(FOLDER_LIST_BACK_TAG, "folder_detail_back_reachable")
+    clickTag(FOLDER_LIST_BACK_TAG, "folder_detail_back_click")
+    recordRepokeState(onStateNote, "session_list_stall_repoke_back_clicked", startedAt)
+
+    awaitTag(hostRowTag, "host_row_reachable")
+    recordRepokeState(onStateNote, "session_list_stall_repoke_host_row_ready", startedAt)
+    clickTag(hostRowTag, "host_row_reopen_click")
+
+    awaitTag(FOLDER_LIST_BACK_TAG, "folder_detail_reopened")
+    recordRepokeState(onStateNote, "session_list_stall_repoke_reopened", startedAt)
+}
+
+private fun recordRepokeState(
+    onStateNote: (String) -> Unit,
+    note: String,
+    startedAt: Long,
+) {
+    val elapsed = SystemClock.elapsedRealtime() - startedAt
+    onStateNote(note)
+    Log.i(SESSION_PICKER_SIGNALS_LOG_TAG, "$note elapsed_ms=$elapsed")
 }
 
 /**

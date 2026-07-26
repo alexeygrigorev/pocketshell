@@ -26,15 +26,6 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 const val APP_DATABASE_SCHEMA_VERSION = 17
 
 /**
- * Issue #261 left a deliberately unsupported pre-migration v1 shape in the
- * release gate: it only contains Room metadata and a stale marker table, not
- * PocketShell user-data tables. Production may destructively rebuild only
- * from these start versions; supported real schemas must be represented in
- * [APP_DATABASE_MIGRATIONS] instead.
- */
-val APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS: IntArray = intArrayOf(1)
-
-/**
  * The PocketShell Room database.
  *
  * Normal APK updates must preserve user data. Any entity-schema change MUST
@@ -275,6 +266,7 @@ val MIGRATION_16_17: Migration = object : Migration(16, 17) {
 }
 
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
+    MIGRATION_1_8,
     MIGRATION_2_8,
     MIGRATION_3_8,
     MIGRATION_4_8,
@@ -299,8 +291,11 @@ private fun legacyMigrationToVersionEight(startVersion: Int): Migration =
         }
     }
 
-private fun normalizeLegacySchemaToVersionEight(db: SupportSQLiteDatabase) {
-    rebuildHostsForVersionEight(db)
+internal fun normalizeLegacySchemaToVersionEight(
+    db: SupportSQLiteDatabase,
+    forcePocketshellLastDetectedAtNull: Boolean = false,
+) {
+    rebuildHostsForVersionEight(db, forcePocketshellLastDetectedAtNull)
     createProjectRootsTableIfMissing(db)
     createAiApiCallLogTableIfMissing(db)
     createPendingTranscriptionsTableIfMissing(db)
@@ -316,19 +311,28 @@ private fun normalizeLegacyVersionNineToVersionTen(db: SupportSQLiteDatabase) {
     createPortUsageTableIfMissing(db)
 }
 
-private fun rebuildHostsForVersionEight(db: SupportSQLiteDatabase) {
+private fun rebuildHostsForVersionEight(
+    db: SupportSQLiteDatabase,
+    forcePocketshellLastDetectedAtNull: Boolean,
+) {
+    val tmuxInstalled = db.firstExistingColumnExpression("hosts", "tmuxInstalled")
+    val lastBootstrapAt = db.firstExistingColumnExpression("hosts", "lastBootstrapAt")
     val usageInstalled = db.firstExistingColumnExpression(
         "hosts",
         "pocketshellInstalled",
         "quseInstalled",
         "heruInstalled",
     )
-    val usageDetectedAt = db.firstExistingColumnExpression(
-        "hosts",
-        "pocketshellLastDetectedAt",
-        "quseLastDetectedAt",
-        "heruLastDetectedAt",
-    )
+    val usageDetectedAt = if (forcePocketshellLastDetectedAtNull) {
+        "NULL"
+    } else {
+        db.firstExistingColumnExpression(
+            "hosts",
+            "pocketshellLastDetectedAt",
+            "quseLastDetectedAt",
+            "heruLastDetectedAt",
+        )
+    }
     val usageCommandOverride = db.firstExistingColumnExpression("hosts", "usageCommandOverride")
     val pathOverride = db.firstExistingColumnExpression("hosts", "pathOverride")
 
@@ -368,8 +372,8 @@ private fun rebuildHostsForVersionEight(db: SupportSQLiteDatabase) {
         )
         SELECT
             id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
-            scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
-            lastBootstrapAt, $usageInstalled, $usageDetectedAt,
+            scanIntervalSec, enabled, createdAt, lastConnectedAt, $tmuxInstalled,
+            $lastBootstrapAt, $usageInstalled, $usageDetectedAt,
             $usageCommandOverride, $pathOverride
         FROM hosts
         """.trimIndent(),

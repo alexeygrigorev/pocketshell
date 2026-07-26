@@ -4,7 +4,9 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -48,31 +50,47 @@ class Issue895SwitchWhileBlackDropTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule(testMainDispatcher)
 
+    private val teardown = mainDispatcherRule.tmuxSessionViewModelTeardown()
+    private val factoryScope =
+        teardown.trackRoot(
+            "factoryScope",
+            CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler)),
+        )
+    private val leaseScope =
+        teardown.trackRoot(
+            "leaseScope",
+            CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler)),
+        )
+
     private fun newVm(registry: ActiveTmuxClients): TmuxSessionViewModel =
-        TmuxSessionViewModel(
-            tmuxClientFactory = com.pocketshell.core.tmux.TmuxClientFactory(
-                kotlinx.coroutines.CoroutineScope(StandardTestDispatcher(scheduler)),
+        teardown.track(
+            TmuxSessionViewModel(
+                tmuxClientFactory = com.pocketshell.core.tmux.TmuxClientFactory(
+                    factoryScope,
+                ),
+                activeTmuxClients = registry,
+                hostDao = null,
+                folderListGateway = null,
+                runtimeCache = TmuxSessionRuntimeCache(),
+                agentSessionMemory = AgentSessionMemory(),
+                sshLeaseManager = SshLeaseManager(
+                    connector = SshLeaseConnector { target ->
+                        error("unexpected SSH lease connect for ${target.leaseKey}")
+                    },
+                    scope = leaseScope,
+                    idleTtlMillis = 0L,
+                    connectTimeoutContext = StandardTestDispatcher(scheduler),
+                    abortTimeoutContext = StandardTestDispatcher(scheduler),
+                    nowMillis = { scheduler.currentTime },
+                ),
+                sessionLifecycleSignals = null,
+                // Issue #1168: the default real-IO `tailScope` is safe here — these
+                // tests only connect/drop SHELL sessions and never start an agent
+                // follow, so `tailScope` never launches a drain and there is no
+                // `invokeOnCompletion -> bridgeScope.launch` Main read to leak past
+                // teardown. (No agent pane is bound/followed anywhere in this class.)
+                agentRepository = com.pocketshell.app.session.AgentConversationRepository(),
             ),
-            activeTmuxClients = registry,
-            hostDao = null,
-            folderListGateway = null,
-            runtimeCache = TmuxSessionRuntimeCache(),
-            agentSessionMemory = AgentSessionMemory(),
-            sshLeaseManager = SshLeaseManager(
-                connector = SshLeaseConnector { target ->
-                    error("unexpected SSH lease connect for ${target.leaseKey}")
-                },
-                idleTtlMillis = 0L,
-                connectTimeoutContext = StandardTestDispatcher(scheduler),
-                nowMillis = { scheduler.currentTime },
-            ),
-            sessionLifecycleSignals = null,
-            // Issue #1168: the default real-IO `tailScope` is safe here — these
-            // tests only connect/drop SHELL sessions and never start an agent
-            // follow, so `tailScope` never launches a drain and there is no
-            // `invokeOnCompletion -> bridgeScope.launch` Main read to leak past
-            // teardown. (No agent pane is bound/followed anywhere in this class.)
-            agentRepository = com.pocketshell.app.session.AgentConversationRepository(),
         ).also {
             it.setReconcileDispatcherForTest(testMainDispatcher)
             it.setReconcileApplyDispatcherForTest(testMainDispatcher)

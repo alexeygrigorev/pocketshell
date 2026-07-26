@@ -6,6 +6,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.setMain
 import org.junit.rules.TestRule
 import org.junit.runners.model.Statement
@@ -33,8 +34,9 @@ import org.junit.runner.Description
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainDispatcherRule(
-    private val dispatcher: TestDispatcher = UnconfinedTestDispatcher(),
+    internal val dispatcher: TestDispatcher = UnconfinedTestDispatcher(),
 ) : TestRule {
+    private val beforeResetMain = mutableListOf<() -> Unit>()
 
     override fun apply(base: Statement, description: Description): Statement =
         object : Statement() {
@@ -52,11 +54,53 @@ class MainDispatcherRule(
                         base.evaluate()
                     } finally {
                         LivenessProbeTestOverride.clear()
-                        Dispatchers.resetMain()
+                        var cleanupFailure: Throwable? = null
+                        beforeResetMain.asReversed().forEach { teardown ->
+                            try {
+                                teardown()
+                            } catch (failure: Throwable) {
+                                val firstFailure = cleanupFailure
+                                if (firstFailure == null) {
+                                    cleanupFailure = failure
+                                } else if (firstFailure !== failure) {
+                                    firstFailure.addSuppressed(failure)
+                                }
+                            }
+                        }
+                        beforeResetMain.clear()
+                        try {
+                            Dispatchers.resetMain()
+                        } catch (failure: Throwable) {
+                            val firstFailure = cleanupFailure
+                            if (firstFailure == null) {
+                                cleanupFailure = failure
+                            } else if (firstFailure !== failure) {
+                                firstFailure.addSuppressed(failure)
+                            }
+                        }
+                        cleanupFailure?.let { throw it }
                     }
                 }
             }
         }
+
+    /**
+     * Registers test-owned cleanup that must finish while the rule's process-global
+     * Main dispatcher is still installed.
+     *
+     * This is deliberately a test-only lifecycle seam rather than a generic JUnit
+     * `@After`: the rule owns the ordering boundary, so a consumer cannot
+     * accidentally return from `@After` and let [Dispatchers.resetMain] race a
+     * still-unwinding coroutine.
+     */
+    internal fun beforeResetMain(teardown: () -> Unit) {
+        beforeResetMain += teardown
+    }
+
+    /** Runs only work already due on this rule's virtual clock; never advances time. */
+    internal fun runCurrent() {
+        dispatcher.scheduler.runCurrent()
+    }
 
     private companion object {
         private val mainDispatcherLock = Any()

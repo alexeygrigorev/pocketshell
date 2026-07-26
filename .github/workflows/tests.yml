@@ -55,6 +55,17 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # Issue #1766: render PNGs are direct test side effects, so Gradle can
+      # otherwise return FROM-CACHE/UP-TO-DATE for a second, differently
+      # filtered DesignRenders method without creating its PNG. This fake-Gradle
+      # self-test deterministically proves sequential filters, source mapping
+      # validation, and invocation-fresh artifact checks without launching
+      # Gradle or Roborazzi.
+      - name: Render harness freshness self-test (issue #1766)
+        run: |
+          chmod +x scripts/render.sh scripts/render-selftest.sh
+          scripts/render-selftest.sh
+
       # Issue #657 (F4): test-validity grep-guard. Flags the highest-signal
       # test anti-patterns the #657 audit catalogued — chiefly an IME/keyboard/
       # geometry assertion gated behind an `assumeTrue(...)` self-skip, which on

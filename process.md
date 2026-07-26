@@ -1440,6 +1440,19 @@ Outputs land in `shared/ui-kit/build/renders/`. Add or adjust a `@Test` case in
 the component/screen you changed (the harness fills the Pixel-7 viewport, so a
 render shows the whole screen).
 
+Render PNGs are direct `DesignRenders` execution side effects rather than
+declared Gradle task outputs. Therefore an exit-zero `FROM-CACHE` /
+`UP-TO-DATE` task is **not** render evidence. `scripts/render.sh` parses each
+single-line `fun method() = render("artifact-label")` declaration (spaces/tabs
+are allowed between tokens; crossing a newline is deliberately rejected),
+forces only `:shared:ui-kit:testDebugUnitTest` fresh through its private opt-in
+property, and holds an exclusive output-directory lock across target deletion,
+Gradle execution, and validation. It succeeds only when the selected mapped
+PNG—or every mapped PNG in all-mode—was recreated non-empty after a
+same-filesystem freshness boundary. Never replace this with a blanket
+`--rerun-tasks`, and never accept a stale PNG merely listed from an earlier
+filter.
+
 - **Implementer (design/UI):** render the changed component/screen and visually
   inspect the PNG BEFORE the emulator run; if the issue links a mockup
   (`docs/mockups/`), compare the render to it and note the comparison. Attach the

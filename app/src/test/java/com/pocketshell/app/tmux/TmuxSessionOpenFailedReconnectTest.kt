@@ -16,11 +16,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -49,25 +51,35 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class TmuxSessionOpenFailedReconnectTest {
 
+    private val scheduler = TestCoroutineScheduler()
+    private val testMainDispatcher = UnconfinedTestDispatcher(scheduler)
+
     @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    val mainDispatcherRule = MainDispatcherRule(testMainDispatcher)
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val teardown = mainDispatcherRule.tmuxSessionViewModelTeardown()
+    private val factoryScope =
+        teardown.trackRoot(
+            "factoryScope",
+            CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
+    private val leaseScope =
+        teardown.trackRoot(
+            "leaseScope",
+            CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler)),
+        )
 
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
-
-    private fun TestNewVm(
+    private fun TestScope.testNewVm(
         registry: ActiveTmuxClients,
         sshLeaseManager: SshLeaseManager,
-    ): TmuxSessionViewModel = TmuxSessionViewModel(
-        tmuxClientFactory = TmuxClientFactory(factoryScope),
-        activeTmuxClients = registry,
-        runtimeCache = TmuxSessionRuntimeCache(),
-        sshLeaseManager = sshLeaseManager,
-        sessionLifecycleSignals = null,
+    ): TmuxSessionViewModel = teardown.track(
+        TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = registry,
+            runtimeCache = TmuxSessionRuntimeCache(),
+            sshLeaseManager = sshLeaseManager,
+            sessionLifecycleSignals = null,
+        ),
     ).also {
         // Issue #926: pin the seed-IO dispatcher (off-Main hop for the
         // attach/reattach `capture-pane`/`list-panes` IO) to the rule's test
@@ -79,7 +91,7 @@ class TmuxSessionOpenFailedReconnectTest {
     }
 
     @Test
-    fun reconnectRecoversFromOpenFailedByEvictingPoisonedTransport() = runTest {
+    fun reconnectRecoversFromOpenFailedByEvictingPoisonedTransport() = runTest(scheduler) {
         // The pool holds a transport that stays `isConnected` but whose
         // channel-open keeps failing — exactly the half-dead transport that
         // surfaces "open failed". A fresh transport works.
@@ -87,9 +99,9 @@ class TmuxSessionOpenFailedReconnectTest {
         val healthySession = AlwaysConnectedSession(id = "healthy")
         val connector = TwoSessionConnector(poisonedSession, healthySession)
         val registry = ActiveTmuxClients()
-        val vm = TestNewVm(
+        val vm = testNewVm(
             registry = registry,
-            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = leaseScope, idleTtlMillis = 0L),
         )
 
         // Disable auto-reconnect so the test drives the manual Retry deterministically.
@@ -162,14 +174,14 @@ class TmuxSessionOpenFailedReconnectTest {
     }
 
     @Test
-    fun reconnectRecoversFromCommandTimeoutByEvictingPoisonedTransport() = runTest {
+    fun reconnectRecoversFromCommandTimeoutByEvictingPoisonedTransport() = runTest(scheduler) {
         val poisonedSession = AlwaysConnectedSession(id = "poisoned")
         val healthySession = AlwaysConnectedSession(id = "healthy")
         val connector = TwoSessionConnector(poisonedSession, healthySession)
         val registry = ActiveTmuxClients()
-        val vm = TestNewVm(
+        val vm = testNewVm(
             registry = registry,
-            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = leaseScope, idleTtlMillis = 60_000L),
         )
 
         vm.setAutoReconnectDelaysForTest(emptyList())
@@ -232,14 +244,14 @@ class TmuxSessionOpenFailedReconnectTest {
     }
 
     @Test
-    fun reconnectRecoversFromListPanesEofWriteByEvictingPoisonedTransport() = runTest {
+    fun reconnectRecoversFromListPanesEofWriteByEvictingPoisonedTransport() = runTest(scheduler) {
         val poisonedSession = AlwaysConnectedSession(id = "poisoned")
         val healthySession = AlwaysConnectedSession(id = "healthy")
         val connector = TwoSessionConnector(poisonedSession, healthySession)
         val registry = ActiveTmuxClients()
-        val vm = TestNewVm(
+        val vm = testNewVm(
             registry = registry,
-            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 60_000L),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = leaseScope, idleTtlMillis = 60_000L),
         )
 
         vm.setAutoReconnectDelaysForTest(emptyList())

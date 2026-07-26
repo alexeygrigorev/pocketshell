@@ -14,14 +14,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -63,15 +64,23 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class Issue1574DeadReconnectTest {
 
+    private val scheduler = TestCoroutineScheduler()
+    private val testMainDispatcher = UnconfinedTestDispatcher(scheduler)
+
     @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    val mainDispatcherRule = MainDispatcherRule(testMainDispatcher)
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
+    private val teardown = mainDispatcherRule.tmuxSessionViewModelTeardown()
+    private val factoryScope =
+        teardown.trackRoot(
+            "factoryScope",
+            CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
+    private val leaseScope =
+        teardown.trackRoot(
+            "leaseScope",
+            CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler)),
+        )
 
     /**
      * Issue #998 determinism helper (copied from TmuxSessionWarmOpenTest): the
@@ -96,12 +105,14 @@ class Issue1574DeadReconnectTest {
     private fun newVm(
         registry: ActiveTmuxClients,
         sshLeaseManager: com.pocketshell.core.ssh.SshLeaseManager,
-    ): TmuxSessionViewModel = TmuxSessionViewModel(
-        tmuxClientFactory = TmuxClientFactory(factoryScope),
-        activeTmuxClients = registry,
-        runtimeCache = TmuxSessionRuntimeCache(),
-        sshLeaseManager = sshLeaseManager,
-        sessionLifecycleSignals = null,
+    ): TmuxSessionViewModel = teardown.track(
+        TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = registry,
+            runtimeCache = TmuxSessionRuntimeCache(),
+            sshLeaseManager = sshLeaseManager,
+            sessionLifecycleSignals = null,
+        ),
     ).also {
         // Issue #926: pin the seed-IO dispatcher to the rule's test Main so the
         // attach/reattach round-trips run inline on the test clock.
@@ -146,13 +157,13 @@ class Issue1574DeadReconnectTest {
     }
 
     @Test
-    fun genericTerminalDialFailure_showingSession_isReconnectableFromRetainedIntent() = runTest {
+    fun genericTerminalDialFailure_showingSession_isReconnectableFromRetainedIntent() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(
                 connector = AlwaysConnectingConnector(),
-                scope = this,
+                scope = leaseScope,
                 idleTtlMillis = 60_000L,
             ),
         )
@@ -188,13 +199,13 @@ class Issue1574DeadReconnectTest {
     }
 
     @Test
-    fun neverOpenedSession_reconnectStillReturnsFalse() = runTest {
+    fun neverOpenedSession_reconnectStillReturnsFalse() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(
                 connector = AlwaysConnectingConnector(),
-                scope = this,
+                scope = leaseScope,
                 idleTtlMillis = 60_000L,
             ),
         )
@@ -208,18 +219,24 @@ class Issue1574DeadReconnectTest {
     }
 
     @Test
-    fun normalActiveConnection_reconnectUnchanged() = runTest {
+    fun normalActiveConnection_reconnectUnchanged() = runTest(scheduler) {
         val registry = ActiveTmuxClients()
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(
                 connector = AlwaysConnectingConnector(),
-                scope = this,
+                scope = leaseScope,
                 idleTtlMillis = 60_000L,
             ),
         )
         vm.setAutoReconnectDelaysForTest(emptyList())
-        val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        // Seed both the initial attach and the reconnect. The old one-round
+        // fixture let this method return with reconnect parked inside its
+        // NonCancellable teardown, which is the #1355 leak seen by the next
+        // rule reset.
+        val client = FakeTmuxClient()
+            .withSinglePaneRow("work", "%1")
+            .withSinglePaneRow("work", "%1")
         vm.setTmuxClientFactoryForTest { _, _, _ -> client }
         vm.connect(
             hostId = 1L,
@@ -240,10 +257,17 @@ class Issue1574DeadReconnectTest {
         // Unchanged: an active target is present, reconnect() still returns true.
         assertTrue("canReconnect stays true with a live active target", vm.canReconnect.value)
         assertTrue("reconnect() with a live active target is unchanged", vm.reconnect())
+        // The reconnect entry point launches a NonCancellable close cascade.
+        // Settle that production path while this test still owns its virtual
+        // clock; a runCurrent-only @After must never advance a product timeout
+        // merely to make teardown finish.
+        pumpUntil(reason = "active reconnect settled back on Connected") {
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected
+        }
     }
 
     @Test
-    fun genuinelyGoneColdRestore_reconnectStaysFalse_noResurrection() = runTest {
+    fun genuinelyGoneColdRestore_reconnectStaysFalse_noResurrection() = runTest(scheduler) {
         // A GENUINELY-gone session (the cold-restore `has-session` preflight exits
         // non-zero) drops to the list via [failSessionEnded]. The #1574 reconnect
         // fallback must NOT resurrect it — the retained intent is cleared, so
@@ -254,7 +278,7 @@ class Issue1574DeadReconnectTest {
             registry = registry,
             sshLeaseManager = testLeaseManager(
                 connector = SingleSessionConnector(goneSession),
-                scope = this,
+                scope = leaseScope,
                 idleTtlMillis = 60_000L,
             ),
         )

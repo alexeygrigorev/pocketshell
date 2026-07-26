@@ -13,11 +13,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -62,29 +63,39 @@ import java.util.concurrent.atomic.AtomicInteger
 @Config(manifest = Config.NONE, sdk = [33])
 class Issue1575PassphraseDedupeTest {
 
-    @get:Rule
-    val mainDispatcherRule = MainDispatcherRule()
+    private val scheduler = TestCoroutineScheduler()
+    private val testMainDispatcher = UnconfinedTestDispatcher(scheduler)
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule(testMainDispatcher)
+
+    private val teardown = mainDispatcherRule.tmuxSessionViewModelTeardown()
+    private val factoryScope =
+        teardown.trackRoot(
+            "factoryScope",
+            CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
+    private val leaseScope =
+        teardown.trackRoot(
+            "leaseScope",
+            CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler)),
+        )
 
     /** Fresh-client factory build count — corroborates the attempts signal per-instance. */
     private val builds = AtomicInteger(0)
 
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
-
-    private fun TestScope.newVm(): TmuxSessionViewModel = TmuxSessionViewModel(
-        tmuxClientFactory = TmuxClientFactory(factoryScope),
-        activeTmuxClients = ActiveTmuxClients(),
-        runtimeCache = TmuxSessionRuntimeCache(),
-        sshLeaseManager = testLeaseManager(
-            connector = AlwaysConnectingConnector(),
-            scope = this,
-            idleTtlMillis = 60_000L,
+    private fun TestScope.newVm(): TmuxSessionViewModel = teardown.track(
+        TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+            runtimeCache = TmuxSessionRuntimeCache(),
+            sshLeaseManager = testLeaseManager(
+                connector = AlwaysConnectingConnector(),
+                scope = leaseScope,
+                idleTtlMillis = 60_000L,
+            ),
+            sessionLifecycleSignals = null,
         ),
-        sessionLifecycleSignals = null,
     ).also {
         it.setSeedIoDispatcherForTest(Dispatchers.Main)
         it.setAutoReconnectDelaysForTest(emptyList())
@@ -114,7 +125,7 @@ class Issue1575PassphraseDedupeTest {
     }
 
     @Test
-    fun passphraseHost_reenterSameSession_isDedupedNoSpuriousReconnect() = runTest {
+    fun passphraseHost_reenterSameSession_isDedupedNoSpuriousReconnect() = runTest(scheduler) {
         val vm = newVm()
         // First open of a passphrase-protected host + session "work".
         vm.connectTo(passphrase = charArrayOf('s', 'e', 'c', 'r', 'e', 't'), sessionName = "work")
@@ -150,7 +161,7 @@ class Issue1575PassphraseDedupeTest {
     }
 
     @Test
-    fun noPassphraseHost_reenterSameSession_staysDeduped() = runTest {
+    fun noPassphraseHost_reenterSameSession_staysDeduped() = runTest(scheduler) {
         // Class coverage: the previously-working case must remain deduped (regression guard).
         val vm = newVm()
         vm.connectTo(passphrase = null, sessionName = "work")
@@ -179,7 +190,7 @@ class Issue1575PassphraseDedupeTest {
     }
 
     @Test
-    fun passphraseHost_differentSession_isNotFalselyDeduped() = runTest {
+    fun passphraseHost_differentSession_isNotFalselyDeduped() = runTest(scheduler) {
         // Class coverage: a GENUINELY different session (different name) on the same
         // passphrase host must NOT be deduped — the switch/reconnect must still fire.
         val vm = newVm()

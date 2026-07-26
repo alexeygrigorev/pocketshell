@@ -8,10 +8,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
-import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -37,11 +35,18 @@ class TmuxSessionViewModelVoiceTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val teardown = mainDispatcherRule.tmuxSessionViewModelTeardown()
+    private val factoryScope =
+        teardown.trackRoot(
+            "factoryScope",
+            CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        )
 
-    private fun newVm(): TmuxSessionViewModel = TmuxSessionViewModel(
-        tmuxClientFactory = TmuxClientFactory(factoryScope),
-        activeTmuxClients = ActiveTmuxClients(),
+    private fun newVm(): TmuxSessionViewModel = teardown.track(
+        TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+        ),
     ).also {
         // Issue #926: pin the seed-IO dispatcher (off-Main hop for the
         // attach/switch/reattach `capture-pane`/`list-panes` IO) to the rule's
@@ -49,11 +54,6 @@ class TmuxSessionViewModelVoiceTest {
         // of a real `Dispatchers.IO` thread `runTest` cannot drain. Production
         // defaults to `Dispatchers.IO` (off the UI thread).
         it.setSeedIoDispatcherForTest(Dispatchers.Main)
-    }
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
     }
 
     @Test

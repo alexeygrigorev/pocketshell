@@ -78,6 +78,17 @@ jobs:
           scripts/check-test-validity.sh
           scripts/check-test-validity-selftest.sh
 
+      # Issue #1355: MainDispatcherRule owns the global Dispatchers.Main reset.
+      # Any standalone TmuxSessionViewModel test that leaves an unregistered VM
+      # can race that reset from a still-unwinding coroutine and fail an
+      # unrelated next class at TestMainDispatcher.kt:72. Keep constructor
+      # registration structural and prove the guard itself goes red.
+      - name: Main-dispatcher VM teardown guard (issue #1355)
+        run: |
+          chmod +x scripts/check-main-dispatcher-vm-teardown.sh
+          scripts/check-main-dispatcher-vm-teardown.sh
+          scripts/check-main-dispatcher-vm-teardown.sh --self-test
+
       # Issue #848: per-push journey harness guard. Proof journeys listed by
       # scripts/ci-journey-suite.sh that launch MainActivity should use the
       # launch-owned createAndroidComposeRule<MainActivity>() +

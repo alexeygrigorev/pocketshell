@@ -325,11 +325,11 @@ class DesignRenders {
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             LoadingLabel("Bar — indeterminate linear (in flight)")
-            LoadingIndicator.Bar()
+            StaticLoadingIndicator.Bar()
 
             LoadingLabel("Spinner — Small (inline / on-row)")
             Row(verticalAlignment = Alignment.CenterVertically) {
-                LoadingIndicator.Spinner(size = SpinnerSize.Small)
+                StaticLoadingIndicator.Spinner(size = SpinnerSize.Small)
                 Spacer(modifier = Modifier.width(10.dp))
                 Text(
                     text = "Transcribing…",
@@ -340,12 +340,12 @@ class DesignRenders {
 
             LoadingLabel("Spinner — Medium (centered, no label)")
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                LoadingIndicator.Spinner(size = SpinnerSize.Medium)
+                StaticLoadingIndicator.Spinner(size = SpinnerSize.Medium)
             }
 
             LoadingLabel("Spinner — Medium + label (whole-area loading)")
             Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                LoadingIndicator.Spinner(
+                StaticLoadingIndicator.Spinner(
                     size = SpinnerSize.Medium,
                     label = "Attaching…",
                 )
@@ -358,7 +358,7 @@ class DesignRenders {
                     .padding(horizontal = 24.dp, vertical = 12.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                LoadingIndicator.Spinner(size = SpinnerSize.Small, onAccent = true)
+                StaticLoadingIndicator.Spinner(size = SpinnerSize.Small, onAccent = true)
             }
 
             LoadingLabel("ProgressBar — determinate sibling (usage quota)")

@@ -73,7 +73,7 @@ internal fun TmuxConnectingStatesRender() {
                 .background(color = PocketShellColors.Surface),
             contentAlignment = Alignment.Center,
         ) {
-            LoadingIndicator.Spinner(
+            StaticLoadingIndicator.Spinner(
                 size = SpinnerSize.Medium,
                 label = "waiting for tmux panes…",
             )
@@ -87,7 +87,7 @@ internal fun TmuxConnectingStatesRender() {
                 .background(color = PocketShellColors.Background),
             contentAlignment = Alignment.Center,
         ) {
-            LoadingIndicator.Spinner(
+            StaticLoadingIndicator.Spinner(
                 size = SpinnerSize.Medium,
                 label = "Attaching…",
             )

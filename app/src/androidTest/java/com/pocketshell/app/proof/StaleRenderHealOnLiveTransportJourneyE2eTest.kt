@@ -13,6 +13,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -26,14 +27,18 @@ import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
+import com.pocketshell.app.tmux.HealAttemptReason
+import com.pocketshell.app.tmux.HealAttemptResult
 import com.pocketshell.app.tmux.HealOutcome
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.ActivePaneRenderOwnerSnapshotForTest
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -152,15 +157,20 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
             bannerRowCount(visibleTerminalText()) >= MIN_RESTORED_BANNER_ROWS,
         )
 
+        // The production 4-second watchdog must not win the race between injection and this
+        // journey's manual one-pass owner. Disable every future auto-arm and cancel+JOIN the
+        // current loop before the first stale frame is injected.
+        pauseAutomaticStaleRenderWatchdog()
+
         // Exercise each stale kind in turn on the SAME live pane (no relaunch).
         for (kind in StaleKind.values()) {
-            runStaleKind(kind)
+            runStaleKind(kind, key)
         }
     } }
 
     private enum class StaleKind { FULLY_BLANK, SCATTERED_FRAGMENT, STALE_AFTER_BURST }
 
-    private fun runStaleKind(kind: StaleKind) {
+    private suspend fun runStaleKind(kind: StaleKind, key: String) {
         val namePrefix = "issue966-${kind.name.lowercase()}"
 
         // Restore the banner baseline before this kind (the prior kind's heal already
@@ -168,17 +178,18 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         waitForVisibleTerminal("$namePrefix pre-kind banner", timeoutMillis = RESTORE_TIMEOUT_MS) {
             bannerRowCount(it) >= MIN_RESTORED_BANNER_ROWS
         }
+        val settledOwner = waitForSettledActiveRenderOwner(namePrefix)
         capturePaintedRows("$namePrefix-01-baseline")
 
         // ===== Inject the stale render on the LIVE, retained emulator. =====
-        when (kind) {
-            StaleKind.SCATTERED_FRAGMENT -> feedScatteredFragmentFrameToEmulator()
-            StaleKind.FULLY_BLANK -> feedFrameToEmulator("[2J[H")
+        val injectedOwner = when (kind) {
+            StaleKind.SCATTERED_FRAGMENT -> feedScatteredFragmentFrameToActiveModel(settledOwner, namePrefix)
+            StaleKind.FULLY_BLANK -> feedFrameToActivePaneModel("[2J[H", settledOwner, namePrefix)
             StaleKind.STALE_AFTER_BURST -> {
                 // A heavy alt-screen repaint burst that outruns the drain, then the
                 // scattered residue — the burst variant of the #966 stale grid.
-                feedHeavyBurstToEmulator()
-                feedScatteredFragmentFrameToEmulator()
+                val burstOwner = feedHeavyBurstToActiveModel(settledOwner, namePrefix)
+                feedScatteredFragmentFrameToActiveModel(burstOwner, namePrefix)
             }
         }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
@@ -186,12 +197,44 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         // The RED state on the real device: the injected stale render shows almost
         // none of tmux's banner (the user-perceived black/fragment pane).
 
+        val remoteCapture = captureAuthoritativeRemotePane(key)
+        val remoteCaptureChars = remoteCapture.count { !it.isWhitespace() }
+        assertTrue(
+            "$namePrefix authoritative remote tmux frame must remain nonempty before the " +
+                "manual heal (>= $MIN_AUTHORITATIVE_CAPTURE_CHARS chars); found " +
+                "$remoteCaptureChars.\n$remoteCapture",
+            remoteCaptureChars >= MIN_AUTHORITATIVE_CAPTURE_CHARS,
+        )
+        assertTrue(
+            "$namePrefix authoritative remote tmux frame must still carry the banner marker",
+            remoteCapture.contains(BANNER_MARKER),
+        )
+        val localStale = activePaneLocalHealState(injectedOwner, namePrefix)
+        assertTrue(
+            "$namePrefix pre-call local render must still be suspect; if the automatic watchdog " +
+                "was left armed it can heal first and this assertion must fail. state=$localStale",
+            localStale.renderLooksSuspect,
+        )
+        when (kind) {
+            StaleKind.FULLY_BLANK -> assertEquals(
+                "$namePrefix intended local state must be fully blank before the manual call",
+                0,
+                localStale.renderedNonBlankChars,
+            )
+            StaleKind.SCATTERED_FRAGMENT,
+            StaleKind.STALE_AFTER_BURST -> assertTrue(
+                "$namePrefix intended local state must retain bounded fragments before the " +
+                    "manual call; state=$localStale",
+                localStale.renderedNonBlankChars in 1..MAX_EXPECTED_FRAGMENT_CHARS,
+            )
+        }
+
         // ----- RED precondition: the v0.4.17 heal oracle SKIPS this pane. -----
         // For the scattered-fragment / burst case the combined blank||partial-blank
         // oracle reads FALSE, so the v0.4.17 heal would never fire — proving the gap.
         // (The fully-blank case is the boundary the v0.4.17 heal already owned, so it
         // reads TRUE there; the divergence path subsumes it.)
-        val v0417OracleHit = activePaneBlankOrPartiallyBlank()
+        val v0417OracleHit = localStale.blankOrPartiallyBlank
         if (kind != StaleKind.FULLY_BLANK) {
             assertFalse(
                 "$namePrefix RED: the v0.4.17 heal oracle (blank||partial-blank) must SKIP " +
@@ -217,11 +260,30 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         // The divergence oracle fires for ALL three stale kinds (fully-black,
         // scattered fragments, post-burst clear) because tmux's grid holds the full
         // banner while the VISIBLE viewport shows almost none of it.
-        val healed = driveStaleRenderHeal()
-        assertTrue(
-            "$namePrefix the stale-render heal must FIRE ($kind) — divergence detected " +
-                "between the stale VISIBLE render and tmux's authoritative capture",
-            healed,
+        val healResult = driveStaleRenderHeal(injectedOwner)
+        writeHealAttemptArtifact(
+            namePrefix = namePrefix,
+            kind = kind,
+            localStale = localStale,
+            remoteCaptureChars = remoteCaptureChars,
+            healResult = healResult,
+        )
+        assertEquals(
+            "$namePrefix typed diagnostics must retain the pre-call stale viewport count, " +
+                "not resample the healed viewport; result=$healResult",
+            localStale.renderedNonBlankChars,
+            healResult.stats.renderedNonBlankChars,
+        )
+        assertEquals(
+            "$namePrefix the one-pass heal must return the exact divergence-applied reason; " +
+                "result=$healResult",
+            HealAttemptReason.DivergenceApplied,
+            healResult.reason,
+        )
+        assertEquals(
+            "$namePrefix the stale-render heal must be typed Healed ($kind); result=$healResult",
+            HealOutcome.Healed,
+            healResult.outcome,
         )
         val visibleAfter = waitForVisibleTerminal(
             "$namePrefix stale-render heal full-viewport restore",
@@ -252,7 +314,13 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
 
-        writeSummary(namePrefix, kind)
+        writeSummary(
+            namePrefix = namePrefix,
+            kind = kind,
+            localStale = localStale,
+            remoteCaptureChars = remoteCaptureChars,
+            healResult = healResult,
+        )
     }
 
     // ---------------------------------------------------------------- Heal driver
@@ -260,34 +328,120 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
     /**
      * Run ONE stale-render heal pass over the active pane (the watchdog tick),
      * synchronously, via the production test seam [TmuxSessionViewModel.
-     * healActivePaneIfStaleRenderForTest]. Returns whether the heal fired.
+     * healActivePaneIfStaleRenderResultForTest]. Returns the exact typed attempt.
      */
-    private fun driveStaleRenderHeal(): Boolean {
-        // Issue #1294: the oracle now returns a three-state [HealOutcome]; "the heal fired"
-        // is the HEALED outcome (a real divergence found + repaired).
-        var result: HealOutcome = HealOutcome.Unverified
+    private fun driveStaleRenderHeal(
+        expectedOwner: ActivePaneRenderOwnerSnapshotForTest,
+    ): HealAttemptResult {
+        var result: HealAttemptResult? = null
         val latch = java.util.concurrent.CountDownLatch(1)
         launchedActivity?.onActivity { activity ->
             val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-            runBlocking {
-                result = vm.healActivePaneIfStaleRenderForTest()
+            activity.lifecycleScope.launch {
+                try {
+                    result = vm.healActivePaneIfStaleRenderResultForTest(expectedOwner)
+                } finally {
+                    latch.countDown()
+                }
             }
-            latch.countDown()
         }
-        latch.await(RESTORE_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+        val completed = latch.await(
+            RESTORE_TIMEOUT_MS,
+            java.util.concurrent.TimeUnit.MILLISECONDS,
+        )
+        assertTrue("manual stale-render heal latch must complete within the bound", completed)
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        return result == HealOutcome.Healed
+        return checkNotNull(result) { "manual stale-render heal completed without a typed result" }
     }
 
-    private fun activePaneBlankOrPartiallyBlank(): Boolean {
-        var hit = false
+    private fun pauseAutomaticStaleRenderWatchdog() {
+        val latch = java.util.concurrent.CountDownLatch(1)
         launchedActivity?.onActivity { activity ->
             val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-            hit = vm.panes.value.firstOrNull()
-                ?.terminalState
-                ?.visibleScreenIsBlankOrPartiallyBlank() ?: false
+            activity.lifecycleScope.launch {
+                try {
+                    vm.pauseActivePaneStaleRenderWatchdogForTest()
+                } finally {
+                    latch.countDown()
+                }
+            }
         }
-        return hit
+        val completed = latch.await(
+            RESTORE_TIMEOUT_MS,
+            java.util.concurrent.TimeUnit.MILLISECONDS,
+        )
+        assertTrue("automatic stale-render watchdog pause latch must complete within the bound", completed)
+        launchedActivity?.onActivity { activity ->
+            val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            assertTrue(
+                "automatic stale-render watchdog must be quiescent before stale injection; " +
+                    "job=${vm.staleRenderWatchdogJobForTest()}",
+                vm.staleRenderWatchdogJobForTest()?.isActive != true,
+            )
+        }
+    }
+
+    private data class LocalHealState(
+        val renderedNonBlankChars: Int,
+        val blankOrPartiallyBlank: Boolean,
+        val renderLooksSuspect: Boolean,
+    )
+
+    private fun activePaneLocalHealState(
+        expectedOwner: ActivePaneRenderOwnerSnapshotForTest,
+        namePrefix: String,
+    ): LocalHealState {
+        var state: LocalHealState? = null
+        var actualOwner: ActivePaneRenderOwnerSnapshotForTest? = null
+        var viewTerminalSessionIdentity: Int? = null
+        var viewEmulatorIdentity: Int? = null
+        var failure: String? = null
+        launchedActivity?.onActivity { activity ->
+            val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            val snapshot = runCatching { vm.activePaneRenderOwnerSnapshotForTest() }
+                .getOrElse {
+                    failure = "could not snapshot active owner: $it"
+                    return@onActivity
+                }
+            actualOwner = snapshot
+            val viewSession = activity.window.decorView.findTerminalView()?.currentSession
+            viewTerminalSessionIdentity = viewSession?.let(System::identityHashCode)
+            viewEmulatorIdentity = viewSession?.emulator?.let(System::identityHashCode)
+            if (!snapshot.coherent ||
+                !snapshot.sameOwnerAs(expectedOwner) ||
+                snapshot.modelMutationEpoch != expectedOwner.modelMutationEpoch ||
+                snapshot.controlSizeGeneration != expectedOwner.controlSizeGeneration ||
+                snapshot.sizeOperationsInFlight != 0 ||
+                snapshot.automaticHealOperationsInFlight != 0 ||
+                snapshot.automaticHealActivityEpoch != expectedOwner.automaticHealActivityEpoch ||
+                viewTerminalSessionIdentity != snapshot.terminalSessionIdentity ||
+                viewEmulatorIdentity != snapshot.emulatorIdentity
+            ) {
+                failure = "render owner/model changed before pre-call oracle"
+                return@onActivity
+            }
+            state = LocalHealState(
+                renderedNonBlankChars = snapshot.renderedNonBlankChars,
+                blankOrPartiallyBlank = snapshot.partiallyBlank ||
+                    snapshot.renderedNonBlankChars == 0,
+                renderLooksSuspect = snapshot.renderLooksSuspect,
+            )
+        }
+        writeRenderOwnerArtifact(
+            namePrefix = namePrefix,
+            label = "pre-call",
+            expected = expectedOwner,
+            actual = actualOwner,
+            viewTerminalSessionIdentity = viewTerminalSessionIdentity,
+            viewEmulatorIdentity = viewEmulatorIdentity,
+            failure = failure,
+        )
+        assertTrue(
+            "$failure expected=$expectedOwner actual=$actualOwner " +
+                "viewSession=$viewTerminalSessionIdentity viewEmulator=$viewEmulatorIdentity",
+            failure == null,
+        )
+        return checkNotNull(state) { "active pane missing while reading local stale state" }
     }
 
     private fun clientDisconnected(): Boolean {
@@ -307,7 +461,10 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
      * a status line) — NOT fully blank, NOT cleanly partial-blank, so the v0.4.17
      * oracle skips it. Local to the emulator; the remote tmux grid keeps the banner.
      */
-    private fun feedScatteredFragmentFrameToEmulator() {
+    private fun feedScatteredFragmentFrameToActiveModel(
+        expectedOwner: ActivePaneRenderOwnerSnapshotForTest,
+        namePrefix: String,
+    ): ActivePaneRenderOwnerSnapshotForTest {
         val esc = ""
         val frame = buildString {
             append("$esc[2J$esc[H")          // erase + home
@@ -320,12 +477,16 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
             append("$esc[20;5H")
             append("y z\r\n")
         }
-        feedFrameToEmulator(frame)
+        return feedFrameToActivePaneModel(frame, expectedOwner, namePrefix)
     }
 
     /** A heavy alt-screen repaint burst — many colored rows faster than the drain. */
-    private fun feedHeavyBurstToEmulator() {
+    private fun feedHeavyBurstToActiveModel(
+        initialOwner: ActivePaneRenderOwnerSnapshotForTest,
+        namePrefix: String,
+    ): ActivePaneRenderOwnerSnapshotForTest {
         val esc = ""
+        var owner = initialOwner
         repeat(8) {
             val frame = buildString {
                 append("$esc[2J$esc[H")
@@ -333,22 +494,144 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
                     append("$esc[3${row % 7}mBURST row $row ${"x".repeat(60)}$esc[0m\r\n")
                 }
             }
-            feedFrameToEmulator(frame)
+            owner = feedFrameToActivePaneModel(frame, owner, namePrefix)
         }
+        return owner
     }
 
-    private fun feedFrameToEmulator(frame: String) {
+    private fun waitForSettledActiveRenderOwner(
+        namePrefix: String,
+    ): ActivePaneRenderOwnerSnapshotForTest {
+        var lastOwner: ActivePaneRenderOwnerSnapshotForTest? = null
+        var lastViewTerminalSessionIdentity: Int? = null
+        var lastViewEmulatorIdentity: Int? = null
+        val settled = runCatching {
+            compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+                var ready = false
+                launchedActivity?.onActivity { activity ->
+                    val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                    lastOwner = runCatching { vm.activePaneRenderOwnerSnapshotForTest() }.getOrNull()
+                    val viewSession = activity.window.decorView.findTerminalView()?.currentSession
+                    lastViewTerminalSessionIdentity = viewSession?.let(System::identityHashCode)
+                    lastViewEmulatorIdentity = viewSession?.emulator?.let(System::identityHashCode)
+                    ready = lastOwner?.attachResizeSeedSettled == true &&
+                        lastViewTerminalSessionIdentity == lastOwner?.terminalSessionIdentity &&
+                        lastViewEmulatorIdentity == lastOwner?.emulatorIdentity
+                }
+                ready
+            }
+            true
+        }.getOrDefault(false)
+        writeRenderOwnerArtifact(
+            namePrefix = namePrefix,
+            label = "settled",
+            expected = null,
+            actual = lastOwner,
+            viewTerminalSessionIdentity = lastViewTerminalSessionIdentity,
+            viewEmulatorIdentity = lastViewEmulatorIdentity,
+            failure = if (settled) null else "attach/resize/reseed settlement timed out",
+        )
+        assertTrue(
+            "$namePrefix attach/resize/reseed must settle on the exact visible VM model; " +
+                "owner=$lastOwner viewSession=$lastViewTerminalSessionIdentity " +
+                "viewEmulator=$lastViewEmulatorIdentity",
+            settled,
+        )
+        return checkNotNull(lastOwner)
+    }
+
+    private fun feedFrameToActivePaneModel(
+        frame: String,
+        expectedOwner: ActivePaneRenderOwnerSnapshotForTest,
+        namePrefix: String,
+    ): ActivePaneRenderOwnerSnapshotForTest {
         val bytes = frame.toByteArray(Charsets.UTF_8)
-        var fed = false
+        var injectedOwner: ActivePaneRenderOwnerSnapshotForTest? = null
+        var viewTerminalSessionIdentity: Int? = null
+        var viewTerminalSessionIdentityAfter: Int? = null
+        var viewEmulatorIdentity: Int? = null
+        var failure: String? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            val emulator = view.mEmulator ?: return@onActivity
-            emulator.append(bytes, bytes.size)
-            view.invalidate()
-            fed = true
+            val view = activity.window.decorView.findTerminalView()
+            val viewSession = view?.currentSession
+            viewTerminalSessionIdentity = viewSession?.let(System::identityHashCode)
+            viewEmulatorIdentity = viewSession?.emulator?.let(System::identityHashCode)
+            if (viewTerminalSessionIdentity != expectedOwner.terminalSessionIdentity ||
+                viewEmulatorIdentity != expectedOwner.emulatorIdentity
+            ) {
+                failure = "TerminalView session/emulator is not bound to the expected active VM owner"
+                return@onActivity
+            }
+            val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            val preInjectionOwner = vm.activePaneRenderOwnerSnapshotForTest()
+            if (preInjectionOwner.automaticHealOperationsInFlight != 0 ||
+                preInjectionOwner.automaticHealActivityEpoch != expectedOwner.automaticHealActivityEpoch
+            ) {
+                failure = "automatic render-heal activity changed before active-model injection"
+                return@onActivity
+            }
+            injectedOwner = runCatching {
+                vm.appendToActivePaneRenderModelForTest(bytes, expectedOwner)
+            }.getOrElse {
+                failure = it.message ?: it.toString()
+                return@onActivity
+            }
+            val viewSessionAfter = view?.currentSession
+            viewTerminalSessionIdentityAfter = viewSessionAfter?.let(System::identityHashCode)
+            if (viewTerminalSessionIdentityAfter != injectedOwner?.terminalSessionIdentity ||
+                viewSessionAfter?.emulator?.let(System::identityHashCode) != injectedOwner?.emulatorIdentity ||
+                injectedOwner?.automaticHealOperationsInFlight != 0 ||
+                injectedOwner?.automaticHealActivityEpoch != expectedOwner.automaticHealActivityEpoch
+            ) {
+                failure = "TerminalView owner or automatic render-heal epoch changed during active-model injection"
+                return@onActivity
+            }
+            view?.invalidate()
         }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        assertTrue("expected to feed the frame to the live emulator", fed)
+        writeRenderOwnerArtifact(
+            namePrefix = namePrefix,
+            label = "injected-${expectedOwner.modelMutationEpoch}",
+            expected = expectedOwner,
+            actual = injectedOwner,
+            viewTerminalSessionIdentity = viewTerminalSessionIdentity,
+            viewTerminalSessionIdentityAfter = viewTerminalSessionIdentityAfter,
+            viewEmulatorIdentity = viewEmulatorIdentity,
+            failure = failure,
+        )
+        assertTrue(
+            "$failure expected=$expectedOwner injected=$injectedOwner " +
+                "viewSession=$viewTerminalSessionIdentity " +
+                "viewSessionAfter=$viewTerminalSessionIdentityAfter viewEmulator=$viewEmulatorIdentity",
+            failure == null && injectedOwner != null,
+        )
+        return checkNotNull(injectedOwner)
+    }
+
+    private fun writeRenderOwnerArtifact(
+        namePrefix: String,
+        label: String,
+        expected: ActivePaneRenderOwnerSnapshotForTest?,
+        actual: ActivePaneRenderOwnerSnapshotForTest?,
+        viewTerminalSessionIdentity: Int?,
+        viewTerminalSessionIdentityAfter: Int? = null,
+        viewEmulatorIdentity: Int?,
+        failure: String?,
+    ) {
+        writeText(
+            "$namePrefix-render-owner-$label.txt",
+            buildString {
+                appendLine("label=$label")
+                appendLine("failure=${failure.orEmpty()}")
+                appendLine("view_terminal_session_identity=$viewTerminalSessionIdentity")
+                appendLine("view_terminal_session_identity_after=$viewTerminalSessionIdentityAfter")
+                appendLine("view_emulator_identity=$viewEmulatorIdentity")
+                appendLine("expected_automatic_heal_activity_epoch=${expected?.automaticHealActivityEpoch}")
+                appendLine("actual_automatic_heal_activity_epoch=${actual?.automaticHealActivityEpoch}")
+                appendLine("expected=$expected")
+                appendLine("actual=$actual")
+            },
+        )
     }
 
     // ---------------------------------------------------------------- Render capture
@@ -591,6 +874,28 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         Log.i(LOG_TAG, "seeded session: ${exec?.stdout?.trim()}")
     }
 
+    private suspend fun captureAuthoritativeRemotePane(key: String): String {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec("tmux capture-pane -p -t ${shellQuote(SESSION_NAME)}")
+            }
+        }
+        val exec = result.getOrNull()
+        assertTrue(
+            "authoritative remote capture-pane must succeed before the manual heal; " +
+                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
+        return exec?.stdout.orEmpty()
+    }
+
     private suspend fun cleanupRemoteTmuxSession(key: String) {
         runCatching {
             SshConnection.connect(
@@ -626,7 +931,36 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         return file
     }
 
-    private fun writeSummary(namePrefix: String, kind: StaleKind): File =
+    private fun writeHealAttemptArtifact(
+        namePrefix: String,
+        kind: StaleKind,
+        localStale: LocalHealState,
+        remoteCaptureChars: Int,
+        healResult: HealAttemptResult,
+    ): File =
+        writeText(
+            "$namePrefix-heal-attempt.txt",
+            buildString {
+                appendLine("stale_kind=$kind")
+                appendLine("auto_watchdog_quiescent=true")
+                appendLine("remote_capture_non_blank_chars=$remoteCaptureChars")
+                appendLine("local_rendered_non_blank_chars=${localStale.renderedNonBlankChars}")
+                appendLine("local_render_looks_suspect=${localStale.renderLooksSuspect}")
+                appendLine("heal_outcome=${healResult.outcome}")
+                appendLine("heal_reason=${healResult.reason}")
+                appendLine("heal_rendered_non_blank_chars=${healResult.stats.renderedNonBlankChars}")
+                appendLine("heal_capture_non_blank_chars=${healResult.stats.captureNonBlankChars}")
+                appendLine("heal_capture_line_count=${healResult.stats.captureLineCount}")
+            },
+        )
+
+    private fun writeSummary(
+        namePrefix: String,
+        kind: StaleKind,
+        localStale: LocalHealState,
+        remoteCaptureChars: Int,
+        healResult: HealAttemptResult,
+    ): File =
         writeText(
             "$namePrefix-summary.txt",
             buildString {
@@ -637,6 +971,17 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
                 appendLine("session=$SESSION_NAME")
                 appendLine("banner_marker=$BANNER_MARKER")
                 appendLine("stale_kind=$kind")
+                appendLine("auto_watchdog_quiescent=true")
+                appendLine("remote_capture_non_blank_chars=$remoteCaptureChars")
+                appendLine("local_rendered_non_blank_chars=${localStale.renderedNonBlankChars}")
+                appendLine("local_render_looks_suspect=${localStale.renderLooksSuspect}")
+                appendLine("heal_outcome=${healResult.outcome}")
+                appendLine("heal_reason=${healResult.reason}")
+                appendLine(
+                    "heal_stats=rendered:${healResult.stats.renderedNonBlankChars}," +
+                        "capture:${healResult.stats.captureNonBlankChars}," +
+                        "lines:${healResult.stats.captureLineCount}",
+                )
                 appendLine(
                     "scenario=attach a full-viewport banner, inject the stale/fragment render " +
                         "($kind) on the LIVE emulator, assert transport stays Connected, then drive " +
@@ -680,6 +1025,8 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         const val POST_RESTORE_SETTLE_MS: Long = 2_000L
         const val MIN_RESTORED_BANNER_ROWS: Int = 20
         const val MIN_PAINTED_ROWS: Int = 30
+        const val MIN_AUTHORITATIVE_CAPTURE_CHARS: Int = 40
+        const val MAX_EXPECTED_FRAGMENT_CHARS: Int = 40
 
         val RESTORE_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 20_000L

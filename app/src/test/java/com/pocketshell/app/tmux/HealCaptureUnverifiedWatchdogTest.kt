@@ -29,6 +29,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -243,12 +244,13 @@ class HealCaptureUnverifiedWatchdogTest {
             client.failBestEffortOnCommandPrefix = "capture-pane"
             client.bestEffortException = TmuxClientException("tmux command timed out")
         }
-        val outcome = vm.healActivePaneIfStaleRenderForTest()
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
         advanceUntilIdle()
+        assertEquals(HealAttemptReason.CaptureException, result.reason)
         assertEquals(
             "a heal-capture TIMEOUT on a black pane is UNVERIFIED (keep hot)",
             HealOutcome.Unverified,
-            outcome,
+            result.outcome,
         )
     }
 
@@ -260,12 +262,14 @@ class HealCaptureUnverifiedWatchdogTest {
                 CommandResponse(number = 90L, output = listOf("capture-pane: no such pane"), isError = true),
             )
         }
-        val outcome = vm.healActivePaneIfStaleRenderForTest()
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
         advanceUntilIdle()
+        assertEquals(HealAttemptReason.CaptureError, result.reason)
+        assertTrue("error response stats stay bounded", result.stats.captureNonBlankChars > 0)
         assertEquals(
             "a heal-capture ERROR response on a black pane is UNVERIFIED (keep hot)",
             HealOutcome.Unverified,
-            outcome,
+            result.outcome,
         )
     }
 
@@ -277,13 +281,64 @@ class HealCaptureUnverifiedWatchdogTest {
             client.defaultCaptureResponse = null
         }
         assertTrue("precondition: the transport is still connected", !vm.clientDisconnectedForTest())
-        val outcome = vm.healActivePaneIfStaleRenderForTest()
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
         advanceUntilIdle()
+        assertEquals(HealAttemptReason.CaptureEmpty, result.reason)
         assertEquals(
             "an EMPTY capture on a live transport over a black pane is UNVERIFIED (keep hot)",
             HealOutcome.Unverified,
-            outcome,
+            result.outcome,
         )
+    }
+
+    // Issue #966: failure classification is independent of whether the local viewport looks
+    // suspect. A dense, non-suspect render still cannot earn Healthy without a successful,
+    // nonempty authoritative capture whose lost-frame predicate returned false.
+
+    @Test
+    fun denseHealthyLocalCaptureExceptionIsUnverified() = runVmTest { _ ->
+        val vm = densePaneVm("%2") { client ->
+            client.failBestEffortOnCommandPrefix = "capture-pane"
+            client.bestEffortException = TmuxClientException("tmux command timed out")
+        }
+
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
+        advanceUntilIdle()
+
+        assertEquals(HealAttemptReason.CaptureException, result.reason)
+        assertEquals(HealOutcome.Unverified, result.outcome)
+        assertTrue(result.stats.renderedNonBlankChars > 0)
+    }
+
+    @Test
+    fun denseHealthyLocalCaptureErrorIsUnverified() = runVmTest { _ ->
+        val vm = densePaneVm("%3") { client ->
+            client.capturePaneResponses.addLast(
+                CommandResponse(number = 91L, output = listOf("capture-pane failed"), isError = true),
+            )
+        }
+
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
+        advanceUntilIdle()
+
+        assertEquals(HealAttemptReason.CaptureError, result.reason)
+        assertEquals(HealOutcome.Unverified, result.outcome)
+        assertTrue(result.stats.renderedNonBlankChars > 0)
+    }
+
+    @Test
+    fun denseHealthyLocalEmptyCaptureIsUnverified() = runVmTest { _ ->
+        val vm = densePaneVm("%4") { client ->
+            client.capturePaneResponses.clear()
+            client.defaultCaptureResponse = null
+        }
+
+        val result = vm.healActivePaneIfStaleRenderResultForTest()
+        advanceUntilIdle()
+
+        assertEquals(HealAttemptReason.CaptureEmpty, result.reason)
+        assertEquals(HealOutcome.Unverified, result.outcome)
+        assertTrue(result.stats.renderedNonBlankChars > 0)
     }
 
     // ------------------------------------------------------------------ Harness
@@ -303,6 +358,25 @@ class HealCaptureUnverifiedWatchdogTest {
         advanceUntilIdle()
         pane.terminalState.appendRemoteOutput(CLEAR_ONLY.toByteArray(Charsets.US_ASCII))
         advanceUntilIdle()
+        configureFailure(client)
+        return vm
+    }
+
+    private fun TestScope.densePaneVm(
+        paneId: String,
+        configureFailure: (FakeTmuxClient) -> Unit,
+    ): TmuxSessionViewModel {
+        val client = FakeTmuxClient().withSinglePaneRow("work", paneId)
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == paneId }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        renderDenseFrame(pane)
+        advanceUntilIdle()
+        assertFalse(
+            "precondition: dense local viewport must not look suspect",
+            pane.terminalState.renderLooksSuspect(),
+        )
         configureFailure(client)
         return vm
     }

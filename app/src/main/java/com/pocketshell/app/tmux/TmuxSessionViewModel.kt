@@ -312,7 +312,6 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setReconcileDispatcherForTest(dispatcher: CoroutineDispatcher) {
         reconcileDispatcher = dispatcher
     }
-
     /**
      * Issue #926: the dispatcher the attach/switch/reattach SEED + `list-panes`
      * BLOCKING control-channel round-trips run on. Defaults to [Dispatchers.IO]
@@ -332,7 +331,6 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setSeedIoDispatcherForTest(dispatcher: CoroutineDispatcher) {
         seedIoDispatcher = dispatcher
     }
-
     /**
      * Issue #877: the dispatcher the per-`%output` new-port detector
      * ([startPortDetectionForPane] → [PortDetector.scan]) runs its decode +
@@ -359,7 +357,6 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setPortDetectionDispatcherForTest(dispatcher: CoroutineDispatcher) {
         portDetectionDispatcher = dispatcher
     }
-
     /**
      * Session-card host CLI reads/writes run on real IO in production. Unit
      * tests pin this to the shared scheduler so card refresh assertions do not
@@ -372,7 +369,6 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionCardsDispatcher = dispatcher
         sessionCardsRemoteSource.setExecDispatcherForTest(dispatcher)
     }
-
     /**
      * Issue #1085 (F2): the application-scoped coroutine the SLOW
      * connection-teardown IO ([closeCurrentConnection]'s tmux `detach-client`
@@ -397,7 +393,6 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setTeardownScopeForTest(scope: CoroutineScope) {
         teardownScope = scope
     }
-
     /**
      * Issue #793: how long the Conversation tab stays in the
      * [ConversationLoadState.Loading] ("Loading conversation…") state before
@@ -1774,9 +1769,12 @@ public class TmuxSessionViewModel @Inject constructor(
     // Issue #966/#967: when false, [armActivePaneStaleRenderWatchdog] is
     // suppressed entirely. Always true in production; a test seam toggles it.
     private var staleRenderWatchdogAutoArmEnabled: Boolean = true
+    private val staleRenderWatchdogArmLock = Any()
 
     internal fun setStaleRenderWatchdogAutoArmEnabledForTest(enabled: Boolean) {
-        staleRenderWatchdogAutoArmEnabled = enabled
+        synchronized(staleRenderWatchdogArmLock) {
+            staleRenderWatchdogAutoArmEnabled = enabled
+        }
     }
 
     // Issue #1166: the single active stale-render watchdog loop. Cancelled and
@@ -1785,7 +1783,22 @@ public class TmuxSessionViewModel @Inject constructor(
     private var staleRenderWatchdogJob: Job? = null
 
     @androidx.annotation.VisibleForTesting
-    internal fun staleRenderWatchdogJobForTest(): Job? = staleRenderWatchdogJob
+    internal fun staleRenderWatchdogJobForTest(): Job? =
+        synchronized(staleRenderWatchdogArmLock) { staleRenderWatchdogJob }
+
+    /**
+     * Issue #966 diagnostics isolation: atomically prevent every future production auto-arm,
+     * then cancel AND join the already-running loop before a connected journey injects stale
+     * state. Once this returns, the manual one-pass seam is the sole heal owner.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun pauseActivePaneStaleRenderWatchdogForTest() {
+        val current = synchronized(staleRenderWatchdogArmLock) {
+            staleRenderWatchdogAutoArmEnabled = false
+            staleRenderWatchdogJob
+        }
+        current?.cancelAndJoin()
+    }
 
     // Issue #1166 (heal-latency fix): a WAKE signal so fresh `%output` on the
     // ACTIVE visible pane snaps a BACKED-OFF watchdog straight back to the hot
@@ -2184,6 +2197,8 @@ public class TmuxSessionViewModel @Inject constructor(
     private var appliedControlClientColumns: Int = 0
     private var appliedControlClientRows: Int = 0
     private var controlClientSizeGeneration: Long = 0L
+    private val controlClientSizeOperationsInFlight = AtomicInteger(0); private val automaticRenderHealTracker =
+        AutomaticRenderHealTracker()
     private var windowSizePolicyAppliedForAttach: Boolean = false
     // Issue #495/#554: injected process-scoped memory of which tmux windows
     // are agent windows (and which agent + the user's last tab choice), keyed
@@ -3259,7 +3274,6 @@ public class TmuxSessionViewModel @Inject constructor(
             connectionManager.setReconnectLadder(delaysMs)
         }
     }
-
     @androidx.annotation.VisibleForTesting
     internal fun setPassiveDisconnectRecoveryForTest(
         graceMs: Long = passiveDisconnectGraceMs,
@@ -7560,7 +7574,6 @@ public class TmuxSessionViewModel @Inject constructor(
         // surface renders a curated sentence, never a raw exception string.
         revealController.driveTerminalError(target, cause)
     }
-
     @androidx.annotation.VisibleForTesting
     internal fun isStaleChannelSymptom(cause: Throwable?): Boolean =
         TmuxSessionFailureClassifiers.isStaleChannelSymptom(cause)
@@ -11201,67 +11214,24 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #966/#967 — the STEADY-STATE stale-render watchdog. The
-     * [armConnectedBlankWatchdog] above exits the instant a frame lands, so it
-     * cannot catch a pane that paints fine at attach and only LATER goes
-     * black-with-fragments (a drop-induced stale grid, a mis-sized resize, a
-     * partial reseed that stalled — the #966 shape). This watchdog runs for the
-     * lifetime of the runtime on a SLOW cadence and, each tick, captures the
-     * ACTIVE visible pane and re-seeds it ONLY when the local render is
-     * mostly-black/stale relative to tmux's authoritative grid
-     * ([healActivePaneIfStaleRender]).
-     *
-     * It is the residual-risk net the #967 spike called out: a render that dies
-     * SILENTLY (no exception, just a stale grid) neither reconnects (correct — the
-     * transport is alive) NOR is caught by the blank/partial-blank oracles. This
-     * watchdog is the missing oracle, gated by a `capture-pane` DIFF so it never
-     * over-fires on a legitimately sparse-but-correct pane.
-     *
-     * Cost: ONE `capture-pane` round-trip per tick, and only while the pane is
-     * NON-blank (the blank watchdog owns the blank case). The diff is computed from
-     * the captured text, so a healthy pane pays just the one cheap round-trip and
-     * never relayouts.
-     *
-     * Issue #1166 (battery/heat) — the watchdog exists to heal the VISIBLE pane, so
-     * it is gated + backed off so an idle/hidden pane stops hammering `capture-pane`
-     * while a churning/agent pane still heals as fast as before:
-     *
-     *  - **Foreground + screen-on gate.** When the app is backgrounded OR the screen
-     *    is off there is nothing on screen to heal, so the tick SKIPS the capture
-     *    round-trip entirely (0 captures/min while backgrounded or screen-off). On
-     *    resume the back-off is reset so the FIRST foreground tick captures at the
-     *    hot 4s cadence — a pane that changed while away heals right on return.
-     *  - **Back-off when HEALTHY (issue #1219 steady-heat fix).** A tick whose
-     *    authoritative capture-diff oracle finds NO divergence widens the next
-     *    interval (4s → 8s → 16s, capped) — EVEN while the pane is actively
-     *    streaming `%output`. Only a real detected divergence (the heal fired), a
-     *    session switch (fresh arm), or a reconnecting band snaps the cadence back
-     *    to 4s. Before #1219 ANY streamed `%output` reset the back-off, so a
-     *    continuously-streaming-but-CORRECT agent pane never left the hot 4s cadence
-     *    and paid a `capture-pane` round-trip every 4s forever (the #1164 "runs
-     *    warm" lever, the heaviest-use foreground window). A streaming-but-BLACK
-     *    pane still heals within the same bound (#1138/#1153/#874) via the suspect
-     *    wake below.
-     *  - **Immediate wake on a SUSPECT redraw (issue #1166 heal-latency fix, #1219
-     *    scoped).** The back-off is NOT purely poll-based: a fresh active-pane
-     *    `%output` fires [staleRenderWatchdogWake] (see [recordVisiblePaneOutput])
-     *    and the loop RACES its backed-off `delay(...)` against that wake (see
-     *    [awaitStaleRenderWatchdogTick]) — but honors it ONLY while the render looks
-     *    locally black/partial-black ([activeVisiblePaneRenderLooksSuspect]). So a
-     *    redraw that turns the pane black ~1s into a 16s backed-off window is
-     *    captured/diffed/healed within the hot bound (≤4s), not up to 16s later —
-     *    the partial-black (#1138) case whose sole steady-state oracle is this
-     *    watchdog can never sit visibly broken for a whole backed-off interval —
-     *    while a healthy streaming pane's output is ignored so it reaps the back-off.
-     *  - **Arm-dedup.** [staleRenderWatchdogJob] is cancelled before each re-arm so
-     *    rapid A→B→A switching can never stack multiple concurrent 4s loops.
+     * Steady-state #966 render net: while foregrounded and screen-on, compare the visible pane
+     * with one authoritative capture. Confirmed-healthy ticks back off; divergence, failure, or
+     * a suspect output wake stays hot. Re-arm replaces the previous loop.
      */
     private fun armActivePaneStaleRenderWatchdog(refreshGuard: RuntimeRefreshGuard) {
-        if (!staleRenderWatchdogAutoArmEnabled) return
-        launchActivePaneStaleRenderWatchdog(refreshGuard)
+        synchronized(staleRenderWatchdogArmLock) {
+            if (!staleRenderWatchdogAutoArmEnabled) return
+            launchActivePaneStaleRenderWatchdogLocked(refreshGuard)
+        }
     }
 
     private fun launchActivePaneStaleRenderWatchdog(refreshGuard: RuntimeRefreshGuard) {
+        synchronized(staleRenderWatchdogArmLock) {
+            launchActivePaneStaleRenderWatchdogLocked(refreshGuard)
+        }
+    }
+
+    private fun launchActivePaneStaleRenderWatchdogLocked(refreshGuard: RuntimeRefreshGuard) {
         // Issue #1166 arm-dedup: cancel any prior loop before launching a new one.
         // A stale loop otherwise only self-terminates on its NEXT tick via
         // isCurrentRuntime (up to one full tick of double/triple captures per switch).
@@ -11504,46 +11474,107 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal suspend fun healActivePaneIfStaleRenderForTest(): HealOutcome {
-        val client = clientRef ?: return HealOutcome.Unverified
-        val activePane = activeVisiblePane() ?: return HealOutcome.Unverified
-        val target = activeTarget ?: return HealOutcome.Unverified
+        return healActivePaneIfStaleRenderResultForTest().outcome
+    }
+
+    /** One production heal pass retaining its exact bounded diagnostic result. */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun healActivePaneIfStaleRenderResultForTest(): HealAttemptResult {
+        val client = clientRef ?: return HealAttemptResult.create(HealAttemptReason.MissingClient, 0)
+        val activePane = activeVisiblePane()
+            ?: return HealAttemptResult.create(HealAttemptReason.MissingActivePane, 0)
+        val target = activeTarget
+            ?: return HealAttemptResult.create(
+                HealAttemptReason.MissingActiveTarget,
+                activePane.terminalState.renderedNonBlankCharCount(),
+            )
         val guard = RuntimeRefreshGuard(
             generation = connectGeneration,
             target = target,
             client = client,
         )
-        return healActivePaneIfStaleRender(client, activePane, guard)
+        return healActivePaneIfStaleRenderAttempt(client, activePane, guard)
     }
 
-    /** Issue #1353 R4 (test seam): submit a reconcile event via [requestReconcile] on the live client. */
+    @androidx.annotation.VisibleForTesting
+    internal fun activePaneRenderOwnerSnapshotForTest(): ActivePaneRenderOwnerSnapshotForTest {
+        val pane = checkNotNull(activeVisiblePane()) { "active visible pane is missing" }
+        val ownerBefore = pane.terminalState.renderModelOwnerSnapshotForTesting()
+        val rendered = pane.terminalState.renderedNonBlankCharCount(); val partial =
+            pane.terminalState.visibleScreenIsPartiallyBlank(); val suspect = pane.terminalState.renderLooksSuspect()
+        val ownerAfter = pane.terminalState.renderModelOwnerSnapshotForTesting(); val automaticHeal =
+            automaticRenderHealTracker.snapshot()
+        return ActivePaneRenderOwnerSnapshotForTest(
+            paneId = pane.paneId, windowId = pane.windowId, sessionId = pane.sessionId,
+            targetSessionName = activeTarget?.sessionName, connectGeneration = connectGeneration,
+            clientIdentity = clientRef?.let(System::identityHashCode),
+            stateIdentity = ownerAfter.stateIdentity, terminalSessionIdentity = ownerAfter.sessionIdentity,
+            emulatorIdentity = ownerAfter.emulatorIdentity, modelMutationEpoch = ownerAfter.mutationEpoch,
+            modelDrainBacklogged = ownerAfter.drainBacklogged,
+            seedOperationInFlight = panesSeedInFlightThisAttach.contains(pane.paneId),
+            sizeOperationsInFlight = controlClientSizeOperationsInFlight.get(), automaticHealOperationsInFlight =
+                automaticHeal.activeCount, automaticHealActivityEpoch = automaticHeal.activityEpoch,
+            controlSizeGeneration = controlClientSizeGeneration,
+            effectiveColumns = effectiveControlClientColumns(), effectiveRows = effectiveControlClientRows(),
+            appliedColumns = appliedControlClientColumns, appliedRows = appliedControlClientRows,
+            lastSeedAtMs = paneLastSeedAtMs[pane.paneId], renderedNonBlankChars = rendered,
+            partiallyBlank = partial, renderLooksSuspect = suspect, coherent = ownerBefore == ownerAfter,
+        )
+    }
+    @androidx.annotation.VisibleForTesting
+    internal fun appendToActivePaneRenderModelForTest(bytes: ByteArray, expectedOwner: ActivePaneRenderOwnerSnapshotForTest, afterAppendBeforeSnapshotForTest: (() -> Unit)? = null):
+        ActivePaneRenderOwnerSnapshotForTest {
+        val before = activePaneRenderOwnerSnapshotForTest()
+        check(expectedOwner.attachResizeSeedSettled) { "expected owner was not settled: $expectedOwner" }
+        check(before.coherent && before.sameOwnerAs(expectedOwner)) {
+            "active render owner changed before injection: expected=$expectedOwner actual=$before"
+        }
+        check(before.modelMutationEpoch == expectedOwner.modelMutationEpoch) {
+            "active render model mutated before injection: expected=$expectedOwner actual=$before"
+        }
+        check(before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
+            before.sizeOperationsInFlight == 0 && before.automaticHealOperationsInFlight == 0 &&
+                before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch &&
+            before.appliedColumns == expectedOwner.appliedColumns &&
+            before.appliedRows == expectedOwner.appliedRows
+        ) {
+            "attach/resize owner changed before injection: expected=$expectedOwner actual=$before"
+        }
+        val pane = checkNotNull(activeVisiblePane())
+        pane.terminalState.appendDirectlyToRenderModelForTesting(bytes)
+        afterAppendBeforeSnapshotForTest?.invoke()
+        val after = activePaneRenderOwnerSnapshotForTest()
+        check(after.coherent && after.sameOwnerAs(expectedOwner)) {
+            "active render owner changed during injection: expected=$expectedOwner actual=$after" }
+        check(after.modelMutationEpoch == expectedOwner.modelMutationEpoch + 1L) {
+            "unexpected concurrent model mutation during injection: expected=$expectedOwner actual=$after" }
+        check(after.automaticHealOperationsInFlight == 0 && after.automaticHealActivityEpoch ==
+            expectedOwner.automaticHealActivityEpoch) {
+            "automatic render heal raced injection: expected=$expectedOwner actual=$after" }
+        return after
+    }
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun healActivePaneIfStaleRenderResultForTest(expectedOwner: ActivePaneRenderOwnerSnapshotForTest):
+        HealAttemptResult {
+        val before = activePaneRenderOwnerSnapshotForTest()
+        check(before.coherent && before.sameOwnerAs(expectedOwner)) {
+            "active render owner changed before manual heal: expected=$expectedOwner actual=$before" }
+        check(before.modelMutationEpoch == expectedOwner.modelMutationEpoch &&
+            before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
+            before.sizeOperationsInFlight == 0 && before.automaticHealOperationsInFlight == 0 &&
+                before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch
+        ) {
+            "active render model/resize changed before manual heal: expected=$expectedOwner actual=$before" }
+        return healActivePaneIfStaleRenderResultForTest()
+    }
+    @androidx.annotation.VisibleForTesting internal fun completeAutomaticRenderHealActivityCycleForTest() =
+        automaticRenderHealTracker.begin().also(automaticRenderHealTracker::complete)
     internal fun requestReconcileForTest(paneId: String, reason: ReconcileReason) {
         val client = clientRef ?: return
         requestReconcile(client, paneId, reason)
     }
-
-    /** Issue #1353 R4 (test seam): the R3 per-pane single-flight owner the reconcile routes through. */
     internal fun renderHealCoordinatorForTest(): RenderHealCoordinator = renderHealCoordinator
-
-    /**
-     * Issue #966/#967 (test seam): is the underlying tmux control client currently
-     * disconnected? The discriminating connected journey asserts this is FALSE while
-     * the render is stale — proving the transport is alive (a render bug, not a drop).
-     */
-    @androidx.annotation.VisibleForTesting
-    internal fun clientDisconnectedForTest(): Boolean = clientRef?.disconnected?.value ?: true
-
-    /**
-     * Issue #886: the attach reveal never produced a frame within the bounded
-     * blank-watchdog window — surface a retryable error so the user is NEVER
-     * left on an infinite "Attaching…" spinner. The control channel is up (green
-     * dot) but the active pane's `capture-pane` seed is wedged (the #470/#835
-     * enumeration-stall class on a streaming agent pane), so we drive the reveal
-     * to the honest-error surface [RevealState.Error] + the #823 Reconnect
-     * affordance by routing through the existing single-emitter [setConnectionState]
-     * `Unreachable` path (the SAME surface the 30 s panes-ready timeout uses).
-     * The current target is preserved as the reconnect target so the Reconnect
-     * button + pull-to-reconnect have something to re-dial.
-     */
+    @androidx.annotation.VisibleForTesting internal fun clientDisconnectedForTest(): Boolean = clientRef?.disconnected?.value ?: true
     private fun failStuckAttachReveal() {
         val target = activeTarget ?: connectingTarget
         Log.w(
@@ -11563,10 +11594,6 @@ public class TmuxSessionViewModel @Inject constructor(
             "maxTicks" to connectedBlankWatchdogMaxTicks,
             "tickMs" to CONNECTED_BLANK_WATCHDOG_TICK_MS,
         )
-        // Preserve the target so Reconnect has something to re-dial, then drive
-        // the honest-error surface via [ConnectionState.Unreachable] (the reveal
-        // machine + [SessionSurfaceState] resolve the held surface to the calm
-        // failure placeholder — no separate loading-overlay flag; #1326).
         connectingTarget = target
         refreshReconnectAvailability()
         val where = target?.let { " ${it.user}@${it.host}:${it.port}" } ?: ""
@@ -11577,38 +11604,13 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
-    /**
-     * Issue #662: re-seed a single visible pane from `capture-pane` if its
-     * emulator is rendering a blank (black) screen. Called when the user
-     * switches to a window: tmux `-CC` never re-emits an idle window's existing
-     * content, so a window that was never successfully seeded (or whose seed was
-     * wiped by a reflow) would otherwise stay black no matter how many times the
-     * user switches to it. A no-op when the pane already shows content.
-     */
     public fun reseedVisiblePaneIfBlank(paneId: String) {
         val pane = paneRows[paneId] ?: return
         val client = clientRef ?: return
         if (client.disconnected.value) return
-        // Issue #830: a pane already seeded THIS attach ([panesSeededThisAttach]),
-        // or with a seed round-trip still IN FLIGHT
-        // ([panesSeedInFlightThisAttach]), has its authoritative `capture-pane`
-        // snapshot applied or arriving. The pager settles on the active pane the
-        // instant the route swaps — in the narrow window between the preload seed
-        // STARTING and its snapshot landing, so a `visibleScreenIsBlank()` read here
-        // is a drain-timing artifact racing the in-flight seed, NOT a
-        // genuinely-never-seeded window. Re-seeding then is the redundant cold-open
-        // reseed the #640 single-capture contract forbids (a 2nd `capture-pane`
-        // round-trip + relayout = visible flicker on a high-latency link). The #662
-        // heal this watchdog exists for is a window with NO seed this attach (a
-        // reused pane whose attach-time seed was missing/wiped), so the skip is
-        // scoped to seeded / in-flight panes only and never suppresses a real
-        // black-window heal.
         if (paneId in panesSeededThisAttach || paneId in panesSeedInFlightThisAttach) return
         if (!pane.terminalState.visibleScreenIsBlank()) return
         bridgeScope.launch {
-            // Re-check inside the coroutine: the pane may have painted between
-            // the synchronous guard and dispatch (a late `%output` landed), or its
-            // attach-time seed may have started in the meantime.
             if (paneId in panesSeededThisAttach || paneId in panesSeedInFlightThisAttach) return@launch
             if (!pane.terminalState.visibleScreenIsBlank()) return@launch
             Log.i(
@@ -11621,58 +11623,14 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #966/#967 — the STALE-RENDER heal. The v0.4.17 black-screen heal only
-     * engages on a FULLY-blank or ≤3-live-line pane, so the maintainer's #966 pane
-     * — a connected Claude window rendering only a lone cursor + a couple of
-     * scattered status fragments while tmux's grid holds the full TUI — reads
-     * "not blank" and is SKIPPED, leaving a black-with-fragments pane on a LIVE
-     * transport (the keepalive keeps succeeding; the render is just stale).
-     *
-     * This heal captures the active pane ONCE, diffs the authoritative capture
-     * against what the local emulator actually rendered
-     * ([TerminalSurfaceState.visibleScreenDivergesFromCapture]), and re-seeds the
-     * pane ONLY when the render is mostly-black/stale relative to tmux. The diff
-     * is what keeps a legitimately sparse-but-correct pane from over-firing: when
-     * the render already matches tmux, the capture is applied as a no-op (the
-     * existing full clear+repaint is idempotent — re-painting the SAME
-     * authoritative content), but we skip even that to avoid a needless relayout.
-     *
-     * Returns true when a stale render was detected and re-seeded. The single
-     * `capture-pane` round-trip is paid ONLY on the watchdog cadence (the caller
-     * gates frequency), never per frame, so steady-state rendering is untouched.
-     */
-    /**
-     * Issue #1175 — fingerprint a degenerate (black / partial-black) frame into the
-     * EXPORTABLE diagnostics JSONL (the same ring the Settings → Diagnostics "Share
-     * log" export reads), so a maintainer who hits a black screen can SHARE the log and
-     * we can tell WHICH class of black screen it was.
-     *
-     * This is emitted ONLY from points the heal/reveal path ALREADY reaches on the
-     * existing gated, backed-off stale-render watchdog tick and the connect/switch
-     * reveal gate — it adds NO new timer/poll/coroutine loop (the deliberate contrast
-     * with the #1164 heat regression). It rides the same `capture-pane` round-trip the
-     * heal already pays; it never issues its own.
-     *
-     * Additive on the OBSERVE side: the successful-heal event (`stale_render_heal`)
-     * still fires from [healActivePaneIfStaleRender]; this fingerprints the frame that
-     * was observed degenerate regardless of whether a heal follows.
-     *
-     * The `class` discriminator is computed at each call site (deterministic per site,
-     * so a unit test can drive every class); this builder just attaches the shared
-     * geometry / lifecycle field set — all redacted by [DiagnosticRedactor] before it
-     * reaches disk (only `session` is host-identifying, as it already is on
-     * `stale_render_heal`).
+     * Record a #1175 degenerate frame using the capture the heal/reveal path already paid for.
+     * No timer, poll, or extra round-trip is introduced.
      */
     private fun recordBlackFrameObserved(
         pane: TmuxPaneState,
         blackClass: String,
         captureText: String?,
-        // Issue #1294: present only on the [BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED]
-        // class — the count of consecutive UNVERIFIED heal ticks (capture timeout / error /
-        // empty / mutex-starved) the watchdog has seen without a confirming capture. It lets
-        // a shared-log export distinguish a genuinely-healthy pane that BACKED OFF (watchdog
-        // throttled, unverifiedStreak absent) from a pane whose heal captures are WEDGED
-        // (watchdog BLIND, unverifiedStreak climbing) — the exact #1294 mechanism.
+        // Present only for BLACK_FRAME_CLASS_HEAL_CAPTURE_UNVERIFIED.
         unverifiedStreak: Int? = null,
     ) {
         val nowMs = SystemClock.elapsedRealtime()
@@ -11694,16 +11652,7 @@ public class TmuxSessionViewModel @Inject constructor(
         DiagnosticEvents.record("terminal", BLACK_FRAME_OBSERVED_EVENT, *fields)
     }
 
-    /**
-     * Issue #1294: record a watchdog tick whose authoritative `capture-pane` could NOT
-     * confirm the render's health (a [HealOutcome.Unverified] outcome — capture timeout,
-     * error response, empty-on-live-transport, or mutex-starved by a concurrent burst).
-     * Rides the existing exportable `black_frame_observed` ring (#1175 conventions) under a
-     * dedicated class + an `unverifiedStreak` field, so an export can tell an idle healthy
-     * pane that legitimately backed off from a pane whose heal captures are WEDGED while it
-     * is black (the #1294 "watchdog blind, not throttled" distinction). Emitted from the
-     * watchdog tick that already paid the capture — no new poll/timer/round-trip.
-     */
+    /** Record a #1294 unverified streak on the already-paid watchdog tick. */
     private fun recordHealCaptureUnverified(pane: TmuxPaneState, unverifiedStreak: Int) {
         recordBlackFrameObserved(
             pane,
@@ -11713,16 +11662,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
-    /**
-     * Issue #1295 — emit the POSITIVE watchdog-liveness heartbeat ([WATCHDOG_LIVENESS_EVENT]).
-     * Called once per steady stale-render watchdog tick AFTER every gate has passed (runtime
-     * current + foregrounded + screen-on + a visible pane), so the heartbeat certifies exactly
-     * "an armed watchdog is ticking over a live-attached, foregrounded, visible pane". The
-     * runtime identity is [refreshGuard]'s `generation` + the live client identity hash, so an
-     * export can correlate the heartbeat to the same runtime the reconnect trail names, and its
-     * ABSENCE (while the export otherwise shows foreground+live) convicts the unarmed-watchdog
-     * bug. Rides the tick that already runs — no new poll/timer/round-trip.
-     */
+    /** Emit the #1295 liveness heartbeat after all watchdog gates pass. */
     private fun recordWatchdogLiveness(
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard,
@@ -11755,6 +11695,18 @@ public class TmuxSessionViewModel @Inject constructor(
         recordMilestone: Boolean = false,
         maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
     ): HealOutcome =
+        healActivePaneIfStaleRenderAttempt(
+            client, pane, refreshGuard, force, recordMilestone, maxAttempts,
+        ).outcome
+
+    private suspend fun healActivePaneIfStaleRenderAttempt(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard?,
+        force: Boolean = false,
+        recordMilestone: Boolean = false,
+        maxAttempts: Int = SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS,
+    ): HealAttemptResult =
         // Issue #1353 R3 — SINGLE-FLIGHT per pane. Serialize the whole close→capture→apply→open
         // seed-gate (M9) window so a sibling launcher (L1 send / L2 watchdog / L5 reveal) on the
         // SAME pane can't cross into it and open the gate early, clobbering a buffered newer
@@ -11782,9 +11734,30 @@ public class TmuxSessionViewModel @Inject constructor(
         // Force-mode only: bound on the empty/near-blank capture retry loop (#693/#662).
         // Ignored on the oracle-gated (non-force) path, which pays exactly one capture.
         maxAttempts: Int,
-    ): HealOutcome {
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
-        if (client.disconnected.value) return HealOutcome.Unverified
+    ): HealAttemptResult {
+        // Issue #966: diagnostics describe the frame that triggered this attempt, not the
+        // frame after a successful reseed. Snapshot before any guard, capture, predicate, or
+        // apply can change the viewport and carry that immutable observation to every exit.
+        val observedRenderedNonBlankChars =
+            pane.terminalState.renderedNonBlankCharCount()
+        fun result(
+            reason: HealAttemptReason,
+            captureText: String? = null,
+            captureLineCount: Int = 0,
+        ): HealAttemptResult =
+            HealAttemptResult.create(
+                reason = reason,
+                renderedNonBlankChars = observedRenderedNonBlankChars,
+                captureNonBlankChars = captureText?.count { !it.isWhitespace() } ?: 0,
+                captureLineCount = captureLineCount,
+            )
+
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+            return result(HealAttemptReason.RuntimeSupersededBeforeCapture)
+        }
+        if (client.disconnected.value) {
+            return result(HealAttemptReason.ClientDisconnectedBeforeCapture)
+        }
         // Issue #1353 R2 — the UNCONDITIONAL reseed (seed mode), folded in from the old
         // `seedPaneFromCapture`: capture tmux's authoritative grid and apply it WITHOUT the
         // oracle gate, RETRYING a transiently empty/near-blank capture (bounded); the
@@ -11801,14 +11774,18 @@ public class TmuxSessionViewModel @Inject constructor(
                 var attempt = 0
                 while (true) {
                     if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
-                        return HealOutcome.Unverified
+                        return result(HealAttemptReason.RuntimeSupersededBeforeCapture)
                     }
-                    if (client.disconnected.value) return HealOutcome.Unverified
+                    if (client.disconnected.value) {
+                        return result(HealAttemptReason.ClientDisconnectedBeforeCapture)
+                    }
                     if (captureAndApplyPaneSnapshot(client, pane, refreshGuard, recordMilestone)) {
-                        return HealOutcome.Healed
+                        return result(HealAttemptReason.ForcedSnapshotApplied)
                     }
                     attempt += 1
-                    if (attempt >= maxAttempts) return HealOutcome.Unverified
+                    if (attempt >= maxAttempts) {
+                        return result(HealAttemptReason.ForcedSnapshotUnavailable)
+                    }
                     // Short backoff so a flaky-link empty capture is re-tried after the
                     // channel has a moment to recover, without stalling a genuinely empty
                     // pane's reveal for long. The guard re-check at the top aborts
@@ -11858,7 +11835,7 @@ public class TmuxSessionViewModel @Inject constructor(
             surfaceBlack || pane.terminalState.renderLooksSuspect()
         if (quiesceLiveDeltas) pane.terminalState.closeSeedGate()
         try {
-        val combined = runCatching {
+        val captureAttempt = runCatching {
             withContext(seedIoDispatcher) {
                 client.captureWithCursor(
                     pane.paneId,
@@ -11866,20 +11843,23 @@ public class TmuxSessionViewModel @Inject constructor(
                     timeoutMs = seedCaptureTimeoutMs,
                 )
             }
-        }.getOrNull()
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return HealOutcome.Unverified
+        }
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+            return result(HealAttemptReason.RuntimeSupersededAfterCapture)
+        }
+        val combined = captureAttempt.getOrNull()
         val captureResponse = combined?.capture
-        if (captureResponse == null || captureResponse.isError || captureResponse.output.isEmpty()) {
+        val captureText = captureResponse?.output?.joinToString(separator = "\n")
+        val failedReason = when {
+            captureAttempt.isFailure -> HealAttemptReason.CaptureException
+            captureResponse?.isError == true -> HealAttemptReason.CaptureError
+            captureResponse?.output?.isEmpty() != false -> HealAttemptReason.CaptureEmpty
+            else -> null
+        }
+        if (failedReason != null) {
             // Issue #1294: the `capture-pane` round-trip could NOT confirm the render against
             // tmux's grid (timed out / errored / EMPTY on a live transport / starved by a
             // capture-mutex-holding burst). The surface repaint above already fired if black.
-            // Scoring turns on whether the LOCAL render looks LOST ([renderLooksSuspect]):
-            //  - LOOKS LOST → UNVERIFIED: we needed this capture to heal a suspect pane and
-            //    couldn't; the watchdog keeps the HOT cadence (retry at 4s) instead of scoring
-            //    the failure as healthy and backing off to 16s while the pane is black (the bug).
-            //  - looks HEALTHY → a momentary empty/failed capture over a dense render is a
-            //    no-op; scoring HEALTHY preserves the #1219/#1164 battery back-off.
-            val renderLooksLost = surfaceBlack || pane.terminalState.renderLooksSuspect()
             // Issue #1175: fingerprint the observed frame when degenerate so an export sees
             // WHICH class of black it was (rides this same failed capture — no new round-trip):
             // surface-only-black → #1192 class; empty capture over a degenerate render →
@@ -11896,9 +11876,15 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 recordBlackFrameObserved(pane, blackClass, captureText = null)
             }
-            return if (renderLooksLost) HealOutcome.Unverified else HealOutcome.Healthy
+            return result(
+                reason = failedReason,
+                captureText = captureText,
+                captureLineCount = captureResponse?.output?.size ?: 0,
+            )
         }
-        val captureText = captureResponse.output.joinToString(separator = "\n")
+        checkNotNull(combined)
+        checkNotNull(captureResponse)
+        checkNotNull(captureText)
         // The discriminating check: tmux carries a real frame but the local render
         // shows almost none of it → stale render on a live transport. If the
         // render already matches tmux, this is false and we never touch the grid.
@@ -11928,7 +11914,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     captureText,
                 )
             }
-            return HealOutcome.Healthy
+            return result(
+                reason = HealAttemptReason.AuthoritativeCaptureMatched,
+                captureText = captureText,
+                captureLineCount = captureResponse.output.size,
+            )
         }
         // Issue #1175: the render LOST tmux's frame (capture carries materially more
         // than the render). Fingerprint the observed black frame BEFORE the heal
@@ -11937,7 +11927,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // painted is `lost_after_paint`. This rides the heal's already-paid capture —
         // no new poll, and it is additive to `stale_render_heal` below (which still
         // fires on the successful heal).
-        val observedClass = if (pane.terminalState.renderedNonBlankCharCount() > 0) {
+        val observedClass = if (observedRenderedNonBlankChars > 0) {
             BLACK_FRAME_CLASS_PARTIAL_BLANK
         } else {
             BLACK_FRAME_CLASS_LOST_AFTER_PAINT
@@ -11971,9 +11961,17 @@ public class TmuxSessionViewModel @Inject constructor(
             // Issue #1294: the divergence was real but the surface write failed — the heal
             // did not complete, so this is UNVERIFIED (keep the hot cadence to retry), not a
             // confirmed-healthy back-off.
-            return HealOutcome.Unverified
+            return result(
+                reason = HealAttemptReason.DivergenceApplyFailed,
+                captureText = captureText,
+                captureLineCount = captureResponse.output.size,
+            )
         }
-        return HealOutcome.Healed
+        return result(
+            reason = HealAttemptReason.DivergenceApplied,
+            captureText = captureText,
+            captureLineCount = captureResponse.output.size,
+        )
         } finally {
             // Issue #1301 (fail-safe): if we quiesced above, REOPEN the seed gate on EVERY
             // exit — the HEALED path already opened it (via `seedThenOpenGate`, an idempotent
@@ -15789,7 +15787,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 rows = rows,
             ),
         )
-        bridgeScope.launch {
+        controlClientSizeOperationsInFlight.incrementAndGet()
+        val refreshJob = bridgeScope.launch {
             val shouldApplyPolicy = !windowSizePolicyAppliedForAttach
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
@@ -15918,6 +15917,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
         }
+        refreshJob.invokeOnCompletion {
+            controlClientSizeOperationsInFlight.decrementAndGet()
+        }
     }
 
     /**
@@ -15956,7 +15958,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "window=${activePane.windowId} session=${target.sessionName} " +
                 "blank=$blank partialBlank=$partialBlank",
         )
-        bridgeScope.launch {
+        val healOwner = automaticRenderHealTracker.begin(); val healJob = bridgeScope.launch {
             if (clientRef !== client) return@launch
             val guard = RuntimeRefreshGuard(
                 generation = attachGeneration,
@@ -15974,6 +15976,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 healActivePaneIfStaleRender(client, activePane, guard)
             }
         }
+        healJob.invokeOnCompletion { automaticRenderHealTracker.complete(healOwner) }
     }
 
     private fun resetControlClientSizeForAttach() {

@@ -188,6 +188,32 @@ class Issue1495WatchdogCoverageTest {
         )
     }
 
+    @Test
+    fun diagnosticsPauseSeamCancelsAndJoinsTheCurrentWatchdog() = runVmTest {
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        val vm = connectVm(client)
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+
+        vm.setStaleRenderWatchdogMaxTicksForTest(1000)
+        vm.setProcessForegroundForClearedForTest(true)
+        vm.setScreenInteractiveForTest(true)
+        val guard = requireNotNull(vm.currentRuntimeGuardForTest())
+        vm.armActivePaneStaleRenderWatchdogForTest(guard)
+        runCurrent()
+        val armed = requireNotNull(vm.staleRenderWatchdogJobForTest())
+        assertTrue("precondition: watchdog must be active before diagnostics pause", armed.isActive)
+
+        vm.pauseActivePaneStaleRenderWatchdogForTest()
+
+        assertTrue("pause must cancel the exact previously-armed job", armed.isCancelled)
+        assertTrue("pause must JOIN the exact previously-armed job", armed.isCompleted)
+        assertFalse(
+            "no automatic watchdog may remain active after the diagnostics seam returns",
+            vm.staleRenderWatchdogJobForTest()?.isActive == true,
+        )
+    }
+
     // -------------------------------------------------------------------------
     // Part 3 (red→green) — the reseed→arm CANCELLATION-WINDOW race. A cancel/teardown throw
     // between the reseed and the re-arm line must NOT leave a still-current runtime watchdog-

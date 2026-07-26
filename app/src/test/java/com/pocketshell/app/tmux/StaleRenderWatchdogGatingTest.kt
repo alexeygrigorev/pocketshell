@@ -229,15 +229,15 @@ class StaleRenderWatchdogGatingTest {
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
 
-        // Issue #1294: model a CONFIRMED-healthy idle pane — a DENSE, fully-rendered viewport
-        // (not the 1-line "work ready" partial-blank, which now reads SUSPECT and correctly
-        // stays hot). Each watchdog tick's empty capture over a confidently-dense render scores
-        // HEALTHY (a non-urgent no-op), so the #1219/#1164 battery back-off (4s->8s->16s) holds.
+        // Issue #966: model a CONFIRMED-healthy idle pane — a DENSE, fully-rendered viewport
+        // plus a matching, nonempty authoritative capture on every tick. An empty capture is
+        // UNVERIFIED regardless of local density and must stay hot.
         pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        client.defaultCaptureResponse = denseHealthyCaptureResponse()
         advanceUntilIdle()
         assertFalse(
-            "precondition: the idle pane is confidently DENSE (not suspect), so an empty " +
-                "capture scores HEALTHY and the pane backs off",
+            "precondition: the idle pane is confidently DENSE (not suspect), and matching " +
+                "authoritative captures let it back off",
             pane.terminalState.renderLooksSuspect(),
         )
 
@@ -282,9 +282,10 @@ class StaleRenderWatchdogGatingTest {
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
 
-        // A DENSE, confidently-healthy idle viewport: each tick's empty capture scores
-        // HEALTHY (a non-urgent no-op), so the pane cools all the way to the ceiling.
+        // A DENSE viewport plus a matching, nonempty capture confirms HEALTHY on each tick,
+        // so the pane cools all the way to the ceiling.
         pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        client.defaultCaptureResponse = denseHealthyCaptureResponse()
         advanceUntilIdle()
         assertFalse(
             "precondition: the idle pane is confidently DENSE (not suspect), so it cools",
@@ -343,6 +344,7 @@ class StaleRenderWatchdogGatingTest {
         // CONFIDENTLY HEALTHY — a real continuously-streaming agent pane, NOT blank /
         // partial-black / fragments-over-black.
         pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        client.defaultCaptureResponse = denseHealthyCaptureResponse()
         advanceUntilIdle()
         assertFalse(
             "precondition: a dense pane must NOT read as a possible lost frame " +
@@ -353,9 +355,8 @@ class StaleRenderWatchdogGatingTest {
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
-        // The watchdog captures return an EMPTY frame each tick (no queued response),
-        // so healActivePaneIfStaleRender no-ops (healed=false) and never repaints —
-        // the dense render is preserved as HEALTHY the whole window.
+        // Matching, nonempty watchdog captures confirm the dense render as HEALTHY and never
+        // repaint it. Empty captures are deliberately not used: #966 classifies them Unverified.
         val guard = requireNotNull(vm.currentRuntimeGuardForTest())
         vm.armActivePaneStaleRenderWatchdogForTest(guard)
         runCurrent()
@@ -406,16 +407,15 @@ class StaleRenderWatchdogGatingTest {
         vm.resizeRemotePty(80, 40)
         advanceUntilIdle()
 
-        // Issue #1294: the pane STREAMS a DENSE, confidently-healthy frame first — the "S" in
-        // "STREAMING pane". Each backoff-phase tick's empty capture over this dense render
-        // scores HEALTHY (a non-urgent no-op), so the pane backs off (a partial-blank pane
-        // would now correctly stay hot). The fragments-over-black redraw below then makes it
-        // suspect.
+        // The pane STREAMS a DENSE frame first — the "S" in "STREAMING pane". Matching,
+        // nonempty captures confirm it HEALTHY during the backoff phase; the
+        // fragments-over-black redraw below then makes it suspect.
         pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        client.defaultCaptureResponse = denseHealthyCaptureResponse()
         advanceUntilIdle()
 
         // Let the watchdog back off to the widest (16s) interval — captures at t=4s,
-        // t=12s (empty capture over a confidently-dense render => HEALTHY no-op).
+        // t=12s (matching capture over a confidently-dense render => HEALTHY no-op).
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setProcessForegroundForClearedForTest(true)
         vm.setScreenInteractiveForTest(true)
@@ -478,6 +478,7 @@ class StaleRenderWatchdogGatingTest {
         advanceUntilIdle()
 
         pane.terminalState.appendRemoteOutput(denseHealthyFrame().toByteArray(Charsets.US_ASCII))
+        client.defaultCaptureResponse = denseHealthyCaptureResponse()
         advanceUntilIdle()
         vm.setStaleRenderWatchdogMaxTicksForTest(1000)
         vm.setProcessForegroundForClearedForTest(true)
@@ -786,8 +787,14 @@ class StaleRenderWatchdogGatingTest {
      */
     private fun denseHealthyFrame(): String = buildString {
         append(CLEAR_ONLY)
-        repeat(32) { append("agent response line $it with real streamed content\r\n") }
+        denseHealthyLines().forEach { append(it).append("\r\n") }
     }
+
+    private fun denseHealthyLines(): List<String> =
+        List(32) { "agent response line $it with real streamed content" }
+
+    private fun denseHealthyCaptureResponse(): CommandResponse =
+        CommandResponse(number = 80L, output = denseHealthyLines(), isError = false)
 
     /**
      * A FRAGMENTS-OVER-BLACK viewport (#966/#1214): a CSI 2J clear then a handful of

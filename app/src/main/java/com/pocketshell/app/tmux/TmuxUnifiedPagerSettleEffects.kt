@@ -10,6 +10,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 
+internal data class UnifiedPagerOwnershipSnapshot(
+    val currentPage: Int,
+    val settledPage: Int,
+    val measuredCurrentPageKey: Any?,
+    val userDraggedSinceAlignment: Boolean,
+)
+
 @Composable
 internal fun TmuxUnifiedPagerSettleEffects(
     pagerState: PagerState,
@@ -56,21 +63,37 @@ internal fun TmuxUnifiedPagerSettleEffects(
         }
     }
     LaunchedEffect(sessionName, unifiedPanes) {
-        // Snap the pager to the nav target's first page. The active session
-        // always heads `unifiedPanes` (see
-        // [TmuxSessionViewModel.rebuildUnifiedPanes]), so for a freshly-opened
-        // session this is page 0. We keep re-snapping until the page the pager
-        // actually sits on resolves to the nav-target session — that is the
-        // signal the pager has caught up with the deliberate choice, at which
-        // point cross-session swipe detection is safe to re-arm.
-        val targetPage = unifiedPanes.indexOfFirst {
-            viewModel.sessionNameForUnifiedPane(it) == sessionName
-        }
-        if (targetPage < 0) return@LaunchedEffect
-        val currentSession = unifiedPanes.getOrNull(pagerState.currentPage)
-            ?.let { viewModel.sessionNameForUnifiedPane(it) }
-        if (currentSession != sessionName) {
-            pagerState.scrollToPage(targetPage)
+        // Issue #1206 (reopened): continuously enforce TARGET ownership until
+        // the user performs a genuine drag. A one-shot comparison of
+        // `currentPage` against the NEW list is racy: when [unifiedPanes]
+        // reorders from [A, B] to [B, A], currentPage can still be numeric 0
+        // from the PREVIOUS measure. Resolving that index against the new list
+        // falsely says "already B", then Pager's delayed key retention moves
+        // the last-measured A page to index 1 and leaves #661's neutral mask on
+        // screen forever. Include the actually MEASURED page key in the
+        // ownership decision, and keep observing after the first request so a
+        // late key-retention move is corrected too.
+        snapshotFlow {
+            val currentPage = pagerState.currentPage
+            UnifiedPagerOwnershipSnapshot(
+                currentPage = currentPage,
+                settledPage = pagerState.settledPage,
+                measuredCurrentPageKey = pagerState.layoutInfo.visiblePagesInfo
+                    .firstOrNull { it.index == currentPage }
+                    ?.key,
+                userDraggedSinceAlignment = userDraggedSinceAlignment,
+            )
+        }.collect { snapshot ->
+            val correctionPage = unifiedPagerTargetCorrectionPage(
+                unifiedPanes = unifiedPanes,
+                sessionName = sessionName,
+                snapshot = snapshot,
+                sessionNameForPane = viewModel::sessionNameForUnifiedPane,
+            )
+            if (correctionPage != null) {
+                pagerAlignedSession = null
+                pagerState.requestScrollToPage(correctionPage)
+            }
         }
     }
 
@@ -164,5 +187,33 @@ internal fun TmuxUnifiedPagerSettleEffects(
             val settledPane = unifiedPanes.getOrNull(page) ?: return@collect
             viewModel.reseedVisiblePaneIfBlank(settledPane.paneId)
         }
+    }
+}
+
+internal fun unifiedPagerTargetCorrectionPage(
+    unifiedPanes: List<TmuxPaneState>,
+    sessionName: String,
+    snapshot: UnifiedPagerOwnershipSnapshot,
+    sessionNameForPane: (TmuxPaneState) -> String?,
+): Int? {
+    val targetPage = unifiedPanes.indexOfFirst {
+        sessionNameForPane(it) == sessionName
+    }
+    if (targetPage < 0) return null
+    if (snapshot.userDraggedSinceAlignment) return null
+
+    val currentPane = unifiedPanes.getOrNull(snapshot.currentPage)
+    val currentSession = currentPane
+        ?.let(sessionNameForPane)
+    val settledSession = unifiedPanes.getOrNull(snapshot.settledPage)
+        ?.let(sessionNameForPane)
+    val measuredKeyOwnsCurrentPane =
+        currentPane != null && snapshot.measuredCurrentPageKey == currentPane.paneId
+    val targetOwnsCurrentAndSettled =
+        currentSession == sessionName && settledSession == sessionName
+    return if (targetOwnsCurrentAndSettled && measuredKeyOwnsCurrentPane) {
+        null
+    } else {
+        targetPage
     }
 }

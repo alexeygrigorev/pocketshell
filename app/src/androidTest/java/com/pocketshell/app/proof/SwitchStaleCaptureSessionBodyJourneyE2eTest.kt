@@ -21,6 +21,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_SESSION_LABEL_TAG
@@ -133,7 +134,12 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
             rule = compose,
             sessionName = SESSION_A,
             timeoutMs = pickerWaitMs,
-            onRepoke = { repokeFolderListFromHostRow(hostRowTag) },
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
         )
         compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -436,32 +442,6 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
             exec?.exitCode == 0,
         )
         Log.i(LOG_TAG, "started A stream via sidecar send-keys")
-    }
-
-    private fun repokeFolderListFromHostRow(hostRowTag: String) {
-        runCatching {
-            val backTags = listOf(
-                TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
-                TMUX_FULL_CHROME_BACK_BUTTON_TAG,
-            )
-            for (tag in backTags) {
-                if (compose.onAllNodesWithTag(tag, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                ) {
-                    compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
-                    break
-                }
-            }
-            compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
-                runCatching {
-                    compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                }.getOrDefault(false)
-            }
-            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        }
     }
 
     private suspend fun cleanupSeededSessions(key: String) {

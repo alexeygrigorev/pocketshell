@@ -2,6 +2,7 @@ package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -27,15 +28,17 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.PrewarmSeedFaultTestOverride
-import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_SESSION_LABEL_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_DETECTING_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_BREADCRUMB_TAG
-import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_OVERLAY_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -153,11 +156,16 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
             rule = compose,
             sessionName = SESSION_A,
             timeoutMs = pickerWaitMs,
-            onRepoke = { repokeFolderListFromHostRow(hostRowTag) },
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
         )
         compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
-        waitForTerminalViewAttached()
+        waitForTerminalViewAttached("initial attach to A")
         waitForTerminalContains(SESSION_A_MARKER, "initial attach to A")
         captureViewport("issue1206-00-attached-$SESSION_A")
 
@@ -192,7 +200,8 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
                 "landed on '$landed'",
             landed == SESSION_B,
         )
-        waitForTerminalViewAttached()
+        selectTerminalSurfaceForOracle("post-pager switch to B")
+        waitForTerminalViewAttached("post-pager switch to B")
 
         // ---- (5) LOAD-BEARING: B lands on a PAINTED grid — its marker visible,
         // NOT blank — despite the empty first prewarm capture. The #1206 retry /
@@ -493,43 +502,132 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
             .commit()
     }
 
-    private fun repokeFolderListFromHostRow(hostRowTag: String) {
-        runCatching {
-            val backTags = listOf(
-                TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
-                TMUX_FULL_CHROME_BACK_BUTTON_TAG,
-            )
-            for (tag in backTags) {
-                if (compose.onAllNodesWithTag(tag, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                ) {
-                    compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
-                    break
-                }
-            }
-            compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
-                runCatching {
-                    compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                }.getOrDefault(false)
-            }
-            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        }
-    }
-
     // ---------------------------------------------------------------- Terminal
 
-    private fun waitForTerminalViewAttached() {
-        compose.waitUntil(timeoutMillis = 30_000) {
-            var attached = false
-            compose.activityRule.scenario.onActivity { activity ->
-                val view = activity.window.decorView.findTerminalView()
-                attached = view?.currentSession != null && view.mEmulator != null
+    /**
+     * Put the journey on the real Terminal surface before inspecting the
+     * [TerminalView]. Presumed/detected agent panes can default to Conversation,
+     * where mounting zero TerminalViews is intentional. Shell-only panes expose
+     * no tab pill, so absence of [TMUX_TERMINAL_TAB_TAG] is not itself a failure:
+     * the load-bearing success condition is a live on-screen TerminalView with
+     * neither Conversation surface present.
+     */
+    private fun selectTerminalSurfaceForOracle(label: String) {
+        val timeoutMillis = 30_000L
+        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
+        var terminalTabPresent = false
+        var conversationDetectingPresent = false
+        var conversationPanePresent = false
+        var liveTerminalPresent = false
+        var lastClickError: Throwable? = null
+
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            terminalTabPresent = hasTag(TMUX_TERMINAL_TAB_TAG)
+            conversationDetectingPresent = hasTag(TMUX_CONVERSATION_DETECTING_TAG)
+            conversationPanePresent = hasTag(TMUX_CONVERSATION_PANE_TAG)
+            liveTerminalPresent = hasLiveOnScreenTerminalView()
+            if (!conversationDetectingPresent && !conversationPanePresent && liveTerminalPresent) {
+                return
             }
-            attached
+
+            if (terminalTabPresent) {
+                runCatching {
+                    compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+                        .performClick()
+                }.onFailure { error ->
+                    lastClickError = error
+                    if (error.message?.contains("Failed to inject touch input") == true) {
+                        runCatching {
+                            compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+                        }
+                        compose.waitForIdle()
+                    } else {
+                        throw error
+                    }
+                }
+            }
+            SystemClock.sleep(250)
         }
+
+        terminalTabPresent = hasTag(TMUX_TERMINAL_TAB_TAG)
+        conversationDetectingPresent = hasTag(TMUX_CONVERSATION_DETECTING_TAG)
+        conversationPanePresent = hasTag(TMUX_CONVERSATION_PANE_TAG)
+        liveTerminalPresent = hasLiveOnScreenTerminalView()
+        captureFullFrame(
+            "failure-${label.toArtifactSlug()}-terminal-surface-selection-fullframe",
+        )
+        val diagnostics = buildString {
+            appendLine("terminalTabPresent=$terminalTabPresent")
+            appendLine("conversationDetectingPresent=$conversationDetectingPresent")
+            appendLine("conversationPanePresent=$conversationPanePresent")
+            appendLine("liveOnScreenTerminalPresent=$liveTerminalPresent")
+            appendLine("lastClickError=$lastClickError")
+            appendLine(composeTagDiagnostics(TMUX_TERMINAL_TAB_TAG))
+            appendLine(composeTagDiagnostics(TMUX_CONVERSATION_DETECTING_TAG))
+            appendLine(composeTagDiagnostics(TMUX_CONVERSATION_PANE_TAG))
+            append(terminalViewCandidateDiagnostics())
+        }
+        writeText(
+            "failure-${label.toArtifactSlug()}-terminal-surface-selection.txt",
+            diagnostics,
+        )
+        assertTrue(
+            "Terminal surface for $label was not selected within ${timeoutMillis}ms. " +
+                "Agent panes must leave both Conversation surfaces and mount a live TerminalView; " +
+                "shell-only panes may omit the Terminal tab.\n$diagnostics",
+            false,
+        )
+    }
+
+    private fun hasTag(tag: String): Boolean =
+        compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+    private fun composeTagDiagnostics(tag: String): String {
+        val nodes = compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        if (nodes.isEmpty()) return "semantics[$tag]=absent"
+        return nodes.mapIndexed { index, node ->
+            "semantics[$tag][$index] bounds=${node.boundsInRoot} config=${node.config}"
+        }.joinToString(separator = "\n")
+    }
+
+    private fun hasLiveOnScreenTerminalView(): Boolean {
+        var live = false
+        compose.activityRule.scenario.onActivity { activity ->
+            val view = activity.window.decorView.findOnScreenTerminalView()
+            live = view?.currentSession != null && view.mEmulator != null
+        }
+        return live
+    }
+
+    private fun waitForTerminalViewAttached(label: String) {
+        val timeoutMillis = 30_000L
+        val attached = runCatching {
+            compose.waitUntil(timeoutMillis = timeoutMillis) {
+                var ready = false
+                compose.activityRule.scenario.onActivity { activity ->
+                    val view = activity.window.decorView.findOnScreenTerminalView()
+                    ready = view?.currentSession != null && view.mEmulator != null
+                }
+                ready
+            }
+            true
+        }.getOrDefault(false)
+        if (attached) return
+
+        val diagnostics = terminalViewCandidateDiagnostics()
+        writeText(
+            "failure-${label.toArtifactSlug()}-terminal-view-candidates.txt",
+            diagnostics,
+        )
+        assertTrue(
+            "on-screen TerminalView for $label was not attached within ${timeoutMillis}ms.\n" +
+                diagnostics,
+            false,
+        )
     }
 
     private fun waitForTerminalContains(
@@ -545,10 +643,17 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
             }
             true
         }.getOrDefault(false)
-        if (!satisfied) writeText("failure-$label-visible-terminal.txt", last)
+        val diagnostics = if (!satisfied) {
+            terminalViewCandidateDiagnostics().also {
+                writeText("failure-${label.toArtifactSlug()}-terminal-view-candidates.txt", it)
+                writeText("failure-$label-visible-terminal.txt", last)
+            }
+        } else {
+            ""
+        }
         assertTrue(
             "expected visible terminal for $label to contain '$expected' within " +
-                "${timeoutMillis}ms; got:\n$last",
+                "${timeoutMillis}ms; got:\n$last\n$diagnostics",
             satisfied,
         )
     }
@@ -557,7 +662,7 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
         var text = ""
         compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
-                .findTerminalView()
+                .findOnScreenTerminalView()
                 ?.currentSession
                 ?.emulator
                 ?.screen
@@ -576,7 +681,7 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
 
         var bitmap: Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
+            val view = activity.window.decorView.findOnScreenTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
             view.draw(Canvas(b))
@@ -672,18 +777,113 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
         println("ISSUE1206_TIMING $line")
     }
 
-    private fun View.findTerminalView(): TerminalView? {
-        if (this is TerminalView) return this
-        if (this !is ViewGroup) return null
-        for (index in 0 until childCount) {
-            val match = getChildAt(index).findTerminalView()
-            if (match != null) return match
+    /**
+     * The pager keeps more than one [TerminalView] in the decor tree. A plain
+     * depth-first lookup can therefore return an attached-but-hidden previous
+     * page after A -> B and make B look unattached/blank. Select the actual
+     * on-screen page by visibility, then prefer the candidate with the largest
+     * visible area when pages overlap during a transition.
+     */
+    private fun View.findOnScreenTerminalView(): TerminalView? =
+        terminalViewCandidates()
+            .asSequence()
+            .filter { candidate ->
+                candidate.view.isAttachedToWindow &&
+                    candidate.view.isShown &&
+                    candidate.hasGlobalVisibleRect &&
+                    candidate.globalVisibleArea > 0L
+            }
+            .maxByOrNull { it.globalVisibleArea }
+            ?.view
+
+    private fun terminalViewCandidateDiagnostics(): String {
+        var diagnostics = "TerminalView candidates: activity unavailable"
+        compose.activityRule.scenario.onActivity { activity ->
+            val candidates = activity.window.decorView.terminalViewCandidates()
+            val selected = activity.window.decorView.findOnScreenTerminalView()
+            diagnostics = buildString {
+                appendLine("TerminalView candidates=${candidates.size}")
+                candidates.forEachIndexed { index, candidate ->
+                    val view = candidate.view
+                    val session = view.currentSession
+                    val transcript = session
+                        ?.emulator
+                        ?.screen
+                        ?.transcriptText
+                        .orEmpty()
+                        .replace("\r", "\\r")
+                        .replace("\n", "\\n")
+                        .take(DIAGNOSTIC_TRANSCRIPT_LIMIT)
+                    append("[$index]")
+                    if (view === selected) append(" SELECTED")
+                    append(" identity=${System.identityHashCode(view)}")
+                    append(" attached=${view.isAttachedToWindow}")
+                    append(" shown=${view.isShown}")
+                    append(" visibility=${visibilityName(view.visibility)}")
+                    append(" hasGlobalVisibleRect=${candidate.hasGlobalVisibleRect}")
+                    append(" visibleArea=${candidate.globalVisibleArea}")
+                    append(" localBounds=[0,0,${view.width},${view.height}]")
+                    append(" layoutBounds=[${view.left},${view.top},${view.right},${view.bottom}]")
+                    append(
+                        " globalBounds=[${candidate.globalVisibleRect.left}," +
+                            "${candidate.globalVisibleRect.top}," +
+                            "${candidate.globalVisibleRect.right}," +
+                            "${candidate.globalVisibleRect.bottom}]",
+                    )
+                    append(" currentSession=${session != null}")
+                    append(" emulator=${view.mEmulator != null}")
+                    append(" sessionHandle=${session?.mHandle ?: "<none>"}")
+                    append(" sessionName=${session?.mSessionName ?: "<none>"}")
+                    appendLine(" transcript='$transcript'")
+                }
+            }
         }
-        return null
+        return diagnostics
     }
+
+    private fun View.terminalViewCandidates(): List<TerminalViewCandidate> {
+        val views = mutableListOf<TerminalView>()
+        collectTerminalViews(views)
+        return views.map { view ->
+            val globalRect = Rect()
+            val hasGlobalVisibleRect = view.getGlobalVisibleRect(globalRect)
+            TerminalViewCandidate(
+                view = view,
+                hasGlobalVisibleRect = hasGlobalVisibleRect,
+                globalVisibleRect = globalRect,
+            )
+        }
+    }
+
+    private fun View.collectTerminalViews(destination: MutableList<TerminalView>) {
+        if (this is TerminalView) destination += this
+        if (this !is ViewGroup) return
+        for (index in 0 until childCount) {
+            getChildAt(index).collectTerminalViews(destination)
+        }
+    }
+
+    private fun visibilityName(visibility: Int): String = when (visibility) {
+        View.VISIBLE -> "VISIBLE"
+        View.INVISIBLE -> "INVISIBLE"
+        View.GONE -> "GONE"
+        else -> visibility.toString()
+    }
+
+    private fun String.toArtifactSlug(): String =
+        lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
+
+    private data class TerminalViewCandidate(
+        val view: TerminalView,
+        val hasGlobalVisibleRect: Boolean,
+        val globalVisibleRect: Rect,
+    ) {
+        val globalVisibleArea: Long
+            get() = globalVisibleRect.width().toLong() * globalVisibleRect.height().toLong()
+    }
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
@@ -705,6 +905,7 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
         const val SWIPE_PAGER_VELOCITY: Float = 2_000f
         const val SWIPE_PAGER_DURATION_MS: Long = 250L
         const val MAX_PAGER_PAGES_PROBE: Int = 24
+        const val DIAGNOSTIC_TRANSCRIPT_LIMIT: Int = 240
 
         const val LOADING_PLACEHOLDER_STATUS: String = "loading same-host sessions"
         const val READY_CURRENT_STATUS: String = "current"

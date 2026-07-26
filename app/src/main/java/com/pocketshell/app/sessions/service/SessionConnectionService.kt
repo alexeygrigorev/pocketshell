@@ -1,6 +1,5 @@
 package com.pocketshell.app.sessions.service
 
-import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -19,6 +18,7 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.portfwd.DefaultDispatcher
+import com.pocketshell.app.settings.AppSettings
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineDispatcher
@@ -56,11 +56,34 @@ class SessionConnectionService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var hasStartedForeground = false
 
+    @androidx.annotation.VisibleForTesting
+    internal enum class StartupPhase {
+        WAKE_LOCK_ACQUIRED,
+        SNAPSHOT_OBSERVED,
+    }
+
+    /**
+     * Behavioral ordering probe for the foreground-service startup envelope. Null in production.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var startupPhaseForTest: ((StartupPhase) -> Unit)? = null
+
     companion object {
         private const val TAG = "PsSessionService"
         private const val CHANNEL_ID = "pocketshell_session_status_v1"
         private const val NOTIFICATION_ID = 0x70_53_53_56 // "pSSV"
         private const val WAKE_LOCK_TAG = "PocketShell:session"
+
+        /**
+         * The platform timeout is defense in depth for a hung teardown/ownership regression.
+         * Normal foreground handoff and grace completion still release the lock immediately.
+         */
+        @androidx.annotation.VisibleForTesting
+        internal const val WAKE_LOCK_TEARDOWN_MARGIN_MILLIS: Long = 30_000L
+
+        @androidx.annotation.VisibleForTesting
+        internal const val WAKE_LOCK_TIMEOUT_MILLIS: Long =
+            AppSettings.MAX_BACKGROUND_GRACE_MILLIS + WAKE_LOCK_TEARDOWN_MARGIN_MILLIS
 
         const val ACTION_START = "com.pocketshell.app.sessions.action.START_SESSION_HOLD"
         const val ACTION_STOP = "com.pocketshell.app.sessions.action.STOP_SESSION_HOLD"
@@ -153,7 +176,9 @@ class SessionConnectionService : Service() {
                 }
             }
         }
-        return START_STICKY
+        // The service can hold only an already-live in-process transport. Process recreation has
+        // no recoverable SSH/tmux state to resurrect, so Android must not schedule a sticky retry.
+        return START_NOT_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -176,6 +201,7 @@ class SessionConnectionService : Service() {
         observeJob = scope.launch {
             controller.flowOfSnapshot()
                 .collect { snapshot ->
+                    startupPhaseForTest?.invoke(StartupPhase.SNAPSHOT_OBSERVED)
                     if (!snapshot.isHoldingConnection) {
                         stopSessionHold()
                     } else {
@@ -385,15 +411,15 @@ class SessionConnectionService : Service() {
         manager.createNotificationChannel(channel)
     }
 
-    @SuppressLint("WakelockTimeout")
     private fun acquireWakeLockIfNeeded() {
         val current = wakeLock
         if (current?.isHeld == true) return
         val powerManager = getSystemService(PowerManager::class.java)
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG).apply {
             setReferenceCounted(false)
-            acquire()
+            acquire(WAKE_LOCK_TIMEOUT_MILLIS)
         }
+        startupPhaseForTest?.invoke(StartupPhase.WAKE_LOCK_ACQUIRED)
     }
 
     private fun releaseWakeLock() {

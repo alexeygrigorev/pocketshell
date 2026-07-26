@@ -63,6 +63,11 @@ run_journey_classes_with_retry() {
 
     run_class "$fqcn"
     rc=$?
+    if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
+      echo "JOURNEY_ISOLATION_FAILURE: $fqcn primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every retry/next class because isolation is unproven"
+      FAILED_CLASSES+=("$fqcn")
+      break
+    fi
     if [[ $rc -eq 0 ]]; then
       echo "JOURNEY_PASS: $fqcn passed on attempt 1 (elapsed $((SECONDS - class_start))s)"
       PASSED_FIRST_TRY+=("$fqcn")
@@ -95,6 +100,11 @@ run_journey_classes_with_retry() {
 
     run_class "$fqcn"
     rc=$?
+    if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
+      echo "JOURNEY_ISOLATION_FAILURE: $fqcn retry primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every next class because isolation is unproven"
+      FAILED_CLASSES+=("$fqcn")
+      break
+    fi
     if [[ $rc -eq 0 ]]; then
       # Loud, greppable recovery marker so masked flakes stay visible and a
       # degrading trend is detectable in the CI logs.

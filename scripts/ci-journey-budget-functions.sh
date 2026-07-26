@@ -20,7 +20,7 @@ cleanup_gradle_after_timeout() {
   local fqcn="$1"
   local stop_rc
 
-  echo "GRADLE_TIMEOUT_CLEANUP: $fqcn timed out; stopping Gradle daemons before any retry"
+  echo "GRADLE_TIMEOUT_CLEANUP: $fqcn aborted; stopping Gradle daemons before any retry"
   if timeout --signal=TERM --kill-after=10 "${JOURNEY_GRADLE_STOP_TIMEOUT_SECS}s" \
       "$GRADLEW" --stop; then
     echo "GRADLE_TIMEOUT_CLEANUP: Gradle daemon stop completed for $fqcn"
@@ -28,12 +28,28 @@ cleanup_gradle_after_timeout() {
   fi
 
   stop_rc=$?
-  echo "GRADLE_TIMEOUT_CLEANUP: Gradle daemon stop exited $stop_rc for $fqcn; continuing with retry/budget handling" >&2
-  return 0
+  echo "GRADLE_TIMEOUT_CLEANUP_FAILED: Gradle daemon stop exited $stop_rc for $fqcn" >&2
+  return "$stop_rc"
 }
 
 LAST_RUN_CLASS_TIMEOUT_HIT=0
 LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=0
+LAST_RUN_CLASS_PRIMARY_RC=0
+LAST_RUN_CLASS_ABORT_CLEANUP_FAILED=0
+LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=0
+LAST_RUN_CLASS_GRADLE_CLEANUP_RC="not_run"
+LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
+LAST_RUN_CLASS_ATTEMPT_DIR=""
+LAST_RUN_CLASS_MODULE=""
+LAST_RUN_CLASS_SELECTOR=""
+LAST_RUN_CLASS_ATTEMPT=0
+LAST_RUN_CLASS_PRIMARY_CLASSIFICATION=""
+LAST_RUN_CLASS_RAW_JUNIT_STATUS=""
+LAST_RUN_CLASS_RAW_JUNIT_COUNT=0
+LAST_RUN_CLASS_SNAPSHOT_STATUS=""
+JOURNEY_ABORT_ISOLATION_FAILED=0
+JOURNEY_HARNESS_FAILURE_RC=125
+declare -A JOURNEY_CLASS_ATTEMPT_COUNTS=()
 
 is_timeout_rc() {
   [[ "$1" -eq 124 || ( "$1" -eq 137 && "${LAST_RUN_CLASS_TIMEOUT_HIT:-0}" -eq 1 ) ]]
@@ -45,6 +61,694 @@ class_attempt_hit_time_budget() {
 
 needs_gradle_cleanup_after_class_abort() {
   [[ "$1" -eq 124 || "$1" -eq 137 ]]
+}
+
+journey_class_artifact_key() {
+  local fqcn="$1"
+  local readable="${fqcn//[^A-Za-z0-9._-]/_}"
+  local digest
+
+  # Keep one readable path component, but hash the full unsanitized selector so
+  # selectors such as A#method and A_method can never overwrite one another.
+  readable="${readable:0:120}"
+  while [[ "$readable" == .* ]]; do
+    readable="_${readable#.}"
+  done
+  [[ "$readable" =~ [A-Za-z0-9] ]] || readable="unnamed-class"
+  digest="$(printf '%s' "$fqcn" | sha256sum | awk '{ print substr($1, 1, 16) }')" \
+    || return 1
+  [[ "$digest" =~ ^[0-9a-f]{16}$ ]] || return 1
+  printf '%s--%s\n' "$readable" "$digest"
+}
+
+journey_app_package_names() {
+  local suffix="${1:-}"
+  local app_package="com.pocketshell.app"
+
+  if [[ -n "$suffix" ]]; then
+    [[ "$suffix" =~ ^[A-Za-z0-9._]+$ ]] || {
+      echo "JOURNEY_ABORT_CLEANUP_FAILED: invalid application id suffix '$suffix'" >&2
+      return 2
+    }
+    app_package+=".$suffix"
+  fi
+  printf '%s.test\n%s\n' "$app_package" "$app_package"
+}
+
+journey_target_package_names() {
+  local module="$1"
+  local suffix="${2:-}"
+
+  case "$module" in
+    app)
+      journey_app_package_names "$suffix"
+      ;;
+    core-terminal)
+      # Android library androidTest APK namespace from
+      # shared/core-terminal/build.gradle.kts.
+      printf '%s\n' "com.termux.view.test"
+      ;;
+    *)
+      echo "JOURNEY_ABORT_CLEANUP_FAILED: unknown connected-test module '$module'" >&2
+      return 2
+      ;;
+  esac
+}
+
+journey_adb() {
+  local adb_command="${JOURNEY_ADB:-${ADB:-adb}}"
+  command "$adb_command" "$@"
+}
+
+journey_resolve_device_serial() {
+  local devices_output serial candidate found=0
+  local -a serials=()
+
+  if ! devices_output="$(journey_adb devices 2>&1)"; then
+    echo "JOURNEY_ABORT_CLEANUP_FAILED: adb devices failed: $devices_output" >&2
+    return 1
+  fi
+  mapfile -t serials < <(
+    awk 'NR > 1 && $2 == "device" { print $1 }' <<< "$devices_output"
+  )
+
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    serial="$ANDROID_SERIAL"
+    for candidate in "${serials[@]}"; do
+      [[ "$candidate" == "$serial" ]] && found=1
+    done
+    if [[ "$found" -ne 1 ]]; then
+      echo "JOURNEY_ABORT_CLEANUP_FAILED: ANDROID_SERIAL=$serial is not the one online device" >&2
+      return 1
+    fi
+    printf '%s\n' "$serial"
+    return 0
+  fi
+
+  if [[ "${#serials[@]}" -ne 1 ]]; then
+    echo "JOURNEY_ABORT_CLEANUP_FAILED: expected exactly one online device without ANDROID_SERIAL; found ${#serials[@]}" >&2
+    return 1
+  fi
+  printf '%s\n' "${serials[0]}"
+}
+
+journey_device_processes_for_packages() {
+  local serial="$1"
+  shift
+  local ps_output package
+
+  if ! ps_output="$(journey_adb -s "$serial" shell ps -A 2>&1)"; then
+    echo "JOURNEY_ABORT_CLEANUP_FAILED: could not inspect processes on $serial: $ps_output" >&2
+    return 2
+  fi
+
+  for package in "$@"; do
+    awk -v package="$package" '
+      {
+        name=$NF
+        if (name == package || index(name, package ":") == 1) {
+          print
+        }
+      }
+    ' <<< "$ps_output"
+  done
+}
+
+cleanup_device_after_class_abort() {
+  local module="$1"
+  local fqcn="$2"
+  local suffix="${3:-}"
+  local serial package process_output deadline
+  local force_stop_failed=0
+  local -a packages=()
+
+  mapfile -t packages < <(journey_target_package_names "$module" "$suffix") || return 1
+  [[ "${#packages[@]}" -gt 0 ]] || {
+    echo "JOURNEY_ABORT_CLEANUP_FAILED: no exact packages resolved for $fqcn" >&2
+    return 1
+  }
+  serial="$(journey_resolve_device_serial)" || return 1
+
+  echo "JOURNEY_ABORT_DEVICE_CLEANUP: force-stopping exact $module packages on $serial before retry: ${packages[*]}"
+  for package in "${packages[@]}"; do
+    if ! journey_adb -s "$serial" shell am force-stop "$package"; then
+      echo "JOURNEY_ABORT_CLEANUP_FAILED: force-stop failed for exact package $package on $serial" >&2
+      force_stop_failed=1
+    fi
+  done
+
+  deadline=$((SECONDS + ${JOURNEY_DEVICE_CLEANUP_TIMEOUT_SECS:-15}))
+  while :; do
+    process_output="$(journey_device_processes_for_packages "$serial" "${packages[@]}")"
+    case $? in
+      0)
+        if [[ -z "$process_output" ]]; then
+          if [[ "$force_stop_failed" -ne 0 ]]; then
+            echo "JOURNEY_ABORT_CLEANUP_FAILED: process absence was observed but an exact force-stop command failed for $fqcn" >&2
+            return 1
+          fi
+          echo "JOURNEY_ABORT_DEVICE_CLEANUP_VERIFIED: no instrumentation/test/app process remains for $fqcn on $serial"
+          return 0
+        fi
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+
+    if (( SECONDS >= deadline )); then
+      echo "JOURNEY_ABORT_CLEANUP_FAILED: stale exact package process remains after abort for $fqcn:" >&2
+      printf '%s\n' "$process_output" >&2
+      return 1
+    fi
+    # Bounded verification pump, not a fixed correctness sleep: every turn
+    # re-checks the load-bearing process-absence condition until its hard wall.
+    sleep 0.2
+  done
+}
+
+journey_module_build_roots() {
+  local module="$1"
+  local suffix="${2:-}"
+  local module_dir
+
+  case "$module" in
+    app) module_dir="$REPO_ROOT/app" ;;
+    core-terminal) module_dir="$REPO_ROOT/shared/core-terminal" ;;
+    *) return 2 ;;
+  esac
+
+  printf '%s\n' "$module_dir/build"
+  if [[ -n "$suffix" ]]; then
+    [[ "$suffix" =~ ^[A-Za-z0-9._]+$ ]] || return 2
+    printf '%s\n' "$module_dir/build/lane-$suffix"
+  fi
+}
+
+clear_connected_test_outputs() {
+  local module="$1"
+  local suffix="${2:-}"
+  local build_root
+  local -a build_roots=()
+
+  mapfile -t build_roots < <(journey_module_build_roots "$module" "$suffix") || return 1
+  for build_root in "${build_roots[@]}"; do
+    # Exact generated report roots only. Clearing them before the invocation
+    # makes every later snapshot attributable to this attempt, never stale.
+    rm -rf -- \
+      "$build_root/reports/androidTests" \
+      "$build_root/outputs/androidTest-results" \
+      "$build_root/outputs/connected_android_test_additional_output" \
+      || return 1
+  done
+}
+
+begin_class_attempt_artifacts() {
+  local module="$1"
+  local fqcn="$2"
+  local suffix="${3:-}"
+  local key="$module:$fqcn"
+  local attempt=$(( ${JOURNEY_CLASS_ATTEMPT_COUNTS[$key]:-0} + 1 ))
+  local artifact_key
+
+  JOURNEY_CLASS_ATTEMPT_COUNTS["$key"]="$attempt"
+  artifact_key="$(journey_class_artifact_key "$fqcn")" || return 1
+  LAST_RUN_CLASS_ATTEMPT_DIR="$ARTIFACT_DIR/class-attempts/$module/$artifact_key/attempt-$attempt"
+  LAST_RUN_CLASS_MODULE="$module"
+  LAST_RUN_CLASS_SELECTOR="$fqcn"
+  LAST_RUN_CLASS_ATTEMPT="$attempt"
+  LAST_RUN_CLASS_PRIMARY_CLASSIFICATION=""
+  LAST_RUN_CLASS_RAW_JUNIT_STATUS=""
+  LAST_RUN_CLASS_RAW_JUNIT_COUNT=0
+  LAST_RUN_CLASS_SNAPSHOT_STATUS=""
+  rm -rf -- "$LAST_RUN_CLASS_ATTEMPT_DIR" || return 1
+  mkdir -p "$LAST_RUN_CLASS_ATTEMPT_DIR" || return 1
+  : > "$LAST_RUN_CLASS_ATTEMPT_DIR/attempt.log" || return 1
+
+  {
+    printf 'format_version=1\n'
+    printf 'module=%s\n' "$module"
+    printf 'class=%s\n' "$fqcn"
+    printf 'attempt=%s\n' "$attempt"
+    printf 'started_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'application_id_suffix=%s\n' "$suffix"
+    printf 'status=running\n'
+  } > "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt" || return 1
+
+  if ! clear_connected_test_outputs "$module" "$suffix"; then
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: could not clear exact generated outputs for $module / $fqcn" >&2
+    return 1
+  fi
+
+  local serial
+  if ! serial="$(journey_resolve_device_serial)"; then
+    printf 'device_serial=unresolved\nlogcat_clear=unavailable\nstatus=artifact_setup_failed\n' \
+      >> "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt" 2>/dev/null || true
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: device identity is unresolved for $fqcn" >&2
+    return 1
+  fi
+  printf 'device_serial=%s\n' "$serial" >> "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt" \
+    || return 1
+  if ! journey_adb -s "$serial" logcat -c; then
+    printf 'logcat_clear=failed\nstatus=artifact_setup_failed\n' \
+      >> "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt" 2>/dev/null || true
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: could not reset logcat for $fqcn on $serial" >&2
+    return 1
+  fi
+  printf 'logcat_clear=ok\n' >> "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt" \
+    || return 1
+}
+
+capture_required_nonempty() {
+  local label="$1"
+  local destination="$2"
+  shift 2
+
+  if ! "$@" > "$destination" 2>&1; then
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: $label capture command failed" >&2
+    return 1
+  fi
+  if [[ ! -s "$destination" ]]; then
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: $label capture was empty" >&2
+    return 1
+  fi
+}
+
+validate_png_artifact() {
+  local source="$1"
+  local python_command="${PYTHON3:-python3}"
+
+  # Python 3 is present on the ubuntu-latest journey runner and is already a
+  # required repo-gate dependency. The validator uses only its standard library.
+  command -v "$python_command" >/dev/null 2>&1 || return 1
+  command "$python_command" -I - "$source" <<'PY'
+import binascii
+import struct
+import sys
+import zlib
+
+data = open(sys.argv[1], "rb").read()
+if data[:8] != b"\x89PNG\r\n\x1a\n":
+    raise SystemExit(1)
+
+offset = 8
+chunks = []
+idat = []
+ihdr = None
+seen_iend = False
+seen_plte = False
+idat_ended = False
+while offset < len(data):
+    if len(data) - offset < 12:
+        raise SystemExit(1)
+    length = struct.unpack(">I", data[offset:offset + 4])[0]
+    kind = data[offset + 4:offset + 8]
+    end = offset + 12 + length
+    if end > len(data) or len(kind) != 4 or not all(
+        65 <= byte <= 90 or 97 <= byte <= 122 for byte in kind
+    ):
+        raise SystemExit(1)
+    payload = data[offset + 8:offset + 8 + length]
+    stored_crc = struct.unpack(">I", data[offset + 8 + length:end])[0]
+    if binascii.crc32(kind + payload) & 0xFFFFFFFF != stored_crc:
+        raise SystemExit(1)
+    if not chunks and kind != b"IHDR":
+        raise SystemExit(1)
+    if kind == b"IHDR":
+        if chunks or length != 13 or ihdr is not None:
+            raise SystemExit(1)
+        ihdr = struct.unpack(">IIBBBBB", payload)
+    elif kind == b"IDAT":
+        if ihdr is None or idat_ended:
+            raise SystemExit(1)
+        idat.append(payload)
+    elif kind == b"PLTE":
+        if seen_plte or idat or length == 0 or length > 768 or length % 3 != 0:
+            raise SystemExit(1)
+        seen_plte = True
+    elif kind == b"IEND":
+        if length != 0 or not idat or end != len(data):
+            raise SystemExit(1)
+        seen_iend = True
+    elif idat:
+        idat_ended = True
+    if kind[0] & 0x20 == 0 and kind not in {
+        b"IHDR", b"PLTE", b"IDAT", b"IEND"
+    }:
+        raise SystemExit(1)
+    chunks.append(kind)
+    offset = end
+    if seen_iend:
+        break
+
+if not seen_iend or ihdr is None:
+    raise SystemExit(1)
+width, height, bit_depth, color_type, compression, filtering, interlace = ihdr
+valid_depths = {
+    0: {1, 2, 4, 8, 16},
+    2: {8, 16},
+    3: {1, 2, 4, 8},
+    4: {8, 16},
+    6: {8, 16},
+}
+if (
+    width == 0
+    or height == 0
+    or bit_depth not in valid_depths.get(color_type, set())
+    or compression != 0
+    or filtering != 0
+    or interlace not in {0, 1}
+):
+    raise SystemExit(1)
+if color_type == 3 and not seen_plte:
+    raise SystemExit(1)
+
+decoder = zlib.decompressobj()
+try:
+    pixels = decoder.decompress(b"".join(idat)) + decoder.flush()
+except zlib.error:
+    raise SystemExit(1)
+if not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+    raise SystemExit(1)
+
+channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[color_type]
+bits_per_pixel = channels * bit_depth
+passes = [(0, 0, 1, 1)]
+if interlace == 1:
+    passes = [
+        (0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4),
+        (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2),
+    ]
+cursor = 0
+for x_start, y_start, x_step, y_step in passes:
+    pass_width = max(0, (width - x_start + x_step - 1) // x_step)
+    pass_height = max(0, (height - y_start + y_step - 1) // y_step)
+    if pass_width == 0 or pass_height == 0:
+        continue
+    row_bytes = (pass_width * bits_per_pixel + 7) // 8
+    for _ in range(pass_height):
+        if cursor >= len(pixels) or pixels[cursor] > 4:
+            raise SystemExit(1)
+        cursor += 1 + row_bytes
+if cursor != len(pixels):
+    raise SystemExit(1)
+PY
+}
+
+capture_required_png() {
+  local destination="$1"
+  shift
+
+  capture_required_nonempty "fallback screenshot" "$destination" "$@" || return 1
+  if ! validate_png_artifact "$destination"; then
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: fallback screenshot is not a structurally valid PNG" >&2
+    return 1
+  fi
+}
+
+snapshot_connected_test_outputs() {
+  local module="$1"
+  local fqcn="$2"
+  local primary_rc="$3"
+  local suffix="${4:-}"
+  local attempt_dir="$LAST_RUN_CLASS_ATTEMPT_DIR"
+  local build_root source_path relative_path destination serial
+  local copied=0
+  local snapshot_failed=0
+  local raw_junit_count=0
+  local raw_junit_status
+  local primary_classification
+  local -a build_roots=()
+
+  mapfile -t build_roots < <(journey_module_build_roots "$module" "$suffix") || return 1
+  for build_root in "${build_roots[@]}"; do
+    for source_path in \
+      "$build_root/reports/androidTests" \
+      "$build_root/outputs/androidTest-results" \
+      "$build_root/outputs/connected_android_test_additional_output"; do
+      [[ -e "$source_path" ]] || continue
+      relative_path="${source_path#"$REPO_ROOT"/}"
+      destination="$attempt_dir/android-test-outputs/$relative_path"
+      mkdir -p "$(dirname "$destination")" || {
+        snapshot_failed=1
+        continue
+      }
+      if cp -a "$source_path" "$destination"; then
+        copied=$((copied + 1))
+      else
+        snapshot_failed=1
+      fi
+    done
+  done
+  if (( copied == 0 )); then
+    printf 'No connected-test report/output directories were produced by this attempt.\n' \
+      > "$attempt_dir/android-test-outputs-missing.txt" || snapshot_failed=1
+  fi
+
+  if [[ -d "$attempt_dir/android-test-outputs" ]]; then
+    raw_junit_count="$(
+      find "$attempt_dir/android-test-outputs" -type f -name 'TEST-*.xml' -print \
+        | wc -l
+    )" || snapshot_failed=1
+    raw_junit_count="${raw_junit_count//[[:space:]]/}"
+  fi
+  [[ "$raw_junit_count" =~ ^[0-9]+$ ]] || {
+    raw_junit_count=0
+    snapshot_failed=1
+  }
+  if (( raw_junit_count > 0 )); then
+    raw_junit_status="present"
+  elif is_timeout_rc "$primary_rc"; then
+    raw_junit_status="absent_by_outer_timeout"
+  else
+    raw_junit_status="absent"
+  fi
+  if [[ "$primary_rc" -eq 0 ]]; then
+    primary_classification="pass"
+  elif is_timeout_rc "$primary_rc"; then
+    primary_classification="outer_timeout"
+  else
+    primary_classification="failure"
+  fi
+
+  if serial="$(journey_resolve_device_serial)"; then
+    if capture_required_nonempty \
+        "device logcat" "$attempt_dir/device-logcat.txt" \
+        journey_adb -s "$serial" logcat -d -v threadtime; then
+      printf 'device_logcat=ok\n' >> "$attempt_dir/manifest.txt" \
+        || snapshot_failed=1
+    else
+      printf 'device_logcat=failed\n' >> "$attempt_dir/manifest.txt" 2>/dev/null \
+        || true
+      snapshot_failed=1
+    fi
+
+    if [[ "$primary_rc" -ne 0 ]]; then
+      capture_required_nonempty \
+        "device process list" "$attempt_dir/device-processes.txt" \
+        journey_adb -s "$serial" shell ps -A \
+        || snapshot_failed=1
+      capture_required_nonempty \
+        "activity processes" "$attempt_dir/activity-processes.txt" \
+        journey_adb -s "$serial" shell dumpsys activity processes \
+        || snapshot_failed=1
+      capture_required_nonempty \
+        "activity top" "$attempt_dir/activity-top.txt" \
+        journey_adb -s "$serial" shell dumpsys activity top \
+        || snapshot_failed=1
+      if capture_required_png \
+          "$attempt_dir/failure-screen.png" \
+          journey_adb -s "$serial" exec-out screencap -p; then
+        printf 'fallback_screenshot=ok\n' >> "$attempt_dir/manifest.txt" \
+          || snapshot_failed=1
+      else
+        printf 'fallback_screenshot=failed\n' >> "$attempt_dir/manifest.txt" 2>/dev/null \
+          || true
+        snapshot_failed=1
+      fi
+    fi
+  else
+    printf 'device_logcat=unavailable\n' >> "$attempt_dir/manifest.txt" 2>/dev/null \
+      || true
+    snapshot_failed=1
+    if [[ "$primary_rc" -ne 0 ]]; then
+      printf 'Device unavailable for post-failure diagnostics.\n' \
+        > "$attempt_dir/device-diagnostics-missing.txt" || snapshot_failed=1
+    fi
+  fi
+
+  {
+    printf 'primary_exit_code=%s\n' "$primary_rc"
+    printf 'primary_classification=%s\n' "$primary_classification"
+    printf 'raw_junit_status=%s\n' "$raw_junit_status"
+    printf 'raw_junit_count=%s\n' "$raw_junit_count"
+    printf 'snapshotted_output_roots=%s\n' "$copied"
+    printf 'snapshot_status=%s\n' "$([[ "$snapshot_failed" -eq 0 ]] && printf complete || printf failed)"
+  } >> "$attempt_dir/manifest.txt" || snapshot_failed=1
+
+  LAST_RUN_CLASS_PRIMARY_CLASSIFICATION="$primary_classification"
+  LAST_RUN_CLASS_RAW_JUNIT_STATUS="$raw_junit_status"
+  LAST_RUN_CLASS_RAW_JUNIT_COUNT="$raw_junit_count"
+  LAST_RUN_CLASS_SNAPSHOT_STATUS="$(
+    [[ "$snapshot_failed" -eq 0 ]] && printf complete || printf failed
+  )"
+
+  if (( snapshot_failed != 0 )); then
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: could not preserve every existing output for $fqcn" >&2
+    return 1
+  fi
+  echo "JOURNEY_ATTEMPT_ARTIFACT_SNAPSHOT: $fqcn -> ${attempt_dir#"$REPO_ROOT"/}"
+}
+
+write_harness_verdict_xml() {
+  local destination="$1"
+  local cleanup_status="$2"
+  local final_status="$3"
+  local python_command="${PYTHON3:-python3}"
+
+  command -v "$python_command" >/dev/null 2>&1 || return 1
+  command "$python_command" -I - \
+    "$destination" \
+    "$LAST_RUN_CLASS_SELECTOR" \
+    "$LAST_RUN_CLASS_MODULE" \
+    "$LAST_RUN_CLASS_ATTEMPT" \
+    "$LAST_RUN_CLASS_PRIMARY_RC" \
+    "$LAST_RUN_CLASS_PRIMARY_CLASSIFICATION" \
+    "$LAST_RUN_CLASS_RAW_JUNIT_STATUS" \
+    "$LAST_RUN_CLASS_RAW_JUNIT_COUNT" \
+    "$LAST_RUN_CLASS_SNAPSHOT_STATUS" \
+    "$cleanup_status" \
+    "$final_status" <<'PY'
+import os
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+
+(
+    destination,
+    selector,
+    module,
+    attempt,
+    primary_rc,
+    classification,
+    raw_status,
+    raw_count,
+    snapshot_status,
+    cleanup_status,
+    final_status,
+) = sys.argv[1:]
+
+root = ET.Element("journey-harness-result", {"format-version": "1"})
+for tag, value in (
+    ("selector", selector),
+    ("module", module),
+    ("attempt", attempt),
+    ("primary-exit-code", primary_rc),
+    ("classification", classification),
+):
+    ET.SubElement(root, tag).text = value
+ET.SubElement(root, "raw-junit", {"status": raw_status, "count": raw_count})
+ET.SubElement(root, "snapshot", {"status": snapshot_status})
+ET.SubElement(root, "cleanup", {"status": cleanup_status})
+ET.SubElement(root, "final-status").text = final_status
+
+directory = os.path.dirname(destination)
+fd, temporary = tempfile.mkstemp(prefix=".journey-harness-verdict.", suffix=".tmp", dir=directory)
+try:
+    with os.fdopen(fd, "wb") as output:
+        ET.ElementTree(root).write(output, encoding="utf-8", xml_declaration=True)
+        output.flush()
+        os.fsync(output.fileno())
+    os.replace(temporary, destination)
+except BaseException:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+    raise
+PY
+}
+
+validate_harness_verdict_xml() {
+  local source="$1"
+  local cleanup_status="$2"
+  local final_status="$3"
+  local python_command="${PYTHON3:-python3}"
+
+  [[ -s "$source" ]] || return 1
+  command -v "$python_command" >/dev/null 2>&1 || return 1
+  command "$python_command" -I - \
+    "$source" \
+    "$LAST_RUN_CLASS_SELECTOR" \
+    "$LAST_RUN_CLASS_MODULE" \
+    "$LAST_RUN_CLASS_ATTEMPT" \
+    "$LAST_RUN_CLASS_PRIMARY_RC" \
+    "$LAST_RUN_CLASS_PRIMARY_CLASSIFICATION" \
+    "$LAST_RUN_CLASS_RAW_JUNIT_STATUS" \
+    "$LAST_RUN_CLASS_RAW_JUNIT_COUNT" \
+    "$LAST_RUN_CLASS_SNAPSHOT_STATUS" \
+    "$cleanup_status" \
+    "$final_status" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+
+(
+    source,
+    selector,
+    module,
+    attempt,
+    primary_rc,
+    classification,
+    raw_status,
+    raw_count,
+    snapshot_status,
+    cleanup_status,
+    final_status,
+) = sys.argv[1:]
+
+root = ET.parse(source).getroot()
+assert root.tag == "journey-harness-result"
+assert root.attrib == {"format-version": "1"}
+assert root.findtext("selector") == selector
+assert root.findtext("module") == module
+assert root.findtext("attempt") == attempt
+assert root.findtext("primary-exit-code") == primary_rc
+assert root.findtext("classification") == classification
+assert root.find("raw-junit").attrib == {"status": raw_status, "count": raw_count}
+assert root.find("snapshot").attrib == {"status": snapshot_status}
+assert root.find("cleanup").attrib == {"status": cleanup_status}
+assert root.findtext("final-status") == final_status
+assert len(root) == 9
+PY
+}
+
+finalize_class_attempt_manifest() {
+  local cleanup_status="$1"
+  local final_status="$2"
+  local manifest="$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt"
+  local verdict="$LAST_RUN_CLASS_ATTEMPT_DIR/journey-harness-verdict.xml"
+
+  write_harness_verdict_xml "$verdict" "$cleanup_status" "$final_status" \
+    || return 1
+  validate_harness_verdict_xml "$verdict" "$cleanup_status" "$final_status" \
+    || return 1
+  {
+    printf 'harness_verdict_kind=harness_owned\n'
+    printf 'harness_verdict_xml=journey-harness-verdict.xml\n'
+    printf 'harness_verdict_status=complete\n'
+    printf 'cleanup_status=%s\n' "$cleanup_status"
+    printf 'gradle_cleanup_exit_code=%s\n' "$LAST_RUN_CLASS_GRADLE_CLEANUP_RC"
+    printf 'device_cleanup_exit_code=%s\n' "$LAST_RUN_CLASS_DEVICE_CLEANUP_RC"
+    printf 'status=%s\n' "$final_status"
+    printf 'finished_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >> "$manifest" || return 1
+
+  [[ -s "$manifest" ]] \
+    && [[ -s "$verdict" ]] \
+    && grep -Fqx "cleanup_status=$cleanup_status" "$manifest" \
+    && grep -Fqx "status=$final_status" "$manifest" \
+    && grep -Fqx "harness_verdict_kind=harness_owned" "$manifest" \
+    && grep -Fqx "harness_verdict_status=complete" "$manifest"
 }
 
 # run_bounded <wall_cap_secs> <cmd...> — issue #1056.
@@ -69,6 +773,9 @@ run_bounded() {
   while :; do
     if IFS= read -r -t "$no_output" -u "$rfd" line; then
       printf '%s\n' "$line"
+      if [[ -n "${JOURNEY_CURRENT_ATTEMPT_LOG:-}" ]]; then
+        printf '%s\n' "$line" >> "$JOURNEY_CURRENT_ATTEMPT_LOG"
+      fi
     else
       read_rc=$?
       break
@@ -78,6 +785,10 @@ run_bounded() {
 
   if (( read_rc > 128 )); then
     echo "JOURNEY_NO_OUTPUT_WATCHDOG: no output for ${no_output}s — hard-killing wedged connectedDebugAndroidTest (issue #1056)" >&2
+    if [[ -n "${JOURNEY_CURRENT_ATTEMPT_LOG:-}" ]]; then
+      printf 'JOURNEY_NO_OUTPUT_WATCHDOG: no output for %ss\n' "$no_output" \
+        >> "$JOURNEY_CURRENT_ATTEMPT_LOG"
+    fi
     kill -TERM "$to_pid" 2>/dev/null || true
     ( sleep "$JOURNEY_CLASS_KILL_AFTER_SECS"; kill -KILL "$to_pid" 2>/dev/null || true ) &
     killer=$!
@@ -98,9 +809,28 @@ run_bounded() {
 # invocation and returns gradle's exit code (0 == that class passed).
 run_class() {
   local fqcn="$1"
-  local remaining cap rc attempt_start attempt_elapsed
+  local remaining cap rc attempt_start attempt_elapsed cleanup_status
+  local app_id_suffix="${POCKETSHELL_APP_ID_SUFFIX:-}"
+  local -a app_id_args=()
+  if [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]]; then
+    return "$JOURNEY_HARNESS_FAILURE_RC"
+  fi
   LAST_RUN_CLASS_TIMEOUT_HIT=0
   LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=0
+  LAST_RUN_CLASS_PRIMARY_RC=0
+  LAST_RUN_CLASS_ABORT_CLEANUP_FAILED=0
+  LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=0
+  LAST_RUN_CLASS_GRADLE_CLEANUP_RC="not_run"
+  LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
+  if [[ -n "$app_id_suffix" ]]; then
+    [[ "$app_id_suffix" =~ ^[A-Za-z0-9._]+$ ]] || {
+      echo "JOURNEY_INVOCATION_IDENTITY_FAILED: invalid application id suffix '$app_id_suffix'" >&2
+      LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
+      JOURNEY_ABORT_ISOLATION_FAILED=1
+      return "$JOURNEY_HARNESS_FAILURE_RC"
+    }
+    app_id_args+=("-PpocketshellAppIdSuffix=$app_id_suffix")
+  fi
   remaining="$(budget_remaining)"
   cap="$JOURNEY_CLASS_TIMEOUT_SECS"
   (( remaining < cap )) && cap="$remaining"
@@ -109,18 +839,26 @@ run_class() {
     LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
     return 124
   fi
+  if ! begin_class_attempt_artifacts app "$fqcn" "$app_id_suffix"; then
+    LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
+    JOURNEY_ABORT_ISOLATION_FAILED=1
+    return "$JOURNEY_HARNESS_FAILURE_RC"
+  fi
+  JOURNEY_CURRENT_ATTEMPT_LOG="$LAST_RUN_CLASS_ATTEMPT_DIR/attempt.log"
   attempt_start=$SECONDS
   # Issue #1458: --max-workers=2 (parity with the Unit job) bounds Gradle's
   # worker fan-out while the emulator and Docker fixtures share the runner. The
   # Gradle DAEMON is still reused (no --no-daemon), preserving the #835 budget-fit.
   run_bounded "$cap" \
     "$GRADLEW" :app:connectedDebugAndroidTest \
+    "${app_id_args[@]}" \
     --max-workers=2 \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
     --stacktrace
   rc=$?
+  LAST_RUN_CLASS_PRIMARY_RC="$rc"
   attempt_elapsed=$((SECONDS - attempt_start))
   if [[ $rc -eq 124 || ( $rc -eq 137 && $attempt_elapsed -ge $cap ) ]]; then
     LAST_RUN_CLASS_TIMEOUT_HIT=1
@@ -128,8 +866,34 @@ run_class() {
   if budget_exhausted; then
     LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
   fi
+  if ! snapshot_connected_test_outputs app "$fqcn" "$rc" "$app_id_suffix"; then
+    LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
+    JOURNEY_ABORT_ISOLATION_FAILED=1
+  fi
+  cleanup_status="not_required"
   if needs_gradle_cleanup_after_class_abort "$rc"; then
+    cleanup_status="failed"
     cleanup_gradle_after_timeout "$fqcn"
+    LAST_RUN_CLASS_GRADLE_CLEANUP_RC=$?
+    cleanup_device_after_class_abort app "$fqcn" "$app_id_suffix"
+    LAST_RUN_CLASS_DEVICE_CLEANUP_RC=$?
+    if [[ "$LAST_RUN_CLASS_GRADLE_CLEANUP_RC" -eq 0 \
+          && "$LAST_RUN_CLASS_DEVICE_CLEANUP_RC" -eq 0 ]]; then
+      cleanup_status="verified_clean"
+    else
+      LAST_RUN_CLASS_ABORT_CLEANUP_FAILED=1
+      JOURNEY_ABORT_ISOLATION_FAILED=1
+    fi
+  fi
+  if ! finalize_class_attempt_manifest "$cleanup_status" \
+      "$([[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 0 ]] && printf complete || printf harness_failure)"; then
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: manifest finalization failed for $fqcn" >&2
+    LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
+    JOURNEY_ABORT_ISOLATION_FAILED=1
+  fi
+  JOURNEY_CURRENT_ATTEMPT_LOG=""
+  if [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]]; then
+    return "$JOURNEY_HARNESS_FAILURE_RC"
   fi
   return "$rc"
 }
@@ -139,9 +903,17 @@ run_class() {
 # SAME budget-capped timeout discipline as run_class.
 run_ct_class() {
   local fqcn="$1"
-  local remaining cap rc attempt_start attempt_elapsed
+  local remaining cap rc attempt_start attempt_elapsed cleanup_status
+  if [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]]; then
+    return "$JOURNEY_HARNESS_FAILURE_RC"
+  fi
   LAST_RUN_CLASS_TIMEOUT_HIT=0
   LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=0
+  LAST_RUN_CLASS_PRIMARY_RC=0
+  LAST_RUN_CLASS_ABORT_CLEANUP_FAILED=0
+  LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=0
+  LAST_RUN_CLASS_GRADLE_CLEANUP_RC="not_run"
+  LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
   remaining="$(budget_remaining)"
   cap="$JOURNEY_CLASS_TIMEOUT_SECS"
   (( remaining < cap )) && cap="$remaining"
@@ -150,6 +922,12 @@ run_ct_class() {
     LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
     return 124
   fi
+  if ! begin_class_attempt_artifacts core-terminal "$fqcn" ""; then
+    LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
+    JOURNEY_ABORT_ISOLATION_FAILED=1
+    return "$JOURNEY_HARNESS_FAILURE_RC"
+  fi
+  JOURNEY_CURRENT_ATTEMPT_LOG="$LAST_RUN_CLASS_ATTEMPT_DIR/attempt.log"
   attempt_start=$SECONDS
   # Issue #1458: --max-workers=2 (parity with the Unit job + run_class) bounds
   # Gradle's worker fan-out while the proof shares the runner with the emulator.
@@ -160,6 +938,7 @@ run_ct_class() {
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
     --stacktrace
   rc=$?
+  LAST_RUN_CLASS_PRIMARY_RC="$rc"
   attempt_elapsed=$((SECONDS - attempt_start))
   if [[ $rc -eq 124 || ( $rc -eq 137 && $attempt_elapsed -ge $cap ) ]]; then
     LAST_RUN_CLASS_TIMEOUT_HIT=1
@@ -167,8 +946,34 @@ run_ct_class() {
   if budget_exhausted; then
     LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT=1
   fi
+  if ! snapshot_connected_test_outputs core-terminal "$fqcn" "$rc" ""; then
+    LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
+    JOURNEY_ABORT_ISOLATION_FAILED=1
+  fi
+  cleanup_status="not_required"
   if needs_gradle_cleanup_after_class_abort "$rc"; then
+    cleanup_status="failed"
     cleanup_gradle_after_timeout "$fqcn"
+    LAST_RUN_CLASS_GRADLE_CLEANUP_RC=$?
+    cleanup_device_after_class_abort core-terminal "$fqcn" ""
+    LAST_RUN_CLASS_DEVICE_CLEANUP_RC=$?
+    if [[ "$LAST_RUN_CLASS_GRADLE_CLEANUP_RC" -eq 0 \
+          && "$LAST_RUN_CLASS_DEVICE_CLEANUP_RC" -eq 0 ]]; then
+      cleanup_status="verified_clean"
+    else
+      LAST_RUN_CLASS_ABORT_CLEANUP_FAILED=1
+      JOURNEY_ABORT_ISOLATION_FAILED=1
+    fi
+  fi
+  if ! finalize_class_attempt_manifest "$cleanup_status" \
+      "$([[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 0 ]] && printf complete || printf harness_failure)"; then
+    echo "JOURNEY_ATTEMPT_ARTIFACT_FAILED: manifest finalization failed for $fqcn" >&2
+    LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
+    JOURNEY_ABORT_ISOLATION_FAILED=1
+  fi
+  JOURNEY_CURRENT_ATTEMPT_LOG=""
+  if [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]]; then
+    return "$JOURNEY_HARNESS_FAILURE_RC"
   fi
   return "$rc"
 }

@@ -218,12 +218,126 @@ STUBBIN="$SANDBOX/stubbin"
 mkdir -p "$STUBBIN"
 cat > "$STUBBIN/adb" <<'STUB'
 #!/usr/bin/env bash
-# `adb devices` -> emit one fake device so the show_ime loop iterates once and
-# `adb -s <serial> shell ...` -> no-op success.
-case "$1" in
-  devices) printf 'List of devices attached\nemulator-5554\tdevice\n' ;;
-  *) exit 0 ;;
+set -u
+
+emit_valid_png() {
+  # Real 1x1 RGBA PNG: signature + CRC-valid IHDR/IDAT/IEND chunks with a
+  # complete zlib stream. Keep positives decoder-valid so structural checks
+  # cannot be masked by signature-only fixtures.
+  printf '\211\120\116\107\015\012\032\012\000\000\000\015\111\110\104\122\000\000\000\001\000\000\000\001\010\006\000\000\000\037\025\304\211\000\000\000\015\111\104\101\124\170\234\143\140\140\140\370\017\000\001\004\001\000\137\345\303\113\000\000\000\000\111\105\116\104\256\102\140\202'
+}
+
+# `adb devices` -> emit one fake device so the show_ime loop iterates once.
+if [[ "${1:-}" == "devices" ]]; then
+  if [[ "${JOURNEY_ABORT_ADB_MODE:-}" == "unresolved-device" ]]; then
+    printf 'List of devices attached\n'
+    exit 0
+  fi
+  printf 'List of devices attached\nemulator-5554\tdevice\n'
+  exit 0
+fi
+
+if [[ "${1:-}" == "-s" ]]; then
+  serial="${2:-}"
+  shift 2
+  [[ "$serial" == "emulator-5554" ]] || exit 44
+fi
+
+# Most fixtures only need a harmless adb. The abort-isolation fixture below
+# opts into a stateful fake device through JOURNEY_ABORT_STUB_DIR.
+state_dir="${JOURNEY_ABORT_STUB_DIR:-}"
+if [[ -z "$state_dir" ]]; then
+  case "${1:-}" in
+    logcat)
+      [[ "${2:-}" == "-c" ]] || printf 'generic-device-logcat\n'
+      ;;
+    exec-out)
+      emit_valid_png
+      ;;
+    shell)
+      if [[ "${2:-}" == "ps" ]]; then
+        printf 'PID NAME\n'
+      elif [[ "${2:-}" == "dumpsys" ]]; then
+        printf 'generic dumpsys diagnostic\n'
+      fi
+      ;;
+  esac
+  exit 0
+fi
+mkdir -p "$state_dir"
+
+case "${1:-}" in
+  logcat)
+    if [[ "${2:-}" == "-c" ]]; then
+      [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "logcat-clear-fail" ]] || exit 47
+      : > "$state_dir/logcat-cleared"
+    else
+      [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "logcat-fail" ]] || exit 48
+      [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "logcat-empty" ]] || exit 0
+      printf 'device-logcat-%s\n' "$(cat "$state_dir/app-count" 2>/dev/null || printf '0')"
+    fi
+    ;;
+  exec-out)
+    [[ "${2:-}" == "screencap" && "${3:-}" == "-p" ]] || exit 45
+    [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "screenshot-fail" ]] || exit 49
+    [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "screenshot-empty" ]] || exit 0
+    if [[ "${JOURNEY_ABORT_ADB_MODE:-}" == "screenshot-invalid" ]]; then
+      printf 'not-a-png\n'
+      exit 0
+    fi
+    if [[ "${JOURNEY_ABORT_ADB_MODE:-}" == "screenshot-truncated" ]]; then
+      # Correct signature and a declared IHDR chunk, but truncated before the
+      # chunk payload/CRC. A magic-byte-only check incorrectly accepts this.
+      printf '\211PNG\r\n\032\n\000\000\000\015IHDR\000\000\000\001\000\000\000\001'
+      exit 0
+    fi
+    if [[ "${JOURNEY_ABORT_ADB_MODE:-}" == "screenshot-bad-crc" ]]; then
+      # Full chunk layout and decodable IDAT, but the IHDR CRC's final byte is
+      # deliberately changed from octal 211 to 210.
+      printf '\211\120\116\107\015\012\032\012\000\000\000\015\111\110\104\122\000\000\000\001\000\000\000\001\010\006\000\000\000\037\025\304\210\000\000\000\015\111\104\101\124\170\234\143\140\140\140\370\017\000\001\004\001\000\137\345\303\113\000\000\000\000\111\105\116\104\256\102\140\202'
+      exit 0
+    fi
+    emit_valid_png
+    ;;
+  shell)
+    shift
+    if [[ "${1:-}" == "am" && "${2:-}" == "force-stop" ]]; then
+      package="${3:-}"
+      printf '%s\n' "$package" >> "$state_dir/force-stop.log"
+      if [[ "$package" == "${JOURNEY_ABORT_FORCE_STOP_FAIL_PACKAGE:-}" ]]; then
+        exit 46
+      fi
+      if [[ -f "$state_dir/device-processes" ]]; then
+        awk -v package="$package" \
+          '$0 != package && index($0, package ":") != 1 { print }' \
+          "$state_dir/device-processes" > "$state_dir/device-processes.next"
+        mv "$state_dir/device-processes.next" "$state_dir/device-processes"
+      fi
+    elif [[ "${1:-}" == "ps" ]]; then
+      [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "ps-fail" ]] || exit 50
+      [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "ps-empty" ]] || exit 0
+      pid=4100
+      if [[ -f "$state_dir/device-processes" ]]; then
+        while IFS= read -r process_name; do
+          [[ -n "$process_name" ]] || continue
+          printf '%s %s\n' "$pid" "$process_name"
+          pid=$((pid + 1))
+        done < "$state_dir/device-processes"
+      fi
+    elif [[ "${1:-}" == "dumpsys" ]]; then
+      if [[ "${2:-}" == "activity" && "${3:-}" == "processes" ]]; then
+        [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "dumpsys-processes-fail" ]] || exit 51
+        [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "dumpsys-processes-empty" ]] || exit 0
+      fi
+      if [[ "${2:-}" == "activity" && "${3:-}" == "top" ]]; then
+        [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "dumpsys-top-fail" ]] || exit 52
+        [[ "${JOURNEY_ABORT_ADB_MODE:-}" != "dumpsys-top-empty" ]] || exit 0
+      fi
+      printf 'simulated dumpsys %s\n' "$*"
+    fi
+    ;;
 esac
+exit 0
 STUB
 chmod +x "$STUBBIN/adb"
 
@@ -617,6 +731,561 @@ if grep -q 'Cannot lock file hash cache' "$out_kill"; then
   fail "(j) retry still saw the simulated Gradle file-hash lock after SIGKILL timeout"
 fi
 pass "(j) SIGKILL timeout stops Gradle and retry avoids the poisoned file-hash lock"
+
+# ---------------------------------------------------------------------------
+# Issue #1458 exact-main abort contamination + artifact preservation.
+#
+# Attempt 1 wedges after installing a suffixed app/test pair and leaves both
+# processes alive on the simulated device. `gradlew --stop` deliberately does
+# NOT clear them. Attempt 2 refuses to run unless the harness force-stopped and
+# verified those exact packages first. A similarly prefixed neighbouring lane
+# must survive. Every later class overwrites the shared Gradle report locations,
+# so attempt 1/2 evidence can only survive in per-class, per-attempt snapshots.
+echo "== #1458 abort isolation: stale instrumentation is verified dead and attempt artifacts survive =="
+cat > "$SANDBOX/gradlew" <<'STUB'
+#!/usr/bin/env bash
+set -u
+
+state_dir="${JOURNEY_ABORT_STUB_DIR:?}"
+mkdir -p "$state_dir"
+printf '%s\n' "$*" >> "$state_dir/args.log"
+
+if [[ "${1:-}" == "--stop" ]]; then
+  printf 'stop\n' >> "$state_dir/stop.log"
+  exit 0
+fi
+
+if [[ "$*" == *":app:connectedDebugAndroidTest"* ]]; then
+  count="$(cat "$state_dir/app-count" 2>/dev/null || printf '0')"
+  count=$((count + 1))
+  printf '%s' "$count" > "$state_dir/app-count"
+  artifact_label="later-class-$count"
+  app_suffix=""
+  for arg in "$@"; do
+    case "$arg" in
+      -PpocketshellAppIdSuffix=*) app_suffix="${arg#*=}" ;;
+    esac
+  done
+  deep_count=0
+  if [[ "$*" == *"DeepLinkSessionSwitchE2eTest"* ]]; then
+    deep_count="$(cat "$state_dir/deep-count" 2>/dev/null || printf '0')"
+    deep_count=$((deep_count + 1))
+    printf '%s' "$deep_count" > "$state_dir/deep-count"
+    artifact_label="$deep_count"
+  fi
+
+  output_root="$PWD/app/build"
+  mkdir -p \
+    "$output_root/outputs/androidTest-results/connected/debug" \
+    "$output_root/outputs/connected_android_test_additional_output/debugAndroidTest/connected/fake-device/attempt" \
+    "$output_root/reports/androidTests/connected/debug"
+  # The first deep attempt models a real outer kill before UTP materializes
+  # JUnit XML. The retry and ordinary classes still emit raw instrumentation
+  # XML, which the harness must preserve separately from its own verdict.
+  if [[ "$deep_count" -ne 1 ]]; then
+    printf 'xml-attempt-%s\n' "$artifact_label" \
+      > "$output_root/outputs/androidTest-results/connected/debug/TEST-fake.xml"
+  fi
+  printf 'screenshot-attempt-%s\n' "$artifact_label" \
+    > "$output_root/outputs/connected_android_test_additional_output/debugAndroidTest/connected/fake-device/attempt/frame.png"
+  printf 'report-attempt-%s\n' "$artifact_label" \
+    > "$output_root/reports/androidTests/connected/debug/index.html"
+
+  if [[ "$deep_count" -eq 1 ]]; then
+    app_package="com.pocketshell.app"
+    if [[ -n "$app_suffix" ]]; then
+      app_package+=".$app_suffix"
+    fi
+    printf '%s\n' \
+      "$app_package.test" \
+      "$app_package" \
+      "$app_package"0.test \
+      > "$state_dir/device-processes"
+    # Silent outer-timeout wedge. The device processes are independent of this
+    # host child and therefore survive until exact package cleanup removes them.
+    sleep 30
+    exit 0
+  fi
+
+  if [[ "$deep_count" -eq 2 ]]; then
+    app_package="com.pocketshell.app"
+    if [[ -n "$app_suffix" ]]; then
+      app_package+=".$app_suffix"
+    fi
+    if grep -qxE "$app_package([.]test)?" \
+        "$state_dir/device-processes" 2>/dev/null; then
+      printf 'STALE_DEVICE_PROCESS_REACHED_RETRY\n' >&2
+      exit 91
+    fi
+  fi
+fi
+
+exit 0
+STUB
+chmod +x "$SANDBOX/gradlew"
+
+abort_stub_dir="$SANDBOX/abort-isolation-stub"
+mkdir -p "$abort_stub_dir"
+out_abort="$SANDBOX/run-abort-isolation.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  JOURNEY_ABORT_STUB_DIR="$abort_stub_dir" \
+  POCKETSHELL_APP_ID_SUFFIX=i1458 \
+  JOURNEY_STEP_BUDGET_SECS=600 \
+  JOURNEY_CLASS_TIMEOUT_SECS=30 \
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=1 \
+  JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_abort" 2>&1
+rc_abort=$?
+set -e
+
+[[ "$rc_abort" -eq 0 ]] \
+  || { sed -n '1,180p' "$out_abort"; fail "(abort) isolated retry run exited $rc_abort; expected recovered success"; }
+grep -q -- '-PpocketshellAppIdSuffix=i1458' "$abort_stub_dir/args.log" \
+  || fail "(abort) suffixed cleanup identity was not bound to the Gradle invocation"
+grep -q 'JOURNEY_FLAKE_RECOVERED:.*DeepLinkSessionSwitchE2eTest' "$out_abort" \
+  || { sed -n '1,220p' "$out_abort"; fail "(abort) wedged attempt did not recover after verified device cleanup"; }
+if grep -q 'STALE_DEVICE_PROCESS_REACHED_RETRY' "$out_abort"; then
+  fail "(abort) retry started while stale instrumentation/app processes were alive"
+fi
+for exact_package in com.pocketshell.app.i1458.test com.pocketshell.app.i1458; do
+  grep -qx "$exact_package" "$abort_stub_dir/force-stop.log" \
+    || fail "(abort) exact package $exact_package was not force-stopped"
+done
+if grep -qx 'com.pocketshell.app' "$abort_stub_dir/force-stop.log" \
+    || grep -qx 'com.pocketshell.app.i14580.test' "$abort_stub_dir/force-stop.log"; then
+  fail "(abort) cleanup escaped the exact suffixed lane package boundary"
+fi
+grep -qx 'com.pocketshell.app.i14580.test' "$abort_stub_dir/device-processes" \
+  || fail "(abort) similarly prefixed neighbouring lane was killed"
+
+deep_class="com.pocketshell.app.proof.DeepLinkSessionSwitchE2eTest"
+deep_artifact_key="$(
+  bash -c 'source "$1"; journey_class_artifact_key "$2"' _ \
+    "$SCRIPT_DIR/ci-journey-budget-functions.sh" "$deep_class"
+)"
+attempt_root="$SANDBOX/artifacts/ci-journey/class-attempts/app/$deep_artifact_key"
+for attempt in 1 2; do
+  attempt_dir="$attempt_root/attempt-$attempt"
+  [[ -f "$attempt_dir/manifest.txt" ]] \
+    || fail "(artifacts) missing attempt-$attempt manifest"
+  [[ -f "$attempt_dir/attempt.log" ]] \
+    || fail "(artifacts) missing attempt-$attempt combined invocation log"
+  [[ -s "$attempt_dir/journey-harness-verdict.xml" ]] \
+    || fail "(artifacts) missing attempt-$attempt harness verdict XML"
+  [[ -f "$attempt_dir/android-test-outputs/app/build/reports/androidTests/connected/debug/index.html" ]] \
+    || fail "(artifacts) missing attempt-$attempt HTML report snapshot"
+  [[ -f "$attempt_dir/android-test-outputs/app/build/outputs/connected_android_test_additional_output/debugAndroidTest/connected/fake-device/attempt/frame.png" ]] \
+    || fail "(artifacts) missing attempt-$attempt screenshot/additional-output snapshot"
+  grep -q "screenshot-attempt-$attempt" \
+    "$attempt_dir/android-test-outputs/app/build/outputs/connected_android_test_additional_output/debugAndroidTest/connected/fake-device/attempt/frame.png" \
+    || fail "(artifacts) attempt-$attempt screenshot was overwritten by a later invocation"
+done
+attempt_1_raw_xml="$attempt_root/attempt-1/android-test-outputs/app/build/outputs/androidTest-results/connected/debug/TEST-fake.xml"
+attempt_2_raw_xml="$attempt_root/attempt-2/android-test-outputs/app/build/outputs/androidTest-results/connected/debug/TEST-fake.xml"
+[[ ! -e "$attempt_1_raw_xml" ]] \
+  || fail "(artifacts) timeout attempt unexpectedly impersonated missing raw instrumentation XML"
+[[ -f "$attempt_2_raw_xml" ]] \
+  || fail "(artifacts) retry raw JUnit XML was not preserved"
+grep -q 'xml-attempt-2' "$attempt_2_raw_xml" \
+  || fail "(artifacts) retry raw JUnit XML was overwritten by a later invocation"
+python3 - "$attempt_root" <<'PY' \
+  || fail "(artifacts) harness verdict XML type/content is invalid or attempts overwrote one another"
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+root = Path(sys.argv[1])
+expected = {
+    1: ("124", "outer_timeout", "absent_by_outer_timeout", "0", "verified_clean"),
+    2: ("0", "pass", "present", "1", "not_required"),
+}
+for attempt, values in expected.items():
+    xml_root = ET.parse(root / f"attempt-{attempt}" / "journey-harness-verdict.xml").getroot()
+    assert xml_root.tag == "journey-harness-result"
+    assert xml_root.attrib == {"format-version": "1"}
+    assert xml_root.findtext("selector") == "com.pocketshell.app.proof.DeepLinkSessionSwitchE2eTest"
+    assert xml_root.findtext("module") == "app"
+    assert xml_root.findtext("attempt") == str(attempt)
+    assert xml_root.findtext("primary-exit-code") == values[0]
+    assert xml_root.findtext("classification") == values[1]
+    assert xml_root.find("raw-junit").attrib == {"status": values[2], "count": values[3]}
+    assert xml_root.find("snapshot").attrib == {"status": "complete"}
+    assert xml_root.find("cleanup").attrib == {"status": values[4]}
+PY
+[[ -f "$attempt_root/attempt-1/device-logcat.txt" ]] \
+  || fail "(artifacts) timeout attempt is missing the stable device logcat snapshot"
+[[ -f "$attempt_root/attempt-1/failure-screen.png" ]] \
+  || fail "(artifacts) timeout attempt is missing the stable fallback screenshot"
+for diagnostic in device-processes.txt activity-processes.txt activity-top.txt; do
+  [[ -f "$attempt_root/attempt-1/$diagnostic" ]] \
+    || fail "(artifacts) timeout attempt is missing $diagnostic"
+done
+grep -q '^primary_exit_code=124$' "$attempt_root/attempt-1/manifest.txt" \
+  || fail "(artifacts) timeout manifest did not preserve the primary rc=124"
+grep -q '^application_id_suffix=i1458$' "$attempt_root/attempt-1/manifest.txt" \
+  || fail "(artifacts) timeout manifest did not preserve the bound invocation suffix"
+grep -q '^cleanup_status=verified_clean$' "$attempt_root/attempt-1/manifest.txt" \
+  || fail "(artifacts) timeout manifest did not record verified cleanup"
+grep -q '^primary_classification=outer_timeout$' "$attempt_root/attempt-1/manifest.txt" \
+  || fail "(artifacts) timeout manifest did not classify the outer timeout"
+grep -q '^raw_junit_status=absent_by_outer_timeout$' "$attempt_root/attempt-1/manifest.txt" \
+  || fail "(artifacts) timeout manifest silently waived absent raw JUnit"
+grep -q '^raw_junit_count=0$' "$attempt_root/attempt-1/manifest.txt" \
+  || fail "(artifacts) timeout manifest has the wrong raw JUnit count"
+grep -q '^primary_exit_code=0$' "$attempt_root/attempt-2/manifest.txt" \
+  || fail "(artifacts) retry manifest did not preserve primary rc=0"
+grep -q '^raw_junit_status=present$' "$attempt_root/attempt-2/manifest.txt" \
+  || fail "(artifacts) retry manifest did not distinguish preserved raw JUnit"
+grep -q '^raw_junit_count=1$' "$attempt_root/attempt-2/manifest.txt" \
+  || fail "(artifacts) retry manifest has the wrong raw JUnit count"
+pass "(abort) exact suffixed instrumentation/app processes are killed + verified before retry; neighbouring lane survives"
+pass "(artifacts) harness verdicts, raw JUnit distinction, reports, logcat, screenshots, diagnostics, logs and manifests survive later overwrites"
+
+# Ordinary instrumentation pass/failure XML remains raw evidence; the harness
+# result is a separately typed document and safely escapes hostile selectors.
+(
+  REPO_ROOT="$SANDBOX"
+  ARTIFACT_DIR="$SANDBOX/artifacts/ordinary-raw"
+  JOURNEY_ADB="$STUBBIN/adb"
+  JOURNEY_ABORT_STUB_DIR="$SANDBOX/ordinary-raw-state"
+  export JOURNEY_ABORT_STUB_DIR
+  mkdir -p "$JOURNEY_ABORT_STUB_DIR"
+  printf '%s\n' com.pocketshell.app.unrelated \
+    > "$JOURNEY_ABORT_STUB_DIR/device-processes"
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  selector='com.example.A<&"Test'
+  begin_class_attempt_artifacts app "$selector" "" || exit 120
+  mkdir -p "$REPO_ROOT/app/build/outputs/androidTest-results/connected/debug"
+  printf '<testsuite tests="1" failures="1"/>\n' \
+    > "$REPO_ROOT/app/build/outputs/androidTest-results/connected/debug/TEST-ordinary.xml"
+  LAST_RUN_CLASS_PRIMARY_RC=7
+  snapshot_connected_test_outputs app "$selector" 7 "" || exit 121
+  finalize_class_attempt_manifest not_required complete || exit 122
+  python3 - "$LAST_RUN_CLASS_ATTEMPT_DIR" "$selector" <<'PY'
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+attempt = Path(sys.argv[1])
+selector = sys.argv[2]
+root = ET.parse(attempt / "journey-harness-verdict.xml").getroot()
+assert root.tag == "journey-harness-result"
+assert root.findtext("selector") == selector
+assert root.findtext("classification") == "failure"
+assert root.find("raw-junit").attrib == {"status": "present", "count": "1"}
+assert (attempt / "android-test-outputs/app/build/outputs/androidTest-results/connected/debug/TEST-ordinary.xml").is_file()
+PY
+) || fail "(artifacts) ordinary raw-JUnit failure or safely escaped harness verdict contract failed"
+pass "(artifacts) ordinary raw JUnit stays separate; failure classification and XML escaping are exact"
+
+# The failure half is load-bearing: if exact process absence cannot be proven,
+# the primary timeout remains in the manifest, cleanup is separately marked
+# failed, and NO retry or next app class may start.
+cleanup_fail_stub_dir="$SANDBOX/abort-cleanup-failure-stub"
+mkdir -p "$cleanup_fail_stub_dir"
+out_cleanup_fail="$SANDBOX/run-abort-cleanup-failure.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  JOURNEY_ABORT_STUB_DIR="$cleanup_fail_stub_dir" \
+  JOURNEY_ABORT_FORCE_STOP_FAIL_PACKAGE=com.pocketshell.app.test \
+  JOURNEY_STEP_BUDGET_SECS=600 \
+  JOURNEY_CLASS_TIMEOUT_SECS=30 \
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=1 \
+  JOURNEY_CLASS_KILL_AFTER_SECS=1 \
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  JOURNEY_DEVICE_CLEANUP_TIMEOUT_SECS=1 \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_cleanup_fail" 2>&1
+rc_cleanup_fail=$?
+set -e
+
+[[ "$rc_cleanup_fail" -ne 0 ]] \
+  || fail "(cleanup-fail) unproven isolation incorrectly exited green"
+grep -q 'JOURNEY_ISOLATION_FAILURE:.*primary_rc=124 cleanup_failed=1' "$out_cleanup_fail" \
+  || { sed -n '1,180p' "$out_cleanup_fail"; fail "(cleanup-fail) hard isolation failure did not preserve primary vs cleanup status"; }
+[[ "$(cat "$cleanup_fail_stub_dir/deep-count")" -eq 1 ]] \
+  || fail "(cleanup-fail) harness retried the wedged class despite unproven isolation"
+[[ "$(cat "$cleanup_fail_stub_dir/app-count")" -eq 2 ]] \
+  || fail "(cleanup-fail) harness launched another app class after unproven isolation"
+if grep -q -- '-PpocketshellAppIdSuffix=' "$cleanup_fail_stub_dir/args.log"; then
+  fail "(cleanup-fail) base-package invocation unexpectedly carried an application-id suffix"
+fi
+cleanup_fail_manifest="$SANDBOX/artifacts/ci-journey/class-attempts/app/$deep_artifact_key/attempt-1/manifest.txt"
+grep -q '^primary_exit_code=124$' "$cleanup_fail_manifest" \
+  || fail "(cleanup-fail) manifest lost the primary timeout rc"
+grep -q '^cleanup_status=failed$' "$cleanup_fail_manifest" \
+  || fail "(cleanup-fail) manifest did not separately record cleanup failure"
+grep -q '^device_cleanup_exit_code=1$' "$cleanup_fail_manifest" \
+  || fail "(cleanup-fail) manifest did not preserve the device cleanup rc"
+pass "(cleanup-fail) unproven process isolation hard-fails and blocks retry/next class while preserving primary+cleanup outcomes"
+
+# Package derivation itself is pinned at both boundaries. This prevents a
+# future cleanup rewrite from broad-matching every com.pocketshell.app.i* lane.
+mapfile -t base_packages < <(
+  bash -c 'source "$1"; journey_app_package_names ""' _ \
+    "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+)
+[[ "${base_packages[*]}" == "com.pocketshell.app.test com.pocketshell.app" ]] \
+  || fail "(packages) base package mapping is not exact: ${base_packages[*]}"
+mapfile -t suffixed_packages < <(
+  bash -c 'source "$1"; journey_app_package_names i1458' _ \
+    "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+)
+[[ "${suffixed_packages[*]}" == "com.pocketshell.app.i1458.test com.pocketshell.app.i1458" ]] \
+  || fail "(packages) suffixed package mapping is not exact: ${suffixed_packages[*]}"
+pass "(packages) base and suffixed lanes resolve only their exact test/app packages"
+
+# A failed force-stop remains a cleanup failure even if a later process-list
+# sample happens to be empty; absence alone cannot erase a failed command.
+(
+  JOURNEY_ADB="$STUBBIN/adb"
+  JOURNEY_ABORT_STUB_DIR="$SANDBOX/force-stop-command-failure"
+  JOURNEY_ABORT_FORCE_STOP_FAIL_PACKAGE=com.pocketshell.app.test
+  export JOURNEY_ABORT_STUB_DIR JOURNEY_ABORT_FORCE_STOP_FAIL_PACKAGE
+  mkdir -p "$JOURNEY_ABORT_STUB_DIR"
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  if cleanup_device_after_class_abort app "com.example.ForceStopFailureTest" ""; then
+    exit 69
+  fi
+) || fail "(packages) failed exact force-stop was erased by an empty process-list sample"
+pass "(packages) exact force-stop command failure stays fail-closed even when process absence is observed"
+
+# Every required per-attempt device capture is fail-closed. A command error,
+# unresolved device, empty output, or invalid screenshot must make the snapshot
+# fail so run_class can latch the harness and refuse the next invocation.
+echo "== #1458 artifact capture failures are never marked complete =="
+artifact_capture_must_fail() {
+  local mode="$1"
+  local primary_rc="$2"
+  local capture_state="$SANDBOX/capture-$mode"
+  mkdir -p "$capture_state"
+  printf '%s\n' com.pocketshell.app.test > "$capture_state/device-processes"
+
+  set +e
+  (
+    REPO_ROOT="$SANDBOX"
+    ARTIFACT_DIR="$SANDBOX/artifacts/capture-$mode"
+    JOURNEY_ADB="$STUBBIN/adb"
+    JOURNEY_ABORT_STUB_DIR="$capture_state"
+    export JOURNEY_ABORT_STUB_DIR
+    source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+    begin_class_attempt_artifacts app "com.example.CaptureFailureTest" "" \
+      || exit 70
+    export JOURNEY_ABORT_ADB_MODE="$mode"
+    if snapshot_connected_test_outputs \
+        app "com.example.CaptureFailureTest" "$primary_rc" ""; then
+      exit 71
+    fi
+    grep -q '^snapshot_status=failed$' \
+      "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt" || exit 78
+    if grep -q '^snapshot_status=complete$' \
+        "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt"; then
+      exit 79
+    fi
+  )
+  capture_rc=$?
+  set -e
+  [[ "$capture_rc" -eq 0 ]] \
+    || fail "(captures) mode=$mode was accepted or setup failed (rc=$capture_rc)"
+}
+
+for mode in logcat-fail logcat-empty; do
+  artifact_capture_must_fail "$mode" 0
+done
+for mode in \
+  ps-fail ps-empty \
+  dumpsys-processes-fail dumpsys-processes-empty \
+  dumpsys-top-fail dumpsys-top-empty \
+  screenshot-fail screenshot-empty screenshot-invalid \
+  screenshot-truncated screenshot-bad-crc; do
+  artifact_capture_must_fail "$mode" 124
+done
+
+(
+  REPO_ROOT="$SANDBOX"
+  ARTIFACT_DIR="$SANDBOX/artifacts/capture-unresolved"
+  JOURNEY_ADB="$STUBBIN/adb"
+  JOURNEY_ABORT_STUB_DIR="$SANDBOX/capture-unresolved"
+  JOURNEY_ABORT_ADB_MODE=unresolved-device
+  export JOURNEY_ABORT_ADB_MODE
+  mkdir -p "$JOURNEY_ABORT_STUB_DIR"
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  if begin_class_attempt_artifacts app "com.example.UnresolvedDeviceTest" ""; then
+    exit 72
+  fi
+) || fail "(captures) unresolved device did not fail closed before invocation"
+
+(
+  REPO_ROOT="$SANDBOX"
+  ARTIFACT_DIR="$SANDBOX/artifacts/capture-clear-fail"
+  JOURNEY_ADB="$STUBBIN/adb"
+  JOURNEY_ABORT_STUB_DIR="$SANDBOX/capture-clear-fail"
+  JOURNEY_ABORT_ADB_MODE=logcat-clear-fail
+  export JOURNEY_ABORT_ADB_MODE JOURNEY_ABORT_STUB_DIR
+  mkdir -p "$JOURNEY_ABORT_STUB_DIR"
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  if begin_class_attempt_artifacts app "com.example.LogcatClearFailureTest" ""; then
+    exit 73
+  fi
+) || fail "(captures) failed per-attempt logcat reset was not fail-closed"
+pass "(captures) command errors, empty content, invalid PNG, unresolved device and logcat-reset failure all fail closed"
+
+# run_class must propagate a manifest-finalization failure into the same hard
+# harness latch; returning the primary success would silently lose metadata.
+cat > "$SANDBOX/finalize-gradlew" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod +x "$SANDBOX/finalize-gradlew"
+(
+  REPO_ROOT="$SANDBOX"
+  ARTIFACT_DIR="$SANDBOX/artifacts/snapshot-failure"
+  GRADLEW="$SANDBOX/finalize-gradlew"
+  JOURNEY_ADB="$STUBBIN/adb"
+  JOURNEY_ABORT_STUB_DIR="$SANDBOX/snapshot-state"
+  JOURNEY_ABORT_ADB_MODE=logcat-fail
+  JOURNEY_STEP_BUDGET_SECS=30
+  JOURNEY_CLASS_TIMEOUT_SECS=10
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=5
+  JOURNEY_CLASS_KILL_AFTER_SECS=1
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=1
+  SUITE_START=$SECONDS
+  export JOURNEY_ABORT_STUB_DIR JOURNEY_ABORT_ADB_MODE
+  mkdir -p "$JOURNEY_ABORT_STUB_DIR"
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  set +e
+  run_class "com.example.SnapshotFailureTest" >/dev/null 2>&1
+  snapshot_rc=$?
+  set -e
+  [[ "$snapshot_rc" -eq "$JOURNEY_HARNESS_FAILURE_RC" ]] || exit 80
+  [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]] || exit 81
+  [[ "$LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED" -eq 1 ]] || exit 82
+) || fail "(captures) run_class ignored required snapshot-capture failure"
+pass "(captures) required snapshot failure hard-latches the harness and cannot return primary success"
+
+(
+  REPO_ROOT="$SANDBOX"
+  ARTIFACT_DIR="$SANDBOX/artifacts/finalize-failure"
+  GRADLEW="$SANDBOX/finalize-gradlew"
+  JOURNEY_ADB="$STUBBIN/adb"
+  JOURNEY_ABORT_STUB_DIR="$SANDBOX/finalize-state"
+  JOURNEY_STEP_BUDGET_SECS=30
+  JOURNEY_CLASS_TIMEOUT_SECS=10
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=5
+  JOURNEY_CLASS_KILL_AFTER_SECS=1
+  JOURNEY_GRADLE_STOP_TIMEOUT_SECS=1
+  SUITE_START=$SECONDS
+  mkdir -p "$JOURNEY_ABORT_STUB_DIR"
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  finalize_class_attempt_manifest() { return 74; }
+  set +e
+  run_class "com.example.ManifestFinalizeFailureTest" >/dev/null 2>&1
+  finalize_rc=$?
+  set -e
+  [[ "$finalize_rc" -eq "$JOURNEY_HARNESS_FAILURE_RC" ]] || exit 75
+  [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]] || exit 76
+  [[ "$LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED" -eq 1 ]] || exit 77
+) || fail "(manifest) run_class ignored manifest-finalization failure"
+pass "(manifest) finalization failure hard-latches the harness and cannot return primary success"
+
+for verdict_failure_mode in synthesis malformed; do
+  (
+    REPO_ROOT="$SANDBOX"
+    ARTIFACT_DIR="$SANDBOX/artifacts/verdict-$verdict_failure_mode"
+    GRADLEW="$SANDBOX/finalize-gradlew"
+    JOURNEY_ADB="$STUBBIN/adb"
+    JOURNEY_ABORT_STUB_DIR="$SANDBOX/verdict-$verdict_failure_mode-state"
+    JOURNEY_STEP_BUDGET_SECS=30
+    JOURNEY_CLASS_TIMEOUT_SECS=10
+    JOURNEY_NO_OUTPUT_TIMEOUT_SECS=5
+    JOURNEY_CLASS_KILL_AFTER_SECS=1
+    JOURNEY_GRADLE_STOP_TIMEOUT_SECS=1
+    SUITE_START=$SECONDS
+    export JOURNEY_ABORT_STUB_DIR
+    mkdir -p "$JOURNEY_ABORT_STUB_DIR"
+    source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+    if [[ "$verdict_failure_mode" == synthesis ]]; then
+      write_harness_verdict_xml() { return 74; }
+    else
+      write_harness_verdict_xml() {
+        printf '<journey-harness-result><broken>' > "$1"
+      }
+    fi
+    set +e
+    run_class "com.example.VerdictFailureTest" >/dev/null 2>&1
+    verdict_rc=$?
+    set -e
+    [[ "$verdict_rc" -eq "$JOURNEY_HARNESS_FAILURE_RC" ]] || exit 123
+    [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]] || exit 124
+    [[ "$LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED" -eq 1 ]] || exit 125
+    if grep -q '^harness_verdict_status=complete$' \
+        "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt"; then
+      exit 126
+    fi
+  ) || fail "(verdict) $verdict_failure_mode verdict failure did not hard-latch the harness"
+done
+pass "(verdict) synthesis and parse-back validation failures hard-latch without false finalization"
+
+# Mutation proof: removing the parse-back call must make this probe fail. This
+# demonstrates that malformed-writer coverage is load-bearing rather than
+# passing merely because synthesis happened to return nonzero.
+mutated_budget="$SANDBOX/ci-journey-budget-no-verdict-validation.sh"
+sed '/^[[:space:]]*validate_harness_verdict_xml "\$verdict"/,+1d' \
+  "$SCRIPT_DIR/ci-journey-budget-functions.sh" > "$mutated_budget"
+set +e
+(
+  source "$mutated_budget"
+  LAST_RUN_CLASS_ATTEMPT_DIR="$SANDBOX/mutated-verdict-attempt"
+  LAST_RUN_CLASS_SELECTOR="com.example.MutatedTest"
+  LAST_RUN_CLASS_MODULE=app
+  LAST_RUN_CLASS_ATTEMPT=1
+  LAST_RUN_CLASS_PRIMARY_RC=124
+  LAST_RUN_CLASS_PRIMARY_CLASSIFICATION=outer_timeout
+  LAST_RUN_CLASS_RAW_JUNIT_STATUS=absent_by_outer_timeout
+  LAST_RUN_CLASS_RAW_JUNIT_COUNT=0
+  LAST_RUN_CLASS_SNAPSHOT_STATUS=complete
+  mkdir -p "$LAST_RUN_CLASS_ATTEMPT_DIR"
+  : > "$LAST_RUN_CLASS_ATTEMPT_DIR/manifest.txt"
+  write_harness_verdict_xml() {
+    printf '<journey-harness-result><broken>' > "$1"
+  }
+  finalize_class_attempt_manifest verified_clean complete
+)
+mutation_rc=$?
+set -e
+[[ "$mutation_rc" -eq 0 ]] \
+  || fail "(verdict-mutation) validation-removal mutant did not demonstrate the malformed-XML escape"
+pass "(verdict-mutation) removing parse-back validation is detected by the malformed-writer regression"
+
+# Readable paths retain a stable hash of the full class selector. This separates
+# names that sanitize identically and makes hostile traversal characters inert.
+collision_a="$(
+  bash -c 'source "$1"; journey_class_artifact_key "com.example.A#method"' _ \
+    "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+)"
+collision_b="$(
+  bash -c 'source "$1"; journey_class_artifact_key "com.example.A_method"' _ \
+    "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+)"
+[[ "$collision_a" != "$collision_b" ]] \
+  || fail "(paths) sanitized class collision produced one artifact key: $collision_a"
+for hostile_class in \
+  '../../com.example.A#method' \
+  '/absolute/path/Test' \
+  '.../../#'; do
+  hostile_key="$(
+    bash -c 'source "$1"; journey_class_artifact_key "$2"' _ \
+      "$SCRIPT_DIR/ci-journey-budget-functions.sh" "$hostile_class"
+  )"
+  [[ -n "$hostile_key" && "$hostile_key" != "." && "$hostile_key" != ".." ]] \
+    || fail "(paths) hostile class produced empty/dot artifact key"
+  [[ "$hostile_key" != */* ]] \
+    || fail "(paths) hostile class escaped into a nested path: $hostile_key"
+  [[ "$hostile_key" =~ --[0-9a-f]{16}$ ]] \
+    || fail "(paths) hostile class key lacks its stable collision-resistant hash: $hostile_key"
+done
+pass "(paths) colliding selectors separate; slash/absolute/traversal selectors stay one hashed safe component"
 
 echo "== Timeout cleanup: repeated SIGKILL timeout stays classified as timeout =="
 cat > "$SANDBOX/gradlew" <<'STUB'

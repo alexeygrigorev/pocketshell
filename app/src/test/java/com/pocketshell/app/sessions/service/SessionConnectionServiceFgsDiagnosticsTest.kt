@@ -4,11 +4,18 @@ import android.content.Context
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.diagnostics.DiagnosticEventSink
+import com.pocketshell.app.diagnostics.DiagnosticRecorder
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.runTest
+import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -26,25 +33,29 @@ import org.robolectric.annotation.Config
  * connection-log was structurally BLIND to the mechanism and the ~4.4s-after-background transport
  * death could not be attributed.
  *
- * These tests reproduce the failure paths synthetically (inject a rejecting starter/promoter) and
- * assert a DiagnosticEvent carrying the exception CLASS is emitted on the `connection` trail.
+ * Issue #1598 closes the remaining fidelity gap end-to-end: these tests inject only the platform
+ * request/promotion outcome, then drive the real producer through the real [DiagnosticRecorder]
+ * and assert the exact JSONL shape uploaded by `connectionLogJsonl()`.
  *
- * RED on base: base swallows both failures with `Log.w` and records nothing → the recording sink
- * stays empty → every assertion below fails.
- * GREEN with the fix: each failure records `connection`/`session_fgs` with `outcome=denied` and
- * the exception class name.
+ * RED on the #1598 base: the captured ACTION_START intent loses `hold_active`, so both promotion
+ * shapes omit it. GREEN: request and promotion carry the same authoritative value, including
+ * false and missing-extra coverage, and denial uses the production `error` key.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
 class SessionConnectionServiceFgsDiagnosticsTest {
 
     private lateinit var context: Context
-    private val sink = RecordingSink()
+    private lateinit var recorder: DiagnosticRecorder
 
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        DiagnosticEvents.install(sink)
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        File(context.filesDir, "diagnostics").deleteRecursively()
+        recorder = DiagnosticRecorder(context, SettingsRepository(context))
+        DiagnosticEvents.install(recorder)
     }
 
     @After
@@ -54,7 +65,7 @@ class SessionConnectionServiceFgsDiagnosticsTest {
     }
 
     @Test
-    fun `a rejected startForegroundService emits a denied diagnostic with the exception class`() {
+    fun `a rejected startForegroundService emits its exact denied producer shape`() = runTest {
         // The on-device background-FGS-start restriction: startForegroundService() throws.
         SessionConnectionService.startForegroundServiceForTest = { _, _ ->
             throw android.app.ForegroundServiceStartNotAllowedException("bg restricted")
@@ -63,103 +74,121 @@ class SessionConnectionServiceFgsDiagnosticsTest {
         val started = SessionConnectionService.start(context, holdActive = true)
 
         assertEquals("a rejected start must return false, not crash", false, started)
-        val denied = sink.find("session_fgs", phase = "request", outcome = "denied")
-        assertNotNull(
-            "the swallowed FGS start rejection must now emit a connection diagnostic (#1595)",
-            denied,
-        )
+        val denied = recorder.sessionFgsEvents()
+            .single { it.metadataString("phase") == "request" }
         assertEquals(
             "the diagnostic must capture the exception CLASS so the device log can tell " +
                 "ForegroundServiceStartNotAllowedException from a real socket error",
             "ForegroundServiceStartNotAllowedException",
-            denied!!["error"],
+            denied.metadataString("error"),
         )
-        assertEquals(true, denied["hold_active"])
+        assertTrue(denied.metadataBoolean("hold_active"))
+        assertFalse(
+            "production records denial under `error`; the mirror proof must not fabricate " +
+                "`exceptionClass`",
+            denied.getJSONObject("metadata").has("exceptionClass"),
+        )
     }
 
     @Test
-    fun `a successful startForegroundService emits an ok diagnostic so the device log proves it fired`() {
-        // No injected starter → the real ShadowApplication start succeeds.
+    fun `the captured true start intent drives exact request and promotion success fields`() = runTest {
+        var capturedIntent: Intent? = null
+        SessionConnectionService.startForegroundServiceForTest = { _, intent ->
+            capturedIntent = intent
+        }
+
         val started = SessionConnectionService.start(context, holdActive = true)
 
-        assertEquals(true, started)
-        val ok = sink.find("session_fgs", phase = "request", outcome = "ok")
-        assertNotNull(
-            "a successful foreground-eligible start must also be recorded so the next device " +
-                "background proves the start actually fired (#1595)",
-            ok,
-        )
-        assertEquals(true, ok!!["hold_active"])
+        assertTrue(started)
+        val request = recorder.sessionFgsEvents().single()
+        assertEquals("request", request.metadataString("phase"))
+        assertEquals("ok", request.metadataString("outcome"))
+        assertTrue(request.metadataBoolean("hold_active"))
+
+        val service = serviceForPromotion()
+        service.onStartCommand(requireNotNull(capturedIntent), 0, 1)
+
+        val promoted = recorder.sessionFgsEvents()
+            .single { it.metadataString("phase") == "promote" }
+        assertEquals("ok", promoted.metadataString("outcome"))
+        assertTrue(promoted.metadataBoolean("hold_active"))
+        service.onDestroy()
     }
 
     @Test
-    fun `a rejected startForeground promotion emits a denied diagnostic with the exception class`() {
-        val service = Robolectric.buildService(SessionConnectionService::class.java).get()
-        service.createNotificationChannel()
+    fun `the captured true start intent drives exact promotion denial fields`() = runTest {
+        var capturedIntent: Intent? = null
+        SessionConnectionService.startForegroundServiceForTest = { _, intent ->
+            capturedIntent = intent
+        }
+        assertTrue(SessionConnectionService.start(context, holdActive = true))
+
+        val service = serviceForPromotion()
         service.promoteForegroundForTest = {
             throw android.app.ForegroundServiceStartNotAllowedException("promote restricted")
         }
 
-        // ACTION_START drives promoteToForegroundIfNeeded → throws → getOrElse records + returns
-        // false → the service stops cleanly instead of crashing.
-        service.onStartCommand(
-            Intent(context, SessionConnectionService::class.java).apply {
-                action = SessionConnectionService.ACTION_START
-            },
-            0,
-            1,
-        )
+        service.onStartCommand(requireNotNull(capturedIntent), 0, 1)
 
-        val denied = sink.find("session_fgs", phase = "promote", outcome = "denied")
-        assertNotNull(
-            "the swallowed FGS promotion failure must now emit a connection diagnostic (#1595)",
-            denied,
-        )
+        val denied = recorder.sessionFgsEvents()
+            .single { it.metadataString("phase") == "promote" }
+        assertEquals("denied", denied.metadataString("outcome"))
         assertEquals(
             "ForegroundServiceStartNotAllowedException",
-            denied!!["error"],
+            denied.metadataString("error"),
         )
+        assertTrue(denied.metadataBoolean("hold_active"))
+        assertFalse(denied.getJSONObject("metadata").has("exceptionClass"))
     }
 
     @Test
-    fun `a successful promotion emits an ok diagnostic`() {
-        val service = Robolectric.buildService(SessionConnectionService::class.java).get()
-        service.createNotificationChannel()
-        // A successful promotion proceeds to startObserving(), which collects the controller's
-        // snapshot flow on observeDispatcher. Robolectric.buildService does NOT run Hilt field
-        // injection, so wire a real controller (else the collector touches the uninitialized
-        // @Inject lateinit and throws uncaught on Dispatchers.Default — a leaked coroutine that
-        // surfaces as UncaughtExceptionsBeforeTest in the next runTest). Run the collector on an
-        // unconfined dispatcher so the Empty snapshot immediately drives a synchronous
-        // stopSessionHold() — no leaked background coroutine.
-        service.controller = SessionServiceController(context, ActiveTmuxClients())
-        service.observeDispatcher = kotlinx.coroutines.Dispatchers.Unconfined
+    fun `false and missing hold extras both produce false rather than a hard coded value`() = runTest {
+        var capturedFalseIntent: Intent? = null
+        SessionConnectionService.startForegroundServiceForTest = { _, intent ->
+            capturedFalseIntent = intent
+        }
+        assertTrue(SessionConnectionService.start(context, holdActive = false))
+        val falseService = serviceForPromotion()
+        falseService.onStartCommand(requireNotNull(capturedFalseIntent), 0, 1)
 
-        service.onStartCommand(
+        val falseEvents = recorder.sessionFgsEvents()
+        assertEquals(2, falseEvents.size)
+        assertTrue(falseEvents.all { !it.metadataBoolean("hold_active") })
+        falseService.onDestroy()
+
+        val missingService = serviceForPromotion()
+        missingService.onStartCommand(
             Intent(context, SessionConnectionService::class.java).apply {
                 action = SessionConnectionService.ACTION_START
             },
             0,
-            1,
+            2,
         )
 
-        val ok = sink.find("session_fgs", phase = "promote", outcome = "ok")
-        assertNotNull("a successful promotion must be recorded on the connection trail", ok)
-        service.onDestroy()
+        val lastPromotion = recorder.sessionFgsEvents()
+            .last { it.metadataString("phase") == "promote" }
+        assertFalse(lastPromotion.metadataBoolean("hold_active"))
+        missingService.onDestroy()
     }
 
-    private class RecordingSink : DiagnosticEventSink {
-        val events = mutableListOf<Triple<String, String, Map<String, Any?>>>()
-        override fun record(category: String, event: String, fields: Map<String, Any?>) {
-            events.add(Triple(category, event, fields))
+    private fun serviceForPromotion(): SessionConnectionService =
+        Robolectric.buildService(SessionConnectionService::class.java).get().apply {
+            createNotificationChannel()
+            controller = SessionServiceController(context, ActiveTmuxClients())
+            observeDispatcher = Dispatchers.Unconfined
         }
 
-        fun find(event: String, phase: String, outcome: String): Map<String, Any?>? =
-            events.firstOrNull { (category, e, fields) ->
-                category == "connection" &&
-                    e == event &&
-                    fields["phase"] == phase &&
-                    fields["outcome"] == outcome
-            }?.third
-    }
+    private suspend fun DiagnosticRecorder.sessionFgsEvents(): List<JSONObject> =
+        connectionLogJsonl()
+            .lineSequence()
+            .filter(String::isNotBlank)
+            .map(::JSONObject)
+            .filter { it.getString("category") == "connection" && it.getString("name") == "session_fgs" }
+            .toList()
+
+    private fun JSONObject.metadataString(key: String): String =
+        getJSONObject("metadata").getString(key)
+
+    private fun JSONObject.metadataBoolean(key: String): Boolean =
+        getJSONObject("metadata").getBoolean(key)
 }

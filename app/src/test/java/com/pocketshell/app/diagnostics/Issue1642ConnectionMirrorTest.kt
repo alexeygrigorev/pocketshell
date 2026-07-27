@@ -3,6 +3,7 @@ package com.pocketshell.app.diagnostics
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.sessions.service.SessionConnectionService
 import kotlinx.coroutines.test.runTest
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -141,16 +142,17 @@ class Issue1642ConnectionMirrorTest {
             "clientDisconnected" to true,
             "willRetry" to false,
         )
-        // #1595/#1598: recorded PRECISELY so the FGS outcome could be confirmed
-        // remotely from the synced log — and it never synced.
-        DiagnosticEvents.record(
-            "connection",
-            "session_fgs",
-            "phase" to "request",
-            "outcome" to "denied",
-            "hold_active" to true,
-            "exceptionClass" to "ForegroundServiceStartNotAllowedException",
-        )
+        // #1595/#1598: use the real producer rather than fabricating a look-alike
+        // event. The background-restricted platform call is injected at the seam,
+        // while SessionConnectionService owns the exact fields recorded.
+        SessionConnectionService.startForegroundServiceForTest = { _, _ ->
+            throw android.app.ForegroundServiceStartNotAllowedException("bg restricted")
+        }
+        try {
+            assertFalse(SessionConnectionService.start(context, holdActive = true))
+        } finally {
+            SessionConnectionService.startForegroundServiceForTest = null
+        }
 
         val jsonl = recorder.connectionLogJsonl()
         val names = jsonl.mirroredLines().map { it.getString("name") }
@@ -166,7 +168,15 @@ class Issue1642ConnectionMirrorTest {
             "session_fgs" in names,
         )
         val fgs = jsonl.mirroredLines().single { it.getString("name") == "session_fgs" }
-        assertEquals("denied", fgs.getJSONObject("metadata").getString("outcome"))
+        val metadata = fgs.getJSONObject("metadata")
+        assertEquals("request", metadata.getString("phase"))
+        assertEquals("denied", metadata.getString("outcome"))
+        assertEquals(
+            "ForegroundServiceStartNotAllowedException",
+            metadata.getString("error"),
+        )
+        assertTrue(metadata.getBoolean("hold_active"))
+        assertFalse(metadata.has("exceptionClass"))
     }
 
     /**
@@ -210,7 +220,7 @@ class Issue1642ConnectionMirrorTest {
         val recorder = newRecorder()
 
         DiagnosticEvents.record("connection", "connect_start", "attempt" to 1)
-        DiagnosticEvents.record("action", "tap_send", "pane" to "%1")
+        DiagnosticEvents.record("action", "shortcut_sent", "paneId" to "%1")
         DiagnosticEvents.record("navigation", "screen_shown", "screen" to "hosts")
         DiagnosticEvents.record("strictmode", "violation", "detail" to "disk read on main")
         DiagnosticEvents.record("terminal", "frame_rendered", "rows" to 40)

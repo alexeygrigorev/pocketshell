@@ -55,6 +55,7 @@ class SessionConnectionService : Service() {
     private var observeJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var hasStartedForeground = false
+    private var promotionHoldActive = false
 
     @androidx.annotation.VisibleForTesting
     internal enum class StartupPhase {
@@ -87,6 +88,7 @@ class SessionConnectionService : Service() {
 
         const val ACTION_START = "com.pocketshell.app.sessions.action.START_SESSION_HOLD"
         const val ACTION_STOP = "com.pocketshell.app.sessions.action.STOP_SESSION_HOLD"
+        private const val EXTRA_HOLD_ACTIVE = "com.pocketshell.app.sessions.extra.HOLD_ACTIVE"
 
         /**
          * Issue #1595: the connection-trail event recording every session-FGS start/promotion
@@ -107,6 +109,7 @@ class SessionConnectionService : Service() {
         fun start(context: Context, holdActive: Boolean = true): Boolean {
             val intent = Intent(context, SessionConnectionService::class.java).apply {
                 action = ACTION_START
+                putExtra(EXTRA_HOLD_ACTIVE, holdActive)
             }
             return runCatching {
                 startForegroundServiceForTest?.invoke(context, intent)
@@ -166,6 +169,10 @@ class SessionConnectionService : Service() {
                 return START_NOT_STICKY
             }
             else -> {
+                // The start request is the authority for this diagnostic field. A missing extra
+                // (including a platform null-intent restart) is deliberately false rather than
+                // inferred from mutable controller state.
+                promotionHoldActive = intent?.getBooleanExtra(EXTRA_HOLD_ACTIVE, false) ?: false
                 if (!promoteToForegroundIfNeeded(initialNotification())) {
                     stopSessionHold()
                     return START_NOT_STICKY
@@ -249,6 +256,7 @@ class SessionConnectionService : Service() {
                 DIAG_EVENT_FGS,
                 "phase" to "promote",
                 "outcome" to "ok",
+                "hold_active" to promotionHoldActive,
             )
             true
         }.getOrElse {
@@ -263,6 +271,7 @@ class SessionConnectionService : Service() {
                 "phase" to "promote",
                 "outcome" to "denied",
                 "error" to it.javaClass.simpleName,
+                "hold_active" to promotionHoldActive,
             )
             false
         }

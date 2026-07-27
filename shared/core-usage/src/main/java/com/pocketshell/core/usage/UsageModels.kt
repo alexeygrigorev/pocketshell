@@ -33,8 +33,35 @@ public data class UsageWindow(
         get() = when (unit.lowercase()) {
             "percent", "%" -> used
             else -> if (limit > 0.0) used / limit * 100.0 else 0.0
-        }
+    }
 }
+
+/**
+ * One already-available Codex reset credit.
+ *
+ * [expiresAt] is inventory expiry, never an automatic quota reset. Keeping it
+ * in a separate type prevents the timestamp from entering [UsageWindow] and
+ * the reset/banner/notification derivations that consume windows.
+ */
+public data class UsageResetCredit(
+    val title: String,
+    val expiresAt: Instant?,
+)
+
+/**
+ * Codex's supplementary reset-credit inventory.
+ *
+ * [availableCount] is authoritative when the inventory fetch succeeded,
+ * including zero. It is null only when [unavailable] is true because quse
+ * reported `reset_credits_error`; raw provider error text is deliberately not
+ * retained. [credits] contains every exact `status == "available"` row in
+ * source order, including duplicates.
+ */
+public data class UsageResetCredits(
+    val availableCount: Int?,
+    val credits: List<UsageResetCredit>,
+    val unavailable: Boolean,
+)
 
 /**
  * One provider record from `pocketshell usage --json` or another
@@ -47,6 +74,7 @@ public data class UsageProviderRecord(
     val rawStatus: String,
     val blockReason: String? = null,
     val lastError: String? = null,
+    val resetCredits: UsageResetCredits? = null,
 ) {
     public val displayName: String
         get() = when (provider.lowercase()) {

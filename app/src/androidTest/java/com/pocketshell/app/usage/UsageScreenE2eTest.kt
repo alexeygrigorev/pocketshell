@@ -2,6 +2,7 @@ package com.pocketshell.app.usage
 
 import android.graphics.Bitmap
 import android.os.SystemClock
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -9,6 +10,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -83,6 +85,7 @@ class UsageScreenE2eTest {
     fun usagePanel_populatedCell_showsProviderCards() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
+        var fixtureStdout = ""
 
         // Sanity probe: the agents fixture actually returns provider
         // records before we drive the UI. This makes a failure on the
@@ -102,9 +105,17 @@ class UsageScreenE2eTest {
                 // fixture proxies the same provider records the app's parser
                 // was written against.
                 val result = it.exec("pocketshell usage --json")
+                fixtureStdout = result.stdout
                 assertTrue(
                     "expected pocketshell usage fixture to succeed, got exit=${result.exitCode} stderr=${result.stderr}",
                     result.exitCode == 0 && result.stdout.contains("provider"),
+                )
+                assertTrue(
+                    "Docker usage fixture must carry #1789 credit count/titles before UI launch",
+                    result.stdout.contains("\"reset_credits_available\":3") &&
+                        result.stdout.contains("\"title\":\"Full reset\"") &&
+                        result.stdout.contains("\"title\":\"Full reset (Weekly + 5 hr)\"") &&
+                        result.stdout.contains("\"status\":\"consumed\""),
                 )
             }
         }
@@ -144,10 +155,10 @@ class UsageScreenE2eTest {
         }
         compose.onNodeWithText("Usage", useUnmergedTree = true).assertExists()
 
-        // Wait for the populated state. The agents fixture provides
-        // three providers; the screen renders each as a card with the
-        // display name ("Claude" / "Codex" / "Opencode"). Any of those
-        // confirms the route + fetch + render path works.
+        // Wait for the populated state. The agents fixture provides three
+        // providers; the screen renders each as a card. A card alone is not
+        // enough for #1789: untouched main already renders Codex while
+        // discarding its supplementary credit inventory.
         compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             val codex = compose.onAllNodesWithText("Codex", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -156,13 +167,55 @@ class UsageScreenE2eTest {
             codex.isNotEmpty() || claude.isNotEmpty()
         }
 
+        val resetCreditsHeader = "Reset credits · 3 available"
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
+            compose.onAllNodesWithText(resetCreditsHeader, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText(resetCreditsHeader, useUnmergedTree = true)
+            .performScrollTo()
+            .assertExists()
+
+        // Full SSH -> host CLI -> UsageRemoteSource -> strict parser ->
+        // production UsageScreen acceptance. Duplicates remain separate,
+        // the distinct source title remains visible, and non-available history
+        // never becomes inventory.
+        compose.onAllNodesWithText("Full reset", useUnmergedTree = true)
+            .assertCountEquals(2)
+        compose.onNodeWithText("Full reset (Weekly + 5 hr)", useUnmergedTree = true)
+            .assertExists()
+        compose.onNodeWithText("Consumed reset must stay hidden", useUnmergedTree = true)
+            .assertDoesNotExist()
+        compose.onAllNodesWithText("expires ", substring = true, useUnmergedTree = true)
+            .assertCountEquals(3)
+        assertTrue(
+            "quota reset vocabulary must remain present beside credit expiry",
+            compose.onAllNodesWithText("resets ", substring = true, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty(),
+        )
+        compose.onNodeWithText("Reset credits unavailable", useUnmergedTree = true)
+            .assertDoesNotExist()
+        compose.onNodeWithText("Heavy work can resume.", useUnmergedTree = true)
+            .assertDoesNotExist()
+
+        // The non-Codex provider cards still survive the same full-path read.
+        compose.onNodeWithText("Claude Code", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("GitHub Copilot", useUnmergedTree = true).assertExists()
+
         captureFullDevice(File(artifactsDir, "01-usage-populated-viewport.png"))
         File(artifactsDir, "01-usage-populated-summary.txt").writeText(
             buildString {
                 appendLine("scenario=usage-populated")
                 appendLine("docker_target=agents")
                 appendLine("docker_port=$DEFAULT_PORT")
-                appendLine("expected_records=3 (claude, codex, opencode)")
+                appendLine("expected_records=3 (codex, claude, copilot)")
+                appendLine("fixture_credit_count=3")
+                appendLine("fixture_stdout_has_reset_credits=${fixtureStdout.contains("reset_credits")}")
+                appendLine("expected_credit_titles=Full reset (x2), Full reset (Weekly + 5 hr)")
+                appendLine("expected_non_available_title_absent=Consumed reset must stay hidden")
+                appendLine("expected_timeline_vocabulary=resets + expires")
                 appendLine("route=HostList → Settings gear → Usage row → UsageScreen")
             },
         )

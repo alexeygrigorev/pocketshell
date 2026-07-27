@@ -248,6 +248,57 @@ internal fun formatResetAbsolute(resetAt: Instant?, zoneId: ZoneId): String? {
 }
 
 /**
+ * Render-only reset-credit expiry copy.
+ *
+ * This deliberately does not call either reset formatter. Credit expiry is not
+ * an automatic quota reset and must never inherit reset vocabulary or reset
+ * routing by convenience.
+ */
+internal data class CreditExpiryText(
+    val primary: String,
+    val absolute: String?,
+)
+
+internal fun formatCreditExpiry(
+    now: Instant,
+    expiresAt: Instant?,
+    zoneId: ZoneId,
+): CreditExpiryText {
+    if (expiresAt == null) {
+        return CreditExpiryText(primary = "Expiry unavailable", absolute = null)
+    }
+    val absolute = DateTimeFormatter.ofPattern("EEE MMM d, HH:mm", Locale.US)
+        .withZone(zoneId)
+        .format(expiresAt)
+    if (!expiresAt.isAfter(now)) {
+        return CreditExpiryText(primary = "expired", absolute = absolute)
+    }
+    return CreditExpiryText(
+        primary = "expires ${formatExpiryRelative(now, expiresAt, zoneId)}",
+        absolute = absolute,
+    )
+}
+
+private fun formatExpiryRelative(now: Instant, expiresAt: Instant, zoneId: ZoneId): String {
+    val seconds = expiresAt.epochSecond - now.epochSecond
+    if (seconds < 60L) return "in <1m"
+    if (seconds < 86_400L) {
+        val totalMinutes = max(1L, ceil(seconds / 60.0).toLong())
+        val hours = totalMinutes / 60L
+        val minutes = totalMinutes % 60L
+        return when {
+            hours > 0 && minutes > 0 -> "in ${hours}h ${minutes}m"
+            hours > 0 -> "in ${hours}h"
+            else -> "in ${minutes}m"
+        }
+    }
+    val nowDate = now.atZone(zoneId).toLocalDate()
+    val expiryDate = expiresAt.atZone(zoneId).toLocalDate()
+    val days = max(1L, ChronoUnit.DAYS.between(nowDate, expiryDate))
+    return if (days == 1L) "in 1 day" else "in $days days"
+}
+
+/**
  * The soonest (smallest non-null `resetAt`) across a provider's windows,
  * for the host-list summary strip. Null when the provider reports no
  * reset times at all.

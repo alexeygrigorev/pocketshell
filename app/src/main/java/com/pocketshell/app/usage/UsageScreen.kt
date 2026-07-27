@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.usage.UsageProviderRecord
+import com.pocketshell.core.usage.UsageResetCredits
 import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
@@ -460,6 +461,11 @@ private fun UsageProviderCard(
             if (index != record.windows.lastIndex) Spacer(modifier = Modifier.height(14.dp))
         }
 
+        record.resetCredits?.let { resetCredits ->
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
+            UsageResetCreditsSection(resetCredits = resetCredits, now = now)
+        }
+
         val messages = listOfNotNull(
             record.blockReason.takeIf { record.windows.isEmpty() },
             usageTelemetryMessageForDisplay(record.lastError),
@@ -471,6 +477,72 @@ private fun UsageProviderCard(
                 color = PocketShellColors.TextMuted,
                 style = PocketShellType.labelMono,
             )
+        }
+    }
+}
+
+/**
+ * Codex's additive credit inventory. Credits are already available; their
+ * timestamps are expiry information only and deliberately do not reuse quota
+ * reset copy, reset actions, or any clickable/link surface.
+ */
+@Composable
+private fun UsageResetCreditsSection(
+    resetCredits: UsageResetCredits,
+    now: Instant,
+) {
+    val zone = ZoneId.systemDefault()
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(USAGE_RESET_CREDITS_SECTION_TAG),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        if (resetCredits.unavailable) {
+            Text(
+                text = "Reset credits unavailable",
+                color = PocketShellColors.TextMuted,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag(USAGE_RESET_CREDITS_UNAVAILABLE_TAG),
+            )
+            return@Column
+        }
+
+        Text(
+            text = "Reset credits · ${resetCredits.availableCount} available",
+            color = PocketShellColors.TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag(USAGE_RESET_CREDITS_HEADER_TAG),
+        )
+        resetCredits.credits.forEachIndexed { index, credit ->
+            val expiry = formatCreditExpiry(now = now, expiresAt = credit.expiresAt, zoneId = zone)
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = credit.title,
+                    color = PocketShellColors.Text,
+                    style = PocketShellType.bodyDense,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(usageResetCreditTitleTag(index)),
+                )
+                Text(
+                    text = expiry.primary,
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    modifier = Modifier.testTag(usageResetCreditExpiryTag(index)),
+                )
+                expiry.absolute?.let { absolute ->
+                    Text(
+                        text = absolute,
+                        color = PocketShellColors.TextSecondary,
+                        style = PocketShellType.labelMono,
+                        modifier = Modifier.testTag(usageResetCreditAbsoluteTag(index)),
+                    )
+                }
+            }
         }
     }
 }
@@ -783,3 +855,11 @@ public const val USAGE_PROVENANCE_TAG: String = "usage:provenance"
 public const val USAGE_OVERFLOW_TAG: String = "usage:overflow"
 public const val USAGE_REFRESH_ACTION_TAG: String = "usage:overflow:refresh"
 public const val USAGE_SETTINGS_ACTION_TAG: String = "usage:overflow:settings"
+
+public const val USAGE_RESET_CREDITS_SECTION_TAG: String = "usage:reset-credits"
+public const val USAGE_RESET_CREDITS_HEADER_TAG: String = "usage:reset-credits:header"
+public const val USAGE_RESET_CREDITS_UNAVAILABLE_TAG: String = "usage:reset-credits:unavailable"
+
+public fun usageResetCreditTitleTag(index: Int): String = "usage:reset-credits:$index:title"
+public fun usageResetCreditExpiryTag(index: Int): String = "usage:reset-credits:$index:expiry"
+public fun usageResetCreditAbsoluteTag(index: Int): String = "usage:reset-credits:$index:absolute"

@@ -43,6 +43,10 @@ const val FILE_VIEWER_MARKDOWN_TAG = "fileViewerMarkdown"
 /** Test tag for a rendered Markdown pipe table (issue #921). */
 const val FILE_VIEWER_MARKDOWN_TABLE_TAG = "fileViewerMarkdownTable"
 
+/** Stable semantics tags for structural list marker/body geometry (#1714). */
+private fun markdownListMarkerTag(path: String): String = "fileViewerMarkdownListMarker:$path"
+private fun markdownListBodyTag(path: String): String = "fileViewerMarkdownListBody:$path"
+
 /** The clickable-text URL annotation tag for Markdown links. */
 private const val MD_URL_TAG = "md_url"
 
@@ -50,9 +54,9 @@ private const val MD_URL_TAG = "md_url"
  * Renders parsed [MarkdownBlock]s into a themed Compose column (issue #696).
  *
  * Headers scale by level, fenced code blocks are monospaced on a tinted
- * surface with their own horizontal scroll, lists are bulleted/numbered with
- * indentation, links are tappable (open in the browser), and bold/italic/
- * strikethrough/inline-code carry through. Block layout always wraps to the
+ * surface with their own horizontal scroll, recursive lists use hanging
+ * marker/body columns, links are tappable (open in the browser), and bold/
+ * italic/strikethrough/inline-code carry through. Block layout always wraps to the
  * viewport; only fenced code keeps a horizontal scroll so a wide code line is
  * still readable. Styling is derived from [PocketShellColors] so it matches the
  * rest of the app.
@@ -68,12 +72,12 @@ internal fun MarkdownView(
             .padding(horizontal = 16.dp, vertical = 12.dp)
             .testTag(FILE_VIEWER_MARKDOWN_TAG),
     ) {
-        blocks.forEach { block ->
+        blocks.forEachIndexed { blockIndex, block ->
             when (block) {
                 is MarkdownBlock.Heading -> HeadingBlock(block)
                 is MarkdownBlock.Paragraph -> ParagraphBlock(block.spans)
                 is MarkdownBlock.CodeBlock -> CodeBlock(block)
-                is MarkdownBlock.ListBlock -> ListBlock(block)
+                is MarkdownBlock.ListBlock -> ListBlock(block, path = blockIndex.toString())
                 is MarkdownBlock.BlockQuote -> BlockQuoteBlock(block)
                 is MarkdownBlock.Table -> TableBlock(block)
                 MarkdownBlock.HorizontalRule -> HorizontalRuleBlock()
@@ -137,25 +141,54 @@ private fun CodeBlock(block: MarkdownBlock.CodeBlock) {
 }
 
 @Composable
-private fun ListBlock(block: MarkdownBlock.ListBlock) {
+private fun ListBlock(
+    block: MarkdownBlock.ListBlock,
+    path: String,
+) {
     Column(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         block.items.forEachIndexed { index, item ->
-            val marker = if (block.ordered) {
-                "${item.ordinal ?: (index + 1)}. "
+            val itemPath = "$path:$index"
+            val marker = if (block.kind == MarkdownBlock.ListBlock.Kind.ORDERED) {
+                "${item.ordinal ?: (index + 1)}."
             } else {
-                "• "
+                "•"
             }
-            LinkableText(
-                text = buildAnnotatedString {
-                    withStyle(SpanStyle(color = PocketShellColors.TextSecondary)) {
-                        append(marker)
-                    }
-                    append(annotated(item.spans))
-                },
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = (12 * (item.indentLevel + 1)).dp, top = 2.dp, bottom = 2.dp),
-            )
+                    .padding(vertical = 2.dp),
+            ) {
+                // No fixed marker width: the marker measures intrinsically, so
+                // a supported nine-digit source ordinal cannot overlap its
+                // body. The separate weighted body is the hanging column; all
+                // of its wrapped lines therefore share the same left edge.
+                Text(
+                    text = marker,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 14.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                    textAlign = TextAlign.End,
+                    modifier = Modifier
+                        .padding(end = 8.dp)
+                        .testTag(markdownListMarkerTag(itemPath)),
+                )
+                LinkableText(
+                    text = annotated(item.spans),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(markdownListBodyTag(itemPath)),
+                )
+            }
+            item.children.forEachIndexed { childIndex, child ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp),
+                ) {
+                    ListBlock(child, path = "$itemPath:$childIndex")
+                }
+            }
         }
     }
 }

@@ -43,11 +43,21 @@ internal sealed interface MarkdownBlock {
     data class CodeBlock(val language: String, val content: String) : MarkdownBlock
 
     /**
-     * A list (ordered or unordered). Each item carries its inline spans and a
-     * nesting [Item.indentLevel] (0 = top level).
+     * A structural ordered or unordered list.
+     *
+     * Each [Item] owns its complete soft-continued inline body and its nested
+     * child lists. Child kind lives on each child [ListBlock], preserving mixed
+     * ordered/unordered nesting instead of flattening structure into an indent
+     * number. Ordered item [Item.ordinal] values come from the source.
      */
-    data class ListBlock(val ordered: Boolean, val items: List<Item>) : MarkdownBlock {
-        data class Item(val indentLevel: Int, val ordinal: Int?, val spans: List<InlineSpan>)
+    data class ListBlock(val kind: Kind, val items: List<Item>) : MarkdownBlock {
+        enum class Kind { ORDERED, UNORDERED }
+
+        data class Item(
+            val ordinal: Int?,
+            val spans: List<InlineSpan>,
+            val children: List<ListBlock> = emptyList(),
+        )
     }
 
     /** A `>` block quote; [spans] is the inline content of the quoted text. */

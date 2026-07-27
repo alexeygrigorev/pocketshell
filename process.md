@@ -508,6 +508,22 @@ Minimum pre-push gate:
   (disguise 5), and a `pkill -f "GradleWrapperMain.*test"` matched a *sibling
   worktree's* run (it survived by luck). Scope process-killing to your own
   worktree, or don't do it.
+
+  **It is not only processes — shared FILES are the worse vector (2026-07-28).**
+  Two more incidents, both silent: a sibling **overwrote another lane's
+  `mutate.py` in the shared scratchpad** mid-session, so one mutation run
+  executed **unmutated production code** and reported green; and a sibling's
+  `scripts/connected-test.sh --include-base` pre-run sweep **repeatedly wiped
+  another lane's journey artifacts** seconds after each run finished. The first
+  is the nastiest shape in this whole catalogue: an unmutated green is
+  indistinguishable from "my tests are adequate", so it argues for exactly the
+  wrong conclusion, and mutation is the technique that catches most other fakes.
+  Rules: keep mutation tooling and artifacts **inside your own worktree**, never
+  the shared scratchpad; **re-verify the mutant is live immediately before each
+  use** rather than trusting a script that has been sitting on disk since your
+  last round; copy connected/journey artifacts to a preservation path promptly.
+  And when artifacts are missing, **re-run** — a plausible explanation for
+  missing evidence is not evidence.
 - **A single green run is NOT evidence on a nondeterministic suite. For any
   change that introduces randomness, timing, or jitter, prove determinism with
   N>=20 consecutive `--rerun-tasks` runs of the affected tests, each with its

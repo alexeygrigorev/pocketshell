@@ -2850,7 +2850,7 @@ class TmuxSessionScreenTest {
         assertFalse("Live surface does not hold the terminal", live.terminalHeld)
         assertEquals(
             "Live → full command-chip band returns",
-            TmuxTerminalHiddenImeSurface.CommandChips,
+            TmuxTerminalHiddenImeSurface.Controls,
             tmuxTerminalHiddenImeSurface(
                 showConversation = false,
                 terminalHeld = live.terminalHeld,

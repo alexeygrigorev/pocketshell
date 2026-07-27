@@ -1441,10 +1441,6 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
     // Issue #810 (hard-cut, D22): the composer launcher is ALWAYS present.
     run {
         val pane = surfacePane
-        val isAgentPane = tmuxSessionIsAgentPane(
-            hasLiveDetection = currentDetection != null,
-            presumedAgent = presumedAgent,
-        )
         val controlsInputEnabled = sessionLive && pane != null
         TmuxSessionBottomBandPlacement(
             isImeVisible = isImeVisible,
@@ -1456,15 +1452,6 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
                     showConversationDetectingPlaceholder = showConversationPlaceholder,
                     sessionLive = controlsInputEnabled,
                     terminalHeld = terminalHeld,
-                    isAgentPane = isAgentPane,
-                    onChipTap = { chip ->
-                        pane?.let {
-                            viewModel.writeInputToPane(
-                                it.paneId,
-                                (chip + "\r").toByteArray(Charsets.UTF_8),
-                            )
-                        }
-                    },
                     onDictateTap = {
                         overlay.micSheetAutoStartRecording = false
                         overlay.showMicSheet = true

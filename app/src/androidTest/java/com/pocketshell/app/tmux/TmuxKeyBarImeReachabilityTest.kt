@@ -32,7 +32,7 @@ class TmuxKeyBarImeReachabilityTest {
     @Test
     fun keyboardDownSurfaceMapsConversationAndTerminalStates() {
         assertEquals(
-            TmuxTerminalHiddenImeSurface.CommandChips,
+            TmuxTerminalHiddenImeSurface.Controls,
             tmuxTerminalHiddenImeSurface(showConversation = false, terminalHeld = false),
         )
         assertEquals(

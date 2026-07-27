@@ -254,8 +254,6 @@ class AgentQuickReplyBandContainmentProofTest {
                     TmuxTerminalBottomControls(
                         showConversation = false,
                         sessionLive = true,
-                        isAgentPane = false,
-                        onChipTap = {},
                         onDictateTap = {},
                         onEnterTap = {},
                         onShowKeyboardTap = {},

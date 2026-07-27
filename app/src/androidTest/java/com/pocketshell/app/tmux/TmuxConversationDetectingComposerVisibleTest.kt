@@ -112,8 +112,6 @@ class TmuxConversationDetectingComposerVisibleTest {
                             showConversationDetectingPlaceholder = showConversationDetectingPlaceholder,
                             sessionLive = true,
                             // Presumed-agent during detection (#716).
-                            isAgentPane = true,
-                            onChipTap = {},
                             // The composer launcher: always wired non-null by the
                             // screen so the user can open the Prompt Composer.
                             onDictateTap = {},

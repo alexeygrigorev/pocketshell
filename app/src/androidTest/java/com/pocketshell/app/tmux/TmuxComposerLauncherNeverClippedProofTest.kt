@@ -62,11 +62,10 @@ class TmuxComposerLauncherNeverClippedProofTest {
      * on a Terminal-tab pane, keyboard down, all primary chips present, pinned to a
      * fixed Pixel-7 width — the maintainer's reported state.
      *
-     * [isAgentPane] toggles the chip SET (shell quick-run chips + snippets vs agent
-     * exit chips) so the launcher's presence is proved on BOTH a plain shell and an
-     * agent pane.
+     * [showSnippetPicker] preserves the shell-versus-agent primary-control policy
+     * while the removed generic literal strip stays absent in both states.
      */
-    private fun renderBottomControls(isAgentPane: Boolean, widthDp: Int) {
+    private fun renderBottomControls(showSnippetPicker: Boolean, widthDp: Int) {
         compose.setContent {
             PocketShellTheme {
                 Box(
@@ -86,8 +85,6 @@ class TmuxComposerLauncherNeverClippedProofTest {
                             // Terminal tab (NOT conversation) — the reported shot.
                             showConversation = false,
                             sessionLive = true,
-                            isAgentPane = isAgentPane,
-                            onChipTap = {},
                             // The composer launcher: always wired non-null by the
                             // screen (issue #810 — unconditional presence).
                             onDictateTap = {},
@@ -95,7 +92,7 @@ class TmuxComposerLauncherNeverClippedProofTest {
                             onShowKeyboardTap = {},
                             // snippets chip present on a shell pane (host persisted,
                             // no sticky agent) — matches the reported screenshot.
-                            onAddSnippetTap = if (isAgentPane) null else ({}),
+                            onAddSnippetTap = if (showSnippetPicker) ({}) else null,
                             onShowHotkeysTap = {},
                             modifier = Modifier.fillMaxWidth(),
                         )
@@ -134,7 +131,7 @@ class TmuxComposerLauncherNeverClippedProofTest {
         // The maintainer's reported state: Terminal tab, shell pane (snippets
         // present), keyboard down, Pixel-7 width. The launcher must be present and
         // fully within the band.
-        renderBottomControls(isAgentPane = false, widthDp = PIXEL_7_WIDTH_DP)
+        renderBottomControls(showSnippetPicker = true, widthDp = PIXEL_7_WIDTH_DP)
         assertLauncherWithinBand("shell terminal tab @ ${PIXEL_7_WIDTH_DP}dp")
         captureFullDevice(File(artifactDir(), "issue810-shell-terminal-launcher-present.png"))
     }
@@ -144,7 +141,7 @@ class TmuxComposerLauncherNeverClippedProofTest {
         // Agent pane (agent exit chips + the hotkeys chip), Terminal tab — the
         // agent chrome from the smoking-gun shot. The launcher must be present and
         // contained here too.
-        renderBottomControls(isAgentPane = true, widthDp = PIXEL_7_WIDTH_DP)
+        renderBottomControls(showSnippetPicker = false, widthDp = PIXEL_7_WIDTH_DP)
         assertLauncherWithinBand("agent terminal tab @ ${PIXEL_7_WIDTH_DP}dp")
         captureFullDevice(File(artifactDir(), "issue810-agent-terminal-launcher-present.png"))
     }

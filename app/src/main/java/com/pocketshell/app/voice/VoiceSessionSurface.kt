@@ -394,9 +394,8 @@ internal const val ASSISTANT_CHOOSING_TAG: String = "assistant:choosing"
 internal fun assistantChoiceTag(path: String): String = "assistant:choice:$path"
 
 /**
- * The static secondary command chips (`git status`, `tmux ls`, …) and the
- * optional `dirs` project-navigation chip — rendered inline WITHOUT their own
- * scroll container.
+ * Optional leading session content and the `dirs` project-navigation chip,
+ * rendered inline without their own scroll container.
  *
  * Issue #813: this content is now hosted inside the single shared
  * horizontally-scrollable flexible region in [BottomChipControls] (alongside the
@@ -407,18 +406,10 @@ internal fun assistantChoiceTag(path: String): String = "assistant:choice:$path"
  */
 @Composable
 private fun StaticChipStripContent(
-    chips: List<String>,
-    onChipTap: (String) -> Unit,
     onProjectNavigationTap: (() -> Unit)? = null,
     leadingContent: (@Composable () -> Unit)? = null,
 ) {
     leadingContent?.invoke()
-    chips.forEach { chip ->
-        CommandChip(
-            label = chip,
-            onClick = { onChipTap(chip) },
-        )
-    }
     if (onProjectNavigationTap != null) {
         CommandChip(
             label = "dirs",
@@ -433,8 +424,8 @@ private fun StaticChipStripContent(
  * scrollable [ScrollableChipStrip] in [BottomChipControls].
  *
  * The cluster pins `Enter` (#568), `show keyboard` (#131), and the picker chip
- * to the right edge of the bottom toolbar regardless of how many static command
- * chips [ScrollableChipStrip] is asked to render. The right-thumb ergonomics
+ * to the right edge of the bottom toolbar regardless of optional leading
+ * content. The right-thumb ergonomics
  * goal of design-system §9 only holds if these primary affordances are
  * actually visible without horizontal-scrolling — see the
  * KDoc on [ScrollableChipStrip] for the round-1 regression that motivated
@@ -573,10 +564,9 @@ private fun TerminalHotkeysIconButton(
  * launcher's fixed width before laying out the chip area:
  *
  * 1. The chip area — width-capped at `rowWidth − launcherSlot` so the launcher's
- *    slot is always reserved. Inside it, [StaticChipStripContent] (low-frequency
- *    static command chips plus the optional previous-session toggle and `dirs`)
- *    is the flexible `weight(1f, fill = false)` scrolling strip that YIELDS
- *    first, followed by the [PrimaryChipCluster] (`Enter`, `show keyboard`,
+ *    slot is always reserved. Inside it, [StaticChipStripContent] (optional
+ *    leading session content and `dirs`) is the flexible scrolling strip,
+ *    followed by the [PrimaryChipCluster] (`Enter`, `show keyboard`,
  *    `hotkeys`, picker) at its natural width, pinned to the right of the chip
  *    area in the right-thumb arc (design-system §9 / #208). The hotkeys entry is
  *    an icon-only 48dp keycap so all four primary actions fit without clipping.
@@ -608,8 +598,6 @@ private fun TerminalHotkeysIconButton(
  */
 @Composable
 internal fun BottomChipControls(
-    chips: List<String>,
-    onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
     // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
     // Composer WITH recording already active + locked. Null leaves the launcher
@@ -627,10 +615,10 @@ internal fun BottomChipControls(
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
     leadingContent: (@Composable () -> Unit)? = null,
-    // Issue #249: gate the command chips and optional composer launcher on whether
-    // the SSH/tmux session is live. While disconnected or reconnecting a
-    // chip tap would `writeInputToPane` into a dead bridge — the bytes
-    // would be silently dropped. We disable the chips, and when the launcher is
+    // Issue #249: gate terminal input controls and optional composer launcher on whether
+    // the SSH/tmux session is live. While disconnected or reconnecting an
+    // input-control tap would write into a dead bridge and be silently dropped.
+    // We disable the controls, and when the launcher is
     // present render it in its disabled state so the user
     // sees that input is unavailable rather than losing a tap.
     inputEnabled: Boolean = true,
@@ -647,8 +635,7 @@ internal fun BottomChipControls(
         // exactly `rowWidth − launcherWidth`. Priority of yielding, highest →
         // lowest: launcher (always full width) > primary cluster (`Enter` /
         // `show keyboard` / `hotkeys` / `snippets`, stays visible at normal
-        // widths in the right-thumb arc) > static command chips (`git status`,
-        // `tmux ls`, … — yield + scroll first).
+        // widths in the right-thumb arc) > optional leading content / dirs.
         //
         // Why this is the least-blast-radius fix for the 07:53 clip: the #641
         // round-2 layout had BOTH the cluster and the launcher unweighted, with
@@ -688,8 +675,8 @@ internal fun BottomChipControls(
                     modifier = Modifier.width(chipAreaMaxWidth),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // Static command chips: the low-priority, low-frequency chips.
-                    // They yield + scroll FIRST (`weight(1f, fill = false)` lets the
+                    // Optional leading content/project navigation yields + scrolls
+                    // first (`weight(1f, fill = false)` lets the
                     // strip shrink below its share and scroll, so the primary cluster
                     // keeps its natural width and stays visible at normal widths).
                     Row(
@@ -701,8 +688,6 @@ internal fun BottomChipControls(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         StaticChipStripContent(
-                            chips = chips,
-                            onChipTap = if (inputEnabled) onChipTap else { _ -> },
                             onProjectNavigationTap = onProjectNavigationTap,
                             leadingContent = leadingContent,
                         )
@@ -1003,17 +988,6 @@ internal fun Modifier.composerLauncherTapOrHoldSwipeUpGesture(
         }
     }
 }
-
-/**
- * v1 chip set — matches `docs/mockups/session.html`'s `.chip-row`
- * (without the composer launcher, which the screen renders separately).
- */
-internal val DefaultSessionChips: List<String> = listOf(
-    "git status",
-    "tmux ls",
-    "k logs",
-    "clear",
-)
 
 internal const val SHOW_KEYBOARD_CHIP_LABEL: String = "show keyboard"
 internal const val ENTER_CHIP_LABEL: String = "Enter"

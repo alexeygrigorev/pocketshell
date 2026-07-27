@@ -87,8 +87,6 @@ class TmuxConversationBottomComposerScreenshotTest {
                     TmuxTerminalBottomControls(
                         showConversation = true,
                         sessionLive = true,
-                        isAgentPane = true,
-                        onChipTap = {},
                         onDictateTap = {},
                         onEnterTap = {},
                         onShowKeyboardTap = {},
@@ -103,8 +101,6 @@ class TmuxConversationBottomComposerScreenshotTest {
                     TmuxTerminalBottomControls(
                         showConversation = false,
                         sessionLive = true,
-                        isAgentPane = true,
-                        onChipTap = {},
                         onDictateTap = {},
                         onEnterTap = {},
                         onShowKeyboardTap = {},

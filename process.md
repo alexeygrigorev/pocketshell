@@ -398,6 +398,19 @@ Minimum pre-push gate:
   still reject headless proof that only exercises plumbing (the assertion must be
   on the symptom-defining signal on the real transport, never on a seam/lambda
   having fired — the #1693 round-1 failure).
+- **`scripts/full-jvm-gate.sh` is a PYTHON program despite the `.sh` extension
+  (`#!/usr/bin/python3 -I`). Execute it directly — NEVER `bash
+  scripts/full-jvm-gate.sh`.** Under `bash` it mis-executes line by line and
+  line 3, `import os`, invokes **ImageMagick's `import`**, which blocks forever
+  waiting on X. The result is the nastiest artifact in this repo's catalogue: a
+  process that stays "active" indefinitely, writes a ~1-line log, produces zero
+  test XML, and — if you wrapped it in the shared `flock` — holds the gate lock
+  the entire time, silently starving every sibling lane. On 2026-07-27 this
+  burned a full lane's gate run and starved four others; it is also the most
+  likely explanation for an earlier #1598 gate that "stalled" at
+  `:app:compileDebugKotlin` with no verdict. A ~1-line gate log is not a slow
+  run and not a failure — it is a run that never happened. Discard it; do not
+  read a verdict out of it.
 - **The canonical forced local gate is `scripts/full-jvm-gate.sh`, which runs
   the complete `./gradlew test --rerun-tasks` graph inside the repository's
   8 GiB cgroup with the guarded single-worker / split-heap profile. Do not

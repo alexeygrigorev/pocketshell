@@ -1,5 +1,7 @@
 package com.pocketshell.core.connection
 
+import java.util.concurrent.atomic.AtomicLong
+
 /**
  * Issue #1537 (option b): the parked-runtime health ledger.
  *
@@ -21,20 +23,21 @@ package com.pocketshell.core.connection
  *
  * ## Shape
  *
- * A pure, single-authority reducer mapping [RuntimeHealthKey] to
+ * A pure, single-authority reducer mapping an exact [RuntimeHealthBinding] to
  * [RuntimeHealth]. It holds NO IO, NO coroutines, NO android imports and NO
  * time — the app-side `ParkedRuntimeHealthEffects` owns the edge subscriptions
  * and feeds this reducer [RuntimeHealthEvent]s, then the switch path consults
  * it. It is confined to the ViewModel's single main dispatcher (same discipline
  * as [ConnectionController]); it is deliberately not internally synchronised.
  *
- * A [RuntimeHealthEvent.Died] verdict is **sticky** — it survives a plain
- * [RuntimeHealthEvent.Cleared] eviction so an imminent switch-back can still
- * consult it — and is cleared only by re-parking the key ([RuntimeHealthEvent.Parked])
- * or by the one-shot [consumeDead].
+ * The opaque [RuntimeInstanceToken] is load-bearing: host + session is only a
+ * logical address and can be reused immediately by a replacement runtime. An
+ * old client's late EOF must never overwrite, clear, or evict the replacement.
+ * Every event therefore carries the exact binding allocated with that runtime;
+ * there is no host/session-only mutation fallback.
  */
 public class RuntimeHealthLedger {
-    private val states = linkedMapOf<RuntimeHealthKey, RuntimeHealth>()
+    private val states = linkedMapOf<RuntimeHealthBinding, RuntimeHealth>()
 
     /**
      * Apply one [event] and return the resulting [RuntimeHealth] for its key
@@ -42,45 +45,43 @@ public class RuntimeHealthLedger {
      */
     public fun reduce(event: RuntimeHealthEvent): RuntimeHealth? = when (event) {
         is RuntimeHealthEvent.Parked -> {
-            // A fresh park always resets to Healthy — even over a stale Dead
-            // marker from a previous life of the same session.
-            states[event.key] = RuntimeHealth.Healthy
+            states[event.binding] = RuntimeHealth.Healthy
             RuntimeHealth.Healthy
         }
         is RuntimeHealthEvent.Died -> {
             val dead = RuntimeHealth.Dead(event.cause)
-            states[event.key] = dead
+            states[event.binding] = dead
             dead
         }
         is RuntimeHealthEvent.Cleared -> {
-            states.remove(event.key)
+            states.remove(event.binding)
             null
         }
     }
 
-    public fun health(key: RuntimeHealthKey): RuntimeHealth? = states[key]
+    public fun health(binding: RuntimeHealthBinding): RuntimeHealth? = states[binding]
 
-    public fun isHealthy(key: RuntimeHealthKey): Boolean = states[key] is RuntimeHealth.Healthy
+    public fun isHealthy(binding: RuntimeHealthBinding): Boolean =
+        states[binding] is RuntimeHealth.Healthy
 
-    public fun isDead(key: RuntimeHealthKey): Boolean = states[key] is RuntimeHealth.Dead
+    public fun isDead(binding: RuntimeHealthBinding): Boolean =
+        states[binding] is RuntimeHealth.Dead
 
-    public fun deadCause(key: RuntimeHealthKey): RuntimeDeathCause? =
-        (states[key] as? RuntimeHealth.Dead)?.cause
+    public fun deadCause(binding: RuntimeHealthBinding): RuntimeDeathCause? =
+        (states[binding] as? RuntimeHealth.Dead)?.cause
 
     /**
-     * One-shot consult: if [key] is currently [RuntimeHealth.Dead], remove the
-     * marker and return its cause; otherwise return `null`. The switch path
-     * uses this to decide, exactly once, that a parked runtime was known-dead
-     * before the switch-back attach so it can present the calm hold instead of
-     * discovering the death as an attach EOF.
+     * One-shot exact-binding consult retained for reducer consumers and tests.
+     * App-side death handling normally clears the binding after its synchronous
+     * exact compare-and-remove callback.
      */
-    public fun consumeDead(key: RuntimeHealthKey): RuntimeDeathCause? {
-        val dead = states[key] as? RuntimeHealth.Dead ?: return null
-        states.remove(key)
+    public fun consumeDead(binding: RuntimeHealthBinding): RuntimeDeathCause? {
+        val dead = states[binding] as? RuntimeHealth.Dead ?: return null
+        states.remove(binding)
         return dead.cause
     }
 
-    public fun trackedKeys(): Set<RuntimeHealthKey> = states.keys.toSet()
+    public fun trackedBindings(): Set<RuntimeHealthBinding> = states.keys.toSet()
 
     public fun size(): Int = states.size
 }
@@ -93,6 +94,37 @@ public class RuntimeHealthLedger {
 public data class RuntimeHealthKey(
     val hostId: Long,
     val sessionName: String,
+)
+
+/**
+ * Opaque identity of one concrete cached-runtime lifetime.
+ *
+ * It deliberately exposes equality and a diagnostic string only — callers
+ * cannot derive it from host/session or choose a generation. This makes every
+ * ledger/binding/cache mutation prove it owns the exact runtime instance.
+ */
+public class RuntimeInstanceToken private constructor(
+    private val sequence: Long,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is RuntimeInstanceToken && sequence == other.sequence
+
+    override fun hashCode(): Int = sequence.hashCode()
+
+    override fun toString(): String = sequence.toString()
+
+    public companion object {
+        private val nextSequence = AtomicLong(0L)
+
+        public fun create(): RuntimeInstanceToken =
+            RuntimeInstanceToken(nextSequence.incrementAndGet())
+    }
+}
+
+/** Exact health ownership: logical session address plus one opaque runtime life. */
+public data class RuntimeHealthBinding(
+    val key: RuntimeHealthKey,
+    val token: RuntimeInstanceToken,
 )
 
 public sealed interface RuntimeHealth {
@@ -108,11 +140,21 @@ public sealed interface RuntimeHealth {
  */
 public enum class RuntimeDeathCause {
     /**
-     * The parked client's own `-CC` reader latched `disconnected` — covers the
-     * control channel EOF AND tmux-server death (the login-scope teardown
-     * class), instantly and with zero new traffic.
+     * The parked client's typed disconnect event reports a reader EOF.
      */
-    ClientDisconnected,
+    ReaderEof,
+
+    /** The parked control-channel reader failed with an exception. */
+    ReaderException,
+
+    /** The remote tmux server announced its own exit in-band. */
+    ServerExited,
+
+    /** A fatal tmux command timeout closed the parked control channel. */
+    CommandTimeout,
+
+    /** A typed control-channel close whose reason remains unattributable. */
+    UnknownControlChannel,
 
     /**
      * The pool declared the parked lease's transport dead via the always-on
@@ -134,14 +176,16 @@ public enum class RuntimeDeathCause {
 }
 
 public sealed interface RuntimeHealthEvent {
-    public val key: RuntimeHealthKey
+    public val binding: RuntimeHealthBinding
 
     /** A runtime was parked into the cache; begin tracking it as Healthy. */
-    public data class Parked(override val key: RuntimeHealthKey) : RuntimeHealthEvent
+    public data class Parked(
+        override val binding: RuntimeHealthBinding,
+    ) : RuntimeHealthEvent
 
     /** A liveness edge declared the parked runtime dead. */
     public data class Died(
-        override val key: RuntimeHealthKey,
+        override val binding: RuntimeHealthBinding,
         val cause: RuntimeDeathCause,
     ) : RuntimeHealthEvent
 
@@ -150,5 +194,7 @@ public sealed interface RuntimeHealthEvent {
      * overflowed, or explicitly evicted); stop tracking it. A sticky [Died]
      * marker is preserved by the effects layer rather than sending this.
      */
-    public data class Cleared(override val key: RuntimeHealthKey) : RuntimeHealthEvent
+    public data class Cleared(
+        override val binding: RuntimeHealthBinding,
+    ) : RuntimeHealthEvent
 }

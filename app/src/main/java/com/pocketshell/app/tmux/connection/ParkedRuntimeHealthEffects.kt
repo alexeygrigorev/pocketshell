@@ -1,14 +1,17 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.app.tmux.CachedTmuxRuntime
 import com.pocketshell.core.connection.RuntimeDeathCause
 import com.pocketshell.core.connection.RuntimeHealthEvent
-import com.pocketshell.core.connection.RuntimeHealthKey
+import com.pocketshell.core.connection.RuntimeHealthBinding
 import com.pocketshell.core.connection.RuntimeHealthLedger
 import com.pocketshell.core.ssh.SshLeaseCloseReason
 import com.pocketshell.core.ssh.SshLeaseConnectionState
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseStateEvent
 import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
@@ -24,8 +27,8 @@ import kotlinx.coroutines.launch
  * When a same-host session is parked into the runtime cache while another
  * session is foreground, its liveness edges keep firing but nobody listens:
  *
- *  - the parked [TmuxClient]'s own `disconnected` StateFlow latches `true` on
- *    the `-CC` reader EOF (control channel death AND tmux-server death), and
+ *  - the parked [TmuxClient]'s typed `disconnectEvent` latches the exact
+ *    reason/source/intent of a `-CC` reader exit, and
  *  - the pool broadcasts a per-key `Closed(KeepaliveDead)`/`Closed` edge on
  *    [leaseStateEvents] when the always-on keepalive declares the transport dead.
  *
@@ -60,21 +63,38 @@ internal class ParkedRuntimeHealthEffects(
      * shared by the foreground session — that is the same-host residual race the
      * attach-EOF fallback covers.
      */
-    private val onDeath: (RuntimeHealthKey, SshLeaseKey?, RuntimeDeathCause) -> Unit,
+    private val onDeath: (ParkedRuntimeDeathSignal) -> Boolean,
 ) {
-    private val bindings = mutableMapOf<RuntimeHealthKey, Job>()
+    private val bindings = mutableMapOf<RuntimeHealthBinding, Job>()
+
+    fun bindParkedRuntime(runtime: CachedTmuxRuntime) {
+        bindParked(
+            binding = runtime.healthBinding,
+            client = runtime.client,
+            leaseKey = runtime.lease?.key ?: SshLeaseKey(
+                host = runtime.key.hostname,
+                port = runtime.key.port,
+                user = runtime.key.username,
+                credentialId = "${runtime.key.hostId}:${runtime.key.keyPath}",
+            ),
+        )
+    }
 
     /**
      * Bind the liveness edges for a runtime being parked into the cache. Idempotent
      * per key — a re-park cancels the prior binding and resets the ledger to Healthy.
      */
-    fun bindParked(key: RuntimeHealthKey, client: TmuxClient, leaseKey: SshLeaseKey?) {
-        cancelBinding(key)
-        ledger.reduce(RuntimeHealthEvent.Parked(key))
-        bindings[key] = scope.launch {
+    fun bindParked(
+        binding: RuntimeHealthBinding,
+        client: TmuxClient,
+        leaseKey: SshLeaseKey?,
+    ) {
+        cancelBinding(binding)
+        ledger.reduce(RuntimeHealthEvent.Parked(binding))
+        bindings[binding] = scope.launch {
             coroutineScope {
-                launch { awaitClientDeath(key, client) }
-                launch { awaitLeaseDeath(key, leaseKey) }
+                launch { awaitClientDeath(binding, client, leaseKey) }
+                launch { awaitLeaseDeath(binding, client, leaseKey) }
             }
         }
     }
@@ -84,30 +104,23 @@ internal class ParkedRuntimeHealthEffects(
      * again. Cancel the binding and drop it from the ledger (a Dead entry would
      * not activate; it fell out via the health probe first).
      */
-    fun onActivated(key: RuntimeHealthKey) {
-        cancelBinding(key)
-        ledger.reduce(RuntimeHealthEvent.Cleared(key))
+    fun onActivated(binding: RuntimeHealthBinding) {
+        cancelBinding(binding)
+        ledger.reduce(RuntimeHealthEvent.Cleared(binding))
     }
 
     /**
      * The parked runtime is leaving the cache WITHOUT a detected death (TTL,
      * host overflow, twin prune, or an explicit evict). Cancel the binding.
-     * A sticky [RuntimeDeathCause] verdict is preserved so an imminent
-     * switch-back can still consult it; a still-Healthy entry is dropped.
+     * Exact death handling removes its ledger entry after the callback, so an
+     * eviction only needs to clear a still-Healthy binding.
      */
-    fun onEvicted(key: RuntimeHealthKey) {
-        cancelBinding(key)
-        if (!ledger.isDead(key)) ledger.reduce(RuntimeHealthEvent.Cleared(key))
+    fun onEvicted(binding: RuntimeHealthBinding) {
+        cancelBinding(binding)
+        ledger.reduce(RuntimeHealthEvent.Cleared(binding))
     }
 
-    /**
-     * Consult-and-clear: if the parked runtime for [key] was proactively marked
-     * dead, return the cause (one-shot) so the switch path can present the calm
-     * hold; otherwise `null`.
-     */
-    fun consumeParkedDeath(key: RuntimeHealthKey): RuntimeDeathCause? = ledger.consumeDead(key)
-
-    fun isTracked(key: RuntimeHealthKey): Boolean = ledger.health(key) != null
+    fun isTracked(binding: RuntimeHealthBinding): Boolean = ledger.health(binding) != null
 
     /** Cancel every binding (VM teardown). */
     fun cancelAll() {
@@ -115,40 +128,108 @@ internal class ParkedRuntimeHealthEffects(
         bindings.clear()
     }
 
-    private fun cancelBinding(key: RuntimeHealthKey) {
-        bindings.remove(key)?.cancel()
+    private fun cancelBinding(binding: RuntimeHealthBinding) {
+        bindings.remove(binding)?.cancel()
     }
 
-    private suspend fun awaitClientDeath(key: RuntimeHealthKey, client: TmuxClient) {
-        // Suspends until the parked reader latches disconnected (or returns
-        // immediately if it already died before we bound). Terminal by nature.
-        client.disconnected.first { it }
-        fireDeath(key, leaseKeyHint = null, cause = RuntimeDeathCause.ClientDisconnected)
+    private suspend fun awaitClientDeath(
+        binding: RuntimeHealthBinding,
+        client: TmuxClient,
+        leaseKey: SshLeaseKey?,
+    ) {
+        // The typed event is published before the legacy Boolean latch. Waiting
+        // on it preserves the emitter's reason/source/intent and lets the single
+        // SelfInflictedClose authority reject our own detach/close.
+        val event = client.disconnectEvent.first { it != null }!!
+        if (SelfInflictedClose.isSelfInflictedControlChannelClose(event)) {
+            ignoreSelfInflicted(binding)
+            return
+        }
+        fireDeath(
+            ParkedRuntimeDeathSignal(
+                binding = binding,
+                leaseKey = leaseKey,
+                cause = event.toRuntimeDeathCause(),
+                boundClientIdentity = System.identityHashCode(client),
+                disconnectEvent = event,
+                leaseCloseReason = null,
+            ),
+        )
     }
 
-    private suspend fun awaitLeaseDeath(key: RuntimeHealthKey, leaseKey: SshLeaseKey?) {
+    private suspend fun awaitLeaseDeath(
+        binding: RuntimeHealthBinding,
+        client: TmuxClient,
+        leaseKey: SshLeaseKey?,
+    ) {
         if (leaseKey == null) return
         val event = leaseStateEvents.first {
             it.key == leaseKey && it.state == SshLeaseConnectionState.Closed
+        }
+        if (SelfInflictedClose.isSelfInflictedLeaseClose(event.closeReason)) {
+            ignoreSelfInflicted(binding)
+            return
         }
         val cause = when (event.closeReason) {
             SshLeaseCloseReason.KeepaliveDead -> RuntimeDeathCause.KeepaliveDead
             else -> RuntimeDeathCause.LeaseClosed
         }
-        fireDeath(key, leaseKeyHint = leaseKey, cause = cause)
+        fireDeath(
+            ParkedRuntimeDeathSignal(
+                binding = binding,
+                leaseKey = leaseKey,
+                cause = cause,
+                boundClientIdentity = System.identityHashCode(client),
+                disconnectEvent = null,
+                leaseCloseReason = event.closeReason,
+            ),
+        )
     }
 
-    private fun fireDeath(
-        key: RuntimeHealthKey,
-        leaseKeyHint: SshLeaseKey?,
-        cause: RuntimeDeathCause,
-    ) {
-        // Idempotent: only the FIRST edge per binding wins.
-        if (ledger.isDead(key)) return
-        ledger.reduce(RuntimeHealthEvent.Died(key, cause))
-        // Terminal: stop both collectors for this key (this cancels the job we
-        // are running inside; the non-suspending [onDeath] below still runs).
-        cancelBinding(key)
-        onDeath(key, leaseKeyHint, cause)
+    private fun fireDeath(signal: ParkedRuntimeDeathSignal) {
+        // Idempotent: atomically claim/remove this exact binding before
+        // publishing the verdict. A concurrently resumed sibling collector
+        // then sees no binding and cannot double-dispatch after the ledger is
+        // cleared.
+        val bindingJob = bindings.remove(signal.binding) ?: return
+        bindingJob.cancel()
+        ledger.reduce(RuntimeHealthEvent.Died(signal.binding, signal.cause))
+        onDeath(signal)
+        // The exact corpse has now either been removed or identified as a stale
+        // callback. No logical-key consult remains, so retain no tombstone.
+        ledger.reduce(RuntimeHealthEvent.Cleared(signal.binding))
     }
+
+    private fun ignoreSelfInflicted(binding: RuntimeHealthBinding) {
+        val bindingJob = bindings.remove(binding) ?: return
+        bindingJob.cancel()
+        ledger.reduce(RuntimeHealthEvent.Cleared(binding))
+    }
+
+    private fun TmuxDisconnectEvent.toRuntimeDeathCause(): RuntimeDeathCause =
+        when (reason) {
+            TmuxDisconnectReason.ReaderEof -> RuntimeDeathCause.ReaderEof
+            TmuxDisconnectReason.ReaderException -> RuntimeDeathCause.ReaderException
+            TmuxDisconnectReason.ServerExited -> RuntimeDeathCause.ServerExited
+            TmuxDisconnectReason.CommandTimeout -> RuntimeDeathCause.CommandTimeout
+            TmuxDisconnectReason.Unknown -> RuntimeDeathCause.UnknownControlChannel
+            // These are filtered through SelfInflictedClose above. Keeping the
+            // exhaustive branches compiler-enforced prevents future enum drift.
+            TmuxDisconnectReason.ExplicitClose,
+            TmuxDisconnectReason.ExplicitDetach,
+            -> error("self-inflicted disconnect reached parked death: $reason")
+        }
 }
+
+/**
+ * Fully attributed death of one exact parked runtime. The handler carries this
+ * unchanged into diagnostics and atomic cache removal.
+ */
+internal data class ParkedRuntimeDeathSignal(
+    val binding: RuntimeHealthBinding,
+    val leaseKey: SshLeaseKey?,
+    val cause: RuntimeDeathCause,
+    val boundClientIdentity: Int,
+    val disconnectEvent: TmuxDisconnectEvent?,
+    val leaseCloseReason: SshLeaseCloseReason?,
+)

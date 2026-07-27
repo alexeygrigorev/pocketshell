@@ -2,8 +2,7 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.ReconnectCauseTrail
-import com.pocketshell.core.connection.RuntimeDeathCause
-import com.pocketshell.core.connection.RuntimeHealthKey
+import com.pocketshell.app.tmux.connection.ParkedRuntimeDeathSignal
 import com.pocketshell.core.ssh.SshLeaseKey
 
 /**
@@ -24,43 +23,79 @@ import com.pocketshell.core.ssh.SshLeaseKey
  * killing a transport the active session is still using.
  */
 internal fun handleParkedRuntimeDeath(
-    key: RuntimeHealthKey,
-    leaseKey: SshLeaseKey?,
-    cause: RuntimeDeathCause,
+    signal: ParkedRuntimeDeathSignal,
     runtimeCache: TmuxSessionRuntimeCache,
     // Lease keys the foreground/connecting session currently holds — a shared one
     // must NOT be force-disconnected.
     foregroundLeaseKeys: Set<SshLeaseKey>,
     disconnectLease: suspend (SshLeaseKey) -> Unit,
     launchContained: (suspend () -> Unit) -> Unit,
-) {
-    val removed = runtimeCache.removeSession(key.hostId, key.sessionName)
+): Boolean {
+    // Atomic exact compare-and-remove. If this binding has already been
+    // replaced, the callback is stale and must not touch the new runtime,
+    // release its lease, or disconnect its transport.
+    val removed = runtimeCache.removeExact(signal.binding)
+    if (removed == null) {
+        DiagnosticEvents.record(
+            "connection",
+            "parked_runtime_death_ignored",
+            "source" to "parked_health_subscriber",
+            "outcome" to "stale_callback",
+            "cause" to signal.cause.name,
+            "hostId" to signal.binding.key.hostId,
+            "session" to signal.binding.key.sessionName,
+            "boundRuntimeToken" to signal.binding.token.toString(),
+            "boundClientHash" to signal.boundClientIdentity,
+            *signal.typedCauseDiagnosticFields(),
+        )
+        return false
+    }
     DiagnosticEvents.record(
         "connection",
         "parked_runtime_death",
         "source" to "parked_health_subscriber",
-        "cause" to cause.name,
-        "hostId" to key.hostId,
-        "session" to key.sessionName,
-        "evictedRuntimes" to removed.size,
+        "cause" to signal.cause.name,
+        "hostId" to signal.binding.key.hostId,
+        "session" to signal.binding.key.sessionName,
+        "evictedRuntimes" to 1,
+        "boundRuntimeToken" to signal.binding.token.toString(),
+        "removedRuntimeToken" to removed.healthBinding.token.toString(),
+        "boundClientHash" to signal.boundClientIdentity,
+        "removedClientHash" to System.identityHashCode(removed.client),
+        *signal.typedCauseDiagnosticFields(),
     )
     ReconnectCauseTrail.record(
         stage = "parked_runtime_health",
         outcome = "proactive_evict",
-        cause = cause.name,
-        "hostId" to key.hostId,
+        cause = signal.cause.name,
+        "hostId" to signal.binding.key.hostId,
+        "runtimeToken" to signal.binding.token.toString(),
     )
-    val evictedLeaseKey = leaseKey ?: removed.firstNotNullOfOrNull { it.lease?.key }
+    val evictedLeaseKey = signal.leaseKey ?: removed.lease?.key
     launchContained {
         // closeCachedRuntime releases the lease REF (decrement refcount) — never a
         // raw pool disconnect that would nuke a shared transport.
-        removed.forEach { runCatching { it.closeCachedRuntime() } }
+        runCatching { removed.closeCachedRuntime() }
         val stillShared = evictedLeaseKey != null && (
             evictedLeaseKey in foregroundLeaseKeys ||
-                runtimeCache.cachedRuntimesForHost(key.hostId).any { it.lease?.key == evictedLeaseKey }
+                runtimeCache.cachedRuntimesForHost(signal.binding.key.hostId)
+                    .any { it.lease?.key == evictedLeaseKey }
             )
         if (evictedLeaseKey != null && !stillShared) {
             disconnectLease(evictedLeaseKey)
         }
     }
+    return true
 }
+
+private fun ParkedRuntimeDeathSignal.typedCauseDiagnosticFields(): Array<Pair<String, Any?>> =
+    arrayOf(
+        "disconnectReason" to disconnectEvent?.reason?.logValue,
+        "disconnectSource" to disconnectEvent?.source,
+        "disconnectIntent" to disconnectEvent?.intent,
+        "commandKind" to disconnectEvent?.commandKind,
+        "timeoutMode" to disconnectEvent?.timeoutMode,
+        "exceptionClass" to disconnectEvent?.exceptionClass,
+        "message" to disconnectEvent?.message,
+        "leaseCloseReason" to leaseCloseReason?.name,
+    )

@@ -2,12 +2,16 @@ package com.pocketshell.app.tmux.connection
 
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.connection.RuntimeDeathCause
+import com.pocketshell.core.connection.RuntimeHealthBinding
 import com.pocketshell.core.connection.RuntimeHealthKey
 import com.pocketshell.core.connection.RuntimeHealthLedger
+import com.pocketshell.core.connection.RuntimeInstanceToken
 import com.pocketshell.core.ssh.SshLeaseCloseReason
 import com.pocketshell.core.ssh.SshLeaseConnectionState
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseStateEvent
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -28,6 +32,7 @@ import org.junit.Test
 class ParkedRuntimeHealthEffectsTest {
 
     private val key = RuntimeHealthKey(hostId = 7L, sessionName = "beta")
+    private val binding = RuntimeHealthBinding(key, RuntimeInstanceToken.create())
     private val leaseKey = SshLeaseKey(
         host = "beta.example",
         port = 22,
@@ -36,9 +41,10 @@ class ParkedRuntimeHealthEffectsTest {
     )
 
     private class DeathCapture {
-        val calls = mutableListOf<Triple<RuntimeHealthKey, SshLeaseKey?, RuntimeDeathCause>>()
-        fun record(k: RuntimeHealthKey, lk: SshLeaseKey?, c: RuntimeDeathCause) {
-            calls += Triple(k, lk, c)
+        val calls = mutableListOf<ParkedRuntimeDeathSignal>()
+        fun record(signal: ParkedRuntimeDeathSignal): Boolean {
+            calls += signal
+            return true
         }
     }
 
@@ -55,19 +61,23 @@ class ParkedRuntimeHealthEffectsTest {
         )
         val client = FakeTmuxClient()
 
-        effects.bindParked(key, client, leaseKey)
+        effects.bindParked(binding, client, leaseKey)
         advanceUntilIdle()
-        assertTrue("bind tracks the parked runtime as healthy", ledger.isHealthy(key))
+        assertTrue("bind tracks the exact parked runtime as healthy", ledger.isHealthy(binding))
         assertTrue(capture.calls.isEmpty())
 
         // The parked -CC reader EOFs while parked.
-        client.disconnectedSignal.value = true
+        client.markDisconnectedForTest(remoteDisconnect(TmuxDisconnectReason.ReaderEof))
         advanceUntilIdle()
 
-        assertTrue("client-disconnect edge marks the parked runtime Dead", ledger.isDead(key))
-        assertEquals(RuntimeDeathCause.ClientDisconnected, ledger.deadCause(key))
+        assertNull("handled exact death leaves no stale ledger tombstone", ledger.health(binding))
         assertEquals("eviction callback fires exactly once", 1, capture.calls.size)
-        assertEquals(key, capture.calls.single().first)
+        assertEquals(binding, capture.calls.single().binding)
+        assertEquals(RuntimeDeathCause.ReaderEof, capture.calls.single().cause)
+        assertEquals(
+            TmuxDisconnectReason.ReaderEof,
+            capture.calls.single().disconnectEvent?.reason,
+        )
 
         // A second edge (a late lease Closed) must NOT double-fire.
         leaseEvents.emit(
@@ -84,7 +94,7 @@ class ParkedRuntimeHealthEffectsTest {
         val capture = DeathCapture()
         val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
 
-        effects.bindParked(key, FakeTmuxClient(), leaseKey)
+        effects.bindParked(binding, FakeTmuxClient(), leaseKey)
         advanceUntilIdle()
 
         leaseEvents.emit(
@@ -92,10 +102,10 @@ class ParkedRuntimeHealthEffectsTest {
         )
         advanceUntilIdle()
 
-        assertTrue(ledger.isDead(key))
-        assertEquals(RuntimeDeathCause.KeepaliveDead, ledger.deadCause(key))
+        assertNull(ledger.health(binding))
         assertEquals(1, capture.calls.size)
-        assertEquals(leaseKey, capture.calls.single().second)
+        assertEquals(RuntimeDeathCause.KeepaliveDead, capture.calls.single().cause)
+        assertEquals(leaseKey, capture.calls.single().leaseKey)
     }
 
     @Test
@@ -104,14 +114,14 @@ class ParkedRuntimeHealthEffectsTest {
         val leaseEvents = MutableSharedFlow<SshLeaseStateEvent>(extraBufferCapacity = 16)
         val capture = DeathCapture()
         val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
-        effects.bindParked(key, FakeTmuxClient(), leaseKey)
+        effects.bindParked(binding, FakeTmuxClient(), leaseKey)
         advanceUntilIdle()
 
         val otherKey = SshLeaseKey("other.example", 22, "alex", "9:/keys/b")
         leaseEvents.emit(SshLeaseStateEvent(otherKey, SshLeaseConnectionState.Closed))
         advanceUntilIdle()
 
-        assertTrue("a foreign key's Closed edge must not kill this parked runtime", ledger.isHealthy(key))
+        assertTrue("a foreign key's Closed edge must not kill this parked runtime", ledger.isHealthy(binding))
         assertTrue(capture.calls.isEmpty())
 
         // A bound-but-unfired runtime is an active binding until VM teardown.
@@ -125,40 +135,37 @@ class ParkedRuntimeHealthEffectsTest {
         val capture = DeathCapture()
         val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
         val client = FakeTmuxClient()
-        effects.bindParked(key, client, leaseKey)
+        effects.bindParked(binding, client, leaseKey)
         advanceUntilIdle()
 
-        effects.onActivated(key)
+        effects.onActivated(binding)
         advanceUntilIdle()
-        assertNull("activation drops the ledger entry", ledger.health(key))
+        assertNull("activation drops the exact ledger entry", ledger.health(binding))
 
         // A death edge AFTER unbind must not fire (the collector is cancelled).
-        client.disconnectedSignal.value = true
+        client.markDisconnectedForTest(remoteDisconnect(TmuxDisconnectReason.ReaderEof))
         advanceUntilIdle()
         assertTrue("no death after activation unbind", capture.calls.isEmpty())
-        assertFalse(ledger.isDead(key))
+        assertFalse(ledger.isDead(binding))
     }
 
     @Test
-    fun evictedPreservesAStickyDeadMarkerForSwitchBack() = runTest {
+    fun handledDeathTerminatesExactLedgerEntry() = runTest {
         val ledger = RuntimeHealthLedger()
         val leaseEvents = MutableSharedFlow<SshLeaseStateEvent>(extraBufferCapacity = 16)
         val capture = DeathCapture()
         val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
         val client = FakeTmuxClient()
-        effects.bindParked(key, client, leaseKey)
+        effects.bindParked(binding, client, leaseKey)
         advanceUntilIdle()
 
-        client.disconnectedSignal.value = true
+        client.markDisconnectedForTest(remoteDisconnect(TmuxDisconnectReason.ReaderException))
         advanceUntilIdle()
-        assertTrue(ledger.isDead(key))
-
-        // A plain evict of the corpse must not wipe the Dead marker — the
-        // switch-back still needs to consult it.
-        effects.onEvicted(key)
+        assertNull(ledger.health(binding))
+        effects.onEvicted(binding)
         advanceUntilIdle()
-        assertEquals(RuntimeDeathCause.ClientDisconnected, effects.consumeParkedDeath(key))
-        assertNull("one-shot consult clears it", ledger.consumeDead(key))
+        assertNull("exact eviction stays idempotent after death handling", ledger.health(binding))
+        assertEquals(RuntimeDeathCause.ReaderException, capture.calls.single().cause)
     }
 
     @Test
@@ -169,14 +176,93 @@ class ParkedRuntimeHealthEffectsTest {
         val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
         val client = FakeTmuxClient()
         // The client already EOFed before we bound it (raced park/death).
-        client.disconnectedSignal.value = true
+        client.markDisconnectedForTest(remoteDisconnect(TmuxDisconnectReason.ReaderEof))
 
-        effects.bindParked(key, client, leaseKey)
+        effects.bindParked(binding, client, leaseKey)
         advanceUntilIdle()
 
-        assertTrue("an already-dead parked client fires on bind", ledger.isDead(key))
+        assertNull("already-dead runtime is handled without a tombstone", ledger.health(binding))
         assertEquals(1, capture.calls.size)
 
         effects.cancelAll()
     }
+
+    @Test
+    fun alreadyClosedExplicitCloseAtParkIsIgnoredNotReportedAsRuntimeDeath() = runTest {
+        val ledger = RuntimeHealthLedger()
+        val leaseEvents = MutableSharedFlow<SshLeaseStateEvent>(extraBufferCapacity = 16)
+        val capture = DeathCapture()
+        val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
+        val client = FakeTmuxClient()
+        client.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ExplicitClose,
+                source = "local",
+                intent = "local_close",
+            ),
+        )
+
+        effects.bindParked(binding, client, leaseKey)
+        advanceUntilIdle()
+
+        assertTrue("local teardown must not be reported as parked-runtime death", capture.calls.isEmpty())
+        assertNull("the self-inflicted exact binding is untracked", ledger.health(binding))
+    }
+
+    @Test
+    fun staleOldCallbackCannotClearOrKillReplacementBindingForSameSession() = runTest {
+        val ledger = RuntimeHealthLedger()
+        val leaseEvents = MutableSharedFlow<SshLeaseStateEvent>(extraBufferCapacity = 16)
+        val capture = DeathCapture()
+        val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
+        val old = binding
+        val replacement = RuntimeHealthBinding(key, RuntimeInstanceToken.create())
+        val oldClient = FakeTmuxClient()
+        val replacementClient = FakeTmuxClient()
+
+        effects.bindParked(old, oldClient, leaseKey)
+        effects.onEvicted(old)
+        effects.bindParked(replacement, replacementClient, leaseKey)
+        advanceUntilIdle()
+
+        oldClient.markDisconnectedForTest(remoteDisconnect(TmuxDisconnectReason.ReaderEof))
+        advanceUntilIdle()
+
+        assertTrue("replacement with same host/session stays healthy", ledger.isHealthy(replacement))
+        assertTrue("cancelled stale binding cannot dispatch death", capture.calls.isEmpty())
+
+        // The healthy replacement remains intentionally bound after the stale
+        // edge; model VM teardown so runTest does not inherit its live watcher.
+        effects.cancelAll()
+    }
+
+    @Test
+    fun explicitDisconnectLeaseEdgeIsIgnoredNotReportedAsRuntimeDeath() = runTest {
+        val ledger = RuntimeHealthLedger()
+        val leaseEvents = MutableSharedFlow<SshLeaseStateEvent>(extraBufferCapacity = 16)
+        val capture = DeathCapture()
+        val effects = ParkedRuntimeHealthEffects(this, ledger, leaseEvents, capture::record)
+        effects.bindParked(binding, FakeTmuxClient(), leaseKey)
+        advanceUntilIdle()
+
+        leaseEvents.emit(
+            SshLeaseStateEvent(
+                leaseKey,
+                SshLeaseConnectionState.Closed,
+                SshLeaseCloseReason.ExplicitDisconnect,
+            ),
+        )
+        advanceUntilIdle()
+
+        assertTrue(capture.calls.isEmpty())
+        assertNull(ledger.health(binding))
+    }
+
+    private fun remoteDisconnect(reason: TmuxDisconnectReason): TmuxDisconnectEvent =
+        TmuxDisconnectEvent(
+            reason = reason,
+            source = if (reason == TmuxDisconnectReason.ReaderException) "read_failure" else "eof",
+            intent = "unknown",
+            exceptionClass = if (reason == TmuxDisconnectReason.ReaderException) "IOException" else null,
+        )
 }

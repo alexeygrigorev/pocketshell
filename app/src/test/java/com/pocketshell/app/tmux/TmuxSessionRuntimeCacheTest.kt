@@ -92,6 +92,21 @@ class TmuxSessionRuntimeCacheTest {
         assertEquals(CacheActivation(runtime = runtime, evicted = emptyList()), cache.activate(runtime.key))
     }
 
+    @Test
+    fun removeExactStaleBindingCannotRemoveSameSessionReplacement() {
+        val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
+        val old = cachedRuntime("work")
+        val replacement = cachedRuntime("work")
+
+        cache.put(old)
+        assertEquals(listOf(old), cache.put(replacement))
+
+        assertEquals(null, cache.removeExact(old.healthBinding))
+        assertTrue(cache.containsExact(replacement.healthBinding))
+        assertFalse(cache.containsExact(old.healthBinding))
+        assertSame(replacement, cache.removeExact(replacement.healthBinding))
+    }
+
     private fun cachedRuntime(
         sessionName: String,
         hostId: Long = 1L,

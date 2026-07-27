@@ -1,6 +1,9 @@
 package com.pocketshell.app.tmux
 
 import android.os.SystemClock
+import com.pocketshell.core.connection.RuntimeHealthBinding
+import com.pocketshell.core.connection.RuntimeHealthKey
+import com.pocketshell.core.connection.RuntimeInstanceToken
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshSession
@@ -113,6 +116,10 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         runtimes.containsKey(key)
     }
 
+    internal fun containsExact(binding: RuntimeHealthBinding): Boolean = synchronized(this) {
+        runtimes.values.any { it.runtime.healthBinding == binding }
+    }
+
     internal fun size(): Int = synchronized(this) { runtimes.size }
 
     internal fun diagnosticSnapshot(): TmuxRuntimeCacheDiagnostics = synchronized(this) {
@@ -145,6 +152,27 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
     internal fun remove(key: TmuxRuntimeKey): CachedTmuxRuntime? = synchronized(this) {
         runtimes.remove(key)?.runtime
     }
+
+    /**
+     * Atomically remove only the runtime lifetime named by [binding].
+     *
+     * A logical host/session can already contain a newer replacement when an
+     * old client's delayed EOF callback arrives. The old `removeSession`
+     * operation erased that replacement. Exact compare-and-remove makes the
+     * stale callback a no-op; there is deliberately no logical-key fallback.
+     */
+    internal fun removeExact(binding: RuntimeHealthBinding): CachedTmuxRuntime? =
+        synchronized(this) {
+            val iterator = runtimes.entries.iterator()
+            while (iterator.hasNext()) {
+                val entry = iterator.next()
+                if (entry.value.runtime.healthBinding == binding) {
+                    iterator.remove()
+                    return@synchronized entry.value.runtime
+                }
+            }
+            null
+        }
 
     internal fun removeSession(hostId: Long, sessionName: String): List<CachedTmuxRuntime> =
         synchronized(this) {
@@ -283,6 +311,15 @@ internal data class CachedTmuxRuntime(
     val remoteColumns: Int,
     val remoteRows: Int,
     val lease: SshLease? = null,
+    /**
+     * Opaque identity for this exact cached-runtime lifetime. Host/session is
+     * intentionally insufficient because a replacement can reuse both before
+     * the old client's disconnect callback is delivered.
+     */
+    val healthBinding: RuntimeHealthBinding = RuntimeHealthBinding(
+        key = RuntimeHealthKey(hostId = key.hostId, sessionName = key.sessionName),
+        token = RuntimeInstanceToken.create(),
+    ),
 )
 
 internal suspend fun CachedTmuxRuntime.closeCachedRuntime(

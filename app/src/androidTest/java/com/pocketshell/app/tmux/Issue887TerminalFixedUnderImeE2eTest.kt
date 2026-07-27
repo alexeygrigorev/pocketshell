@@ -1,10 +1,14 @@
 package com.pocketshell.app.tmux
 
 import android.graphics.Bitmap
+import android.content.Context
 import android.os.SystemClock
+import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.view.inputmethod.InputMethodManager
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -12,6 +16,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -137,6 +142,12 @@ class Issue887TerminalFixedUnderImeE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        // Issue #1748: the #810 launcher is present even while #1672 holds the
+        // command band during Connecting / Attaching / Reattaching /
+        // Reconnecting. The Show-keyboard chip is the real Live-band oracle.
+        // Do not measure keyboard-down geometry until that production state
+        // transition has completed and the user-facing chip is reachable.
+        waitForLiveKeyboardChip()
         compose.waitForIdle()
         // Let the terminal grid + bottom band fully settle before measuring.
         SystemClock.sleep(500)
@@ -144,7 +155,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
         // ---------------------------------------------------------------
         // Keyboard DOWN: capture the live TerminalView's on-screen rect.
         // ---------------------------------------------------------------
-        val termDown = terminalViewRect()
+        val termDown = terminalViewSnapshot()
         summaryLines += "keyboard_down_terminal=$termDown"
         captureFullDevice("01-keyboard-down")
 
@@ -152,6 +163,8 @@ class Issue887TerminalFixedUnderImeE2eTest {
         // Raise the REAL soft IME exactly as the user does — tap the
         // `show keyboard` chip, which calls showTerminalSoftKeyboard().
         // ---------------------------------------------------------------
+        val transitionMarker = "issue887-ime-transition-${System.nanoTime()}"
+        Log.i(LOG_TAG, transitionMarker)
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()
 
         var imeTopPx = -1
@@ -165,7 +178,8 @@ class Issue887TerminalFixedUnderImeE2eTest {
         // terminal rect.
         SystemClock.sleep(800)
 
-        val termUp = terminalViewRect()
+        assertImeUpTerminalSurface()
+        val termUp = terminalViewSnapshot()
         summaryLines += "keyboard_up_ime_top_px=$imeTopPx"
         summaryLines += "keyboard_up_terminal=$termUp"
 
@@ -189,49 +203,62 @@ class Issue887TerminalFixedUnderImeE2eTest {
         requireNotNull(termDown)
         requireNotNull(termUp)
 
-        writeSummary()
+        assertSameTerminalSnapshot("keyboard show", termDown, termUp)
 
-        // LOAD-BEARING on-device acceptance: the live TerminalView occupies the
-        // SAME on-screen rectangle keyboard-UP as keyboard-DOWN.
-        //  - same top/left  => no pan (the #887 fix).
-        //  - same width/height => no resize/reflow (the #457 invariant; if the
-        //    window had resized, updateSize() would have changed the grid and the
-        //    view height would shrink by the keyboard overlap).
-        val slopPx = SLOP_PX
-        assertEquals(
-            "Terminal LEFT moved when the keyboard showed (#887). down=$termDown up=$termUp",
-            termDown.left.toFloat(),
-            termUp.left.toFloat(),
-            slopPx,
-        )
-        assertEquals(
-            "Terminal TOP moved when the keyboard showed (#887: must NOT pan up). " +
-                "down=$termDown up=$termUp",
-            termDown.top.toFloat(),
-            termUp.top.toFloat(),
-            slopPx,
-        )
-        assertEquals(
-            "Terminal WIDTH changed when the keyboard showed (#457/#887: must NOT " +
-                "resize). down=$termDown up=$termUp",
-            termDown.width.toFloat(),
-            termUp.width.toFloat(),
-            slopPx,
-        )
-        assertEquals(
-            "Terminal HEIGHT changed when the keyboard showed (#457/#887: must NOT " +
-                "resize/reflow). down=$termDown up=$termUp",
-            termDown.height.toFloat(),
-            termUp.height.toFloat(),
-            slopPx,
+        // Complete the lifecycle: hide the same real IME and prove the exact
+        // same AndroidView/session/emulator + pixel/grid geometry survives the
+        // round-trip. A replacement TerminalView at equal bounds is not
+        // accepted as "fixed".
+        hideSoftKeyboard()
+        compose.waitUntil(timeoutMillis = 15_000) {
+            imeInsetTopOnScreenPx() < 0
+        }
+        compose.waitForIdle()
+        SystemClock.sleep(800)
+        val termHiddenAgain = terminalViewSnapshot()
+        summaryLines += "keyboard_hidden_again_terminal=$termHiddenAgain"
+        captureFullDevice("03-keyboard-hidden-again")
+        assertSameTerminalSnapshot("keyboard hide", termDown, termHiddenAgain)
+
+        // Existing production diagnostics log every actual tmux client-size
+        // refresh. Slice from a unique marker emitted immediately before the
+        // IME transition; there must be no resize wire operation in either the
+        // show or hide half of this lifecycle.
+        val postMarkerLogcat = postMarkerResizeLogcat(transitionMarker)
+        artifactFile("ime-transition-logcat.txt").writeText(postMarkerLogcat)
+        val resizeEvents = listOf(
+            "tmux-client-size-known",
+            "tmux-refresh-client-size-start",
+            "tmux-refresh-client-size-ok",
+            "tmux-refresh-client-size-error",
+        ).filter { it in postMarkerLogcat }
+        summaryLines += "post_marker_resize_events=$resizeEvents"
+        writeSummary()
+        assertTrue(
+            "IME show/hide must not emit a tmux client-size refresh after marker " +
+                "$transitionMarker; events=$resizeEvents log=$postMarkerLogcat",
+            resizeEvents.isEmpty(),
         )
         Unit
     } }
 
     // ---------------------------------------------------------------- geometry
 
-    private data class ViewRect(val left: Int, val top: Int, val width: Int, val height: Int) {
-        override fun toString() = "ViewRect(left=$left top=$top width=$width height=$height)"
+    private data class TerminalSnapshot(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int,
+        val viewIdentity: Int,
+        val sessionIdentity: Int,
+        val emulatorIdentity: Int,
+        val columns: Int,
+        val rows: Int,
+    ) {
+        override fun toString(): String =
+            "TerminalSnapshot(left=$left top=$top width=$width height=$height " +
+                "view=$viewIdentity session=$sessionIdentity emulator=$emulatorIdentity " +
+                "grid=${columns}x$rows)"
     }
 
     /**
@@ -240,22 +267,71 @@ class Issue887TerminalFixedUnderImeE2eTest {
      * reflects the REAL laid-out + (potentially) panned view, not a Compose
      * semantics rect.
      */
-    private fun terminalViewRect(): ViewRect? {
-        var rect: ViewRect? = null
+    private fun terminalViewSnapshot(): TerminalSnapshot? {
+        var snapshot: TerminalSnapshot? = null
         launchedActivity?.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView()
-            if (view != null) {
+            val session = view?.currentSession
+            val emulator = view?.mEmulator
+            if (view != null && session != null && emulator != null) {
                 val loc = IntArray(2)
                 view.getLocationOnScreen(loc)
-                rect = ViewRect(
+                snapshot = TerminalSnapshot(
                     left = loc[0],
                     top = loc[1],
                     width = view.width,
                     height = view.height,
+                    viewIdentity = System.identityHashCode(view),
+                    sessionIdentity = System.identityHashCode(session),
+                    emulatorIdentity = System.identityHashCode(emulator),
+                    columns = emulator.mColumns,
+                    rows = emulator.mRows,
                 )
             }
         }
-        return rect
+        return snapshot
+    }
+
+    private fun assertSameTerminalSnapshot(
+        transition: String,
+        expected: TerminalSnapshot,
+        actual: TerminalSnapshot?,
+    ) {
+        assertTrue(
+            "Terminal snapshot missing after $transition; before=$expected after=$actual",
+            actual != null,
+        )
+        requireNotNull(actual)
+        assertEquals("TerminalView identity changed on $transition", expected.viewIdentity, actual.viewIdentity)
+        assertEquals("TerminalSession identity changed on $transition", expected.sessionIdentity, actual.sessionIdentity)
+        assertEquals("TerminalEmulator identity changed on $transition", expected.emulatorIdentity, actual.emulatorIdentity)
+        assertEquals("Terminal grid columns changed on $transition", expected.columns, actual.columns)
+        assertEquals("Terminal grid rows changed on $transition", expected.rows, actual.rows)
+        assertEquals(
+            "Terminal LEFT moved on $transition (#887). before=$expected after=$actual",
+            expected.left.toFloat(),
+            actual.left.toFloat(),
+            SLOP_PX,
+        )
+        assertEquals(
+            "Terminal TOP moved on $transition (#887: must NOT pan). before=$expected after=$actual",
+            expected.top.toFloat(),
+            actual.top.toFloat(),
+            SLOP_PX,
+        )
+        assertEquals(
+            "Terminal WIDTH changed on $transition (#457/#887). before=$expected after=$actual",
+            expected.width.toFloat(),
+            actual.width.toFloat(),
+            SLOP_PX,
+        )
+        assertEquals(
+            "Terminal HEIGHT changed on $transition (#457/#887: no resize/reflow). " +
+                "before=$expected after=$actual",
+            expected.height.toFloat(),
+            actual.height.toFloat(),
+            SLOP_PX,
+        )
     }
 
     private fun imeInsetTopOnScreenPx(): Int {
@@ -281,6 +357,185 @@ class Issue887TerminalFixedUnderImeE2eTest {
             attached
         }
     }
+
+    private fun hideSoftKeyboard() {
+        launchedActivity?.onActivity { activity ->
+            val view = checkNotNull(activity.window.decorView.findTerminalView())
+            val inputMethodManager =
+                activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            inputMethodManager.hideSoftInputFromWindow(view.windowToken, 0)
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
+    private fun postMarkerResizeLogcat(marker: String): String {
+        val descriptor = InstrumentationRegistry.getInstrumentation()
+            .uiAutomation
+            .executeShellCommand(
+                "logcat -d -v threadtime -s $LOG_TAG:I $ISSUE_145_RECONNECT_TAG:I",
+            )
+        val full = ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+            .bufferedReader()
+            .use { it.readText() }
+        assertTrue(
+            "Unique IME transition marker missing from filtered logcat: $marker",
+            marker in full,
+        )
+        return full.substringAfterLast(marker)
+    }
+
+    private fun assertImeUpTerminalSurface() {
+        fun state(): Triple<Int, Int, Boolean> {
+            val conversationLoadingCount = compose
+                .onAllNodesWithText("Loading conversation…", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+            val hotkeysLauncherCount = compose
+                .onAllNodesWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+            var terminalVisible = false
+            launchedActivity?.onActivity { activity ->
+                val terminal = activity.window.decorView.findTerminalView()
+                terminalVisible =
+                    terminal?.isShown == true &&
+                    terminal.visibility == View.VISIBLE &&
+                    terminal.width > 0 &&
+                    terminal.height > 0
+            }
+            return Triple(conversationLoadingCount, hotkeysLauncherCount, terminalVisible)
+        }
+
+        try {
+            compose.waitUntil(timeoutMillis = 15_000) {
+                val (conversationLoadingCount, hotkeysLauncherCount, terminalVisible) = state()
+                conversationLoadingCount == 0 &&
+                    hotkeysLauncherCount == 1 &&
+                    terminalVisible
+            }
+        } catch (cause: Throwable) {
+            val (conversationLoadingCount, hotkeysLauncherCount, terminalVisible) = state()
+            throw AssertionError(
+                "IME-up measurement must remain on the same visible Terminal surface. " +
+                    "loadingConversationNodes=$conversationLoadingCount " +
+                    "terminalHotkeysLauncherNodes=$hotkeysLauncherCount " +
+                    "terminalVisible=$terminalVisible",
+                cause,
+            )
+        }
+        val (conversationLoadingCount, hotkeysLauncherCount, terminalVisible) = state()
+        assertTrue(
+            "IME-up measurement must remain on the same visible Terminal surface. " +
+                "loadingConversationNodes=$conversationLoadingCount " +
+                "terminalHotkeysLauncherNodes=$hotkeysLauncherCount " +
+                "terminalVisible=$terminalVisible",
+            conversationLoadingCount == 0 &&
+                hotkeysLauncherCount == 1 &&
+                terminalVisible,
+        )
+        summaryLines += "keyboard_up_same_terminal_surface=true"
+    }
+
+    private fun waitForLiveKeyboardChip() {
+        try {
+            compose.waitUntil(
+                timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs(),
+            ) {
+                liveKeyboardChipFullyWithinOwningRoot()
+            }
+            assertLiveKeyboardChipFullyWithinOwningRoot()
+            summaryLines += "live_band_ready=true"
+        } catch (cause: Throwable) {
+            val screenCount = semanticsNodeCount(TMUX_SESSION_SCREEN_TAG)
+            val launcherCount = semanticsNodeCount(SESSION_COMPOSER_LAUNCHER_TAG)
+            val keyboardChipCount = semanticsNodeCount(SHOW_KEYBOARD_CHIP_TAG)
+            val terminal = terminalViewSnapshot()
+            val connection = currentConnectionDiagnostics()
+            summaryLines += "live_band_ready=false"
+            summaryLines += "live_band_screen_nodes=$screenCount"
+            summaryLines += "live_band_launcher_nodes=$launcherCount"
+            summaryLines += "live_band_keyboard_chip_nodes=$keyboardChipCount"
+            summaryLines += "live_band_terminal=$terminal"
+            summaryLines += "live_band_connection=$connection"
+            val screenshotFailure = runCatching {
+                captureFullDevice("00-live-band-timeout")
+            }.exceptionOrNull()
+            summaryLines += "live_band_timeout_screenshot_saved=${screenshotFailure == null}"
+            screenshotFailure?.let {
+                summaryLines += "live_band_timeout_screenshot_error=${it.message}"
+            }
+            val summaryFailure = runCatching {
+                writeSummary(liveTimeoutScreenshotSaved = screenshotFailure == null)
+            }.exceptionOrNull()
+            throw AssertionError(
+                "Timed out waiting for the contained Live-only Show-keyboard chip. " +
+                    "screenNodes=$screenCount launcherNodes=$launcherCount " +
+                    "keyboardChipNodes=$keyboardChipCount terminal=$terminal " +
+                    "connection=$connection screenshotFailure=${screenshotFailure?.message} " +
+                    "summaryFailure=${summaryFailure?.message}. " +
+                    "The composer launcher alone is not a Live oracle (#1672/#1748).",
+                cause,
+            )
+        }
+    }
+
+    private fun liveKeyboardChipFullyWithinOwningRoot(): Boolean =
+        runCatching {
+            val node = compose.onAllNodesWithTag(
+                SHOW_KEYBOARD_CHIP_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().singleOrNull() ?: return@runCatching false
+            val root = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .singleOrNull { it.root === node.root }
+                ?: return@runCatching false
+            val bounds = node.boundsInRoot
+            val rootBounds = root.boundsInRoot
+            bounds.left >= rootBounds.left - ROOT_SLOP_PX &&
+                bounds.top >= rootBounds.top - ROOT_SLOP_PX &&
+                bounds.right <= rootBounds.right + ROOT_SLOP_PX &&
+                bounds.bottom <= rootBounds.bottom + ROOT_SLOP_PX
+        }.getOrDefault(false)
+
+    private fun assertLiveKeyboardChipFullyWithinOwningRoot() {
+        val node = compose.onNodeWithTag(
+            SHOW_KEYBOARD_CHIP_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNode()
+        val root = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .single { it.root === node.root }
+        val bounds = node.boundsInRoot
+        val rootBounds = root.boundsInRoot
+        assertTrue(
+            "Live-only Show-keyboard chip must be fully contained in its owning " +
+                "Compose root. node=$bounds root=$rootBounds",
+            bounds.left >= rootBounds.left - ROOT_SLOP_PX &&
+                bounds.top >= rootBounds.top - ROOT_SLOP_PX &&
+                bounds.right <= rootBounds.right + ROOT_SLOP_PX &&
+                bounds.bottom <= rootBounds.bottom + ROOT_SLOP_PX,
+        )
+    }
+
+    private fun currentConnectionDiagnostics(): String =
+        runCatching {
+            var diagnostics = "activity-unavailable"
+            launchedActivity?.onActivity { activity ->
+                val viewModel = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                diagnostics =
+                    "raw=${viewModel.connectionStatus.value} " +
+                    "display=${viewModel.displayConnectionStatus.value} " +
+                    "reveal=${viewModel.revealState.value} panes=${viewModel.panes.value.size}"
+            }
+            diagnostics
+        }.getOrElse { "unavailable(${it::class.simpleName}: ${it.message})" }
+
+    private fun semanticsNodeCount(tag: String): Int =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(-1)
 
     private fun forceFlatHostDetailViewMode() {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
@@ -336,6 +591,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
                 "tmux new-session -d -s ${shellQuote(SESSION_LAB)} " +
                     shellQuote("printf 'SHELL-READY\\n'; while true; do sleep 60; done"),
             )
+            appendLine("tmux set-option -t ${shellQuote(SESSION_LAB)} @ps_agent_kind shell")
         }
         runSsh(key, script)
     }
@@ -406,7 +662,9 @@ class Issue887TerminalFixedUnderImeE2eTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(200)
-        val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "UiAutomation returned no screenshot for $name"
+        }
         val file = artifactFile("$name.png")
         try {
             FileOutputStream(file).use { output ->
@@ -420,7 +678,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
         }
     }
 
-    private fun writeSummary() {
+    private fun writeSummary(liveTimeoutScreenshotSaved: Boolean? = null) {
         val file = artifactFile("summary.txt")
         file.writeText(
             buildString {
@@ -429,8 +687,16 @@ class Issue887TerminalFixedUnderImeE2eTest {
                 appendLine("seeded_session=$SESSION_LAB")
                 summaryLines.forEach { appendLine(it) }
                 appendLine("artifacts:")
-                appendLine("  01-keyboard-down.png")
-                appendLine("  02-keyboard-up.png")
+                when (liveTimeoutScreenshotSaved) {
+                    true -> appendLine("  00-live-band-timeout.png")
+                    false -> Unit
+                    null -> {
+                        appendLine("  01-keyboard-down.png")
+                        appendLine("  02-keyboard-up.png")
+                        appendLine("  03-keyboard-hidden-again.png")
+                        appendLine("  ime-transition-logcat.txt")
+                    }
+                }
             },
         )
         println("ISSUE887_SUMMARY ${file.absolutePath}")
@@ -450,7 +716,8 @@ class Issue887TerminalFixedUnderImeE2eTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val LOG_TAG: String = "Issue887Terminal"
         const val DEVICE_DIR_NAME: String = "issue887-terminal-fixed-under-ime"
-        const val SESSION_LAB: String = "opencode-lab"
+        const val SESSION_LAB: String = "issue1748-887-shell"
+        const val ROOT_SLOP_PX: Float = 1f
 
         // Allow 2px of sub-pixel/location rounding between two on-screen reads;
         // a pan of the keyboard overlap (~787px on this AVD) is far above it.

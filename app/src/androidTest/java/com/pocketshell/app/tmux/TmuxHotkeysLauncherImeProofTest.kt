@@ -51,7 +51,7 @@ import org.junit.runner.RunWith
  * waits on a real keyboard goes green locally and red (or vacuously-skipped) on
  * CI. Instead we DISPATCH a synthetic `Type.ime()` inset to the decor view and
  * read the inset Compose actually consumed from INSIDE the composition. The
- * keyboard-up band ([TmuxTerminalBottomControls] with `isImeVisible = true`)
+ * keyboard-up overlay ([TmuxTerminalImeHotkeysLauncher])
  * is hosted at the bottom of a fixed-height container and wrapped in
  * `Modifier.imePadding()` — exactly the production behaviour: the band is lifted
  * to sit above the keyboard. There is NO `assumeTrue` / self-skip: the synthetic
@@ -98,16 +98,7 @@ class TmuxHotkeysLauncherImeProofTest {
                             .testTag(CONTAINER_TAG),
                         contentAlignment = Alignment.BottomCenter,
                     ) {
-                        TmuxTerminalBottomControls(
-                            isImeVisible = true,
-                            showConversation = false,
-                            sessionLive = true,
-                            isAgentPane = false,
-                            onChipTap = {},
-                            onDictateTap = {},
-                            onEnterTap = {},
-                            onShowKeyboardTap = {},
-                            onAddSnippetTap = {},
+                        TmuxTerminalImeHotkeysLauncher(
                             onShowHotkeysTap = {},
                             modifier = Modifier.imePadding(),
                         )

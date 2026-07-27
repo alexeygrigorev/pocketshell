@@ -120,16 +120,7 @@ class TerminalHotkeysPanelScreenshotHarness {
                             .testTag(BAND_TAG),
                         contentAlignment = Alignment.BottomCenter,
                     ) {
-                        TmuxTerminalBottomControls(
-                            isImeVisible = true,
-                            showConversation = false,
-                            sessionLive = true,
-                            isAgentPane = false,
-                            onChipTap = {},
-                            onDictateTap = {},
-                            onEnterTap = {},
-                            onShowKeyboardTap = {},
-                            onAddSnippetTap = {},
+                        TmuxTerminalImeHotkeysLauncher(
                             onShowHotkeysTap = {},
                             modifier = Modifier.imePadding(),
                         )

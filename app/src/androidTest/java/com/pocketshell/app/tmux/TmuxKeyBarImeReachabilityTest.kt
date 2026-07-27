@@ -22,29 +22,26 @@ import org.junit.runner.RunWith
  * `PromptComposerKeyBarImeReachabilityTest` (the twin of the #615 Send
  * reachability test).
  *
- * What survives here is the pure FSM contract: a terminal pane with the IME up
- * still maps to [TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys] (now a
- * render-nothing state on the terminal surface — the bar is in the composer),
- * and a conversation pane maps to the no-accessory state. This belt-and-
- * suspenders guards a future refactor from silently re-routing IME-up terminal
- * panes.
+ * What survives here is the keyboard-down bottom-band contract. Keyboard-up
+ * chrome is now structurally separate at screen-overlay level and covered by
+ * [TmuxTerminalImeHotkeysOverlayLifecycleTest].
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxKeyBarImeReachabilityTest {
 
     @Test
-    fun chromeModeFsmMapsImeStatesCorrectly() {
+    fun keyboardDownSurfaceMapsConversationAndTerminalStates() {
         assertEquals(
-            TmuxTerminalKeyboardChromeMode.HiddenImeControls,
-            tmuxTerminalKeyboardChromeMode(isImeVisible = false, showConversation = false),
+            TmuxTerminalHiddenImeSurface.CommandChips,
+            tmuxTerminalHiddenImeSurface(showConversation = false, terminalHeld = false),
         )
         assertEquals(
-            TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys,
-            tmuxTerminalKeyboardChromeMode(isImeVisible = true, showConversation = false),
+            TmuxTerminalHiddenImeSurface.LauncherOnly,
+            tmuxTerminalHiddenImeSurface(showConversation = true, terminalHeld = false),
         )
         assertEquals(
-            TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory,
-            tmuxTerminalKeyboardChromeMode(isImeVisible = true, showConversation = true),
+            TmuxTerminalHiddenImeSurface.LauncherOnly,
+            tmuxTerminalHiddenImeSurface(showConversation = false, terminalHeld = true),
         )
     }
 }

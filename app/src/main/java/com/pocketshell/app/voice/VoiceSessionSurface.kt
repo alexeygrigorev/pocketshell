@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Icon
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -428,7 +429,7 @@ private fun StaticChipStripContent(
 }
 
 /**
- * Non-scrolling sticky cluster of primary chips, rendered after the
+ * Sticky one-line cluster of primary controls, rendered after the
  * scrollable [ScrollableChipStrip] in [BottomChipControls].
  *
  * The cluster pins `Enter` (#568), `show keyboard` (#131), and the picker chip
@@ -470,16 +471,10 @@ private fun PrimaryChipCluster(
         onShowHotkeysTap == null
     ) return
     Row(
-        // Issue #813: the primary cluster (`Enter` / `show keyboard` / `hotkeys` /
-        // `snippets`) renders at its NATURAL width. It NO LONGER reserves that
-        // width ahead of the launcher — [BottomChipControls] now hosts the cluster
-        // inside a single horizontally-scrollable, weighted flexible region while
-        // the launcher is pinned UNWEIGHTED (so the launcher reserves its width
-        // FIRST and is never the element that overflows). When the row is wide
-        // enough (Pixel-class width, default font) every cluster chip is fully
-        // visible without scrolling; when it is tight (narrow / large system
-        // font — the #813 07:53 clip) the cluster yields by scrolling within the
-        // flexible region instead of pushing the launcher off the right edge.
+        // Issue #813: the primary cluster is capped to the launcher-reserved
+        // chip area. #789 permits the hotkeys entry to be a compact icon button;
+        // keeping that one affordance at the 48dp touch floor lets all four
+        // primary controls remain fully visible on one Pixel-width line.
         // Issue #787: the `/ commands` chip was hard-cut from this cluster —
         // slash entry now lives only in the composer.
         modifier = modifier
@@ -511,10 +506,8 @@ private fun PrimaryChipCluster(
         // chip opening the same dedicated `TerminalHotkeysSheet` panel. Carries
         // the stable `tmux:hotkeys-launcher` tag so existing tests still find it.
         if (onShowHotkeysTap != null) {
-            CommandChip(
-                label = HOTKEYS_CHIP_LABEL,
+            TerminalHotkeysIconButton(
                 onClick = onShowHotkeysTap,
-                icon = HotkeysChipIcon,
                 modifier = Modifier.testTag(hotkeysLauncherTag),
             )
         }
@@ -526,6 +519,48 @@ private fun PrimaryChipCluster(
                 modifier = Modifier.testTag(SESSION_ADD_SNIPPET_CHIP_TAG),
             )
         }
+    }
+}
+
+/**
+ * Keyboard-down inline hotkeys entry. The 48dp keycap keeps the launcher at the
+ * accessibility touch floor while reclaiming the label width that forced the
+ * terminal control band onto a second row.
+ */
+@Composable
+private fun TerminalHotkeysIconButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .minimumInteractiveComponentSize()
+            .size(PocketShellDensity.tapTargetMin)
+            .background(
+                color = LocalPocketShellSemantic.current.accentSoft,
+                shape = PocketShellShapes.small,
+            )
+            .border(
+                width = 1.dp,
+                color = LocalPocketShellSemantic.current.accentDim,
+                shape = PocketShellShapes.small,
+            )
+            .semantics {
+                contentDescription = TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL
+            }
+            .clickable(
+                role = Role.Button,
+                onClickLabel = TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL,
+                onClick = onClick,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = HotkeysChipIcon,
+            contentDescription = null,
+            tint = LocalPocketShellSemantic.current.accent,
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 
@@ -543,9 +578,8 @@ private fun PrimaryChipCluster(
  *    is the flexible `weight(1f, fill = false)` scrolling strip that YIELDS
  *    first, followed by the [PrimaryChipCluster] (`Enter`, `show keyboard`,
  *    `hotkeys`, picker) at its natural width, pinned to the right of the chip
- *    area in the right-thumb arc (design-system §9 / #208). The whole chip area
- *    also scrolls, so in the extreme narrow / huge-font case the cluster yields
- *    by scrolling rather than clipping.
+ *    area in the right-thumb arc (design-system §9 / #208). The hotkeys entry is
+ *    an icon-only 48dp keycap so all four primary actions fit without clipping.
  * 2. The composer launcher — its fixed-width slot is reserved up front, so it
  *    RESERVES its width FIRST and is never the element pushed off the right edge
  *    (issue #813). Raw SSH keeps the prompt composer affordance; tmux terminal
@@ -564,8 +598,8 @@ private fun PrimaryChipCluster(
  * last) was squeezed to zero and clipped off the right edge — the maintainer's
  * 07:53 clip (`snippets`-wraps-to-two-lines tell). The fix reserves the
  * launcher's fixed width up front via the constraints math, so the launcher is
- * never the element that overflows; the chip area absorbs the squeeze by
- * scrolling and every chip stays reachable (scroll, never silently dropped).
+ * never the element that overflows; the static strip absorbs horizontal squeeze
+ * by scrolling; the compact hotkeys keycap keeps the primary row visible.
  *
  * `onProjectNavigationTap` is optional because the tmux route does not
  * surface project navigation yet (the raw-SSH `SessionViewModel` owns the
@@ -623,14 +657,8 @@ internal fun BottomChipControls(
         // took its full (font-inflated) natural width and the launcher (declared
         // last) was squeezed to zero and clipped off the right edge. Reserving the
         // launcher's fixed width up front (via the constraints math here) keeps the
-        // launcher fully on-screen; the chip area absorbs the squeeze by scrolling.
-        // On a Pixel-class width with the default font the static chips + cluster
-        // fit in the capped area with room to spare (nothing scrolls, every chip
-        // is fully visible — the existing #641 assertions stay green). When tight
-        // (narrow / large system font), the static strip scrolls first and, only
-        // if even an empty static strip can't fit the cluster, the whole chip area
-        // scrolls — the cluster yields by scrolling, never silently dropping a chip
-        // and never pushing the launcher off-screen.
+        // launcher fully on-screen. The static strip yields by scrolling; if the
+        // compact hotkeys keycap lets the primary cluster stay on one line.
         val launcherSlotWidth = if (onDictateTap != null) {
             // Launcher tap target + its end padding (matches the Box padding below).
             PocketShellDensity.tapTargetMin + PocketShellSpacing.sm
@@ -679,16 +707,11 @@ internal fun BottomChipControls(
                             leadingContent = leadingContent,
                         )
                     }
-                    // Primary cluster: high-frequency, pinned to the right of the
-                    // chip area (right-thumb arc, design-system §9 / #208). Natural
-                    // width, but wrapped in its OWN scroll bounded to the chip area
-                    // (`widthIn(max = chipAreaMaxWidth)`): measured before the
-                    // weighted static strip, so it keeps its full width and the
-                    // static strip yields to it; in the extreme narrow / huge-font
-                    // case where the cluster alone exceeds the chip area it yields by
-                    // scrolling WITHIN the cap instead of overflowing into (and
-                    // clipping) the launcher's reserved slot. Every chip stays
-                    // reachable (#813 AC) and the launcher is never clipped.
+                    // The compact keycap keeps the full default-Pixel cluster on
+                    // one line with no scroll. Narrow / large-font configurations
+                    // retain that one-line terminal-space contract but expose a
+                    // real scroll viewport, so accessibility bring-into-view can
+                    // make every primary control fully visible and clickable.
                     Row(
                         modifier = Modifier
                             .widthIn(max = chipAreaMaxWidth)
@@ -1293,6 +1316,7 @@ private fun ImageVector.Builder.addKeyboardPath(fill: SolidColor): ImageVector.B
  * working unchanged.
  */
 internal const val HOTKEYS_CHIP_LABEL: String = "hotkeys"
+internal const val TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL: String = "Terminal hotkeys"
 internal const val HOTKEYS_CHIP_TAG: String = "tmux:hotkeys-launcher"
 
 /**

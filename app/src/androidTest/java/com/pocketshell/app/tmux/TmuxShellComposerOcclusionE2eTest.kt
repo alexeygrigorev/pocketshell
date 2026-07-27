@@ -6,6 +6,11 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.isRoot
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -13,6 +18,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -24,11 +30,15 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
-import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
+import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
+import com.pocketshell.app.voice.TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -38,6 +48,7 @@ import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -130,6 +141,11 @@ class TmuxShellComposerOcclusionE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        // Issue #1748: the always-present #810 launcher is not proof that the
+        // #1672 held surface has reached Live. The Show-keyboard chip exists
+        // only in the Live command band, so await and contain that real
+        // user-facing state before measuring the keyboard-down layout.
+        waitForLiveKeyboardChip()
         compose.waitForIdle()
 
         // ---------------------------------------------------------------
@@ -156,19 +172,69 @@ class TmuxShellComposerOcclusionE2eTest {
         val snippetsNodes = compose
             .onAllNodesWithTag(SESSION_ADD_SNIPPET_CHIP_TAG, useUnmergedTree = true)
             .fetchSemanticsNodes()
-        if (snippetsNodes.isNotEmpty()) {
-            val snippetsBounds = boundsInRoot(SESSION_ADD_SNIPPET_CHIP_TAG)
-            summaryLines += "keyboard_down_snippets=$snippetsBounds"
+        assertEquals(
+            "live shell keyboard-down band must expose exactly one snippets chip",
+            1,
+            snippetsNodes.size,
+        )
+        val snippetsBounds = compose.onNodeWithTag(
+            SESSION_ADD_SNIPPET_CHIP_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val launcherUnclippedBounds = compose.onNodeWithTag(
+            SESSION_COMPOSER_LAUNCHER_TAG,
+            useUnmergedTree = true,
+        ).getUnclippedBoundsInRoot()
+        val rootUnclippedBounds = compose.onNode(isRoot()).getUnclippedBoundsInRoot()
+        summaryLines += "keyboard_down_snippets=$snippetsBounds"
+        compose.onNodeWithTag(
+            SESSION_ADD_SNIPPET_CHIP_TAG,
+            useUnmergedTree = true,
+        ).assertHasClickAction()
+        assertTrue(
+            "snippets chip must be fully contained and not clipped behind the launcher " +
+                "(keyboard down); snippets=$snippetsBounds " +
+                "launcher=$launcherUnclippedBounds root=$rootUnclippedBounds",
+            snippetsBounds.left >= rootUnclippedBounds.left &&
+                snippetsBounds.top >= rootUnclippedBounds.top &&
+                snippetsBounds.right <= rootUnclippedBounds.right &&
+                snippetsBounds.bottom <= rootUnclippedBounds.bottom &&
+                snippetsBounds.right <= launcherUnclippedBounds.left,
+        )
+        listOf(
+            SESSION_ENTER_CHIP_TAG,
+            SHOW_KEYBOARD_CHIP_TAG,
+            HOTKEYS_CHIP_TAG,
+            SESSION_ADD_SNIPPET_CHIP_TAG,
+        ).forEach { tag ->
+            val control = compose.onNodeWithTag(tag, useUnmergedTree = true)
+            val bounds = control.getUnclippedBoundsInRoot()
+            summaryLines += "keyboard_down_primary[$tag]=$bounds"
+            control.assertHasClickAction()
             assertTrue(
-                "snippets chip must be fully on-screen and not clipped behind the launcher " +
-                    "(keyboard down); snippets=$snippetsBounds launcher=$launcherBounds root=$rootBounds",
-                snippetsBounds.right <= launcherBounds.left + 0.5f &&
-                    snippetsBounds.right <= rootBounds.right + 0.5f &&
-                    snippetsBounds.left >= rootBounds.left - 0.5f,
+                "every keyboard-down primary control must be fully visible and " +
+                    "clear of the launcher; tag=$tag bounds=$bounds " +
+                    "launcher=$launcherUnclippedBounds root=$rootUnclippedBounds",
+                bounds.left >= rootUnclippedBounds.left &&
+                    bounds.top >= rootUnclippedBounds.top &&
+                    bounds.right <= rootUnclippedBounds.right &&
+                    bounds.bottom <= rootUnclippedBounds.bottom &&
+                    bounds.right <= launcherUnclippedBounds.left,
             )
-        } else {
-            summaryLines += "keyboard_down_snippets=absent"
         }
+        compose.onNodeWithTag(
+            HOTKEYS_CHIP_TAG,
+            useUnmergedTree = true,
+        ).assertContentDescriptionEquals(TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL)
+        val hotkeysOnClick = compose.onNodeWithTag(
+            HOTKEYS_CHIP_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().config[SemanticsActions.OnClick]
+        assertEquals(
+            "compact hotkeys button must announce its action",
+            TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL,
+            hotkeysOnClick.label,
+        )
 
         captureFullDevice("01-keyboard-down")
 
@@ -188,6 +254,8 @@ class TmuxShellComposerOcclusionE2eTest {
         compose.waitForIdle()
         SystemClock.sleep(500)
         imeTopPx = imeInsetTopOnScreenPx()
+        assertImeUpTerminalSurface()
+        assertImeHotkeysLauncherReachableAbove(imeTopPx)
         val rootBoundsKbUp = rootBounds()
         summaryLines += "keyboard_up_ime_top_px=$imeTopPx"
         summaryLines += "keyboard_up_root=$rootBoundsKbUp"
@@ -286,6 +354,200 @@ class TmuxShellComposerOcclusionE2eTest {
         return ready
     }
 
+    private fun assertImeUpTerminalSurface() {
+        fun state(): Triple<Int, Int, Boolean> {
+            val conversationLoadingCount = compose
+                .onAllNodesWithText("Loading conversation…", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+            val hotkeysLauncherCount = compose
+                .onAllNodesWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+            var terminalVisible = false
+            launchedActivity?.onActivity { activity ->
+                val terminal = activity.window.decorView.findTerminalView()
+                terminalVisible =
+                    terminal?.isShown == true &&
+                    terminal.visibility == View.VISIBLE &&
+                    terminal.width > 0 &&
+                    terminal.height > 0
+            }
+            return Triple(conversationLoadingCount, hotkeysLauncherCount, terminalVisible)
+        }
+
+        try {
+            compose.waitUntil(timeoutMillis = 15_000) {
+                val (conversationLoadingCount, hotkeysLauncherCount, terminalVisible) = state()
+                conversationLoadingCount == 0 &&
+                    hotkeysLauncherCount == 1 &&
+                    terminalVisible
+            }
+        } catch (cause: Throwable) {
+            val (conversationLoadingCount, hotkeysLauncherCount, terminalVisible) = state()
+            throw AssertionError(
+                "IME-up assertions must remain on the same visible Terminal surface. " +
+                    "loadingConversationNodes=$conversationLoadingCount " +
+                    "terminalHotkeysLauncherNodes=$hotkeysLauncherCount " +
+                    "terminalVisible=$terminalVisible",
+                cause,
+            )
+        }
+        val (conversationLoadingCount, hotkeysLauncherCount, terminalVisible) = state()
+        assertTrue(
+            "IME-up assertions must remain on the same visible Terminal surface. " +
+                "loadingConversationNodes=$conversationLoadingCount " +
+                "terminalHotkeysLauncherNodes=$hotkeysLauncherCount " +
+                "terminalVisible=$terminalVisible",
+            conversationLoadingCount == 0 &&
+                hotkeysLauncherCount == 1 &&
+                terminalVisible,
+        )
+        summaryLines += "keyboard_up_same_terminal_surface=true"
+    }
+
+    private fun assertImeHotkeysLauncherReachableAbove(imeTopPx: Int) {
+        val nodes = compose
+            .onAllNodesWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        assertTrue(
+            "Keyboard-up Terminal surface must expose exactly one compact hotkeys " +
+                "launcher; count=${nodes.size}",
+            nodes.size == 1,
+        )
+        compose.onNodeWithTag(
+            TERMINAL_HOTKEYS_LAUNCHER_TAG,
+            useUnmergedTree = true,
+        ).assertHasClickAction()
+
+        val node = nodes.single()
+        val owningRoot = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .single { it.root === node.root }
+        val bounds = node.boundsInRoot
+        val rootBounds = owningRoot.boundsInRoot
+        assertTrue(
+            "Compact hotkeys launcher must be fully contained in its owning root. " +
+                "launcher=$bounds root=$rootBounds",
+            bounds.left >= rootBounds.left - ROOT_SLOP_PX &&
+                bounds.top >= rootBounds.top - ROOT_SLOP_PX &&
+                bounds.right <= rootBounds.right + ROOT_SLOP_PX &&
+                bounds.bottom <= rootBounds.bottom + ROOT_SLOP_PX,
+        )
+
+        val launcherBottomScreenPx = bottomEdgeOnScreenPx(TERMINAL_HOTKEYS_LAUNCHER_TAG)
+        summaryLines += "keyboard_up_hotkeys_launcher_count=${nodes.size}"
+        summaryLines += "keyboard_up_hotkeys_launcher_bounds=$bounds"
+        summaryLines += "keyboard_up_hotkeys_launcher_bottom_screen_px=$launcherBottomScreenPx"
+        assertTrue(
+            "Compact hotkeys launcher must remain fully above the real IME and " +
+                "clickable. launcherBottom=$launcherBottomScreenPx imeTop=$imeTopPx",
+            launcherBottomScreenPx >= 0 &&
+                launcherBottomScreenPx <= imeTopPx + ROOT_SLOP_PX.toInt(),
+        )
+    }
+
+    private fun waitForLiveKeyboardChip() {
+        try {
+            compose.waitUntil(
+                timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs(),
+            ) {
+                liveKeyboardChipFullyWithinOwningRoot()
+            }
+            assertLiveKeyboardChipFullyWithinOwningRoot()
+            summaryLines += "live_band_ready=true"
+        } catch (cause: Throwable) {
+            val screenCount = semanticsNodeCount(TMUX_SESSION_SCREEN_TAG)
+            val launcherCount = semanticsNodeCount(SESSION_COMPOSER_LAUNCHER_TAG)
+            val keyboardChipCount = semanticsNodeCount(SHOW_KEYBOARD_CHIP_TAG)
+            val terminalReady = terminalGridReady()
+            val connection = currentConnectionDiagnostics()
+            summaryLines += "live_band_ready=false"
+            summaryLines += "live_band_screen_nodes=$screenCount"
+            summaryLines += "live_band_launcher_nodes=$launcherCount"
+            summaryLines += "live_band_keyboard_chip_nodes=$keyboardChipCount"
+            summaryLines += "live_band_terminal_ready=$terminalReady"
+            summaryLines += "live_band_connection=$connection"
+            val screenshotFailure = runCatching {
+                captureFullDevice("00-live-band-timeout")
+            }.exceptionOrNull()
+            summaryLines += "live_band_timeout_screenshot_saved=${screenshotFailure == null}"
+            screenshotFailure?.let {
+                summaryLines += "live_band_timeout_screenshot_error=${it.message}"
+            }
+            val summaryFailure = runCatching {
+                writeSummary(liveTimeoutScreenshotSaved = screenshotFailure == null)
+            }.exceptionOrNull()
+            throw AssertionError(
+                "Timed out waiting for the contained Live-only Show-keyboard chip. " +
+                    "screenNodes=$screenCount launcherNodes=$launcherCount " +
+                    "keyboardChipNodes=$keyboardChipCount terminalReady=$terminalReady " +
+                    "connection=$connection screenshotFailure=${screenshotFailure?.message} " +
+                    "summaryFailure=${summaryFailure?.message}. " +
+                    "The composer launcher alone is not a Live oracle (#1672/#1748).",
+                cause,
+            )
+        }
+    }
+
+    private fun liveKeyboardChipFullyWithinOwningRoot(): Boolean =
+        runCatching {
+            val node = compose.onAllNodesWithTag(
+                SHOW_KEYBOARD_CHIP_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().singleOrNull() ?: return@runCatching false
+            val root = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .singleOrNull { it.root === node.root }
+                ?: return@runCatching false
+            val bounds = node.boundsInRoot
+            val rootBounds = root.boundsInRoot
+            bounds.left >= rootBounds.left - ROOT_SLOP_PX &&
+                bounds.top >= rootBounds.top - ROOT_SLOP_PX &&
+                bounds.right <= rootBounds.right + ROOT_SLOP_PX &&
+                bounds.bottom <= rootBounds.bottom + ROOT_SLOP_PX
+        }.getOrDefault(false)
+
+    private fun assertLiveKeyboardChipFullyWithinOwningRoot() {
+        val node = compose.onNodeWithTag(
+            SHOW_KEYBOARD_CHIP_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNode()
+        val root = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .single { it.root === node.root }
+        val bounds = node.boundsInRoot
+        val rootBounds = root.boundsInRoot
+        assertTrue(
+            "Live-only Show-keyboard chip must be fully contained in its owning " +
+                "Compose root. node=$bounds root=$rootBounds",
+            bounds.left >= rootBounds.left - ROOT_SLOP_PX &&
+                bounds.top >= rootBounds.top - ROOT_SLOP_PX &&
+                bounds.right <= rootBounds.right + ROOT_SLOP_PX &&
+                bounds.bottom <= rootBounds.bottom + ROOT_SLOP_PX,
+        )
+    }
+
+    private fun currentConnectionDiagnostics(): String =
+        runCatching {
+            var diagnostics = "activity-unavailable"
+            launchedActivity?.onActivity { activity ->
+                val viewModel = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                diagnostics =
+                    "raw=${viewModel.connectionStatus.value} " +
+                    "display=${viewModel.displayConnectionStatus.value} " +
+                    "reveal=${viewModel.revealState.value} panes=${viewModel.panes.value.size}"
+            }
+            diagnostics
+        }.getOrElse { "unavailable(${it::class.simpleName}: ${it.message})" }
+
+    private fun semanticsNodeCount(tag: String): Int =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(-1)
+
     private fun View.findTerminalView(): TerminalView? {
         if (this is TerminalView) return this
         if (this !is ViewGroup) return null
@@ -314,6 +576,7 @@ class TmuxShellComposerOcclusionE2eTest {
                 "tmux new-session -d -s ${shellQuote(SESSION_LAB)} " +
                     shellQuote("printf 'SHELL-READY\\n'; while true; do sleep 60; done"),
             )
+            appendLine("tmux set-option -t ${shellQuote(SESSION_LAB)} @ps_agent_kind shell")
         }
         runSsh(key, script)
     }
@@ -384,7 +647,9 @@ class TmuxShellComposerOcclusionE2eTest {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(200)
-        val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "UiAutomation returned no screenshot for $name"
+        }
         val file = artifactFile("$name.png")
         try {
             FileOutputStream(file).use { output ->
@@ -398,7 +663,7 @@ class TmuxShellComposerOcclusionE2eTest {
         }
     }
 
-    private fun writeSummary() {
+    private fun writeSummary(liveTimeoutScreenshotSaved: Boolean? = null) {
         val file = artifactFile("summary.txt")
         file.writeText(
             buildString {
@@ -407,8 +672,14 @@ class TmuxShellComposerOcclusionE2eTest {
                 appendLine("seeded_session=$SESSION_LAB")
                 summaryLines.forEach { appendLine(it) }
                 appendLine("artifacts:")
-                appendLine("  01-keyboard-down.png")
-                appendLine("  02-keyboard-up.png")
+                when (liveTimeoutScreenshotSaved) {
+                    true -> appendLine("  00-live-band-timeout.png")
+                    false -> Unit
+                    null -> {
+                        appendLine("  01-keyboard-down.png")
+                        appendLine("  02-keyboard-up.png")
+                    }
+                }
             },
         )
         println("ISSUE641_SUMMARY ${file.absolutePath}")
@@ -428,6 +699,7 @@ class TmuxShellComposerOcclusionE2eTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val LOG_TAG: String = "Issue641Composer"
         const val DEVICE_DIR_NAME: String = "issue641-shell-composer-occlusion"
-        const val SESSION_LAB: String = "opencode-lab"
+        const val SESSION_LAB: String = "issue1748-641-shell"
+        const val ROOT_SLOP_PX: Float = 1f
     }
 }

@@ -99,7 +99,6 @@ class ComposerUnsentBadgeContainmentProofTest {
                             .testTag(BAND_TAG),
                     ) {
                         TmuxTerminalBottomControls(
-                            isImeVisible = false,
                             showConversation = showConversation,
                             sessionLive = true,
                             isAgentPane = false,

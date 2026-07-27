@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -284,12 +285,11 @@ class TmuxSessionScreenImeChromeTest {
             }
         compose.waitForIdle()
 
-        // #782 hard-cut the "In this session" window group; the kebab menu now
-        // opens to the "On this host" section (matching the sibling
-        // compactChromeRightEdgeTapOpensMoreMenu assertion below, which #782
-        // updated — this one was missed and had been asserting a section header
-        // that no longer renders).
-        compose.onNodeWithText("On this host").assertIsDisplayed()
+        // Issue #1749: prove the edge tap opened the production popup through a
+        // stable popup-only semantic node. Section copy/order belongs to
+        // TmuxMoreMenuGroupingTest and must not make this reachability proof
+        // stale again.
+        assertPopupOnlyMenuOracleDisplayedAndContained()
     }
 
     @Test
@@ -308,7 +308,7 @@ class TmuxSessionScreenImeChromeTest {
             }
         compose.waitForIdle()
 
-        compose.onNodeWithText("On this host").assertIsDisplayed()
+        assertPopupOnlyMenuOracleDisplayedAndContained()
     }
 
     @Test
@@ -459,7 +459,27 @@ class TmuxSessionScreenImeChromeTest {
         }
     }
 
+    private fun assertPopupOnlyMenuOracleDisplayedAndContained() {
+        val interaction =
+            compose.onNodeWithTag(TMUX_CHANGE_KIND_BUTTON_TAG, useUnmergedTree = true)
+        interaction.assertIsDisplayed()
+        val node = interaction.fetchSemanticsNode()
+        val owningRoot = compose.onAllNodes(isRoot()).fetchSemanticsNodes()
+            .single { it.root === node.root }
+        val bounds = node.boundsInRoot
+        val rootBounds = owningRoot.boundsInRoot
+        assertTrue(
+            "Popup-only Change-kind action must be fully contained in its owning " +
+                "production menu root. node=$bounds root=$rootBounds",
+            bounds.left >= rootBounds.left - ROOT_SLOP_PX &&
+                bounds.top >= rootBounds.top - ROOT_SLOP_PX &&
+                bounds.right <= rootBounds.right + ROOT_SLOP_PX &&
+                bounds.bottom <= rootBounds.bottom + ROOT_SLOP_PX,
+        )
+    }
+
     private companion object {
+        const val ROOT_SLOP_PX = 1f
         const val TERMINAL_PROXY_TAG = "tmux:ime-chrome-test:terminal"
         const val BOTTOM_CHROME_PROXY_TAG = "tmux:ime-chrome-test:bottom-chrome"
     }

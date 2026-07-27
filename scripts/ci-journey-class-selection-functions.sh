@@ -62,7 +62,7 @@ print_journey_class_selection() {
   for c in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
     echo "  - $c"
   done
-  echo "  (pocketshellCi=true; deterministic agents:2222 only, no toxiproxy)"
+  echo "  (pocketshellCi=true; deterministic agents:2222 plus the existing Toxiproxy fixture for #1733)"
   echo "  (per-class retry-once for CI-AVD infra flakes — issue #712)"
   echo "=========================================================="
 }

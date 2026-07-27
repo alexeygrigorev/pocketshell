@@ -812,6 +812,12 @@ run_class() {
   local remaining cap rc attempt_start attempt_elapsed cleanup_status
   local app_id_suffix="${POCKETSHELL_APP_ID_SUFFIX:-}"
   local -a app_id_args=()
+  local -a network_fault_args=()
+  if [[ "$fqcn" == *OutboundAttachmentOffsetResumeJourneyE2eTest* ]]; then
+    network_fault_args+=(
+      -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true
+    )
+  fi
   if [[ "$JOURNEY_ABORT_ISOLATION_FAILED" -eq 1 ]]; then
     return "$JOURNEY_HARNESS_FAILURE_RC"
   fi
@@ -854,6 +860,7 @@ run_class() {
     "${app_id_args[@]}" \
     --max-workers=2 \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+    "${network_fault_args[@]}" \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
     --stacktrace
@@ -981,8 +988,15 @@ run_ct_class() {
 shard_class() {
   local idx="$1"
   local fqcn="$2"
+  local -a network_fault_args=()
+  if [[ "$fqcn" == *OutboundAttachmentOffsetResumeJourneyE2eTest* ]]; then
+    network_fault_args+=(
+      -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true
+    )
+  fi
   "$REPO_ROOT/scripts/connected-test.sh" --pool --suffix "ij$idx" \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+    "${network_fault_args[@]}" \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
     -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
     --stacktrace

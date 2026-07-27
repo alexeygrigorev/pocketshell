@@ -11,14 +11,15 @@
 # This driver runs inside the `reactivecircus/android-emulator-runner`
 # `script:` step, so the emulator is already booted and `adb` is on PATH. The
 # deterministic Docker `agents` fixture (agents:2222 -> emulator 10.0.2.2:2222)
-# was started + waited-healthy by the workflow before this script runs.
+# and its existing Toxiproxy route (2228/API 8474) are started by the workflow.
 #
 # It runs ONLY the load-bearing subset (NOT the full connected suite — that
-# stays nightly). Every class below uses the plain deterministic `agents:2222`
-# fixture; NONE need the opt-in toxiproxy network-fault proxies, so the job is
-# deterministic and does not depend on the proxy family the per-push job
-# deliberately leaves down. `pocketshellCi=true` selects the generous E2E
-# timeout ceilings so a slow CI runner does not flake these out.
+# stays nightly). Every class below uses the deterministic `agents:2222`
+# fixture. Issue #1733 additionally routes only the app transport through the
+# existing Toxiproxy service while its direct checkpoint/killer sidecar remains
+# on 2222; the suite passes the explicit network-fault opt-in and the workflow
+# starts that service. `pocketshellCi=true` selects the generous E2E timeout
+# ceilings so a slow CI runner does not flake these out.
 #
 # Load-bearing subset and what each pins:
 #   * DeepLinkSessionSwitchE2eTest (issue #470)
@@ -92,8 +93,8 @@ GRADLEW="$REPO_ROOT/gradlew"
 FQCN_PREFIX="com.pocketshell.app.proof"
 
 # The load-bearing journey classes. Keep this list aligned with the issue #691
-# named subset; every class here MUST use only the deterministic agents:2222
-# fixture (no toxiproxy) so the per-push job stays deterministic.
+# named subset. Every class uses deterministic agents:2222; #1733 alone also
+# uses the existing 2228/API-8474 Toxiproxy route to hold its real outage.
 #
 # Issue #705: three picker-driven journeys re-join the picker-FREE
 # DeepLinkSessionSwitchE2eTest now that the picker enumeration wedge is fixed
@@ -156,6 +157,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"  # #848 #900 audit / ): the foreground outbound queue surface was
   "com.pocketshell.app.tmux.Issue1686QueueDrainWireOracleDockerTest"  # #1686 D33/G4 the composer-queue clog fix on the REAL wire: a false not-Connected label (inline enum Reconnecting + drain-gate sessionLive=false) while the -CC transport is writable — the queued prompt must DRAIN to the real tmux pane (capture-pane), and the transport-alive edge un-parks the storm-stranded backlog
   "$FQCN_PREFIX.OutboundExactlyOnceAcrossFlapE2eTest"  # #1526 S1/S6 D31: delivery-level exactly-once across a mid-send flap (server capture-pane occurrence == 1, composer + keystroke lanes)
+  "$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"  # #1733 durable queued sidecar: real app-worker death preserves checkpoint N, fresh session sends total-N, atomic SHA-identical promotion and once-only prompt+Enter
   "com.pocketshell.app.composer.PromptComposerUndeliveredRetryTest"  # #1272 #1341 the durable couldn't deliver — retry surface wired into
   "com.pocketshell.app.composer.PromptComposerUndeliveredRetryHiltWiringTest"  # #1272 #1341 round-2, finding 1): the PRODUCTION-WIRING proof. The class…
   "com.pocketshell.app.tmux.AgentQuickReplyBandContainmentProofTest"  # #1235 F2/F3: quick-reply band stays above the IME + doesn't occlude composer/terminal controls (synthetic ime inset)

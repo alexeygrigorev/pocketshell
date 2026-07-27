@@ -1,6 +1,8 @@
 package com.pocketshell.app.proof
 
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class ToxiproxyControlTest {
@@ -68,6 +70,43 @@ class ToxiproxyControlTest {
     }
 
     @Test
+    fun disabledScopeOrdersRealCutBeforeCaptureAndRestoresAfterward() {
+        val events = mutableListOf<String>()
+        val transport = RecordingTransport { request ->
+            events += if (request.body == """{"enabled":false}""") "disable" else "enable"
+        }
+
+        runBlocking {
+            ToxiproxyControl(baseUrl = "http://unused", transport = transport)
+                .withDisabledProxy {
+                    events += "assert-and-capture"
+                }
+        }
+
+        assertEquals(listOf("disable", "assert-and-capture", "enable"), events)
+    }
+
+    @Test
+    fun disabledScopeRestoresProxyWhenCaptureAssertionFails() {
+        val events = mutableListOf<String>()
+        val transport = RecordingTransport { request ->
+            events += if (request.body == """{"enabled":false}""") "disable" else "enable"
+        }
+
+        assertThrows(AssertionError::class.java) {
+            runBlocking {
+                ToxiproxyControl(baseUrl = "http://unused", transport = transport)
+                    .withDisabledProxy {
+                        events += "assert-and-capture"
+                        throw AssertionError("visible pill missing")
+                    }
+            }
+        }
+
+        assertEquals(listOf("disable", "assert-and-capture", "enable"), events)
+    }
+
+    @Test
     fun clearToxicsDeletesEveryKnownFaultModel() {
         val transport = RecordingTransport()
         ToxiproxyControl(baseUrl = "http://unused", transport = transport).clearToxics()
@@ -93,11 +132,15 @@ class ToxiproxyControlTest {
         val body: String?,
     )
 
-    private class RecordingTransport : ToxiproxyTransport {
+    private class RecordingTransport(
+        private val onRequest: (RecordedRequest) -> Unit = {},
+    ) : ToxiproxyTransport {
         val requests = mutableListOf<RecordedRequest>()
 
         override fun request(method: String, path: String, body: String?): String {
-            requests += RecordedRequest(method, path, body)
+            val request = RecordedRequest(method, path, body)
+            requests += request
+            onRequest(request)
             return "{}"
         }
     }

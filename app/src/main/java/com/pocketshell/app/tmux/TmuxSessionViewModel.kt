@@ -13695,17 +13695,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
             val uploadedPaths = sidecars.mapIndexed { index, ref ->
-                val local = File(ref.localPath)
-                if (!local.exists()) {
-                    throw SshException("Queued attachment no longer exists: ${ref.displayName}")
-                }
                 val sanitised = FilenameSanitiser.sanitise(
                     ref.displayName,
                     defaultExtension = ShareUploader.extensionForMimeType(ref.mimeType),
                 )
-                val remoteName = PromptAttachmentStager.composeAttachmentName(timestamp, index, sanitised)
+                val remoteName = PromptAttachmentStager.composeAttachmentName(
+                    timestamp,
+                    ref.attachmentIndex ?: index,
+                    sanitised,
+                )
                 val remotePath = "$remoteDir/$remoteName"
-                session.uploadFile(local, remotePath)
+                session.uploadQueuedSidecar(ref, remotePath)
                 "$displayDir/$remoteName"
             }
             DiagnosticEvents.record(

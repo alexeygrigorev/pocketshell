@@ -288,6 +288,15 @@ class PromptComposerSidecarReuploadSkipTest {
             listOf("~/.pocketshell/attachments/session-a/uploaded-doc.pdf"),
             sent.single().attachments.map { it.remotePath },
         )
+        assertEquals(
+            "the original attachment-bearing prompt is emitted exactly once after resume",
+            "retry me",
+            sent.single().cleanDraft,
+        )
+        assertTrue(
+            "the one resumed delivery preserves the original single Enter intent",
+            sent.single().withEnter,
+        )
     }
 
     // ---- Class coverage: first send uploads normally (skip never fires spuriously) -

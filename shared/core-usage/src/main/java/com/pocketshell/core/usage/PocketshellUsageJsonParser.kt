@@ -21,7 +21,7 @@ import java.time.Instant
  *   "long_term":  {"percent_remaining": 30.0, "reset_at": "2026-07-09T14:59:59Z", "window": "7d"},
  *   "block_reason": null,
  *   "error": null,
- *   "details": { ... IGNORED by the app ... }
+ *   "details": { ... ignored except documented Codex reset-credit fields ... }
  * }
  * ```
  *
@@ -30,8 +30,9 @@ import java.time.Instant
  * (e.g. `5h`, `7d`, `weekly`, `monthly`, or `null` → the generic key name).
  * `status` values include `ok`, `unsupported`, `error`, and `limited` /
  * `blocked`. When `status == "error"` the `error` field carries a free-form
- * string. The app IGNORES `details` entirely — windows come from the unified
- * top-level fields.
+ * string. The app ignores `details` except for Codex
+ * `reset_credits_available`, `reset_credits`, and `reset_credits_error`.
+ * Windows still come only from the unified top-level fields.
  *
  * STRICT / fail-loud (issue #1318): the parser expects quse's exact schema.
  * Any malformed record — non-JSON line, missing `provider`, a `short_term` /
@@ -89,6 +90,76 @@ public class PocketshellUsageJsonParser {
             blockReason = obj.optionalString("block_reason"),
             lastError = actionableProviderError(provider, obj.optionalString("error")),
             windows = windows,
+            resetCredits = parseResetCredits(record = obj, provider = provider),
+        )
+    }
+
+    /**
+     * Parse the one narrow issue #1789 exception to #1318's details-ignore
+     * rule. This method never reads `details.windows` and never creates a
+     * [UsageWindow], so credit expiry cannot become quota reset state.
+     */
+    private fun parseResetCredits(
+        record: JSONObject,
+        provider: String,
+    ): UsageResetCredits? {
+        if (!provider.equals("codex", ignoreCase = true)) return null
+        if (!record.has("details") || record.isNull("details")) return null
+        val details = record.opt("details") as? JSONObject
+            ?: throw UsageParseException("'details' for codex is not an object")
+
+        val hasCount = details.has("reset_credits_available")
+        val hasCredits = details.has("reset_credits")
+        val hasError = details.has("reset_credits_error")
+        if (!hasCount && !hasCredits && !hasError) return null
+
+        if (hasError && !details.isNull("reset_credits_error")) {
+            val errorValue = details.opt("reset_credits_error")
+            if (errorValue !is String || errorValue.isBlank()) {
+                throw UsageParseException("invalid 'reset_credits_error' for codex")
+            }
+            return UsageResetCredits(
+                availableCount = null,
+                credits = emptyList(),
+                unavailable = true,
+            )
+        }
+
+        if (!hasCount || details.isNull("reset_credits_available") ||
+            !hasCredits || details.isNull("reset_credits")
+        ) {
+            throw UsageParseException(
+                "codex reset_credits_available and reset_credits must be present together",
+            )
+        }
+
+        val availableCount = details.requiredNonNegativeInt("reset_credits_available")
+        val rawCredits = details.opt("reset_credits") as? org.json.JSONArray
+            ?: throw UsageParseException("'reset_credits' for codex is not an array")
+        val availableCredits = buildList {
+            for (index in 0 until rawCredits.length()) {
+                val rawCredit = rawCredits.opt(index) as? JSONObject
+                    ?: throw UsageParseException("codex reset_credits[$index] is not an object")
+                val status = rawCredit.requiredExactString("status", "reset_credits[$index]")
+                if (status != "available") continue
+                add(
+                    UsageResetCredit(
+                        title = rawCredit.resetCreditTitle(),
+                        expiresAt = rawCredit.optionalExpiryInstant(index),
+                    ),
+                )
+            }
+        }
+        if (availableCount != availableCredits.size) {
+            throw UsageParseException(
+                "codex reset_credits_available=$availableCount does not match " +
+                    "${availableCredits.size} exact-available reset_credits rows",
+            )
+        }
+        return UsageResetCredits(
+            availableCount = availableCount,
+            credits = availableCredits,
+            unavailable = false,
         )
     }
 
@@ -230,6 +301,50 @@ private fun JSONObject.requiredNumber(name: String, provider: String, windowKey:
         else -> null
     } ?: throw UsageParseException("invalid '$name' for $provider $windowKey")
 }
+
+private fun JSONObject.requiredNonNegativeInt(name: String): Int {
+    val value = opt(name)
+    val number = value as? Number
+        ?: throw UsageParseException("invalid '$name' for codex")
+    val asDouble = number.toDouble()
+    val asLong = number.toLong()
+    if (!asDouble.isFinite() || asDouble != asLong.toDouble() || asLong !in 0..Int.MAX_VALUE) {
+        throw UsageParseException("invalid '$name' for codex")
+    }
+    return asLong.toInt()
+}
+
+private fun JSONObject.requiredExactString(name: String, context: String): String {
+    val value = opt(name)
+    return value as? String
+        ?: throw UsageParseException("invalid '$name' for codex $context")
+}
+
+private fun JSONObject.resetCreditTitle(): String {
+    if (!has("title") || isNull("title")) return RESET_CREDIT_TITLE_FALLBACK
+    val value = opt("title") as? String
+        ?: throw UsageParseException("invalid reset-credit 'title' for codex")
+    return value.trim()
+        .ifBlank { RESET_CREDIT_TITLE_FALLBACK }
+        .take(RESET_CREDIT_TITLE_MAX_CHARS)
+}
+
+private fun JSONObject.optionalExpiryInstant(index: Int): Instant? {
+    if (!has("expires_at") || isNull("expires_at")) return null
+    val raw = opt("expires_at") as? String
+        ?: throw UsageParseException("invalid 'expires_at' for codex reset_credits[$index]")
+    return try {
+        Instant.parse(raw.trim())
+    } catch (e: Exception) {
+        throw UsageParseException(
+            "invalid 'expires_at' for codex reset_credits[$index]: $raw",
+            e,
+        )
+    }
+}
+
+private const val RESET_CREDIT_TITLE_FALLBACK = "Reset credit"
+private const val RESET_CREDIT_TITLE_MAX_CHARS = 160
 
 /**
  * Read quse's canonical `reset_at` (ISO-8601 UTC, e.g. `2026-07-07T23:19:59Z`).

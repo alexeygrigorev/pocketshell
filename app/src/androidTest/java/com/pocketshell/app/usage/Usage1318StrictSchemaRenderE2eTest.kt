@@ -5,9 +5,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
@@ -24,6 +26,9 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.InputStream
 import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 /**
  * Issue #1318 — on-device (connected) render acceptance for the quse-v0.0.9
@@ -140,6 +145,65 @@ class Usage1318StrictSchemaRenderE2eTest {
             compose.onAllNodesWithText("Refresh usage failed", useUnmergedTree = true)
                 .fetchSemanticsNodes().isEmpty(),
         )
+    }
+
+    /**
+     * Issue #1789 reproduce-first RED: the REAL quse-0.0.9 Codex payload
+     * already contains two available reset credits with the same source title
+     * and distinct expiry instants. The production fetch/parser/screen path
+     * currently discards `details`, so this method fails on untouched main at
+     * the missing inventory header.
+     *
+     * Keep the quota reset and credit expiry assertions together: a credit is
+     * already available and merely EXPIRES later. Its expiry must never be
+     * relabelled as the automatic quota reset or as permission to resume work.
+     */
+    @Test
+    fun flattenedQuseV009Ndjson_rendersAvailableCreditsAsExpiryNotQuotaReset() {
+        val state = renderStateFor(stdout = FLATTENED_QUSE_V009_NDJSON, exitCode = 0)
+        setUsageScreen(state)
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText(RESET_CREDITS_HEADER, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText(RESET_CREDITS_HEADER, useUnmergedTree = true)
+            .performScrollTo()
+            .assertExists()
+
+        // Both exact-available records survive even though their source titles
+        // are duplicates. The consumed decoy is history, not inventory.
+        compose.onAllNodesWithText(DUPLICATE_CREDIT_TITLE, useUnmergedTree = true)
+            .assertCountEquals(2)
+        compose.onNodeWithText(NON_AVAILABLE_DECOY_TITLE, useUnmergedTree = true)
+            .assertDoesNotExist()
+
+        val zone = ZoneId.systemDefault()
+        CREDIT_EXPIRIES.forEach { expiry ->
+            val creditExpiry = formatCreditExpiry(now, expiry, zone)
+            compose.onNodeWithText(
+                creditExpiry.primary,
+                useUnmergedTree = true,
+            ).assertExists()
+            compose.onNodeWithText(
+                creditExpiry.primary.replace("expires", "resets"),
+                substring = true,
+                useUnmergedTree = true,
+            ).assertDoesNotExist()
+            compose.onNodeWithText(
+                CREDIT_ABSOLUTE_FORMAT.withZone(zone).format(expiry),
+                useUnmergedTree = true,
+            ).assertExists()
+        }
+
+        // The normalized Codex quota reset remains present and uses the
+        // existing reset vocabulary at the same time as credit expiry rows.
+        compose.onNodeWithText("resets in 3h 58m", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText(
+            "Heavy work can resume.",
+            useUnmergedTree = true,
+        ).assertDoesNotExist()
     }
 
     /**
@@ -267,10 +331,20 @@ class Usage1318StrictSchemaRenderE2eTest {
          */
         val FLATTENED_QUSE_V009_NDJSON: String = listOf(
             """{"details":{"limit_reached":false,"windows":{"five_hour":{"reset_at":"2026-07-07T23:19:59Z","used_percent":9.0},"seven_day":{"reset_at":"2026-07-09T14:59:59Z","used_percent":70.0}}},"error":null,"long_term":{"percent_remaining":30.0,"reset_at":"2026-07-09T14:59:59Z","window":"7d"},"provider":"claude","short_term":{"percent_remaining":91.0,"reset_at":"2026-07-07T23:19:59Z","window":"5h"},"status":"ok"}""",
-            """{"details":{"limit_reached":true,"windows":{"primary_window":{"reset_at":"2026-07-07T23:57:08Z","used_percent":0.0},"secondary_window":{"reset_at":"2026-07-11T06:23:55Z","used_percent":98.0}}},"error":null,"long_term":{"percent_remaining":2.0,"reset_at":"2026-07-11T06:23:55Z","window":"7d"},"provider":"codex","short_term":{"percent_remaining":100.0,"reset_at":"2026-07-07T23:57:08Z","window":"5h"},"status":"ok"}""",
+            """{"details":{"limit_reached":true,"reset_credits":[{"expires_at":"2026-07-26T23:52:15Z","status":"available","title":"Full reset (Weekly + 5 hr)"},{"expires_at":"2026-07-31T19:09:12Z","status":"available","title":"Full reset (Weekly + 5 hr)"},{"expires_at":"2026-08-01T19:09:12Z","status":"consumed","title":"Consumed reset must stay hidden"}],"reset_credits_available":2,"reset_credits_error":null,"windows":{"primary_window":{"reset_at":"2026-07-07T23:57:08Z","used_percent":0.0},"secondary_window":{"reset_at":"2026-07-11T06:23:55Z","used_percent":98.0}}},"error":null,"long_term":{"percent_remaining":2.0,"reset_at":"2026-07-11T06:23:55Z","window":"7d"},"provider":"codex","short_term":{"percent_remaining":100.0,"reset_at":"2026-07-07T23:57:08Z","window":"5h"},"status":"ok"}""",
             """{"details":{"limit_reached":false,"premium_percent_remaining":97.1},"error":null,"long_term":{"percent_remaining":97.1,"reset_at":"2026-08-01T00:00:00Z","window":"monthly"},"provider":"copilot","short_term":{"percent_remaining":100.0,"reset_at":null,"window":null},"status":"ok"}""",
             """{"details":{"limit_reached":false,"max_used_percent":44.0},"error":null,"long_term":{"percent_remaining":56.0,"reset_at":"2026-07-11T14:04:58Z","window":"weekly"},"provider":"zai","short_term":{"percent_remaining":58.0,"reset_at":null,"window":"5h"},"status":"ok"}""",
         ).joinToString("\n")
+
+        const val RESET_CREDITS_HEADER: String = "Reset credits · 2 available"
+        const val DUPLICATE_CREDIT_TITLE: String = "Full reset (Weekly + 5 hr)"
+        const val NON_AVAILABLE_DECOY_TITLE: String = "Consumed reset must stay hidden"
+        val CREDIT_EXPIRIES: List<Instant> = listOf(
+            Instant.parse("2026-07-26T23:52:15Z"),
+            Instant.parse("2026-07-31T19:09:12Z"),
+        )
+        val CREDIT_ABSOLUTE_FORMAT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("EEE MMM d, HH:mm", Locale.US)
 
         /**
          * The RAW, un-flattened quse-0.0.9 `--json` document — a provider-keyed

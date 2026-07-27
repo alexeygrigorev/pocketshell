@@ -39,6 +39,8 @@ Per provider, one card with:
 - Short-term window (Codex primary, Claude 5h, Copilot fixed at 100%, Z.AI tokens) with progress bar
 - Long-term window (Codex weekly, Claude 7d, Copilot monthly, Z.AI fixed at 100%) with progress bar
 - Reset time (countdown if soon, absolute date if days away)
+- Codex-only reset-credit inventory when quse reports it (available count,
+  source title, and expiry)
 - Last error if status is `error`
 
 ### Window labels are data-driven, by genuine span (issue #800)
@@ -64,8 +66,25 @@ cadence**: GitHub Copilot's long-term quota carries `monthly` and renders
 `Monthly limit`, NOT a 7d window. When quse carries no span (`window: null`,
 e.g. Copilot's short-term bucket), the parser falls back to the generic key
 name so the label humanizes to `Short term` / `Long term`. There is no
-downstream re-derivation of the span from `details` — the app IGNORES
-`details` entirely.
+downstream re-derivation of the span from `details`. The app ignores
+`details` for quota windows; the one narrow exception is Codex reset-credit
+inventory described below.
+
+### Codex reset credits (issue #1789)
+
+For Codex only, PocketShell reads the additive inventory fields
+`details.reset_credits`, `details.reset_credits_available`, and
+`details.reset_credits_error`. These credits are already available. Their
+timestamps are expiry times, never quota resets, and they do not feed the
+dashboard's soonest-reset value, reset banners/events, notifications, push,
+or any reset action.
+
+The panel preserves source order and duplicates, and includes only rows whose
+status is exactly `available`. It shows an honest zero-count header. Missing
+inventory fields omit the section; a supplementary inventory error leaves the
+valid quota windows visible and adds only `Reset credits unavailable` (never
+the raw error). A malformed expiry or count/list mismatch fails the whole
+usage panel loudly. Other providers ignore these detail fields.
 
 ## Surfaces
 
@@ -167,7 +186,7 @@ unchanged. No downstream re-derivation of windows / resets / percentages
     "short_term": {"percent_remaining": 100.0, "reset_at": "2026-07-07T23:57:08Z", "window": "5h"},
     "long_term":  {"percent_remaining": 2.0,   "reset_at": "2026-07-11T06:23:55Z", "window": "7d"},
     "error": null,
-    "details": { ... extra/human-CLI only; the app IGNORES it ... }
+    "details": { ... extra fields; Codex reset-credit inventory is the sole app exception ... }
   },
   "claude": { "status": "ok", "short_term": {...}, "long_term": {...}, "error": null, "details": {...} }
 }
@@ -184,8 +203,9 @@ The app reads `provider`, `status`, `short_term` / `long_term`
 `{percent_remaining, reset_at, window}`, and `error` directly, and expects
 this exact schema — a mismatch fails the whole panel loudly (no per-record
 skip-resilience). `reset_at` is canonical ISO-8601 UTC; the window label comes
-straight from `short_term.window` / `long_term.window`. The app **ignores**
-`details`.
+straight from `short_term.window` / `long_term.window`. The app ignores
+`details` except for Codex's strict reset-credit inventory fields documented
+above; it never reads `details.windows` or re-derives quota state from details.
 
 The supported providers are `codex`, `claude`, `copilot`, and `zai`.
 `gemini` is accepted but reports `status: "unsupported"` because Gemini

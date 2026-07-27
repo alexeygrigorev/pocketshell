@@ -265,6 +265,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.usage.UsageGlancePillE2eTest"  # #1241 #418 the landing app-bar usage GLANCE PILL on-device proof. The
   "com.pocketshell.app.usage.UsageThresholdNotificationE2eTest"  # #1618 both relative countdown + absolute reset time reach the real status-bar notification
   "com.pocketshell.app.usage.Usage1318StrictSchemaRenderE2eTest"  # #1318 on-device render acceptance for the quse-v0.0.9 strict-schem…
+  "com.pocketshell.app.usage.UsageResetCreditsLayoutTest"  # #1789 reset-credit inventory remains contained and scrollable on narrow / large-font layouts
 )
 
 # CI-matrix journey class selection and banner logging live in a sourced helper.

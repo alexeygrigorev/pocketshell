@@ -36,6 +36,13 @@ run_core_terminal_reattach_repaint() {
   run_ct_class "$CORE_TERMINAL_REATTACH_REPAINT_CLASS"
 }
 
+CORE_TERMINAL_SESSION_BINDING_CLASS="com.pocketshell.core.terminal.ui.TerminalSurfaceComposeIntegrationTest#mountedViewRebindsImmediatelyFromSessionAToBAndRoutesOnlyToB"
+SESSION_BINDING_STATUS="PASS"
+
+run_core_terminal_session_binding() {
+  run_ct_class "$CORE_TERMINAL_SESSION_BINDING_CLASS"
+}
+
 CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS="com.pocketshell.core.terminal.selection.TerminalOverlayUnboundedMeasureCrashTest"
 OVERLAY_UNBOUNDED_STATUS="PASS"
 

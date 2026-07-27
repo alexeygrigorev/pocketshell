@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -272,7 +273,6 @@ fun TerminalSurface(
     viewClient.onTerminalSurfaceError = onLocalTerminalError
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
     var viewportTick by remember { mutableStateOf(0L) }
-    val desiredSession = state.session
 
     val context = LocalContext.current
 
@@ -378,6 +378,43 @@ fun TerminalSurface(
         onDispose {
             state.setSmartTextStagingBridge(null)
             state.setSurfacePixelSampler(null)
+        }
+    }
+
+    // Issue #959 recurrence: TerminalSurfaceState owns the authoritative
+    // TerminalSession identity, while the mounted TerminalView owns the real
+    // IME/key-event entry point. Binding the two from AndroidView.update left a
+    // lifecycle-sized window where the state and pane producer had already moved
+    // to session B but the reused View still exposed session A. A one-shot key
+    // written in that window disappeared into A's stopped bridge.
+    //
+    // Observe the latest exact session identity independently of recomposition. A
+    // DisposableEffect keyed by state.session is still gated by a Compose apply
+    // turn; the post-grace diagnostic proved that turn can arrive after the
+    // user's first input. snapshotFlow registers directly with snapshot state,
+    // and the Handler-based main dispatcher applies the lifecycle's settled
+    // session identity to the mounted View before the post-reattach input turn.
+    // The A→null→B connected proof separately exercises the detach identity;
+    // snapshotFlow may conflate faster intermediate writes, so this is not a
+    // claim that arbitrary off-main mutations are synchronously mirrored.
+    // This is the single attachment owner; AndroidView.update below only reports
+    // the View instance and never performs a second delayed attachment.
+    LaunchedEffect(state, terminalView) {
+        val view = terminalView ?: return@LaunchedEffect
+        withContext(Dispatchers.Main.immediate) {
+            snapshotFlow { state.session }.collect { session ->
+                if (view.currentSession !== session) {
+                    runCatching {
+                        view.attachSession(session)
+                        if (session != null) {
+                            // Issue #721: a replacement session may already hold
+                            // seeded buffer content, while the reused View's dirty
+                            // cache still describes the old surface.
+                            view.forceFullRepaint()
+                        }
+                    }.onFailure { onLocalTerminalError?.invoke(it) }
+                }
+            }
         }
     }
 
@@ -650,37 +687,6 @@ fun TerminalSurface(
                 },
                 update = { view ->
                     terminalView = view
-                    val current = view.currentSession
-                    // Attach / detach as the state's session reference
-                    // changes. `attachSession` early-returns when given the
-                    // same instance, so this is idempotent across
-                    // recompositions.
-                    if (desiredSession != null) {
-                        if (desiredSession !== current) {
-                            runCatching {
-                                view.attachSession(desiredSession)
-                                // Issue #721: attaching a session that already
-                                // holds buffer content (a tmux session switch via
-                                // pager dispose, or any attach with no fresh bytes
-                                // pending) updates the emulator the View points at
-                                // but does not, on its own, repaint the existing
-                                // screen — the #469 dirty cache still assumes the
-                                // previous surface pixels. Force a full repaint so
-                                // the whole buffer is redrawn on attach, not just
-                                // newly-written cells.
-                                view.forceFullRepaint()
-                            }.onFailure { onLocalTerminalError?.invoke(it) }
-                        }
-                    } else if (desiredSession !== current) {
-                        // No public detach on TerminalView; clear the
-                        // field via an attach of an empty marker is not
-                        // possible because TerminalSession is `final`
-                        // and we cannot construct a sentinel without
-                        // driving JNI. The view simply keeps its last
-                        // session reference until the next attach. This
-                        // is acceptable for #8 — #9 will always have a
-                        // fresh session on hand when changing sessions.
-                    }
                 },
             )
             if (matchScannerEnabled) {

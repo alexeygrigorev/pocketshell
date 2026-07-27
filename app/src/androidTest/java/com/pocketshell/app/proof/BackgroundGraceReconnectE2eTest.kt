@@ -36,6 +36,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
@@ -288,7 +289,7 @@ class BackgroundGraceReconnectE2eTest {
      * TYPES a unique token through the real input path and asserts the shell's
      * FRESH ECHO of that token renders in the visible terminal — the live-terminal
      * property. RED on a frozen reattach (no echo ever appears → times out);
-     * GREEN once the producer + input re-bind to the new client.
+     * GREEN once the visible TerminalView also adopts the reattached session.
      */
     @Test
     fun postGraceReattachLeavesTerminalLiveWithFreshInputEcho() { runBlocking<Unit> {
@@ -355,30 +356,75 @@ class BackgroundGraceReconnectE2eTest {
         captureViewport("issue959-02-post-grace-reattached")
 
         // LOAD-BEARING: type a NEW token AFTER the reattach and require the shell's
-        // FRESH echo to render. On a frozen reattach (producer/input still bound to
-        // the dead client) the keystrokes never reach the shell and/or the echo
+        // FRESH echo to render. On a frozen reattach (the visible TerminalView still
+        // exposing the dead session) the keystrokes never reach the shell and/or the echo
         // never reaches the emulator, so this token NEVER appears -> the wait
         // HARD-fails. This is the user-visible "terminal usable again" property.
         val postToken = "ISSUE959-POST-${SystemClock.elapsedRealtime()}"
-        sendLineToActivePane("echo $postToken")
-        waitForVisibleTerminal("post-grace fresh input echo") { it.contains(postToken) }
+        val diagnosticRunId =
+            "issue959-${System.currentTimeMillis()}-${SystemClock.elapsedRealtime()}"
+        val sendSessionHash = sendLineToActivePane("echo $postToken")
+
+        // Diagnostic-only recurrence slice (unchanged production): take the
+        // independent server/view/input/identity snapshot IMMEDIATELY after the
+        // real TerminalView.currentSession write, before the unchanged load-bearing
+        // visible-terminal wait. The server capture uses a separate
+        // SSH connection, never the app's `clientRef`, so it remains authoritative
+        // when the app-side stream/view is stale.
+        val immediateEvidence = capturePostGraceEvidence(
+            runId = diagnosticRunId,
+            phase = "immediate-post-send",
+            token = postToken,
+            sendSessionHash = sendSessionHash,
+        )
+        assertEquals(
+            "the input write must use the exact TerminalSurfaceState session identity",
+            immediateEvidence.identity.terminalStateSessionHash,
+            immediateEvidence.identity.sendTerminalViewSessionHash,
+        )
+        assertEquals(
+            "the mounted TerminalView must already expose the exact state session at immediate send",
+            immediateEvidence.identity.terminalStateSessionHash,
+            immediateEvidence.identity.terminalViewSessionHash,
+        )
+        assertTrue(
+            "the immediate post-send identity artifact must classify View and state as identical",
+            immediateEvidence.identity.viewSessionMatchesTerminalStateSession,
+        )
+
+        val visibleWaitFailure = runCatching {
+            waitForVisibleTerminal("post-grace fresh input echo") { it.contains(postToken) }
+        }.exceptionOrNull()
+        val terminalEvidence = capturePostGraceEvidence(
+            runId = diagnosticRunId,
+            phase = if (visibleWaitFailure == null) "visible-success" else "visible-timeout",
+            token = postToken,
+            sendSessionHash = sendSessionHash,
+        )
+        writePostGraceDiagnosticSummary(
+            runId = diagnosticRunId,
+            token = postToken,
+            immediate = immediateEvidence,
+            terminal = terminalEvidence,
+            waitFailure = visibleWaitFailure,
+        )
+        if (visibleWaitFailure != null) {
+            throw AssertionError(
+                "post-grace fresh input echo failed; classification=" +
+                    terminalEvidence.classification.code +
+                    " runId=$diagnosticRunId token=$postToken " +
+                    "serverHasToken=${terminalEvidence.serverHasToken} " +
+                    "viewportHasToken=${terminalEvidence.viewportHasToken} " +
+                    "paneInputBatchCount=${terminalEvidence.paneInputBatchCount} " +
+                    "sendFailureCount=${terminalEvidence.sendFailureCount}. " +
+                    "See issue959-post-grace-diagnostic-summary.txt and phase artifacts.",
+                visibleWaitFailure,
+            )
+        }
         captureViewport("issue959-03-post-grace-fresh-echo")
         writeTimings()
     } }
 
-    /**
-     * Issue #959: send a line of text + Enter to the active pane through the
-     * REAL on-device input path: bytes are written to the live Termux
-     * [TerminalView]'s session (`currentSession.write`) — EXACTLY what the Termux
-     * key handler does for a typed character. That session is the bridge's
-     * `TerminalSession`, whose output stream is the pane's `remoteStdin` (the tmux
-     * input sink -> queue -> drain coroutine). This is the path the freeze kills:
-     * after a beyond-grace reattach the reused pane's bridge/remoteStdin/drain are
-     * still wired to the DEAD client (its queue was closed at teardown), so the
-     * keystrokes never reach the shell and nothing echoes. Driving the VM's
-     * `writeInputToPane` (which sends straight to `clientRef`) would BYPASS that
-     * frozen queue and mask the bug — this MUST go through the terminal session.
-     */
     /**
      * Issue #959 (#780 model): arm the synthetic injection so the next background
      * teardown PRESERVES the pane runtime (paneRows + producers + input + client
@@ -395,18 +441,415 @@ class BackgroundGraceReconnectE2eTest {
         check(armed) { "failed to arm the #959 surviving-pane-runtime injection" }
     }
 
-    private fun sendLineToActivePane(line: String) {
+    /**
+     * Issue #959: send a line of text + Enter to the active pane through the
+     * REAL on-device input path: bytes are written to the live Termux
+     * [TerminalView]'s session (`currentSession.write`) — EXACTLY what the Termux
+     * key handler does for a typed character. That session's output stream is the
+     * pane's `remoteStdin` (the tmux input sink -> queue -> drain coroutine).
+     * After a beyond-grace reattach the pane's TerminalSurfaceState may already
+     * own the replacement session while the visible TerminalView still exposes
+     * the dead one, so the keystrokes never reach the shell and nothing echoes.
+     * Driving the VM's `writeInputToPane` (which sends straight to `clientRef`)
+     * would bypass the stale view session and mask the bug.
+     */
+    private fun sendLineToActivePane(line: String): Int {
         val bytes = (line + "\n").toByteArray(Charsets.UTF_8)
         var wrote = false
+        var sessionHash: Int? = null
         compose.activityRule.scenario.onActivity { activity ->
             val session = activity.window.decorView.findTerminalView()?.currentSession
                 ?: return@onActivity
+            sessionHash = System.identityHashCode(session)
             session.write(bytes, 0, bytes.size)
             wrote = true
         }
         check(wrote) { "no live terminal session to send input to" }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        return checkNotNull(sessionHash) {
+            "TerminalView.currentSession identity disappeared during the input write"
+        }
     }
+
+    /**
+     * Issue #959 recurrence diagnosis: preserve the independently-observed
+     * server pane, app viewport/text, real pane-input delivery diagnostics, and
+     * all identities needed to distinguish a stale TerminalView/session from a
+     * superseded client/producer/pane target. This is test-only instrumentation:
+     * it changes no production connection/input/output path, retry, timeout, or
+     * threshold.
+     */
+    private suspend fun capturePostGraceEvidence(
+        runId: String,
+        phase: String,
+        token: String,
+        sendSessionHash: Int,
+    ): PostGraceEvidence {
+        val identity = snapshotPostGraceIdentity(sendSessionHash)
+        val exactPaneId = requireNotNull(identity.paneId) {
+            "cannot classify #959 server evidence without the exact active pane id"
+        }
+        val serverCapture = capturePaneThroughIndependentSsh(exactPaneId)
+        val captureValidity = serverCapture.validity()
+        val viewportText = visibleTerminalText()
+        val inputEvents = relevantPaneInputEvents()
+        val prerequisites = postGracePrerequisiteEvents()
+        val serverHasToken = serverCapture.stdout.contains(token)
+        val viewportHasToken = viewportText.contains(token)
+        val batches = inputEvents.count { it.name == "pane_input_batch" }
+        val failures = inputEvents.count {
+            it.name == "pane_input_send_failed" || it.name == "pane_input_send_abandoned"
+        }
+        val classification = classifyPostGraceEvidence(
+            captureValidity = captureValidity,
+            serverHasToken = serverHasToken,
+            viewportHasToken = viewportHasToken,
+            paneInputBatchCount = batches,
+            sendFailureCount = failures,
+        )
+        val evidence = PostGraceEvidence(
+            phase = phase,
+            identity = identity,
+            serverCapture = serverCapture,
+            captureValidity = captureValidity,
+            viewportText = viewportText,
+            inputEvents = inputEvents,
+            prerequisites = prerequisites,
+            serverHasToken = serverHasToken,
+            viewportHasToken = viewportHasToken,
+            paneInputBatchCount = batches,
+            sendFailureCount = failures,
+            classification = classification,
+        )
+
+        // A direct TerminalView render + transcript pair from THIS snapshot.
+        // captureViewport also leaves an explicit visible-terminal artifact when
+        // the AndroidView cannot be drawn, so absence is observable.
+        captureViewport("issue959-$phase")
+        writeText(
+            "issue959-$phase-server-capture-pane.txt",
+            buildString {
+                appendLine("runId=$runId")
+                appendLine("phase=$phase")
+                appendLine("token=$token")
+                appendLine("command=${serverCapture.command}")
+                appendLine("targetPaneId=${serverCapture.targetPaneId}")
+                appendLine("validity=${captureValidity.code}")
+                appendLine("authoritative=${captureValidity.authoritative}")
+                appendLine("exitCode=${serverCapture.exitCode}")
+                appendLine("failureKind=${serverCapture.failureKind}")
+                appendLine("exception=${serverCapture.exception}")
+                appendLine("stderr:")
+                appendLine(serverCapture.stderr)
+                appendLine("stdout:")
+                append(serverCapture.stdout)
+            },
+        )
+        writeText(
+            "issue959-$phase-identity-input-prerequisites.txt",
+            evidence.describe(runId = runId, token = token),
+        )
+        return evidence
+    }
+
+    private fun snapshotPostGraceIdentity(sendSessionHash: Int): PostGraceIdentity {
+        var snapshot: PostGraceIdentity? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            val terminalView = activity.window.decorView.findTerminalView()
+            val viewSession = terminalView?.currentSession
+            val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            val pane = vm.panes.value.firstOrNull()
+            val terminalState = pane?.terminalState
+            val stateSession = terminalState?.terminalSessionForDiagnostics()
+            val clientHash = vm.currentClientIdentityForTest()
+            val generation = vm.currentConnectGenerationForTest()
+            val targetSessionKey = vm.currentTargetSessionKeyForTest()
+            snapshot = PostGraceIdentity(
+                sendTerminalViewSessionHash = sendSessionHash,
+                terminalViewSessionHash = viewSession?.let(System::identityHashCode),
+                terminalViewEmulatorHash = terminalView?.mEmulator?.let(System::identityHashCode),
+                terminalStateHash = terminalState?.let(System::identityHashCode),
+                terminalStateSessionHash = stateSession?.let(System::identityHashCode),
+                viewSessionMatchesTerminalStateSession =
+                    viewSession != null && viewSession === stateSession,
+                terminalStateAttached = terminalState?.isAttached,
+                activeClientRefHash = clientHash,
+                paneProducerClientHash =
+                    pane?.paneId?.let(vm::paneProducerClientIdentityForTest),
+                paneProducerActive = pane?.paneId?.let(vm::paneProducerActiveForTest),
+                generation = generation,
+                paneId = pane?.paneId,
+                windowId = pane?.windowId,
+                tmuxSessionId = pane?.sessionId,
+                targetSessionKey = targetSessionKey,
+                runtimeKey =
+                    "target=$targetSessionKey|client=$clientHash|generation=$generation|" +
+                        "pane=${pane?.paneId}",
+            )
+        }
+        return checkNotNull(snapshot) {
+            "could not snapshot TerminalView/terminalState/client/producer runtime identities"
+        }
+    }
+
+    /**
+     * TerminalSurfaceState.session is `internal` to :shared:core-terminal.
+     * Keep production APIs unchanged: the diagnostic test reads the exact
+     * attached session from the state's private bridge and compares it with
+     * TerminalView.currentSession by identity.
+     */
+    private fun TerminalSurfaceState.terminalSessionForDiagnostics(): Any? =
+        runCatching {
+            val bridgeField = TerminalSurfaceState::class.java.getDeclaredField("bridge").apply {
+                isAccessible = true
+            }
+            val bridge = bridgeField.get(this) ?: return@runCatching null
+            bridge.javaClass.getMethod("getSession").invoke(bridge)
+        }.getOrNull()
+
+    /**
+     * Authoritative discriminator: this opens a brand-new SSH connection and
+     * runs tmux capture-pane directly. It is independent of the app's active SSH
+     * lease, `-CC` client, output producer, TerminalSession, and viewport.
+     */
+    private suspend fun capturePaneThroughIndependentSsh(paneId: String): ServerPaneCapture {
+        val command = "tmux capture-pane -p -S - -t ${shellQuote(paneId)}"
+        val connected = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(fixtureKey),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        )
+        return connected.fold(
+            onSuccess = { session ->
+                session.use {
+                    runCatching { it.exec(command) }.fold(
+                        onSuccess = { result ->
+                            ServerPaneCapture(
+                                targetPaneId = paneId,
+                                command = command,
+                                exitCode = result.exitCode,
+                                stdout = result.stdout,
+                                stderr = result.stderr,
+                                failureKind = null,
+                                exception = null,
+                            )
+                        },
+                        onFailure = { error ->
+                            ServerPaneCapture(
+                                targetPaneId = paneId,
+                                command = command,
+                                exitCode = null,
+                                stdout = "",
+                                stderr = "",
+                                failureKind = ServerPaneCaptureFailure.EXECUTION,
+                                exception = "${error.javaClass.name}: ${error.message}",
+                            )
+                        },
+                    )
+                }
+            },
+            onFailure = { error ->
+                ServerPaneCapture(
+                    targetPaneId = paneId,
+                    command = command,
+                    exitCode = null,
+                    stdout = "",
+                    stderr = "",
+                    failureKind = ServerPaneCaptureFailure.CONNECTION,
+                    exception = "${error.javaClass.name}: ${error.message}",
+                )
+            },
+        )
+    }
+
+    private fun ServerPaneCapture.validity(): ServerPaneCaptureValidity =
+        when {
+            failureKind == ServerPaneCaptureFailure.CONNECTION ->
+                ServerPaneCaptureValidity.CONNECTION_FAILED
+            failureKind == ServerPaneCaptureFailure.EXECUTION ->
+                ServerPaneCaptureValidity.EXEC_EXCEPTION
+            exitCode == null ->
+                ServerPaneCaptureValidity.UNUSABLE_RESULT
+            exitCode != 0 ->
+                ServerPaneCaptureValidity.NONZERO_EXIT
+            stdout.isEmpty() ->
+                ServerPaneCaptureValidity.VERIFIED_EXIT_ZERO_EMPTY
+            else ->
+                ServerPaneCaptureValidity.VERIFIED_EXIT_ZERO_WITH_OUTPUT
+        }
+
+    private fun relevantPaneInputEvents(): List<RecordedDiagnosticEvent> =
+        diagnostics!!.events.filter {
+            it.name in setOf(
+                "pane_input_batch",
+                "pane_input_send_deferred",
+                "pane_input_send_failed",
+                "pane_input_send_abandoned",
+                "pane_input_verify_before_resend",
+            )
+        }
+
+    private fun postGracePrerequisiteEvents(): List<RecordedDiagnosticEvent> {
+        val prerequisiteNames = setOf(
+            "background_grace_elapsed",
+            "terminal_background_teardown",
+            "background_grace_foreground",
+            "terminal_foreground_reattach",
+            "foreground_reattach",
+        )
+        return diagnostics!!.events.filter { it.name in prerequisiteNames }
+    }
+
+    private fun classifyPostGraceEvidence(
+        captureValidity: ServerPaneCaptureValidity,
+        serverHasToken: Boolean,
+        viewportHasToken: Boolean,
+        paneInputBatchCount: Int,
+        sendFailureCount: Int,
+    ): PostGraceClassification =
+        when {
+            !captureValidity.authoritative ->
+                PostGraceClassification.UNVERIFIED_CAPTURE_FAILED
+            serverHasToken && viewportHasToken ->
+                PostGraceClassification.TOKEN_SERVER_SIDE_AND_VIEWPORT
+            serverHasToken ->
+                PostGraceClassification.TOKEN_SERVER_SIDE_VIEWPORT_ABSENT
+            paneInputBatchCount == 0 ->
+                PostGraceClassification.TOKEN_ABSENT_NO_PANE_INPUT_BATCH
+            sendFailureCount > 0 ->
+                PostGraceClassification.TOKEN_ABSENT_BATCH_SEND_FAILED_OR_SUPERSEDED
+            else ->
+                PostGraceClassification.TOKEN_ABSENT_BATCH_NO_FAILURE_WRONG_TARGET_OR_FALSE_SUCCESS
+        }
+
+    private fun writePostGraceDiagnosticSummary(
+        runId: String,
+        token: String,
+        immediate: PostGraceEvidence,
+        terminal: PostGraceEvidence,
+        waitFailure: Throwable?,
+    ) {
+        writeText(
+            "issue959-post-grace-diagnostic-summary.txt",
+            buildString {
+                appendLine("runId=$runId")
+                appendLine("token=$token")
+                appendLine("visibleWaitFailure=${waitFailure?.javaClass?.name}: ${waitFailure?.message}")
+                appendLine()
+                appendLine(immediate.describe(runId = runId, token = token))
+                appendLine()
+                appendLine(terminal.describe(runId = runId, token = token))
+            },
+        )
+    }
+
+    private data class PostGraceIdentity(
+        val sendTerminalViewSessionHash: Int,
+        val terminalViewSessionHash: Int?,
+        val terminalViewEmulatorHash: Int?,
+        val terminalStateHash: Int?,
+        val terminalStateSessionHash: Int?,
+        val viewSessionMatchesTerminalStateSession: Boolean,
+        val terminalStateAttached: Boolean?,
+        val activeClientRefHash: Int?,
+        val paneProducerClientHash: Int?,
+        val paneProducerActive: Boolean?,
+        val generation: Long,
+        val paneId: String?,
+        val windowId: String?,
+        val tmuxSessionId: String?,
+        val targetSessionKey: String?,
+        val runtimeKey: String,
+    )
+
+    private data class ServerPaneCapture(
+        val targetPaneId: String,
+        val command: String,
+        val exitCode: Int?,
+        val stdout: String,
+        val stderr: String,
+        val failureKind: ServerPaneCaptureFailure?,
+        val exception: String?,
+    )
+
+    private data class PostGraceEvidence(
+        val phase: String,
+        val identity: PostGraceIdentity,
+        val serverCapture: ServerPaneCapture,
+        val captureValidity: ServerPaneCaptureValidity,
+        val viewportText: String,
+        val inputEvents: List<RecordedDiagnosticEvent>,
+        val prerequisites: List<RecordedDiagnosticEvent>,
+        val serverHasToken: Boolean,
+        val viewportHasToken: Boolean,
+        val paneInputBatchCount: Int,
+        val sendFailureCount: Int,
+        val classification: PostGraceClassification,
+    ) {
+        fun describe(runId: String, token: String): String =
+            buildString {
+                appendLine("runId=$runId")
+                appendLine("phase=$phase")
+                appendLine("token=$token")
+                appendLine("classification=${classification.code}")
+                appendLine("serverHasToken=$serverHasToken")
+                appendLine("viewportHasToken=$viewportHasToken")
+                appendLine("paneInputBatchCount=$paneInputBatchCount")
+                appendLine("sendFailureCount=$sendFailureCount")
+                appendLine("identity=$identity")
+                appendLine("serverCaptureTargetPaneId=${serverCapture.targetPaneId}")
+                appendLine("serverCaptureCommand=${serverCapture.command}")
+                appendLine("serverCaptureValidity=${captureValidity.code}")
+                appendLine("serverCaptureAuthoritative=${captureValidity.authoritative}")
+                appendLine("serverCaptureExitCode=${serverCapture.exitCode}")
+                appendLine("serverCaptureFailureKind=${serverCapture.failureKind}")
+                appendLine("serverCaptureException=${serverCapture.exception}")
+                appendLine("prerequisites:")
+                prerequisites.forEach {
+                    appendLine("  ${it.category}/${it.name} fields=${it.fields.toSortedMap()}")
+                }
+                appendLine("paneInputAndSendOutcomeDiagnostics:")
+                inputEvents.forEach {
+                    appendLine("  ${it.category}/${it.name} fields=${it.fields.toSortedMap()}")
+                }
+                appendLine("visibleTerminalText:")
+                append(viewportText)
+            }
+    }
+
+    private enum class ServerPaneCaptureFailure {
+        CONNECTION,
+        EXECUTION,
+    }
+
+    private enum class ServerPaneCaptureValidity(
+        val code: String,
+        val authoritative: Boolean,
+    ) {
+        VERIFIED_EXIT_ZERO_WITH_OUTPUT("verified_exit_zero_with_output", true),
+        VERIFIED_EXIT_ZERO_EMPTY("verified_exit_zero_empty", true),
+        CONNECTION_FAILED("connection_failed", false),
+        EXEC_EXCEPTION("exec_exception", false),
+        UNUSABLE_RESULT("unusable_result", false),
+        NONZERO_EXIT("nonzero_exit", false),
+    }
+
+    private enum class PostGraceClassification(val code: String) {
+        UNVERIFIED_CAPTURE_FAILED("unverified_capture_failed"),
+        TOKEN_SERVER_SIDE_AND_VIEWPORT("token_server_side_and_viewport"),
+        TOKEN_SERVER_SIDE_VIEWPORT_ABSENT("token_server_side_viewport_absent_output_or_surface"),
+        TOKEN_ABSENT_NO_PANE_INPUT_BATCH("token_absent_no_batch_stale_session_or_stopped_drainer"),
+        TOKEN_ABSENT_BATCH_SEND_FAILED_OR_SUPERSEDED("token_absent_batch_send_failed_or_superseded"),
+        TOKEN_ABSENT_BATCH_NO_FAILURE_WRONG_TARGET_OR_FALSE_SUCCESS(
+            "token_absent_batch_no_failure_wrong_pane_client_or_false_success",
+        ),
+    }
+
+    private fun RecordedDiagnosticEvent.describe(): String =
+        "$category/$name fields=${fields.toSortedMap()}"
 
     @Test
     fun sixSecondAppSwitchWithProductionGraceDoesNotShowOrRecordReconnect() { runBlocking<Unit> {

@@ -9,6 +9,7 @@ import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.protocol.ControlEvent
+import com.pocketshell.testsupport.drainMainLooperUntil as drainMainLooperUntilShared
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
@@ -27,6 +28,7 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.robolectric.Shadows.shadowOf
+import java.util.concurrent.TimeUnit
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TmuxSessionViewModelAttachReadinessTest : TmuxSessionViewModelTestBase() {
@@ -282,6 +284,11 @@ class TmuxSessionViewModelAttachReadinessTest : TmuxSessionViewModelTestBase() {
         // Open the seed gate so live %output flushes to the emulator, then prove
         // I/O is wired to client A: an %output emitted on A renders.
         val state = vm.panes.value.single().terminalState
+        val terminalSessionOnA = terminalSessionFrom(state)
+        assertNotNull(
+            "precondition: terminalState.session must be attached through client A's bridge",
+            terminalSessionOnA,
+        )
         state.appendRemoteOutput("SEED-A\r\n".toByteArray(Charsets.US_ASCII))
         shadowOf(Looper.getMainLooper()).idle()
         clientA.emittedPaneOutputs.emit(
@@ -324,6 +331,17 @@ class TmuxSessionViewModelAttachReadinessTest : TmuxSessionViewModelTestBase() {
             state,
             vm.panes.value.single().terminalState,
         )
+        val terminalSessionOnB = terminalSessionFrom(state)
+        assertNotNull(
+            "the reused terminalState must expose a live TerminalSession after client B rebind",
+            terminalSessionOnB,
+        )
+        assertNotSame(
+            "client B rebind must replace terminalState.session; retaining client A's " +
+                "TerminalSession leaves its remoteStdin closed/stale",
+            terminalSessionOnA,
+            terminalSessionOnB,
+        )
 
         // The rebind re-arms the producer's seed gate (awaitSeed=true closes it
         // until the reattach re-seed lands — in production that is
@@ -346,15 +364,31 @@ class TmuxSessionViewModelAttachReadinessTest : TmuxSessionViewModelTestBase() {
             renderedTranscriptFrom(state).contains("OUTPUT-ON-B"),
         )
 
-        // LOAD-BEARING (input): a key written to the pane's input sink must drain
-        // to the NEW client B (a send-keys on B), NOT the dead client A.
+        // LOAD-BEARING (input): write through terminalState.session — the exact
+        // TerminalView.currentSession -> TerminalSession -> SshTerminalBridge
+        // drainer -> remoteStdin path the connected journey exercises. The old
+        // `tmuxInputSinkForTest` write bypassed the TerminalSession + real drainer
+        // and could stay green while the on-device view retained a closed/stale
+        // session. The shared Shape-B wall-clock pump is mandatory here because
+        // SshTerminalBridge's drainer is a real Thread/Handler, not owned by the
+        // runTest virtual scheduler.
         val keysOnBBefore = clientB.sentCommands.count { it.startsWith("send-keys") }
-        vm.tmuxInputSinkForTest("%0").write("x".toByteArray(Charsets.US_ASCII))
-        advanceUntilIdle()
+        state.writeInput("x".toByteArray(Charsets.US_ASCII))
+        val drainedThroughTerminalSession = drainMainLooperUntilShared(
+            deadlineMs = SLOW_FEED_DRAIN_TIMEOUT_MS,
+            sleepMs = 2L,
+            onTick = {
+                shadowOf(Looper.getMainLooper()).idleFor(16L, TimeUnit.MILLISECONDS)
+                runCurrent()
+            },
+        ) {
+            clientB.sentCommands.count { it.startsWith("send-keys") } > keysOnBBefore
+        }
         assertTrue(
-            "REGRESSION (#959): input after a reattach must reach the NEW client " +
-                "(a send-keys on B), not the dead client.",
-            clientB.sentCommands.count { it.startsWith("send-keys") } > keysOnBBefore,
+            "REGRESSION (#959): terminalState.session input did not drain through " +
+                "SshTerminalBridge to the NEW client B before the bounded wall-clock " +
+                "deadline; B=${clientB.sentCommands} A=${clientA.sentCommands}",
+            drainedThroughTerminalSession,
         )
         assertTrue(
             "the input key must carry the typed byte to client B",
@@ -1043,6 +1077,13 @@ class TmuxSessionViewModelAttachReadinessTest : TmuxSessionViewModelTestBase() {
         }
         val bridge = bridgeField.get(state) as? SshTerminalBridge ?: return ""
         return bridge.emulator.screen.transcriptText
+    }
+
+    private fun terminalSessionFrom(state: TerminalSurfaceState): Any? {
+        val bridgeField = TerminalSurfaceState::class.java.getDeclaredField("bridge").apply {
+            isAccessible = true
+        }
+        return (bridgeField.get(state) as? SshTerminalBridge)?.session
     }
 
     private companion object {

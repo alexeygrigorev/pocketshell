@@ -32,8 +32,8 @@ import com.pocketshell.app.voice.AssistantCorrectionDictation
 import com.pocketshell.app.voice.AssistantDictationTextEvent
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.BottomChipControls
-import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
+import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 import com.pocketshell.app.voice.TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
@@ -187,8 +187,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                 TmuxTerminalBottomControls(
                     showConversation = false,
                     sessionLive = true,
-                    isAgentPane = false,
-                    onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = {},
                     onShowKeyboardTap = {},
@@ -290,8 +288,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                     showConversation = false,
                     sessionLive = true,
                     // Shell (non-agent) pane — the regression case from #641.
-                    isAgentPane = false,
-                    onChipTap = {},
                     onDictateTap = { dictateTaps++ },
                     onEnterTap = { enterTaps++ },
                     onShowKeyboardTap = { keyboardTaps++ },
@@ -361,8 +357,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                     // Issue #1672: the terminal is held behind the "Attaching…"
                     // loader (Reconnecting / Attaching — the reported state).
                     terminalHeld = true,
-                    isAgentPane = false,
-                    onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = {},
                     onShowKeyboardTap = {},
@@ -374,9 +368,8 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("issue1672-held-terminal-no-command-band.png")
 
-        // The quick-command chip band is HIDDEN — none of the DefaultSessionChips
-        // render while the terminal is held.
-        DefaultSessionChips.forEach { chip ->
+        // Generic command literals stay absent in every state.
+        FORBIDDEN_LITERAL_CHIPS.forEach { chip ->
             compose.onNodeWithText(chip).assertDoesNotExist()
         }
         // The primary cluster is gone too (nothing operable while held).
@@ -396,15 +389,13 @@ class TmuxSessionVoiceSurfaceUiTest {
      * absent-while-held / present-when-Live regression pair.
      */
     @Test
-    fun liveTerminalShowsQuickCommandBand() {
+    fun liveTerminalShowsRetainedPrimaryControlsWithoutGenericLiterals() {
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
                     showConversation = false,
                     sessionLive = true,
                     terminalHeld = false,
-                    isAgentPane = false,
-                    onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = {},
                     onShowKeyboardTap = {},
@@ -416,28 +407,8 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("issue1672-live-terminal-command-band.png")
 
-        // The static command band RETURNS when the terminal is live: every
-        // `DefaultSessionChips` entry is present in the tree — the exact mirror of
-        // the held test's `assertDoesNotExist()`. This is the load-bearing AC2
-        // assertion: if the surface fn wrongly returned `LauncherOnly` for the
-        // Live case, `BottomChipControls` would not render and these nodes would
-        // not exist, so this fails.
-        //
-        // These use `assertExists()` — NOT `assertIsDisplayed()` — deliberately.
-        // Per the #813 layout the static-chip strip is the LOWEST-priority row: it
-        // yields and horizontally scrolls FIRST so the higher-priority primary
-        // cluster (`Enter` / `show keyboard` / `hotkeys` / `snippets`) and the
-        // composer launcher keep their width and stay on-screen. At the real
-        // emulator viewport width the cluster consumes the whole capped chip area,
-        // so the static strip collapses and scrolls entirely off (see
-        // `issue1672-live-terminal-command-band.png` — the live band shows the
-        // cluster + `>_` launcher, the static chips are scrolled off the left).
-        // That is the PRODUCTION behaviour of the live band, byte-identical to
-        // pre-#1672; asserting `assertIsDisplayed()` on all four would contradict
-        // the real layout. "The band returned" is proven by existence here plus the
-        // containment checks below on the parts the live band actually presents.
-        DefaultSessionChips.forEach { chip ->
-            compose.onNodeWithText(chip).assertExists()
+        FORBIDDEN_LITERAL_CHIPS.forEach { chip ->
+            compose.onNodeWithText(chip, useUnmergedTree = true).assertDoesNotExist()
         }
         // The primary cluster is the visible face of the returned command band
         // (the held state showed ONLY the launcher). F3 containment — the
@@ -446,6 +417,8 @@ class TmuxSessionVoiceSurfaceUiTest {
         // the leftmost cluster chips shown in the live viewport artifact.
         compose.assertNodeFullyWithinRoot(SESSION_ENTER_CHIP_TAG)
         compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
+        compose.assertNodeFullyWithinRoot(SESSION_ADD_SNIPPET_CHIP_TAG)
+        compose.assertNodeFullyWithinRoot(HOTKEYS_CHIP_TAG)
         compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
     }
 
@@ -469,8 +442,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 BottomChipControls(
-                    chips = DefaultSessionChips,
-                    onChipTap = {},
                     onDictateTap = { dictateTaps++ },
                     onEnterTap = {},
                     onShowKeyboardTap = {},
@@ -545,8 +516,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                 TmuxTerminalBottomControls(
                     showConversation = false,
                     sessionLive = true,
-                    isAgentPane = true,
-                    onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = { enterTaps++ },
                     onShowKeyboardTap = { keyboardTaps++ },
@@ -582,8 +551,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 BottomChipControls(
-                    chips = AgentExitChips,
-                    onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = {},
                     onShowKeyboardTap = {},
@@ -635,8 +602,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                     TmuxTerminalBottomControls(
                         showConversation = false,
                         sessionLive = true,
-                        isAgentPane = true,
-                        onChipTap = {},
                         onDictateTap = { composerOpen = true },
                         onEnterTap = {},
                         onShowKeyboardTap = {},
@@ -713,16 +678,13 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun shellBottomChipControlsRenderCommandsWithMic() {
+    fun shellBottomChipControlsKeepGenericActionsAndNoGuessedCommands() {
         var snippetTaps = 0
         var keyboardTaps = 0
         var dictateTaps = 0
-        val chipTaps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
                 BottomChipControls(
-                    chips = DefaultSessionChips,
-                    onChipTap = { chipTaps += it },
                     onDictateTap = { dictateTaps++ },
                     onShowKeyboardTap = { keyboardTaps += 1 },
                     onAddSnippetTap = { snippetTaps += 1 },
@@ -770,8 +732,9 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertIsDisplayed()
         compose.onNodeWithText("+ snippet").assertDoesNotExist()
 
-        compose.onNodeWithText("git status").assertHasClickAction().performClick()
-        assertEquals(listOf("git status"), chipTaps)
+        FORBIDDEN_LITERAL_CHIPS.forEach { chip ->
+            compose.onNodeWithText(chip, useUnmergedTree = true).assertDoesNotExist()
+        }
     }
 
     @Test
@@ -779,16 +742,13 @@ class TmuxSessionVoiceSurfaceUiTest {
         // Issue #787 (D22 hard-cut): the bottom `/ commands` chip is GONE — slash
         // entry now lives only in the composer (its `/` button + type-`/`
         // autocomplete). The agent-pane band keeps the Prompt Composer launcher.
-        // `AgentExitChips` is empty; there is no snippet chip on agent panes (the
-        // composer's `{}` inserts prompts). The former `Ctrl-C ×2` / `Ctrl-D ×2`
+        // There is no snippet chip on agent panes (the composer's `{}` inserts
+        // prompts). The former `Ctrl-C ×2` / `Ctrl-D ×2`
         // interrupt/EOF controls were re-homed into the hotkeys panel, not here.
         var dictateTaps = 0
-        val chipTaps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
                 BottomChipControls(
-                    chips = AgentExitChips,
-                    onChipTap = { chipTaps += it },
                     onDictateTap = { dictateTaps++ },
                     onShowKeyboardTap = null,
                     onAddSnippetTap = null,
@@ -810,8 +770,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("git status").assertDoesNotExist()
         captureViewportArtifact("agent-command-and-composer-bottom-strip.png")
 
-        // No scrollable band chips — only sticky primary controls are interactive.
-        assertEquals(emptyList<String>(), chipTaps)
     }
 
     // ─── Issue #459: Conversation shares the unified composer bottom with
@@ -836,8 +794,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                 // launcher, and NO show-keyboard chip (raw keys aren't sent from
                 // Conversation — that's Terminal-only, #459).
                 BottomChipControls(
-                    chips = AgentExitChips,
-                    onChipTap = {},
                     onDictateTap = { dictateTaps++ },
                     onShowKeyboardTap = null,
                     onAddSnippetTap = {},
@@ -880,8 +836,6 @@ class TmuxSessionVoiceSurfaceUiTest {
                 // Terminal tab of an agent pane when the IME is hidden:
                 // same composer launcher, plus standalone Enter and show-keyboard.
                 BottomChipControls(
-                    chips = AgentExitChips,
-                    onChipTap = {},
                     onDictateTap = {},
                     onEnterTap = { enterTaps++ },
                     onShowKeyboardTap = {},
@@ -1087,5 +1041,7 @@ class TmuxSessionVoiceSurfaceUiTest {
 
     private companion object {
         const val CONVERSATION_IME_BOTTOM_CONTROLS_TAG = "tmux:test:conversation-ime-bottom-controls"
+        val FORBIDDEN_LITERAL_CHIPS: List<String> =
+            listOf("git status", "tmux ls", "k logs", "clear")
     }
 }

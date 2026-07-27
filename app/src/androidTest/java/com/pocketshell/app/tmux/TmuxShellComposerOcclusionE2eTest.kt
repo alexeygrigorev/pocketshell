@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -32,6 +33,7 @@ import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.snippets.snippetSendChipTag
 import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -44,6 +46,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.SnippetEntity
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -95,6 +98,8 @@ class TmuxShellComposerOcclusionE2eTest {
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val summaryLines = mutableListOf<String>()
+    private var commandSnippetId: Long = 0
+    private var commandWithEnterSnippetId: Long = 0
 
     @After
     fun cleanup() {
@@ -147,6 +152,20 @@ class TmuxShellComposerOcclusionE2eTest {
         // user-facing state before measuring the keyboard-down layout.
         waitForLiveKeyboardChip()
         compose.waitForIdle()
+
+        // Issue #1754 fail-first oracle: query the complete unmerged semantics
+        // tree. The four obsolete literals can be laid out in the horizontally
+        // scrollable strip while fully offscreen, so a visible-only matcher
+        // would produce a false green.
+        FORBIDDEN_LITERAL_CHIPS.forEach { literal ->
+            assertEquals(
+                "the live shell strip must hard-delete the unconfigured '$literal' chip",
+                0,
+                compose.onAllNodesWithText(literal, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .size,
+            )
+        }
 
         // ---------------------------------------------------------------
         // SYMPTOM 1 — keyboard DOWN: nothing hides behind the launcher.
@@ -237,6 +256,99 @@ class TmuxShellComposerOcclusionE2eTest {
         )
 
         captureFullDevice("01-keyboard-down")
+        captureTerminalViewport("01-keyboard-down")
+
+        // The hard cut must not remove the independent host-scoped Command
+        // snippet route. Plain Send writes the stored body byte-for-byte and
+        // exactly once (without a line ending); the retained Enter control then
+        // submits it. The authoritative remote side effect must be one byte.
+        compose.onNodeWithTag(
+            SESSION_ADD_SNIPPET_CHIP_TAG,
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText(SNIPPET_LABEL, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(
+            snippetSendChipTag(commandSnippetId, withEnter = false),
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitForIdle()
+        val beforeSubmitCapture = runSsh(
+            key,
+            "tmux capture-pane -p -t ${shellQuote(SESSION_LAB)}",
+        )
+        artifactFile("02-snippet-typed-remote-capture-pane.txt")
+            .writeText(beforeSubmitCapture)
+        assertEquals(
+            "plain Send must place the exact stored body once in the real pane",
+            1,
+            beforeSubmitCapture.windowed(SNIPPET_BODY.length, 1)
+                .count { it == SNIPPET_BODY },
+        )
+        assertEquals(
+            "plain Send must not submit before the separate Enter action",
+            0,
+            remoteSideEffectBytes(key, SIDE_EFFECT_PATH),
+        )
+        compose.onNodeWithTag(
+            SESSION_ENTER_CHIP_TAG,
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            runBlocking { remoteSideEffectBytes(key, SIDE_EFFECT_PATH) } == 1
+        }
+        assertRemoteSideEffectRemainsExactlyOnce(
+            key = key,
+            path = SIDE_EFFECT_PATH,
+            label = "plain Send plus explicit Enter",
+        )
+
+        // Preserve the picker's second action too: Send+Enter applies the
+        // existing CRLF/trailing-line-ending normalization and submits exactly
+        // once without a separate Enter tap.
+        compose.onNodeWithTag(
+            SESSION_ADD_SNIPPET_CHIP_TAG,
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText(SNIPPET_WITH_ENTER_LABEL, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(
+            snippetSendChipTag(commandWithEnterSnippetId, withEnter = true),
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            runBlocking { remoteSideEffectBytes(key, SIDE_EFFECT_WITH_ENTER_PATH) } == 1
+        }
+        assertRemoteSideEffectRemainsExactlyOnce(
+            key = key,
+            path = SIDE_EFFECT_WITH_ENTER_PATH,
+            label = "Send+Enter",
+        )
+        val afterSendWithEnterCapture = runSsh(
+            key,
+            "tmux capture-pane -p -t ${shellQuote(SESSION_LAB)}",
+        )
+        artifactFile("03-send-with-enter-remote-capture-pane.txt")
+            .writeText(afterSendWithEnterCapture)
+        assertEquals(
+            "Send+Enter must normalize the stored CRLF body to one shell command",
+            1,
+            afterSendWithEnterCapture.windowed(SNIPPET_WITH_ENTER_COMMAND.length, 1)
+                .count { it == SNIPPET_WITH_ENTER_COMMAND },
+        )
+        summaryLines += "forbidden_literal_nodes=0"
+        summaryLines += "snippet_plain_send_exact_body_occurrences=1"
+        summaryLines += "snippet_remote_side_effect_bytes=1"
+        summaryLines += "snippet_send_with_enter_normalized_occurrences=1"
+        summaryLines += "snippet_send_with_enter_remote_side_effect_bytes=1"
+        captureFullDevice("03-snippet-dispatched")
+        captureTerminalViewport("03-snippet-dispatched")
 
         // ---------------------------------------------------------------
         // SYMPTOM 2 — keyboard UP: accessory band is above the keyboard.
@@ -247,8 +359,17 @@ class TmuxShellComposerOcclusionE2eTest {
 
         // Wait for the real IME to become visible (inset > 0).
         var imeTopPx = -1
+        var lastKeyboardRequestAt = 0L
         compose.waitUntil(timeoutMillis = 15_000) {
             imeTopPx = imeInsetTopOnScreenPx()
+            val now = SystemClock.elapsedRealtime()
+            if (imeTopPx <= 0 && now - lastKeyboardRequestAt >= KEYBOARD_REQUEST_RETRY_MS) {
+                compose.onNodeWithTag(
+                    SHOW_KEYBOARD_CHIP_TAG,
+                    useUnmergedTree = true,
+                ).performClick()
+                lastKeyboardRequestAt = now
+            }
             imeTopPx in 1..Int.MAX_VALUE
         }
         compose.waitForIdle()
@@ -572,9 +693,11 @@ class TmuxShellComposerOcclusionE2eTest {
         val script = buildString {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_LAB)} 2>/dev/null || true")
+            appendLine("rm -f ${shellQuote(SIDE_EFFECT_PATH)}")
+            appendLine("rm -f ${shellQuote(SIDE_EFFECT_WITH_ENTER_PATH)}")
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_LAB)} " +
-                    shellQuote("printf 'SHELL-READY\\n'; while true; do sleep 60; done"),
+                    shellQuote("printf 'SHELL-READY\\n'; exec sh -i"),
             )
             appendLine("tmux set-option -t ${shellQuote(SESSION_LAB)} @ps_agent_kind shell")
         }
@@ -603,6 +726,22 @@ class TmuxShellComposerOcclusionE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                ),
+            )
+            commandSnippetId = db.snippetDao().insert(
+                SnippetEntity(
+                    hostId = hostId,
+                    label = SNIPPET_LABEL,
+                    body = SNIPPET_BODY,
+                    kind = "command",
+                ),
+            )
+            commandWithEnterSnippetId = db.snippetDao().insert(
+                SnippetEntity(
+                    hostId = hostId,
+                    label = SNIPPET_WITH_ENTER_LABEL,
+                    body = SNIPPET_WITH_ENTER_BODY,
+                    kind = "command",
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId
@@ -638,6 +777,31 @@ class TmuxShellComposerOcclusionE2eTest {
         return exec?.stdout?.trim().orEmpty()
     }
 
+    private suspend fun remoteSideEffectBytes(key: String, path: String): Int =
+        runSsh(
+            key,
+            "if [ -f ${shellQuote(path)} ]; then " +
+                "wc -c < ${shellQuote(path)}; else printf 0; fi",
+        ).trim().toIntOrNull() ?: -1
+
+    private suspend fun assertRemoteSideEffectRemainsExactlyOnce(
+        key: String,
+        path: String,
+        label: String,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + EXACT_ONCE_STABILITY_MS
+        var polls = 0
+        do {
+            assertEquals(
+                "$label side effect must remain exactly one byte throughout the stability window",
+                1,
+                remoteSideEffectBytes(key, path),
+            )
+            polls++
+        } while (SystemClock.elapsedRealtime() < deadline)
+        assertTrue("$label exact-once stability pump must execute", polls > 0)
+    }
+
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -663,6 +827,40 @@ class TmuxShellComposerOcclusionE2eTest {
         }
     }
 
+    private fun captureTerminalViewport(name: String) {
+        var bitmap: Bitmap? = null
+        launchedActivity?.onActivity { activity ->
+            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
+            if (view.width <= 0 || view.height <= 0) return@onActivity
+            val rendered = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(rendered))
+            bitmap = rendered
+        }
+        val rendered = checkNotNull(bitmap) { "TerminalView was not renderable for $name" }
+        try {
+            FileOutputStream(artifactFile("$name-viewport.png")).use { output ->
+                check(rendered.compress(Bitmap.CompressFormat.PNG, 100, output))
+            }
+            artifactFile("$name-visible-terminal.txt").writeText(visibleTerminalText())
+        } finally {
+            rendered.recycle()
+        }
+    }
+
+    private fun visibleTerminalText(): String {
+        var text = ""
+        launchedActivity?.onActivity { activity ->
+            text = activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.screen
+                ?.transcriptText
+                .orEmpty()
+        }
+        return text
+    }
+
     private fun writeSummary(liveTimeoutScreenshotSaved: Boolean? = null) {
         val file = artifactFile("summary.txt")
         file.writeText(
@@ -677,7 +875,14 @@ class TmuxShellComposerOcclusionE2eTest {
                     false -> Unit
                     null -> {
                         appendLine("  01-keyboard-down.png")
+                        appendLine("  01-keyboard-down-viewport.png")
+                        appendLine("  01-keyboard-down-visible-terminal.txt")
+                        appendLine("  02-snippet-typed-remote-capture-pane.txt")
                         appendLine("  02-keyboard-up.png")
+                        appendLine("  03-send-with-enter-remote-capture-pane.txt")
+                        appendLine("  03-snippet-dispatched.png")
+                        appendLine("  03-snippet-dispatched-viewport.png")
+                        appendLine("  03-snippet-dispatched-visible-terminal.txt")
                     }
                 }
             },
@@ -700,6 +905,18 @@ class TmuxShellComposerOcclusionE2eTest {
         const val LOG_TAG: String = "Issue641Composer"
         const val DEVICE_DIR_NAME: String = "issue641-shell-composer-occlusion"
         const val SESSION_LAB: String = "issue1748-641-shell"
+        const val SNIPPET_LABEL: String = "Issue 1754 exact command"
+        const val SNIPPET_WITH_ENTER_LABEL: String = "Issue 1754 command plus Enter"
+        const val SIDE_EFFECT_PATH: String = "/tmp/issue1754-command-count"
+        const val SIDE_EFFECT_WITH_ENTER_PATH: String = "/tmp/issue1754-enter-command-count"
+        const val SNIPPET_BODY: String = "printf z>>$SIDE_EFFECT_PATH"
+        const val SNIPPET_WITH_ENTER_COMMAND: String =
+            "printf y>>$SIDE_EFFECT_WITH_ENTER_PATH"
+        const val SNIPPET_WITH_ENTER_BODY: String = "$SNIPPET_WITH_ENTER_COMMAND\r\n"
         const val ROOT_SLOP_PX: Float = 1f
+        const val EXACT_ONCE_STABILITY_MS: Long = 750
+        const val KEYBOARD_REQUEST_RETRY_MS: Long = 1_000
+        val FORBIDDEN_LITERAL_CHIPS: List<String> =
+            listOf("git status", "tmux ls", "k logs", "clear")
     }
 }

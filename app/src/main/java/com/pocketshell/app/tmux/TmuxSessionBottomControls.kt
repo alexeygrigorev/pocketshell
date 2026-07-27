@@ -22,7 +22,6 @@ import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.ConversationComposerLauncherRow
-import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
 import com.pocketshell.app.voice.HotkeysChipIcon
 import com.pocketshell.app.voice.SnippetsChipIcon
@@ -67,16 +66,14 @@ internal fun TmuxSessionBottomControlsCallSite(
     // Issue #1672: true while the terminal surface is HELD behind the "Attaching…"
     // loader (any non-`Live` [com.pocketshell.core.connection.SessionSurfaceState]
     // — Connecting / Attaching / Reattaching / Reconnecting). While held, the
-    // static quick-command chip band (`git status` / `tmux ls` / … + primary
-    // cluster) is HIDDEN, not merely disabled, so the bottom chrome reads the
-    // SAME connection state as the held terminal above it (one coherent state,
-    // #1321/#1331). Distinct from [sessionLive] (= input routable): the held
+    // Terminal primary-control band is HIDDEN, not merely disabled, so the
+    // bottom chrome reads the SAME connection state as the held terminal above
+    // it (one coherent state, #1321/#1331). Distinct from [sessionLive] (=
+    // input routable): the held
     // signal is derived from the surface authority, so the band tracks the
     // "Attaching…" hold exactly. Defaults to `false` (live band) so component
     // call sites that render the steady-state surface do not have to thread it.
     terminalHeld: Boolean = false,
-    isAgentPane: Boolean,
-    onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
     // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
     // Composer WITH recording already active + locked hands-free.
@@ -107,8 +104,6 @@ internal fun TmuxSessionBottomControlsCallSite(
         showConversation = onConversationTab,
         sessionLive = sessionLive,
         terminalHeld = terminalHeld,
-        isAgentPane = isAgentPane,
-        onChipTap = onChipTap,
         onDictateTap = onDictateTap,
         onDictateHoldSwipeUp = onDictateHoldSwipeUp,
         onEnterTap = onEnterTap,
@@ -128,12 +123,10 @@ internal fun TmuxTerminalBottomControls(
     showConversation: Boolean,
     sessionLive: Boolean,
     // Issue #1672: while true (terminal held behind the "Attaching…" loader), the
-    // Terminal-tab static command chip band is HIDDEN — see
+    // Terminal-tab primary-control band is HIDDEN — see
     // [tmuxTerminalHiddenImeSurface]. Defaults to `false` so the many component
     // call sites that render the live band unchanged do not have to thread it.
     terminalHeld: Boolean = false,
-    isAgentPane: Boolean,
-    onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
     // Issue #585: hold-the-launcher-and-swipe-up entry gesture — open the Prompt
     // Composer WITH recording already active + locked hands-free.
@@ -165,9 +158,8 @@ internal fun TmuxTerminalBottomControls(
                 TmuxTerminalHiddenImeSurface.LauncherOnly -> {
                     // Issue #786 (Conversation tab, hard-cut D22) AND Issue #1672
                     // (Terminal tab while the terminal is HELD during connect): the
-                    // bottom band is JUST the composer launcher — no static command
-                    // chips (`git status` / `tmux ls` / …), no #628 previous-session
-                    // toggle chip, no snippets `{}` chip, no primary cluster.
+                    // bottom band is JUST the composer launcher — no #628
+                    // previous-session toggle, snippets picker, or primary cluster.
                     //
                     // For #1672 this is the key coherence fix: while the terminal is
                     // held behind the "Attaching…" loader, input CANNOT reach the
@@ -191,7 +183,7 @@ internal fun TmuxTerminalBottomControls(
                         )
                     }
                 }
-                TmuxTerminalHiddenImeSurface.CommandChips -> {
+                TmuxTerminalHiddenImeSurface.Controls -> {
                     // Issue #789 (hard-cut, D22): the full-width
                     // `TerminalHotkeysLauncherBar` (#784) is GONE. The launcher is now
                     // a COMPACT chip inline in the [BottomChipControls] primary
@@ -200,8 +192,6 @@ internal fun TmuxTerminalBottomControls(
                     // Terminal tab, LIVE only — the panel writes control bytes to the
                     // raw pane (while held this branch is not reached, per #1672).
                     BottomChipControls(
-                        chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
-                        onChipTap = onChipTap,
                         onDictateTap = onDictateTap,
                         onDictateHoldSwipeUp = onDictateHoldSwipeUp,
                         onEnterTap = onEnterTap,
@@ -363,19 +353,19 @@ internal const val TERMINAL_HOTKEYS_LAUNCHER_TAG: String =
  * decision the composable dispatches on, so
  * a JVM test of this function is load-bearing for the visible outcome.
  *
- *  - [LauncherOnly] — JUST the composer launcher (no static command chip band, no
+ *  - [LauncherOnly] — JUST the composer launcher (no primary-control band, no
  *    primary cluster). Reached on the Conversation tab (#786, always) OR while the
  *    terminal is HELD behind the "Attaching…" loader during connect (#1672 — any
  *    non-`Live` [com.pocketshell.core.connection.SessionSurfaceState]). Hiding the
  *    band while held — rather than showing it disabled — makes the bottom chrome a
  *    coherent projection of the SAME connection state as the held terminal above it
  *    (the maintainer's "this panel on connecting makes no sense" report).
- *  - [CommandChips] — the full Terminal-tab command band (`git status` / `tmux ls` /
- *    … + primary cluster + launcher), the steady-state LIVE surface.
+ *  - [Controls] — the Terminal primary cluster + launcher, the steady-state
+ *    LIVE surface.
  */
 internal enum class TmuxTerminalHiddenImeSurface {
     LauncherOnly,
-    CommandChips,
+    Controls,
 }
 
 internal fun tmuxTerminalHiddenImeSurface(
@@ -385,10 +375,10 @@ internal fun tmuxTerminalHiddenImeSurface(
     // The Conversation tab is launcher-only regardless of connection state (#786).
     showConversation -> TmuxTerminalHiddenImeSurface.LauncherOnly
     // Issue #1672: the terminal is held behind the "Attaching…" loader — hide the
-    // static command band so nothing looks operable while input cannot be sent.
+    // primary-control band so nothing looks operable while input cannot be sent.
     terminalHeld -> TmuxTerminalHiddenImeSurface.LauncherOnly
-    // Live Terminal tab: the full command band returns.
-    else -> TmuxTerminalHiddenImeSurface.CommandChips
+    // Live Terminal tab: the retained terminal controls return.
+    else -> TmuxTerminalHiddenImeSurface.Controls
 }
 
 /**
@@ -556,4 +546,3 @@ internal val TmuxHotkeyPanelSections: List<HotkeySection> = listOf(
 // `Ctrl-D ×2` interrupt/EOF chips' function is preserved in the hotkeys panel's
 // "INTERRUPT / EOF" section (see [TmuxHotkeyInterruptX2Label] /
 // [TmuxHotkeyEofX2Label] and [onKeyBarKey]).
-internal val AgentExitChips: List<String> = emptyList()

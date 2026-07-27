@@ -101,8 +101,6 @@ class ComposerUnsentBadgeContainmentProofTest {
                         TmuxTerminalBottomControls(
                             showConversation = showConversation,
                             sessionLive = true,
-                            isAgentPane = false,
-                            onChipTap = {},
                             // The composer launcher: always wired non-null (issue
                             // #810 — unconditional presence). On the conversation
                             // path we also wire the #585 hold-swipe-up entry

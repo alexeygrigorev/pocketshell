@@ -118,8 +118,6 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
                                 sessionLive = true,
                                 // Shell pane — snippets chip present, matching the
                                 // 4-chip cluster from the 07:53 shot.
-                                isAgentPane = false,
-                                onChipTap = {},
                                 onDictateTap = {},
                                 onEnterTap = { clickedPrimaryControls += SESSION_ENTER_CHIP_TAG },
                                 onShowKeyboardTap = {
@@ -161,8 +159,6 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
                                 .testTag(BAND_TAG),
                         ) {
                             BottomChipControls(
-                                chips = emptyList(),
-                                onChipTap = {},
                                 onDictateTap = {
                                     clickedPrimaryControls += SESSION_COMPOSER_LAUNCHER_TAG
                                 },

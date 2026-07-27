@@ -163,34 +163,13 @@ internal object MarkdownParser {
                 continue
             }
 
-            // List (ordered or unordered) — consume consecutive item lines.
-            if (UL_ITEM.matchEntire(line) != null || OL_ITEM.matchEntire(line) != null) {
-                val items = mutableListOf<MarkdownBlock.ListBlock.Item>()
-                val ordered = OL_ITEM.matchEntire(line) != null
-                while (i < lines.size) {
-                    val ul = UL_ITEM.matchEntire(lines[i])
-                    val ol = OL_ITEM.matchEntire(lines[i])
-                    when {
-                        ol != null && ordered -> {
-                            items += MarkdownBlock.ListBlock.Item(
-                                indentLevel = indentLevel(ol.groupValues[1]),
-                                ordinal = ol.groupValues[2].toIntOrNull(),
-                                spans = parseInline(ol.groupValues[3]),
-                            )
-                            i++
-                        }
-                        ul != null && !ordered -> {
-                            items += MarkdownBlock.ListBlock.Item(
-                                indentLevel = indentLevel(ul.groupValues[1]),
-                                ordinal = null,
-                                spans = parseInline(ul.groupValues[3]),
-                            )
-                            i++
-                        }
-                        else -> break
-                    }
-                }
-                blocks += MarkdownBlock.ListBlock(ordered = ordered, items = items)
+            // Structural list. A marker owns its indented soft-continuation
+            // prose; deeper markers become child list blocks. This preserves
+            // complete item bodies, mixed nesting, and source ordinals (#1714).
+            if (listMarker(line) != null) {
+                val parsed = parseList(lines, i)
+                blocks += parsed.block
+                i = parsed.nextIndex
                 continue
             }
 
@@ -225,9 +204,130 @@ internal object MarkdownParser {
         return blocks
     }
 
-    private fun indentLevel(leading: String): Int {
-        val width = leading.fold(0) { acc, c -> acc + if (c == '\t') 4 else 1 }
-        return (width / 2).coerceAtMost(4)
+    private data class ListMarker(
+        val indent: Int,
+        val kind: MarkdownBlock.ListBlock.Kind,
+        val ordinal: Int?,
+        val body: String,
+    )
+
+    private data class MutableListItem(
+        val ordinal: Int?,
+        val bodyLines: MutableList<String>,
+        val children: MutableList<MarkdownBlock.ListBlock> = mutableListOf(),
+    )
+
+    private data class ParsedList(
+        val block: MarkdownBlock.ListBlock,
+        val nextIndex: Int,
+    )
+
+    /**
+     * Parses one list whose sibling markers share the first marker's indentation
+     * and kind. Deeper markers recursively become children of the current item;
+     * an outdent or same-depth kind switch returns to the caller.
+     *
+     * Supported block starts take precedence over marker-shaped lines: indented
+     * thematic rules such as `* * *` and `- - -` must close the list rather than
+     * become nested unordered items. An indented non-marker line is a soft
+     * continuation only until a blank or another supported block start.
+     * Loose/multi-paragraph items and block contents inside list items remain
+     * outside this bounded Markdown subset. Recursion follows source structure
+     * and deliberately has no depth clamp.
+     */
+    private fun parseList(lines: List<String>, start: Int): ParsedList {
+        val first = requireNotNull(listMarker(lines[start]))
+        val baseIndent = first.indent
+        val kind = first.kind
+        val items = mutableListOf<MutableListItem>()
+        var current: MutableListItem? = null
+        var i = start
+
+        while (i < lines.size) {
+            val line = lines[i]
+            if (line.isBlank() || isSupportedBlockStart(lines, i)) break
+
+            val marker = listMarker(line)
+            if (marker != null) {
+                when {
+                    marker.indent < baseIndent -> break
+                    marker.indent == baseIndent && marker.kind != kind -> break
+                    marker.indent == baseIndent -> {
+                        current = MutableListItem(
+                            ordinal = marker.ordinal,
+                            bodyLines = mutableListOf(marker.body.trim()),
+                        )
+                        items += current
+                        i++
+                    }
+                    else -> {
+                        val owner = current ?: break
+                        val child = parseList(lines, i)
+                        owner.children += child.block
+                        i = child.nextIndex
+                    }
+                }
+                continue
+            }
+
+            val leadingIndent = indentationWidth(line.takeWhile { it == ' ' || it == '\t' })
+            if (leadingIndent <= baseIndent) break
+
+            val owner = current ?: break
+            owner.bodyLines += line.trim()
+            i++
+        }
+
+        return ParsedList(
+            block = MarkdownBlock.ListBlock(
+                kind = kind,
+                items = items.map { item ->
+                    MarkdownBlock.ListBlock.Item(
+                        ordinal = item.ordinal,
+                        spans = parseInline(item.bodyLines.joinToString(" ")),
+                        children = item.children.toList(),
+                    )
+                },
+            ),
+            nextIndex = i,
+        )
+    }
+
+    private fun listMarker(line: String): ListMarker? {
+        OL_ITEM.matchEntire(line)?.let { match ->
+            return ListMarker(
+                indent = indentationWidth(match.groupValues[1]),
+                kind = MarkdownBlock.ListBlock.Kind.ORDERED,
+                ordinal = match.groupValues[2].toIntOrNull(),
+                body = match.groupValues[3],
+            )
+        }
+        UL_ITEM.matchEntire(line)?.let { match ->
+            return ListMarker(
+                indent = indentationWidth(match.groupValues[1]),
+                kind = MarkdownBlock.ListBlock.Kind.UNORDERED,
+                ordinal = null,
+                body = match.groupValues[3],
+            )
+        }
+        return null
+    }
+
+    private fun indentationWidth(leading: String): Int =
+        leading.fold(0) { width, char -> width + if (char == '\t') 4 else 1 }
+
+    private fun isSupportedBlockStart(lines: List<String>, index: Int): Boolean {
+        val line = lines[index]
+        return FENCE.matchEntire(line) != null ||
+            isThematicBreak(line) ||
+            ATX.matchEntire(line) != null ||
+            BLOCKQUOTE.matchEntire(line) != null ||
+            (
+                line.contains('|') &&
+                    index + 1 < lines.size &&
+                    isTableDelimiterRow(lines[index + 1]) &&
+                    splitTableRow(lines[index + 1]).size == splitTableRow(line).size
+                )
     }
 
     /**

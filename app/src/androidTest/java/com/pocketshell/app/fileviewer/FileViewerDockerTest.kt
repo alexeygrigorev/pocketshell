@@ -1,23 +1,41 @@
 package com.pocketshell.app.fileviewer
 
+import android.app.Activity
+import android.app.Instrumentation
+import android.content.Intent
+import android.content.RecordingClipboardManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import android.util.Base64
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.Clipboard
+import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -30,6 +48,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -598,6 +617,324 @@ class FileViewerDockerTest {
         )
     } }
 
+    /**
+     * Issue #1714 real File-viewer journey.
+     *
+     * Provenance is pinned to
+     * DataTalksClub/ai-dev-tools-zoomcamp@132e601061ec3bb46c61a4e594a2bdc431754ca2,
+     * `01-overview/article.md`, blob
+     * 833c847fdd2b94f6ea76d78d8c9ce507e5a67a29, full-file SHA-256
+     * 38703da0717d46fb6b61fb242f7a617e754229f526f02488d686e936b9563383,
+     * reported 2026-07-22. [ISSUE1714_BODY] embeds the exact unordered and
+     * ordered excerpts plus the exact link prose/target under explicitly
+     * synthetic list wrappers; it does not claim to embed the whole article.
+     *
+     * The first rendered and raw-control frames are captured before the first
+     * #1714 structural assertion. Therefore this same source-compatible test on
+     * untouched base produces the required base-wrong screenshot and then fails
+     * at runtime because the complete continued item is not one rendered text
+     * node; it does not rely on fixed-only APIs to manufacture a compile RED.
+     */
+    @Test
+    fun moduleOneArticleListsRenderIntactAndContinuedLinkOpensExactUrl(): Unit { runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val markdownPath = "/tmp/issue1714-module1-$suffix.md"
+        val recordingClipboard = RecordingClipboardManager()
+        val clipboard = object : Clipboard {
+            override val nativeClipboard: android.content.ClipboardManager
+                get() = recordingClipboard
+
+            override suspend fun getClipEntry(): ClipEntry? =
+                recordingClipboard.primaryClip?.let(::ClipEntry)
+
+            override suspend fun setClipEntry(clipEntry: ClipEntry?) {
+                if (clipEntry == null) {
+                    recordingClipboard.clearPrimaryClip()
+                } else {
+                    recordingClipboard.setPrimaryClip(clipEntry.clipData)
+                }
+            }
+        }
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val body = Base64.encodeToString(ISSUE1714_BODY.toByteArray(), Base64.NO_WRAP)
+                val exit = session.exec("printf '%s' '$body' | base64 -d > '$markdownPath'")
+                assertEquals("seed issue #1714 markdown exit", 0, exit.exitCode)
+                seededPaths += markdownPath
+            } ?: error("could not connect to seed issue #1714 fixture")
+        }
+
+        composeRule.setContent {
+            CompositionLocalProvider(LocalClipboard provides clipboard) {
+                FileViewerScreen(
+                    hostId = TEST_HOST_ID,
+                    hostName = "agents",
+                    hostname = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    username = DEFAULT_USER,
+                    keyPath = keyFile.absolutePath,
+                    passphrase = null,
+                    remotePath = markdownPath,
+                    cwd = null,
+                    onBack = {},
+                    viewModel = FileViewerViewModel(
+                        InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                        leasing.manager,
+                    ),
+                )
+            }
+        }
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTag(FILE_VIEWER_MARKDOWN_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Capture the production rendered observation and raw-source control
+        // before the first structural oracle. On base, the rendered frame is
+        // visibly wrong and the later exact-node assertion is the behavioral RED.
+        composeRule.onNodeWithText(
+            "Feature-level - what a change should do",
+            substring = true,
+        ).performScrollTo()
+        WalkthroughScreenshotArtifacts.capture("issue1714-rendered-before-runtime-assertion")
+        composeRule.onNodeWithTag(FILE_VIEWER_RENDER_MD_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag(FILE_VIEWER_MARKDOWN_TAG)
+                .fetchSemanticsNodes().isEmpty()
+        }
+        composeRule.onNodeWithText(ISSUE1714_BODY).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue1714-raw-source-control")
+        composeRule.onNodeWithTag(FILE_VIEWER_RENDER_MD_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            composeRule.onAllNodesWithTag(FILE_VIEWER_MARKDOWN_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        val expectedContinuedFeatureBody =
+            "Feature-level - what a change should do and how you'll know it worked, " +
+                "written per task and thrown away after."
+
+        // Load-bearing shared old/new runtime oracle: the production screen
+        // must expose the complete continued item as ONE exact rendered text
+        // node before any fixed-only list tag is consulted. Untouched base
+        // renders the marker line and continuation as separate text nodes.
+        composeRule.onNodeWithText(
+            expectedContinuedFeatureBody,
+            substring = false,
+            useUnmergedTree = true,
+        ).performScrollTo().assertExists()
+
+        // Exact article continuation bodies must belong to their tagged item
+        // bodies. A detached paragraph elsewhere cannot satisfy these oracles.
+        val unorderedBody = listBodyTag("3:1")
+        composeRule.onNodeWithTag(unorderedBody).performScrollTo()
+        assertMarkerText("3:0", "•")
+        assertMarkerText("3:1", "•")
+        assertHangingItem(
+            path = "3:0",
+            expectedBody =
+                "Project-level - what the project is. We create it once and don't modify often.",
+            requireWrap = true,
+        )
+        assertHangingItem(
+            path = "3:1",
+            expectedBody = expectedContinuedFeatureBody,
+            requireWrap = true,
+        )
+        WalkthroughScreenshotArtifacts.capture("issue1714-fixed-unordered")
+
+        // The real production SelectionContainer must still select and copy
+        // Markdown text. Use the platform Copy key action after long-pressing
+        // the body: this avoids both floating-toolbar coordinates and the
+        // unrelated File-viewer header "Copy" / body "Copy all" actions.
+        composeRule.onNodeWithTag(unorderedBody).performTouchInput { longClick() }
+        WalkthroughScreenshotArtifacts.capture("issue1714-fixed-selection")
+        InstrumentationRegistry.getInstrumentation()
+            .sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_COPY)
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            recordingClipboard.lastText != null
+        }
+        val copiedSelection = requireNotNull(recordingClipboard.lastText).trim()
+        assertTrue(
+            "system Copy must put non-blank Markdown text on the clipboard",
+            copiedSelection.isNotEmpty(),
+        )
+        assertTrue(
+            "clipboard payload must come from the continued Feature-level item, was: $copiedSelection",
+            expectedContinuedFeatureBody.contains(copiedSelection),
+        )
+        // The exact article link prose is synthetically nested/continued to
+        // cover the list class. Its body keeps the annotation, accent/underline
+        // style, and exact HTTPS ACTION_VIEW target.
+        val linkPath = "1:0:0:0"
+        val linkBody = composeRule.onNodeWithTag(listBodyTag(linkPath))
+        linkBody.performScrollTo()
+        assertMarkerText(linkPath, "7.")
+        assertHangingItem(
+            path = linkPath,
+            expectedBody = ISSUE1714_LINK_BODY,
+            requireWrap = true,
+        )
+        val linkText = annotatedText(listBodyTag(linkPath))
+        val linkAnnotation = linkText.getStringAnnotations(
+            tag = MD_URL_TAG_FOR_TEST,
+            start = 0,
+            end = linkText.length,
+        ).single()
+        assertEquals(ISSUE1714_URL, linkAnnotation.item)
+        val linkStyle = linkText.spanStyles.single { range ->
+            range.start == linkAnnotation.start &&
+                range.end == linkAnnotation.end &&
+                range.item.textDecoration == TextDecoration.Underline
+        }
+        assertEquals(PocketShellColors.Accent, linkStyle.item.color)
+        assertEquals(TextDecoration.Underline, linkStyle.item.textDecoration)
+
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val monitor = object : Instrumentation.ActivityMonitor() {
+            @Volatile
+            var startedIntent: Intent? = null
+
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult {
+                startedIntent = Intent(intent)
+                return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
+            }
+        }
+        instrumentation.addMonitor(monitor)
+        try {
+            val layout = textLayout(listBodyTag(linkPath))
+            val linkOffset = layout.layoutInput.text.text.indexOf("SQLiteSearch")
+            assertTrue("link label must be in the tagged continued body", linkOffset >= 0)
+            linkBody.performTouchInput { click(layout.getBoundingBox(linkOffset).center) }
+            composeRule.waitUntil(timeoutMillis = 5_000) { monitor.startedIntent != null }
+            val started = requireNotNull(monitor.startedIntent)
+            assertEquals(Intent.ACTION_VIEW, started.action)
+            assertEquals(ISSUE1714_URL, started.dataString)
+        } finally {
+            instrumentation.removeMonitor(monitor)
+        }
+        WalkthroughScreenshotArtifacts.capture("issue1714-fixed-continued-link")
+
+        // Exact ordered article markers and complete bodies.
+        composeRule.onNodeWithTag(listBodyTag("7:3")).performScrollTo()
+        assertMarkerText("7:0", "1.")
+        assertMarkerText("7:3", "4.")
+        assertHangingItem(
+            path = "7:1",
+            expectedBody =
+                "Acceptance criteria - checkable statements. Not \"it works\" but things " +
+                    "where you can point at the screen and say yes or no.",
+            requireWrap = true,
+        )
+        assertHangingItem(
+            path = "7:3",
+            expectedBody =
+                "Constraints - files it should stay inside, libraries it may not add, " +
+                    "patterns it must follow.",
+            requireWrap = true,
+        )
+        WalkthroughScreenshotArtifacts.capture("issue1714-fixed-ordered")
+
+        // Synthetic class coverage: mixed kinds, fifth-level ownership, source
+        // 7/42 ordinals, and an intrinsic nine-digit marker. A fixed marker
+        // column mutation makes the one- and nine-digit widths equal and fails.
+        val widePath = "5:0:0:1"
+        composeRule.onNodeWithTag(listBodyTag(widePath)).performScrollTo()
+        assertMarkerText("5:0:0:0", "7.")
+        assertMarkerText("5:0:0:0:0:0:0:0", "42.")
+        assertMarkerText(widePath, "123456789.")
+        assertHangingItem(
+            path = widePath,
+            expectedBody = "wide ordered sibling",
+            requireWrap = false,
+        )
+        val oneDigitMarker = bounds(listMarkerTag("5:0:0:0"))
+        val wideMarker = bounds(listMarkerTag(widePath))
+        assertTrue(
+            "intrinsic marker width must grow for nine digits: one=$oneDigitMarker wide=$wideMarker",
+            wideMarker.width > oneDigitMarker.width,
+        )
+
+        val deepestPath = "5:0:0:0:0:0:0:0:0:0"
+        composeRule.onNodeWithTag(listBodyTag(deepestPath)).performScrollTo()
+        assertMarkerText(deepestPath, "•")
+        assertHangingItem(
+            path = deepestPath,
+            expectedBody = "fifth level is not clamped",
+            requireWrap = false,
+        )
+        WalkthroughScreenshotArtifacts.capture("issue1714-fixed-wide-deep-containment")
+    } }
+
+    private fun assertMarkerText(path: String, expected: String) {
+        assertEquals(expected, annotatedText(listMarkerTag(path)).text)
+    }
+
+    private fun assertHangingItem(
+        path: String,
+        expectedBody: String,
+        requireWrap: Boolean,
+    ) {
+        val markerBounds = bounds(listMarkerTag(path))
+        val bodyTag = listBodyTag(path)
+        val bodyBounds = bounds(bodyTag)
+        val viewport = bounds(FILE_VIEWER_TEXT_TAG)
+        assertEquals(
+            "complete body must belong to tagged item $path",
+            expectedBody,
+            annotatedText(bodyTag).text,
+        )
+        assertTrue(
+            "marker/body must not overlap for $path: marker=$markerBounds body=$bodyBounds",
+            markerBounds.right <= bodyBounds.left,
+        )
+        assertTrue(
+            "marker must stay in viewport for $path: marker=$markerBounds viewport=$viewport",
+            markerBounds.left >= viewport.left && markerBounds.right <= viewport.right,
+        )
+        assertTrue(
+            "body must stay in viewport for $path: body=$bodyBounds viewport=$viewport",
+            bodyBounds.left >= viewport.left && bodyBounds.right <= viewport.right,
+        )
+
+        val layout = textLayout(bodyTag)
+        if (requireWrap) {
+            assertTrue("body $path must wrap to prove hanging alignment", layout.lineCount > 1)
+        }
+        val firstLeft = layout.getLineLeft(0).toDouble()
+        repeat(layout.lineCount) { line ->
+            assertEquals(
+                "every wrapped line in body $path must share the body-column left edge",
+                firstLeft,
+                layout.getLineLeft(line).toDouble(),
+                0.5,
+            )
+        }
+    }
+
+    private fun annotatedText(tag: String): AnnotatedString {
+        val node = composeRule.onNodeWithTag(tag).fetchSemanticsNode()
+        return node.config.getOrNull(SemanticsProperties.Text)?.single()
+            ?: error("$tag had no unique annotated text semantics")
+    }
+
+    private fun textLayout(tag: String): TextLayoutResult {
+        val node = composeRule.onNodeWithTag(tag).fetchSemanticsNode()
+        val action = node.config.getOrNull(SemanticsActions.GetTextLayoutResult)
+            ?: error("$tag had no text-layout semantics action")
+        val results = mutableListOf<TextLayoutResult>()
+        assertTrue("$tag text-layout action must succeed", action.action?.invoke(results) == true)
+        return results.single()
+    }
+
+    private fun bounds(tag: String): Rect =
+        composeRule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot
+
+    // Kept local and literal so this connected RED remains source-compatible
+    // with untouched base, where production does not yet expose these tags.
+    private fun listMarkerTag(path: String): String = "fileViewerMarkdownListMarker:$path"
+    private fun listBodyTag(path: String): String = "fileViewerMarkdownListBody:$path"
+
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,
         port = DEFAULT_PORT,
@@ -687,6 +1024,62 @@ class FileViewerDockerTest {
          * transport.
          */
         const val TEST_HOST_ID: Long = 497L
+
+        const val MD_URL_TAG_FOR_TEST = "md_url"
+        const val ISSUE1714_URL =
+            "https://alexeyondata.substack.com/p/how-i-built-sqlitesearch-a-lightweight"
+        const val ISSUE1714_LINK_BODY =
+            "This is how I built SQLiteSearch, a small SQLite-backed search library. " +
+                "First a long chat session to get the design straight, then I downloaded " +
+                "the plan.md file and started coding. That file had all five sections: " +
+                "what the library is, how it differs from minsearch, when you should use " +
+                "it, when you shouldn't, and the architecture."
+
+        /**
+         * #1714 connected fixture. The two specifications/task-section excerpts
+         * retain the exact issue-time source lines. The SQLiteSearch prose and
+         * URL also come from exact source lines 95-101, but are intentionally
+         * indented beneath synthetic unordered/ordered markers to cover a
+         * continued nested link. The mixed/deep/wide section is wholly
+         * synthetic class coverage. This is not the complete article.
+         */
+        val ISSUE1714_BODY = """
+            # Synthetic nested-link class extension
+
+            - Synthetic list wrapper
+              7. This is how I built
+                 [SQLiteSearch]($ISSUE1714_URL),
+                 a small SQLite-backed search library. First a long chat session to get
+                 the design straight, then I downloaded the `plan.md` file and started
+                 coding. That file had all five sections: what the library is, how it
+                 differs from `minsearch`, when you should use it, when you shouldn't,
+                 and the architecture.
+
+            There are two levels of specifications:
+
+            - Project-level - what the project is. We create it once and don't
+              modify often.
+            - Feature-level - what a change should do and how you'll know it
+              worked, written per task and thrown away after.
+
+            ## Synthetic mixed, deep, and wide class coverage
+
+            + root
+              7) ordered child
+                 * unordered grandchild
+                   42. ordered great-grandchild
+                       + fifth level is not clamped
+              123456789) wide ordered sibling
+
+            Every task has four sections:
+
+            1. Goal - one or two sentences on what should be true afterwards.
+            2. Acceptance criteria - checkable statements. Not "it works" but
+               things where you can point at the screen and say yes or no.
+            3. Out of scope - what this change must not do.
+            4. Constraints - files it should stay inside, libraries it may not
+               add, patterns it must follow.
+        """.trimIndent()
     }
 }
 

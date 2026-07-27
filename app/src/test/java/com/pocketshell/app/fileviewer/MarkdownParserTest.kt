@@ -11,6 +11,86 @@ import org.junit.Test
  */
 class MarkdownParserTest {
 
+    /**
+     * Base-compatible D33/G10 runtime regression for issue #1714. This method
+     * intentionally uses only model observables present before and after the
+     * structural hard cut (`ListBlock.items`, `Item.spans`, and `Paragraph`),
+     * so applying this test to untouched base fails behaviorally rather than at
+     * compilation.
+     *
+     * Exact issue-time excerpt from
+     * DataTalksClub/ai-dev-tools-zoomcamp@132e601061ec3bb46c61a4e594a2bdc431754ca2,
+     * `01-overview/article.md` lines 48-53, blob
+     * 833c847fdd2b94f6ea76d78d8c9ce507e5a67a29. The full article SHA-256 is
+     * 38703da0717d46fb6b61fb242f7a617e754229f526f02488d686e936b9563383;
+     * the report date is 2026-07-22. Only this excerpt is embedded here.
+     */
+    @Test
+    fun `issue 1714 exact unordered excerpt owns both continued item bodies`() {
+        val source = """
+            There are two levels of specifications:
+
+            - Project-level - what the project is. We create it once and don't
+              modify often.
+            - Feature-level - what a change should do and how you'll know it
+              worked, written per task and thrown away after.
+        """.trimIndent()
+
+        val blocks = MarkdownParser.parse(source)
+        val list = blocks.filterIsInstance<MarkdownBlock.ListBlock>().single()
+        assertEquals(2, list.items.size)
+        assertEquals(
+            "Project-level - what the project is. We create it once and don't modify often.",
+            inlineText(list.items[0].spans),
+        )
+        assertEquals(
+            "Feature-level - what a change should do and how you'll know it worked, " +
+                "written per task and thrown away after.",
+            inlineText(list.items[1].spans),
+        )
+        assertTrue(
+            "continuations must not escape into detached paragraphs",
+            blocks.filterIsInstance<MarkdownBlock.Paragraph>().none {
+                inlineText(it.spans).startsWith("modify often") ||
+                    inlineText(it.spans).startsWith("worked, written")
+            },
+        )
+    }
+
+    /**
+     * Second exact excerpt from the same pinned source, lines 156-163. Like the
+     * unordered test, this remains source-compatible with the flat base model
+     * and fails on base because physical continuations split the four-item list.
+     */
+    @Test
+    fun `issue 1714 exact ordered excerpt owns all four continued item bodies`() {
+        val source = """
+            Every task has four sections:
+
+            1. Goal - one or two sentences on what should be true afterwards.
+            2. Acceptance criteria - checkable statements. Not "it works" but
+               things where you can point at the screen and say yes or no.
+            3. Out of scope - what this change must not do.
+            4. Constraints - files it should stay inside, libraries it may not
+               add, patterns it must follow.
+        """.trimIndent()
+
+        val blocks = MarkdownParser.parse(source)
+        val list = blocks.filterIsInstance<MarkdownBlock.ListBlock>().single()
+        assertEquals(4, list.items.size)
+        assertEquals(listOf(1, 2, 3, 4), list.items.map { it.ordinal })
+        assertEquals(
+            "Acceptance criteria - checkable statements. Not \"it works\" but things " +
+                "where you can point at the screen and say yes or no.",
+            inlineText(list.items[1].spans),
+        )
+        assertEquals(
+            "Constraints - files it should stay inside, libraries it may not add, " +
+                "patterns it must follow.",
+            inlineText(list.items[3].spans),
+        )
+    }
+
     @Test
     fun `markdown extensions are detected, others are not`() {
         assertTrue(MarkdownParser.isMarkdownPath("/home/me/README.md"))
@@ -48,19 +128,262 @@ class MarkdownParserTest {
     fun `unordered list items parse with nesting`() {
         val blocks = MarkdownParser.parse("- one\n- two\n  - nested")
         val list = blocks.single() as MarkdownBlock.ListBlock
-        assertFalse(list.ordered)
-        assertEquals(3, list.items.size)
-        assertEquals(0, list.items[0].indentLevel)
-        assertTrue(list.items[2].indentLevel >= 1)
+        assertEquals("UNORDERED", listKindName(list))
+        assertEquals(2, list.items.size)
+        assertTrue(childrenOf(list.items[0]).isEmpty())
+        val child = childrenOf(list.items[1]).single()
+        assertEquals("UNORDERED", listKindName(child))
+        assertEquals("nested", inlineText(child.items.single().spans))
     }
 
     @Test
     fun `ordered list keeps ordinals`() {
         val blocks = MarkdownParser.parse("1. first\n2. second")
         val list = blocks.single() as MarkdownBlock.ListBlock
-        assertTrue(list.ordered)
+        assertEquals("ORDERED", listKindName(list))
         assertEquals(1, list.items[0].ordinal)
         assertEquals(2, list.items[1].ordinal)
+    }
+
+    @Test
+    fun `mixed list kinds retain parentage marker dialects and source ordinals`() {
+        val source = """
+            - unordered root
+              7) ordered child
+                 * unordered grandchild
+                   42. ordered great-grandchild
+                       + plus-marker fifth level
+              123456789) wide ordered sibling
+            * star-marker root sibling
+
+            4. ordered root
+               - unordered below ordered
+                 9) ordered below unordered again
+        """.trimIndent()
+
+        val roots = MarkdownParser.parse(source).filterIsInstance<MarkdownBlock.ListBlock>()
+        assertEquals(2, roots.size)
+
+        val unorderedRoot = roots[0]
+        assertEquals("UNORDERED", listKindName(unorderedRoot))
+        assertEquals(2, unorderedRoot.items.size)
+        val orderedChild = childrenOf(unorderedRoot.items[0]).single()
+        assertEquals("ORDERED", listKindName(orderedChild))
+        assertEquals(listOf(7, 123456789), orderedChild.items.map { it.ordinal })
+        val unorderedGrandchild = childrenOf(orderedChild.items[0]).single()
+        assertEquals("UNORDERED", listKindName(unorderedGrandchild))
+        val orderedGreatGrandchild = childrenOf(unorderedGrandchild.items.single()).single()
+        assertEquals("ORDERED", listKindName(orderedGreatGrandchild))
+        assertEquals(42, orderedGreatGrandchild.items.single().ordinal)
+        val plusMarkerLevel = childrenOf(orderedGreatGrandchild.items.single()).single()
+        assertEquals("UNORDERED", listKindName(plusMarkerLevel))
+        assertEquals("plus-marker fifth level", inlineText(plusMarkerLevel.items.single().spans))
+
+        val orderedRoot = roots[1]
+        assertEquals("ORDERED", listKindName(orderedRoot))
+        assertEquals(4, orderedRoot.items.single().ordinal)
+        val unorderedChild = childrenOf(orderedRoot.items.single()).single()
+        assertEquals("UNORDERED", listKindName(unorderedChild))
+        val orderedGrandchild = childrenOf(unorderedChild.items.single()).single()
+        assertEquals("ORDERED", listKindName(orderedGrandchild))
+        assertEquals(9, orderedGrandchild.items.single().ordinal)
+    }
+
+    @Test
+    fun `recursive list parser has no four-level depth clamp`() {
+        val depth = 12
+        val source = buildString {
+            repeat(depth) { level ->
+                append("  ".repeat(level))
+                if (level % 2 == 0) {
+                    append("-")
+                } else {
+                    append("${level * 10 + 7}.")
+                }
+                append(" depth-").append(level).append('\n')
+            }
+        }
+
+        var list = MarkdownParser.parse(source).single() as MarkdownBlock.ListBlock
+        repeat(depth) { level ->
+            val expectedKind = if (level % 2 == 0) "UNORDERED" else "ORDERED"
+            assertEquals("kind at depth $level", expectedKind, listKindName(list))
+            assertEquals("depth-$level", inlineText(list.items.single().spans))
+            if (level < depth - 1) {
+                list = childrenOf(list.items.single()).single()
+            } else {
+                assertTrue(childrenOf(list.items.single()).isEmpty())
+            }
+        }
+    }
+
+    @Test
+    fun `continuations stay with their current sibling only`() {
+        val source = """
+            - first physical line
+              first continuation
+            - second physical line
+              second continuation
+        """.trimIndent()
+
+        val list = MarkdownParser.parse(source).single() as MarkdownBlock.ListBlock
+        assertEquals(
+            listOf(
+                "first physical line first continuation",
+                "second physical line second continuation",
+            ),
+            list.items.map { inlineText(it.spans) },
+        )
+    }
+
+    @Test
+    fun `every supported block boundary and outdent closes continuation ownership`() {
+        val cases = listOf(
+            BoundaryCase(
+                name = "blank paragraph",
+                source = "- item\n  owned continuation\n\n  detached paragraph",
+                followingType = "Paragraph",
+            ),
+            BoundaryCase(
+                name = "heading",
+                source = "- item\n  owned continuation\n  ## detached heading",
+                followingType = "Heading",
+            ),
+            BoundaryCase(
+                name = "fence",
+                source = "- item\n  owned continuation\n  ```text\n  detached code\n  ```",
+                followingType = "CodeBlock",
+            ),
+            BoundaryCase(
+                name = "table",
+                source = "- item\n  owned continuation\n  | A | B |\n  |---|---|\n  | 1 | 2 |",
+                followingType = "Table",
+            ),
+            BoundaryCase(
+                name = "blockquote",
+                source = "- item\n  owned continuation\n  > detached quote",
+                followingType = "BlockQuote",
+            ),
+            BoundaryCase(
+                name = "thematic rule",
+                source = "- item\n  owned continuation\n  ---",
+                followingType = "HorizontalRule",
+            ),
+            BoundaryCase(
+                name = "outdent paragraph",
+                source = "- item\n  owned continuation\nDetached outdent",
+                followingType = "Paragraph",
+            ),
+        )
+
+        cases.forEach { case ->
+            val blocks = MarkdownParser.parse(case.source)
+            val list = blocks.first() as MarkdownBlock.ListBlock
+            assertEquals(case.name, "item owned continuation", inlineText(list.items.single().spans))
+            assertEquals(case.name, case.followingType, blocks[1]::class.simpleName)
+        }
+    }
+
+    /**
+     * Reviewer regression for #1714: both rule spellings also match `UL_ITEM`'s
+     * marker shape when indented. Boundary recognition must win before recursive
+     * list-marker recognition, leaving the owning body, rule, and outdented
+     * paragraph as three separate structures.
+     */
+    @Test
+    fun `indented star and dash thematic rules are boundaries not nested list items`() {
+        listOf("* * *", "- - -").forEach { rule ->
+            val blocks = MarkdownParser.parse(
+                "- item\n  owned continuation\n  $rule\nFollowing paragraph",
+            )
+
+            assertEquals("block sequence for $rule", 3, blocks.size)
+            val list = blocks[0] as MarkdownBlock.ListBlock
+            assertEquals(
+                "list body before $rule",
+                "item owned continuation",
+                inlineText(list.items.single().spans),
+            )
+            assertTrue("$rule must be a thematic rule", blocks[1] === MarkdownBlock.HorizontalRule)
+            val paragraph = blocks[2] as MarkdownBlock.Paragraph
+            assertEquals(
+                "paragraph after $rule",
+                "Following paragraph",
+                inlineText(paragraph.spans),
+            )
+        }
+    }
+
+    @Test
+    fun `nested outdent returns ownership to the correct ancestor and sibling`() {
+        val source = """
+            - parent
+              7. child
+                 child continuation
+              42. child sibling
+            - root sibling
+        """.trimIndent()
+
+        val root = MarkdownParser.parse(source).single() as MarkdownBlock.ListBlock
+        assertEquals(2, root.items.size)
+        val child = childrenOf(root.items[0]).single()
+        assertEquals(listOf(7, 42), child.items.map { it.ordinal })
+        assertEquals("child child continuation", inlineText(child.items[0].spans))
+        assertEquals("child sibling", inlineText(child.items[1].spans))
+        assertEquals("root sibling", inlineText(root.items[1].spans))
+    }
+
+    /**
+     * The real article's lines 95-101 are a paragraph, not a list. This exact
+     * excerpt pins the URL provenance; the separate synthetic test below moves
+     * the same prose/link under mixed nested list markers to cover #1714's list
+     * ownership class without claiming that the source article did so.
+     */
+    @Test
+    fun `issue 1714 exact soft-wrapped article link keeps its target`() {
+        val source = """
+            This is how I built
+            [SQLiteSearch](https://alexeyondata.substack.com/p/how-i-built-sqlitesearch-a-lightweight),
+            a small SQLite-backed search library. First a long chat session to get
+            the design straight, then I downloaded the `plan.md` file and started
+            coding. That file had all five sections: what the library is, how it
+            differs from `minsearch`, when you should use it, when you shouldn't,
+            and the architecture.
+        """.trimIndent()
+        val paragraph = MarkdownParser.parse(source).single() as MarkdownBlock.Paragraph
+        assertEquals(
+            ISSUE1714_LINK_BODY,
+            inlineText(paragraph.spans),
+        )
+        assertEquals(
+            ISSUE1714_LINK,
+            paragraph.spans.filterIsInstance<InlineSpan.Link>().single().url,
+        )
+    }
+
+    @Test
+    fun `synthetic continued nested item keeps complete body and exact link`() {
+        val source = """
+            - synthetic root
+              7. This is how I built
+                 [SQLiteSearch]($ISSUE1714_LINK),
+                 a small SQLite-backed search library. First a long chat session to get
+                 the design straight, then I downloaded the `plan.md` file and started
+                 coding. That file had all five sections: what the library is, how it
+                 differs from `minsearch`, when you should use it, when you shouldn't,
+                 and the architecture.
+        """.trimIndent()
+
+        val root = MarkdownParser.parse(source).single() as MarkdownBlock.ListBlock
+        val nested = childrenOf(root.items.single()).single().items.single()
+        assertEquals(
+            ISSUE1714_LINK_BODY,
+            inlineText(nested.spans),
+        )
+        assertEquals(
+            ISSUE1714_LINK,
+            nested.spans.filterIsInstance<InlineSpan.Link>().single().url,
+        )
     }
 
     @Test
@@ -327,5 +650,60 @@ class MarkdownParserTest {
         // Header has 2 columns, delimiter has 3 — not a table.
         val blocks = MarkdownParser.parse("| a | b |\n|---|---|---|\n| 1 | 2 |")
         assertTrue("mismatched column count must not parse as a table", blocks.none { it is MarkdownBlock.Table })
+    }
+
+    /**
+     * Returns the structural kind through runtime observation so the whole test
+     * source remains compilable on the pre-#1714 flat model. On that base,
+     * `getOrdered()` supplies the legacy observation and structural tests fail
+     * at runtime because parentage is absent; on fixed code `getKind()` is used.
+     */
+    private fun listKindName(list: MarkdownBlock.ListBlock): String {
+        val kindGetter = list.javaClass.methods.firstOrNull {
+            it.name == "getKind" && it.parameterCount == 0
+        }
+        if (kindGetter != null) return kindGetter.invoke(list).toString()
+        val ordered = list.javaClass.methods.first {
+            it.name == "getOrdered" && it.parameterCount == 0
+        }.invoke(list) as Boolean
+        return if (ordered) "ORDERED" else "UNORDERED"
+    }
+
+    /**
+     * Same base-compatibility device for child ownership. The old item has no
+     * `children` property, so it observes an empty list and fails structural
+     * assertions behaviorally rather than making the RED patch uncompilable.
+     */
+    @Suppress("UNCHECKED_CAST")
+    private fun childrenOf(item: Any): List<MarkdownBlock.ListBlock> {
+        val getter = item.javaClass.methods.firstOrNull {
+            it.name == "getChildren" && it.parameterCount == 0
+        } ?: return emptyList()
+        return getter.invoke(item) as List<MarkdownBlock.ListBlock>
+    }
+
+    private fun inlineText(spans: List<InlineSpan>): String = spans.joinToString("") { span ->
+        when (span) {
+            is InlineSpan.Text -> span.text
+            is InlineSpan.Code -> span.text
+            is InlineSpan.Link -> span.label.ifEmpty { span.url }
+        }
+    }
+
+    private data class BoundaryCase(
+        val name: String,
+        val source: String,
+        val followingType: String,
+    )
+
+    private companion object {
+        const val ISSUE1714_LINK =
+            "https://alexeyondata.substack.com/p/how-i-built-sqlitesearch-a-lightweight"
+        const val ISSUE1714_LINK_BODY =
+            "This is how I built SQLiteSearch, a small SQLite-backed search library. " +
+                "First a long chat session to get the design straight, then I downloaded " +
+                "the plan.md file and started coding. That file had all five sections: " +
+                "what the library is, how it differs from minsearch, when you should use " +
+                "it, when you shouldn't, and the architecture."
     }
 }

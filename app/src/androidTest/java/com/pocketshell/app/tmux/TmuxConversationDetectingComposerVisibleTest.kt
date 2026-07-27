@@ -108,7 +108,6 @@ class TmuxConversationDetectingComposerVisibleTest {
                     ) {
                         TmuxSessionBottomControlsCallSite(
                             // Keyboard down — the maintainer's exact reported state.
-                            isImeVisible = false,
                             showConversationTranscript = showConversationTranscript,
                             showConversationDetectingPlaceholder = showConversationDetectingPlaceholder,
                             sessionLive = true,

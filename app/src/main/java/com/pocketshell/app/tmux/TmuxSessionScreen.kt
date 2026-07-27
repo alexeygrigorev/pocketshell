@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -38,9 +39,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import com.pocketshell.app.composer.PromptComposerSendDispatcher
 import com.pocketshell.app.conversation.ConversationImageViewModel
 import com.pocketshell.app.conversation.LocalConversationImageLoader
@@ -393,6 +397,27 @@ public fun TmuxSessionScreen(
             )
         }
 
+        val imeOverlayPane = panesSel.surfacePane
+        TmuxTerminalImeHotkeysOverlay(
+            isImeVisible = isImeVisible,
+            hasPane = imeOverlayPane != null,
+            isConversationTab = agent.currentSelectedTab == SessionTab.Conversation,
+            onShowHotkeysTap = {
+                imeOverlayPane?.let { pane ->
+                    DiagnosticEvents.record(
+                        "action",
+                        "hotkey_panel_show",
+                        "mode" to "tmux",
+                        "paneId" to pane.paneId,
+                    )
+                    overlay.showHotkeysPanel = true
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .imePadding(),
+        )
+
         TmuxSessionOverlaysRegion(
             viewModel = viewModel,
             sessionPickerViewModel = sessionPickerViewModel,
@@ -428,6 +453,34 @@ public fun TmuxSessionScreen(
         showCardFeedSheet = showCardFeedSheet,
         onShowCardFeedSheet = { showCardFeedSheet = it },
     )
+}
+
+/**
+ * The IME launcher belongs only to the foreground destination. MainActivity's
+ * retained compositions can keep an older tmux screen composed during route
+ * changes; observing lifecycle state reactively prevents that retained screen
+ * from exposing a second interactive overlay.
+ */
+@Composable
+internal fun TmuxTerminalImeHotkeysOverlay(
+    isImeVisible: Boolean,
+    hasPane: Boolean,
+    isConversationTab: Boolean,
+    onShowHotkeysTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateAsState()
+    if (
+        lifecycleState == Lifecycle.State.RESUMED &&
+        isImeVisible &&
+        hasPane &&
+        !isConversationTab
+    ) {
+        TmuxTerminalImeHotkeysLauncher(
+            onShowHotkeysTap = onShowHotkeysTap,
+            modifier = modifier,
+        )
+    }
 }
 
 /**
@@ -897,13 +950,22 @@ private fun TmuxSessionHeaderRegion(
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            // Issue #887 recurrence: the TerminalView must not inherit a new
+            // top coordinate when the 56dp full chrome swaps to the 40dp
+            // compact visual. The visual still compresses, but both variants
+            // live inside one stable header reservation.
+            .height(56.dp)
             .verticalSwipeInput(
                 thresholdPx = verticalSwipeThresholdPx,
                 onBoundary = { haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
                 onSwipeDown = { overlay.showSessionSwitcher = true },
             ),
+        contentAlignment = Alignment.Center,
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
             AnimatedVisibility(
                 visible = !chromeCompressed,
                 enter = expandVertically(
@@ -917,43 +979,41 @@ private fun TmuxSessionHeaderRegion(
                     animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
                 ),
             ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    ConsolidatedTopChrome(
-                        sessionName = sessionName,
-                        agentName = if (terminalHeld) {
-                            null
-                        } else {
-                            currentDetection?.agent?.displayName
-                        },
-                        tabLabels = tabState.labels,
-                        selectedTabIndex = tabState.selectedIndex,
-                        onTabSelected = onTabSelected,
-                        pulseConversationTab = tabState.showsConversationTab,
-                        onBack = onBack,
-                        onMore = { overlay.moreExpanded = true },
-                        moreMenu = { AnchoredTmuxMoreMenu() },
-                        projectLabel = projectLabel,
-                        projectSwitcher = projectSwitcherState,
-                        onProjectSwitcherOpen = {
-                            sessionPickerViewModel.refreshProjectSiblings(
-                                host = sessionPickerRequest.host,
-                                keyPath = sessionPickerRequest.keyPath,
-                                currentSessionName = sessionName,
-                                projectPath = projectPath,
-                            )
-                        },
-                        onSwitchToSibling = { selected ->
-                            handleTmuxSessionSelection(
-                                currentSessionName = sessionName,
-                                selectedSessionName = selected,
-                                onDismiss = {},
-                                onReplace = onReplaceTmuxSession,
-                            )
-                        },
-                        connectionStatus = surfaceState.toUiStatus(),
-                        modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
-                    )
-                }
+                ConsolidatedTopChrome(
+                    sessionName = sessionName,
+                    agentName = if (terminalHeld) {
+                        null
+                    } else {
+                        currentDetection?.agent?.displayName
+                    },
+                    tabLabels = tabState.labels,
+                    selectedTabIndex = tabState.selectedIndex,
+                    onTabSelected = onTabSelected,
+                    pulseConversationTab = tabState.showsConversationTab,
+                    onBack = onBack,
+                    onMore = { overlay.moreExpanded = true },
+                    moreMenu = { AnchoredTmuxMoreMenu() },
+                    projectLabel = projectLabel,
+                    projectSwitcher = projectSwitcherState,
+                    onProjectSwitcherOpen = {
+                        sessionPickerViewModel.refreshProjectSiblings(
+                            host = sessionPickerRequest.host,
+                            keyPath = sessionPickerRequest.keyPath,
+                            currentSessionName = sessionName,
+                            projectPath = projectPath,
+                        )
+                    },
+                    onSwitchToSibling = { selected ->
+                        handleTmuxSessionSelection(
+                            currentSessionName = sessionName,
+                            selectedSessionName = selected,
+                            onDismiss = {},
+                            onReplace = onReplaceTmuxSession,
+                        )
+                    },
+                    connectionStatus = surfaceState.toUiStatus(),
+                    modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
+                )
             }
             AnimatedVisibility(
                 visible = chromeCompressed,
@@ -1385,88 +1445,103 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
             hasLiveDetection = currentDetection != null,
             presumedAgent = presumedAgent,
         )
-        val bottomControlsModifier = if (isImeVisible) {
-            Modifier
-        } else {
-            Modifier.navigationBarsPadding()
-        }
         val controlsInputEnabled = sessionLive && pane != null
-        TmuxSessionBottomControlsCallSite(
+        TmuxSessionBottomBandPlacement(
             isImeVisible = isImeVisible,
-            showConversationTranscript = showConversation,
-            showConversationDetectingPlaceholder = showConversationPlaceholder,
-            sessionLive = controlsInputEnabled,
-            terminalHeld = terminalHeld,
-            isAgentPane = isAgentPane,
-            onChipTap = { chip ->
-                pane?.let {
-                    viewModel.writeInputToPane(
-                        it.paneId,
-                        (chip + "\r").toByteArray(Charsets.UTF_8),
-                    )
-                }
-            },
-            onDictateTap = {
-                overlay.micSheetAutoStartRecording = false
-                overlay.showMicSheet = true
-            },
-            onDictateHoldSwipeUp = {
-                overlay.micSheetAutoStartRecording = true
-                overlay.showMicSheet = true
-            },
-            onEnterTap = pane?.let { p -> { viewModel.onKeyBarKey(p.paneId, "Enter") } },
-            onShowKeyboardTap = pane?.let { p ->
-                {
-                    DiagnosticEvents.record(
-                        "action",
-                        "keyboard_panel_show",
-                        "mode" to "tmux",
-                        "paneId" to p.paneId,
-                    )
-                    showTerminalSoftKeyboard(
-                        composeRootView,
-                        onLocalTerminalError = { cause ->
-                            viewModel.reportTerminalSurfaceFailure(p.paneId, cause)
-                        },
-                    )
-                }
-            },
-            onAddSnippetTap = if (
-                pane != null &&
-                tmuxSessionShowsSnippetChip(
-                    hasHost = hostId != 0L,
-                    hasLiveDetection = currentDetection != null,
-                    hasStickyAgent = paletteAgent != null,
+            onConversationTab = showConversation || showConversationPlaceholder,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+                TmuxSessionBottomControlsCallSite(
+                    showConversationTranscript = showConversation,
+                    showConversationDetectingPlaceholder = showConversationPlaceholder,
+                    sessionLive = controlsInputEnabled,
+                    terminalHeld = terminalHeld,
+                    isAgentPane = isAgentPane,
+                    onChipTap = { chip ->
+                        pane?.let {
+                            viewModel.writeInputToPane(
+                                it.paneId,
+                                (chip + "\r").toByteArray(Charsets.UTF_8),
+                            )
+                        }
+                    },
+                    onDictateTap = {
+                        overlay.micSheetAutoStartRecording = false
+                        overlay.showMicSheet = true
+                    },
+                    onDictateHoldSwipeUp = {
+                        overlay.micSheetAutoStartRecording = true
+                        overlay.showMicSheet = true
+                    },
+                    onEnterTap = pane?.let { p -> { viewModel.onKeyBarKey(p.paneId, "Enter") } },
+                    onShowKeyboardTap = pane?.let { p ->
+                        {
+                            DiagnosticEvents.record(
+                                "action",
+                                "keyboard_panel_show",
+                                "mode" to "tmux",
+                                "paneId" to p.paneId,
+                            )
+                            showTerminalSoftKeyboard(
+                                composeRootView,
+                                onLocalTerminalError = { cause ->
+                                    viewModel.reportTerminalSurfaceFailure(p.paneId, cause)
+                                },
+                            )
+                        }
+                    },
+                    onAddSnippetTap = if (
+                        pane != null &&
+                        tmuxSessionShowsSnippetChip(
+                            hasHost = hostId != 0L,
+                            hasLiveDetection = currentDetection != null,
+                            hasStickyAgent = paletteAgent != null,
+                        )
+                    ) {
+                        { overlay.showSnippetPicker = true }
+                    } else null,
+                    onShowHotkeysTap = pane?.let { p ->
+                        {
+                            DiagnosticEvents.record(
+                                "action",
+                                "hotkey_panel_show",
+                                "mode" to "tmux",
+                                "paneId" to p.paneId,
+                            )
+                            overlay.showHotkeysPanel = true
+                        }
+                    },
+                    // The real keyboard-down controls stay composed/measured
+                    // under the IME, including this chip. Their subtree is
+                    // unplaced and accessibility-hidden, but Compose keeps
+                    // implementation nodes in its unmerged test tree. Give
+                    // that hidden measurement copy a private tag so the
+                    // public tag identifies exactly the visible IME overlay.
+                    hotkeysLauncherTag = if (isImeVisible) {
+                        RESERVED_TERMINAL_HOTKEYS_MEASUREMENT_TAG
+                    } else {
+                        TERMINAL_HOTKEYS_LAUNCHER_TAG
+                    },
+                    leadingChipContent = if (controlsInputEnabled) {
+                        sessionCardFeedChipState?.let { state ->
+                            {
+                                SessionCardFeedChip(
+                                    state = state,
+                                    onClick = {
+                                        viewModel.refreshActiveSessionCards()
+                                        onShowCardFeedSheet(true)
+                                    },
+                                )
+                            }
+                        }
+                    } else {
+                        null
+                    },
+                    unsentCount = outboundLauncherBadge?.count ?: 0, // #1531 (RC1)
+                    unsentHasFailure = outboundLauncherBadge?.hasFailure ?: false,
+                    modifier = Modifier,
                 )
-            ) {
-                { overlay.showSnippetPicker = true }
-            } else null,
-            onShowHotkeysTap = pane?.let { p ->
-                {
-                    DiagnosticEvents.record(
-                        "action",
-                        "hotkey_panel_show",
-                        "mode" to "tmux",
-                        "paneId" to p.paneId,
-                    )
-                    overlay.showHotkeysPanel = true
-                }
-            },
-            leadingChipContent = if (controlsInputEnabled) sessionCardFeedChipState?.let { state ->
-                {
-                    SessionCardFeedChip(
-                        state = state,
-                        onClick = {
-                            viewModel.refreshActiveSessionCards()
-                            onShowCardFeedSheet(true)
-                        },
-                    )
-                }
-            } else null,
-            unsentCount = outboundLauncherBadge?.count ?: 0, // #1531 (RC1)
-            unsentHasFailure = outboundLauncherBadge?.hasFailure ?: false,
-            modifier = bottomControlsModifier,
-        )
+        }
     }
 
     // Pane pager dot indicator (only when >1 pane).
@@ -1477,6 +1552,9 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
         )
     }
 }
+
+private const val RESERVED_TERMINAL_HOTKEYS_MEASUREMENT_TAG: String =
+    "tmux:hotkeys-launcher:reserved-measurement"
 
 /**
  * Issue #1685: the modal dialog + auxiliary modals + session switcher / drawer +

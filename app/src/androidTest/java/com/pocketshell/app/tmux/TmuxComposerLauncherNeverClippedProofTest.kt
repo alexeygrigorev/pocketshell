@@ -83,7 +83,6 @@ class TmuxComposerLauncherNeverClippedProofTest {
                         TmuxTerminalBottomControls(
                             // Keyboard DOWN — the maintainer's exact reported state
                             // (the full chip row, where the launcher lives).
-                            isImeVisible = false,
                             // Terminal tab (NOT conversation) — the reported shot.
                             showConversation = false,
                             sessionLive = true,

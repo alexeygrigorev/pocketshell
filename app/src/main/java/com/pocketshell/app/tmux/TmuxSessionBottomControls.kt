@@ -3,13 +3,20 @@ package com.pocketshell.app.tmux
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
@@ -54,7 +61,6 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
  */
 @Composable
 internal fun TmuxSessionBottomControlsCallSite(
-    isImeVisible: Boolean,
     showConversationTranscript: Boolean,
     showConversationDetectingPlaceholder: Boolean,
     sessionLive: Boolean,
@@ -79,6 +85,7 @@ internal fun TmuxSessionBottomControlsCallSite(
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
     onShowHotkeysTap: (() -> Unit)? = null,
+    hotkeysLauncherTag: String = TERMINAL_HOTKEYS_LAUNCHER_TAG,
     leadingChipContent: (@Composable () -> Unit)? = null,
     // Issue #1531 (audit RC1): the unsent-queue badge shown on the docked composer
     // launcher so a queued / deferred / uploading / failed send is VISIBLE on the
@@ -97,7 +104,6 @@ internal fun TmuxSessionBottomControlsCallSite(
         showConversationDetectingPlaceholder = showConversationDetectingPlaceholder,
     )
     TmuxTerminalBottomControls(
-        isImeVisible = isImeVisible,
         showConversation = onConversationTab,
         sessionLive = sessionLive,
         terminalHeld = terminalHeld,
@@ -109,6 +115,7 @@ internal fun TmuxSessionBottomControlsCallSite(
         onShowKeyboardTap = onShowKeyboardTap,
         onAddSnippetTap = onAddSnippetTap,
         onShowHotkeysTap = onShowHotkeysTap,
+        hotkeysLauncherTag = hotkeysLauncherTag,
         leadingChipContent = leadingChipContent,
         unsentCount = unsentCount,
         unsentHasFailure = unsentHasFailure,
@@ -118,7 +125,6 @@ internal fun TmuxSessionBottomControlsCallSite(
 
 @Composable
 internal fun TmuxTerminalBottomControls(
-    isImeVisible: Boolean,
     showConversation: Boolean,
     sessionLive: Boolean,
     // Issue #1672: while true (terminal held behind the "Attaching…" loader), the
@@ -142,6 +148,7 @@ internal fun TmuxTerminalBottomControls(
     // terminal. Null on surfaces with no pane to receive control bytes (e.g. the
     // Conversation tab).
     onShowHotkeysTap: (() -> Unit)? = null,
+    hotkeysLauncherTag: String = TERMINAL_HOTKEYS_LAUNCHER_TAG,
     leadingChipContent: (@Composable () -> Unit)? = null,
     // Issue #1531 (audit RC1): the unsent-queue badge for the docked composer
     // launcher (see [TmuxSessionBottomControlsCallSite]).
@@ -149,59 +156,12 @@ internal fun TmuxTerminalBottomControls(
     unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    val chromeMode = tmuxTerminalKeyboardChromeMode(
-        isImeVisible = isImeVisible,
-        showConversation = showConversation,
-    )
-    when (chromeMode) {
-        // Issue #673: the conversation IME-open mode renders no accessory at
-        // all. Staged attachments used to surface here; they now live only
-        // inside the Prompt Composer sheet.
-        TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory -> Unit
-        // Issue #784: with the keyboard up on the Terminal tab, render a SLIM
-        // launcher bar above the IME so the hotkeys panel is one tap away while
-        // typing. The full hotkey grid lives in the dedicated
-        // [TerminalHotkeysPanel] bottom sheet — never crammed above the keyboard
-        // (the #755/#784 occlusion + cram complaints), just a single launcher.
-        TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys -> {
-            if (onShowHotkeysTap != null) {
-                // Issue #789 (hard-cut, D22): above the soft keyboard the
-                // launcher is a COMPACT chip pinned to the right edge — NOT the
-                // deleted full-width bar — so it occupies a single short row and
-                // reclaims the vertical space the bar wasted. It sits on the
-                // surface band so it reads above the IME, and opens the same
-                // dedicated [TerminalHotkeysSheet]. The host's layout modifier
-                // (which carries `imePadding()` upstream) keeps it above the
-                // keyboard. The chip carries the stable `tmux:hotkeys-launcher`
-                // tag so existing tests still find it.
-                Row(
-                    modifier = modifier
-                        .fillMaxWidth()
-                        .background(color = PocketShellColors.Surface)
-                        .border(width = 1.dp, color = PocketShellColors.Border)
-                        .padding(
-                            horizontal = PocketShellSpacing.sm,
-                            vertical = PocketShellSpacing.sm,
-                        ),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    CommandChip(
-                        label = HOTKEYS_CHIP_LABEL,
-                        onClick = onShowHotkeysTap,
-                        icon = HotkeysChipIcon,
-                        modifier = Modifier.testTag(TERMINAL_HOTKEYS_LAUNCHER_TAG),
-                    )
-                }
-            }
-        }
-        TmuxTerminalKeyboardChromeMode.HiddenImeControls -> {
-            when (
-                tmuxTerminalHiddenImeSurface(
-                    showConversation = showConversation,
-                    terminalHeld = terminalHeld,
-                )
-            ) {
+    when (
+        tmuxTerminalHiddenImeSurface(
+            showConversation = showConversation,
+            terminalHeld = terminalHeld,
+        )
+    ) {
                 TmuxTerminalHiddenImeSurface.LauncherOnly -> {
                     // Issue #786 (Conversation tab, hard-cut D22) AND Issue #1672
                     // (Terminal tab while the terminal is HELD during connect): the
@@ -250,6 +210,7 @@ internal fun TmuxTerminalBottomControls(
                         // Issue #789: the compact hotkeys launcher chip (terminal tab
                         // only). Reclaims the deleted full-width bar's row.
                         onShowHotkeysTap = onShowHotkeysTap,
+                        hotkeysLauncherTag = hotkeysLauncherTag,
                         addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
                         addSnippetIcon = SnippetsChipIcon,
                         leadingContent = leadingChipContent,
@@ -263,8 +224,121 @@ internal fun TmuxTerminalBottomControls(
                         modifier = modifier,
                     )
                 }
+    }
+}
+
+/**
+ * Issue #887 recurrence: the IME-only compact launcher is a screen overlay, not
+ * a member of the TerminalView-measuring column. Its host supplies
+ * `imePadding()` so this one user-facing control remains reachable above the
+ * real keyboard while the terminal keeps its keyboard-down constraints.
+ */
+@Composable
+internal fun TmuxTerminalImeHotkeysLauncher(
+    onShowHotkeysTap: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.Border)
+            .padding(
+                horizontal = PocketShellSpacing.sm,
+                vertical = PocketShellSpacing.sm,
+            ),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CommandChip(
+            label = HOTKEYS_CHIP_LABEL,
+            onClick = onShowHotkeysTap,
+            icon = HotkeysChipIcon,
+            modifier = Modifier.testTag(TERMINAL_HOTKEYS_LAUNCHER_TAG),
+        )
+    }
+}
+
+/**
+ * Issue #887 recurrence: one stable measuring slot for the keyboard-DOWN
+ * production controls. The child remains composed and measured while the IME is
+ * visible, so session/pane content, density, font scale and stable system-inset
+ * changes naturally remeasure without a cached pixel height. It is deliberately
+ * not placed in the IME state: its semantics and pointer input leave the
+ * rendered tree, while this layout still reserves the exact measured height.
+ *
+ * The IME-only compact launcher is rendered separately by
+ * [TmuxTerminalImeHotkeysLauncher] at screen-overlay level.
+ */
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+internal fun ReservedTmuxTerminalBottomBand(
+    isImeVisible: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Layout(
+        content = {
+            Box(
+                modifier = if (isImeVisible) {
+                    Modifier.clearAndSetSemantics {}
+                } else {
+                    Modifier
+                },
+            ) {
+                content()
+            }
+        },
+        modifier = modifier.windowInsetsPadding(
+            WindowInsets.navigationBarsIgnoringVisibility,
+        ),
+    ) { measurables, constraints ->
+        check(measurables.size == 1) {
+            "ReservedTmuxTerminalBottomBand requires exactly one measurable child"
+        }
+        val placeable = measurables.single().measure(
+            constraints.copy(minWidth = 0, minHeight = 0),
+        )
+        layout(
+            width = maxOf(placeable.width, constraints.minWidth),
+            height = maxOf(placeable.height, constraints.minHeight),
+        ) {
+            if (!isImeVisible) {
+                placeable.placeRelative(0, 0)
             }
         }
+    }
+}
+
+/**
+ * Chooses the screen-level bottom-band geometry. Terminal keeps its measured
+ * keyboard-down reservation through IME transitions; Conversation deliberately
+ * has no IME accessory, so it reserves zero rows while the keyboard is up.
+ */
+@Composable
+@OptIn(ExperimentalLayoutApi::class)
+internal fun TmuxSessionBottomBandPlacement(
+    isImeVisible: Boolean,
+    onConversationTab: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    if (onConversationTab) {
+        if (!isImeVisible) {
+            Box(
+                modifier = modifier.windowInsetsPadding(
+                    WindowInsets.navigationBarsIgnoringVisibility,
+                ),
+            ) {
+                content()
+            }
+        }
+    } else {
+        ReservedTmuxTerminalBottomBand(
+            isImeVisible = isImeVisible,
+            modifier = modifier,
+            content = content,
+        )
     }
 }
 
@@ -284,24 +358,9 @@ internal fun TmuxTerminalBottomControls(
 internal const val TERMINAL_HOTKEYS_LAUNCHER_TAG: String =
     com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 
-internal enum class TmuxTerminalKeyboardChromeMode {
-    HiddenImeControls,
-    OpenImeTerminalHotkeys,
-    OpenImeConversationNoAccessory,
-}
-
-internal fun tmuxTerminalKeyboardChromeMode(
-    isImeVisible: Boolean,
-    showConversation: Boolean,
-): TmuxTerminalKeyboardChromeMode = when {
-    !isImeVisible -> TmuxTerminalKeyboardChromeMode.HiddenImeControls
-    showConversation -> TmuxTerminalKeyboardChromeMode.OpenImeConversationNoAccessory
-    else -> TmuxTerminalKeyboardChromeMode.OpenImeTerminalHotkeys
-}
-
 /**
- * Issue #1672: what the keyboard-DOWN ([TmuxTerminalKeyboardChromeMode.HiddenImeControls])
- * bottom band renders. This is the SINGLE decision the composable dispatches on, so
+ * Issue #1672: what the keyboard-DOWN bottom band renders. This is the SINGLE
+ * decision the composable dispatches on, so
  * a JVM test of this function is load-bearing for the visible outcome.
  *
  *  - [LauncherOnly] — JUST the composer launcher (no static command chip band, no

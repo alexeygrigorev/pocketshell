@@ -248,18 +248,21 @@ class AgentQuickReplyBandContainmentProofTest {
                     replies = sampleReplies,
                     onReply = {},
                 )
-                TmuxTerminalBottomControls(
-                    isImeVisible = isImeVisible,
-                    showConversation = false,
-                    sessionLive = true,
-                    isAgentPane = false,
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = {},
-                    onShowHotkeysTap = {},
-                )
+                if (isImeVisible) {
+                    TmuxTerminalImeHotkeysLauncher(onShowHotkeysTap = {})
+                } else {
+                    TmuxTerminalBottomControls(
+                        showConversation = false,
+                        sessionLive = true,
+                        isAgentPane = false,
+                        onChipTap = {},
+                        onDictateTap = {},
+                        onEnterTap = {},
+                        onShowKeyboardTap = {},
+                        onAddSnippetTap = {},
+                        onShowHotkeysTap = {},
+                    )
+                }
             }
         }
     }

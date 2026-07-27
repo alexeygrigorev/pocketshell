@@ -85,7 +85,6 @@ class TmuxConversationBottomComposerScreenshotTest {
                     // composer launcher: no toggle chip, no snippets chip, no
                     // command chips, no show-keyboard chip.
                     TmuxTerminalBottomControls(
-                        isImeVisible = false,
                         showConversation = true,
                         sessionLive = true,
                         isAgentPane = true,
@@ -102,7 +101,6 @@ class TmuxConversationBottomComposerScreenshotTest {
 
                     SectionLabel("Terminal tab — full band (untouched by #786)")
                     TmuxTerminalBottomControls(
-                        isImeVisible = false,
                         showConversation = false,
                         sessionLive = true,
                         isAgentPane = true,

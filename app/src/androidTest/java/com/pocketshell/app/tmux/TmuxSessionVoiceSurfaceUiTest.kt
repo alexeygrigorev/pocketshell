@@ -6,6 +6,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextContains
@@ -33,6 +34,7 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
+import com.pocketshell.app.voice.TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
@@ -68,22 +70,19 @@ class TmuxSessionVoiceSurfaceUiTest {
         // Issue #784 (D22 hard-cut): with the soft keyboard UP on the Terminal
         // tab, this bottom-controls surface never renders a crammed key GRID
         // above the IME (the #755 cram the maintainer rejected). The full hotkeys
-        // grid is the dedicated `TerminalHotkeysPanel` sheet. When no
-        // `onShowHotkeysTap` is wired (this test), nothing renders here at all.
+        // grid is the dedicated `TerminalHotkeysPanel` sheet. When no active
+        // pane can own `onShowHotkeysTap` (this test), nothing renders here.
         // This guards the hard-cut: no key grid, no Esc/^C/Tab keys, no
         // attachment grid, no chip band when the IME is up on a terminal pane.
         compose.setContent {
             PocketShellTheme {
-                TmuxTerminalBottomControls(
+                TmuxTerminalImeHotkeysOverlay(
                     isImeVisible = true,
-                    showConversation = false,
-                    sessionLive = true,
-                    isAgentPane = false,
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = {},
+                    hasPane = false,
+                    isConversationTab = false,
+                    onShowHotkeysTap = {
+                        error("pane-less Terminal must not expose the hotkeys callback")
+                    },
                     modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
                 )
             }
@@ -117,16 +116,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         var launched = false
         compose.setContent {
             PocketShellTheme {
-                TmuxTerminalBottomControls(
-                    isImeVisible = true,
-                    showConversation = false,
-                    sessionLive = true,
-                    isAgentPane = false,
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = {},
+                TmuxTerminalImeHotkeysLauncher(
                     onShowHotkeysTap = { launched = true },
                     modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
                 )
@@ -151,16 +141,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         // reclaimed. The old bar's "Terminal hotkeys" caption no longer appears.
         compose.setContent {
             PocketShellTheme {
-                TmuxTerminalBottomControls(
-                    isImeVisible = true,
-                    showConversation = false,
-                    sessionLive = true,
-                    isAgentPane = false,
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = {},
+                TmuxTerminalImeHotkeysLauncher(
                     onShowHotkeysTap = {},
                     modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
                 )
@@ -204,7 +185,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
-                    isImeVisible = false,
                     showConversation = false,
                     sessionLive = true,
                     isAgentPane = false,
@@ -231,7 +211,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG)
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG)
             .assertHasClickAction()
-            .assertTextContains(HOTKEYS_CHIP_LABEL)
+            .assertContentDescriptionEquals(TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL)
         compose.assertNodeFullyWithinRoot(TERMINAL_HOTKEYS_LAUNCHER_TAG)
 
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG).performClick()
@@ -243,16 +223,11 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun tmuxConversationImeOpenDoesNotRenderAccessoryStrip() {
         compose.setContent {
             PocketShellTheme {
-                TmuxTerminalBottomControls(
+                TmuxTerminalImeHotkeysOverlay(
                     isImeVisible = true,
-                    showConversation = true,
-                    sessionLive = true,
-                    isAgentPane = true,
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = {},
+                    hasPane = true,
+                    isConversationTab = true,
+                    onShowHotkeysTap = {},
                     modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
                 )
             }
@@ -278,16 +253,11 @@ class TmuxSessionVoiceSurfaceUiTest {
         // Composer sheet, never in the session view (even in conversation mode).
         compose.setContent {
             PocketShellTheme {
-                TmuxTerminalBottomControls(
+                TmuxTerminalImeHotkeysOverlay(
                     isImeVisible = true,
-                    showConversation = true,
-                    sessionLive = true,
-                    isAgentPane = true,
-                    onChipTap = {},
-                    onDictateTap = {},
-                    onEnterTap = {},
-                    onShowKeyboardTap = {},
-                    onAddSnippetTap = {},
+                    hasPane = true,
+                    isConversationTab = true,
+                    onShowHotkeysTap = {},
                     modifier = Modifier.testTag(CONVERSATION_IME_BOTTOM_CONTROLS_TAG),
                 )
             }
@@ -317,7 +287,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
-                    isImeVisible = false,
                     showConversation = false,
                     sessionLive = true,
                     // Shell (non-agent) pane — the regression case from #641.
@@ -385,7 +354,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
-                    isImeVisible = false,
                     showConversation = false,
                     // Held ⇒ input is not routable; matches the screen's
                     // `controlsInputEnabled = false` during connect.
@@ -432,7 +400,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
-                    isImeVisible = false,
                     showConversation = false,
                     sessionLive = true,
                     terminalHeld = false,
@@ -576,7 +543,6 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
-                    isImeVisible = false,
                     showConversation = false,
                     sessionLive = true,
                     isAgentPane = true,
@@ -667,7 +633,6 @@ class TmuxSessionVoiceSurfaceUiTest {
             PocketShellTheme {
                 if (!composerOpen) {
                     TmuxTerminalBottomControls(
-                        isImeVisible = false,
                         showConversation = false,
                         sessionLive = true,
                         isAgentPane = true,

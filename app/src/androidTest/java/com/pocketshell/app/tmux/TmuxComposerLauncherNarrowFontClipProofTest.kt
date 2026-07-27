@@ -13,8 +13,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.assertContentDescriptionEquals
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -23,11 +28,14 @@ import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
+import com.pocketshell.app.voice.TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL
 import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
+import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -72,6 +80,8 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
 
+    private val clickedPrimaryControls = mutableListOf<String>()
+
     /**
      * Render the production bottom controls the way [TmuxSessionScreen] wires them
      * on a Terminal-tab shell pane (keyboard down, all primary chips present),
@@ -79,6 +89,7 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
      * reported state.
      */
     private fun renderBottomControls(widthDp: Int, fontScale: Float) {
+        clickedPrimaryControls.clear()
         compose.setContent {
             val base = LocalDensity.current
             // Synthetic large system font (the maintainer's larger-than-default
@@ -102,7 +113,6 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
                             TmuxTerminalBottomControls(
                                 // Keyboard DOWN — the maintainer's exact state
                                 // (the full chip row, where the launcher lives).
-                                isImeVisible = false,
                                 // Terminal tab (NOT conversation) — the report.
                                 showConversation = false,
                                 sessionLive = true,
@@ -111,10 +121,60 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
                                 isAgentPane = false,
                                 onChipTap = {},
                                 onDictateTap = {},
-                                onEnterTap = {},
-                                onShowKeyboardTap = {},
-                                onAddSnippetTap = {},
-                                onShowHotkeysTap = {},
+                                onEnterTap = { clickedPrimaryControls += SESSION_ENTER_CHIP_TAG },
+                                onShowKeyboardTap = {
+                                    clickedPrimaryControls += SHOW_KEYBOARD_CHIP_TAG
+                                },
+                                onAddSnippetTap = {
+                                    clickedPrimaryControls += SESSION_ADD_SNIPPET_CHIP_TAG
+                                },
+                                onShowHotkeysTap = {
+                                    clickedPrimaryControls += HOTKEYS_CHIP_TAG
+                                },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+    }
+
+    private fun renderRawSshBottomControls(widthDp: Int, fontScale: Float) {
+        clickedPrimaryControls.clear()
+        compose.setContent {
+            val base = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(density = base.density, fontScale = fontScale),
+            ) {
+                PocketShellTheme {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(PocketShellColors.Background),
+                        contentAlignment = Alignment.BottomCenter,
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .width(widthDp.dp)
+                                .testTag(BAND_TAG),
+                        ) {
+                            BottomChipControls(
+                                chips = emptyList(),
+                                onChipTap = {},
+                                onDictateTap = {
+                                    clickedPrimaryControls += SESSION_COMPOSER_LAUNCHER_TAG
+                                },
+                                onEnterTap = {
+                                    clickedPrimaryControls += SESSION_ENTER_CHIP_TAG
+                                },
+                                onShowKeyboardTap = {
+                                    clickedPrimaryControls += SHOW_KEYBOARD_CHIP_TAG
+                                },
+                                onAddSnippetTap = {
+                                    clickedPrimaryControls += SESSION_ADD_SNIPPET_CHIP_TAG
+                                },
                                 modifier = Modifier.fillMaxWidth(),
                             )
                         }
@@ -165,24 +225,99 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
 
     @Test
     fun allFourPrimaryChipsRemainReachableOnNarrowLargeFont() {
-        // The cluster yields by SCROLLING, never by silently dropping a chip. All
-        // four primary affordances must still exist in the tree (reachable via
-        // scroll) even when the launcher has reserved its width first.
+        // The one-line cluster yields by SCROLLING, never by silently dropping or
+        // clipping an unreachable chip. Bring every control into view, prove its
+        // complete bounds, then invoke its real callback.
         renderBottomControls(widthDp = NARROW_WIDTH_DP, fontScale = LARGE_FONT_SCALE)
-        listOf(
+        val tags = listOf(
             SESSION_ENTER_CHIP_TAG,
             SHOW_KEYBOARD_CHIP_TAG,
             HOTKEYS_CHIP_TAG,
             SESSION_ADD_SNIPPET_CHIP_TAG,
-        ).forEach { tag ->
-            compose.onNodeWithTag(tag).assertExists(
-                "primary chip '$tag' must remain present + reachable (#813: chips " +
-                    "yield by scrolling, they are never silently dropped)",
+        )
+        val bandBounds = compose.onNodeWithTag(BAND_TAG).getUnclippedBoundsInRoot()
+        val launcherBounds = compose.onNodeWithTag(
+            SESSION_COMPOSER_LAUNCHER_TAG,
+        ).getUnclippedBoundsInRoot()
+        tags.forEach { tag ->
+            val control = compose.onNodeWithTag(tag)
+            control.assertExists(
+                "primary control '$tag' must remain in the one-line scroll viewport",
             )
+            control.performScrollTo()
+            compose.waitForIdle()
+            val bounds = control.getUnclippedBoundsInRoot()
+            assertTrue(
+                "bring-into-view must fully contain '$tag' clear of the pinned " +
+                    "composer launcher; control=$bounds band=$bandBounds " +
+                    "launcher=$launcherBounds",
+                bounds.left >= bandBounds.left &&
+                    bounds.top >= bandBounds.top &&
+                    bounds.right <= launcherBounds.left &&
+                    bounds.bottom <= bandBounds.bottom,
+            )
+            control.assertHasClickAction().performClick()
         }
+        compose.runOnIdle { assertEquals(tags, clickedPrimaryControls) }
         // The launcher is also still present + contained.
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG).assertExists()
         assertLauncherWithinBand("reachability case @ ${NARROW_WIDTH_DP}dp")
+
+        // #789's compact hotkeys launcher remains a real accessible 48dp button,
+        // not a decorative glyph or a clipped sliver, even in this tight case.
+        val hotkeys = compose.onNodeWithTag(HOTKEYS_CHIP_TAG)
+        hotkeys.assertHasClickAction()
+            .assertContentDescriptionEquals(TERMINAL_HOTKEYS_ACCESSIBILITY_LABEL)
+        val hotkeysBounds = hotkeys.getUnclippedBoundsInRoot()
+        assertTrue(
+            "compact Terminal hotkeys launcher must remain fully within the " +
+                "narrow large-font band; hotkeys=$hotkeysBounds band=$bandBounds",
+            hotkeysBounds.left >= bandBounds.left &&
+                hotkeysBounds.top >= bandBounds.top &&
+                hotkeysBounds.right <= bandBounds.right &&
+                hotkeysBounds.bottom <= bandBounds.bottom,
+        )
+    }
+
+    @Test
+    fun rawSshPrimaryControlsScrollIntoFullReachOnNarrowLargeFont() {
+        renderRawSshBottomControls(
+            widthDp = NARROW_WIDTH_DP,
+            fontScale = LARGE_FONT_SCALE,
+        )
+        val tags = listOf(
+            SESSION_ENTER_CHIP_TAG,
+            SHOW_KEYBOARD_CHIP_TAG,
+            SESSION_ADD_SNIPPET_CHIP_TAG,
+        )
+        val bandBounds = compose.onNodeWithTag(BAND_TAG).getUnclippedBoundsInRoot()
+        val launcher = compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+        val launcherBounds = launcher.getUnclippedBoundsInRoot()
+        assertTrue(
+            "raw SSH composer launcher must stay pinned inside the narrow band",
+            launcherBounds.left >= bandBounds.left &&
+                launcherBounds.right <= bandBounds.right &&
+                launcherBounds.bottom <= bandBounds.bottom,
+        )
+        tags.forEach { tag ->
+            val control = compose.onNodeWithTag(tag)
+            control.performScrollTo()
+            compose.waitForIdle()
+            val bounds = control.getUnclippedBoundsInRoot()
+            assertTrue(
+                "raw SSH '$tag' must become fully contained and clear of the " +
+                    "pinned launcher; control=$bounds launcher=$launcherBounds band=$bandBounds",
+                bounds.left >= bandBounds.left &&
+                    bounds.top >= bandBounds.top &&
+                    bounds.right <= launcherBounds.left &&
+                    bounds.bottom <= bandBounds.bottom,
+            )
+            control.assertHasClickAction().performClick()
+        }
+        launcher.assertHasClickAction().performClick()
+        compose.runOnIdle {
+            assertEquals(tags + SESSION_COMPOSER_LAUNCHER_TAG, clickedPrimaryControls)
+        }
     }
 
     private fun artifactDir(): File {

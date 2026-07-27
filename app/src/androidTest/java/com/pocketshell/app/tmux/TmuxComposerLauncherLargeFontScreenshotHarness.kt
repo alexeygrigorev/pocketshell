@@ -65,19 +65,25 @@ class TmuxComposerLauncherLargeFontScreenshotHarness {
                                 .width(PIXEL_7A_WIDTH_DP.dp)
                                 .testTag(BAND_TAG),
                         ) {
-                            TmuxTerminalBottomControls(
-                                isImeVisible = isImeVisible,
-                                showConversation = false,
-                                sessionLive = true,
-                                isAgentPane = false,
-                                onChipTap = {},
-                                onDictateTap = {},
-                                onEnterTap = {},
-                                onShowKeyboardTap = {},
-                                onAddSnippetTap = {},
-                                onShowHotkeysTap = {},
-                                modifier = Modifier.fillMaxWidth(),
-                            )
+                            if (isImeVisible) {
+                                TmuxTerminalImeHotkeysLauncher(
+                                    onShowHotkeysTap = {},
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            } else {
+                                TmuxTerminalBottomControls(
+                                    showConversation = false,
+                                    sessionLive = true,
+                                    isAgentPane = false,
+                                    onChipTap = {},
+                                    onDictateTap = {},
+                                    onEnterTap = {},
+                                    onShowKeyboardTap = {},
+                                    onAddSnippetTap = {},
+                                    onShowHotkeysTap = {},
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
                         }
                     }
                 }

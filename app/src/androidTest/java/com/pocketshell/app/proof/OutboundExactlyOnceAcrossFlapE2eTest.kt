@@ -678,11 +678,16 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             it.filterNot { ch -> ch.isWhitespace() }.contains(FAKE_AGENT_SUBMITTED_STRIPPED)
         }
         waitForConnected("post-cut silent heal")
-        if (!pollSidecarCapture(SILENT_HEAL_SUBMIT_WINDOW_MS, submittedPredicate)) {
+        if (
+            pollSidecarCaptureWhileDrivingIssue1739Main(
+                SILENT_HEAL_SUBMIT_WINDOW_MS,
+                submittedPredicate,
+            ) == null
+        ) {
             recordTiming("user_retype_resend_used", 1L)
             openComposerAndSend(payload)
         }
-        waitForSidecarCapture(
+        waitForSidecarCaptureWhileDrivingIssue1739Main(
             "prompt submitted after the chunk-boundary cut",
             SUBMIT_AFTER_FLAP_TIMEOUT_MS,
             submittedPredicate,
@@ -1300,11 +1305,36 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         verified: () -> Boolean,
         submitted: (String) -> Boolean,
     ): String {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
         var last = ""
+        val matched = pollSidecarCaptureWhileDrivingIssue1739Main(timeoutMs) { capture ->
+            last = capture
+            verified() && submitted(capture)
+        }
+        assertTrue(
+            "$label did not resolve within ${timeoutMs}ms while driving the real " +
+                "auto-flush; verified=${verified()} capture:\n$last",
+            matched != null,
+        )
+        return matched ?: last
+    }
+
+    /**
+     * Poll the real pane while pacing launch-owned Compose Main.
+     *
+     * The sidecar SSH read is wall-clock IO. Between reads, drive Main in the
+     * same bounded 20ms steps as the #1739 acknowledgement and redispatch
+     * helpers so a non-immediate capture, ack timeout, Enter, or queue
+     * continuation cannot be frozen merely because this journey is observing
+     * the real pane. The hard wall deadline remains authoritative.
+     */
+    private fun pollSidecarCaptureWhileDrivingIssue1739Main(
+        timeoutMs: Long,
+        predicate: (String) -> Boolean,
+    ): String? {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
-            last = runBlocking { sidecarCapturePane() }
-            if (verified() && submitted(last)) return last
+            val capture = runBlocking { sidecarCapturePane() }
+            if (predicate(capture)) return capture
 
             var tick = 0
             while (
@@ -1316,12 +1346,22 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 tick += 1
             }
         }
+        return null
+    }
+
+    private fun waitForSidecarCaptureWhileDrivingIssue1739Main(
+        label: String,
+        timeoutMs: Long,
+        predicate: (String) -> Boolean,
+    ): String {
+        val matched = pollSidecarCaptureWhileDrivingIssue1739Main(timeoutMs, predicate)
         assertTrue(
-            "$label did not resolve within ${timeoutMs}ms while driving the real " +
-                "auto-flush; verified=${verified()} capture:\n$last",
-            verified() && submitted(last),
+            "$label: sidecar capture never satisfied predicate within ${timeoutMs}ms " +
+                "while advancing Compose Main by ${ISSUE1739_MAIN_CLOCK_STEP_MS}ms steps; " +
+                "diagnostics=${diagnostics?.events?.map { "${it.name}${it.fields}" }}",
+            matched != null,
         )
-        return last
+        return matched.orEmpty()
     }
 
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {

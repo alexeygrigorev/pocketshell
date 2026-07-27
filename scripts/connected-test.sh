@@ -314,7 +314,8 @@ if [[ "$CLEANUP_ONLY" != "1" ]]; then
   case "$gradle_args_str" in
     *NetworkFault*|*NetworkLatencyModel*|*PacketLoss*|*DisconnectBlackhole*\
       |*DisconnectFlap*|*KeepAliveDeadPeer*|*RideThrough*|*WithinGrace*\
-      |*StaleLeaseSwitchRecovery*|*CodexRedrawOverflowReconnect*)
+      |*StaleLeaseSwitchRecovery*|*CodexRedrawOverflowReconnect*\
+      |*OutboundAttachmentOffsetResumeJourneyE2eTest*)
       NETWORK_FAULT_RUN=1
       ;;
   esac

@@ -178,6 +178,21 @@ class ToxiproxyControl(
         transport.request("POST", "/proxies/$PROXY_NAME", """{"enabled":true}""")
     }
 
+    /**
+     * Hold a real proxy outage while [whileDisabled] inspects the production UI.
+     *
+     * Restoration is unconditional so a failed visibility assertion cannot leave
+     * the singleton network-fault fixture disabled for the next journey.
+     */
+    suspend inline fun <T> withDisabledProxy(whileDisabled: suspend () -> T): T {
+        disable()
+        return try {
+            whileDisabled()
+        } finally {
+            enable()
+        }
+    }
+
     private fun createProxy() {
         // Tolerate HTTP 409 "proxy already exists": toxiproxy is a single shared
         // instance, so when more than one connected lane resets concurrently the

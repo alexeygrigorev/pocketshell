@@ -526,13 +526,13 @@ jobs:
   # the classes above — no new Docker service/port.
   #
   # This is intentionally the FAST subset (scripts/ci-journey-suite.sh), not the
-  # full connected suite — the heavy/long-running + toxiproxy network-fault +
-  # bootstrap-matrix suites stay in nightly-extensive.yml. The selected proofs
-  # need no toxiproxy proxy family, so this job brings up only the deterministic
-  # `agents` (2222) fixture plus the deterministic `agents-old-cli` (2238, issue
-  # #849) fixture — both plain SSH/tmux, keeping the job deterministic (the
-  # maintainer already gets CI email spam — a flaky per-push job would make that
-  # worse).
+  # full connected suite — the heavy/long-running network-fault matrix and
+  # bootstrap matrix stay in nightly-extensive.yml. Issue #1733 is the one
+  # selected proof that also needs the existing deterministic Toxiproxy route
+  # (2228/API 8474) to hold a genuine app-transport outage; all other selected
+  # proofs remain on plain `agents` (2222), `agents-old-cli` (2238), or their
+  # documented fixture. This explicit fixture is not a self-skipping nightly
+  # lane.
   #
   # Issue #849 (epic #848, ADDED): the v0.4.10 connect-break regression tests
   # (FolderListOldCliHydrateDockerTest + FolderListBootstrapSkipTreeLoadsDockerTest)
@@ -830,11 +830,11 @@ jobs:
       # ColdRestoreGoneSessionNoResurrect, ReconnectRepaint,
       # BackgroundGraceReconnect, plus the share-auth pair ShareTarget +
       # SharePassphraseDialog promoted in #727) all drive the plain deterministic
-      # `agents` fixture on host port 2222 (emulator 10.0.2.2:2222) and NONE of
-      # them need the opt-in toxiproxy network-fault proxies. Bring up `agents`
-      # (2222) plus the deterministic `agents-old-cli` (2238, issue #849) fixture
-      # below — both are plain SSH/tmux fixtures with NO toxiproxy, so the job
-      # stays deterministic.
+      # `agents` fixture on host port 2222 (emulator 10.0.2.2:2222). Issue #1733
+      # additionally routes the app transport through the existing Toxiproxy
+      # fixture (2228/API 8474) while retaining its direct checkpoint/killer
+      # sidecar on 2222. Bring up both explicitly so that load-bearing journey
+      # cannot self-skip or silently fall back to the direct route.
       - name: Start Docker fixture (agents)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents
@@ -844,6 +844,18 @@ jobs:
           source tests/docker/lib/wait-for-healthy.sh
           wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
           cat /tmp/agents-health.log
+
+      - name: Start Docker fixture (network-fault-proxy, issue #1733)
+        run: |
+          docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --show-error http://127.0.0.1:8474/version; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy
+          exit 1
 
       - name: Verify agent SSH target tool surface
         run: |
@@ -1247,6 +1259,8 @@ jobs:
           docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log 2>/dev/null || true
           docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy > artifacts/docker/network-fault-proxy.log 2>/dev/null || true
+          docker inspect pocketshell-test-network-fault-proxy > artifacts/docker/network-fault-proxy-inspect.json 2>/dev/null || true
           # Issue #849: also capture the old-CLI (2238) fixture diagnostics.
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents-old-cli > artifacts/docker/agents-old-cli.log 2>/dev/null || true
           docker inspect pocketshell-test-agents-old-cli > artifacts/docker/agents-old-cli-inspect.json 2>/dev/null || true

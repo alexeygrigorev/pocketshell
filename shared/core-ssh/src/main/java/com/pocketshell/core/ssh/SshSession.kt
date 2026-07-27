@@ -157,6 +157,17 @@ public interface SshSession : AutoCloseable {
     ): String = uploadFile(file, remotePath)
 
     /**
+     * Resume one immutable durable outbound-queue sidecar from its deterministic
+     * remote checkpoint. This deliberately does not alter [uploadFile] or
+     * [uploadStream]: their random partials retain cleanup-on-failure semantics.
+     */
+    public suspend fun uploadQueueSidecar(
+        request: QueueSidecarResumableUploadRequest,
+        onProgress: ((QueueSidecarUploadProgress) -> Unit)? = null,
+    ): QueueSidecarResumableUploadResult =
+        throw NotImplementedError("resumable queue-sidecar upload is only implemented by RealSshSession")
+
+    /**
      * Read the contents of a remote file at [remotePath] into memory.
      *
      * The path is resolved by the remote login shell, so `~`-relative and

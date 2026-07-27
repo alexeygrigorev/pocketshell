@@ -1264,6 +1264,37 @@ internal class RealSshSession(
             remotePath
         }
 
+    override suspend fun uploadQueueSidecar(
+        request: QueueSidecarResumableUploadRequest,
+        onProgress: ((QueueSidecarUploadProgress) -> Unit)?,
+    ): QueueSidecarResumableUploadResult = withContext(Dispatchers.IO) {
+        QueueSidecarResumableUploader(
+            isConnected = { isConnected },
+            ensureConnected = ::ensureConnected,
+            exec = ::exec,
+            shellQuote = ::shellSingleQuote,
+            streamRemainder = { paths, offset ->
+                val remainder = request.expectedBytes - offset
+                request.localFile.inputStream().use { input ->
+                    skipQueueSidecarLocalPrefix(input, offset, request.displayName)
+                    streamToRemoteTemp(
+                        input = input,
+                        name = request.displayName,
+                        remotePath = request.remotePath,
+                        tempRemotePath = paths.dataPath,
+                        declaredLength = remainder,
+                        onProgress = { progress ->
+                            onProgress?.invoke(progress.toQueueSidecarProgress(paths, offset))
+                        },
+                        append = true,
+                        progressOffset = offset,
+                        progressTotal = request.expectedBytes,
+                    )
+                }
+            },
+        ).upload(request)
+    }
+
     override suspend fun uploadStream(
         input: InputStream,
         length: Long,
@@ -1563,12 +1594,16 @@ internal class RealSshSession(
         tempRemotePath: String,
         declaredLength: Long,
         onProgress: ((SshUploadProgress) -> Unit)?,
+        append: Boolean = false,
+        progressOffset: Long = 0L,
+        progressTotal: Long = declaredLength,
     ): Long {
         val coroutineJob = currentCoroutineContext()[Job]
         // Channel open + `cat >` exec are transport-mutating packets — serialise
         // through the dispatcher (issue #847). The byte copy below runs OUTSIDE
         // the dispatcher so a large upload never wedges the `-CC` write.
         val quoted = shellSingleQuote(tempRemotePath)
+        val redirect = if (append) ">>" else ">"
         var command: Command? = null
         val sessionChannel = dispatcher.run {
             val channel = try {
@@ -1580,7 +1615,7 @@ internal class RealSshSession(
                 )
             }
             command = try {
-                channel.exec("cat > $quoted")
+                channel.exec("cat $redirect $quoted")
             } catch (t: Throwable) {
                 runCatching { channel.close() }
                 throw SshException(
@@ -1611,7 +1646,14 @@ internal class RealSshSession(
             val copied = try {
                 runInterruptible(Dispatchers.IO) {
                     val output = command!!.outputStream
-                    val n = copyToRemoteBlocking(input, output, declaredLength, onProgress)
+                    val n = copyToRemoteBlocking(
+                        input = input,
+                        output = output,
+                        declaredLength = declaredLength,
+                        onProgress = onProgress,
+                        progressOffset = progressOffset,
+                        progressTotal = progressTotal,
+                    )
                     runTransferStepWithStallTimeout(
                         operation = "closing upload output",
                         timeoutMs = uploadStallTimeoutMs,
@@ -1765,10 +1807,14 @@ internal class RealSshSession(
         output: OutputStream,
         declaredLength: Long,
         onProgress: ((SshUploadProgress) -> Unit)?,
+        progressOffset: Long = 0L,
+        progressTotal: Long = declaredLength,
     ): Long {
         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
         var total = 0L
-        onProgress?.invoke(SshUploadProgress(bytesTransferred = 0L, totalBytes = declaredLength))
+        onProgress?.invoke(
+            SshUploadProgress(bytesTransferred = progressOffset, totalBytes = progressTotal),
+        )
         while (true) {
             if (Thread.interrupted()) throw InterruptedException("SSH upload interrupted")
             val read = runTransferStepWithStallTimeout(
@@ -1793,7 +1839,12 @@ internal class RealSshSession(
             }
             total += read
             recordOutboundActivity()
-            onProgress?.invoke(SshUploadProgress(bytesTransferred = total, totalBytes = declaredLength))
+            onProgress?.invoke(
+                SshUploadProgress(
+                    bytesTransferred = progressOffset + total,
+                    totalBytes = progressTotal,
+                ),
+            )
         }
         runTransferStepWithStallTimeout(
             operation = "flushing upload bytes",

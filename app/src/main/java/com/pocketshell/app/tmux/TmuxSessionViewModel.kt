@@ -77,6 +77,7 @@ import com.pocketshell.app.tmux.connection.KEEPALIVE_DEATH_REDIAL_QUIET_RESET_MS
 import com.pocketshell.app.tmux.connection.KeepaliveDeathRedialAmortizer
 import com.pocketshell.app.tmux.connection.NetworkLossBandDebouncer
 import com.pocketshell.app.tmux.connection.ParkedRuntimeHealthEffects
+import com.pocketshell.app.tmux.connection.ParkedRuntimeDeathSignal
 import com.pocketshell.app.tmux.connection.isSameIdentityNetworkRestore
 import com.pocketshell.app.tmux.connection.recordNetworkRestoreReconnectStart
 import com.pocketshell.app.tmux.connection.recordNetworkRestoreRideThrough
@@ -102,8 +103,6 @@ import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.connection.RevealState
-import com.pocketshell.core.connection.RuntimeDeathCause
-import com.pocketshell.core.connection.RuntimeHealthKey
 import com.pocketshell.core.connection.RuntimeHealthLedger
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
@@ -4736,7 +4735,11 @@ public class TmuxSessionViewModel @Inject constructor(
             lease = null
             client = null
             paneRuntime = null
-            closeCachedRuntimesAsync(runtimeCache.put(runtime))
+            val evicted = runtimeCache.put(runtime)
+            if (evicted.none { it.healthBinding == runtime.healthBinding }) {
+                parkedRuntimeHealthEffects.bindParkedRuntime(runtime)
+            }
+            closeCachedRuntimesAsync(evicted)
             rebuildUnifiedPanes()
             TmuxSessionLatencyTelemetry.record(
                 name = "runtime_prewarm_ready",
@@ -5680,6 +5683,8 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return null
         }
+        // `activate` removed this exact runtime; the live path now owns liveness.
+        parkedRuntimeHealthEffects.onActivated(cached.healthBinding)
         if (cached.client.disconnected.value || cached.session?.isConnected != true) {
             val startedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L }
                 ?: SystemClock.elapsedRealtime()
@@ -5691,7 +5696,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = "source=runtime_cache reason=disconnected",
             )
-            parkedRuntimeHealthEffects.onEvicted(cached.key.toHealthKey()) // #1537 unbind
             // Issue #935 R1: contained — closing a stale cached runtime issues
             // `detach-client`/close IO against a dead transport.
             launchContainedTeardown {
@@ -5721,7 +5725,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = "source=runtime_cache reason=health_probe_failed",
             )
-            parkedRuntimeHealthEffects.onEvicted(cached.key.toHealthKey()) // #1537 unbind
             runCatching { cached.client.close() }
             // Issue #935 R1: contained — closing the unhealthy cached runtime +
             // disconnecting its lease is teardown IO against a dead transport.
@@ -5733,7 +5736,6 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             return false
         }
-        parkedRuntimeHealthEffects.onActivated(cached.key.toHealthKey()) // #1537 activated
         val startedAtMs = SystemClock.elapsedRealtime()
         val milestoneStartedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L } ?: startedAtMs
         closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
@@ -5869,12 +5871,9 @@ public class TmuxSessionViewModel @Inject constructor(
             remoteRows = remoteRows,
         )
         val evicted = runtimeCache.put(runtime)
-        // Issue #1537 (option b): bind the parked runtime's liveness edges.
-        parkedRuntimeHealthEffects.bindParked(
-            key = runtime.key.toHealthKey(),
-            client = runtime.client,
-            leaseKey = runtime.lease?.key ?: target.toSshLeaseTarget().leaseKey,
-        )
+        if (evicted.none { it.healthBinding == runtime.healthBinding }) {
+            parkedRuntimeHealthEffects.bindParkedRuntime(runtime)
+        }
         leaseRef = null
         sessionRef = null
         clientRef = null
@@ -5967,8 +5966,9 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun closeCachedRuntimesAsync(runtimes: List<CachedTmuxRuntime>) {
         if (runtimes.isEmpty()) return
-        // Issue #1537 (option b): cancel each evicted runtime's parked-health binding.
-        runtimes.forEach { parkedRuntimeHealthEffects.onEvicted(it.key.toHealthKey()) }
+        // Issue #1537: unbind the exact evicted runtime life. A host/session-only
+        // unbind can cancel a same-key replacement parked moments later.
+        runtimes.forEach { parkedRuntimeHealthEffects.onEvicted(it.healthBinding) }
         // Issue #935 R1: contained — async eviction of deactivated cached
         // runtimes is teardown IO that may race the transport drop.
         launchContainedTeardown {
@@ -5981,13 +5981,9 @@ public class TmuxSessionViewModel @Inject constructor(
     // Issue #1537 (option b): parked-runtime death effect — delegates to the
     // extracted [handleParkedRuntimeDeath] (kept out of the god-object, #1047).
     private fun onParkedRuntimeDeath(
-        key: RuntimeHealthKey,
-        leaseKey: SshLeaseKey?,
-        cause: RuntimeDeathCause,
+        signal: ParkedRuntimeDeathSignal,
     ) = handleParkedRuntimeDeath(
-        key = key,
-        leaseKey = leaseKey,
-        cause = cause,
+        signal = signal,
         runtimeCache = runtimeCache,
         foregroundLeaseKeys = setOfNotNull(
             activeTarget?.toSshLeaseTarget()?.leaseKey,
@@ -6201,7 +6197,9 @@ public class TmuxSessionViewModel @Inject constructor(
         val forceFreshLease = shouldForceFreshLease(trigger)
         val evictedIdleLease = if (forceFreshLease) {
             withContext(NonCancellable) {
-                runtimeCache.removeLease(leaseTarget.leaseKey).forEach { cached ->
+                val removed = runtimeCache.removeLease(leaseTarget.leaseKey)
+                removed.forEach { parkedRuntimeHealthEffects.onEvicted(it.healthBinding) }
+                removed.forEach { cached ->
                     runCatching { cached.closeCachedRuntime() }
                 }
                 runCatching { sshLeaseManager.evictIdle(leaseTarget.leaseKey) }
@@ -6933,12 +6931,6 @@ public class TmuxSessionViewModel @Inject constructor(
         // this attempt only (mirrors [runConnect]).
         lastConnectFailureCause = null
         // Issue #1537 (option b): consult the parked-health ledger before attach.
-        parkedRuntimeHealthEffects.consumeParkedDeath(target.toHealthKey())?.let { cause ->
-            ReconnectCauseTrail.record(
-                "parked_runtime_health", "switch_consult_dead", cause.name, trigger.logValue,
-                "hostId" to target.hostId,
-            )
-        }
         try {
             val lease = acquireLeaseForTmux(
                 target = target,
@@ -9170,6 +9162,7 @@ public class TmuxSessionViewModel @Inject constructor(
         deactivateCurrentRuntimeToCache()
         val runtime = runtimeCache.activate(target.toRuntimeKey()).runtime
             ?: error("#1083 test seam: parked runtime missing from cache after deactivate")
+        parkedRuntimeHealthEffects.onActivated(runtime.healthBinding)
         restoreCachedRuntime(target = target, runtime = runtime, trigger = trigger)
     }
 
@@ -17087,13 +17080,18 @@ public class TmuxSessionViewModel @Inject constructor(
         when (cacheEviction) {
             RuntimeCacheEviction.HostWide -> {
                 closingHostId?.let { hostId ->
-                    runtimeCache.removeHost(hostId).forEach { cached ->
+                    val removed = runtimeCache.removeHost(hostId)
+                    removed.forEach { parkedRuntimeHealthEffects.onEvicted(it.healthBinding) }
+                    removed.forEach { cached ->
                         cached.closeCachedRuntime()
                     }
                 }
             }
             is RuntimeCacheEviction.TargetRuntime -> {
-                runtimeCache.remove(cacheEviction.key)?.closeCachedRuntime()
+                runtimeCache.remove(cacheEviction.key)?.let { cached ->
+                    parkedRuntimeHealthEffects.onEvicted(cached.healthBinding)
+                    cached.closeCachedRuntime()
+                }
             }
         }
         releaseCurrentLeaseOrCloseRawSession()
@@ -17235,6 +17233,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val runtimesToClose = closingHostId?.let { hostId ->
             runtimeCache.removeHost(hostId)
         } ?: emptyList()
+        runtimesToClose.forEach { parkedRuntimeHealthEffects.onEvicted(it.healthBinding) }
         val leaseToRelease = leaseRef
         val sessionToClose = sessionRef
         sessionRef = null

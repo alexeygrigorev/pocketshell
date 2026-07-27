@@ -11,6 +11,8 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -228,7 +230,13 @@ class Issue1537ParkedRuntimeHealthTest {
         val diagnostics = installRecordingDiagnosticSink()
 
         // The parked alpha client's -CC reader EOFs while parked (the blind spot).
-        alphaClient.disconnectedSignal.value = true
+        alphaClient.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderEof,
+                source = "eof",
+                intent = "unknown",
+            ),
+        )
         advanceUntilIdle()
 
         // The health subscriber marks it dead and evicts the corpse PROACTIVELY —
@@ -239,7 +247,7 @@ class Issue1537ParkedRuntimeHealthTest {
         )
         val deaths = diagnostics.eventsNamed("parked_runtime_death")
         assertEquals("the parked-health subscriber records exactly one death", 1, deaths.size)
-        assertEquals("ClientDisconnected", deaths.single().fields["cause"])
+        assertEquals("ReaderEof", deaths.single().fields["cause"])
         assertEquals(1L, deaths.single().fields["hostId"])
         diagnostics.close()
     }

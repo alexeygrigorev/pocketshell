@@ -1,7 +1,11 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
+import com.pocketshell.app.tmux.connection.ParkedRuntimeDeathSignal
 import com.pocketshell.core.connection.RuntimeDeathCause
+import com.pocketshell.core.connection.RuntimeHealthBinding
 import com.pocketshell.core.connection.RuntimeHealthKey
+import com.pocketshell.core.connection.RuntimeInstanceToken
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseConnector
@@ -10,6 +14,8 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -64,6 +70,7 @@ class ParkedRuntimeDeathHandlerTest {
 
     // The parked runtime that just died: session "alpha" on host 1.
     private val deadKey = RuntimeHealthKey(hostId = 1L, sessionName = "alpha")
+    private val deadBinding = RuntimeHealthBinding(deadKey, RuntimeInstanceToken.create())
 
     // -------------------------------------------------------------------------
     // Test A — same-host, the FOREGROUND session still holds the shared lease
@@ -73,12 +80,13 @@ class ParkedRuntimeDeathHandlerTest {
     fun sameHostForegroundHoldsKey_forceDisconnectWithheld_sharedLiveTransportSurvives() = runTest {
         val sharedTransport = FakeSession()
         val disconnectedKeys = mutableListOf<SshLeaseKey>()
+        val cache = TmuxSessionRuntimeCache().also {
+            it.put(siblingRuntime("alpha", lease = null, healthBinding = deadBinding))
+        }
 
         handleParkedRuntimeDeath(
-            key = deadKey,
-            leaseKey = leaseKey,
-            cause = RuntimeDeathCause.ClientDisconnected,
-            runtimeCache = TmuxSessionRuntimeCache(),
+            signal = deathSignal(deadBinding, leaseKey, RuntimeDeathCause.ReaderEof),
+            runtimeCache = cache,
             // The FOREGROUND (or connecting) session shares the SAME host/key —
             // this is the always-true condition for a same-host parked runtime.
             foregroundLeaseKeys = setOf(leaseKey),
@@ -121,17 +129,15 @@ class ParkedRuntimeDeathHandlerTest {
         advanceUntilIdle()
 
         val cache = TmuxSessionRuntimeCache()
+        cache.put(siblingRuntime("alpha", lease = null, healthBinding = deadBinding))
         // A DIFFERENT same-host session ("beta") is parked holding the SAME
-        // shared lease. The dying runtime is "alpha" (not cached here) — so
-        // removeSession(1,"alpha") returns nothing and the beta corpse-share
-        // must still WITHHOLD the force-disconnect.
+        // shared lease. Exact removal removes only alpha; beta must still
+        // WITHHOLD the force-disconnect.
         cache.put(siblingRuntime(sessionName = "beta", lease = lease))
 
         val disconnectedKeys = mutableListOf<SshLeaseKey>()
         handleParkedRuntimeDeath(
-            key = deadKey,
-            leaseKey = lease.key,
-            cause = RuntimeDeathCause.ClientDisconnected,
+            signal = deathSignal(deadBinding, lease.key, RuntimeDeathCause.ReaderEof),
             runtimeCache = cache,
             // The foreground does NOT hold it here — the ONLY live holder is the
             // sibling cached runtime, which must still block the disconnect.
@@ -162,12 +168,13 @@ class ParkedRuntimeDeathHandlerTest {
     fun foreignSoleHolder_forceDisconnectFires_corpseTransportKilled() = runTest {
         val corpseTransport = FakeSession()
         val disconnectedKeys = mutableListOf<SshLeaseKey>()
+        val cache = TmuxSessionRuntimeCache().also {
+            it.put(siblingRuntime("alpha", lease = null, healthBinding = deadBinding))
+        }
 
         handleParkedRuntimeDeath(
-            key = deadKey,
-            leaseKey = leaseKey,
-            cause = RuntimeDeathCause.KeepaliveDead,
-            runtimeCache = TmuxSessionRuntimeCache(),
+            signal = deathSignal(deadBinding, leaseKey, RuntimeDeathCause.KeepaliveDead),
+            runtimeCache = cache,
             // No foreground/connecting session shares this key, and no sibling
             // cached runtime holds it -> sole holder -> disconnect must fire.
             foregroundLeaseKeys = emptySet(),
@@ -190,12 +197,67 @@ class ParkedRuntimeDeathHandlerTest {
         )
     }
 
+    @Test
+    fun staleOldRuntimeCallbackCannotRemoveNewSameSessionRuntime() = runTest {
+        val cache = TmuxSessionRuntimeCache()
+        val old = siblingRuntime(sessionName = "alpha", lease = null)
+        val replacement = siblingRuntime(sessionName = "alpha", lease = null)
+        cache.put(old)
+        cache.put(replacement)
+        val diagnostics = installRecordingDiagnosticSink()
+
+        val handled = handleParkedRuntimeDeath(
+            signal = deathSignal(old.healthBinding, leaseKey, RuntimeDeathCause.ReaderException),
+            runtimeCache = cache,
+            foregroundLeaseKeys = emptySet(),
+            disconnectLease = { error("stale callback must not disconnect any lease") },
+            launchContained = { block -> launch { block() } },
+        )
+        advanceUntilIdle()
+
+        assertFalse("a callback for an evicted old runtime is explicitly ignored", handled)
+        assertTrue("the exact replacement runtime must remain cached", cache.containsExact(replacement.healthBinding))
+        assertFalse(cache.containsExact(old.healthBinding))
+        val ignored = diagnostics.eventsNamed("parked_runtime_death_ignored").single()
+        assertEquals("stale_callback", ignored.fields["outcome"])
+        assertEquals(old.healthBinding.token.toString(), ignored.fields["boundRuntimeToken"])
+        assertEquals(1234, ignored.fields["boundClientHash"])
+        diagnostics.close()
+    }
+
+    @Test
+    fun readerExceptionRemovesOnlyItsExactRuntime() = runTest {
+        val cache = TmuxSessionRuntimeCache()
+        val dead = siblingRuntime(sessionName = "alpha", lease = null)
+        val sibling = siblingRuntime(sessionName = "beta", lease = null)
+        cache.put(dead)
+        cache.put(sibling)
+
+        val handled = handleParkedRuntimeDeath(
+            signal = deathSignal(
+                dead.healthBinding,
+                leaseKey = null,
+                cause = RuntimeDeathCause.ReaderException,
+            ),
+            runtimeCache = cache,
+            foregroundLeaseKeys = emptySet(),
+            disconnectLease = { error("no lease key was attributed") },
+            launchContained = { block -> launch { block() } },
+        )
+        advanceUntilIdle()
+
+        assertTrue(handled)
+        assertFalse(cache.containsExact(dead.healthBinding))
+        assertTrue("unrelated exact sibling survives", cache.containsExact(sibling.healthBinding))
+    }
+
     // ------------------------------- fakes -----------------------------------
 
     private fun siblingRuntime(
         sessionName: String,
-        lease: com.pocketshell.core.ssh.SshLease,
+        lease: com.pocketshell.core.ssh.SshLease?,
         hostId: Long = 1L,
+        healthBinding: RuntimeHealthBinding? = null,
     ): CachedTmuxRuntime = CachedTmuxRuntime(
         key = TmuxRuntimeKey(
             hostId = hostId,
@@ -220,7 +282,44 @@ class ParkedRuntimeDeathHandlerTest {
         remoteColumns = 0,
         remoteRows = 0,
         lease = lease,
+        healthBinding = healthBinding ?: RuntimeHealthBinding(
+            RuntimeHealthKey(hostId, sessionName),
+            RuntimeInstanceToken.create(),
+        ),
     )
+
+    private fun deathSignal(
+        binding: RuntimeHealthBinding,
+        leaseKey: SshLeaseKey?,
+        cause: RuntimeDeathCause,
+    ): ParkedRuntimeDeathSignal =
+        ParkedRuntimeDeathSignal(
+            binding = binding,
+            leaseKey = leaseKey,
+            cause = cause,
+            boundClientIdentity = 1234,
+            disconnectEvent = if (
+                cause == RuntimeDeathCause.ReaderEof ||
+                cause == RuntimeDeathCause.ReaderException
+            ) {
+                TmuxDisconnectEvent(
+                    reason = if (cause == RuntimeDeathCause.ReaderEof) {
+                        TmuxDisconnectReason.ReaderEof
+                    } else {
+                        TmuxDisconnectReason.ReaderException
+                    },
+                    source = if (cause == RuntimeDeathCause.ReaderEof) "eof" else "read_failure",
+                    intent = "unknown",
+                )
+            } else {
+                null
+            },
+            leaseCloseReason = if (cause == RuntimeDeathCause.KeepaliveDead) {
+                com.pocketshell.core.ssh.SshLeaseCloseReason.KeepaliveDead
+            } else {
+                null
+            },
+        )
 
     private class FakeSession : SshSession {
         @Volatile

@@ -10,6 +10,8 @@ import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.TestScope
@@ -112,6 +114,51 @@ class TmuxSessionViewModelPrewarmSeedTest : TmuxSessionViewModelTestBase() {
         assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")))
         assertFalse("prewarm seed timeout must not close tmux client", prewarmClient.closed)
         assertFalse("prewarm seed timeout must not mark tmux disconnected", prewarmClient.disconnected.value)
+    }
+
+    @Test
+    fun prewarmedRuntimeReaderEofIsBoundAndEvictedBeforeActivation() = runTest(scheduler) {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = testLeaseManager(
+                connector = QueueLeaseConnector(FakeSshSession()),
+                scope = this,
+                idleTtlMillis = 0L,
+            ),
+        )
+        val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4")
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+        val key = TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        advanceUntilIdle()
+        assertTrue(runtimeCache.contains(key))
+
+        prewarmClient.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ReaderEof,
+                source = "eof",
+                intent = "unknown",
+            ),
+        )
+        advanceUntilIdle()
+
+        assertFalse(
+            "prewarm must use the same parked-health binding as switch-away parking",
+            runtimeCache.contains(key),
+        )
     }
 
     @Test

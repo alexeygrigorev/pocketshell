@@ -17,6 +17,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -36,12 +37,23 @@ import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_PROJECT_SWITCHER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.CachedTmuxRuntime
+import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
+import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.closeCachedRuntime
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -422,6 +434,229 @@ class MultiSessionSwitchJourneyE2eTest {
             ),
         )
         writeTimings()
+        Unit
+    } }
+
+    /**
+     * Issue #1537 G10 deterministic stale-generation reproduction.
+     *
+     * This drives the real Docker/tmux lifecycle with APIs present on both the
+     * untouched base and candidate:
+     *
+     *  1. open A generation 1, then switch to B so A is genuinely parked;
+     *  2. create and connect a second real A control client, construct the same
+     *     common CachedTmuxRuntime shape, and replace generation 1 through the
+     *     production cache.put operation;
+     *  3. remotely detach only generation 1's real tmux client, delivering its
+     *     ReaderEof through the existing parked-health lifecycle.
+     *
+     * On untouched 3e8474d0 the logical host/session removal evicts healthy
+     * generation 2 and records parked_runtime_death. With exact binding, the
+     * callback records stale_callback, generation 2 remains cached, switches
+     * back without a new SSH handshake, and accepts real terminal input.
+     */
+    @Test
+    fun lateOldRuntimeRemoteDeathCannotEvictHealthySameSessionReplacement() { runBlocking {
+        val recording = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        diagnostics = recording
+
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady(hostRowTag)
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalContains(SESSION_A_MARKER, "issue1537 stale-generation initial A")
+
+        expectedMarker[SESSION_A] = SESSION_A_MARKER
+        expectedMarker[SESSION_B] = SESSION_B_MARKER
+        expectedMarker[SESSION_C] = SESSION_C_MARKER
+        assertInputRoutesToShownSession(SESSION_A, "issue1537-generation1")
+        switchAndAssert(step = 1, fromSession = SESSION_A, toSession = SESSION_B)
+
+        val cache = runtimeCacheFromActiveViewModel()
+        val currentHostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
+        val generation1Key = cache.snapshotKeys().single {
+            it.hostId == currentHostId && it.sessionName == SESSION_A
+        }
+        val generation1 = cache.cachedRuntimesForHost(generation1Key.hostId)
+            .single { it.key == generation1Key }
+        val generation1ClientHash = System.identityHashCode(generation1.client)
+        val generation1TmuxClient = listTmuxClientsForSession(SESSION_A).single()
+
+        val replacementScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val replacementSession = withTimeout(20_000L) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(fixtureKey),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ).getOrThrow()
+        }
+        val replacementClient = TmuxClientFactory(replacementScope).create(
+            session = replacementSession,
+            sessionName = SESSION_A,
+            createIfMissing = false,
+        )
+        withTimeout(20_000L) { replacementClient.connect() }
+        val clientsWithReplacement = listTmuxClientsForSession(SESSION_A)
+        assertEquals(
+            "issue1537 fixture must have exactly old A + healthy replacement A clients",
+            2,
+            clientsWithReplacement.size,
+        )
+        assertTrue(
+            "issue1537 fixture must retain the exact old A client until remote EOF",
+            generation1TmuxClient in clientsWithReplacement,
+        )
+        assertEquals(
+            "issue1537 old and replacement must be distinct remote tmux clients and shell channels",
+            2,
+            clientsWithReplacement.map { it.pid }.distinct().size,
+        )
+        assertEquals(
+            "issue1537 old and replacement must have distinct parent login shells",
+            2,
+            clientsWithReplacement.map { it.shellPid }.distinct().size,
+        )
+        assertTrue(
+            "issue1537 all authoritative tmux and parent shell PIDs must be positive",
+            clientsWithReplacement.all { it.pid > 1L && it.shellPid > 1L },
+        )
+        assertTrue(
+            "issue1537 replacement client/session must be healthy before cache replacement",
+            !replacementClient.disconnected.value && replacementSession.isConnected,
+        )
+        val generation2 = CachedTmuxRuntime(
+            key = generation1.key,
+            hostName = generation1.hostName,
+            startDirectory = generation1.startDirectory,
+            session = replacementSession,
+            client = replacementClient,
+            panes = generation1.panes,
+            paneRows = generation1.paneRows,
+            // The restored-runtime production path rebinds these jobs and
+            // queues to generation 2. Empty maps force that normal rebind.
+            paneProducerJobs = emptyMap(),
+            paneInputQueues = emptyMap(),
+            paneInputJobs = emptyMap(),
+            paneAgentJobs = emptyMap(),
+            paneAgentInputs = generation1.paneAgentInputs,
+            agentConversations = generation1.agentConversations,
+            remoteColumns = generation1.remoteColumns,
+            remoteRows = generation1.remoteRows,
+            lease = null,
+        )
+        val generation2ClientHash = System.identityHashCode(replacementClient)
+        assertTrue(
+            "issue1537 replacement must be a distinct real client generation",
+            generation2ClientHash != generation1ClientHash,
+        )
+        val replaced = cache.put(generation2)
+        assertEquals(
+            "issue1537 fixture must replace exactly old A through production cache.put",
+            listOf(generation1ClientHash),
+            replaced.map { System.identityHashCode(it.client) },
+        )
+        assertTrue(
+            "issue1537: healthy generation 2 must occupy A's common runtime cache key",
+            cache.cachedRuntimesForHost(generation1Key.hostId)
+                .single { it.key == generation1Key }
+                .client === replacementClient,
+        )
+
+        try {
+            killRemoteTmuxClientShell(generation1TmuxClient)
+            val generation1Disconnect = withTimeout(10_000L) {
+                generation1.client.disconnectEvent.first { it != null }!!
+            }
+            assertEquals(
+                "issue1537: killing the exact old remote shell channel must produce ReaderEof",
+                TmuxDisconnectReason.ReaderEof,
+                generation1Disconnect.reason,
+            )
+            assertTrue(
+                "issue1537: old remote death must not damage healthy generation 2",
+                !replacementClient.disconnected.value && replacementSession.isConnected,
+            )
+            compose.waitUntil(timeoutMillis = 15_000L) {
+                recording.eventsNamed("parked_runtime_death_ignored").isNotEmpty() ||
+                    recording.eventsNamed("parked_runtime_death").isNotEmpty()
+            }
+
+            val ignored = recording.eventsNamed("parked_runtime_death_ignored")
+            val falseDeaths = recording.eventsNamed("parked_runtime_death")
+            writeText(
+                "issue1537-stale-generation-diagnostics.txt",
+                buildString {
+                    appendLine("killed_tmux_client=$generation1TmuxClient")
+                    appendLine("generation1_disconnect=$generation1Disconnect")
+                    appendLine("generation1_client_hash=$generation1ClientHash")
+                    appendLine("generation2_client_hash=$generation2ClientHash")
+                    appendLine("ignored=$ignored")
+                    appendLine("parked_runtime_death=$falseDeaths")
+                },
+            )
+            assertEquals(
+                "issue1537: late old-A edge must have exact stale_callback outcome; " +
+                    "untouched base instead records logical-key parked_runtime_death",
+                1,
+                ignored.count {
+                    it.fields["outcome"] == "stale_callback" &&
+                        it.fields["cause"] == "ReaderEof" &&
+                        it.fields["session"] == SESSION_A &&
+                        it.fields["boundClientHash"] == generation1ClientHash
+                },
+            )
+            assertTrue(
+                "issue1537: late old-A edge must cause zero false eviction events; saw $falseDeaths",
+                falseDeaths.isEmpty(),
+            )
+            assertTrue(
+                "issue1537: exact stale callback must leave healthy A generation 2 cached",
+                cache.cachedRuntimesForHost(generation1Key.hostId)
+                    .single { it.key == generation1Key }
+                    .client === replacementClient,
+            )
+
+            val handshakesBeforeReturn = SSH_HANDSHAKE_ATTEMPTS.get()
+            val reconnectsBeforeReturn = reconnectTriggerConnectCount()
+            switchAndAssert(step = 2, fromSession = SESSION_B, toSession = SESSION_A)
+            assertEquals(
+                "issue1537: retained generation 2 must warm-switch without a fresh SSH handshake",
+                handshakesBeforeReturn,
+                SSH_HANDSHAKE_ATTEMPTS.get(),
+            )
+            assertEquals(
+                "issue1537: retained generation 2 must not trigger reconnect on return",
+                reconnectsBeforeReturn,
+                reconnectTriggerConnectCount(),
+            )
+            // switchAndAssert performs the load-bearing terminal input round-trip.
+            captureViewport("issue1537-exact-generation-return-$SESSION_A")
+            writeSummary(
+                lines = listOf(
+                    "issue=1537 deterministic stale old-runtime callback",
+                    "session=$SESSION_A",
+                    "old_client_hash=$generation1ClientHash",
+                    "replacement_client_hash=$generation2ClientHash",
+                    "remote_killed_client=$generation1TmuxClient",
+                    "parked_runtime_death_ignored=${ignored.size}",
+                    "parked_runtime_death=${falseDeaths.size}",
+                    "outcome=stale_callback",
+                    "replacement_cached_and_input_round_trip=true",
+                ),
+            )
+            writeTimings()
+        } finally {
+            runCatching { generation1.closeCachedRuntime() }
+            runCatching { replacementClient.close() }
+            runCatching { replacementSession.close() }
+            replacementScope.cancel()
+        }
         Unit
     } }
 
@@ -1106,6 +1341,72 @@ class MultiSessionSwitchJourneyE2eTest {
     }
 
     // ---------------------------------------------------------------- Helpers
+
+    private fun runtimeCacheFromActiveViewModel(): TmuxSessionRuntimeCache {
+        var cache: TmuxSessionRuntimeCache? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+            cache = TmuxSessionViewModel::class.java
+                .getDeclaredField("runtimeCache")
+                .apply { isAccessible = true }
+                .get(vm) as TmuxSessionRuntimeCache
+        }
+        return requireNotNull(cache) { "issue1537: active VM common runtime cache unavailable" }
+    }
+
+    private suspend fun listTmuxClientsForSession(sessionName: String): List<RemoteTmuxClient> {
+        val script =
+            "tmux list-clients -t ${shellQuote(sessionName)} -F '#{client_name}|#{client_pid}'"
+        val rows = runDockerSshCommand(script, "list clients for $sessionName")
+            .lineSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .toList()
+        return rows
+            .map { line ->
+                val fields = line.split('|', limit = 2)
+                require(fields.size == 2) { "issue1537: malformed tmux client row '$line'" }
+                val pid = fields[1].toLong()
+                val shellPid = runDockerSshCommand(
+                    "ps -o ppid= -p $pid",
+                    "resolve parent login shell for tmux client ${fields[0]}",
+                ).trim().toLong()
+                RemoteTmuxClient(name = fields[0], pid = pid, shellPid = shellPid)
+            }
+    }
+
+    private suspend fun killRemoteTmuxClientShell(client: RemoteTmuxClient) {
+        require(client.shellPid > 1L) {
+            "issue1537: refusing invalid remote shell PID ${client.shellPid}"
+        }
+        runDockerSshCommand(
+            "kill -KILL ${client.shellPid}",
+            "kill exact old A tmux client shell channel $client",
+        )
+    }
+
+    private data class RemoteTmuxClient(val name: String, val pid: Long, val shellPid: Long)
+
+    private suspend fun runDockerSshCommand(command: String, label: String): String {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(fixtureKey),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(command) }
+        }
+        val exec = result.getOrNull()
+        assertEquals(
+            "issue1537: Docker SSH command must succeed for $label; " +
+                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            0,
+            exec?.exitCode,
+        )
+        return exec?.stdout.orEmpty()
+    }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()

@@ -135,6 +135,7 @@ class MobileSpuriousReconnectE2eTest {
                 val vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
                 vm.forceTransportProvenAliveForTest = null
                 vm.forceLivenessProbeDeadForTest = false
+                vm.forceRestoreReaderActivityStaleForTest = false
             }
         }
         runCatching {
@@ -163,6 +164,12 @@ class MobileSpuriousReconnectE2eTest {
         // the #1042 liveness-first restore rides through deterministically (the AVD
         // cannot reproduce the 90s real ride-through window in-test).
         vm.forceTransportProvenAliveForTest = true
+        // Issue #1768 reproduce-first: #1533's recent-reader vouch otherwise wins
+        // before the bounded probe and falsely attributes this fixture to
+        // same_identity_reader_active. Force the production-reachable stale-reader
+        // state so the real restore reducer must reach the probe. Mutation: removing
+        // this assignment must make the exact cause assertion below fail.
+        vm.forceRestoreReaderActivityStaleForTest = true
         diagnostics!!.clear()
 
         // THE BRIEF DIP: drive the REAL VM network hook directly with a bare loss then
@@ -336,6 +343,7 @@ class MobileSpuriousReconnectE2eTest {
         // runLivenessProbePing() answers over the REAL connected `-CC` Docker session.
         vm.forceTransportProvenAliveForTest = false
         vm.forceLivenessProbeDeadForTest = false
+        vm.forceRestoreReaderActivityStaleForTest = true
         diagnostics!!.clear()
 
         val baseline = TerminalNetworkSnapshot.Validated(networkHandle = "wifi-A", transports = setOf("WIFI"))
@@ -452,11 +460,11 @@ class MobileSpuriousReconnectE2eTest {
             TerminalNetworkChangeKind.NetworkLost,
             lost!!.kind,
         )
-        assertTrue(
-            "the VM must record a network_loss_hold for the bare loss (proves the hold " +
-                "arm fired, not a vacuous pass); events=${diagnostics!!.events.map { it.name }}",
-            diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty(),
-        )
+        // Issue #1768 / #1098: App fan-out to the VM hook is asynchronous. This
+        // bounded, hard-failing await keeps the hold assertion load-bearing without
+        // racing the terminal-network scope. Mutation: restoring the immediate read
+        // must reproduce the exact-main missing-hold failure.
+        awaitNetworkLossHold("after the long-idle bare loss")
 
         // (3) SURVIVE THE LONG IDLE OUTAGE: no churn across the whole idle window.
         watchNoRedialDiagnostics("across the long idle outage", LONG_IDLE_OUTAGE_MS)
@@ -466,6 +474,7 @@ class MobileSpuriousReconnectE2eTest {
         // bounded probe answers over the REAL live agents:2222 channel.
         vm.forceTransportProvenAliveForTest = false
         vm.forceLivenessProbeDeadForTest = false
+        vm.forceRestoreReaderActivityStaleForTest = true
 
         // (5) Distinct-from-fast-path proof: step 1 cannot fire on restore.
         assertTrue(
@@ -580,6 +589,7 @@ class MobileSpuriousReconnectE2eTest {
         captureViewport("issue1042d-01-attached")
 
         val vm = currentViewModel()
+        awaitInitialAttachFinalized(vm, "before cross-transport handoff")
 
         // Pin NOT-proven-alive so the #981 ride-through cannot suppress the REAL handoff
         // (we WANT it to redial — that is the contract being guarded).
@@ -603,15 +613,18 @@ class MobileSpuriousReconnectE2eTest {
         )
         compose.activityRule.scenario.onActivity { vm.onNetworkChanged(handoff) }
 
-        // LOAD-BEARING: the real handoff DOES redial (#548 preserved).
-        compose.waitUntil(timeoutMillis = RESTORE_RECONNECT_TIMEOUT_MS) {
-            diagnostics!!.eventsNamed("network_reconnect_start").isNotEmpty()
-        }
-        assertTrue(
-            "expected a network_reconnect_start for the real cross-transport handoff " +
-                "(proves the #548 redial fired, not a vacuous pass); " +
-                "events=${diagnostics!!.events.map { it.name }}",
-            diagnostics!!.eventsNamed("network_reconnect_start").isNotEmpty(),
+        // LOAD-BEARING: the exact handoff event DOES redial (#548 preserved).
+        // Match its reason + sequence + production classification so a concurrent
+        // reconnect cannot satisfy this proof, and hard-fail with the full labelled
+        // boundary instead of Compose's generic wait timeout.
+        val handoffReconnect = awaitCrossTransportHandoffReconnect(
+            reason = handoff.reason,
+            sequence = handoff.sequence,
+        )
+        assertEquals(
+            "the exact cross-transport handoff must retain the proactive classification",
+            "proactive_network_handoff",
+            handoffReconnect.fields["classification"],
         )
 
         // The redial reconnects over the (real, healthy) fixture and settles.
@@ -762,6 +775,83 @@ class MobileSpuriousReconnectE2eTest {
             forbidden.isEmpty(),
         )
     }
+
+    /**
+     * Issue #1768 / #1098: await the asynchronous loss fan-out with the established
+     * connected-event budget. A missing hold still hard-fails below; there is no skip,
+     * relaunch, or fixed-sleep proxy.
+     */
+    private fun awaitNetworkLossHold(label: String) {
+        runCatching {
+            compose.waitUntil(timeoutMillis = LOSS_HOLD_TIMEOUT_MS) {
+                diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty()
+            }
+        }
+        assertTrue(
+            "the VM must record a network_loss_hold for the bare loss $label (proves the " +
+                "hold arm fired, not a vacuous pass); events=${diagnosticBoundary()}",
+            diagnostics!!.eventsNamed("network_loss_hold").isNotEmpty(),
+        )
+    }
+
+    private fun awaitCrossTransportHandoffReconnect(
+        reason: String,
+        sequence: Long,
+    ): RecordedDiagnosticEvent {
+        fun exactEvents(): List<RecordedDiagnosticEvent> =
+            diagnostics!!.eventsNamed("network_reconnect_start").filter { event ->
+                event.fields["reason"] == reason &&
+                    event.fields["sequence"] == sequence &&
+                    event.fields["classification"] == "proactive_network_handoff"
+            }
+
+        runCatching {
+            compose.waitUntil(timeoutMillis = RESTORE_RECONNECT_TIMEOUT_MS) {
+                exactEvents().isNotEmpty()
+            }
+        }
+        val exact = exactEvents()
+        assertTrue(
+            "expected exact cross-handoff network_reconnect_start " +
+                "reason=$reason sequence=$sequence " +
+                "classification=proactive_network_handoff; events=${diagnosticBoundary()}",
+            exact.isNotEmpty(),
+        )
+        return exact.last()
+    }
+
+    /**
+     * Issue #1768: the visible Connected/terminal signals can precede the original
+     * attach job's final `tmux-connect-ready` bookkeeping by a few milliseconds. A
+     * handoff in that interval is correctly ignored as attach-in-flight, making the
+     * scope guard vacuous. Await the existing connect-job truth before injection.
+     */
+    private fun awaitInitialAttachFinalized(
+        vm: TmuxSessionViewModel,
+        label: String,
+    ) {
+        runCatching {
+            compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+                !vm.connectJobActiveForTest()
+            }
+        }
+        assertTrue(
+            "expected the initial attach connect job to be finalized $label; " +
+                "connectJobActive=${vm.connectJobActiveForTest()} events=${diagnosticBoundary()}",
+            !vm.connectJobActiveForTest(),
+        )
+    }
+
+    private fun diagnosticBoundary(): List<String> =
+        diagnostics!!.events.map { event ->
+            "${event.name}(" +
+                "reason=${event.fields["reason"]}," +
+                "sequence=${event.fields["sequence"]}," +
+                "classification=${event.fields["classification"]}," +
+                "stage=${event.fields["stage"]}," +
+                "outcome=${event.fields["outcome"]}," +
+                "cause=${event.fields["cause"]})"
+        }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()
@@ -927,6 +1017,10 @@ class MobileSpuriousReconnectE2eTest {
         // Bounded so the connected journey stays affordable; long enough to be a
         // genuine "survived an outage" hold rather than a synchronous brief dip.
         const val LONG_IDLE_OUTAGE_MS: Long = 6_000L
+
+        // Issue #1098 / #1768: bounded budget for asynchronous network-loss fan-out.
+        val LOSS_HOLD_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 20_000L else 10_000L
 
         val HOST_ROW_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L

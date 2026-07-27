@@ -186,6 +186,7 @@ class Issue1078DeadSocketHandoffRedialJourneyE2eTest {
 
         val key = requireNotNull(seededKey)
         val vm = currentViewModel()
+        awaitInitialAttachFinalized(vm, "before dead-socket handoff")
 
         // The #1078 state (both injected over the LIVE connected session, #780 model):
         //  * passively proven alive  -> the reducer takes SuppressNetworkTransportProvenAlive
@@ -281,6 +282,7 @@ class Issue1078DeadSocketHandoffRedialJourneyE2eTest {
 
         val key = requireNotNull(seededKey)
         val vm = currentViewModel()
+        awaitInitialAttachFinalized(vm, "before alive-socket handoff")
 
         // Same passively-proven-alive handoff, but the bounded probe ANSWERS over the
         // REAL live `-CC` channel (probe-dead seam OFF) — the socket SURVIVED the handoff.
@@ -430,6 +432,29 @@ class Issue1078DeadSocketHandoffRedialJourneyE2eTest {
         assertTrue(
             "expected Connected after $label, observed=${currentConnectionStatus()}",
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+    }
+
+    /**
+     * Issue #1768: terminal visibility and Connected can lead the original attach
+     * job's final bookkeeping. A synthetic handoff in that narrow interval is
+     * correctly ignored as attach-in-flight, so wait for the existing job truth and
+     * hard-fail with the diagnostic boundary instead of exercising no handoff arm.
+     */
+    private fun awaitInitialAttachFinalized(
+        vm: TmuxSessionViewModel,
+        label: String,
+    ) {
+        runCatching {
+            compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+                !vm.connectJobActiveForTest()
+            }
+        }
+        assertTrue(
+            "expected the initial attach connect job to be finalized $label; " +
+                "connectJobActive=${vm.connectJobActiveForTest()} " +
+                "events=${diagnostics!!.events.map { it.name }}",
+            !vm.connectJobActiveForTest(),
         )
     }
 

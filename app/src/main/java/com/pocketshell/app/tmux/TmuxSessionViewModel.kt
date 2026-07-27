@@ -91,6 +91,7 @@ import com.pocketshell.app.tmux.connection.PassiveDropArm
 import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
 import com.pocketshell.app.tmux.connection.preferFreshTransportForPassiveReattach
 import com.pocketshell.app.tmux.connection.ReconnectRungFailureSource
+import com.pocketshell.app.tmux.connection.RestoreReaderActivityVerdict
 import com.pocketshell.app.tmux.connection.SshLeaseTransportPort
 import com.pocketshell.app.tmux.connection.SuppressedDropDiagnostic
 import com.pocketshell.app.tmux.connection.TmuxAttachEffects
@@ -1181,6 +1182,13 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     @Volatile
     internal var forceLivenessProbeDeadForTest: Boolean = false
+
+    private val restoreReaderActivityVerdict = RestoreReaderActivityVerdict()
+    internal var forceRestoreReaderActivityStaleForTest: Boolean
+        get() = restoreReaderActivityVerdict.forceStaleForTest
+        set(value) {
+            restoreReaderActivityVerdict.forceStaleForTest = value
+        }
 
     /** EPIC #792 Slice D test seam: drive one liveness ping synchronously from a
      *  test (returns alive/dead) so a unit/connected proof can assert the probe
@@ -5519,7 +5527,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val sameIdentity = change.isSameIdentityNetworkRestore()
         // Issue #1533: same-identity + live-but-busy (recent reader activity) rides
         // through WITHOUT the strict probe a `%output` burst would park past its budget.
-        if (sameIdentity && isRestoreTransportProvenAliveByReaderActivity()) {
+        if (sameIdentity && restoreReaderActivityVerdict.isAlive(clientRef)) {
             rideThroughNetworkRestore(change, target, cause = "same_identity_reader_active")
             return
         }
@@ -5548,19 +5556,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 forceFreshLeaseRestoreReconnect(change, target)
             }
         }
-    }
-
-    /**
-     * Issue #1533: is the current control channel proven alive by RECENT reader
-     * activity (#927)? A `%output` burst keeps advancing the reader's last-activity
-     * clock even while a `refresh-client` reply is parked — proof the SAME socket is
-     * alive. Valid ONLY on a same-identity restore (caller gates on that).
-     */
-    private fun isRestoreTransportProvenAliveByReaderActivity(): Boolean {
-        val client = clientRef ?: return false
-        return runCatching {
-            client.millisSinceLastReaderActivity() <= client.readerActivityLivenessWindowMs
-        }.getOrDefault(false)
     }
 
     private fun recordStaleNetworkTransitionProbe(

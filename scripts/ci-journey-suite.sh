@@ -640,6 +640,36 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #959 recurrence: the real mounted TerminalSurface/AndroidView boundary.
+# Reuse one production TerminalView across session A→null→B, then prove null
+# detaches input and the View adopts B by identity before input readiness,
+# routes input to B only, and renders B output. This closes the historical JVM
+# proxy gap that bypassed TerminalView.currentSession and stayed green while
+# the connected journey lost the first post-grace key into stale session A.
+# Uses no Docker fixture.
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  SESSION_BINDING_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #959 mounted session-binding proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #959 MOUNTED SESSION-BINDING PROOF: $CORE_TERMINAL_SESSION_BINDING_CLASS (attempt 1)"
+  echo "=========================================================="
+  session_binding_start=$SECONDS
+  if run_core_terminal_session_binding; then
+    echo "SESSION_BINDING_PASS: passed on attempt 1 (elapsed $((SECONDS - session_binding_start))s)"
+  else
+    echo ">>> SESSION-BINDING PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_session_binding; then
+      echo "SESSION_BINDING_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "SESSION_BINDING_FAILED: #959 mounted session-binding proof failed twice"
+      SESSION_BINDING_STATUS="FAIL"
+    fi
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # v0.4.17 RELEASE-BLOCKER: the terminal affordance-overlay UNBOUNDED-height
 # measure crash (CI run 28184338389, reproduced 4/4). The draw-only overlays

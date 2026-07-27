@@ -6,6 +6,7 @@ import android.content.ContextWrapper
 import android.content.Intent
 import android.net.Uri
 import android.os.SystemClock
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -35,11 +36,14 @@ import org.hamcrest.Matchers.allOf
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -184,6 +188,136 @@ class TerminalSurfaceComposeIntegrationTest {
     fun tearDown() {
         // No-op — each test scopes its own producer/scope/Intents lifecycle.
     }
+
+    /**
+     * Issue #959 recurrence: exercise the production Compose/AndroidView owner,
+     * not a bare TerminalView or a VM input-sink proxy.
+     *
+     * The same mounted View first displays session A, observes the real detached
+     * null identity, then [TerminalSurfaceState.attachExternalProducer] installs
+     * B. Each transition must reach the View after one main-loop idle boundary;
+     * input is inert while detached, then input written through the View must
+     * reach B only and B output must render through the View's attached emulator.
+     * This is the boundary the historical VM test bypassed and the exact-main
+     * connected diagnostic found stale.
+     */
+    @Test
+    fun mountedViewRebindsImmediatelyFromSessionAToBAndRoutesOnlyToB() { runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val state = TerminalSurfaceState()
+        val stdoutA = MutableSharedFlow<ByteArray>(extraBufferCapacity = 4)
+        val stdoutB = MutableSharedFlow<ByteArray>(extraBufferCapacity = 4)
+        val stdinA = RecordingOutputStream()
+        val stdinB = RecordingOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerA = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdoutA,
+            remoteStdin = stdinA,
+        )
+        val sessionA = requireNotNull(state.session)
+        var producerB: kotlinx.coroutines.Job? = null
+
+        try {
+            composeTestRule.setContent {
+                TerminalSurface(state = state, modifier = Modifier)
+            }
+            composeTestRule.waitForIdle()
+            val mountedView = waitForTerminalView()
+            assertSame(
+                "precondition: the production surface must bind mounted View to session A",
+                sessionA,
+                mountedView.currentSession,
+            )
+
+            val inputA = "issue959-input-a"
+            instrumentation.runOnMainSync {
+                val bytes = inputA.toByteArray(Charsets.UTF_8)
+                requireNotNull(mountedView.currentSession).write(bytes, 0, bytes.size)
+            }
+            stdinA.awaitContains(inputA)
+
+            val outputA = "ISSUE959-OUTPUT-A"
+            stdoutA.emit("$outputA\r\n".toByteArray(Charsets.UTF_8))
+            waitForViewTranscript(mountedView, outputA)
+
+            instrumentation.runOnMainSync {
+                state.detachExternalProducer()
+            }
+            composeTestRule.waitForIdle()
+            val detachedView = waitForTerminalView()
+            assertSame(
+                "the AndroidView instance must be reused across A→null",
+                mountedView,
+                detachedView,
+            )
+            assertSame(
+                "the mounted View must expose the exact detached null identity",
+                null,
+                detachedView.currentSession,
+            )
+            val stdinAAfterDetach = stdinA.snapshot()
+            instrumentation.runOnMainSync {
+                detachedView.dispatchKeyEvent(
+                    KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_X),
+                )
+            }
+            assertEquals(
+                "mounted View input must be inert while the state is detached",
+                stdinAAfterDetach,
+                stdinA.snapshot(),
+            )
+
+            lateinit var sessionB: com.termux.terminal.TerminalSession
+            instrumentation.runOnMainSync {
+                producerB = state.attachExternalProducer(
+                    scope = producerScope,
+                    stdout = stdoutB,
+                    remoteStdin = stdinB,
+                )
+                sessionB = requireNotNull(state.session)
+            }
+            assertTrue("session B must replace session A by identity", sessionB !== sessionA)
+
+            // One main-loop idle turn is the readiness boundary: no retry/poll is
+            // allowed for identity. The old AndroidView.update ownership retained A
+            // through the null lifecycle transition until a later unrelated update.
+            composeTestRule.waitForIdle()
+            val reusedView = waitForTerminalView()
+            assertSame("the AndroidView instance must be reused across A→null→B", mountedView, reusedView)
+            assertSame(
+                "the mounted View must expose exact session B before input readiness",
+                sessionB,
+                reusedView.currentSession,
+            )
+
+            val inputB = "issue959-input-b"
+            instrumentation.runOnMainSync {
+                val bytes = inputB.toByteArray(Charsets.UTF_8)
+                requireNotNull(reusedView.currentSession).write(bytes, 0, bytes.size)
+            }
+            stdinB.awaitContains(inputB)
+            assertFalse(
+                "post-rebind input must never leak into stopped session A",
+                stdinA.snapshot().contains(inputB),
+            )
+
+            val lateA = "ISSUE959-LATE-OUTPUT-A"
+            val outputB = "ISSUE959-OUTPUT-B"
+            stdoutA.emit("$lateA\r\n".toByteArray(Charsets.UTF_8))
+            stdoutB.emit("$outputB\r\n".toByteArray(Charsets.UTF_8))
+            waitForViewTranscript(reusedView, outputB)
+            assertFalse(
+                "the reused View must render B's emulator, never late output from A",
+                viewTranscript(reusedView).contains(lateA),
+            )
+        } finally {
+            producerB?.cancel()
+            producerA.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    } }
 
     @Test
     fun copyActionRoutesSelectedTextThroughRealClipboardManager() { runBlocking {
@@ -890,6 +1024,17 @@ class TerminalSurfaceComposeIntegrationTest {
         return null
     }
 
+    private suspend fun waitForViewTranscript(view: TerminalView, expected: String) {
+        withTimeout(5_000) {
+            while (!viewTranscript(view).contains(expected)) {
+                delay(20)
+            }
+        }
+    }
+
+    private fun viewTranscript(view: TerminalView): String =
+        view.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+
     /**
      * Dispatch a synthetic ACTION_DOWN immediately followed by ACTION_UP at
      * `(x, y)` (view-local pixels) so the vendored GestureDetector confirms
@@ -965,6 +1110,31 @@ class TerminalSurfaceComposeIntegrationTest {
                 onImeLookup()
             }
             return super.getSystemService(name)
+        }
+    }
+
+    private class RecordingOutputStream : OutputStream() {
+        private val bytes = ByteArrayOutputStream()
+
+        @Synchronized
+        override fun write(value: Int) {
+            bytes.write(value)
+        }
+
+        @Synchronized
+        override fun write(buffer: ByteArray, offset: Int, length: Int) {
+            bytes.write(buffer, offset, length)
+        }
+
+        @Synchronized
+        fun snapshot(): String = bytes.toString(Charsets.UTF_8.name())
+
+        suspend fun awaitContains(expected: String) {
+            withTimeout(5_000) {
+                while (!snapshot().contains(expected)) {
+                    delay(20)
+                }
+            }
         }
     }
 }

@@ -16,14 +16,16 @@ finish_ci_journey_suite() {
   if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
         && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
         && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
-        && "$REATTACH_REPAINT_STATUS" == "PASS" && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" \
+        && "$REATTACH_REPAINT_STATUS" == "PASS" && "$SESSION_BINDING_STATUS" == "PASS" \
+        && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" \
         && "$SURFACE_REPAINT_STATUS" == "PASS" && "$SHELL_SNAPSHOT_STATUS" == "PASS" ]]; then
     JOURNEY_EXIT=0
     journey_status="PASS"
   elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
           && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
           && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
-          && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" \
+          && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$SESSION_BINDING_STATUS" != "FAIL" \
+          && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" \
           && "$SURFACE_REPAINT_STATUS" != "FAIL" && "$SHELL_SNAPSHOT_STATUS" != "FAIL" ]]; then
     # Only the budget timeout fired (no class failed BOTH attempts on its own
     # merits): a pure #470-stall time-budget casualty.
@@ -70,6 +72,9 @@ finish_ci_journey_suite() {
     echo
     echo "Core-terminal #879 beyond-grace reattach-repaint proof (\`shared:core-terminal\`): **$REATTACH_REPAINT_STATUS**"
     echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\`"
+    echo
+    echo "Core-terminal #959 mounted session-binding proof (\`shared:core-terminal\`): **$SESSION_BINDING_STATUS**"
+    echo "- \`$CORE_TERMINAL_SESSION_BINDING_CLASS\`"
     echo
     echo "Core-terminal v0.4.17 overlay-unbounded-measure crash proof (\`shared:core-terminal\`): **$OVERLAY_UNBOUNDED_STATUS**"
     echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\`"
@@ -122,7 +127,8 @@ finish_ci_journey_suite() {
     # else-branch and is mislabeled as an infra abort, burying the real cause.
     if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" \
           || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" \
-          || "$REATTACH_REPAINT_STATUS" == "FAIL" || "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
+          || "$REATTACH_REPAINT_STATUS" == "FAIL" || "$SESSION_BINDING_STATUS" == "FAIL" \
+          || "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
       echo
       echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
       for c in "${FAILED_CLASSES[@]}"; do
@@ -142,6 +148,9 @@ finish_ci_journey_suite() {
       fi
       if [[ "$REATTACH_REPAINT_STATUS" == "FAIL" ]]; then
         echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\` (#879 reattach-repaint proof)"
+      fi
+      if [[ "$SESSION_BINDING_STATUS" == "FAIL" ]]; then
+        echo "- \`$CORE_TERMINAL_SESSION_BINDING_CLASS\` (#959 mounted session-binding proof)"
       fi
       if [[ "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
         echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\` (v0.4.17 overlay-unbounded-measure crash proof)"

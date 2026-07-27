@@ -377,9 +377,11 @@ class TerminalSurfaceState(
     }
 
     /**
-     * Bind a live [TerminalSession] to this state holder. The next
-     * recomposition of [TerminalSurface] will attach it to the underlying
-     * [TerminalView].
+     * Bind a live [TerminalSession] to this state holder. During the app's
+     * main-thread detach/reattach lifecycle, a mounted [TerminalSurface]'s
+     * observer applies the settled latest identity to the underlying
+     * [TerminalView] independently of an unrelated recomposition. This is not a
+     * synchronous mirroring contract for arbitrary off-main mutations.
      *
      * Attaching twice with the same session is a no-op. Attaching a new
      * session over an existing one replaces it; the old session is NOT
@@ -393,9 +395,10 @@ class TerminalSurfaceState(
     }
 
     /**
-     * Release the current session reference. The [TerminalView] keeps
-     * rendering its existing emulator state until something else replaces
-     * it; this method only severs the state-holder ↔ session link.
+     * Release the current session reference. During the app's main-thread
+     * detach/reattach lifecycle, a mounted [TerminalSurface]'s observer applies
+     * the settled null identity to the underlying [TerminalView]; with no
+     * mounted surface this only severs the state-holder ↔ session link.
      */
     fun detach() {
         if (_session != null) renderModelMutationEpoch.incrementAndGet()

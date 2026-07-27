@@ -141,6 +141,12 @@ class BareNetworkLossRestoreReconnectE2eTest {
     @After
     fun tearDown() {
         runCatching {
+            compose.activityRule.scenario.onActivity { activity ->
+                ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                    .forceRestoreReaderActivityStaleForTest = false
+            }
+        }
+        runCatching {
             compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         }
         // Issue #1098 (item 5): re-enable real network callbacks for any sibling
@@ -222,6 +228,13 @@ class BareNetworkLossRestoreReconnectE2eTest {
         val vm = currentViewModel()
         vm.forceTransportProvenAliveForTest = false
         vm.forceLivenessProbeDeadForTest = true
+        // Issue #1768 reproduce-first: exact-main rode through here via #1533's
+        // recent-reader vouch before either dead seam was consulted. Force only that
+        // real stale-reader state so the production restore reducer must reach the
+        // authoritative dead-probe → fresh-redial branch. Mutation: deleting this
+        // assignment must restore cause=same_identity_reader_active and make the
+        // load-bearing reconnect-start await hard-fail.
+        vm.forceRestoreReaderActivityStaleForTest = true
 
         // THE RESTORE: validation returns to the SAME pure-WIFI identity — the
         // airplane-mode round-trip the pre-#997 detector swallowed at `:333`. On
@@ -356,6 +369,7 @@ class BareNetworkLossRestoreReconnectE2eTest {
         // redial (the #780 hard-inject model — no self-skip).
         vm.forceTransportProvenAliveForTest = false
         vm.forceLivenessProbeDeadForTest = true
+        vm.forceRestoreReaderActivityStaleForTest = true
 
         // Distinct-from-fast-path proof: step 1 cannot fire on restore.
         assertTrue(
@@ -482,6 +496,7 @@ class BareNetworkLossRestoreReconnectE2eTest {
         // cleanly redial.
         vm.forceTransportProvenAliveForTest = true
         vm.forceLivenessProbeDeadForTest = true
+        vm.forceRestoreReaderActivityStaleForTest = true
         diagnostics!!.clear()
 
         // THE RESTORE: validation returns to the SAME WIFI identity.

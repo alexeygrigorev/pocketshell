@@ -4,6 +4,7 @@ import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.connectivity.hasSameNetworkIdentityAs
+import com.pocketshell.core.tmux.TmuxClient
 
 internal enum class NetworkChangeArm {
     Ignore,
@@ -45,6 +46,26 @@ internal fun TerminalNetworkChange.isSameIdentityNetworkRestore(): Boolean {
     val restored = current as? TerminalNetworkSnapshot.Validated ?: return false
     val preLoss = previousValidated ?: return false
     return preLoss.hasSameNetworkIdentityAs(restored)
+}
+
+/**
+ * Issue #1533 / #1768: resolves whether recent control-channel reader activity
+ * proves a same-identity restore alive. The test override makes the verdict stale
+ * so fault proofs can deterministically reach the authoritative bounded-probe
+ * branch. A real quiet/dead socket reaches the same stale verdict after the
+ * client's activity window expires; production leaves the override false.
+ */
+internal class RestoreReaderActivityVerdict {
+    @Volatile
+    var forceStaleForTest: Boolean = false
+
+    fun isAlive(client: TmuxClient?): Boolean {
+        if (forceStaleForTest) return false
+        val current = client ?: return false
+        return runCatching {
+            current.millisSinceLastReaderActivity() <= current.readerActivityLivenessWindowMs
+        }.getOrDefault(false)
+    }
 }
 
 internal fun selectNetworkChangeArm(

@@ -160,6 +160,7 @@ EXPECTED_FAIL_CLASSES=(
 # Run as a trimmed slice in its own phase; excluded from the journey phase so it
 # does not just self-skip there (the journey phase never passes the opt-in flag).
 BOOTSTRAP_TEST_CLASS="com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest"
+NOTIFICATION_PERMISSION_TEST_CLASS="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
 
 # Trimmed but meaningful set of bootstrap scenarios (issue #667): the first-run
 # `ready` profile, the `uvInstall` first-install journey, and the
@@ -190,6 +191,7 @@ JOURNEY_EXCLUDED_CLASSES=(
   "$FQCN_PREFIX.LongRunningInstrumentationHeartbeatTest"
   "$FQCN_PREFIX.RealAgentReleaseGateTest"
   "$BOOTSTRAP_TEST_CLASS"
+  "$NOTIFICATION_PERMISSION_TEST_CLASS"
 )
 
 join_by() {
@@ -280,15 +282,51 @@ echo "phase 1 (journey/E2E) exit code: $JOURNEY_EXIT"
 # (issue #1293). Observability only — never affects JOURNEY_EXIT.
 preserve_phase_reports "phase1-journey" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
 
-# Default the aux phases to SKIPPED; only the shard that owns them flips these.
+# Default the dedicated/aux phases to SKIPPED; only shard 0 owns them.
+NOTIFICATION_PERMISSION_EXIT=0
 NETWORK_FAULT_EXIT=0
 BOOTSTRAP_EXIT=0
 EXPECTED_FAIL_EXIT=0
+notification_permission_status="SKIP"
+notification_permission_executed=0
 nf_status="SKIP"
 bootstrap_status="SKIP"
 expectedfail_status="SKIP"
 
 if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
+  echo "=========================================================="
+  echo "Nightly Extensive Tests — phase 1b: notification permission (NON-GATING)"
+  echo "Included class: $NOTIFICATION_PERMISSION_TEST_CLASS"
+  echo "  (dedicated unsharded invocation; external denied-permission fixture)"
+  echo "=========================================================="
+
+  notification_permission_log="$ARTIFACT_DIR/phase1b-notification-permission.log"
+  "$REPO_ROOT/scripts/connected-test.sh" --no-pool \
+    --deny-notifications-before-instrumentation \
+    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+    -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
+    -Pandroid.testInstrumentationRunnerArguments.class="$NOTIFICATION_PERMISSION_TEST_CLASS" \
+    --stacktrace 2>&1 | tee "$notification_permission_log"
+  NOTIFICATION_PERMISSION_EXIT=${PIPESTATUS[0]}
+  notification_permission_executed="$(
+    sed -n 's/^NOTIFICATION_PERMISSION_TEST_RESULT executed=\([0-9][0-9]*\) .*/\1/p' \
+      "$notification_permission_log" | tail -1
+  )"
+  notification_permission_executed="${notification_permission_executed:-0}"
+  echo "phase 1b (notification permission) exit code: $NOTIFICATION_PERMISSION_EXIT"
+  echo "phase 1b (notification permission) executed tests: $notification_permission_executed"
+
+  # Snapshot before phase 2 overwrites the connected-test report. The wrapper
+  # itself hard-fails zero tests, skips, failures, a missing named method, or a
+  # runner crash, so this copy is always a non-vacuous report on green.
+  preserve_phase_reports \
+    "phase1b-notification-permission" \
+    "$APP_BUILD_DIR" \
+    "$PHASE_REPORTS_DIR"
+
+  notification_permission_status="PASS"
+  [[ "$NOTIFICATION_PERMISSION_EXIT" -ne 0 ]] && notification_permission_status="FAIL"
+
   echo "=========================================================="
   echo "Nightly Extensive Tests — phase 2: network-fault proofs (un-gated, GATING)"
   echo "Included classes: $NETWORK_FAULT_CLASS_ARG"
@@ -382,8 +420,8 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   echo "----------------------------------------------------------"
 else
   echo "=========================================================="
-  echo "Nightly Extensive Tests — phases 2, 2b & 3 SKIPPED on shard ${SHARD_INDEX:-0}"
-  echo "  (network-fault + expected-fail + bootstrap run once, on shard 0)"
+  echo "Nightly Extensive Tests — phases 1b, 2, 2b & 3 SKIPPED on shard ${SHARD_INDEX:-0}"
+  echo "  (notification + network-fault + expected-fail + bootstrap run once, on shard 0)"
   echo "=========================================================="
 fi
 
@@ -396,7 +434,10 @@ journey_status="PASS"
 # make the shard summary permanently red for a non-reason. Note: `overall_status`
 # is NOT the release-gating signal; the machine-readable fault verdict above is.
 overall_status="PASS"
-if [[ "$JOURNEY_EXIT" -ne 0 || "$NETWORK_FAULT_EXIT" -ne 0 || "$BOOTSTRAP_EXIT" -ne 0 ]]; then
+if [[ "$JOURNEY_EXIT" -ne 0 \
+      || "$NOTIFICATION_PERMISSION_EXIT" -ne 0 \
+      || "$NETWORK_FAULT_EXIT" -ne 0 \
+      || "$BOOTSTRAP_EXIT" -ne 0 ]]; then
   overall_status="FAIL"
 fi
 
@@ -414,6 +455,7 @@ fi
   echo "| Phase | Selection | Args | Exit | Result |"
   echo "| --- | --- | --- | --- | --- |"
   echo "| Journey / E2E (non-gating) | full connected suite minus network-fault + expected-fail + opt-in classes ($shard_label) | \`pocketshellCi=true\` | $JOURNEY_EXIT | **$journey_status** |"
+  echo "| Notification permission (NON-GATING) | dedicated unsharded $NOTIFICATION_PERMISSION_TEST_CLASS; executed=$notification_permission_executed | external revoke/verify before instrumentation; external grant/verify after | $NOTIFICATION_PERMISSION_EXIT | **$notification_permission_status** |"
   echo "| Network-fault proofs (GATING) | ${#NETWORK_FAULT_CLASSES[@]} NetworkFaultProofBase classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** |"
   echo "| #822 expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} Slice C/D TDD spec class(es) | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** |"
   echo "| Bootstrap setup scenarios (GATING) | ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (trimmed) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** |"

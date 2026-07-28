@@ -212,6 +212,17 @@ jobs:
           chmod +x scripts/test-ci-journey-budget.sh
           scripts/test-ci-journey-budget.sh
 
+      # Issue #1741: emulator-free fixture proof for the app-open notification
+      # journey. Exercises the real connected-test wrapper with stubbed
+      # adb/Gradle to pin install -> external revoke/verify -> instrumentation ->
+      # named non-zero report -> external grant/verify for base and suffixed
+      # packages, including killed-runner/zero-test/cleanup mutations. It also
+      # pins the per-push and nightly phase-1b selection without consuming an AVD.
+      - name: Notification permission fixture guard (issue #1741)
+        run: |
+          chmod +x scripts/test-notification-permission-fixture.sh
+          scripts/test-notification-permission-fixture.sh
+
       # Issue #1458: fast, JVM-free fixture test for the emulator-journey
       # aggregate verdict (scripts/ci-journey-aggregate-verdict.sh) + the
       # per-shard token-writing / aggregation wiring in tests.yml. Proves the

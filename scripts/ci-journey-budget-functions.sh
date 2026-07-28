@@ -810,8 +810,10 @@ run_bounded() {
 run_class() {
   local fqcn="$1"
   local remaining cap rc attempt_start attempt_elapsed cleanup_status
+  local notification_class="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
   local app_id_suffix="${POCKETSHELL_APP_ID_SUFFIX:-}"
   local -a app_id_args=()
+  local -a notification_gradle_args=(--max-workers=2)
   local -a network_fault_args=()
   if [[ "$fqcn" == *OutboundAttachmentOffsetResumeJourneyE2eTest* ]]; then
     network_fault_args+=(
@@ -852,18 +854,35 @@ run_class() {
   fi
   JOURNEY_CURRENT_ATTEMPT_LOG="$LAST_RUN_CLASS_ATTEMPT_DIR/attempt.log"
   attempt_start=$SECONDS
-  # Issue #1458: --max-workers=2 (parity with the Unit job) bounds Gradle's
-  # worker fan-out while the emulator and Docker fixtures share the runner. The
-  # Gradle DAEMON is still reused (no --no-daemon), preserving the #835 budget-fit.
-  run_bounded "$cap" \
-    "$GRADLEW" :app:connectedDebugAndroidTest \
-    "${app_id_args[@]}" \
-    --max-workers=2 \
-    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
-    "${network_fault_args[@]}" \
-    -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
-    -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
-    --stacktrace
+  if [[ "$fqcn" == "$notification_class" ]]; then
+    # Issue #1741: this class must enter instrumentation already DENIED. The
+    # canonical wrapper owns install -> external revoke/verify -> runner ->
+    # result-count validation -> external grant/verify under the AVD lock.
+    # POCKETSHELL_APP_ID_SUFFIX is inherited by the wrapper, which derives the
+    # exact Gradle property and base/suffixed package identity itself.
+    run_bounded "$cap" \
+      "$REPO_ROOT/scripts/connected-test.sh" --no-pool \
+      --deny-notifications-before-instrumentation \
+      "${notification_gradle_args[@]}" \
+      -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+      -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
+      -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
+      --stacktrace
+  else
+    # Issue #1458: --max-workers=2 (parity with the Unit job) bounds Gradle's
+    # worker fan-out while the emulator and Docker fixtures share the runner.
+    # The Gradle DAEMON is still reused (no --no-daemon), preserving the #835
+    # budget-fit for the ordinary class set.
+    run_bounded "$cap" \
+      "$GRADLEW" :app:connectedDebugAndroidTest \
+      "${app_id_args[@]}" \
+      --max-workers=2 \
+      -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+      "${network_fault_args[@]}" \
+      -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \
+      -Pandroid.testInstrumentationRunnerArguments.class="$fqcn" \
+      --stacktrace
+  fi
   rc=$?
   LAST_RUN_CLASS_PRIMARY_RC="$rc"
   attempt_elapsed=$((SECONDS - attempt_start))
@@ -988,13 +1007,19 @@ run_ct_class() {
 shard_class() {
   local idx="$1"
   local fqcn="$2"
+  local notification_class="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
+  local notification_fixture_args=()
   local -a network_fault_args=()
+  if [[ "$fqcn" == "$notification_class" ]]; then
+    notification_fixture_args+=(--deny-notifications-before-instrumentation)
+  fi
   if [[ "$fqcn" == *OutboundAttachmentOffsetResumeJourneyE2eTest* ]]; then
     network_fault_args+=(
       -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true
     )
   fi
   "$REPO_ROOT/scripts/connected-test.sh" --pool --suffix "ij$idx" \
+    "${notification_fixture_args[@]}" \
     -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
     "${network_fault_args[@]}" \
     -Pandroid.testInstrumentationRunnerArguments.timeout_msec=300000 \

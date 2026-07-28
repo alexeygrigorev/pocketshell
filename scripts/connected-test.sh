@@ -17,6 +17,7 @@ set -euo pipefail
 #
 # Usage:
 #   scripts/connected-test.sh [--suffix <token>] [--module <gradle-module>] \
+#     [--deny-notifications-before-instrumentation] \
 #     [--pool|--no-pool] [gradle args...]
 #   POCKETSHELL_APP_ID_SUFFIX=i672 scripts/connected-test.sh \
 #     -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.SomeTest
@@ -87,6 +88,13 @@ set -euo pipefail
 #   --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i*
 #                        (and .test) package from the target device, then exit.
 #                        Prevents install pile-up across worktrees.
+#   --deny-notifications-before-instrumentation
+#                        Narrow issue-#1741 fixture for
+#                        NoNotificationPromptOnAppOpenE2eTest. Installs the exact
+#                        base/suffixed target APK, externally revokes and verifies
+#                        POST_NOTIFICATIONS before the runner starts, validates a
+#                        non-vacuous named result, then externally restores and
+#                        verifies the grant after the runner exits.
 #
 # Everything after the recognised flags is forwarded verbatim to gradle's
 # connectedDebugAndroidTest task (e.g. instrumentation-runner-argument filters).
@@ -114,8 +122,10 @@ source "$ROOT_DIR/scripts/lib/scope-run.sh"
 # inherited copy; the wrapper remains the continuous owner (issue #1737).
 export POCKETSHELL_AVD_LOCK_CONTINUOUS=1
 
-ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
-ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
+ANDROID_SDK="${ANDROID_SDK:-${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/home/alexey/Android/Sdk}}}"
+if [[ -z "${ADB:-}" ]]; then
+  ADB="$(command -v adb 2>/dev/null || printf '%s/platform-tools/adb' "$ANDROID_SDK")"
+fi
 
 print_usage() {
   cat >&2 <<'USAGE'
@@ -123,6 +133,7 @@ Lock-wrapped ad-hoc connected-test runner (issues #672/#724/#798).
 
 Usage:
   scripts/connected-test.sh [--suffix <token>] [--module <gradle-module>] \
+    [--deny-notifications-before-instrumentation] \
     [--pool|--no-pool] [gradle args...]
   scripts/connected-test.sh --cleanup-suffixes
   scripts/connected-test.sh --help
@@ -143,6 +154,10 @@ Flags:
   --no-pool            Force the legacy single-lane path.
   --cleanup-suffixes   Uninstall every accumulated com.pocketshell.app.i* package
                        from the target device, then exit.
+  --deny-notifications-before-instrumentation
+                       Run the NoNotificationPromptOnAppOpenE2eTest permission
+                       fixture outside instrumentation: install, revoke+verify,
+                       run, validate its named result, then grant+verify.
   --help, -h           Print this help and exit.
 
 Examples:
@@ -165,6 +180,7 @@ SUFFIX="${POCKETSHELL_APP_ID_SUFFIX:-}"
 # -> the :app default below. Set via --module.
 MODULE=""
 CLEANUP_ONLY=0
+DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION=0
 USE_POOL=0
 # 0 = unset (auto-decide), 1 = caller forced --pool, -1 = caller forced --no-pool.
 POOL_FLAG=0
@@ -206,6 +222,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cleanup-suffixes)
       CLEANUP_ONLY=1
+      shift
+      ;;
+    --deny-notifications-before-instrumentation)
+      DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION=1
       shift
       ;;
     --)
@@ -257,6 +277,38 @@ if [[ -n "$MODULE" ]]; then
     exit 2
   fi
   CONNECTED_TASK=":${module_path}:connectedDebugAndroidTest"
+fi
+
+NOTIFICATION_PERMISSION_TEST_CLASS="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
+NOTIFICATION_PERMISSION_TEST_METHOD="appOpenDoesNotPopNotificationPermissionDialog"
+NOTIFICATION_PERMISSION="android.permission.POST_NOTIFICATIONS"
+if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" ]]; then
+  if [[ "$CLEANUP_ONLY" == "1" ]]; then
+    printf 'FAIL: notification-permission fixture cannot be combined with --cleanup-suffixes\n' >&2
+    exit 2
+  fi
+  if [[ "$CONNECTED_TASK" != ":app:connectedDebugAndroidTest" ]]; then
+    printf 'FAIL: notification-permission fixture is valid only for the app module\n' >&2
+    exit 2
+  fi
+  notification_class_selected=0
+  for arg in "${GRADLE_ARGS[@]}"; do
+    case "$arg" in
+      "-Pandroid.testInstrumentationRunnerArguments.class=$NOTIFICATION_PERMISSION_TEST_CLASS")
+        notification_class_selected=1
+        ;;
+      -Pandroid.testInstrumentationRunnerArguments.numShards=*\
+      |-Pandroid.testInstrumentationRunnerArguments.shardIndex=*)
+        printf 'FAIL: notification-permission fixture must be a dedicated unsharded invocation\n' >&2
+        exit 2
+        ;;
+    esac
+  done
+  if [[ "$notification_class_selected" != "1" ]]; then
+    printf 'FAIL: notification-permission fixture requires dedicated class=%s\n' \
+      "$NOTIFICATION_PERMISSION_TEST_CLASS" >&2
+    exit 2
+  fi
 fi
 
 # Count emulators currently online (issue #776). Used to decide whether to
@@ -506,6 +558,182 @@ pocketshell_run_guarded_mutation() {
   return "$child_rc"
 }
 
+notification_permission_capture() {
+  local output_file="$1"
+  shift
+  local adb_target=("$ADB")
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    adb_target+=(-s "$ANDROID_SERIAL")
+  fi
+  : > "$output_file"
+  pocketshell_run_guarded_mutation "${adb_target[@]}" "$@" > "$output_file"
+}
+
+notification_permission_state() {
+  local target_package="$1"
+  local output_file="$2"
+  local line
+  notification_permission_capture \
+    "$output_file" \
+    shell dumpsys package "$target_package"
+  line="$(grep -F "$NOTIFICATION_PERMISSION: granted=" "$output_file" | head -1 || true)"
+  case "$line" in
+    *"granted=true"*)
+      printf 'granted\n'
+      ;;
+    *"granted=false"*)
+      printf 'denied\n'
+      ;;
+    *)
+      printf 'unknown\n'
+      ;;
+  esac
+}
+
+notification_permission_prepare() {
+  local target_package="$1"
+  local scratch_dir="$2"
+  local sdk_file="$scratch_dir/sdk"
+  local package_file="$scratch_dir/package"
+  local state_file="$scratch_dir/state"
+  local adb_target=("$ADB")
+  local sdk state
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    adb_target+=(-s "$ANDROID_SERIAL")
+  fi
+
+  notification_permission_capture "$sdk_file" shell getprop ro.build.version.sdk
+  sdk="$(tr -d '\r[:space:]' < "$sdk_file")"
+  if [[ ! "$sdk" =~ ^[0-9]+$ || "$sdk" -lt 33 ]]; then
+    printf 'FAIL: POST_NOTIFICATIONS fixture requires Android API 33+ (got: %s)\n' \
+      "${sdk:-empty}" >&2
+    return 1
+  fi
+
+  notification_permission_capture "$package_file" shell pm path "$target_package"
+  if ! grep -q '^package:' "$package_file"; then
+    printf 'FAIL: target package %s is not installed before permission revoke\n' \
+      "$target_package" >&2
+    return 1
+  fi
+
+  if ! pocketshell_run_guarded_mutation \
+      "${adb_target[@]}" shell pm revoke \
+      "$target_package" "$NOTIFICATION_PERMISSION"; then
+    printf 'FAIL: external pre-instrumentation revoke failed for %s\n' \
+      "$target_package" >&2
+    return 1
+  fi
+  state="$(notification_permission_state "$target_package" "$state_file")"
+  if [[ "$state" != "denied" ]]; then
+    printf 'FAIL: %s must be denied before instrumentation (state=%s)\n' \
+      "$NOTIFICATION_PERMISSION" "${state:-empty}" >&2
+    return 1
+  fi
+  printf 'Notification permission fixture prepared externally: package=%s state=denied api=%s\n' \
+    "$target_package" "$sdk"
+}
+
+notification_permission_restore() {
+  local target_package="$1"
+  local scratch_dir="$2"
+  local target_apk="$3"
+  local package_file="$scratch_dir/restore-package"
+  local state_file="$scratch_dir/restore-state"
+  local adb_target=("$ADB")
+  local state
+  if [[ -n "${ANDROID_SERIAL:-}" ]]; then
+    adb_target+=(-s "$ANDROID_SERIAL")
+  fi
+
+  notification_permission_capture "$package_file" shell pm path "$target_package"
+  if ! grep -q '^package:' "$package_file"; then
+    if [[ ! -s "$target_apk" ]]; then
+      printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: target APK missing for restore: %s\n' \
+        "$target_apk" >&2
+      return 1
+    fi
+    if ! pocketshell_run_guarded_mutation \
+        "${adb_target[@]}" install -r "$target_apk"; then
+      printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: reinstall failed for %s\n' \
+        "$target_package" >&2
+      return 1
+    fi
+    notification_permission_capture "$package_file" shell pm path "$target_package"
+    if ! grep -q '^package:' "$package_file"; then
+      printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: %s absent after reinstall\n' \
+        "$target_package" >&2
+      return 1
+    fi
+  fi
+
+  if ! pocketshell_run_guarded_mutation \
+      "${adb_target[@]}" shell pm grant \
+      "$target_package" "$NOTIFICATION_PERMISSION"; then
+    printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: external grant failed for %s\n' \
+      "$target_package" >&2
+    return 1
+  fi
+  state="$(notification_permission_state "$target_package" "$state_file")"
+  if [[ "$state" != "granted" ]]; then
+    printf 'NOTIFICATION_PERMISSION_CLEANUP_FAILED: %s was not restored for %s (state=%s)\n' \
+      "$NOTIFICATION_PERMISSION" "$target_package" "${state:-empty}" >&2
+    return 1
+  fi
+  printf 'Notification permission fixture restored externally: package=%s state=granted\n' \
+    "$target_package"
+}
+
+notification_permission_validate_report() {
+  local report_dir="$1"
+  local tests=0 skipped=0 failures=0 errors=0
+  local xml line value
+  local named_method=0 xml_count=0
+
+  while IFS= read -r -d '' xml; do
+    xml_count=$((xml_count + 1))
+    line="$(grep -m1 '<testsuite ' "$xml" 2>/dev/null || true)"
+    [[ -n "$line" ]] || continue
+    value="$(sed -n 's/.* tests="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    tests=$((tests + ${value:-0}))
+    value="$(sed -n 's/.* skipped="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    skipped=$((skipped + ${value:-0}))
+    value="$(sed -n 's/.* failures="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    failures=$((failures + ${value:-0}))
+    value="$(sed -n 's/.* errors="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    errors=$((errors + ${value:-0}))
+    if grep -q "classname=\"$NOTIFICATION_PERMISSION_TEST_CLASS\"" "$xml" \
+        && grep -q "name=\"$NOTIFICATION_PERMISSION_TEST_METHOD\"" "$xml"; then
+      named_method=1
+    fi
+  done < <(find "$report_dir" -type f -name '*.xml' -print0 2>/dev/null)
+
+  local executed=$((tests - skipped))
+  if (( xml_count == 0 || executed != 1 )); then
+    printf 'FAIL: notification-permission invocation must execute exactly one test (xml=%s tests=%s skipped=%s executed=%s)\n' \
+      "$xml_count" "$tests" "$skipped" "$executed" >&2
+    return 1
+  fi
+  if (( skipped != 0 )); then
+    printf 'FAIL: notification-permission invocation skipped %s test(s); no-self-skip policy requires zero\n' \
+      "$skipped" >&2
+    return 1
+  fi
+  if (( failures != 0 || errors != 0 )); then
+    printf 'FAIL: notification-permission invocation report is red (failures=%s errors=%s)\n' \
+      "$failures" "$errors" >&2
+    return 1
+  fi
+  if [[ "$named_method" != "1" ]]; then
+    printf 'FAIL: notification-permission report did not contain %s#%s\n' \
+      "$NOTIFICATION_PERMISSION_TEST_CLASS" "$NOTIFICATION_PERMISSION_TEST_METHOD" >&2
+    return 1
+  fi
+  printf 'NOTIFICATION_PERMISSION_TEST_RESULT executed=%s skipped=%s failures=%s errors=%s class=%s method=%s\n' \
+    "$executed" "$skipped" "$failures" "$errors" \
+    "$NOTIFICATION_PERMISSION_TEST_CLASS" "$NOTIFICATION_PERMISSION_TEST_METHOD"
+}
+
 cleanup_suffixed_packages() {
   # Optional first arg:
   #   --include-base   ALSO uninstall the base com.pocketshell.app[.test] and
@@ -693,6 +921,37 @@ if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
   trap 'pocketshell_cleanup_lane_init; pocketshell_release_all' EXIT
 fi
 
+NOTIFICATION_PERMISSION_RESTORE_NEEDED=0
+NOTIFICATION_PERMISSION_TARGET_PACKAGE="com.pocketshell.app${SUFFIX:+.$SUFFIX}"
+NOTIFICATION_PERMISSION_SCRATCH=""
+NOTIFICATION_PERMISSION_BUILD_DIR="$ROOT_DIR/app/build"
+if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
+  NOTIFICATION_PERMISSION_BUILD_DIR="$ROOT_DIR/app/build/lane-$SUFFIX"
+fi
+NOTIFICATION_PERMISSION_TARGET_APK="$NOTIFICATION_PERMISSION_BUILD_DIR/outputs/apk/debug/app-debug.apk"
+
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2317
+pocketshell_connected_test_exit_cleanup() {
+  local original_rc=$?
+  if [[ "$NOTIFICATION_PERMISSION_RESTORE_NEEDED" == "1" \
+        && -n "$NOTIFICATION_PERMISSION_SCRATCH" ]]; then
+    notification_permission_restore \
+      "$NOTIFICATION_PERMISSION_TARGET_PACKAGE" \
+      "$NOTIFICATION_PERMISSION_SCRATCH" \
+      "$NOTIFICATION_PERMISSION_TARGET_APK" || true
+  fi
+  if declare -F pocketshell_cleanup_lane_init >/dev/null 2>&1; then
+    pocketshell_cleanup_lane_init
+  fi
+  if [[ -n "$NOTIFICATION_PERMISSION_SCRATCH" ]]; then
+    pocketshell_run_without_avd_lock_fd rm -rf "$NOTIFICATION_PERMISSION_SCRATCH"
+  fi
+  pocketshell_release_all
+  return "$original_rc"
+}
+trap pocketshell_connected_test_exit_cleanup EXIT
+
 # Issue #730: the heavy gradle build runs inside its OWN transient systemd
 # --user scope (a SIBLING of the session's per-session scope under robust.slice,
 # NOT nested), so a runaway OOMs only its own scope and the parent tmux session
@@ -728,12 +987,75 @@ trap 'forward_signal TERM' TERM
 
 # The wrapper retains the serial flock while scope-run/Gradle has its inherited
 # copy closed. Helper death is monitored until the mutation process exits.
-set +e
-pocketshell_run_guarded_mutation pocketshell_scope_run "$SCOPE_UNIT" \
-  ./gradlew --no-daemon "$CONNECTED_TASK" \
-  "${GRADLE_INIT_ARGS[@]}" \
-  "${GRADLE_SUFFIX_ARGS[@]}" \
-  "${GRADLE_ARGS[@]}"
-rc=$?
-set -e
+rc=0
+cleanup_rc=0
+notification_report_dir=""
+if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" ]]; then
+  NOTIFICATION_PERMISSION_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-notification-permission.XXXXXX")"
+
+  # Install the exact base/suffixed target before changing its runtime grant.
+  # No instrumentation process exists during this install/revoke/verify stage.
+  set +e
+  pocketshell_run_guarded_mutation pocketshell_scope_run "${SCOPE_UNIT}-permission-install" \
+    ./gradlew --no-daemon :app:installDebug \
+    "${GRADLE_INIT_ARGS[@]}" \
+    "${GRADLE_SUFFIX_ARGS[@]}" \
+    "${GRADLE_ARGS[@]}"
+  rc=$?
+  set -e
+  if (( rc == 0 )); then
+    NOTIFICATION_PERMISSION_RESTORE_NEEDED=1
+    set +e
+    notification_permission_prepare \
+      "$NOTIFICATION_PERMISSION_TARGET_PACKAGE" \
+      "$NOTIFICATION_PERMISSION_SCRATCH"
+    rc=$?
+    set -e
+  fi
+
+  notification_build_dir="$NOTIFICATION_PERMISSION_BUILD_DIR"
+  notification_report_dir="$notification_build_dir/outputs/androidTest-results/connected"
+  if (( rc == 0 )); then
+    # Prevent a killed/zero-test runner from borrowing an earlier invocation's
+    # XML. The directory is a generated output owned by this dedicated run.
+    rm -rf "$notification_report_dir"
+  fi
+fi
+
+if (( rc == 0 )); then
+  set +e
+  pocketshell_run_guarded_mutation pocketshell_scope_run "$SCOPE_UNIT" \
+    ./gradlew --no-daemon "$CONNECTED_TASK" \
+    "${GRADLE_INIT_ARGS[@]}" \
+    "${GRADLE_SUFFIX_ARGS[@]}" \
+    "${GRADLE_ARGS[@]}"
+  rc=$?
+  set -e
+fi
+
+if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" && "$rc" == "0" ]]; then
+  set +e
+  notification_permission_validate_report "$notification_report_dir"
+  rc=$?
+  set -e
+fi
+
+if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" \
+      && "$NOTIFICATION_PERMISSION_RESTORE_NEEDED" == "1" ]]; then
+  set +e
+  notification_permission_restore \
+    "$NOTIFICATION_PERMISSION_TARGET_PACKAGE" \
+    "$NOTIFICATION_PERMISSION_SCRATCH" \
+    "$NOTIFICATION_PERMISSION_TARGET_APK"
+  cleanup_rc=$?
+  set -e
+  NOTIFICATION_PERMISSION_RESTORE_NEEDED=0
+  if (( cleanup_rc != 0 )); then
+    printf 'NOTIFICATION_PERMISSION_PRIMARY_RC=%s CLEANUP_RC=%s\n' "$rc" "$cleanup_rc" >&2
+    if (( rc == 0 )); then
+      rc="$cleanup_rc"
+    fi
+  fi
+fi
+
 exit "$rc"

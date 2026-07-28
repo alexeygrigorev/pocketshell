@@ -232,6 +232,23 @@ jobs:
           chmod +x scripts/ci-journey-retry-budget.sh scripts/test-ci-journey-retry-budget.sh
           scripts/test-ci-journey-retry-budget.sh
 
+      # Issue #1800: the failure-SIGNATURE classifier that types the CI
+      # swiftshader "real system input-method window never became visible"
+      # PRECONDITION as INFRA (-> RE-RUN) while keeping every genuine journey
+      # assertion failure — including a containment/anchor failure in the SAME
+      # class — hard RED. Drives the real classifier + the real aggregate
+      # reducer over fixture artifacts so BOTH outcomes are observed, and pins
+      # the measured cold-boot retry-cost model against the observed shard-0
+      # numbers from run 30305256109. Cheap (< 5 s), no emulator.
+      - name: CI journey infra-signature + measured retry-budget guard (issue #1800)
+        run: |
+          chmod +x scripts/ci-journey-infra-signature.sh \
+            scripts/ci-journey-infra-signature.py \
+            scripts/ci-journey-shard-signature-verdict.sh \
+            scripts/ci-journey-suite-elapsed.sh \
+            scripts/test-ci-journey-infra-signature.sh
+          scripts/test-ci-journey-infra-signature.sh
+
       # Issue #1781: fast, JVM-free artifact packaging fixture. Proves the
       # first-cold-boot preservation scan keeps real module Android outputs and
       # canonical per-attempt evidence without recursively nesting
@@ -958,6 +975,14 @@ jobs:
       # identical bringup runs. The journey TESTS only "really failed" if the
       # second attempt's suite reports failures — a one-off boot flake recovers
       # to green instead of spamming a red-CI email on an inert diff.
+
+      # Issue #1800: the cold-boot retry-budget decision needs THIS job's own
+      # observed bringup cost, not the 900s boot-timeout ceiling. Recording the
+      # first attempt's start epoch here lets the budget helper derive
+      # `bringup = (now - attempt start) - measured suite elapsed`.
+      - name: Record first journey attempt start
+        run: echo "JOURNEY_FIRST_ATTEMPT_START_EPOCH_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
+
       - name: Run load-bearing journey subset on the emulator
         id: journey
         continue-on-error: true
@@ -1009,10 +1034,24 @@ jobs:
           if [[ "$first_failure" != "true" && -f "$summary" ]] && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$summary"; then
             first_timeout="true"
           fi
+          # Issue #1800: the suite records its own measured wall cost in the
+          # summary's result table ("| 48 load-bearing journey classes ... | 1 |
+          # 2338s | **FAIL** |"). That measured number — not the 4200s budget
+          # CAP — is what a retry of this same selection actually costs, so the
+          # retry-budget helper uses it instead of the flat worst case.
+          first_suite_elapsed_secs=""
+          if [[ -f "$summary" ]]; then
+            first_suite_elapsed_secs="$(
+              bash scripts/ci-journey-suite-elapsed.sh "$summary" 2>/dev/null || true
+            )"
+          fi
+          [[ "$first_suite_elapsed_secs" =~ ^[0-9]+$ ]] || first_suite_elapsed_secs=""
           echo "first_timeout=$first_timeout" >> "$GITHUB_OUTPUT"
           echo "first_failure=$first_failure" >> "$GITHUB_OUTPUT"
+          echo "first_suite_elapsed_secs=$first_suite_elapsed_secs" >> "$GITHUB_OUTPUT"
           echo "first summary timeout-only: $first_timeout"
           echo "first summary genuine failure: $first_failure"
+          echo "first summary measured suite elapsed: ${first_suite_elapsed_secs:-<unmeasured>}s"
 
       # Preserve the first cold-boot attempt before a retry can overwrite the
       # shared artifacts/ci-journey summary or Gradle connected-test outputs.
@@ -1062,9 +1101,16 @@ jobs:
         if: always()
         run: |
           chmod +x scripts/ci-journey-retry-budget.sh
+          # Issue #1800: pass this job's own measurements (first-attempt start
+          # epoch + the suite's measured elapsed) so the requirement reflects
+          # what redoing the observed work costs. Missing/invalid measurements
+          # fall back to the unchanged flat worst case inside the helper.
           scripts/ci-journey-retry-budget.sh \
             "${JOURNEY_JOB_START_EPOCH_MS:-}" \
-            "$(date +%s%3N)" | tee -a "$GITHUB_OUTPUT"
+            "$(date +%s%3N)" \
+            "${JOURNEY_FIRST_ATTEMPT_START_EPOCH_MS:-}" \
+            "${{ steps.journey_summary.outputs.first_suite_elapsed_secs }}" \
+            | tee -a "$GITHUB_OUTPUT"
 
       # Infra-retry-once: runs if the first bringup failed with a boot/adb abort
       # or a genuine test failure. It is deliberately skipped for a pure
@@ -1155,6 +1201,7 @@ jobs:
           retry_reason="${{ steps.journey_retry_budget.outputs.retry_reason }}"
           retry_remaining_ms="${{ steps.journey_retry_budget.outputs.retry_remaining_ms }}"
           retry_required_ms="${{ steps.journey_retry_budget.outputs.retry_required_ms }}"
+          retry_cost_model="${{ steps.journey_retry_budget.outputs.retry_cost_model }}"
           summary="artifacts/ci-journey/summary.md"
           # Issue #1458: record this shard's verdict token for the aggregation
           # job. CLEAN = passed; INFRA = environmental (#470 cancel / #771
@@ -1172,6 +1219,7 @@ jobs:
           echo "cold-boot retry allowed: ${retry_allowed:-false}"
           echo "cold-boot retry reason: ${retry_reason:-missing_decision}"
           echo "cold-boot retry remaining/required: ${retry_remaining_ms:-0}/${retry_required_ms:-5400000}ms"
+          echo "cold-boot retry cost model: ${retry_cost_model:-worst_case} (issue #1800)"
           if [[ "$first" == "success" ]]; then
             echo "Emulator journey passed on the first cold boot."
             write_verdict CLEAN
@@ -1181,6 +1229,33 @@ jobs:
             echo "::warning title=Emulator infra flake recovered::The first emulator bringup failed but a second cold boot passed (issue #760). Treating as a recovered infra flake, NOT a test failure. Watch for a degrading trend."
             write_verdict CLEAN
             exit 0
+          fi
+          # Issue #1800: ONE captured environment signature is not a product
+          # failure — the CI swiftshader AVD cannot raise a real system
+          # input-method window, so `PromptComposerSaturatedImeAnchorE2eTest`'s
+          # physical-IME PRECONDITION ("The real system input-method window
+          # never became visible.") fails there regardless of app code. That is
+          # the environment-divergent capability process.md F3 / #780 says must
+          # be injected synthetically, and the same class asserts every
+          # load-bearing anchor/containment property on its synthetic
+          # `Type.ime()` path with HARD failures
+          # (saturatedDraftAndAllActionsStayReachableWithSyntheticImeThenRestoreAfterHide),
+          # so typing this precondition INFRA loses no protection on CI.
+          #
+          # The classifier is deliberately narrow and fail-safe: it downgrades
+          # ONLY when EVERY failing test case of EVERY class listed under the
+          # summary's "Failed BOTH attempts" section carries that exact message,
+          # in EVERY preserved attempt. Any containment/anchor/other assertion
+          # failure, any unreadable result file, and any missing evidence keep
+          # the shard RED via the branches below. It cannot swallow a real
+          # regression, and it never applies to a #835 budget timeout.
+          signature_out="$(bash scripts/ci-journey-shard-signature-verdict.sh artifacts 2>&1 || true)"
+          printf '%s\n' "$signature_out" | sed 's/^/journey failure signature: /'
+          signature_verdict="$(sed -n 's/^shard_signature_verdict=//p' <<<"$signature_out" | tail -n 1)"
+          if [[ "$signature_verdict" == "INFRA" && "${first_timeout:-false}" != "true" ]]; then
+            echo "::warning title=Emulator journey INFRA — real system IME unavailable on this AVD::The ONLY failure(s) on this shard were the physical input-method-window PRECONDITION (\"The real system input-method window never became visible.\"), which the CI swiftshader AVD cannot satisfy. This is a captured environment signature (G5), NOT a product regression: the same class's anchor/containment properties are asserted with hard failures on its synthetic Type.ime() path, which ran in this same suite. Typed INFRA so aggregation requests RE-RUN. Any containment/anchor assertion failure would have stayed RED (issue #1800)."
+            write_verdict INFRA
+            exit 1
           fi
           if [[ "${first_failure:-false}" == "true" ]]; then
             echo "::error title=Emulator journey FAILED — first attempt genuine failure::The first cold boot wrote a JOURNEY_FAILED / Failed BOTH attempts summary, and the retry did not pass cleanly. Refusing to downgrade this run to advisory timeout even if the retry overwrote summary.md with a timeout-only artifact."

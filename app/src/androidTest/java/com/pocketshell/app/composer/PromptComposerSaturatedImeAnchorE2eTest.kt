@@ -410,6 +410,255 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         assertFalse(vm.uiState.value.draft.isEmpty())
     }
 
+    /**
+     * Issue #1800: the synthetic-inset MIRROR of
+     * [saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide].
+     *
+     * The real-IME method's load-bearing properties are reachability
+     * (containment of draft/send/attach/mic inside the measured modal root and
+     * above the exact keyboard boundary), keyboard-up editability + draft
+     * durability, and keyboard-down geometry restoration. Every one of those is
+     * a property of the composer's anchor policy, NOT of the physical
+     * input-method window — but on the CI swiftshader AVD the real IME never
+     * becomes visible, so the real-IME method cannot assert them there and the
+     * shard classifier types that precondition as INFRA.
+     *
+     * This method asserts the SAME property set with a HARD failure, driven by
+     * the deterministic synthetic `Type.ime()` inset (the #780 model), so no
+     * protection is lost on an environment without a real IME. It deliberately
+     * uses the SATURATED fixture — a durable long draft plus the real queued
+     * `Sending` banner — because that is the state whose Material
+     * [SheetValue.PartiallyExpanded] anchor crosses the keyboard boundary; it
+     * is therefore sensitive to a regression of the production anchor policy,
+     * which a non-saturated fixture would not be. It also mounts the production
+     * attachment-availability contract so Attach is enabled and can be asserted
+     * reachable alongside Mic.
+     *
+     * The physical keyboard is hard-asserted ABSENT throughout, so this method
+     * behaves identically on a dev-box AVD and on a CI AVD that cannot raise a
+     * real IME.
+     */
+    @Test
+    fun saturatedDraftAndAllActionsStayReachableWithSyntheticImeThenRestoreAfterHide() {
+        val drafts = InMemoryComposerDraftStore()
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newViewModel(drafts, queue)
+        val visible = mutableStateOf(true)
+        val sendEntered = CompletableDeferred<Unit>()
+        val deliveryGate = CompletableDeferred<Unit>().also { releaseDelivery = it }
+        val sheetStateRef = AtomicReference<SheetState?>()
+        val targetKey = "1/issue-1800-synthetic-reach"
+
+        prepareActivityWindow()
+        compose.setContent {
+            PocketShellTheme {
+                Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    if (visible.value) {
+                        val sheetState =
+                            rememberModalBottomSheetState(skipPartiallyExpanded = false)
+                        SideEffect { sheetStateRef.set(sheetState) }
+                        PromptComposerSheet(
+                            onDismiss = { visible.value = false },
+                            onSend = {
+                                sendEntered.complete(Unit)
+                                deliveryGate.await()
+                                true
+                            },
+                            composerTargetKey = targetKey,
+                            sendTargetSnapshotProvider = {
+                                PromptComposerViewModel.SendTargetSnapshot(sessionKey = targetKey)
+                            },
+                            // Same production availability contract the real-IME
+                            // method mounts: a non-null callback enables Attach
+                            // without opening the picker or touching geometry.
+                            onStageAttachments = { uris ->
+                                Result.success(
+                                    uris.mapIndexed { index, uri ->
+                                        "/tmp/issue-1800-" +
+                                            (uri.lastPathSegment ?: "attachment-$index")
+                                    },
+                                )
+                            },
+                            modifier = Modifier.observeProductionSheetIme(),
+                            sheetState = sheetState,
+                            viewModel = vm,
+                        )
+                    }
+                }
+            }
+        }
+        compose.waitUntil(5_000) {
+            vm.composerTarget == targetKey &&
+                sheetStateRef.get()?.currentValue != null &&
+                sheetStateRef.get()?.currentValue != SheetValue.Hidden
+        }
+        val sheetState = checkNotNull(sheetStateRef.get())
+
+        // Saturate exactly like the #1744 anchor oracle: one in-flight queued
+        // send (the real `Sending` banner) plus the long durable draft.
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performClick()
+            .performTextInput("prompt A")
+        compose.waitUntil(5_000) {
+            vm.uiState.value.draft == "prompt A" && drafts.load(targetKey) == "prompt A"
+        }
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.waitUntil(5_000) {
+            sendEntered.isCompleted && vm.uiState.value.sendInFlight
+        }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performClick()
+            .performTextInput(LONG_DRAFT_B)
+        compose.waitUntil(5_000) {
+            vm.uiState.value.draft == LONG_DRAFT_B &&
+                drafts.load(targetKey) == LONG_DRAFT_B
+        }
+        assertPromptAExactlyOnce(queue, targetKey)
+        hideRealImeAndAssertHidden(
+            "Synthetic reachability mirror must start with no physical keyboard window.",
+        )
+
+        val keyboardDown = applyInsetsAndReadGeometry(
+            imeBottomPx = 0,
+            sheetState = sheetState,
+        )
+        assertEquals(0, keyboardDown.observedImeBottomPx)
+
+        // HARD "the keyboard-up state actually applied" precondition — the
+        // synthetic equivalent of the real method's physical-IME-window +
+        // positive-app-inset preconditions. `applyInsetsAndReadGeometry`
+        // asserts the exact value was Compose-observed on the production
+        // modifier; no assumeTrue, no skip.
+        val expectedIme = (SYNTHETIC_IME_HEIGHT_DP * displayDensity()).toInt()
+        val keyboardUpBeforeEdit = applyInsetsAndReadGeometry(
+            imeBottomPx = expectedIme,
+            sheetState = sheetState,
+        )
+        assertEquals(expectedIme, keyboardUpBeforeEdit.observedImeBottomPx)
+
+        // Keyboard-up editability + durability (mirrors the real method's
+        // performTextReplacement while the physical keyboard is visible).
+        val editedDraft = "$LONG_DRAFT_B$SYNTHETIC_REACH_SUFFIX"
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performTextReplacement(editedDraft)
+        compose.waitUntil(5_000) {
+            vm.uiState.value.draft == editedDraft &&
+                drafts.load(targetKey) == editedDraft
+        }
+        assertNoPhysicalImeWindow(
+            "Post-inset semantics input must not summon LatinIME in the synthetic mirror.",
+        )
+
+        val keyboardUp = applyInsetsAndReadGeometry(
+            imeBottomPx = expectedIme,
+            sheetState = sheetState,
+        )
+        val keyboardTopPx = keyboardUp.rootBottomPx - keyboardUp.observedImeBottomPx
+        assertTrue(
+            "The synthetic keyboard must expose a positive inset on the production " +
+                "modal root. geometry=$keyboardUp",
+            keyboardUp.observedImeBottomPx > 0,
+        )
+        // Mirrors the real-IME method's settle gate: reachability is asserted on
+        // a settled anchor, never mid-animation.
+        compose.waitUntil(REAL_IME_TIMEOUT_MS) {
+            sheetState.currentValue == sheetState.targetValue
+        }
+        assertEquals(sheetState.targetValue, sheetState.currentValue)
+
+        // THE load-bearing mirror of the real-IME reachability contract: every
+        // action the maintainer must be able to see and tap stays inside the
+        // measured modal root AND above the exact same-root keyboard boundary.
+        // Containment (all four edges), never a bare assertIsDisplayed().
+        REAL_IME_REACHABLE_TAGS.forEach { tag ->
+            compose.onNodeWithTag(tag, useUnmergedTree = true)
+                .assertIsDisplayed()
+                .assertIsEnabled()
+            assertNodeBelongsToMeasuredModalAndIsReachable(
+                tag = tag,
+                geometry = keyboardUp,
+                keyboardTopPx = keyboardTopPx,
+            )
+        }
+        // The whole Surface (drag handle included) must clear the boundary too,
+        // so a partially-contained sheet cannot pass on its children alone.
+        assertTrue(
+            "The saturated production Surface must be fully above the exact same-root " +
+                "keyboard boundary. keyboardTopPx=$keyboardTopPx geometry=$keyboardUp " +
+                "state=${sheetState.currentValue}/${sheetState.targetValue}",
+            keyboardUp.displayedSurfaceBottomPx <= keyboardTopPx + ROOT_SLOP_PX,
+        )
+        assertEquals(editedDraft, vm.uiState.value.draft)
+        assertEquals(editedDraft, drafts.load(targetKey))
+        assertPromptAExactlyOnce(queue, targetKey)
+        assertTrue(visible.value)
+        assertNotEquals(SheetValue.Hidden, sheetState.currentValue)
+        println(
+            "ISSUE1800_SYNTHETIC_REACH keyboardDown=$keyboardDown keyboardUp=$keyboardUp " +
+                "keyboardTopPx=$keyboardTopPx " +
+                "physicalImeWindows=${visiblePhysicalImeWindows()} " +
+                "state=${sheetState.currentValue}/${sheetState.targetValue}",
+        )
+        assertNoPhysicalImeWindow(
+            "Synthetic reachability screenshot must not contain a physical keyboard.",
+        )
+        WalkthroughScreenshotArtifacts.capture(
+            "issue-1800-synthetic-ime-all-actions-reachable",
+        )
+
+        // Keyboard-down restoration (mirrors the real method's actual-hide leg).
+        applyInsetsAndReadGeometry(imeBottomPx = 0, sheetState = sheetState)
+        compose.waitUntil(REAL_IME_TIMEOUT_MS) {
+            sheetState.currentValue == sheetState.targetValue
+        }
+        assertEquals(sheetState.targetValue, sheetState.currentValue)
+        val restored = readMountedGeometry(
+            sheetState = sheetState,
+            expectedImeBottomPx = 0,
+        )
+        val returnSlopPx = RETURN_GEOMETRY_SLOP_DP * displayDensity()
+        assertEquals(0, restored.observedImeBottomPx)
+        assertTrue(visible.value)
+        assertNotEquals(SheetValue.Hidden, sheetState.currentValue)
+        assertEquals(editedDraft, vm.uiState.value.draft)
+        assertEquals(editedDraft, drafts.load(targetKey))
+        assertTrue(
+            "Hiding the synthetic keyboard must restore the stable keyboard-down " +
+                "sheet geometry. before=$keyboardDown restored=$restored " +
+                "slopPx=$returnSlopPx",
+            abs(restored.surfaceTopPx - keyboardDown.surfaceTopPx) <= returnSlopPx &&
+                abs(
+                    restored.displayedSurfaceBottomPx -
+                        keyboardDown.displayedSurfaceBottomPx,
+                ) <= returnSlopPx,
+        )
+        REAL_IME_REACHABLE_TAGS.forEach { tag ->
+            assertNodeBelongsToMeasuredModalAndIsReachable(
+                tag = tag,
+                geometry = restored,
+                keyboardTopPx = restored.rootBottomPx,
+            )
+        }
+        println(
+            "ISSUE1800_SYNTHETIC_REACH_RESTORED restored=$restored " +
+                "physicalImeWindows=${visiblePhysicalImeWindows()} " +
+                "draftDurable=${drafts.load(targetKey) == editedDraft} " +
+                "state=${sheetState.currentValue}/${sheetState.targetValue}",
+        )
+        assertNoPhysicalImeWindow(
+            "The restored synthetic screenshot must not contain the system keyboard.",
+        )
+        WalkthroughScreenshotArtifacts.capture(
+            "issue-1800-synthetic-ime-hidden-draft-restored",
+        )
+
+        deliveryGate.complete(Unit)
+        compose.waitUntil(5_000) { !vm.uiState.value.sendInFlight }
+        assertEquals(editedDraft, vm.uiState.value.draft)
+        assertEquals(editedDraft, drafts.load(targetKey))
+    }
+
     @Test
     fun saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide() {
         val drafts = InMemoryComposerDraftStore()
@@ -500,13 +749,9 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             "The real-IME artifact requires the system input-method window to be visible.",
         )
 
-        val reachableTags = listOf(
-            COMPOSER_DRAFT_TAG,
-            COMPOSER_SEND_ENTER_TAG,
-            COMPOSER_ATTACH_TAG,
-            COMPOSER_MIC_TAG,
-        )
-        reachableTags.forEach { tag ->
+        // Issue #1800: the SAME tag set the synthetic mirror asserts, shared so
+        // the two paths cannot silently drift apart.
+        REAL_IME_REACHABLE_TAGS.forEach { tag ->
             compose.onNodeWithTag(tag, useUnmergedTree = true)
                 .assertIsDisplayed()
                 .assertIsEnabled()
@@ -994,6 +1239,21 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         const val TERMINAL_MARKER = "agent output remains visible above the composer"
         const val POST_IME_SUFFIX = " remains editable above the keyboard"
         const val REAL_IME_SUFFIX = " edited while the real keyboard is visible"
+        const val SYNTHETIC_REACH_SUFFIX =
+            " edited while the synthetic keyboard boundary is up"
+
+        /**
+         * Issue #1800: the controls whose keyboard-up reachability is the
+         * load-bearing property. Shared by the real-IME journey and its
+         * synthetic mirror so the CI-runnable path can never assert less than
+         * the dev-box path.
+         */
+        val REAL_IME_REACHABLE_TAGS = listOf(
+            COMPOSER_DRAFT_TAG,
+            COMPOSER_SEND_ENTER_TAG,
+            COMPOSER_ATTACH_TAG,
+            COMPOSER_MIC_TAG,
+        )
         val LONG_DRAFT_B = (1..14).joinToString(separator = " ") {
             "draft B segment $it stays durable while prompt A is sending;"
         }

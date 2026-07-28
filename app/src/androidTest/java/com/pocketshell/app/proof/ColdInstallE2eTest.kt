@@ -5,6 +5,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -31,6 +32,8 @@ import com.pocketshell.app.hosts.HOST_LIST_EMPTY_STATE_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_TITLE_TAG
 import com.pocketshell.app.settings.ABOUT_FOOTER_TAG
 import com.pocketshell.app.settings.ABOUT_VERSION_TAG
 import com.pocketshell.app.settings.AppSettings
@@ -260,14 +263,33 @@ class ColdInstallE2eTest {
         // ---------------------------------------------------------------
         // Phase 5 — wait for the folder list (issue #171) to mount with
         // the pre-seeded session row visible inline under its folder
-        // header, then tap the session to attach. The screen title is
-        // "Folders" — the post-tap surface flipped from the picker
-        // sheet to FolderListScreen.
+        // header, then tap the session to attach. The post-tap surface
+        // flipped from the picker sheet to FolderListScreen.
+        //
+        // Issue #1837: this used to wait on the literal screen title
+        // "Folders". `FolderListScreen` stopped rendering that word on
+        // 2026-06-01 (commit 26592101, "Align project tree with compact
+        // mockup", #396) when the header became `title = hostName` with a
+        // "Flat projects"/"Workspace roots" subtitle — so the wait timed
+        // out for ~2 months and both release-gate journeys were red for a
+        // stale reason. Product copy is free to change; a journey must not
+        // be pinned to it. We now assert the two things this step actually
+        // guards, both on durable affordances:
+        //
+        //   1. [FOLDER_LIST_SCREEN_TAG] — the post-tap surface really is
+        //      FolderListScreen (what the literal title was a proxy for).
+        //   2. [FOLDER_LIST_TITLE_TAG] carries `hostName` — we landed on
+        //      the folder list of the host we just tapped, not a stale or
+        //      wrong host. `hostName` is data THIS test supplies, so no
+        //      copy rename can invalidate it, and this is strictly
+        //      stronger than the constant word it replaces.
         // ---------------------------------------------------------------
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithText("Folders", useUnmergedTree = true)
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG, useUnmergedTree = true)
+            .assertTextEquals(hostName)
         compose.waitUntil(timeoutMillis = 20_000) {
             compose.onAllNodesWithText(sessionName, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()

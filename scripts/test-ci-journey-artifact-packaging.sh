@@ -78,8 +78,21 @@ seed_fixture() {
   printf 'first-attempt metadata\n' > "$root/artifacts/ci-journey-attempt-1/attempt-metadata.md"
 }
 
+# Issue #1809: the shard verdict token lives in its OWN directory, deliberately
+# outside artifacts/ci-journey/, because it is now pre-seeded at job start and a
+# token inside artifacts/ci-journey/ would land in the #1781 first-attempt
+# snapshot. Keeping it separate makes "the snapshot never carries a shard token"
+# structural instead of ordering-dependent.
 write_current_shard_token() {
-  printf 'CLEAN\n' > "$1/artifacts/ci-journey/shard-verdict.txt"
+  mkdir -p "$1/artifacts/ci-journey-shard-verdict"
+  printf 'CLEAN\n' > "$1/artifacts/ci-journey-shard-verdict/shard-verdict.txt"
+}
+
+# The pre-seed the emulator-journey job writes right after checkout, BEFORE the
+# suite runs and therefore before the first-attempt snapshot is taken.
+write_preseeded_shard_token() {
+  mkdir -p "$1/artifacts/ci-journey-shard-verdict"
+  printf 'INFRA\n' > "$1/artifacts/ci-journey-shard-verdict/shard-verdict.txt"
 }
 
 extract_workflow_snapshot_copy() {
@@ -323,6 +336,8 @@ echo
 echo "== #1781 corrected production snapshot + module packaging =="
 fixed_root="$SANDBOX/fixed"
 seed_fixture "$fixed_root"
+# Issue #1809: model the pre-seeded token existing BEFORE the snapshot is taken.
+write_preseeded_shard_token "$fixed_root"
 current_root="$fixed_root/artifacts/ci-journey"
 snapshot_root="$fixed_root/artifacts/ci-journey-attempt-1"
 current_hashes_before="$(hash_tree "$current_root")"
@@ -354,7 +369,10 @@ run_production_snapshot "$fixed_root" || fail "production workflow snapshot path
 
 write_current_shard_token "$fixed_root"
 assert_real_attempt_paths "$fixed_root"
-[[ -f "$current_root/shard-verdict.txt" ]] || fail "current shard token missing"
+[[ -f "$fixed_root/artifacts/ci-journey-shard-verdict/shard-verdict.txt" ]] \
+  || fail "current shard token missing"
+[[ ! -e "$current_root/shard-verdict.txt" ]] \
+  || fail "the shard token must not live inside artifacts/ci-journey/ (issue #1809: it is pre-seeded, and artifacts/ci-journey/ is byte-copied into the first-attempt snapshot)"
 [[ ! -e "$snapshot_root/ci-journey/shard-verdict.txt" ]] \
   || fail "first-cold-boot snapshot incorrectly contains the later-written shard token"
 [[ -f "$current_root/summary.md" && -f "$snapshot_root/ci-journey/summary.md" ]] \
@@ -510,10 +528,14 @@ grep -Fq 'cp -a artifacts/ci-journey/. "$snapshot/ci-journey/"' <<<"$preserve_st
 if grep -q '\*\*/build' "$HELPER" || grep -q '\*\*/build' <<<"$preserve_step"; then
   fail "broad recursive Android build-output scan was restored"
 fi
-preserve_line="$(grep -n 'name: Preserve first journey attempt diagnostics' "$WORKFLOW" | cut -d: -f1)"
-verdict_line="$(grep -n 'verdict_file="artifacts/ci-journey/shard-verdict.txt"' "$WORKFLOW" | cut -d: -f1)"
-[[ "$preserve_line" =~ ^[0-9]+$ && "$verdict_line" =~ ^[0-9]+$ && "$preserve_line" -lt "$verdict_line" ]] \
-  || fail "first-attempt snapshot no longer precedes current shard-token creation"
+# Issue #1809 replaced the ordering guarantee with a STRUCTURAL one: the shard
+# token is written outside artifacts/ci-journey/, so no step order can leak it
+# into the first-attempt snapshot. Pin that instead of the old line ordering
+# (the token is now pre-seeded at job start, so an ordering pin would be false).
+grep -q 'path: artifacts/ci-journey-shard-verdict/shard-verdict.txt' "$WORKFLOW" \
+  || fail "shard verdict token upload must read artifacts/ci-journey-shard-verdict/shard-verdict.txt"
+grep -q 'artifacts/ci-journey/shard-verdict.txt' "$WORKFLOW" \
+  && fail "the shard token must not be written or uploaded from inside artifacts/ci-journey/ — it would land in the first-attempt snapshot"
 
 upload_step="$(sed -n \
   '/- name: Upload Android test reports/,/- name: Upload Docker logs/p' \
@@ -532,6 +554,8 @@ printf '%s\n' "${upload_paths[@]}" | grep -Fxq 'artifacts/ci-journey/' \
   || fail "actual Android-report upload step lost artifacts/ci-journey/"
 printf '%s\n' "${upload_paths[@]}" | grep -Fxq 'artifacts/ci-journey-attempt-1/' \
   || fail "actual Android-report upload step lost artifacts/ci-journey-attempt-1/"
+printf '%s\n' "${upload_paths[@]}" | grep -Fxq 'artifacts/ci-journey-shard-verdict/' \
+  || fail "actual Android-report upload step lost artifacts/ci-journey-shard-verdict/ (issue #1809: the token must stay in the forensic bundle)"
 
 upload_manifest="$SANDBOX/upload-manifest.txt"
 : > "$upload_manifest"
@@ -547,7 +571,7 @@ for upload_path in "${upload_paths[@]}"; do
 done
 grep -q '  artifacts/ci-journey/summary.md$' "$upload_manifest" \
   || fail "actual upload paths do not package the canonical summary"
-grep -q '  artifacts/ci-journey/shard-verdict.txt$' "$upload_manifest" \
+grep -q '  artifacts/ci-journey-shard-verdict/shard-verdict.txt$' "$upload_manifest" \
   || fail "actual upload paths do not package the current shard token"
 grep -q '  artifacts/ci-journey-attempt-1/ci-journey/summary.md$' "$upload_manifest" \
   || fail "actual upload paths do not package the first-cold-boot summary"

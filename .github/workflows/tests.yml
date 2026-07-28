@@ -229,9 +229,10 @@ jobs:
       # load-bearing property WITHOUT an emulator: all-green -> CLEAN,
       # all-infra -> RE-RUN (neutral, no false red email), and a genuine
       # journey failure -> RED (never masked). Cheap (< 5 s), no emulator.
-      - name: CI journey aggregate-verdict guard (issue #1458)
+      - name: CI journey aggregate-verdict guard (issues #1458, #1809)
         run: |
-          chmod +x scripts/test-ci-journey-aggregate-verdict.sh
+          chmod +x scripts/test-ci-journey-aggregate-verdict.sh \
+            scripts/ci-journey-write-shard-verdict.sh
           scripts/test-ci-journey-aggregate-verdict.sh
 
       # Issue #1458: the 95-minute emulator job must not start a second cold boot
@@ -398,6 +399,10 @@ jobs:
           path: |
             **/build/reports/tests/
             **/build/test-results/
+          # Issue #1809: a re-run of this job replaces its OWN attempt's upload
+          # instead of hitting a duplicate-name failure; the previous attempt's
+          # artifact is in a different scope and is left intact.
+          overwrite: true
           if-no-files-found: ignore
 
   python:
@@ -519,6 +524,8 @@ jobs:
           path: |
             **/build/reports/tests/
             **/build/test-results/
+          # Issue #1809: same re-run hygiene as the unit job's upload.
+          overwrite: true
           if-no-files-found: ignore
 
   # ---------------------------------------------------------------------------
@@ -622,6 +629,31 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v6
+
+      # Issue #1809 (G5 re-run): pre-seed this shard's verdict token IMMEDIATELY
+      # after checkout — before anything can fail — so EVERY attempt that starts
+      # contributes a token of its own.
+      #
+      # Artifact names are unique per run ATTEMPT, so a re-run shard's token is
+      # stored alongside (not instead of) the previous attempt's, and
+      # download-artifact resolves the name with `latest: true` — the newest
+      # upload wins. That is what makes a single-shard re-run work. The hole it
+      # left: a shard that IS re-run but dies before the classifier uploads
+      # nothing, and the aggregation job then silently consumes the PREVIOUS
+      # attempt's token as if it were the re-run's verdict. Pre-seeding makes
+      # "no token from this attempt" impossible for a shard that actually ran,
+      # so a carried-over token soundly means "this shard was not re-run" — and
+      # the stamp the writer adds lets the aggregation job say which is which.
+      #
+      # The seed is INFRA (a re-run signal), never CLEAN and never RED: an
+      # attempt that died before classifying has neither proved the gate clean
+      # nor found a regression. The classify step overwrites it with the real
+      # verdict on every normal run.
+      - name: "Pre-seed shard verdict token (issue #1809)"
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci-journey-write-shard-verdict.sh
+          scripts/ci-journey-write-shard-verdict.sh INFRA
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -1189,7 +1221,7 @@ jobs:
       # never-booted) can NEVER fail the whole `Tests` workflow on its own and
       # fire a false red-CI email. Instead, EVERY branch below writes
       # a one-word per-shard VERDICT TOKEN (CLEAN | INFRA | RED) to
-      # artifacts/ci-journey/shard-verdict.txt, which is uploaded per shard and
+      # artifacts/ci-journey-shard-verdict/shard-verdict.txt, uploaded per shard and
       # rolled up by the downstream `emulator-journey-verdict` aggregation job
       # into ONE overall verdict (CLEAN / RE-RUN / RED). The per-shard ::error /
       # ::warning annotations + red step marker are PRESERVED for forensics; the
@@ -1199,6 +1231,7 @@ jobs:
       # timeout) still produces an aggregate RED, so a real regression is never
       # masked.
       - name: Classify emulator-journey result (infra-abort vs test-failure)
+        id: classify
         if: always()
         continue-on-error: true
         run: |
@@ -1218,9 +1251,11 @@ jobs:
           # job. CLEAN = passed; INFRA = environmental (#470 cancel / #771
           # never-booted) re-run signal; RED = genuine journey failure or #835
           # budget timeout. Written in EVERY branch before its exit.
-          verdict_file="artifacts/ci-journey/shard-verdict.txt"
-          mkdir -p "$(dirname "$verdict_file")"
-          write_verdict() { printf '%s\n' "$1" > "$verdict_file"; echo "SHARD_VERDICT=$1 (shard ${{ matrix.shard }})"; }
+          # Issue #1809: the token is written by ONE helper so its provenance
+          # stamp (run id / run attempt / shard) can never drift between the
+          # pre-seed and the classifier, and so a later step can gate on the
+          # `shard_verdict` output the helper exports.
+          write_verdict() { bash scripts/ci-journey-write-shard-verdict.sh "$1"; }
           echo "first attempt outcome:  $first"
           echo "retry attempt outcome:  ${retry:-<skipped>}"
           echo "first attempt conclusion:  $first_concl"
@@ -1379,6 +1414,11 @@ jobs:
             **/build/outputs/connected_android_test_additional_output/
             artifacts/ci-journey/
             artifacts/ci-journey-attempt-1/
+            artifacts/ci-journey-shard-verdict/
+          # Issue #1809: attempt-scoped, so a re-run of THIS shard replaces its
+          # own upload while the previous attempt's reports — the infra
+          # signature G5 makes an on-call capture — survive untouched.
+          overwrite: true
           if-no-files-found: ignore
 
       - name: Upload Docker logs
@@ -1388,6 +1428,8 @@ jobs:
           # Issue #835: per-shard name so matrix legs don't collide on upload.
           name: emulator-journey-docker-logs-shard-${{ matrix.shard }}
           path: artifacts/docker/
+          # Issue #1809: same attempt-scoped re-run hygiene as the reports above.
+          overwrite: true
           if-no-files-found: ignore
 
       # Issue #1458 (AGGREGATION): upload this shard's one-word verdict token so
@@ -1399,12 +1441,49 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: emulator-journey-verdict-shard-${{ matrix.shard }}
-          path: artifacts/ci-journey/shard-verdict.txt
+          path: artifacts/ci-journey-shard-verdict/shard-verdict.txt
+          # Issue #1809: `overwrite` is scoped to the CURRENT run attempt (the
+          # delete resolves the name through the attempt's own backend id), so
+          # it removes the within-attempt duplicate-name failure class WITHOUT
+          # touching the previous attempt's artifact — the forensic evidence G5
+          # requires an on-call to keep is safe.
+          overwrite: true
           if-no-files-found: warn
 
       - name: Stop Docker fixture
         if: always()
         run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+
+      # Issue #1809 (G5 clean re-run): make THIS shard's job conclusion reflect a
+      # genuine RED verdict.
+      #
+      # The defect this closes: #1458 made the classify step `continue-on-error`
+      # so an environmental shard could not fire a false red-CI email. A side
+      # effect nobody noticed is that a shard whose token is RED ALSO finishes
+      # `success` — so on a red emulator-journey run the ONLY failed job is the
+      # aggregation job, and GitHub's "Re-run failed jobs" re-runs ONLY that
+      # aggregation job. It then re-downloads the very same shard tokens and
+      # emits the very same RED: a second, identical red that proves nothing.
+      # That is the on-call's "could not produce a clean re-run" in mechanical
+      # terms (runs 30305256109 / 30314178005 / 30318408377 all show three
+      # `success` shard jobs under a `failure` aggregate).
+      #
+      # Failing the shard on RED — and ONLY on RED — makes "Re-run failed jobs"
+      # re-run the offending shard AND the aggregation job that `needs` it, so
+      # the standard button is the G5 clean-re-run path. It cannot reintroduce
+      # the #1458 false red: a RED token already turns the whole run red through
+      # the aggregation job, so the run's conclusion is unchanged. INFRA and
+      # CLEAN shards still finish green, which is the property #1458 added.
+      #
+      # Placed last so every `if: always()` artifact/teardown step above has
+      # already run; the verdict artifact is uploaded before this can fail.
+      - name: "Fail this shard on a genuine RED verdict (issue #1809)"
+        if: always() && steps.classify.outputs.shard_verdict == 'RED'
+        run: |
+          echo "This shard recorded a RED verdict (a genuine journey failure or the #835 budget timeout)."
+          echo "Failing the shard job so 'Re-run failed jobs' re-runs THIS shard plus the aggregation job (issue #1809, G5)."
+          echo "The per-shard annotations above carry the failing class(es); the aggregate verdict job owns the overall run verdict."
+          exit 1
 
   # ---------------------------------------------------------------------------
   # Issue #1458 (AGGREGATION): roll the per-shard emulator-journey verdict tokens

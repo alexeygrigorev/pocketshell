@@ -60,6 +60,7 @@ import com.pocketshell.app.fileviewer.FileViewerScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.nav.parentDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.projects.FolderListScreen
 import com.pocketshell.app.projects.RepoBrowserScreen
@@ -810,10 +811,17 @@ private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
  * Sealed-class destination state machine. The back-stack is a `List<AppDestination>`
  * we push / pop; rendering branches on the head.
  *
- * Saveable: we don't persist the back stack across process death today.
- * Phase 1 acceptance only requires that hosts + keys persist across app
- * restarts; the back stack is volatile by design (cold-launch returns
- * the user to `HostList`).
+ * Saveable: we deliberately do NOT persist the back stack across process
+ * death or a configuration change. Every destination carries the host's SSH
+ * connection tuple including a decrypted `CharArray?` passphrase, and a
+ * `rememberSaveable` stack would write that secret into the saved-state bundle
+ * the system spills to disk.
+ *
+ * Losing the stack is therefore expected, and issue #1831 made it harmless:
+ * when the stack is empty, `back()` resolves the current destination's
+ * structural parent ([com.pocketshell.app.nav.parentDestination]) — a session
+ * falls back to its host's session/folder list, that falls back to `HostList`,
+ * and `HostList` itself has no parent so Back there still exits the app.
  */
 @Composable
 private fun AppNavigator(
@@ -881,8 +889,10 @@ private fun AppNavigator(
     // from [requestedDestination], which the activity seeds with either an
     // intent route or — for a plain launch that would otherwise land on
     // the host list — the persisted last tmux session (#177 fast resume).
-    // The back stack itself is still volatile by design (a back gesture
-    // from a restored session returns the user to the host list).
+    // The back stack itself stays volatile by design; issue #1831 made that
+    // safe by resolving the current destination's PARENT when there is nothing
+    // to pop, so a back gesture from a restored session reaches that host's
+    // sessions screen rather than the host list.
     var current: AppDestination by remember {
         mutableStateOf(requestedDestination)
     }
@@ -984,7 +994,37 @@ private fun AppNavigator(
         setCurrentDestination(AppDestination.HostList)
     }
 
+    // Issue #1831: when the navigator has a real navigation history, Back pops
+    // it — unchanged. When the stack is EMPTY, Back falls back to the current
+    // destination's structural parent ([parentDestination]) instead of jumping
+    // unconditionally to the host list.
+    //
+    // The stack is empty for every destination the app lands on WITHOUT a user
+    // navigation: the #177 process-death restore, a share-into-session launch,
+    // the active-sessions widget tap, the #859 agent-card push deep-link — and
+    // for ANY destination after a configuration change, which discards this
+    // `remember`ed list. In all of those the maintainer's first Back jumped
+    // from the agent session straight to the HOST list instead of the sessions
+    // screen (#1831). Resolving the parent instead fixes every one of those
+    // producers with a single rule (session -> that host's session/folder list
+    // -> host list), and `parentDestination()` returns null for the root host
+    // list so Back there still exits the app ([shouldTrapSystemBack], #520).
     fun back() {
+        val previous = backStack.removeLastOrNull()
+            ?: current.parentDestination()
+            ?: AppDestination.HostList
+        setCurrentDestination(previous)
+    }
+
+    // Issue #666 (kept deliberately distinct from [back] by #1831): the
+    // AUTOMATIC recovery when the session we are sitting on is found GONE on
+    // the server. This is not a user Back, so it does NOT get #1831's
+    // parent-destination fallback: on a cold restore straight into a
+    // now-dead session there is nothing to pop, and #666 deliberately chose
+    // the host list as the safe landing rather than re-dialing SSH into the
+    // dead session's host tree. When the user DID navigate in normally the
+    // stack pops to wherever they came from, exactly as before.
+    fun recoverToPreviousOrHostList() {
         setCurrentDestination(backStack.removeLastOrNull() ?: AppDestination.HostList)
     }
 
@@ -1645,7 +1685,11 @@ private fun AppNavigator(
             // then drop to the previous screen (the host/session list).
             onSessionEnded = {
                 onClearLastSession()
-                back()
+                // Issue #1831: deliberately NOT `back()` — see
+                // [recoverToPreviousOrHostList]. A server-side session death is
+                // an automatic recovery, not a user Back, and #666 pinned the
+                // host list as its no-history landing.
+                recoverToPreviousOrHostList()
             },
             onOpenTmuxSession = { sessionName, startDirectory ->
                 navigate(

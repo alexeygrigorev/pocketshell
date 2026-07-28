@@ -187,6 +187,52 @@ fi
 pass "(pre-1458) raw console-count classifier + classifier-only capture plumbing are absent"
 
 # ---------------------------------------------------------------------------
+# Issue #1839: the suite-budget clock seam must stay TEST-ONLY.
+#
+# `JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE` exists so a budget assertion is decided
+# by the budget arithmetic instead of by whether an integer `$SECONDS` tick
+# happened to land (the flaky-by-construction `(c2)` that reddened `main` at
+# ae368467). A pinned clock that reached PRODUCTION would silently disable the
+# whole #835 budget, so pin three things mechanically:
+#   * the production default path still measures `$SECONDS - SUITE_START`;
+#   * the override is validated (a malformed pin is a hard abort, never ignored);
+#   * neither the workflow nor the suite itself ever SETS the override.
+BUDGET_FUNCTIONS="$SCRIPT_DIR/ci-journey-budget-functions.sh"
+[[ -f "$BUDGET_FUNCTIONS" ]] || fail "(pre-1839) cannot find ci-journey-budget-functions.sh"
+grep -q 'printf .%s\\n. "\$((SECONDS - SUITE_START))"' "$BUDGET_FUNCTIONS" \
+  || fail "(pre-1839) the production suite-budget clock must still measure \$SECONDS - SUITE_START"
+grep -q 'JOURNEY_BUDGET_CLOCK_INVALID' "$BUDGET_FUNCTIONS" \
+  || fail "(pre-1839) a malformed JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE must abort, not silently disable the #835 budget"
+if grep -qE '^[^#]*JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE=' "$WORKFLOW" "$REAL_SUITE"; then
+  fail "(pre-1839) the suite-budget clock override is TEST-ONLY — it must never be set by tests.yml or the suite"
+fi
+# The seam is load-bearing only if the override actually governs. Drive the real
+# helper at both extremes of the exhaustion boundary, with no wall clock involved.
+budget_clock_probe() {
+  JOURNEY_STEP_BUDGET_SECS=900 JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE="$1" \
+    bash -c 'source "$0"; SUITE_START=$SECONDS; budget_exhausted && echo exhausted || echo live' \
+    "$BUDGET_FUNCTIONS"
+}
+[[ "$(budget_clock_probe 0)" == "live" ]] \
+  || fail "(pre-1839) pinned elapsed=0 of 900s must NOT be exhausted"
+[[ "$(budget_clock_probe 900)" == "exhausted" ]] \
+  || fail "(pre-1839) pinned elapsed=900 of 900s must be exhausted (the boundary is <= 0 remaining)"
+[[ "$(budget_clock_probe 901)" == "exhausted" ]] \
+  || fail "(pre-1839) pinned elapsed beyond the budget must be exhausted"
+# BEHAVIOURAL, not just a grep for the message: a malformed pin must ABORT the
+# sourcing shell with exit 2. A structural grep alone survives a mutation that
+# guts the validation while leaving its error string in place.
+budget_clock_invalid_out="$(mktemp)"
+budget_clock_probe not-a-number > "$budget_clock_invalid_out" 2>&1
+invalid_rc=$?
+[[ "$invalid_rc" -eq 2 ]] \
+  || { cat "$budget_clock_invalid_out"; fail "(pre-1839) a malformed budget-clock pin must abort with exit 2, got $invalid_rc"; }
+grep -q 'JOURNEY_BUDGET_CLOCK_INVALID' "$budget_clock_invalid_out" \
+  || { cat "$budget_clock_invalid_out"; fail "(pre-1839) a malformed budget-clock pin must abort greppably"; }
+rm -f "$budget_clock_invalid_out"
+pass "(pre-1839) suite-budget clock: production reads \$SECONDS, the test-only pin governs at 0/900/901, a malformed pin aborts (exit 2), and it is never set in tests.yml or the suite"
+
+# ---------------------------------------------------------------------------
 # Build a sandbox "repo root": a copy of the suite script + a stub gradlew that
 # SLEEPS (modelling a #470-stalling class) + stub scripts the suite shells out
 # to. REPO_ROOT in the suite is derived from BASH_SOURCE, so we run the COPY

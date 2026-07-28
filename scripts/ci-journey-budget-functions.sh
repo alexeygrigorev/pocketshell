@@ -1,9 +1,55 @@
 #!/usr/bin/env bash
 # Budget and bounded-run helpers for scripts/ci-journey-suite.sh.
 
+# ---------------------------------------------------------------------------
+# The suite-budget clock seam (issue #1839).
+#
+# Production measures elapsed suite time with bash's `$SECONDS`, which advances
+# in whole INTEGER seconds. That is fine for the real 4200s budget, but it made
+# the guard that drives a tiny budget (scripts/test-ci-journey-summary-evidence.sh
+# `(c2)`) flaky-BY-CONSTRUCTION: with a 1s budget the verdict hinged on whether a
+# `$SECONDS` tick happened to land in the sub-second window between SUITE_START
+# and the first `budget_exhausted` check. Whether that tick lands is a property
+# of the MACHINE, not of the budget logic — the hosted runner lost it 2/2 (red
+# `main` @ ae368467, run 30368416112) while the contended dev box won it 5/5 on
+# the identical commit.
+#
+# The cure is a pinnable seam, not a bigger number (process.md: "the tuning knob
+# must be injectable/seedable so tests are deterministic while production keeps
+# real randomness — never widen the assertion into a band that no longer
+# constrains behaviour", G6). `JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE` pins the
+# elapsed reading so a budget test is decided by the budget ARITHMETIC alone, on
+# any hardware, at either extreme of the tick.
+#
+# Safety, because a pinned clock that leaked into production would silently
+# DISABLE the #835 budget:
+#   * It is validated HERE, once, at source time in the suite's own shell — a
+#     malformed value is a hard `exit 2`, never a silently ignored override
+#     (`budget_remaining` runs inside `$(...)`, where an exit could only kill the
+#     subshell and would read as "not exhausted").
+#   * scripts/test-ci-journey-budget.sh asserts the production default path still
+#     measures `$SECONDS - SUITE_START`, and that neither the workflow nor the
+#     suite ever sets the override.
+if [[ -n "${JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE:-}" ]]; then
+  if [[ ! "${JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE}" =~ ^[0-9]+$ ]]; then
+    echo "JOURNEY_BUDGET_CLOCK_INVALID: JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE='${JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE}' is not a non-negative integer — refusing to run with an unreadable suite-budget clock (issue #1839)" >&2
+    exit 2
+  fi
+fi
+
+# journey_budget_elapsed — seconds of suite budget consumed so far.
+journey_budget_elapsed() {
+  if [[ -n "${JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE:-}" ]]; then
+    printf '%s\n' "$JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE"
+    return 0
+  fi
+  printf '%s\n' "$((SECONDS - SUITE_START))"
+}
+
 # budget_remaining — seconds left in the suite-level budget (never negative).
 budget_remaining() {
-  local elapsed=$((SECONDS - SUITE_START))
+  local elapsed
+  elapsed="$(journey_budget_elapsed)"
   local remaining=$((JOURNEY_STEP_BUDGET_SECS - elapsed))
   (( remaining < 0 )) && remaining=0
   echo "$remaining"

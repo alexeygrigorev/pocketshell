@@ -10,20 +10,13 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -97,13 +90,8 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class VoiceSendSameGridRevealHealTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val createdVms = mutableListOf<TmuxSessionViewModel>()
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
     // -------------------------------------------------------------------------
     // (1) Voice-send: the active pane went BLACK on the IME transition; the
@@ -288,22 +276,7 @@ class VoiceSendSameGridRevealHealTest {
 
     // ------------------------------------------------------------------ Harness
 
-    private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
-        try {
-            body()
-        } finally {
-            for (vm in createdVms) {
-                runCatching { vm.setProcessForegroundForClearedForTest(false) }
-                runCatching { vm.clearForTest() }
-            }
-            advanceUntilIdle()
-            createdVms.clear()
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
-    }
+    private fun runVmTest(body: suspend TestScope.() -> Unit) = fixture.runVmTest(body = body)
 
     private fun TestScope.newVm(
         registry: ActiveTmuxClients,
@@ -320,7 +293,7 @@ class VoiceSendSameGridRevealHealTest {
         // virtual-clock scheduler so the round-trips run inline on the test
         // clock. Production defaults to `Dispatchers.IO` (off the UI thread).
         it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
-        createdVms.add(it)
+        fixture.track(it)
     }
 
     private fun TestScope.connectVm(client: FakeTmuxClient): TmuxSessionViewModel {

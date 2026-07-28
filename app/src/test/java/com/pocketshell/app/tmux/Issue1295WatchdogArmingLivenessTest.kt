@@ -14,21 +14,13 @@ import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -77,13 +69,8 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class Issue1295WatchdogArmingLivenessTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val createdVms = mutableListOf<TmuxSessionViewModel>()
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
     // -------------------------------------------------------------------------
     // Deliverable 1 — POSITIVE liveness heartbeat, and its ABSENCE while backgrounded.
@@ -566,23 +553,12 @@ class Issue1295WatchdogArmingLivenessTest {
         return bridge.emulator.screen.transcriptText
     }
 
-    private fun runVmTest(body: suspend TestScope.(RecordingSink) -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
+    private fun runVmTest(body: suspend TestScope.(RecordingSink) -> Unit) = fixture.runVmTest {
         val sink = installRecordingDiagnosticSink()
-        try {
-            body(RecordingSink(sink))
-        } finally {
-            sink.close()
-            for (vm in createdVms) {
-                runCatching { vm.setProcessForegroundForClearedForTest(false) }
-                runCatching { vm.clearForTest() }
-            }
-            advanceUntilIdle()
-            createdVms.clear()
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
+        // Issue #1765: the sink must close BEFORE the VMs are cleared and while
+        // Main is still installed, exactly as the pre-migration `finally` did.
+        fixture.onTeardown { sink.close() }
+        body(RecordingSink(sink))
     }
 
     private class RecordingSink(
@@ -606,7 +582,7 @@ class Issue1295WatchdogArmingLivenessTest {
         // test is the SOLE opportunity; individual tests re-enable auto-arm as needed.
         it.setStaleRenderWatchdogAutoArmEnabledForTest(false)
         it.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
-        createdVms.add(it)
+        fixture.track(it)
     }
 
     private fun TestScope.connectVm(client: FakeTmuxClient): TmuxSessionViewModel {
@@ -658,7 +634,7 @@ class Issue1295WatchdogArmingLivenessTest {
             it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
             it.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
             it.setStaleRenderWatchdogMaxTicksForTest(1000)
-            createdVms.add(it)
+            fixture.track(it)
         }
         runCurrent()
         vm.setTmuxClientFactoryForTest { _, requested, _ -> clientFactory(requested) }

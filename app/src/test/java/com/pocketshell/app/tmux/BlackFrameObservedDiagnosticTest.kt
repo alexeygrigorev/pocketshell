@@ -12,20 +12,12 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -80,13 +72,8 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class BlackFrameObservedDiagnosticTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val createdVms = mutableListOf<TmuxSessionViewModel>()
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
     // -------------------------------------------------------------------------
     // (1) capture_empty — capture-pane empty on a live transport, pane WAS seeded.
@@ -329,23 +316,12 @@ class BlackFrameObservedDiagnosticTest {
 
     // ------------------------------------------------------------------ Harness
 
-    private fun runVmTest(body: suspend TestScope.(RecordingSink) -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
+    private fun runVmTest(body: suspend TestScope.(RecordingSink) -> Unit) = fixture.runVmTest {
         val sink = installRecordingDiagnosticSink()
-        try {
-            body(RecordingSink(sink))
-        } finally {
-            sink.close()
-            for (vm in createdVms) {
-                runCatching { vm.setProcessForegroundForClearedForTest(false) }
-                runCatching { vm.clearForTest() }
-            }
-            advanceUntilIdle()
-            createdVms.clear()
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
+        // Issue #1765: the sink must close BEFORE the VMs are cleared and while
+        // Main is still installed, exactly as the pre-migration `finally` did.
+        fixture.onTeardown { sink.close() }
+        body(RecordingSink(sink))
     }
 
     /** Thin wrapper so the test body can pull black-frame events by class without imports. */
@@ -381,7 +357,7 @@ class BlackFrameObservedDiagnosticTest {
         // reveal-gate pass is the one the test drives directly — no spurious events.
         it.setStaleRenderWatchdogAutoArmEnabledForTest(false)
         it.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
-        createdVms.add(it)
+        fixture.track(it)
     }
 
     private fun TestScope.connectVm(client: FakeTmuxClient): TmuxSessionViewModel {

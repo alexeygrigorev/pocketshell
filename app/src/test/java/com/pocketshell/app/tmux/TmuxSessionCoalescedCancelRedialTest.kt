@@ -14,20 +14,15 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.TmuxClientFactory
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -68,23 +63,10 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class TmuxSessionCoalescedCancelRedialTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
-
-    private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
-        try {
-            body()
-        } finally {
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
-    }
+    private fun runVmTest(body: suspend TestScope.() -> Unit) = fixture.runVmTest(body = body)
 
     private fun TestScope.coalescingLeaseManager(connector: SshLeaseConnector): SshLeaseManager =
         SshLeaseManager(
@@ -108,6 +90,7 @@ class TmuxSessionCoalescedCancelRedialTest {
         sshLeaseManager = sshLeaseManager,
         sessionLifecycleSignals = null,
     ).also {
+        fixture.track(it)
         it.setSeedIoDispatcherForTest(Dispatchers.Main)
     }
 

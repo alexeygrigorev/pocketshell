@@ -17,21 +17,15 @@ import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -90,7 +84,8 @@ class ReseedBlankWatchdogCharacterizationTest {
     private fun TmuxSessionViewModel.loadingHoldRaisedForTest(): Boolean =
         revealState.value is com.pocketshell.core.connection.RevealState.Seeding
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
     // Every VM created during a test is tracked so [runVmTest] can tear it down
     // deterministically INSIDE the runTest body (before runTest's uncompleted-
@@ -99,37 +94,8 @@ class ReseedBlankWatchdogCharacterizationTest {
     // scheduler), so a test that advances time past a disconnect can leave a
     // VM-owned coroutine parked on a delay — `clearForTest()` cancels the scope
     // and drains it, keeping the suite free of `UncompletedCoroutinesError`.
-    private val createdVms = mutableListOf<TmuxSessionViewModel>()
 
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
-
-    private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        // EPIC #792 Slice D: disable the VM LivenessProbe auto-start — its infinite
-        // periodic `delay` loop would otherwise spin `advanceUntilIdle()` forever on
-        // this virtual-clock Main (this file does not use MainDispatcherRule).
-        com.pocketshell.app.tmux.LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
-        try {
-            body()
-        } finally {
-            // Tear down every VM the body created, draining its background
-            // coroutines on the virtual clock so runTest sees a quiescent scope.
-            for (vm in createdVms) {
-                // Don't park the runtime for a background grace — we want a
-                // clean, immediate teardown (cancel viewModelScope, close the
-                // connection), not a deferred handoff that keeps timers alive.
-                runCatching { vm.setProcessForegroundForClearedForTest(false) }
-                runCatching { vm.clearForTest() }
-            }
-            advanceUntilIdle()
-            createdVms.clear()
-            com.pocketshell.app.tmux.LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
-    }
+    private fun runVmTest(body: suspend TestScope.() -> Unit) = fixture.runVmTest(body = body)
 
     private fun TestScope.newVm(
         registry: ActiveTmuxClients,
@@ -147,7 +113,7 @@ class ReseedBlankWatchdogCharacterizationTest {
         // clock and `advanceUntilIdle` drains them deterministically. Production
         // defaults to `Dispatchers.IO` (a real thread off the UI thread).
         it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
-        createdVms.add(it)
+        fixture.track(it)
     }
 
     private fun TestScope.connectVm(client: FakeTmuxClient): TmuxSessionViewModel {

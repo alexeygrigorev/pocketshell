@@ -13,21 +13,14 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -70,27 +63,25 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class Issue1543LivenessProbeAutoStartHangTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val createdVms = mutableListOf<TmuxSessionViewModel>()
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
     // -------------------------------------------------------------------------
     // RED→GREEN reproduction — a naive VM test must not silently hang forever.
     // -------------------------------------------------------------------------
 
     @Test
-    fun naiveVmConnectDoesNotHangBecauseAutoStartDefaultsOffInUnitTestRuntime() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        // DELIBERATELY do NOT call LivenessProbeTestOverride.setAutoStartEnabledForTest(false):
-        // this reproduces the naive test author who relies on the DEFAULT. Under the fix the
-        // default is OFF in the Robolectric unit-test runtime, so the probe never auto-arms and
-        // the VM's own advanceUntilIdle() can complete. On base (default ON) the probe's
-        // cancel-terminal-only delay() loop re-arms forever and this test HANGS (times out).
-        try {
+    fun naiveVmConnectDoesNotHangBecauseAutoStartDefaultsOffInUnitTestRuntime() =
+        // Issue #1765: `disableLivenessProbeAutoStart = false` is load-bearing here —
+        // this test's whole point is that the DEFAULT is safe, so the fixture must not
+        // opt out on the body's behalf. Every other standalone fixture keeps the
+        // default `true` (the per-file "EPIC #792 Slice D" opt-out this replaces).
+        fixture.runVmTest(disableLivenessProbeAutoStart = false) {
+            // DELIBERATELY do NOT call LivenessProbeTestOverride.setAutoStartEnabledForTest(false):
+            // this reproduces the naive test author who relies on the DEFAULT. Under the fix the
+            // default is OFF in the Robolectric unit-test runtime, so the probe never auto-arms and
+            // the VM's own advanceUntilIdle() can complete. On base (default ON) the probe's
+            // cancel-terminal-only delay() loop re-arms forever and this test HANGS (times out).
             val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
             // connectVm() itself calls advanceUntilIdle() internally — on base (auto-start default
             // ON) this is EXACTLY where the hang happens: connect -> attachClient ->
@@ -113,12 +104,7 @@ class Issue1543LivenessProbeAutoStartHangTest {
                 "the VM settled connect and surfaced its pane (advanceUntilIdle completed, not hung)",
                 vm.panes.value.any { it.paneId == "%1" },
             )
-        } finally {
-            teardownVms()
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
         }
-    }
 
     // -------------------------------------------------------------------------
     // Production preserved — with auto-start EXPLICITLY enabled the probe loop still
@@ -126,19 +112,28 @@ class Issue1543LivenessProbeAutoStartHangTest {
     // -------------------------------------------------------------------------
 
     @Test
-    fun livenessProbeStillAutoStartsAndDetectsSilentDropWhenExplicitlyEnabled() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        val sink: RecordingDiagnosticEventSink = installRecordingDiagnosticSink()
-        // Explicit opt-in (the PRODUCTION posture) + a short deterministic probe window so the
-        // drop lands within a small BOUNDED advance. We must NEVER call advanceUntilIdle() after
-        // this — the loop is intentionally infinite, so only bounded advanceTimeBy() is safe.
-        LivenessProbeTestOverride.setAutoStartEnabledForTest(true)
-        LivenessProbeTestOverride.setForTest(
-            intervalMs = 10L,
-            perProbeTimeoutMs = 10L,
-            failureThreshold = 2,
-        )
-        try {
+    fun livenessProbeStillAutoStartsAndDetectsSilentDropWhenExplicitlyEnabled() =
+        fixture.runVmTest(disableLivenessProbeAutoStart = false) {
+            val sink: RecordingDiagnosticEventSink = installRecordingDiagnosticSink()
+            // Issue #1765: close the sink and stop the probe/gate BEFORE the fixture clears
+            // the VMs and while Main is still installed — the ordering the pre-migration
+            // `finally` had.
+            fixture.onTeardown {
+                for (vm in createdVms) {
+                    runCatching { vm.forceLivenessProbeDeadForTest = false }
+                    runCatching { vm.setProcessForegroundForClearedForTest(false) }
+                }
+                sink.close()
+            }
+            // Explicit opt-in (the PRODUCTION posture) + a short deterministic probe window so the
+            // drop lands within a small BOUNDED advance. We must NEVER call advanceUntilIdle() after
+            // this — the loop is intentionally infinite, so only bounded advanceTimeBy() is safe.
+            LivenessProbeTestOverride.setAutoStartEnabledForTest(true)
+            LivenessProbeTestOverride.setForTest(
+                intervalMs = 10L,
+                perProbeTimeoutMs = 10L,
+                failureThreshold = 2,
+            )
             val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
             val vm = connectVmBounded(client)
 
@@ -169,32 +164,18 @@ class Issue1543LivenessProbeAutoStartHangTest {
                     "recorded=${drops.size}",
                 drops.isNotEmpty(),
             )
-        } finally {
-            // Stop the probe/gate before teardown so the bounded window closes cleanly.
-            for (vm in createdVms) {
-                runCatching { vm.forceLivenessProbeDeadForTest = false }
-                runCatching { vm.setProcessForegroundForClearedForTest(false) }
-            }
-            sink.close()
-            teardownVms()
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
         }
-    }
 
     // ------------------------------------------------------------------ Harness
 
-    private fun TestScope.teardownVms() {
-        for (vm in createdVms) {
-            runCatching { vm.setProcessForegroundForClearedForTest(false) }
-            runCatching { vm.clearForTest() }
-        }
-        // clearForTest() may schedule teardown coroutines; drain with a bounded advance rather
-        // than advanceUntilIdle (which could hang if any probe were left auto-armed).
-        advanceTimeBy(1_000L)
-        runCurrent()
-        createdVms.clear()
-    }
+    /**
+     * Issue #1765: this file still needs its OWN VM list because
+     * [livenessProbeStillAutoStartsAndDetectsSilentDropWhenExplicitlyEnabled]
+     * has to disarm `forceLivenessProbeDeadForTest`/the foreground gate on each
+     * VM before teardown. The fixture owns the clear/cancel/drain/reset ordering;
+     * this list only feeds that pre-teardown hook.
+     */
+    private val createdVms = mutableListOf<TmuxSessionViewModel>()
 
     private fun TestScope.newVm(
         registry: ActiveTmuxClients,
@@ -212,6 +193,7 @@ class Issue1543LivenessProbeAutoStartHangTest {
         // idle-tick bound, so they never hang advanceUntilIdle; disabling them isolates the fix.)
         it.setStaleRenderWatchdogAutoArmEnabledForTest(false)
         it.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+        fixture.track(it)
         createdVms.add(it)
     }
 

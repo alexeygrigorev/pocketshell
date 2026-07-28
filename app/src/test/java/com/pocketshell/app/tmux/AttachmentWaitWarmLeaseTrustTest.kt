@@ -9,19 +9,14 @@ import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.TmuxClientFactory
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -59,26 +54,10 @@ import java.io.InputStream
 @Config(manifest = Config.NONE)
 class AttachmentWaitWarmLeaseTrustTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
-
-    private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        // EPIC #792 Slice D: disable the VM LivenessProbe auto-start — its infinite
-        // periodic `delay` loop would otherwise spin `advanceUntilIdle()` forever on
-        // this virtual-clock Main (this file does not use MainDispatcherRule).
-        com.pocketshell.app.tmux.LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
-        try {
-            body()
-        } finally {
-            com.pocketshell.app.tmux.LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
-    }
+    private fun runVmTest(body: suspend TestScope.() -> Unit) = fixture.runVmTest(body = body)
 
     private fun TestScope.newVm(
         sshLeaseManager: SshLeaseManager,
@@ -89,6 +68,7 @@ class AttachmentWaitWarmLeaseTrustTest {
         sshLeaseManager = sshLeaseManager,
         sessionLifecycleSignals = null,
     ).also {
+        fixture.track(it)
         // Issue #926: pin the seed-IO dispatcher (off-Main hop for the
         // attach/switch/reattach `capture-pane`/`list-panes` IO) to the shared
         // virtual-clock scheduler so the round-trips run inline on the test clock

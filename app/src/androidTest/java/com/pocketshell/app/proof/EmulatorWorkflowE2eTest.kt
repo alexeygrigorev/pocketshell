@@ -10,6 +10,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -23,6 +24,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_TITLE_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -194,15 +197,28 @@ class EmulatorWorkflowE2eTest {
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        // Issue #171: the post-tap surface is now the FolderListScreen,
-        // titled "Folders". Sessions render inline as visible
-        // SessionRow nodes under their folder header so callers can
-        // tap a session by its name directly.
+        // Issue #171: the post-tap surface is now the FolderListScreen.
+        // Sessions render inline as visible SessionRow nodes under their
+        // folder header so callers can tap a session by its name directly.
+        //
+        // Issue #1837: this used to wait on the literal screen title
+        // "Folders", which `FolderListScreen` stopped rendering on
+        // 2026-06-01 (commit 26592101, "Align project tree with compact
+        // mockup", #396) when the header became `title = hostName`. The
+        // wait then timed out for ~2 months. We assert the two properties
+        // this step actually guards, on durable affordances instead of
+        // product copy: [FOLDER_LIST_SCREEN_TAG] proves the post-tap
+        // surface IS FolderListScreen, and [FOLDER_LIST_TITLE_TAG] equal
+        // to `hostName` proves it is the folder list of the host row we
+        // just tapped (`hostName` is data this test supplies, so a copy
+        // rename cannot invalidate it).
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("Folders", useUnmergedTree = true)
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG, useUnmergedTree = true)
+            .assertTextEquals(hostName)
     }
 
     private fun waitForPickerAction(text: String) {

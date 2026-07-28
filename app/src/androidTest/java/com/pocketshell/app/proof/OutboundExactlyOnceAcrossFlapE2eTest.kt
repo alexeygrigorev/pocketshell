@@ -12,6 +12,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
@@ -139,6 +141,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     private lateinit var hostRowTag: String
     private var diagnostics: RecordingDiagnosticSink? = null
     private var issue1739CaptureCleanupGate: CompletableDeferred<Unit>? = null
+
+    /** Issue #1819: the last sidecar SSH read error, so a blank frame can name its cause. */
+    private var lastSidecarFailure: String? = null
     private val timings = mutableListOf<String>()
 
     private suspend fun seedBeforeLaunch() {
@@ -216,6 +221,17 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         // "Will send when reconnected." queue-row status.
         waitForDeferral()
 
+        // Issue #1819: the INJECTION must be asserted where it is injected.
+        // `triggerCleanPassiveDropForTest()` silently returns false when the
+        // live classification says Ignore, and the arm it selects may skip
+        // recovery entirely — so "the seam was armed" does NOT imply "a flap
+        // happened". Proving it here, bounded, is what stops a no-op injection
+        // from cascading into a 180s delivery timeout that reads like an
+        // outbound-delivery bug (the whole reason this class was suspected of a
+        // product race). The end-of-journey fresh-client assertion below is kept
+        // as well — this one only makes it fail EARLIER and for the true reason.
+        val clientAfterInjection = assertFlapInjected(clientBeforeFlap)
+
         // The flap heals (the within-grace silent reattach — a real redial to
         // the fixture). Give the #900 auto-flush resend a short window; if the
         // resend raced the dying transport and re-deferred (the in-window
@@ -230,7 +246,10 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 .contains(FAKE_AGENT_SUBMITTED_STRIPPED + payloadStripped)
         }
         waitForConnected("post-flap silent heal")
-        val silentHealSubmitted = pollSidecarCapture(SILENT_HEAL_SUBMIT_WINDOW_MS, submittedPredicate)
+        val silentHealSubmitted = pollSidecarCaptureWhileDrivingIssue1739Main(
+            SILENT_HEAL_SUBMIT_WINDOW_MS,
+            submittedPredicate,
+        ) != null
         if (!silentHealSubmitted) {
             recordTiming("user_retype_resend_used", 1L)
             openComposerAndSend(payload)
@@ -240,7 +259,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         // "timely" half of the acceptance). The authoritative signal is the
         // SERVER-side `capture-pane` (the TerminalView is covered by the
         // Conversation surface here).
-        waitForSidecarCapture(
+        waitForSidecarCaptureWhileDrivingIssue1739Main(
             "prompt submitted after flap",
             SUBMIT_AFTER_FLAP_TIMEOUT_MS,
             submittedPredicate,
@@ -253,7 +272,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val clientAfterFlap = currentViewModel().currentClientIdentityForTest()
         assertTrue(
             "the seam must have dropped the transport (fresh tmux client after " +
-                "the flap); before=$clientBeforeFlap after=$clientAfterFlap",
+                "the flap); before=$clientBeforeFlap atInjection=$clientAfterInjection " +
+                "after=$clientAfterFlap " +
+                "seam=${diagnostics!!.eventsNamed("outbound_result_lost_seam")
+                    .map { it.fields }} " +
+                "events=${boundedEventTail(diagnostics!!.events)}",
             clientAfterFlap != null && clientAfterFlap != clientBeforeFlap,
         )
 
@@ -762,14 +785,22 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         writeThroughTerminalSession(typed)
 
         // GREEN: the keystrokes must arrive (timely) ...
-        val capture = waitForSidecarCapture("typed keystrokes visible", KEYSTROKE_TIMEOUT_MS) {
+        val capture = waitForSidecarCaptureWhileDrivingIssue1739Main(
+            "typed keystrokes visible",
+            KEYSTROKE_TIMEOUT_MS,
+        ) {
             it.filterNot { ch -> ch.isWhitespace() }.contains(typed)
         }
         recordTiming("keystrokes_visible_after_type_ms", SystemClock.elapsedRealtime() - typedAtMs)
 
         // ... and after the retry window settles, EXACTLY ONCE (base: the blind
         // attempt 2 re-sends the batch and the input box reads '<typed><typed>').
-        SystemClock.sleep(KEYSTROKE_SETTLE_MS)
+        // Issue #1819: PUMP this settle rather than sleeping it. The window must
+        // cover the production 150ms retry delay + probe round-trip; a bare wall
+        // sleep leaves the Compose scheduler frozen, so the very retry this
+        // assertion exists to catch could not fire and the proof passed
+        // vacuously.
+        pumpComposeMainFor(KEYSTROKE_SETTLE_MS)
         val settled = waitForStableSidecarCapture()
         writeText("keystroke-final-capture.txt", settled)
         val settledStripped = settled.filterNot { it.isWhitespace() }
@@ -789,7 +820,41 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     // ---------------------------------------------------------------- drive helpers
 
-    /** Wait for REAL live detection to bind (the #975 transcript-evidence path). */
+    /**
+     * Wait for REAL live detection to bind (the #975 transcript-evidence path).
+     *
+     * DO NOT convert this [SystemClock.sleep] into [pumpComposeMainFor]. It is a
+     * DELIBERATE exception to the #1739/#1773/#1798/#1819 pump sweep, and the
+     * exception is load-bearing.
+     *
+     * The sweep's rationale is that a bare wall sleep freezes the
+     * [createAndroidComposeRule]-installed Main [kotlinx.coroutines.test.TestDispatcher]
+     * scheduler, so a production continuation the test is waiting FOR — a Main
+     * `delay` retry timer, an ack/cleanup `withTimeoutOrNull` that must EXPIRE —
+     * can never run. That rationale does not apply here, and inverts.
+     *
+     * This wait's subject is not a Main continuation: it is a WALL-CLOCK remote
+     * round trip. `startAgentDetectionForPane` launches on `bridgeScope`
+     * (= `viewModelScope` context, i.e. the virtual-time Main dispatcher) and the
+     * pane/detection chain it depends on is wrapped in Main-scoped
+     * `withTimeoutOrNull` budgets (`awaitPanesReadyForAttach`'s
+     * `attachPanesReadyTimeoutMs`, the conversation load watchdog). Those budgets
+     * are sized for a real device, not for a starved swiftshader AVD whose SSH
+     * `list-panes` / `/proc/<pid>/fd` round trips run far slower in WALL time.
+     * Freezing the virtual clock is exactly what lets those round trips finish:
+     * the budgets simply never expire while the probe is in flight. Advancing the
+     * clock ~1:1 with wall time re-arms them, and the probe gets CANCELLED rather
+     * than completing — leaving `_agentConversations` entirely empty, which is why
+     * the failure signature is `conversations={}` (an empty map, not a map with an
+     * unbound row) rather than a slow bind.
+     *
+     * Measured, paired A/B on one lane, full 5-test class per run: `origin/main`
+     * base 5/5 green; this diff with ONLY this hunk reverted 3/3 green; this diff
+     * with the hunk pumped 4/9 green — every failure this function's own assertion
+     * (Fisher one-tailed p ~ 0.020). [currentViewModel]'s `SystemClock.sleep(100)`
+     * is left alone for the same reason: its subject is also a remote-IO
+     * completion (panes arriving), not a Main continuation.
+     */
     private fun waitForDetectionBound(vm: TmuxSessionViewModel) {
         val deadline = SystemClock.elapsedRealtime() + DETECTION_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -830,7 +895,16 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 vm.selectSessionTab(paneId, com.pocketshell.app.session.SessionTab.Conversation)
             }
             compose.waitForIdle()
-            SystemClock.sleep(300)
+            // Issue #1819 audit: pumping is safe HERE even though opening the
+            // Conversation does a remote window read, because this loop already
+            // calls `compose.waitForIdle()` on every iteration — which advances
+            // the Compose clock — so base was never clock-frozen across this
+            // wait and the pump introduces no new clock advancement. (Contrast
+            // [waitForDetectionBound], whose base loop was a bare sleep and
+            // therefore genuinely frozen.) The exit condition is also the TAB
+            // being open, not the transcript having loaded, so no one-shot
+            // remote completion is riding on this wait.
+            pumpComposeMainFor(TAB_POLL_STEP_MS)
         }
         assertTrue(
             "the Conversation tab must open (segment tapped / selectSessionTab); " +
@@ -846,6 +920,28 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             .isNotEmpty()
     }.getOrDefault(false)
 
+    /**
+     * Drive the REAL composer: launcher -> draft -> Send, and PROVE the send
+     * was dispatched before returning.
+     *
+     * Issue #1819 — the locally reproduced defect. This helper used to
+     * `performTextInput(payload)` and immediately `performClick()` Send with no
+     * wait and no check. When the sheet had not yet recomposed the draft, Send
+     * fired against an empty draft, production correctly did nothing, and NO
+     * `composer_send` was ever recorded — so the journey's own scenario never
+     * started and every downstream wait (deferral, ack capture, submission) then
+     * burned its full budget and failed with a message that reads like an
+     * outbound-delivery bug. Captured locally: `events=total=61` with no
+     * `composer_send`/`enqueue`, `rowsTotal=0`.
+     *
+     * The fix removes the race at its CAUSE rather than retrying an assertion:
+     * the draft content is confirmed committed before Send is tapped, and the
+     * dispatch is then confirmed from the production `composer_send` diagnostic.
+     * This is a DRIVER, not the property under test — the property is
+     * exactly-once delivery, and a driver that silently fails to drive is the
+     * #1778 shape (the injected scenario never happening). Both waits are
+     * bounded by the existing [UI_TIMEOUT_MS] and hard-fail.
+     */
     private fun openComposerAndSend(payload: String) {
         // Open the composer via the launcher unless the sheet is already open
         // (a deferred send leaves it open with the queue row visible).
@@ -858,7 +954,139 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { hasNode(COMPOSER_DRAFT_TAG) }
         }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true).performTextInput(payload)
+
+        // The draft must actually hold the payload before Send is tapped —
+        // otherwise the tap dispatches nothing and the journey silently no-ops.
+        waitForIssue1739Boundary(
+            timeoutMs = UI_TIMEOUT_MS,
+            label = "composer draft committed before Send",
+            timeoutDetails = { "draftText=${draftText()} expectedLength=${payload.length}" },
+        ) {
+            draftText().contains(payload)
+        }
+
+        // ...and Send must be ENABLED when it is tapped. `PromptComposerSheet`
+        // computes `sendEnabled = !state.outboundHandoffInProgress && ...`, and a
+        // performClick on a DISABLED Compose button silently does nothing — so a
+        // tap that lands while a previous handoff is still in flight dispatches
+        // no send at all. Observed on determinism run det4/6 with the draft fully
+        // committed: "the Send tap did not dispatch: no new 'composer_send'
+        // diagnostic; sendsBefore=0 draftText=<full payload>". Wait for the
+        // enabled state rather than retrying the click — same reason as above,
+        // the race is removed at its cause.
+        waitForIssue1739Boundary(
+            timeoutMs = UI_TIMEOUT_MS,
+            label = "composer Send enabled before tap",
+            timeoutDetails = {
+                "Send stayed disabled (outboundHandoffInProgress / no composition); " +
+                    "draftText=${draftText()}"
+            },
+        ) {
+            sendButtonEnabled()
+        }
+
+        val sendsBefore = diagnostics!!.eventsNamed("composer_send").size
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true).performClick()
+
+        // The tap must have DISPATCHED a send. Without this the whole journey
+        // can proceed against a send that never happened.
+        waitForIssue1739Boundary(
+            timeoutMs = UI_TIMEOUT_MS,
+            label = "composer Send dispatched a real send",
+            timeoutDetails = {
+                "the Send tap did not dispatch: no new 'composer_send' diagnostic; " +
+                    "sendsBefore=$sendsBefore draftText=${draftText()} " +
+                    "events=${boundedEventTail(diagnostics!!.events)}"
+            },
+        ) {
+            diagnostics!!.eventsNamed("composer_send").size > sendsBefore
+        }
+    }
+
+    /**
+     * Is the composer's Send control currently ENABLED? A disabled Compose node
+     * carries [SemanticsProperties.Disabled]; `performClick` on it is a silent
+     * no-op, which is how a tap can leave no trace at all.
+     */
+    private fun sendButtonEnabled(): Boolean = runCatching {
+        val node = compose.onAllNodesWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .firstOrNull() ?: return false
+        !node.config.contains(SemanticsProperties.Disabled)
+    }.getOrDefault(false)
+
+    /** The live composer draft field's text, or "" when the sheet is not open. */
+    private fun draftText(): String = runCatching {
+        compose.onAllNodesWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .firstOrNull()
+            ?.config
+            ?.getOrNull(SemanticsProperties.EditableText)
+            ?.text
+            .orEmpty()
+    }.getOrDefault("")
+
+    /**
+     * Issue #1819 — assert the injected flap AT THE POINT OF INJECTION.
+     *
+     * The `failSendResultLostBeforeSubmitEnter` seam does NOT guarantee a flap.
+     * `TmuxSessionViewModel.consumeSendResultLostSeamForTest()` consumes the
+     * flag, calls `triggerCleanPassiveDropForTest()` — which returns `false` and
+     * does nothing when the live `PassiveTransportDropEffects.classify(client)`
+     * says `Ignore` — and throws either way. It also cannot control WHICH
+     * recovery arm the drop selects: `PauseUntilForeground` /
+     * `SkipInAppNavigation` install no replacement client at all. So the row
+     * defers, the resend completes on the SAME client, and the journey's
+     * "the flap was REAL" precondition failed ~180s later with a message that
+     * looked like a delivery bug. Captured on CI run 30220248414 attempt-1: two
+     * `tmux-passive-disconnect-silent-reattach` events for a class that injects
+     * three drops — this test's flap never happened.
+     *
+     * Assert the two things the injection must actually produce, bounded, right
+     * here: the seam FIRED with `dropped=true`, and a FRESH client identity
+     * replaced the pre-flap one. No assertion is weakened — this constrains the
+     * flap strictly more than the end-of-journey check alone, and names the true
+     * cause when the injection no-ops.
+     */
+    private fun assertFlapInjected(clientBeforeFlap: Int?): Int? {
+        waitForIssue1739Boundary(
+            timeoutMs = CONNECTED_TIMEOUT_MS,
+            label = "flap seam fired",
+            timeoutDetails = {
+                "the injected send never reached the drop seam; " +
+                    "events=${boundedEventTail(diagnostics!!.events)}"
+            },
+        ) {
+            diagnostics!!.eventsNamed("outbound_result_lost_seam").isNotEmpty()
+        }
+        val seam = diagnostics!!.eventsNamed("outbound_result_lost_seam")
+        assertTrue(
+            "the injected drop seam must have ACTUALLY dropped the transport " +
+                "(triggerCleanPassiveDropForTest returned false — the live " +
+                "passive-drop classification refused it, so no flap happened and " +
+                "this journey would have proved exactly-once across NO flap); " +
+                "seam=${seam.map { it.fields }}",
+            seam.any { it.fields["dropped"] == true },
+        )
+        var fresh: Int? = null
+        waitForIssue1739Boundary(
+            timeoutMs = CONNECTED_TIMEOUT_MS,
+            label = "fresh tmux client after the injected flap",
+            timeoutDetails = {
+                "the drop fired but no replacement client was installed — the " +
+                    "recovery arm skipped reattach (PauseUntilForeground / " +
+                    "SkipInAppNavigation), so the resend rides the SAME client " +
+                    "and there is no flap to prove delivery across; " +
+                    "before=$clientBeforeFlap current=$fresh " +
+                    "seam=${seam.map { it.fields }} " +
+                    "events=${boundedEventTail(diagnostics!!.events)}"
+            },
+        ) {
+            fresh = currentViewModel().currentClientIdentityForTest()
+            fresh != null && fresh != clientBeforeFlap
+        }
+        recordTiming("flap_injected_fresh_client", (fresh ?: 0).toLong())
+        return fresh
     }
 
     private fun writeThroughTerminalSession(text: String) {
@@ -925,50 +1153,110 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 it.exec("tmux capture-pane -p -t ${shellQuote(SESSION_NAME)}")
             }
         }
+        // Issue #1819: remember WHY a read came back empty. A failed sidecar
+        // dial is indistinguishable from an empty pane at the call sites, and
+        // that ambiguity is what let a transient SSH failure be reported as a
+        // delivery violation (see [waitForStableSidecarCapture]).
+        result.exceptionOrNull()?.let { lastSidecarFailure = it.toString() }
         return result.getOrNull()?.stdout.orEmpty()
     }
 
-    /** Non-asserting sidecar poll: true when [predicate] matched within [timeoutMs]. */
-    private fun pollSidecarCapture(timeoutMs: Long, predicate: (String) -> Boolean): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            if (predicate(runBlocking { sidecarCapturePane() })) return true
-            SystemClock.sleep(250)
-        }
-        return false
-    }
-
-    private fun waitForSidecarCapture(
-        label: String,
-        timeoutMs: Long,
-        predicate: (String) -> Boolean,
-    ): String {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        var last = ""
-        while (SystemClock.elapsedRealtime() < deadline) {
-            last = runBlocking { sidecarCapturePane() }
-            if (predicate(last)) return last
-            SystemClock.sleep(250)
-        }
-        assertTrue(
-            "$label: sidecar capture never satisfied predicate; " +
-                "diagnostics=${diagnostics?.events?.map { "${it.name}${it.fields}" }}; " +
-                "capture:\n$last",
-            predicate(last),
-        )
-        return last
-    }
-
-    /** Poll the sidecar capture until two consecutive reads agree (settled). */
+    /**
+     * Issue #1819 — the class-wide sweep of the #1739/#1773/#1798 pump.
+     *
+     * The unpumped `pollSidecarCapture` / `waitForSidecarCapture` wall-only
+     * polls that used to live here are DELETED (D22 hard-cut, no shim). Three
+     * previous determinism rounds each pumped only the waits that round happened
+     * to trip over — #1773 the initial-capture/deferral boundaries, #1798 the
+     * `multiChunk` sidecar waits — leaving the composer and keystroke limbs of
+     * the SAME class polling wall time while launch-owned Compose Main stayed
+     * frozen, so the production auto-flush/ack/Enter continuation this journey is
+     * waiting FOR could not run. Every sidecar wait in this class now goes
+     * through [pollSidecarCaptureWhileDrivingIssue1739Main]; the hard wall
+     * deadline remains the load-bearing bound.
+     *
+     * Poll the sidecar capture until two consecutive reads agree (settled),
+     * pacing Compose Main between reads so a production continuation cannot be
+     * starved by the settle loop itself.
+     *
+     * Issue #1819 — NEVER return a blank frame to a delivery assertion. This
+     * used to `return previous` after 20 tries even when every read had come
+     * back empty, and every caller feeds the result straight into an
+     * exactly-once count. Observed locally (determinism run 9/10): a transient
+     * sidecar SSH dial failure returned "", and
+     * `postReconnectAckCleanupIsBoundedAndSameTokenRetrySubmitsExactlyOnce`
+     * failed with *"the multiline payload must occur exactly once in the real
+     * submitted transcript; capture= expected:<1> but was:<0>"* — a read failure
+     * wearing the exact message that would convince a reader this class has a
+     * duplicate-delivery race. The fake-agent pane always holds at least its
+     * READY banner and input box, so a BLANK capture is by definition a failed
+     * read and never a real pane state; hard-fail as the harness failure it is,
+     * naming the SSH error. This strengthens the proof — a genuinely wrong pane
+     * still fails the count assertion, but a broken sidecar can no longer
+     * masquerade as one.
+     */
     private fun waitForStableSidecarCapture(): String {
+        lastSidecarFailure = null
         var previous = runBlocking { sidecarCapturePane() }
         repeat(20) {
-            SystemClock.sleep(300)
+            // Issue #1819 audit: pumped, and correctly so. This wait's subject is
+            // "production has STOPPED changing the pane" — the inverse of waiting
+            // for a remote round trip to land. Freezing virtual Main would make
+            // in-flight production work invisible and settle falsely early, which
+            // is the vacuous-pass direction (G6). It also matches the pre-existing
+            // [pollSidecarCaptureWhileDrivingIssue1739Main] (#1798), which already
+            // pumps across the identical sidecar reads.
+            pumpComposeMainFor(SIDECAR_SETTLE_STEP_MS)
             val next = runBlocking { sidecarCapturePane() }
             if (next == previous && next.isNotBlank()) return next
             previous = next
         }
+        assertTrue(
+            "the sidecar capture never returned a non-blank pane frame — this is a " +
+                "sidecar SSH READ failure, not a delivery result. The fake-agent pane " +
+                "always contains its READY banner and input box, so a blank frame " +
+                "cannot be a real pane state; do NOT read a delivery count off it. " +
+                "lastSidecarFailure=$lastSidecarFailure",
+            previous.isNotBlank(),
+        )
         return previous
+    }
+
+    /**
+     * Advance launch-owned Compose Main in the same bounded 20ms steps as the
+     * #1739 helpers for [millis] of wall time.
+     *
+     * The replacement for a bare `SystemClock.sleep(n)`: a raw sleep advances
+     * wall time while the Compose test scheduler stays frozen, so any production
+     * `delay`/`withTimeoutOrNull` this journey is waiting on never fires. Used
+     * wherever the test must let REAL production work happen rather than merely
+     * let wall time pass.
+     *
+     * Issue #1819 — this is NOT a blanket replacement, and a future sweep must
+     * not convert every `SystemClock.sleep` in this class. The rule, by SUBJECT
+     * of the wait:
+     *
+     *  - **Pump** when the test waits for a step that can only happen once
+     *    virtual Main time moves: a production `delay` retry timer must fire, an
+     *    ack/cleanup `withTimeoutOrNull` must EXPIRE, a recomposition must land,
+     *    or a retry LADDER with Main backoff must make progress. Freezing there
+     *    wedges the very thing under test and yields a vacuous pass (G6).
+     *  - **Sleep** when the test waits for a one-shot WALL-CLOCK remote round
+     *    trip to COMPLETE and production guards it with a Main-scoped
+     *    `withTimeoutOrNull` budget sized for a real device. On a starved
+     *    swiftshader AVD the wall latency exceeds that budget, so advancing the
+     *    clock ~1:1 with wall time CANCELS what the test is waiting for. The
+     *    frozen clock is the thing making the wait work.
+     *
+     * The two sites on the sleep side are [waitForDetectionBound] and
+     * [currentViewModel]; both carry the reasoning at the site.
+     */
+    private fun pumpComposeMainFor(millis: Long) {
+        val deadline = SystemClock.elapsedRealtime() + millis
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.mainClock.advanceTimeBy(ISSUE1739_MAIN_CLOCK_STEP_MS)
+            SystemClock.sleep(ISSUE1739_MAIN_CLOCK_STEP_MS)
+        }
     }
 
     private fun assertInputBoxEmpty(label: String, capture: String) {
@@ -1017,6 +1305,15 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             }.getOrDefault(false)
         }
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
+        // Issue #1819: WAIT for the navigation the tap starts. This used to
+        // assert the session screen exists on the very next statement, with no
+        // wait — the same "act, then immediately assert a dependent step"
+        // shape as the composer Send tap. Observed locally (determinism run
+        // 9/10): `Failed: assertExists. Expected exactly '1' node ... (TestTag
+        // = 'tmux:session')` — the tap had landed but the screen had not been
+        // composed yet, so the attach precondition failed before the journey
+        // began. Bounded by the existing session-screen timeout; still hard-fails.
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { hasNode(TMUX_SESSION_SCREEN_TAG) }
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
@@ -1036,6 +1333,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
             }
             if (vm?.panes?.value?.isNotEmpty() == true) break
+            // Issue #1819: deliberately a bare sleep, NOT [pumpComposeMainFor].
+            // Same exception as [waitForDetectionBound] — the subject is a
+            // one-shot wall-clock remote round trip (`list-panes` arriving)
+            // guarded by a Main-scoped `withTimeoutOrNull`, so freezing the
+            // virtual clock is what lets it finish on a starved AVD.
             SystemClock.sleep(100)
         }
         return requireNotNull(vm) { "TmuxSessionViewModel not available" }
@@ -1062,6 +1364,23 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         return requireNotNull(current)
     }
 
+    /**
+     * Issue #1819: this is the wait behind [waitForFreshClient], i.e. it waits
+     * for a PRODUCTION reconnect to install a replacement client. It used to
+     * sleep wall time with the Compose scheduler frozen, so the reconnect it
+     * waits for could be starved by the wait itself. Pump instead; the hard wall
+     * deadline stays the load-bearing bound.
+     *
+     * Audited against the [pumpComposeMainFor] rule and deliberately KEPT on the
+     * pump side, even though a reconnect is remote IO. A reconnect is not a
+     * one-shot round trip: it is a retry LADDER whose backoff/spacing are Main
+     * `delay`s (the grace `withTimeoutOrNull` loop and its 250ms retry spacing),
+     * so a frozen virtual clock wedges the ladder instead of protecting it — the
+     * opposite of [waitForDetectionBound]. And this wait's bound is
+     * [CONNECTED_TIMEOUT_MS] (45s local / 90s CI), many times a single attempt's
+     * dial/attach budget, so an attempt that the advancing clock does cancel is
+     * simply re-tried well inside the bound. Detection has neither property.
+     */
     private fun waitUntilWall(
         timeoutMs: Long,
         label: String,
@@ -1070,7 +1389,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         while (SystemClock.elapsedRealtime() < deadline) {
             if (predicate()) return
-            SystemClock.sleep(20)
+            compose.mainClock.advanceTimeBy(ISSUE1739_MAIN_CLOCK_STEP_MS)
+            SystemClock.sleep(ISSUE1739_MAIN_CLOCK_STEP_MS)
         }
         assertTrue("$label did not resolve within ${timeoutMs}ms", predicate())
     }
@@ -1654,10 +1974,36 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 10_000L
         val CONNECTED_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 90_000L else 45_000L
-        const val ACK_CAPTURE_OBSERVED_TIMEOUT_MS: Long = 5_000L
+        /**
+         * Issue #1819: SCALED for CI (3x), matching every other environment
+         * bound in this class (detection 45->90, host row 20->60, UI 10->30,
+         * connected 45->90, deferral 30->60, submit-after-flap 90->180). This
+         * one was overlooked and stayed a flat 5s — a wait for a REAL SSH
+         * capture-pane round trip on a starved swiftshader emulator, which is
+         * signature D of #1819. The LOCAL bound is unchanged at 5s, so a local
+         * run remains the stricter check; only the CI environment is scaled.
+         *
+         * Deliberately NOT scaled below: [ACK_BOUNDED_RESULT_TIMEOUT_MS] and
+         * [MAIN_HEARTBEAT_TIMEOUT_MS] bound PRODUCTION deadlines (the 800ms ack
+         * bound and Main responsiveness). Those are the load-bearing #1739
+         * assertions — scaling them would weaken what they constrain (G6).
+         */
+        val ACK_CAPTURE_OBSERVED_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 15_000L else 5_000L
         const val ACK_BOUNDED_RESULT_TIMEOUT_MS: Long = 5_000L
         const val MAIN_HEARTBEAT_TIMEOUT_MS: Long = 2_000L
         const val ISSUE1739_MAIN_CLOCK_STEP_MS: Long = 20L
+
+        /**
+         * Issue #1819 pumped-step sizes replacing bare `SystemClock.sleep`s.
+         *
+         * There is deliberately NO detection-poll step here: [waitForDetectionBound]
+         * keeps its bare `SystemClock.sleep`, because its subject is a wall-clock
+         * SSH round trip guarded by Main-scoped budgets rather than a Main
+         * continuation. See that function's KDoc for the measured A/B.
+         */
+        const val SIDECAR_SETTLE_STEP_MS: Long = 300L
+        const val TAB_POLL_STEP_MS: Long = 300L
         const val ISSUE1739_MAIN_CLOCK_STEPS_PER_SIDECAR_POLL: Int = 10
         const val DIAGNOSTIC_CAPTURE_LIMIT: Int = 1_024
         const val DIAGNOSTIC_CAPTURE_LIMIT_COUNT: Int = 3

@@ -452,6 +452,7 @@ private class DisambiguationGateway(
         sessionName: String,
         cwd: String,
         startCommand: String?,
+        namePolicy: SessionNamePolicy,
     ): Result<String> {
         createdSessions += cwd
         return Result.success(sessionName)

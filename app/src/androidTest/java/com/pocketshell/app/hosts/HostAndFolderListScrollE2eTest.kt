@@ -20,6 +20,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.projects.FOLDER_LIST_BOTTOM_SPACER_TAG
@@ -358,6 +359,7 @@ private class OverflowFolderListGateway(
         sessionName: String,
         cwd: String,
         startCommand: String?,
+        namePolicy: SessionNamePolicy,
     ): Result<String> = Result.success(sessionName)
 
     override suspend fun createEmptyProject(

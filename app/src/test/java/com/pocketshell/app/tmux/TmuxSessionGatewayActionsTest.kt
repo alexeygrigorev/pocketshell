@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
+import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.app.projects.WindowKillOutcome
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
@@ -183,6 +184,11 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
         assertEquals("git-codex", call.sessionName)
         assertEquals("/home/alex/git", call.cwd)
         assertEquals(startCommand, call.startCommand)
+        // Issue #1820: the in-session "+ New session" create must ask the HOST
+        // for a free name. `ExactName` here is the original defect — a second
+        // same-folder create would request the taken base and fail the #976
+        // guard (agent launch) or no-op-attach (plain shell).
+        assertEquals(SessionNamePolicy.UniqueOnHost, call.namePolicy)
         assertEquals("git-claude", resolved)
         assertFalse(
             "rich-sheet create must use the gateway, not control-channel new-session; " +
@@ -505,6 +511,13 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             val sessionName: String,
             val cwd: String,
             val startCommand: String?,
+            /**
+             * Issue #1820: the policy the PRODUCTION caller chose. Recording it
+             * is the point — the whole fix is "each call site declares its
+             * intent", so the declaration is load-bearing state and a fake that
+             * discards it cannot fail when a caller flips to the wrong one.
+             */
+            val namePolicy: SessionNamePolicy,
         )
         val createCalls = mutableListOf<CreateCall>()
 
@@ -522,8 +535,9 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             sessionName: String,
             cwd: String,
             startCommand: String?,
+            namePolicy: SessionNamePolicy,
         ): Result<String> {
-            createCalls += CreateCall(sessionName, cwd, startCommand)
+            createCalls += CreateCall(sessionName, cwd, startCommand, namePolicy)
             return createResolvedName?.let { Result.success(it) } ?: error("not used")
         }
 

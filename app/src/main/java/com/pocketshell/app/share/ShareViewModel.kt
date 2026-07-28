@@ -25,6 +25,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.terminal.input.BracketedPaste
 import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxTarget
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
@@ -736,7 +737,13 @@ internal class ShareViewModel internal constructor(
         client: TmuxClient,
         session: ActiveSessionTarget,
     ): Boolean {
-        val escaped = escapeSingleQuoted(session.sessionName)
+        // Issue #1820: EXACT targets. A bare `-t <name>` prefix-matches, so with
+        // `<name>` gone and a `<name>-2` sibling alive this staleness check would
+        // answer with the NEIGHBOUR's identity and route the share into it. The
+        // pane-target verbs (`display-message`) need `=<name>:`, the
+        // session-target verbs (`has-session`) need `=<name>` — see [TmuxTarget].
+        val escapedPane = escapeSingleQuoted(TmuxTarget.pane(session.sessionName))
+        val escaped = escapeSingleQuoted(TmuxTarget.session(session.sessionName))
         val expectedId = session.tmuxSessionId
         val expectedCreated = session.sessionCreated
         if (expectedId != null && expectedCreated != null) {
@@ -747,7 +754,7 @@ internal class ShareViewModel internal constructor(
                 // round-trip here would wedge the confirm exactly as the picker
                 // build did. Same command string / parse; only the lane moves.
                 client.listPanesViaExec(
-                    "display-message -p -t '$escaped' '#{session_id}::#{session_created}'",
+                    "display-message -p -t '$escapedPane' '#{session_id}::#{session_created}'",
                 )
             }.getOrNull() ?: return false
             if (response.isError) return false

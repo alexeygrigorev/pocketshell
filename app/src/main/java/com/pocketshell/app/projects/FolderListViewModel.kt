@@ -1129,6 +1129,7 @@ class FolderListViewModel internal constructor(
                     sessionName = sessionName,
                     cwd = cwd,
                     startCommand = startCommand,
+                    namePolicy = SessionNamePolicy.UniqueOnHost,
                 )
                 result.fold(
                     onSuccess = { resolvedName ->

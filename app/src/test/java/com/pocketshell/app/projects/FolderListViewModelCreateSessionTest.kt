@@ -101,6 +101,16 @@ class FolderListViewModelCreateSessionTest {
             runCurrent()
 
             assertEquals("the create callback fires with the resolved name", "beta", resolved)
+            // Issue #1820: the folder-tree "+ New session" create (which serves
+            // both FolderListScreen and RepoBrowserScreen) must ask the HOST for
+            // a free name. `ExactName` here is the original defect: a second
+            // create in an occupied folder requests the taken base and the user
+            // gets a failure instead of a `-2` session.
+            assertEquals(
+                "FolderListViewModel.createSession must resolve the name on the host",
+                SessionNamePolicy.UniqueOnHost,
+                gateway.lastNamePolicy,
+            )
             // #678: beta appears IMMEDIATELY by id even though the gateway probe
             // (which the create's follow-up refresh just ran) still reports only
             // alpha — the optimistic node survives via the optimistic grace.
@@ -480,6 +490,9 @@ class FolderListViewModelCreateSessionTest {
         var createdProjectFolderName: String? = null
         var lastCreateCwd: String? = null
 
+        /** Issue #1820: the [SessionNamePolicy] the production caller supplied. */
+        @Volatile var lastNamePolicy: SessionNamePolicy? = null
+
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
             keyPath: String,
@@ -494,8 +507,13 @@ class FolderListViewModelCreateSessionTest {
             sessionName: String,
             cwd: String,
             startCommand: String?,
+            namePolicy: SessionNamePolicy,
         ): Result<String> {
             createCalls += 1
+            // Issue #1820: record the policy the PRODUCTION caller chose. The
+            // whole fix is "each call site declares its intent", so a fake that
+            // discards it cannot fail when a caller flips to the wrong one.
+            lastNamePolicy = namePolicy
             // #1036: when a pending deferred is supplied the create stays
             // in-flight until the test completes it (drives the Running→Idle
             // actionStatus assertion).

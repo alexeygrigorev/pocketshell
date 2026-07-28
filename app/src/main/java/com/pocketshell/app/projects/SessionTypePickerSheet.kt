@@ -467,9 +467,12 @@ data class SessionTypeChoice(
     /**
      * The user-entered custom session label (issue #1184). `null`/blank means
      * "use the directory-derived default" (#429/#642). When present it is
-     * sanitised to a tmux-safe name and disambiguated against the known
-     * session names by [SessionNameDerivation.resolveSessionName] at create
-     * time — it never bypasses collision handling.
+     * sanitised to a tmux-safe BASE name by
+     * [SessionNameDerivation.resolveSessionName] at create time. Issue #1820,
+     * D22 hard cut: it is NOT disambiguated against a client-side set of known
+     * session names any more (that set could be stale or empty) — collision
+     * handling belongs to the host, which resolves the final unique name under
+     * [SessionNamePolicy.UniqueOnHost].
      */
     val customName: String? = null,
     /**

@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.systemsurfaces.ActiveSessionsWidgetProvider
 import com.pocketshell.app.systemsurfaces.SystemSurfaceStateStore
 import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxTarget
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.model.resolveSessionAgentState
@@ -537,8 +538,12 @@ class SessionsDashboardViewModel @Inject constructor(
                 // Issue #1496: Rename rides the DEDICATED exec lane
                 // ([TmuxClient.sendLifecycleViaExec]), NOT the shared `-CC`
                 // control channel a live Codex burst can head-of-line-block.
+                // Issue #1820: EXACT `-t` ([TmuxTarget]) — a bare target
+                // prefix-matches, so renaming `<name>` while `<name>-2` lives
+                // would rename the NEIGHBOUR. The new name is created, not
+                // resolved, so it stays verbatim.
                 entry.client.sendLifecycleViaExec(
-                    "rename-session -t '${escapeSingleQuoted(oldTrimmed)}' " +
+                    "rename-session -t '${escapeSingleQuoted(TmuxTarget.session(oldTrimmed))}' " +
                         "'${escapeSingleQuoted(newTrimmed)}'",
                 )
             }
@@ -630,7 +635,11 @@ class SessionsDashboardViewModel @Inject constructor(
                 // tmux still emits `%sessions-changed` to the attached `-CC`
                 // client on teardown, so the post-kill event wait below is
                 // unaffected by moving the kill itself onto the exec lane.
-                client.sendLifecycleViaExec("kill-session -t '${escapeSingleQuoted(trimmed)}'")
+                // Issue #1820: EXACT `-t` ([TmuxTarget]) — a bare target
+                // prefix-matches and would kill the `<name>-2` NEIGHBOUR.
+                client.sendLifecycleViaExec(
+                    "kill-session -t '${escapeSingleQuoted(TmuxTarget.session(trimmed))}'",
+                )
             }
             val response = sendResult.getOrNull()
             val transportFailure = sendResult.exceptionOrNull()

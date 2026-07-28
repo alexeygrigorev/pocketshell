@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
+import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -206,6 +207,15 @@ class StaleSessionPromptControllerTest {
         assertTrue("gateway create must succeed", result.isSuccess)
         assertEquals("work", result.getOrNull())
         assertEquals("the gateway must be asked to create the gone session name", "work", gateway.lastSessionName)
+        // Issue #1820: RECOVERY must recreate the EXACT gone name. This is the
+        // one call site where `UniqueOnHost` would be wrong — a stray `-2` would
+        // recreate a DIFFERENT session and silently abandon the one the user is
+        // trying to get back.
+        assertEquals(
+            "stale-session recovery must recreate the exact gone name, never a -2 sibling",
+            SessionNamePolicy.ExactName,
+            gateway.lastNamePolicy,
+        )
         assertEquals(
             "the recreate must target the STALE session's folder (cwd = folderPath)",
             goneFolder,
@@ -288,6 +298,8 @@ class StaleSessionPromptControllerTest {
         var lastSessionName: String? = null
         var lastCwd: String? = null
         var lastStartCommand: String? = null
+        /** Issue #1820: the policy the production caller chose (see below). */
+        var lastNamePolicy: SessionNamePolicy? = null
 
         override suspend fun createSession(
             host: HostEntity,
@@ -296,11 +308,13 @@ class StaleSessionPromptControllerTest {
             sessionName: String,
             cwd: String,
             startCommand: String?,
+            namePolicy: SessionNamePolicy,
         ): Result<String> {
             called = true
             lastSessionName = sessionName
             lastCwd = cwd
             lastStartCommand = startCommand
+            lastNamePolicy = namePolicy
             return Result.success(resolvedName)
         }
 

@@ -42,6 +42,7 @@ import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.ManualKindWriter
 import com.pocketshell.app.projects.ProfilesResult
 import com.pocketshell.app.projects.RemoteProfile
+import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
@@ -138,6 +139,7 @@ import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.LayoutChangeCoalescer
+import com.pocketshell.core.tmux.TmuxTarget
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -6856,9 +6858,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 return@launch
             }
             val probe = runCatching {
-                lease.session.exec(
-                    "tmux has-session -t '${escapeSingleQuoted(sessionName)}'",
-                )
+                // Issue #1820 [TmuxTarget]: EXACT target — a bare `-t <name>` prefix-matches, so a
+                // GONE session with a live `<name>-2` sibling reports alive and `new-session -A`
+                // resurrects an empty `<name>`, breaking the #666/#998 no-resurrect contract.
+                lease.session.exec("tmux has-session -t '${escapeSingleQuoted(TmuxTarget.session(sessionName))}'")
             }
             // Return the pooled transport so the subsequent attach can reuse it.
             runCatching { lease.release() }
@@ -16057,6 +16060,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 sessionName = creation.sessionName,
                 cwd = creation.startDirectory,
                 startCommand = startCommand,
+                namePolicy = SessionNamePolicy.UniqueOnHost,
             )
             result.fold(
                 onSuccess = { resolvedName ->
@@ -16143,7 +16147,8 @@ public class TmuxSessionViewModel @Inject constructor(
         val trimmed = newName.trim()
         if (trimmed.isEmpty()) return
         sendLifecycleCommand(
-            "rename-session -t '${escapeSingleQuoted(target)}' '${escapeSingleQuoted(trimmed)}'",
+            // Issue #1820 [TmuxTarget]: EXACT `-t`; the NEW name is created, not resolved.
+            "rename-session -t '${escapeSingleQuoted(TmuxTarget.session(target))}' '${escapeSingleQuoted(trimmed)}'",
         )
     }
 
@@ -16207,7 +16212,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // over the control channel and still signal so the tree reconciles.
             if (windowIndex != null) {
                 sendLifecycleCommand(
-                    "kill-window -t '${escapeSingleQuoted("$target:$windowIndex")}'",
+                    "kill-window -t '${escapeSingleQuoted(TmuxTarget.window(target, windowIndex))}'",
                 )
                 if (windowId != null) {
                     sessionLifecycleSignals?.emitWindowClosed(current.hostId, windowId)
@@ -16215,7 +16220,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     sessionLifecycleSignals?.emitKilled(current.hostId, target)
                 }
             } else {
-                sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(target)}'")
+                sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(TmuxTarget.session(target))}'")
                 sessionLifecycleSignals?.emitKilled(current.hostId, target)
             }
             return
@@ -16325,13 +16330,13 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
         val session = sessionRef ?: return
+        // Issue #1820 [TmuxTarget]: EXACT pane target — a bare `-t <name>` prefix-matches, so with
+        // `<name>-2` alive this would read the NEIGHBOUR's recorded kind/profile.
+        val optionTarget = "'${escapeSingleQuoted(TmuxTarget.pane(target))}'"
         bridgeScope.launch {
             val raw = withContext(Dispatchers.IO) {
                 runCatching {
-                    session.exec(
-                        "tmux show-options -v -t '${escapeSingleQuoted(target)}' " +
-                            "@ps_agent_kind 2>/dev/null || true",
-                    ).stdout
+                    session.exec("tmux show-options -v -t $optionTarget @ps_agent_kind 2>/dev/null || true").stdout
                 }.getOrNull()
             }
             val recordedKind = sessionAgentKindFromOption(raw)
@@ -16356,10 +16361,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // non-profiled / legacy session) leaves the profile null.
             val rawProfile = withContext(Dispatchers.IO) {
                 runCatching {
-                    session.exec(
-                        "tmux show-options -v -t '${escapeSingleQuoted(target)}' " +
-                            "@ps_agent_profile 2>/dev/null || true",
-                    ).stdout
+                    session.exec("tmux show-options -v -t $optionTarget @ps_agent_profile 2>/dev/null || true").stdout
                 }.getOrNull()
             }
             _currentSessionRecordedProfile.value =

@@ -14,6 +14,7 @@ import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.OpenCodeReader
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.tmux.TmuxTarget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -563,10 +564,13 @@ public class AgentConversationRepository internal constructor(
         session: SshSession,
         sessionTarget: String,
     ): AgentKind? {
+        // Issue #1820: EXACT pane target — a bare `-t <name>` prefix-matches, so
+        // with `<name>-2` alive this reads the NEIGHBOUR's recorded kind. That is
+        // the #819/#825 wrong-source class with a different trigger.
         val target = sessionTarget.trim().ifBlank { return null }
         val raw = runCatching {
             session.exec(
-                "tmux show-options -v -t ${shellQuote(target)} @ps_agent_kind 2>/dev/null || true",
+                "tmux show-options -v -t ${shellQuote(TmuxTarget.pane(target))} @ps_agent_kind 2>/dev/null || true",
             ).stdout
         }.getOrNull() ?: return null
         return recordedAgentKindFromOption(raw)
@@ -596,13 +600,15 @@ public class AgentConversationRepository internal constructor(
             return RecordedAgentSourceOption(source = null, generationScoped = false)
         }
         val generationSentinel = "@@PS_RECORDED_SOURCE_GENERATION@@"
+        // Issue #1820: EXACT pane target (see [readRecordedAgentKind]).
+        val quotedTarget = shellQuote(TmuxTarget.pane(target))
         val raw = runCatching {
             session.exec(
                 "ps_recorded_source_generation=\$(" +
-                    "tmux show-options -v -t ${shellQuote(target)} @ps_agent_source_generation 2>/dev/null || true" +
+                    "tmux show-options -v -t $quotedTarget @ps_agent_source_generation 2>/dev/null || true" +
                     "); printf '%s\\n' \"\$ps_recorded_source_generation\"; " +
                     "printf '%s\\n' $generationSentinel; " +
-                    "tmux show-options -v -t ${shellQuote(target)} @ps_agent_source 2>/dev/null || true",
+                    "tmux show-options -v -t $quotedTarget @ps_agent_source 2>/dev/null || true",
             ).stdout
         }.getOrNull() ?: return RecordedAgentSourceOption(source = null, generationScoped = false)
         val lines = raw.split("\n")
@@ -1093,11 +1099,13 @@ public class AgentConversationRepository internal constructor(
             .coerceAtLeast(1)
         val claudeWindowSentinel = "@@PS_CLAUDE_WINDOW@@"
         val encodedClaudeCwd = detector.encodeClaudeCwd(normalizedCwd)
+        // Issue #1820: EXACT pane target (see [readRecordedAgentKind]).
+        val quotedSessionTarget = shellQuote(TmuxTarget.pane(sessionTarget.trim()))
         val combined = buildString {
             // 1. The recorded-kind read first, then a sentinel. `|| true` keeps
             //    the exec exit code 0 on a foreign session (no option set).
             append(
-                "tmux show-options -v -t ${shellQuote(sessionTarget.trim())} @ps_agent_kind 2>/dev/null || true",
+                "tmux show-options -v -t $quotedSessionTarget @ps_agent_kind 2>/dev/null || true",
             )
             append("\n")
             append("printf '%s\\n' $kindSentinel")
@@ -1107,7 +1115,7 @@ public class AgentConversationRepository internal constructor(
             //     adds no round-trip to the cold-open path.
             append(
                 "ps_recorded_source_generation=\$(" +
-                    "tmux show-options -v -t ${shellQuote(sessionTarget.trim())} " +
+                    "tmux show-options -v -t $quotedSessionTarget " +
                     "@ps_agent_source_generation 2>/dev/null || true" +
                     "); printf '%s\\n' \"\$ps_recorded_source_generation\"",
             )
@@ -1116,7 +1124,7 @@ public class AgentConversationRepository internal constructor(
             append("\n")
             append(
                 "ps_recorded_source=\$(" +
-                    "tmux show-options -v -t ${shellQuote(sessionTarget.trim())} @ps_agent_source 2>/dev/null || true" +
+                    "tmux show-options -v -t $quotedSessionTarget @ps_agent_source 2>/dev/null || true" +
                     "); printf '%s\\n' \"\$ps_recorded_source\"",
             )
             append("\n")

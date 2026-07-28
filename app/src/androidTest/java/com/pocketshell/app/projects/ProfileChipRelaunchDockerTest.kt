@@ -103,7 +103,10 @@ class ProfileChipRelaunchDockerTest {
             profileName = zaiProfileLabel,
         )
         withTimeout(30_000) {
-            gateway.createSession(host, keyFile.absolutePath, null, session, cwd, zaiCommand).getOrThrow()
+            gateway.createSession(
+                host, keyFile.absolutePath, null, session, cwd, zaiCommand,
+                SessionNamePolicy.UniqueOnHost,
+            ).getOrThrow()
         }
         // The fake claude prints + exits; the option write happens before exec,
         // so poll the host option directly until the wrapper has recorded it.

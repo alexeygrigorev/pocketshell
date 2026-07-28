@@ -508,10 +508,15 @@ fun FolderListScreen(
                         startDirectory = cwd,
                         createStartDirectory = null,
                     )
+                    // Issue #1820: `knownSessionNames(state)` returned an EMPTY
+                    // set for every non-`Ready` tree state, so creating while
+                    // the tree was loading/failed silently requested the
+                    // colliding base name with no guard at all — strictly worse
+                    // than the in-session sheet this issue was reported
+                    // against. Uniqueness is the host's job at create time now.
                     val newName = derivedSessionName(
                         choice = resolvedChoice,
                         homeDirectory = conventionalRemoteHome(username),
-                        existingNames = knownSessionNames(state),
                     )
                     viewModel.createSession(
                         sessionName = newName,

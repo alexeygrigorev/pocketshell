@@ -26,10 +26,21 @@ package com.pocketshell.app.projects
  *
  * The random timestamp suffix is gone. Idempotency for re-picking the
  * same directory is handled server-side by `tmux new-session -A`
- * (attach-if-exists), which PocketShell already uses. When the caller
- * supplies the set of session names it already knows about, a *genuinely
- * different* second session in the same directory gets a deterministic,
- * human-readable `-2`, `-3`, … suffix instead of silently colliding.
+ * (attach-if-exists), which PocketShell already uses.
+ *
+ * ## This object NEVER decides uniqueness (issue #1820, D22 hard cut)
+ *
+ * It used to accept an `existingNames` set and append `-2`/`-3`/… itself
+ * (`derive(…)` + a private `disambiguate(…)`, both DELETED). That set came
+ * from a screen's UI cache, which could be stale or — whenever the picker/tree
+ * was not `Ready` — simply empty, and the "second session in this folder" then
+ * silently asked for a name that was already taken. Uniqueness is now decided
+ * ONCE, on the host, at create time:
+ * [FolderListGateway.createSession] with [SessionNamePolicy.UniqueOnHost].
+ *
+ * The parameter is GONE rather than defaulted, deliberately: a defaulted
+ * `existingNames = emptySet()` is exactly how a future caller silently inherits
+ * the superseded semantics. There is no client-side second opinion to express.
  *
  * This object is intentionally pure (no Android / SSH dependencies) so the
  * convention is unit-testable on the JVM and so it does not need to reach
@@ -38,44 +49,10 @@ package com.pocketshell.app.projects
 internal object SessionNameDerivation {
 
     /**
-     * Derive a tmux-safe session name from a directory.
-     *
-     * @param startDirectory the chosen cwd. May be absolute
-     *   (`/home/alexey/git/pocketshell`), `~`-relative (`~`, `~/git/x`),
-     *   or have a trailing slash. Leading/trailing whitespace is trimmed.
-     * @param homeDirectory the remote `$HOME` if known (used to compute the
-     *   home-relative path and the `$HOME` special case). When `null` only
-     *   the `~`-prefix form can be recognised as home; absolute paths are
-     *   treated as outside-home.
-     * @param agentCommand accepted for call-site convenience (the picker
-     *   passes the agent CLI for agent sessions). It no longer affects the
-     *   name — the convention is a pure path-prefix shared by agent and
-     *   shell sessions (#642). The flat list distinguishes them via the
-     *   badge, not the name.
-     * @param existingNames names already taken on the host. When the
-     *   derived base name is present, a deterministic `-2`, `-3`, … suffix
-     *   is appended until a free name is found. Default empty (no
-     *   disambiguation), in which case `tmux new-session -A` attaches to
-     *   any same-named session rather than overwriting it.
-     */
-    fun derive(
-        startDirectory: String,
-        homeDirectory: String?,
-        @Suppress("UNUSED_PARAMETER") agentCommand: String?,
-        existingNames: Set<String> = emptySet(),
-    ): String {
-        // Pure path-prefix: the agent CLI no longer decorates the name
-        // (#642). Agent and shell sessions in the same directory share the
-        // same base; the flat list distinguishes them via the badge.
-        val base = baseName(startDirectory, homeDirectory)
-        return disambiguate(base, existingNames)
-    }
-
-    /**
      * Resolve the final tmux session name for a NEW session, honouring an
      * optional user-entered custom label (issue #1184).
      *
-     * The directory-derived default ([derive]/#429/#642) is preserved as the
+     * The directory-derived default ([baseName]/#429/#642) is preserved as the
      * fallback — this ADDS a user override, it does not replace the default
      * (D22 hard-cut: no fork of the naming convention). Behaviour:
      *
@@ -87,22 +64,22 @@ internal object SessionNameDerivation {
      *    that leaves only `_`/`-` separators) — falls back to the
      *    directory-derived [baseName]. "Meaningful" means the sanitised label
      *    contains at least one letter or digit.
-     *  - Either way the base is run through [disambiguate] against
-     *    [existingNames], so a duplicate label gets a deterministic `-2`,
-     *    `-3`, … suffix and can never silently attach to a DIFFERENT
-     *    session's tmux.
+     *
+     * The result is the BASE name. Issue #1820: this function does NOT append
+     * a `-2`/`-3` collision suffix and takes no `existingNames` — a duplicate
+     * label is resolved against the host's live session list at create time
+     * ([SessionNamePolicy.UniqueOnHost]), which is the only place that can
+     * answer "is this name free?" correctly.
      */
     fun resolveSessionName(
         customName: String?,
         startDirectory: String,
         homeDirectory: String?,
-        existingNames: Set<String> = emptySet(),
     ): String {
         val custom = customName
             ?.let { sanitiseName(it) }
             ?.takeIf { name -> name.any(Char::isLetterOrDigit) }
-        val base = custom ?: baseName(startDirectory, homeDirectory)
-        return disambiguate(base, existingNames)
+        return (custom ?: baseName(startDirectory, homeDirectory)).ifBlank { "shell" }
     }
 
     /**
@@ -175,15 +152,13 @@ internal object SessionNameDerivation {
             .replace(Regex("[^A-Za-z0-9_-]+"), "-")
             .trim('-')
 
-    /**
-     * Append the smallest `-<n>` (n ≥ 2) that is free in [existingNames].
-     * Deterministic and human-readable, unlike the old random suffix.
-     */
-    private fun disambiguate(candidate: String, existingNames: Set<String>): String {
-        val base = candidate.ifBlank { "shell" }
-        if (base !in existingNames) return base
-        var n = 2
-        while ("$base-$n" in existingNames) n++
-        return "$base-$n"
-    }
+    // Issue #1820, D22 hard cut: `derive(startDirectory, homeDirectory,
+    // agentCommand, existingNames)` and the private `disambiguate(candidate,
+    // existingNames)` are DELETED. `derive` had no production caller left once
+    // `derivedSessionName` dropped `existingNames`, and `disambiguate` was the
+    // last place a caller could express a client-side uniqueness opinion — with
+    // an opt-OUT default, i.e. the exact "next caller silently inherits the
+    // superseded semantics" hazard. Callers that want the directory convention
+    // use [baseName]; callers that want the final name use [resolveSessionName];
+    // uniqueness belongs to the host ([SessionNamePolicy.UniqueOnHost]).
 }

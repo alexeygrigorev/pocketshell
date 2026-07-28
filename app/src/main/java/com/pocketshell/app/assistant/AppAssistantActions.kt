@@ -3,6 +3,7 @@ package com.pocketshell.app.assistant
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
+import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
@@ -11,6 +12,7 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxTarget
 import kotlinx.coroutines.flow.first
 
 /**
@@ -315,6 +317,12 @@ internal class AppAssistantActions(
             sessionName = sessionName,
             cwd = cwd,
             startCommand = startCommand,
+            // Issue #1820: "start a <agent> session in <cwd>" derives its name
+            // from the directory alone and has NEVER had a known-names list, so
+            // before this it always requested the bare base and hard-failed on
+            // the #976 collision guard whenever that folder already had a
+            // session. Host-side resolution makes the assistant path work.
+            namePolicy = SessionNamePolicy.UniqueOnHost,
         )
         return result.fold(
             onSuccess = { resolved ->
@@ -347,7 +355,10 @@ internal class AppAssistantActions(
         val params = activeParams()
             ?: return ActionResult.error("Failed to send prompt to session $sessionName: no active host connection.")
         return sshExecutor.withSession(params) { session ->
-            val target = shellQuote(sessionName)
+            // Issue #1820: EXACT pane target. A bare `-t <name>` prefix-matches, so
+            // with `<name>` gone and `<name>-2` alive the assistant's prompt would
+            // be typed into the NEIGHBOUR's pane — the #976 misroute class.
+            val target = shellQuote(TmuxTarget.pane(sessionName))
             val command = "tmux send-keys -t $target -l ${shellQuote(prompt)} && tmux send-keys -t $target Enter"
             val result = session.exec(command)
             if (result.exitCode == 0) {

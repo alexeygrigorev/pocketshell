@@ -58,8 +58,10 @@ class ManualKindWriterTest {
         val command = ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.Codex)!!
 
         assertTrue(command.contains("@ps_agent_kind codex"))
-        assertTrue(command.contains("set-option -u -q -t 'work' @ps_agent_source_generation"))
-        assertTrue(command.contains("set-option -u -q -t 'work' @ps_agent_source"))
+        // Issue #1820: the unset commands carry the SAME exact pane target as the
+        // set — a half-swept command would clear the sibling's source.
+        assertTrue(command.contains("set-option -u -q -t '=work:' @ps_agent_source_generation"))
+        assertTrue(command.contains("set-option -u -q -t '=work:' @ps_agent_source"))
     }
 
     @Test
@@ -137,9 +139,19 @@ class ManualKindWriterTest {
     }
 
     private companion object {
-        fun manualKindCommand(target: String, kind: String): String =
-            "tmux set-option -t '$target' @ps_agent_kind $kind" +
+        /**
+         * Issue #1820: every `-t` here is the EXACT pane target `=<session>:`.
+         * A bare `<session>` prefix-matches a `<session>-2` sibling, and
+         * [ManualKindWriter] is the SOLE recorded-kind authority — a write that
+         * lands on the neighbour silently rewrites a live session's identity.
+         * The trailing `:` is required: tmux rejects a bare `=<session>` for
+         * `set-option` ("no such session: =<session>").
+         */
+        fun manualKindCommand(sessionName: String, kind: String): String {
+            val target = "=$sessionName:"
+            return "tmux set-option -t '$target' @ps_agent_kind $kind" +
                 " \\; set-option -u -q -t '$target' @ps_agent_source_generation" +
                 " \\; set-option -u -q -t '$target' @ps_agent_source"
+        }
     }
 }

@@ -401,7 +401,10 @@ class AgentConversationRepositoryTest {
         val command = session.execCommands.single()
         assertTrue("must read the session-scoped option value; got $command", command.contains("show-options -v"))
         assertTrue(command.contains("@ps_agent_kind"))
-        assertTrue("must target the pane's session; got $command", command.contains("'\$3'"))
+        // Issue #1820: the EXACT pane target (`=<session>:`) — a bare `-t` would
+        // prefix-match a `<session>-2` sibling and read ITS recorded kind/source
+        // (the #819/#825 wrong-source class). tmux accepts a session ID here too.
+        assertTrue("must target the pane's session exactly; got $command", command.contains("'=\$3:'"))
     }
 
     @Test
@@ -424,7 +427,10 @@ class AgentConversationRepositoryTest {
         val command = session.execCommands.single()
         assertTrue(command.contains("show-options -v"))
         assertTrue(command.contains("@ps_agent_source"))
-        assertTrue("must target the pane's session; got $command", command.contains("'\$3'"))
+        // Issue #1820: the EXACT pane target (`=<session>:`) — a bare `-t` would
+        // prefix-match a `<session>-2` sibling and read ITS recorded kind/source
+        // (the #819/#825 wrong-source class). tmux accepts a session ID here too.
+        assertTrue("must target the pane's session exactly; got $command", command.contains("'=\$3:'"))
     }
 
     @Test

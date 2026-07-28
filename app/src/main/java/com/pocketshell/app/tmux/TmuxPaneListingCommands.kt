@@ -1,5 +1,7 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.core.tmux.TmuxTarget
+
 internal fun buildTmuxPaneListingCommand(sessionName: String?): String = buildString {
     // pane_index is appended last so we can sort within a window.
     // tmux can change index order on layout-rotate commands, so we
@@ -9,7 +11,25 @@ internal fun buildTmuxPaneListingCommand(sessionName: String?): String = buildSt
     // in the session, not only the current window.
     append("list-panes ")
     if (sessionName != null) {
-        append("-s -t '${escapePaneListingSingleQuoted(sessionName)}' ")
+        // Issue #1820: EXACT target, and specifically the PANE form
+        // ([TmuxTarget.pane]) — `-s` widens what gets LISTED, it does not change
+        // how `-t` is RESOLVED, so `list-panes` keeps a pane/window lookup and
+        // `=<name>` is NOT enough. Verified on tmux 3.4 with only `foo-2` alive
+        // and `aaa` current (so this is a real prefix match, not a
+        // current-session fallback):
+        //
+        //   list-panes -s -t 'foo'    -> rc=0, foo-2's rows   (prefix match)
+        //   list-panes -s -t '=foo'   -> rc=0, foo-2's rows   (`=` IGNORED)
+        //   list-panes -s -t '=foo:'  -> rc=1 "can't find session: foo"
+        //   list-panes -s -t '=foo-2:'-> all 3 panes across 2 windows (`-s` intact)
+        //
+        // Why the bare form is worse here than "reads the wrong session": with
+        // `<base>` gone and `<base>-2` alive the sibling's rows come back
+        // NON-empty, so `reconcilePanes`' preserve-last-known-state guard does
+        // not fire, and `applyParsedPanes`' exact-session-name filter then drops
+        // every row — `_panes` is SILENTLY CLEARED (empty terminal, no error)
+        // instead of surfacing a named, retryable `PaneReconcileResult.Failed`.
+        append("-s -t '${escapePaneListingSingleQuoted(TmuxTarget.pane(sessionName))}' ")
     }
     append("-F ")
     // Issue #186: append `#{pane_tty}` so per-pane agent detection

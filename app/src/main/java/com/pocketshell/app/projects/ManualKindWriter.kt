@@ -2,6 +2,7 @@ package com.pocketshell.app.projects
 
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.shellSingleQuote
+import com.pocketshell.core.tmux.TmuxTarget
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.tmuxOptionValue
 
@@ -36,13 +37,16 @@ import com.pocketshell.uikit.model.tmuxOptionValue
  *
  * Mirror of the server-side argv (`agents.py`):
  * ```
- * tmux set-option -t <session> @ps_agent_kind <value> \; \
- *   set-option -u -q -t <session> @ps_agent_source_generation \; \
- *   set-option -u -q -t <session> @ps_agent_source
+ * tmux set-option -t =<session>: @ps_agent_kind <value> \; \
+ *   set-option -u -q -t =<session>: @ps_agent_source_generation \; \
+ *   set-option -u -q -t =<session>: @ps_agent_source
  * ```
  * The wrapper omits `-t` (it runs inside the target session); the client is
  * NOT inside the session, so it must target it explicitly with `-t`. The
- * option is session-scoped (no `-g`), matching the wrapper.
+ * option is session-scoped (no `-g`), matching the wrapper. Issue #1820: the
+ * `=<session>:` form is tmux's EXACT pane-target match — a bare `<session>`
+ * prefix-matches a `<session>-2` sibling and would write the kind onto the
+ * wrong session (see [com.pocketshell.core.tmux.TmuxTarget]).
  */
 internal object ManualKindWriter {
 
@@ -55,7 +59,14 @@ internal object ManualKindWriter {
      */
     fun buildSetOptionCommand(sessionName: String, kind: SessionAgentKind): String? {
         val value = kind.tmuxOptionValue() ?: return null
-        val target = shellSingleQuote(sessionName)
+        // Issue #1820: EXACT target. `set-option` resolves `-t` through tmux's
+        // pane-ish lookup, where a bare `<name>` prefix-matches — so with
+        // `<name>` gone (or simply alphabetically shadowed) and `<name>-2` alive
+        // the user's chosen kind is written onto the NEIGHBOUR session, and this
+        // writer is the SOLE kind authority. Reproduced on tmux 3.4:
+        // `set-option -t 'foo' @x LEAK` landed on `foo-2`. The trailing `:` is
+        // required for a pane target — see [TmuxTarget].
+        val target = shellSingleQuote(TmuxTarget.pane(sessionName))
         return "tmux set-option -t $target @ps_agent_kind $value" +
             " \\; set-option -u -q -t $target @ps_agent_source_generation" +
             " \\; set-option -u -q -t $target @ps_agent_source"

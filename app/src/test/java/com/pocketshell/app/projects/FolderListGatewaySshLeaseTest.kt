@@ -103,8 +103,8 @@ class FolderListGatewaySshLeaseTest {
         // fish login shell can't break it. That outer sh-quoting re-escapes the
         // inner `'old'\''s'` apostrophe quoting, so match on the EXACT wrapped
         // command strings the gateway sends rather than a fragile substring.
-        val hasOldQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t 'old'\\''s'")
-        val hasNewQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t 'new name'")
+        val hasOldQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t '=old'\\''s'")
+        val hasNewQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t '=new name'")
         val session = FakeSshSession { command ->
             when (command) {
                 hasOldQuoted ->
@@ -136,9 +136,11 @@ class FolderListGatewaySshLeaseTest {
         assertTrue(result.isSuccess)
         assertEquals(
             listOf(
-                "tmux rename-session -t 'old'\\''s' 'new name'",
-                "tmux has-session -t 'old'\\''s'",
-                "tmux has-session -t 'new name'",
+                // Issue #1820: the `-t` LOOKUPS are exact (`=`); the NEW name is
+                // created, not resolved, so it stays bare.
+                "tmux rename-session -t '=old'\\''s' 'new name'",
+                "tmux has-session -t '=old'\\''s'",
+                "tmux has-session -t '=new name'",
             ).map { ReposRemoteSource.pathAwareCommand(it) },
             session.execCommands,
         )

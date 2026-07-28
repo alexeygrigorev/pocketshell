@@ -147,7 +147,7 @@ class TmuxClientConnectionTest {
                 thrown is TmuxSessionNotFoundException,
             )
             assertEquals(
-                listOf("tmux has-session -t 'deploy'"),
+                listOf("tmux has-session -t '=deploy'"),
                 session.execCommands.toList(),
             )
             assertTrue(
@@ -171,7 +171,7 @@ class TmuxClientConnectionTest {
             client.connect()
             awaitClientWrite(shell)
             assertEquals(
-                listOf("tmux has-session -t 'deploy'"),
+                listOf("tmux has-session -t '=deploy'"),
                 session.execCommands.toList(),
             )
             assertEquals(
@@ -232,7 +232,7 @@ class TmuxClientConnectionTest {
                 thrown is TmuxSessionNotFoundException,
             )
             assertEquals(
-                listOf("tmux has-session -t 'work'"),
+                listOf("tmux has-session -t '=work'"),
                 session.execCommands.toList(),
             )
             assertTrue(
@@ -271,7 +271,7 @@ class TmuxClientConnectionTest {
                 thrown is TmuxServerDeadException,
             )
             assertEquals(
-                listOf("tmux has-session -t 'work'"),
+                listOf("tmux has-session -t '=work'"),
                 session.execCommands.toList(),
             )
             assertTrue(
@@ -301,7 +301,7 @@ class TmuxClientConnectionTest {
             client.connect()
             awaitClientWrite(shell)
             assertEquals(
-                listOf("tmux has-session -t 'work'"),
+                listOf("tmux has-session -t '=work'"),
                 session.execCommands.toList(),
             )
             assertEquals(

@@ -1607,34 +1607,32 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
         onDismissNewSessionSheet = { overlay.showNewSessionSheet = false },
         onCreateNewSession = { choice ->
             overlay.showNewSessionSheet = false
-            val readyPicker = sessionPickerState as? HostTmuxSessionPickerState.Ready
-            if (readyPicker == null) {
-                Toast.makeText(
-                    context,
-                    "Session list isn't loaded yet — reconnect or wait " +
-                        "for it to finish, then start the new session again.",
-                    Toast.LENGTH_LONG,
-                ).show()
-            } else {
-                val knownNames = readyPicker.rows.map { it.name }.toSet()
-                val newName = derivedSessionName(
-                    choice = choice,
-                    homeDirectory = conventionalRemoteHome(user),
-                    existingNames = knownNames,
-                )
-                viewModel.createSession(
-                    name = newName,
-                    cwd = choice.startDirectory,
-                    startCommand = choice.startCommand(
-                        newSessionClaudeProfiles,
-                        newSessionCodexProfiles,
-                    ),
-                    chosenKind = choice.sessionAgentKind,
-                    onResolved = { resolved ->
-                        onOpenTmuxSession(resolved, choice.startDirectory)
-                    },
-                )
-            }
+            // Issue #1820: Create no longer depends on the picker's session
+            // list. It used to gate on `sessionPickerState is Ready` and then
+            // subtract `Ready.rows` from the derived name — which is precisely
+            // how a WRONG `Ready` (an empty/mis-correlated `-CC` enumeration
+            // published as authoritative, while the app was attached to the very
+            // session it omitted) produced a colliding name and no new session.
+            // The host resolves uniqueness at create time now, so the derived
+            // name here is only the base, and Create works whatever the picker
+            // is doing. D22: the Ready-gate and the known-names plumbing are
+            // deleted, not left as a second opinion.
+            val newName = derivedSessionName(
+                choice = choice,
+                homeDirectory = conventionalRemoteHome(user),
+            )
+            viewModel.createSession(
+                name = newName,
+                cwd = choice.startDirectory,
+                startCommand = choice.startCommand(
+                    newSessionClaudeProfiles,
+                    newSessionCodexProfiles,
+                ),
+                chosenKind = choice.sessionAgentKind,
+                onResolved = { resolved ->
+                    onOpenTmuxSession(resolved, choice.startDirectory)
+                },
+            )
         },
         showKindPicker = overlay.showKindPicker,
         sessionName = sessionName,

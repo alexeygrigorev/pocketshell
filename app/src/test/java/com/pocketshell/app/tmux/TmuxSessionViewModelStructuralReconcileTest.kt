@@ -226,7 +226,13 @@ class TmuxSessionViewModelStructuralReconcileTest : TmuxSessionViewModelTestBase
         // Issue #782: PocketShell no longer manages windows, but the unified
         // pager + the per-window `[wN]` switcher entries still rely on the
         // full multi-window pane list, so the `-s` scope is preserved.
-        assertTrue(command.startsWith("list-panes -s -t 'work' -F "))
+        // Issue #1820: the target is the EXACT pane form. `-s` widens the
+        // LISTING, not the `-t` resolution, so `list-panes` keeps a pane lookup
+        // and a bare `-t 'work'` (or even `=work`) prefix-matches a live
+        // `work-2` — the reconcile then reads the SIBLING's rows and, because
+        // they parse non-empty, `applyParsedPanes` silently clears `_panes`
+        // instead of surfacing `PaneReconcileResult.Failed`.
+        assertTrue(command, command.startsWith("list-panes -s -t '=work:' -F "))
         assertTrue(command.contains(LIST_PANES_FIELD_SEPARATOR))
         assertFalse(command.contains(" -a "))
 
@@ -340,6 +346,86 @@ class TmuxSessionViewModelStructuralReconcileTest : TmuxSessionViewModelTestBase
         assertEquals(1, after.size)
         assertSame(before.single().terminalState, after.single().terminalState)
     }
+
+    /**
+     * Issue #1820 (round 3) — the OTHER half of the reconcile's misclassification,
+     * and the reason `list-panes` had to take the exact target rather than merely
+     * a better one.
+     *
+     * An ERRORED `list-panes` is handled correctly (see
+     * [listPanesErrorLeavesExistingPaneListUntouched]: the pane list survives and
+     * the caller gets a named, retryable `PaneReconcileResult.Failed`). A
+     * NON-errored response carrying only ANOTHER session's rows is not: it parses
+     * non-empty, so the preserve-last-known-state guard does not fire, and the
+     * exact-session-name filter in `applyParsedPanes` then drops every row. The
+     * user sees a blank terminal with no error and nothing to retry.
+     *
+     * That is exactly what a bare `-t '<base>'` produced once `<base>-2` existed
+     * — verified on a real tmux by
+     * `SiblingSuffixExactTargetDockerTest#paneReconcileOnAGoneSessionFailsLoudlyInsteadOfReturningTheSiblingsPanes`.
+     * This test pins the CONSEQUENCE in the per-PR Unit job (the connected class
+     * only runs in the batched emulator lane), so anyone who weakens the target
+     * form can see what it costs.
+     */
+    @Test
+    fun foreignSessionRowsSilentlyClearThePaneListWhichIsWhyTheTargetMustBeExact() =
+        runTest(scheduler) {
+            val vm = newVm()
+            val client = FakeTmuxClient()
+            // First reconcile: our own session's rows.
+            client.responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                    isError = false,
+                ),
+            )
+            // Second reconcile: what a PREFIX-MATCHED `list-panes` returns once
+            // `work` is gone and the `work-2` sibling is alive — a SUCCESSFUL
+            // response made entirely of the neighbour's rows.
+            client.responses.addLast(
+                CommandResponse(
+                    number = 2L,
+                    output = listOf(
+                        "%7\t@7\t\$1\twork-2\tshell\t0",
+                        "%8\t@8\t\$1\twork-2\teditor\t0",
+                    ),
+                    isError = false,
+                ),
+            )
+            vm.replaceClientForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+            )
+
+            client.emittedEvents.emit(
+                ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@0", name = ""),
+            )
+            advanceUntilIdle()
+            assertEquals(listOf("%0"), vm.panes.value.map { it.paneId })
+
+            client.emittedEvents.emit(
+                ControlEvent.LayoutChange(sessionId = "\$0", windowId = "@0", layout = "bf3d"),
+            )
+            advanceUntilIdle()
+
+            // The harm, pinned: a non-error response that contains no rows for the
+            // active session BLANKS the pane list. No error surfaces, so nothing
+            // upstream can retry or explain it. The only defence is that the
+            // reconcile's `-t` cannot resolve to another session in the first
+            // place — hence [com.pocketshell.core.tmux.TmuxTarget.pane].
+            assertTrue(
+                "a prefix-matched reconcile silently clears the pane list; " +
+                    "got ${vm.panes.value.map { it.paneId }}",
+                vm.panes.value.isEmpty(),
+            )
+        }
 
     @Test
     fun unrelatedEventDoesNotTriggerListPanes() = runTest(scheduler) {

@@ -6,6 +6,7 @@ import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
+import com.pocketshell.core.tmux.TmuxTarget
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
@@ -598,7 +599,11 @@ internal open class FakeTmuxClient(
     )
 
     override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse {
-        val escaped = sessionId.replace("'", "'\\''")
+        // Issue #1820: mirror production's EXACT pane target ([TmuxTarget.pane]).
+        // `sessionId` is really a session NAME here, and a bare `-t` writes the
+        // window-size policy onto a live `<name>-2` neighbour, so a fake that
+        // records the bare form would let that regression back in unnoticed.
+        val escaped = TmuxTarget.pane(sessionId).replace("'", "'\\''")
         sentCommands += "set-window-option -t '$escaped' window-size latest"
         return setWindowSizeLatestResponse
     }

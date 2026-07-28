@@ -54,6 +54,7 @@ class AgentLaunchVersionMismatchHintE2eTest {
                 // The exact short wrapper line the picker builds for a Claude
                 // agent launch (issue #703).
                 startCommand = "pocketshell agent claude --dir '/home/alexey/tmp/test'",
+                namePolicy = SessionNamePolicy.UniqueOnHost,
             )
         }.exceptionOrNull()
 

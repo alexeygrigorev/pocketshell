@@ -23,6 +23,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.tmux.TmuxTarget
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.parseAgentStateUpdatedAtEpochSec
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
@@ -218,6 +219,50 @@ class FolderListExecTimeoutException(
 )
 
 /**
+ * What a create call's requested session name MEANS — issue #1820.
+ *
+ * Session-name uniqueness used to be decided on the CLIENT, by subtracting a
+ * UI-cached session list (`existingNames`) from the derived base name, and was
+ * then executed with an idempotent create (`tmuxctl create-detached` /
+ * `tmux new-session -A -d`). That made correctness depend on a snapshot the
+ * client cannot trust: on 2026-07-28 the in-session picker published `Ready`
+ * with a list that OMITTED the very session the app was attached to over
+ * `-CC`, so the "second session in this folder" derived the colliding base
+ * name and the create failed with `open terminal failed: not a terminal`. The
+ * user tapped Create and got an error instead of a session.
+ *
+ * (That error, not a silent no-op, is what a colliding create actually does:
+ * `tmux new-session -A -d -s <taken>` turns into an ATTACH — `-d` is not the
+ * "detach others" flag, `-D` is — and an attach over an SSH exec has no tty.
+ * Much of the surrounding prose predates that finding and still calls the
+ * collision idempotent; it is not.)
+ *
+ * The uniqueness decision therefore belongs to the HOST, at create time, on
+ * the very session that performs the create — the only place that knows the
+ * live truth. This enum is how a caller states which of the two genuinely
+ * different intents it has, instead of every caller re-deriving a name from
+ * whatever list it happens to hold.
+ */
+enum class SessionNamePolicy {
+    /**
+     * "Give me a NEW session; this name is just the base." The gateway resolves
+     * the smallest free `-2`/`-3`… variant against the host's live session list
+     * immediately before creating, so a stale, empty, or wrong client-side list
+     * can no longer produce a collision. Every "+ New session" picker path uses
+     * this.
+     */
+    UniqueOnHost,
+
+    /**
+     * "Create/attach EXACTLY this session." No disambiguation — the caller
+     * names a specific session it means, so the idempotent attach-or-create
+     * semantics are the point (e.g. recreating a session that went away under
+     * the name the user is recovering).
+     */
+    ExactName,
+}
+
+/**
  * Gateway used by [FolderListViewModel] to fetch session rows with
  * `pane_current_path` / `session_path` metadata.
  *
@@ -270,8 +315,14 @@ interface FolderListGateway {
      * [SessionTypePickerSheet] confirm path so an "Agent" choice
      * auto-runs the chosen CLI as the new pane's first command.
      *
-     * Returns the resolved session name (sometimes munged by tmux when
-     * the requested name collides) or null on failure.
+     * [namePolicy] states what [sessionName] MEANS — a base name that must
+     * become a genuinely new session ([SessionNamePolicy.UniqueOnHost]) or the
+     * exact session the caller intends ([SessionNamePolicy.ExactName]). See
+     * [SessionNamePolicy]; it is deliberately required at every call site so a
+     * new caller has to state its intent rather than inherit a default.
+     *
+     * Returns the RESOLVED session name — which for [SessionNamePolicy.UniqueOnHost]
+     * may carry a `-2`/`-3` suffix the caller did not ask for — or a failure.
      */
     suspend fun createSession(
         host: HostEntity,
@@ -280,6 +331,7 @@ interface FolderListGateway {
         sessionName: String,
         cwd: String,
         startCommand: String?,
+        namePolicy: SessionNamePolicy,
     ): Result<String>
 
     suspend fun createEmptyProject(
@@ -1207,6 +1259,7 @@ class SshFolderListGateway internal constructor(
         sessionName: String,
         cwd: String,
         startCommand: String?,
+        namePolicy: SessionNamePolicy,
     ): Result<String> {
         return withLeaseSession(host, keyPath, passphrase) { session ->
             createSessionOnSession(
@@ -1214,6 +1267,7 @@ class SshFolderListGateway internal constructor(
                 sessionName = sessionName,
                 cwd = cwd,
                 startCommand = startCommand,
+                namePolicy = namePolicy,
             )
         }
     }
@@ -1253,6 +1307,7 @@ class SshFolderListGateway internal constructor(
         sessionName: String,
         cwd: String,
         startCommand: String?,
+        namePolicy: SessionNamePolicy,
     ): String {
         if (session.execBounded(remoteStartDirectoryExistsCommand(cwd)).exitCode != 0) {
             throw RuntimeException(
@@ -1262,7 +1317,14 @@ class SshFolderListGateway internal constructor(
                 ),
             )
         }
-        val quotedName = shellQuote(sessionName)
+        // Issue #1820: for a "give me a NEW session" create, resolve the free
+        // name HERE — on the host, on the very SshSession that is about to
+        // create — instead of trusting a client-side list. See [SessionNamePolicy].
+        val resolvedName = when (namePolicy) {
+            SessionNamePolicy.ExactName -> sessionName
+            SessionNamePolicy.UniqueOnHost -> resolveFreeSessionName(session, sessionName)
+        }
+        val quotedName = shellQuote(resolvedName)
         val quotedCwd = shellQuote(cwd)
         // Issue #976: routing-safety guard for a LAUNCH create (startCommand
         // set). The create commands (`create-detached` / `new-session -A`) are
@@ -1271,25 +1333,26 @@ class SshFolderListGateway internal constructor(
         // idempotency is correct for a plain re-pick, but it is the misroute trap
         // for an agent/shell LAUNCH: session names are a pure path-prefix shared
         // by agent AND shell (#642), so a new Codex launch in a dir that already
-        // has an open Claude session derives the SAME name. When the picker's
-        // de-dupe list is empty (a #974 connection drop / still-loading list
-        // collapses `existingNames` to ∅, so the `-2`/`-3` suffix is skipped),
-        // the name collides, the idempotent create is a no-op REUSE of the live
-        // session, and `send-keys -t '<name>'` types the launch line straight
-        // into the currently-attached pane (the maintainer's #976 report).
+        // has an open Claude session derives the SAME name, the idempotent create
+        // is a no-op REUSE of the live session, and `send-keys -t '<name>'` types
+        // the launch line straight into the currently-attached pane (the
+        // maintainer's #976 report).
         //
-        // So before creating for a launch, probe whether the target name already
-        // exists. If it does, the launch must NOT proceed — typing into a
-        // pre-existing (possibly current) pane is exactly the #968-class misroute
-        // we refuse. Surface a clear error so the caller can re-derive against a
-        // fresh list / suffix instead of silently leaking keystrokes. A plain
+        // Since #1820 the [SessionNamePolicy.UniqueOnHost] resolution above
+        // normally makes this unreachable — the name it picked was free on the
+        // host moments earlier. It STAYS as the last line of defence, because it
+        // is the only check that covers the two cases the resolver cannot: an
+        // [SessionNamePolicy.ExactName] caller, and a resolver whose probe failed
+        // and fell back to the requested base. Typing into a pre-existing
+        // (possibly current) pane is exactly the #968-class misroute we refuse, so
+        // surface a clear error rather than silently leaking keystrokes. A plain
         // shell/no-launch create keeps its idempotent attach-or-create semantics.
         if (startCommand != null) {
             val hasSession = session.execBounded(
-                pathAware("tmux has-session -t $quotedName"),
+                pathAware("tmux has-session -t ${shellQuote(TmuxTarget.session(resolvedName))}"),
             )
             if (hasSession.exitCode == 0) {
-                throw RuntimeException(launchTargetCollisionMessage(sessionName))
+                throw RuntimeException(launchTargetCollisionMessage(resolvedName))
             }
         }
         val createResult = session.execBounded(
@@ -1341,11 +1404,56 @@ class SshFolderListGateway internal constructor(
                 ensureAgentSubcommandAvailable(session)
             }
             val quotedCommand = shellQuote(startCommand)
+            // Issue #1820: EXACT pane target. A bare `-t <name>` prefix-matches,
+            // so with `<name>-2` alive and `<name>` gone the launch line would be
+            // typed into the NEIGHBOUR's pane — the #976 misroute, one line below
+            // the guard that exists to prevent it. `=<name>:` is the exact form
+            // for a pane target (see [TmuxTarget]).
             session.execBounded(
-                pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
+                pathAware(
+                    "tmux send-keys -t ${shellQuote(TmuxTarget.pane(resolvedName))} " +
+                        "$quotedCommand Enter",
+                ),
             )
         }
-        return sessionName
+        return resolvedName
+    }
+
+    /**
+     * Issue #1820: ask the HOST for a free session name, on the very
+     * [session] that is about to create it.
+     *
+     * The whole walk runs remotely in ONE exec, so the client never round-trips
+     * per candidate and the gap between "this name is free" and "create it" is a
+     * single command on one connection, rather than the seconds-wide (and
+     * sometimes simply WRONG) window a UI-cached session list gave us.
+     *
+     * `-t "=<name>"` forces tmux's EXACT session match. Without the `=`, tmux
+     * falls back to prefix and then fnmatch matching, so probing `foo` while
+     * `foo-2` exists answers "taken" — which would make this resolver skip a
+     * genuinely free `foo` (and, in the launch guard above, refuse a launch
+     * outright). The `=` is what makes both checks mean what they read as.
+     *
+     * Fail-safe by design: any non-zero exit or unparseable reply falls back to
+     * the requested base name, i.e. exactly the pre-#1820 behaviour. A create
+     * must never be BLOCKED by the uniqueness probe itself — if the probe cannot
+     * run, the create still runs and reports whatever the host says about it,
+     * and for a LAUNCH the #976 has-session guard still refuses rather than
+     * mistyping into a live pane.
+     */
+    private suspend fun resolveFreeSessionName(
+        session: SshSession,
+        requestedName: String,
+    ): String {
+        val probe = runCatching {
+            session.execBounded(pathAware(freeSessionNameCommand(shellQuote(requestedName))))
+        }.getOrNull() ?: return requestedName
+        if (probe.exitCode != 0) return requestedName
+        return probe.stdout
+            .lineSequence()
+            .map { it.trim() }
+            .lastOrNull { it.isNotEmpty() }
+            ?: requestedName
     }
 
     /**
@@ -1400,7 +1508,15 @@ class SshFolderListGateway internal constructor(
             return Result.failure(IllegalArgumentException("No session to stop."))
         }
         return withLeaseSession(host, keyPath, passphrase) { session ->
-            val quotedName = shellQuote(target)
+            // Issue #1820: EXACT session target on BOTH the kill and its
+            // verify. A bare `-t <name>` prefix-matches, so with `<name>` and
+            // `<name>-2` both alive the kill lands correctly but the verify
+            // prefix-matches the surviving `<name>-2`, reports "still running",
+            // and the row never leaves the tree — closed issue #168 returning.
+            // Since #1820 the `<base>` + `<base>-2` pair is the ROUTINE result
+            // of a second same-folder create, so this is reliably wrong for the
+            // older sibling rather than a rare edge.
+            val quotedName = shellQuote(TmuxTarget.session(target))
             session.exec(pathAware("tmux kill-session -t $quotedName"))
             // Authoritative check: a kill "succeeded" only when the session
             // is genuinely gone. `tmux has-session` exits non-zero when the
@@ -1432,13 +1548,19 @@ class SshFolderListGateway internal constructor(
             return Result.failure(IllegalArgumentException("Invalid window index."))
         }
         return withLeaseSession(host, keyPath, passphrase) { session ->
-            val quotedName = shellQuote(target)
+            // Issue #1820: EXACT targets throughout. A bare `-t <session>:<i>`
+            // prefix-matches the SESSION half, so with `<name>` gone and
+            // `<name>-2` alive `kill-window -t '<name>:0'` destroys the
+            // NEIGHBOUR's window (reproduced on tmux 3.4 — it took the whole
+            // sibling session down with it). The `has-session`/`list-windows`
+            // verifies below would then report on the neighbour too.
+            val quotedName = shellQuote(TmuxTarget.session(target))
             // Issue #883: target the specific window of the session by index.
             // The colon target `<session>:<index>` is a tmux window target, so
             // kill-window removes ONLY that window. We single-quote the whole
-            // `session:index` so a session name with shell metacharacters is
+            // `=session:index` so a session name with shell metacharacters is
             // safe (the index is a plain integer).
-            val quotedWindow = shellQuote("$target:$windowIndex")
+            val quotedWindow = shellQuote(TmuxTarget.window(target, windowIndex))
             session.exec(pathAware("tmux kill-window -t $quotedWindow"))
             // Authoritative check. tmux destroys the session when its LAST
             // window closes, so the kill "succeeded" in two distinct shapes:
@@ -1488,14 +1610,21 @@ class SshFolderListGateway internal constructor(
         }
         if (oldTarget == newTarget) return Result.success(Unit)
         return withLeaseSession(host, keyPath, passphrase) { session ->
-            val quotedOld = shellQuote(oldTarget)
+            // Issue #1820: EXACT session targets. The NEW name is a name to
+            // CREATE, not a target to resolve, so it stays verbatim — only the
+            // `-t` lookups take the `=` prefix. Without it, renaming `<name>`
+            // while `<name>-2` lives renames the neighbour, and the
+            // old-name verify below prefix-matches the survivor and reports
+            // "was not renamed" even when the rename landed.
+            val quotedOld = shellQuote(TmuxTarget.session(oldTarget))
+            val quotedNewTarget = shellQuote(TmuxTarget.session(newTarget))
             val quotedNew = shellQuote(newTarget)
             val rename = session.exec(pathAware("tmux rename-session -t $quotedOld $quotedNew"))
             if (rename.exitCode != 0) {
                 throw RuntimeException(rename.stderr.ifBlank { rename.stdout }.trim())
             }
             val oldExists = session.exec(pathAware("tmux has-session -t $quotedOld"))
-            val newExists = session.exec(pathAware("tmux has-session -t $quotedNew"))
+            val newExists = session.exec(pathAware("tmux has-session -t $quotedNewTarget"))
             if (oldExists.exitCode == 0 || newExists.exitCode != 0) {
                 throw RuntimeException("tmux session '$oldTarget' was not renamed to '$newTarget'.")
             }
@@ -2131,6 +2260,38 @@ class SshFolderListGateway internal constructor(
          */
         internal fun fallbackCreateSessionCommand(quotedName: String, quotedCwd: String): String =
             "tmux new-session -A -d -s $quotedName -c $quotedCwd"
+
+        /**
+         * Issue #1820: the ceiling on the `-2`/`-3`… walk in
+         * [freeSessionNameCommand]. A directory with 200 live sessions is not a
+         * real state; the bound exists only so a pathological host (or a
+         * `has-session` that somehow always answers 0) cannot spin the remote
+         * shell forever. On hitting it the walk returns its last candidate and
+         * the create falls back to its normal idempotent behaviour.
+         */
+        internal const val FREE_SESSION_NAME_MAX_SUFFIX: Int = 200
+
+        /**
+         * Issue #1820: emit the smallest free `<base>`, `<base>-2`, `<base>-3`…
+         * for [quotedBase], evaluated ENTIRELY on the host in one exec.
+         *
+         * `[quotedBase]` must already be shell-quoted by the caller (via
+         * [shellQuote]); it is concatenated with `-$i` in the loop, which is
+         * safe because POSIX sh concatenates adjacent quoted and unquoted words.
+         *
+         * `has-session -t "=$n"` is the EXACT-match form (see
+         * [resolveFreeSessionName] for why the `=` is load-bearing). `2>/dev/null`
+         * keeps "no server running" quiet — with no tmux server nothing is taken,
+         * the loop does not run, and the base name is returned.
+         */
+        internal fun freeSessionNameCommand(quotedBase: String): String =
+            "__ps_n=$quotedBase; __ps_i=2; " +
+                "while tmux has-session -t \"=\$__ps_n\" 2>/dev/null; do " +
+                "if [ \"\$__ps_i\" -gt $FREE_SESSION_NAME_MAX_SUFFIX ]; then break; fi; " +
+                "__ps_n=$quotedBase-\$__ps_i; " +
+                "__ps_i=\$((__ps_i+1)); " +
+                "done; " +
+                "printf '%s\\n' \"\$__ps_n\""
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
         const val POCKETSHELL_PROJECT_HISTORY_COMMAND: String =

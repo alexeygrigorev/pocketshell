@@ -151,6 +151,7 @@ class FolderListGatewayExecTimeoutTest {
                 sessionName = "telegram-writing-assistant",
                 cwd = "/home/me/telegram-writing-assistant",
                 startCommand = "pocketshell agent codex --dir '/home/me/telegram-writing-assistant'",
+                namePolicy = SessionNamePolicy.ExactName,
             )
         }.exceptionOrNull()
 

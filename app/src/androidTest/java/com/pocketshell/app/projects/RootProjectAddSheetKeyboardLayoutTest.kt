@@ -84,13 +84,19 @@ import org.junit.runner.RunWith
  *    results viewport, so a published-but-ignored inset cannot pass.
  *
  * Mutation note (#1742): removing `imePadding()` from `RootProjectAddSheetContent`
- * changes nothing measurable here — Material3's `ModalBottomSheet` already
- * resolves the ime inset for its own window, so that call is redundant. The
- * assertion with proven bite is the SHRINK bound: replacing the bounded,
- * shrinkable content column with a fixed `requiredHeight` (the pre-#613 shape)
- * drops the viewport response to 127px against a 774px keyboard and turns this
- * proof red. Deliberately NOT deleting the redundant `imePadding()` here: #1742
- * is a fixture/oracle slice with an explicit "no layout behavior change" scope.
+ * changed nothing measurable here — Material3's `ModalBottomSheet` wraps its
+ * window content in `Modifier.fillMaxSize().imePadding()` and so has already
+ * CONSUMED the ime inset before the sheet content is composed. #1812 confirmed
+ * that on API 33/34/35 (byte-identical geometry with and without the modifier)
+ * and deleted it, which makes THIS proof strictly sharper: the lift it measures
+ * can now only come from Material's own sheet handling, so a Material3 upgrade
+ * that stopped consuming the ime inset turns this test red instead of being
+ * masked by a duplicate content-level `imePadding()`.
+ *
+ * The assertion with proven bite for the #613 mechanism itself is the SHRINK
+ * bound: replacing the bounded, shrinkable content column with a fixed
+ * `requiredHeight` (the pre-#613 shape) drops the viewport response to 127px
+ * against a 774px keyboard and turns this proof red.
  *
  * There is no `assumeTrue`/`assumeFalse` anywhere: an environment that cannot
  * reach the required state fails hard.
@@ -573,9 +579,10 @@ class RootProjectAddSheetKeyboardLayoutTest {
 
         /**
          * The results viewport must move up by essentially the whole keyboard
-         * (the sheet is bottom-anchored, so `imePadding()` translates it by the
-         * full inset). Half the inset is a generous floor that still goes red
-         * the moment the #613 layout stops responding.
+         * (the sheet is bottom-anchored, and Material3's own
+         * `ModalBottomSheet` ime padding translates it by the full inset).
+         * Half the inset is a generous floor that still goes red the moment the
+         * #613 layout stops responding.
          */
         const val MINIMUM_LIFT_FRACTION = 0.5f
 

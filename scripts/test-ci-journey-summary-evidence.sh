@@ -534,21 +534,88 @@ run_classify_step "$ws" "$(classify_expressions failure "$FIRST_TIMEOUT" "$FIRST
 pass "(c1) FAILED_CLASSES -> failed-both section -> first_failure=true -> RED [$first_class]"
 
 # (c2) The #835 suite-budget timeout: its own JOURNEY_STEP_TIMEOUT evidence.
-ws="$SANDBOX/budget-timeout"
-make_workspace "$ws"
-JOURNEY_STEP_BUDGET_SECS_OVERRIDE=1 run_real_suite "$ws"
-[[ "$SUITE_RC" -ne 0 ]] || fail "(c2) an exhausted suite budget must redden the suite"
+#
+# DETERMINISM (issue #1839). This case used to drive the real suite with a
+# ONE-SECOND budget and rely on bash's INTEGER `$SECONDS` having ticked before
+# the suite's first `budget_exhausted` check. Whether that tick lands is a
+# property of the MACHINE, not of the budget logic:
+#
+#   budget=1s elapsed=0s remaining=1s => NOT exhausted -> suite exits 0 -> FAIL
+#   budget=1s elapsed=1s remaining=0s => EXHAUSTED     -> suite RED     -> pass
+#
+# and `run_real_suite` pins POCKETSHELL_JOURNEY_CI_SHARD_TOTAL=400 so exactly ONE
+# class is selected — there is no second loop iteration to catch the budget
+# later, making a single missed tick terminal. The hosted runner lost that race
+# 2/2 (red `main` @ ae368467) while the dev box won it 5/5 on the identical
+# commit. A guard whose whole purpose is to stop the gate reporting false greens
+# was itself flaky-by-construction.
+#
+# The budget clock is now a pinnable seam (`JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE`,
+# scripts/ci-journey-budget-functions.sh), so elapsed time is INJECTED rather
+# than raced. The budget is NOT widened — widening only narrows the same race
+# (G6). `budget_exhausted` is monotone in elapsed, so pinning BOTH extremes plus
+# the exact boundary covers the whole distribution — strictly stronger than N
+# sampled runs. The complementary "budget burns down over real wall time and
+# trips mid-loop" shape is covered end-to-end by scripts/test-ci-journey-budget.sh,
+# whose stub gradle `sleep`s are a hard FLOOR (faster hardware cannot lose it).
+BUDGET_CLOCK_BUDGET_SECS=900
+
+# run_budget_clock_arm <workspace> <pinned-elapsed-secs>
+run_budget_clock_arm() {
+  local ws="$1" elapsed="$2"
+  make_workspace "$ws"
+  JOURNEY_STEP_BUDGET_SECS_OVERRIDE="$BUDGET_CLOCK_BUDGET_SECS" \
+    run_real_suite "$ws" JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE="$elapsed"
+}
+
+# (c2a) elapsed = 0 — the MINIMUM extreme, i.e. the "no tick landed" arm the
+#       hosted runner deterministically hit. The budget is NOT spent, so the
+#       suite must stay green and write NO timeout evidence. This turns the
+#       losing side of the old coin flip into an explicit assertion, and it is
+#       what makes (c2b)/(c2c) discriminating rather than vacuous (G6).
+ws="$SANDBOX/budget-clock-unexhausted"
+run_budget_clock_arm "$ws" 0
+[[ "$SUITE_RC" -eq 0 ]] \
+  || { sed -n '1,40p' "$ws/suite.log"; fail "(c2a) elapsed=0 of a ${BUDGET_CLOCK_BUDGET_SECS}s budget is NOT exhausted, but the suite exited $SUITE_RC"; }
 grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$ws/artifacts/ci-journey/summary.md" \
-  || { cat "$ws/artifacts/ci-journey/summary.md"; fail "(c2) no JOURNEY_STEP_TIMEOUT evidence for a budget timeout"; }
+  && { cat "$ws/artifacts/ci-journey/summary.md"; fail "(c2a) an unspent budget must write NO timeout evidence"; }
 run_journey_summary_step "$ws"
-[[ "$FIRST_TIMEOUT" == "true" ]] || fail "(c2) first_timeout=$FIRST_TIMEOUT, expected true"
-run_classify_step "$ws" "$(classify_expressions failure "$FIRST_TIMEOUT" "$FIRST_FAILURE")"
-[[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_RC" -ne 0 ]] \
-  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(c2) a #835 budget timeout must stay a hard RED, got '$CLASSIFY_TOKEN'"; }
-aggregate_with "$CLASSIFY_TOKEN"
-[[ "$AGG_VERDICT" == "RED" && "$AGG_RC" -eq 1 ]] \
-  || { printf '%s\n' "$AGG_OUT"; fail "(c2) expected aggregate RED/exit1, got $AGG_VERDICT/exit$AGG_RC"; }
-pass "(c2) #835 budget timeout -> JOURNEY_STEP_TIMEOUT -> first_timeout=true -> RED (unchanged)"
+[[ "$FIRST_TIMEOUT" == "false" ]] || fail "(c2a) first_timeout=$FIRST_TIMEOUT, expected false"
+pass "(c2a) pinned elapsed=0s of ${BUDGET_CLOCK_BUDGET_SECS}s -> not exhausted -> green, no timeout evidence"
+
+# (c2b) elapsed = budget — the EXACT exhaustion boundary (`remaining <= 0`), and
+#       (c2c) elapsed > budget — beyond it, through the negative-clamp. Both must
+#       produce the #835 hard RED with classifier-readable evidence.
+for arm in "boundary:$BUDGET_CLOCK_BUDGET_SECS:c2b" \
+           "beyond:$((BUDGET_CLOCK_BUDGET_SECS + 1)):c2c"; do
+  IFS=':' read -r arm_name arm_elapsed arm_id <<<"$arm"
+  ws="$SANDBOX/budget-clock-$arm_name"
+  run_budget_clock_arm "$ws" "$arm_elapsed"
+  [[ "$SUITE_RC" -ne 0 ]] \
+    || { sed -n '1,40p' "$ws/suite.log"; fail "($arm_id) an exhausted suite budget must redden the suite (pinned elapsed=${arm_elapsed}s of ${BUDGET_CLOCK_BUDGET_SECS}s)"; }
+  grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$ws/artifacts/ci-journey/summary.md" \
+    || { cat "$ws/artifacts/ci-journey/summary.md"; fail "($arm_id) no JOURNEY_STEP_TIMEOUT evidence for a budget timeout"; }
+  run_journey_summary_step "$ws"
+  [[ "$FIRST_TIMEOUT" == "true" ]] || fail "($arm_id) first_timeout=$FIRST_TIMEOUT, expected true"
+  run_classify_step "$ws" "$(classify_expressions failure "$FIRST_TIMEOUT" "$FIRST_FAILURE")"
+  [[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_RC" -ne 0 ]] \
+    || { printf '%s\n' "$CLASSIFY_OUT"; fail "($arm_id) a #835 budget timeout must stay a hard RED, got '$CLASSIFY_TOKEN'"; }
+  aggregate_with "$CLASSIFY_TOKEN"
+  [[ "$AGG_VERDICT" == "RED" && "$AGG_RC" -eq 1 ]] \
+    || { printf '%s\n' "$AGG_OUT"; fail "($arm_id) expected aggregate RED/exit1, got $AGG_VERDICT/exit$AGG_RC"; }
+  pass "($arm_id) pinned elapsed=${arm_elapsed}s of ${BUDGET_CLOCK_BUDGET_SECS}s ($arm_name) -> JOURNEY_STEP_TIMEOUT -> first_timeout=true -> RED (unchanged)"
+done
+
+# (c2d) The seam must not be able to DISABLE the budget silently: a malformed
+#       pin is a hard, greppable abort, not an ignored override.
+ws="$SANDBOX/budget-clock-invalid"
+make_workspace "$ws"
+run_real_suite "$ws" JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE=not-a-number
+[[ "$SUITE_RC" -eq 2 ]] \
+  || { sed -n '1,20p' "$ws/suite.log"; fail "(c2d) a malformed budget-clock pin must abort with exit 2, got $SUITE_RC"; }
+grep -q 'JOURNEY_BUDGET_CLOCK_INVALID' "$ws/suite.log" \
+  || { sed -n '1,20p' "$ws/suite.log"; fail "(c2d) a malformed budget-clock pin must say so greppably"; }
+pass "(c2d) a malformed JOURNEY_BUDGET_ELAPSED_SECS_OVERRIDE aborts the suite instead of disabling the #835 budget"
 
 # ---------------------------------------------------------------------------
 # (d) The FAIL-SAFE backstop: a red suite whose summary carries no

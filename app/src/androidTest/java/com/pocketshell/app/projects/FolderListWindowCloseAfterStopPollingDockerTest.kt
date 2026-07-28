@@ -25,6 +25,7 @@ import com.pocketshell.core.tmux.TmuxClientFactory
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -143,7 +144,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
         val sessionName = "issue783-$suffix"
 
         // 0. Seed a real session with TWO windows on the host.
-        withTimeout(20_000) {
+        stage("seed-connect") { withTimeout(20_000) {
             SshConnection.connect(
                 host = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -157,7 +158,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
                 s.exec("tmux new-window -t $sessionName -c $folder")
                 createdSessions += sessionName
             }
-        }
+        } }
 
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "issue783-key", privateKeyPath = keyFile.absolutePath),
@@ -177,7 +178,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
         //    (the same wiring TmuxSessionViewModel uses) and register it. This is
         //    the SOLE `-CC` connection — the prune below reuses it (D21).
         val registry = ActiveTmuxClients()
-        val session = withTimeout(20_000) {
+        val session = stage("cc-session-connect") { withTimeout(20_000) {
             SshConnection.connect(
                 host = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -186,14 +187,14 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
                 knownHosts = KnownHostsPolicy.AcceptAll,
                 timeoutMs = 15_000,
             ).getOrThrow()
-        }
+        } }
         ccSession = session
         val client = TmuxClientFactory(tmuxClientScope).create(
             session = session,
             sessionName = sessionName,
         )
         ccClient = client
-        withTimeout(20_000) { client.connect() }
+        stage("cc-client-connect") { withTimeout(20_000) { client.connect() } }
         registry.register(
             hostId = host.id,
             hostName = host.name,
@@ -231,7 +232,18 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
         )
 
         // Cold-open reconcile settles: the session shows both windows.
-        awaitWindowCount(vm, sessionName, expected = 2)
+        //
+        // Issue #1810: this is the bound the wedge expired. It is the FIRST
+        // consumer of the live `-CC` client, so it is what a mis-correlated
+        // attach block silently broke — the enumeration resolved with an EMPTY,
+        // non-error `list-sessions`, the tree went `Ready` with ZERO sessions,
+        // and nothing else ever happened on the wire (the "20 seconds of
+        // complete silence"). The failure message carries the observed state so
+        // "wedged in setup" is never again an unattributed `DefaultExecutor`
+        // frame.
+        stage("await-window-count-2") {
+            awaitWindowCount(vm, sessionName, expected = 2)
+        }
         val windowIdsBefore = windowIds(vm, sessionName)
         assertEquals(
             "the seeded session must have two windows before the close; ids=$windowIdsBefore",
@@ -249,7 +261,7 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
 
         // 4. Close ONE window ON THE HOST from a SEPARATE plain SSH connection
         //    (NOT the app). tmux emits %window-close on the live `-CC` client.
-        withTimeout(20_000) {
+        stage("kill-window-connect") { withTimeout(20_000) {
             SshConnection.connect(
                 host = DEFAULT_HOST,
                 port = DEFAULT_PORT,
@@ -260,12 +272,14 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
             ).getOrThrow().use { s ->
                 s.exec("tmux kill-window -t $targetWindowId")
             }
-        }
+        } }
 
         // 5. The closed window's node must disappear from the tree within
         //    seconds — NO manual refresh, NO resume — while its sibling survives.
         val startedAt = System.currentTimeMillis()
-        awaitWindowGone(vm, sessionName, targetWindowId!!, timeoutMs = 25_000L)
+        stage("await-window-gone") {
+            awaitWindowGone(vm, sessionName, targetWindowId!!, timeoutMs = 25_000L)
+        }
         val elapsedMs = System.currentTimeMillis() - startedAt
         assertTrue(
             "the host-closed window must be pruned within seconds (event-driven), not the " +
@@ -284,6 +298,25 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
         )
     } }
 
+    /**
+     * Issue #1810: run one bounded step under a LABEL.
+     *
+     * This test has five 20 s bounds. When one expired, JUnit reported a bare
+     * `TimeoutCancellationException: Timed out waiting for 20000 ms` on a
+     * `DefaultExecutor` frame that named none of them, so "it wedges in setup"
+     * could not be attributed without re-instrumenting. Re-throwing with the
+     * stage name (and, for the tree waits, the observed UI state) makes the
+     * report self-describing.
+     *
+     * This changes NO bound and weakens NO assertion — it only renames the
+     * failure.
+     */
+    private suspend fun <T> stage(name: String, block: suspend () -> T): T = try {
+        block()
+    } catch (e: TimeoutCancellationException) {
+        throw AssertionError("stage `$name` timed out; ${e.message}", e)
+    }
+
     private fun windowIds(vm: FolderListViewModel, sessionName: String): List<String?> {
         val state = vm.state.value as? FolderListUiState.Ready ?: return emptyList()
         return state.flatSessions
@@ -299,12 +332,32 @@ class FolderListWindowCloseAfterStopPollingDockerTest {
         expected: Int,
         timeoutMs: Long = 20_000L,
     ) {
-        withTimeout(timeoutMs) {
-            while (windowIds(vm, sessionName).size != expected) {
-                delay(200L)
+        try {
+            withTimeout(timeoutMs) {
+                while (windowIds(vm, sessionName).size != expected) {
+                    delay(200L)
+                }
             }
+        } catch (e: TimeoutCancellationException) {
+            // Issue #1810: report WHAT the tree actually held. An empty
+            // `Ready` here means the enumeration answered (wrongly) with zero
+            // sessions rather than that the host never came up.
+            throw AssertionError(
+                "session `$sessionName` never showed $expected windows within ${timeoutMs}ms; " +
+                    "observed ${describeState(vm)}",
+                e,
+            )
         }
     }
+
+    private fun describeState(vm: FolderListViewModel): String =
+        when (val state = vm.state.value) {
+            is FolderListUiState.Ready ->
+                "Ready(sessions=[" +
+                    state.flatSessions.joinToString { "${it.sessionName}:${it.windows.size}w" } +
+                    "] refreshing=${state.isRefreshing})"
+            else -> state.toString().take(240)
+        }
 
     private suspend fun awaitWindowGone(
         vm: FolderListViewModel,

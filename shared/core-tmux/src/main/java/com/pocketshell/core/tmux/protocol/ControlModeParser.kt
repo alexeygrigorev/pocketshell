@@ -254,6 +254,19 @@ public class ControlModeParser {
 }
 
 /**
+ * Issue #1810: does this raw line carry the control-mode DCS passthrough OPENER
+ * (`ESC P ... p`)? tmux emits it exactly once, on the very first line of the
+ * `-CC` stream, so it uniquely identifies the attach block — the `%begin`/`%end`
+ * pair tmux sends as its answer to the `tmux -CC new-session ...` command line
+ * itself. [normalizeControlLine] strips the wrapper, so callers that need to know
+ * must ask BEFORE normalising.
+ */
+internal fun hasDcsPreamble(line: ByteArray): Boolean =
+    line.size >= DCS_PREFIX_BYTES.size &&
+        line[0] == DCS_PREFIX_BYTES[0] &&
+        line[1] == DCS_PREFIX_BYTES[1]
+
+/**
  * Strip a terminal DCS passthrough wrapper (`ESC P ... ESC \`) off a raw
  * control-mode line at the byte level. The DCS framing bytes are all ASCII
  * (`0x1b`, `'P'`, `'%'`, `'\'`), so byte-level stripping is safe even when

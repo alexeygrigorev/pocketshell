@@ -134,6 +134,26 @@ public sealed interface ControlEvent {
         val time: Long,
         val number: Long,
         val flags: Int,
+        /**
+         * Issue #1810: `true` when this `%begin` line arrived carrying the
+         * control-mode DCS preamble (`ESC P 1000 p`), i.e. it is the FIRST block
+         * of the `-CC` stream — tmux's own answer to the
+         * `tmux -CC new-session …` command line that started control mode:
+         *
+         * ```
+         * ESC P1000p%begin 1785219223 305 0
+         * %end 1785219223 305 0
+         * %session-changed $0 probe
+         * ```
+         *
+         * That block carries an EMPTY payload and is owed to NO caller, so it
+         * must never be correlated with a queued command. tmux opens the DCS
+         * passthrough string exactly once, at the start of the control-mode
+         * stream, so this flag identifies that block and nothing else — the
+         * marker is self-describing rather than positional, which is what makes
+         * the skip safe regardless of when the reader happens to parse it.
+         */
+        val controlModePreamble: Boolean = false,
     ) : ControlEvent
 
     /** Closes a [Begin] block on success. */

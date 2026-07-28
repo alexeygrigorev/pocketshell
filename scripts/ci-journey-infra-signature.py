@@ -34,6 +34,15 @@ Output (GitHub step-output compatible key=value lines):
     journey_signature_matches=<count of those carrying the captured signature>
     journey_offending_failures=<semicolon separated "class#method" that did not match>
 
+Issue #1822: the suite registers several load-bearing journeys at `Class#method`
+granularity, so the summary's failed-both bullets can be either
+``- `com.example.Foo` `` or ``- `com.example.Foo#someMethod` ``. Both forms are
+collected here, keyed on the class (the JUnit `classname` attribute the result
+XML carries). A bullet the parser cannot read is MISSING EVIDENCE, not proof of
+an environmental cause: it reports `unclassified` (RED) rather than silently
+ending the section, which is how the original `[\\w.$]`-only pattern dropped the
+first method-scoped entry AND truncated every entry after it.
+
 Exit status is always 0: the caller decides the verdict from the classification.
 """
 
@@ -49,20 +58,37 @@ REAL_IME_UNAVAILABLE_SIGNATURE = (
     "The real system input-method window never became visible."
 )
 
-# `- \`com.example.Foo\`` bullets under the summary's failed-both header.
+# `- \`com.example.Foo\`` and `- \`com.example.Foo#someMethod\`` bullets under
+# the summary's failed-both header. The suite writes BOTH forms (issue #1822);
+# trailing prose after the closing backtick — e.g. ``(#803 append-burst proof)``
+# — is tolerated because the match is not anchored at the end of the line.
 _FAILED_HEADER = re.compile(r"Failed BOTH attempts|JOURNEY_FAILED")
-_BULLET = re.compile(r"^\s*-\s+`([A-Za-z_][\w.$]*)`")
+_BULLET = re.compile(r"^\s*-\s+`([A-Za-z_][\w.$]*)(?:#([^`\s]+))?`")
+# Anything that is written as a markdown list item. A list item inside the
+# failed-both section that `_BULLET` cannot read is an ENTRY WE FAILED TO
+# UNDERSTAND, not the end of the section.
+_ANY_BULLET = re.compile(r"^\s*[-*+]\s+\S")
 
 
-def failed_both_classes(summary_path: str) -> list[str]:
-    """FQCNs listed under the suite summary's failed-BOTH-attempts section."""
+def failed_both_section(summary_path: str) -> tuple[list[str], list[str]]:
+    """Parse the suite summary's failed-BOTH-attempts section.
+
+    Returns ``(classes, unreadable)``:
+
+    * ``classes`` — deduplicated FQCNs (the class part of each bullet, which is
+      what the JUnit result XML's ``classname`` attribute carries).
+    * ``unreadable`` — verbatim list-item lines inside the section that could not
+      be parsed. A non-empty list forces `unclassified`, i.e. RED. Fail-safe is
+      toward the red verdict, NEVER toward green.
+    """
     try:
         with open(summary_path, "r", encoding="utf-8", errors="replace") as handle:
             lines = handle.read().splitlines()
     except OSError:
-        return []
+        return [], []
 
     classes: list[str] = []
+    unreadable: list[str] = []
     in_section = False
     for line in lines:
         if _FAILED_HEADER.search(line):
@@ -78,9 +104,16 @@ def failed_both_classes(summary_path: str) -> list[str]:
             continue
         if line.strip() == "":
             continue
+        if _ANY_BULLET.match(line):
+            # A list item we cannot read. Refusing to classify is the only safe
+            # answer: treating it as "the section ended" would drop this entry
+            # AND every entry after it, which is exactly how a genuine product
+            # failure got laundered into an INFRA green (issue #1822).
+            unreadable.append(line.strip())
+            continue
         # Any other non-bullet content ends the section.
         in_section = False
-    return classes
+    return classes, unreadable
 
 
 def _iter_result_xml(roots: list[str]):
@@ -100,10 +133,11 @@ def _failure_text(element: ET.Element) -> str:
 
 
 def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
-    classes = failed_both_classes(summary_path)
+    classes, unreadable = failed_both_section(summary_path)
     failing = 0
     matches = 0
-    offenders: list[str] = []
+    offenders: list[str] = [f"<unreadable-summary-entry>#{line}" for line in unreadable]
+    covered: set[str] = set()
 
     if classes:
         wanted = set(classes)
@@ -127,13 +161,24 @@ def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
                 if not problems:
                     continue
                 failing += 1
+                covered.add(base)
                 texts = [_failure_text(problem) for problem in problems]
                 if all(REAL_IME_UNAVAILABLE_SIGNATURE in text for text in texts):
                     matches += 1
                 else:
                     offenders.append(f"{base}#{case.get('name') or '<unknown>'}")
 
-    if not classes or failing == 0:
+    # Every class the summary listed as failing BOTH attempts must be backed by
+    # at least one failing test case in the preserved evidence. A listed class
+    # with no failing evidence is missing data — downgrading the shard on the
+    # remaining classes would mask whatever that one actually did (issue #1822).
+    uncovered = [name for name in classes if name not in covered]
+    for name in uncovered:
+        offenders.append(f"{name}#<no-failing-testcase-in-evidence>")
+
+    if unreadable or uncovered:
+        classification = "unclassified"
+    elif not classes or failing == 0:
         classification = "unclassified"
     elif offenders or matches != failing:
         classification = "product_failure"

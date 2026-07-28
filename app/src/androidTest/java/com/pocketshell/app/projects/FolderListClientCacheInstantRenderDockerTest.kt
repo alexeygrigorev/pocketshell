@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import android.os.Looper
 import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -46,6 +47,32 @@ import java.io.FileOutputStream
  * 2. The silent reconcile against the LIVE Docker `agents` fixture then converges
  *    the tree on the authoritative session set (the cached session is confirmed),
  *    proving the cache is ADVISORY, not the source of truth.
+ *
+ * ## Issue #1823 — `bind` + the first-frame capture MUST run on the Main thread
+ *
+ * [FolderListViewModel] is Main-confined: its `viewModelScope` is
+ * `Dispatchers.Main.immediate`, `applyReadyProjection` writes `_state` and is
+ * documented "Must run on Main", and the ONE production caller is
+ * `FolderListScreen`'s `LaunchedEffect { viewModel.bind(...) }` — the Main thread.
+ * The instant render is only an invariant under that confinement, because the
+ * synchronous cold seed's `++emitGeneration` … `buildProjection` … staleness-check
+ * sequence is atomic only when nothing else can run on Main meanwhile.
+ *
+ * This test used to call `bind` from the INSTRUMENTATION thread, so the view
+ * model's own Main-dispatched coroutines ran CONCURRENTLY with that sequence. When
+ * the `init` block's `forwardingController.flowOfHostSnapshots()` collector landed
+ * its `emitReady()` inside the ~1 ms window, it bumped `emitGeneration` first, the
+ * synchronous seed then saw its own generation as stale and DISCARDED its
+ * projection, and `_state` stayed `Loading` — a first frame the real screen can
+ * never see. Measured over 120 consecutive cold binds: 28 `Loading` first frames
+ * off Main (23%) versus 0 on Main; the client-cache `peek` HIT on every one of
+ * them, so the failure was never a cold cache.
+ *
+ * So the bind + capture below runs inside `runOnMainSync`, exactly as the sibling
+ * [FolderListScaleAnrStrictModeDockerTest] does and exactly as the screen does.
+ * The assertion is unchanged and NOT weakened: it is still the FIRST state after
+ * `bind`, with no wait, no retry and no widened bound — just observed on the
+ * thread the screen actually composes on.
  *
  * Docker service: `agents` on host port `2222` (the standard journey fixture the
  * `emulator-journey` CI workflow already starts), so this runs on CI with no new
@@ -188,20 +215,43 @@ class FolderListClientCacheInstantRenderDockerTest {
         // A FRESH view model = a cold app start. Bind the cached host.
         val vm = newViewModel()
         vm.setProcessStartedForTest(true)
-        vm.bind(
-            hostId = host.id,
-            hostName = host.name,
-            hostname = host.hostname,
-            port = host.port,
-            username = host.username,
-            keyPath = keyFile.absolutePath,
-            passphrase = null,
-        )
 
-        // LOAD-BEARING: the FIRST state after bind (before any SSH round-trip) is
-        // already Ready with the cached session — the instant render. The
-        // pre-#867 behaviour would be Loading here (the empty rebuild flash).
-        val firstState = vm.state.value
+        // Issue #1823: drive `bind` and capture the FIRST state on the MAIN thread,
+        // exactly as `FolderListScreen`'s `LaunchedEffect` does in production (and
+        // as the sibling FolderListScaleAnrStrictModeDockerTest already does). Off
+        // Main the view model's own Main-dispatched coroutines interleave with
+        // bind's synchronous cold seed and can discard it as stale — a first frame
+        // the real screen can never observe. See this class's KDoc.
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val capturedOnMain = arrayOfNulls<FolderListUiState>(1)
+        val captureThreadWasMain = booleanArrayOf(false)
+        instrumentation.runOnMainSync {
+            captureThreadWasMain[0] = Looper.myLooper() === Looper.getMainLooper()
+            vm.bind(
+                hostId = host.id,
+                hostName = host.name,
+                hostname = host.hostname,
+                port = host.port,
+                username = host.username,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+            )
+            // LOAD-BEARING: the FIRST state after bind (before any SSH round-trip)
+            // is already Ready with the cached session — the instant render. The
+            // pre-#867 behaviour would be Loading here (the empty rebuild flash).
+            // Captured INSIDE the same Main runnable as `bind`, so this really is
+            // the first frame the screen would compose, not a later one.
+            capturedOnMain[0] = vm.state.value
+        }
+        // HARD guard (never a skip): if this ever stops running on Main the
+        // instant-render assertion below is no longer the invariant it claims to
+        // test, so fail loudly instead of measuring a race (issue #1823).
+        assertTrue(
+            "the instant-render capture must run on the Main thread (production " +
+                "binds from FolderListScreen's LaunchedEffect) — issue #1823",
+            captureThreadWasMain[0],
+        )
+        val firstState = capturedOnMain[0]!!
         assertTrue(
             "cold connect must render the cached tree INSTANTLY (Ready, not the " +
                 "Loading rebuild flash) — state=$firstState",

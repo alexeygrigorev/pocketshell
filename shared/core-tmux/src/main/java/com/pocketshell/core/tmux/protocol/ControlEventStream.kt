@@ -93,6 +93,9 @@ public class ControlEventStream(
         var openBlockBytes = 0L
 
         lines.collect { rawLine ->
+            // Issue #1810: ask BEFORE normalising — the strip below removes the
+            // marker that identifies tmux's control-mode preamble block.
+            val dcsPreamble = hasDcsPreamble(rawLine)
             // Byte-level DCS strip; the parser re-strips defensively but we
             // need the normalized bytes for the String-decoded payload path.
             val lineBytes = normalizeControlLine(rawLine)
@@ -144,7 +147,7 @@ public class ControlEventStream(
                     openBlockBytes = 0L
                     // Re-process this same line as if it arrived outside a
                     // block. `parsed` is the parse of `lineBytes`, so reuse it.
-                    val event = parsed ?: return@collect
+                    val event = (parsed ?: return@collect).withPreambleFlag(dcsPreamble)
                     if (event is ControlEvent.Begin) {
                         openBlock = event.number
                     }
@@ -162,7 +165,7 @@ public class ControlEventStream(
             }
 
             // Outside any block: parse normally.
-            val event = parser.parse(lineBytes) ?: return@collect
+            val event = (parser.parse(lineBytes) ?: return@collect).withPreambleFlag(dcsPreamble)
             if (event is ControlEvent.Begin) {
                 openBlock = event.number
                 openBlockLines = 0
@@ -172,3 +175,13 @@ public class ControlEventStream(
         }
     }
 }
+
+/**
+ * Issue #1810: carry "this line opened the control-mode DCS passthrough" onto the
+ * parsed [ControlEvent.Begin]. The parser is byte-level and re-strips the wrapper
+ * defensively, so the marker has to be re-attached here, where the RAW line is
+ * still in hand. Only `%begin` can be the preamble block; every other event is
+ * returned unchanged.
+ */
+private fun ControlEvent.withPreambleFlag(dcsPreamble: Boolean): ControlEvent =
+    if (dcsPreamble && this is ControlEvent.Begin) copy(controlModePreamble = true) else this

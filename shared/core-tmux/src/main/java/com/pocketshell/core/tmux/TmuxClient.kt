@@ -2169,7 +2169,12 @@ internal class RealTmuxClient(
                 when (event) {
                     is ControlEvent.Begin -> {
                         val match = synchronized(responseCorrelationLock) {
-                            if (staleResponseBlocksToIgnore > 0) {
+                            if (event.controlModePreamble) {
+                                // #1810: tmux's own attach reply, owed to no
+                                // caller — see the flag's KDoc.
+                                ignoredResponseNumber = event.number
+                                null
+                            } else if (staleResponseBlocksToIgnore > 0) {
                                 staleResponseBlocksToIgnore -= 1
                                 ignoredResponseNumber = event.number
                                 null

@@ -61,18 +61,39 @@
 # the same as softening it — softening a build-cost timeout to a re-run signal
 # would be exactly the masking D31/D32 forbid.
 #
+# Issue #1833 (retry AFFORDABILITY): the token also carries whether this shard
+# could still afford its cold-boot retry when it reached this verdict. The
+# concrete miss: on run 30383504733 ALL THREE shards were denied their retry with
+# `insufficient_remaining_budget` and every one of them still reported a plain
+# `CLEAN` / `RED` — a gate that had silently lost half its resilience was
+# indistinguishable from one that had not, until a #788-class swiftshader flake
+# landed on the shard that could no longer retry and reddened the batch. The
+# stamp is `retry_affordable` (true|false|unknown) plus the shortfall in ms, so
+# "this shard ran ONE-SHOT" is an artifact rather than a log line nobody reads.
+#
+# Like the reason, affordability NEVER changes the verdict: line 1 stays the bare
+# CLEAN|INFRA|RED token. It is `unknown` on the pre-seeded token (written at job
+# start, before any budget decision exists), which is honest — at that point the
+# shard has not yet asked.
+#
 # Usage:
 #   ci-journey-write-shard-verdict.sh <CLEAN|INFRA|RED> [REASON]
 # Env:
 #   SHARD_VERDICT_FILE                     output path (default
 #                                          artifacts/ci-journey-shard-verdict/shard-verdict.txt)
 #   SHARD_VERDICT_REASON                   fallback for the REASON argument
+#   SHARD_RETRY_AFFORDABLE                 `true` | `false` (issue #1833); any
+#                                          other value, including unset, records
+#                                          `unknown`
+#   SHARD_RETRY_DENIED_REASON              the budget helper's `retry_reason`
+#   SHARD_RETRY_SHORTFALL_MS               required-minus-remaining, in ms
 #   POCKETSHELL_JOURNEY_CI_SHARD_INDEX     shard index (set by the matrix)
 #   GITHUB_RUN_ID / GITHUB_RUN_ATTEMPT     provenance (set by Actions)
 #   GITHUB_OUTPUT                          when set, also exports
 #                                          `shard_verdict=<token>` (so a later
-#                                          step can gate on it) and
-#                                          `shard_verdict_reason=<reason>`
+#                                          step can gate on it),
+#                                          `shard_verdict_reason=<reason>` and
+#                                          `shard_retry_affordable=<true|false|unknown>`
 set -uo pipefail
 
 verdict="${1:-}"
@@ -99,21 +120,39 @@ shard="${POCKETSHELL_JOURNEY_CI_SHARD_INDEX:-unknown}"
 run_id="${GITHUB_RUN_ID:-unknown}"
 run_attempt="${GITHUB_RUN_ATTEMPT:-unknown}"
 
+# Issue #1833: same fail-soft discipline as the reason — a malformed
+# affordability stamp must never cost the run its verdict token, so each field
+# degrades to a safe placeholder instead of rejecting the write.
+retry_affordable="${SHARD_RETRY_AFFORDABLE:-}"
+[[ "$retry_affordable" == "true" || "$retry_affordable" == "false" ]] \
+  || retry_affordable="unknown"
+retry_denied_reason="${SHARD_RETRY_DENIED_REASON:-unspecified}"
+[[ "$retry_denied_reason" =~ ^[a-z][a-z0-9_]{0,63}$ ]] || retry_denied_reason="unspecified"
+retry_shortfall_ms="${SHARD_RETRY_SHORTFALL_MS:-0}"
+[[ "$retry_shortfall_ms" =~ ^[0-9]{1,18}$ ]] || retry_shortfall_ms=0
+
 if ! {
   printf '%s\n' "$verdict"
   printf 'shard=%s\n' "$shard"
   printf 'run_id=%s\n' "$run_id"
   printf 'run_attempt=%s\n' "$run_attempt"
   printf 'verdict_reason=%s\n' "$reason"
+  printf 'retry_affordable=%s\n' "$retry_affordable"
+  printf 'retry_denied_reason=%s\n' "$retry_denied_reason"
+  printf 'retry_shortfall_ms=%s\n' "$retry_shortfall_ms"
   printf 'written_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$out"; then
   echo "ci-journey-write-shard-verdict.sh: cannot write $out" >&2
   exit 1
 fi
 
-echo "SHARD_VERDICT=$verdict (shard $shard, run $run_id attempt $run_attempt, reason $reason)"
+echo "SHARD_VERDICT=$verdict (shard $shard, run $run_id attempt $run_attempt, reason $reason, retry_affordable $retry_affordable)"
+if [[ "$retry_affordable" == "false" ]]; then
+  echo "SHARD_RETRY_UNAFFORDABLE: this shard reached its verdict on ONE attempt — a cold-boot retry did not fit (${retry_denied_reason}, short by ${retry_shortfall_ms}ms) (issue #1833)"
+fi
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   printf 'shard_verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
   printf 'shard_verdict_reason=%s\n' "$reason" >> "$GITHUB_OUTPUT"
+  printf 'shard_retry_affordable=%s\n' "$retry_affordable" >> "$GITHUB_OUTPUT"
 fi

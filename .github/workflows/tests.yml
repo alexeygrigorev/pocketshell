@@ -239,9 +239,19 @@ jobs:
       # when the first attempt has already consumed the wall needed for a full
       # retry plus classifier/artifact teardown. Deterministic millisecond
       # boundary fixtures cover allowed/denied and malformed-clock paths.
-      - name: CI journey cold-boot retry-budget guard (issue #1458)
+      #
+      # Issue #1833 extends it with the observed shortfall from run 30383504733
+      # (all three shards refused their retry): the fixtures reproduce that
+      # refusal AND each shard's `required` to the millisecond on #1800's model,
+      # then prove the warm-retry correction restores shards 0 and 2 while shard
+      # 1 stays honestly refused. It also drives the REAL "Inspect first journey
+      # summary" and classify step bodies out of this file so the one-shot stamp
+      # is proven end to end (summary -> budget -> verdict token -> aggregate).
+      - name: CI journey cold-boot retry-budget guard (issues #1458, #1833)
         run: |
-          chmod +x scripts/ci-journey-retry-budget.sh scripts/test-ci-journey-retry-budget.sh
+          chmod +x scripts/ci-journey-retry-budget.sh \
+            scripts/ci-journey-warm-build-elapsed.sh \
+            scripts/test-ci-journey-retry-budget.sh
           scripts/test-ci-journey-retry-budget.sh
 
       # Issue #1800: the failure-SIGNATURE classifier that types the CI
@@ -1144,12 +1154,28 @@ jobs:
             )"
           fi
           [[ "$first_suite_elapsed_secs" =~ ^[0-9]+$ ]] || first_suite_elapsed_secs=""
+          # Issue #1833: the suite ALSO records the cold Gradle build it paid up
+          # front (#1814: "Warm build (issue #1814): **ok** in 464s"). That build
+          # is the one part of the suite a within-job retry does NOT repeat — the
+          # retry re-creates the AVD but reuses this runner's `~/.gradle` and
+          # `app/build`, so every assemble task is UP-TO-DATE. Feeding it to the
+          # retry-budget helper stops the model charging the cold build twice.
+          # Unreadable / non-ok warm build => empty => #1800's model unchanged.
+          first_warm_build_secs=""
+          if [[ -f "$summary" ]]; then
+            first_warm_build_secs="$(
+              bash scripts/ci-journey-warm-build-elapsed.sh "$summary" 2>/dev/null || true
+            )"
+          fi
+          [[ "$first_warm_build_secs" =~ ^[0-9]+$ ]] || first_warm_build_secs=""
           echo "first_timeout=$first_timeout" >> "$GITHUB_OUTPUT"
           echo "first_failure=$first_failure" >> "$GITHUB_OUTPUT"
           echo "first_suite_elapsed_secs=$first_suite_elapsed_secs" >> "$GITHUB_OUTPUT"
+          echo "first_warm_build_secs=$first_warm_build_secs" >> "$GITHUB_OUTPUT"
           echo "first summary timeout-only: $first_timeout"
           echo "first summary genuine failure: $first_failure"
           echo "first summary measured suite elapsed: ${first_suite_elapsed_secs:-<unmeasured>}s"
+          echo "first summary measured warm build: ${first_warm_build_secs:-<unmeasured>}s"
 
       # Preserve the first cold-boot attempt before a retry can overwrite the
       # shared artifacts/ci-journey summary or Gradle connected-test outputs.
@@ -1203,11 +1229,16 @@ jobs:
           # epoch + the suite's measured elapsed) so the requirement reflects
           # what redoing the observed work costs. Missing/invalid measurements
           # fall back to the unchanged flat worst case inside the helper.
+          # Issue #1833: also pass the measured cold build (#1814) so the suite
+          # cost is priced as the WARM retry it actually is, instead of charging
+          # a build the retry never repeats a second time. Missing/invalid warm
+          # measurement falls back to #1800's model, unchanged.
           scripts/ci-journey-retry-budget.sh \
             "${JOURNEY_JOB_START_EPOCH_MS:-}" \
             "$(date +%s%3N)" \
             "${JOURNEY_FIRST_ATTEMPT_START_EPOCH_MS:-}" \
             "${{ steps.journey_summary.outputs.first_suite_elapsed_secs }}" \
+            "${{ steps.journey_summary.outputs.first_warm_build_secs }}" \
             | tee -a "$GITHUB_OUTPUT"
 
       # Infra-retry-once: runs if the first bringup failed with a boot/adb abort
@@ -1301,6 +1332,8 @@ jobs:
           retry_remaining_ms="${{ steps.journey_retry_budget.outputs.retry_remaining_ms }}"
           retry_required_ms="${{ steps.journey_retry_budget.outputs.retry_required_ms }}"
           retry_cost_model="${{ steps.journey_retry_budget.outputs.retry_cost_model }}"
+          retry_shortfall_ms="${{ steps.journey_retry_budget.outputs.retry_shortfall_ms }}"
+          retry_warm_build_deducted_ms="${{ steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms }}"
           summary="artifacts/ci-journey/summary.md"
           # Issue #1458: record this shard's verdict token for the aggregation
           # job. CLEAN = passed; INFRA = environmental (#470 cancel / #771
@@ -1375,6 +1408,28 @@ jobs:
           echo "cold-boot retry reason: ${retry_reason:-missing_decision}"
           echo "cold-boot retry remaining/required: ${retry_remaining_ms:-0}/${retry_required_ms:-5400000}ms"
           echo "cold-boot retry cost model: ${retry_cost_model:-worst_case} (issue #1800)"
+          echo "cold-boot retry warm-build deducted: ${retry_warm_build_deducted_ms:-0}ms (issue #1833)"
+          # Issue #1833: a shard that reaches its verdict UNABLE to start a
+          # cold-boot retry ran ONE-SHOT — half the gate's resilience is gone and
+          # a single #788-class swiftshader flake reddens `main` outright instead
+          # of recovering. On run 30383504733 all three shards were in that state
+          # and every one still reported a plain CLEAN/RED: a gate that had lost
+          # its retry looked identical to one that had not. Same principle as
+          # #1814's `outer_timeout_phase` and #1827's registry — a condition that
+          # changes what the gate CAN DO must appear in the gate's own evidence.
+          # This is REPORTING only: it never changes a verdict or an exit code,
+          # and it is stamped on the token in EVERY branch below, including the
+          # CLEAN one (where the loss is otherwise completely invisible).
+          [[ "$retry_shortfall_ms" =~ ^[0-9]+$ ]] || retry_shortfall_ms=0
+          if [[ "${retry_allowed:-false}" == "true" ]]; then
+            SHARD_RETRY_AFFORDABLE="true"
+          else
+            SHARD_RETRY_AFFORDABLE="false"
+            echo "::warning title=Emulator journey shard ran ONE-SHOT — no cold-boot retry was affordable (#1833)::This shard reached its verdict unable to start a second cold boot (reason=${retry_reason:-missing_decision}, remaining=${retry_remaining_ms:-0}ms, required=${retry_required_ms:-5400000}ms, short by ${retry_shortfall_ms}ms, cost model=${retry_cost_model:-worst_case}). The verdict below is from ONE attempt: a #788-class environmental flake here reddens the aggregate instead of flake-recovering. Reported so a gate running at half resilience is never invisible (issue #1833)."
+          fi
+          SHARD_RETRY_DENIED_REASON="${retry_reason:-missing_decision}"
+          SHARD_RETRY_SHORTFALL_MS="$retry_shortfall_ms"
+          export SHARD_RETRY_AFFORDABLE SHARD_RETRY_DENIED_REASON SHARD_RETRY_SHORTFALL_MS
           if [[ "$first" == "success" ]]; then
             echo "Emulator journey passed on the first cold boot."
             write_verdict CLEAN passed_first_attempt

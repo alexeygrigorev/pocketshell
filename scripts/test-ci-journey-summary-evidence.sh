@@ -223,7 +223,9 @@ classify_expressions() {
   "steps.journey_retry_budget.outputs.retry_reason": "sufficient_remaining_budget",
   "steps.journey_retry_budget.outputs.retry_remaining_ms": "3112241",
   "steps.journey_retry_budget.outputs.retry_required_ms": "3028613",
-  "steps.journey_retry_budget.outputs.retry_cost_model": "measured_first_attempt"
+  "steps.journey_retry_budget.outputs.retry_cost_model": "measured_first_attempt",
+  "steps.journey_retry_budget.outputs.retry_shortfall_ms": "0",
+  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "0"
 }
 JSONEOF
 }

@@ -258,6 +258,7 @@ jobs:
             scripts/ci-journey-infra-signature.py \
             scripts/ci-journey-shard-signature-verdict.sh \
             scripts/ci-journey-suite-elapsed.sh \
+            scripts/ci-journey-build-phase-failure.sh \
             scripts/test-ci-journey-infra-signature.sh
           scripts/test-ci-journey-infra-signature.sh
 
@@ -274,8 +275,27 @@ jobs:
       - name: CI journey warm-build + build-phase attribution guard (issue #1814)
         run: |
           chmod +x scripts/ci-journey-build-phase-timeout.sh \
+            scripts/ci-journey-build-phase-failure.sh \
             scripts/test-ci-journey-warm-build.sh
           scripts/test-ci-journey-warm-build.sh
+
+      # Issue #1840: the suite's own post-timeout cleanup destroyed the retry it
+      # exists to enable. `gradlew --stop` reaches the GRADLE daemon and not the
+      # Kotlin compile daemon it spawned, so on run 30339688411 shard 0 the
+      # orphan was still writing `kotlin-classes/debugAndroidTest` 47s later, the
+      # retry's `compileDebugAndroidTestKotlin` died clearing that directory, and
+      # a per-class timeout became a whole-shard RED with no product defect in
+      # it. This guard drives the REAL suite against a gradle stub that models
+      # that exact shape — a session-detached orphan writer that survives
+      # `--stop` — proves the retry's build dies against a mutant with only the
+      # orphan reap removed (RED) and runs to instrumentation against the real
+      # suite (GREEN), and checks the build-level attribution end to end.
+      # Cheap (no emulator, no Gradle, no JVM).
+      - name: CI journey inter-attempt cleanup guard (issue #1840)
+        run: |
+          chmod +x scripts/ci-journey-build-phase-failure.sh \
+            scripts/test-ci-journey-inter-attempt-cleanup.sh
+          scripts/test-ci-journey-inter-attempt-cleanup.sh
 
       # Issue #1781: fast, JVM-free artifact packaging fixture. Proves the
       # first-cold-boot preservation scan keeps real module Android outputs and
@@ -1312,10 +1332,34 @@ jobs:
           if (( build_phase_attempts > 0 )); then
             echo "::warning title=Emulator journey — an attempt was cut during the Gradle BUILD phase (#1814)::${build_phase_attempts} attempt(s) on this shard hit their per-class wall cap while Gradle was still BUILDING: ${build_phase_classes:-<unnamed>}. Instrumentation never started, so there is no JUnit XML and the zero-test outer timeout is a BUILD-COST artefact — it is NOT evidence that the named journey is broken. The cold build is paid up front by the suite's warm-build step, so a recurrence means the build outgrew its bound; investigate the build, not the journey."
           fi
-          # verdict_reason_for <fallback> — prefer the cold-build attribution
-          # when this shard carries that evidence, else the branch's own reason.
+          # Issue #1840: the #1814 sibling one step over. A retry whose GRADLE
+          # BUILD died never started instrumentation and produced NO journey
+          # verdict, yet on run 30339688411 shard 0 it was reported as the class
+          # "failing twice" — the suite's own post-timeout `gradlew --stop`
+          # cleanup left an orphaned build process writing
+          # `kotlin-classes/debugAndroidTest`, the retry's
+          # `compileDebugAndroidTestKotlin` died clearing that directory, and a
+          # self-inflicted infra cascade was typed as a product defect. Read the
+          # suite's own per-attempt manifests so the verdict can NAME it.
+          # Reporting only: severity is unchanged (a build that cannot run is a
+          # real problem and must stay visible).
+          build_fail_out="$(bash scripts/ci-journey-build-phase-failure.sh artifacts 2>&1 || true)"
+          printf '%s\n' "$build_fail_out" | sed 's/^/journey build-phase failure: /'
+          build_fail_attempts="$(sed -n 's/^build_phase_failure_attempts=//p' <<<"$build_fail_out" | tail -n 1)"
+          [[ "$build_fail_attempts" =~ ^[0-9]+$ ]] || build_fail_attempts=0
+          build_fail_classes="$(sed -n 's/^build_phase_failure_classes=//p' <<<"$build_fail_out" | tail -n 1)"
+          if (( build_fail_attempts > 0 )); then
+            echo "::warning title=Emulator journey — an attempt died at the Gradle BUILD level (#1840)::${build_fail_attempts} attempt(s) on this shard failed while Gradle was still BUILDING: ${build_fail_classes:-<unnamed>}. Instrumentation never started, so there is no JUnit XML and this attempt produced NO journey verdict — it is NOT evidence that the named journey is broken. Check the inter-attempt cleanup (an orphaned build process still writing the module build outputs makes the next build die clearing them) and the build itself, not the listed journey."
+          fi
+          # verdict_reason_for <fallback> — prefer the most specific attribution
+          # this shard carries, else the branch's own reason. A build-level
+          # failure is checked FIRST because it explains why the shard has no
+          # journey verdict at all, which subsumes a cold-build timeout earlier
+          # in the same class.
           verdict_reason_for() {
-            if (( build_phase_attempts > 0 )); then
+            if (( build_fail_attempts > 0 )); then
+              printf 'build_level_failure\n'
+            elif (( build_phase_attempts > 0 )); then
               printf 'cold_build_timeout\n'
             else
               printf '%s\n' "$1"

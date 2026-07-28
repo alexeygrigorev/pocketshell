@@ -62,20 +62,215 @@ budget_exhausted() {
   (( $(budget_remaining) <= 0 ))
 }
 
-cleanup_gradle_after_timeout() {
-  local fqcn="$1"
-  local stop_rc
+# ---------------------------------------------------------------------------
+# Issue #1840: the timeout cleanup must leave the RETRY a usable build tree.
+#
+# THE DEFECT
+# ----------
+# `gradlew --stop` stops the GRADLE daemon. It does NOT stop the other build
+# JVMs that daemon spawned — above all the KOTLIN COMPILE DAEMON, a separate
+# long-lived process (`kotlin.compiler.execution.strategy=daemon` is the KGP
+# default and this repo does not override it). When a class attempt is cut
+# mid-build, `run_bounded` kills the Gradle CLIENT, `--stop` kills the daemon,
+# and the Kotlin daemon keeps compiling the module it was handed — still
+# emitting `.class` files into `<module>/build/tmp/kotlin-classes/<variant>`.
+#
+# Observed end to end on run 30339688411, shard 0
+# (`com.pocketshell.app.proof.TmuxSessionScreenArtVerifyE2eTest`):
+#   13:10:41  attempt 1 cut by the per-class wall cap while Gradle was BUILDING
+#   13:10:43  `Stopping Daemon(s)` / `1 Daemon stopped`, and this function
+#             reported `GRADLE_TIMEOUT_CLEANUP: ... stop completed`
+#   13:11:30  the RETRY's `:app:compileDebugAndroidTestKotlin` FAILED with
+#               Unable to delete directory '.../kotlin-classes/debugAndroidTest'
+#               Failed to delete some children. ...
+#               New files were found. This might happen because a process is
+#               still writing to the target directory.
+#             naming freshly-written `com/pocketshell/app/tmux/*.class` files.
+# Gradle said it in as many words: 47 seconds after the daemon "stopped",
+# something was STILL WRITING. The retry never reached instrumentation, both
+# attempts produced unusable summaries, and the shard went RED with no product
+# defect anywhere in it — a per-class timeout converted into a whole-shard RED
+# by our own cleanup, with the retry (the mechanism meant to absorb exactly that
+# timeout) destroyed before it could help.
+#
+# THE FIX: SCOPING, NOT SKIPPING
+# ------------------------------
+# The cleanup is not the problem — a wedged daemon poisoning the next build was
+# the #918 problem it exists to solve. What was wrong is its SCOPE: it reached
+# one process out of the process tree the killed build left behind. So after the
+# daemon stop, reap every process that still holds an open file under THIS
+# checkout's build-output roots, and refuse to report the cleanup clean until
+# none remains. No timeout and no budget is widened (G6): this runs only on the
+# already-exceptional abort path and normally finds nothing at all.
 
-  echo "GRADLE_TIMEOUT_CLEANUP: $fqcn aborted; stopping Gradle daemons before any retry"
-  if timeout --signal=TERM --kill-after=10 "${JOURNEY_GRADLE_STOP_TIMEOUT_SECS}s" \
-      "$GRADLEW" --stop; then
-    echo "GRADLE_TIMEOUT_CLEANUP: Gradle daemon stop completed for $fqcn"
+# journey_build_output_roots — the build-output directories this checkout owns.
+#
+# Deliberately an EXPLICIT list, never a `find`/glob for "any directory named
+# build under $REPO_ROOT": on the maintainer's dev box sibling agents' worktrees
+# live at `$REPO_ROOT/.worktrees/issue-*/`, so a glob would nominate THEIR build
+# processes and killing those is exactly the cross-agent damage process.md
+# forbids. Every module the journey suite compiles is covered here.
+journey_build_output_roots() {
+  local dir
+  for dir in "$REPO_ROOT/build" "$REPO_ROOT/app/build" "$REPO_ROOT/shared"/*/build; do
+    [[ -d "$dir" ]] && printf '%s\n' "$dir"
+  done
+  return 0
+}
+
+# journey_self_and_ancestor_pids — this shell and every ancestor, so the reap can
+# never signal the suite, the workflow's step shell, or the runner agent.
+journey_self_and_ancestor_pids() {
+  local pid=$$
+  local parent
+  while [[ "$pid" =~ ^[0-9]+$ ]] && (( pid > 1 )); do
+    printf '%s\n' "$pid"
+    parent="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null)"
+    [[ "$parent" =~ ^[0-9]+$ ]] || break
+    pid="$parent"
+  done
+  return 0
+}
+
+# journey_build_output_writer_pids — PIDs still holding an open file under this
+# checkout's build-output roots.
+#
+# The test is the process's open FILE DESCRIPTORS, never its cwd. That is not an
+# implementation detail: the `adb` server inherits the suite's cwd ($REPO_ROOT —
+# the suite `cd`s there) and must never be nominated, while a build JVM that is
+# still writing class files necessarily holds real descriptors under a build
+# root. Processes owned by another user simply yield an unreadable
+# `/proc/<pid>/fd` and are skipped.
+#
+# The whole scan runs in ONE python3 process on purpose: a bash loop would fork
+# `readlink` once per descriptor (tens of thousands of forks on a busy box), and
+# a cleanup that takes minutes to answer is its own outage. python3 is already a
+# hard dependency of this helper (validate_png_artifact, write_harness_verdict_xml).
+journey_build_output_writer_pids() {
+  local -a roots=()
+  local python_command="${PYTHON3:-python3}"
+
+  [[ -d /proc ]] || return 0
+  command -v "$python_command" >/dev/null 2>&1 || return 0
+  mapfile -t roots < <(journey_build_output_roots)
+  (( ${#roots[@]} > 0 )) || return 0
+
+  command "$python_command" -I - \
+    "$(printf '%s\n' "${roots[@]}")" \
+    "$(journey_self_and_ancestor_pids | tr '\n' ' ')" <<'PY'
+import os
+import sys
+
+roots = [line.rstrip("/") + "/" for line in sys.argv[1].split("\n") if line]
+skip = set(sys.argv[2].split())
+found = []
+for entry in os.listdir("/proc"):
+    if not entry.isdigit() or entry in skip:
+        continue
+    fd_dir = "/proc/%s/fd" % entry
+    try:
+        names = os.listdir(fd_dir)
+    except OSError:
+        continue
+    for name in names:
+        try:
+            target = os.readlink(os.path.join(fd_dir, name))
+        except OSError:
+            continue
+        if any(target.startswith(root) for root in roots):
+            found.append(entry)
+            break
+if found:
+    print("\n".join(found))
+PY
+}
+
+journey_pid_cmdline() {
+  local pid="$1" cmd
+  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" || cmd=""
+  [[ -n "$cmd" ]] || cmd="<gone>"
+  printf '%s\n' "${cmd:0:160}"
+}
+
+# cleanup_build_output_writers_after_abort <label> — TERM, then KILL, then VERIFY
+# that nothing is left writing this checkout's build outputs. Same shape as
+# cleanup_device_after_class_abort: a bounded pump whose load-bearing assertion
+# is the absence condition, with a hard wall.
+cleanup_build_output_writers_after_abort() {
+  local label="$1"
+  local deadline term_deadline signal pid
+  local -a pids=()
+
+  if [[ ! -d /proc ]]; then
+    echo "JOURNEY_ABORT_BUILD_CLEANUP_UNSUPPORTED: /proc is unavailable, so no orphaned build writer can be observed for $label (issue #1840)" >&2
     return 0
   fi
 
+  mapfile -t pids < <(journey_build_output_writer_pids)
+  if (( ${#pids[@]} == 0 )); then
+    echo "JOURNEY_ABORT_BUILD_CLEANUP_VERIFIED: no process still holds this checkout's build outputs after $label"
+    return 0
+  fi
+
+  echo "JOURNEY_ABORT_BUILD_CLEANUP: the aborted build left process(es) still holding this checkout's build outputs after $label — \`gradlew --stop\` does not reach them (issue #1840):"
+  for pid in "${pids[@]}"; do
+    echo "  pid=$pid cmd=$(journey_pid_cmdline "$pid")"
+  done
+
+  term_deadline=$((SECONDS + ${JOURNEY_BUILD_CLEANUP_TERM_GRACE_SECS:-5}))
+  deadline=$((SECONDS + ${JOURNEY_BUILD_CLEANUP_TIMEOUT_SECS:-30}))
+  while :; do
+    signal=TERM
+    (( SECONDS >= term_deadline )) && signal=KILL
+    for pid in "${pids[@]}"; do
+      kill "-$signal" "$pid" 2>/dev/null || true
+    done
+    # Bounded verification pump, not a fixed correctness sleep: every turn
+    # re-checks the load-bearing absence condition until its hard wall.
+    sleep 0.2
+    mapfile -t pids < <(journey_build_output_writer_pids)
+    if (( ${#pids[@]} == 0 )); then
+      echo "JOURNEY_ABORT_BUILD_CLEANUP_VERIFIED: no process still holds this checkout's build outputs after $label"
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      echo "JOURNEY_ABORT_CLEANUP_FAILED: process(es) still hold this checkout's build outputs after $label; the next build would race them (issue #1840):" >&2
+      for pid in "${pids[@]}"; do
+        echo "  pid=$pid cmd=$(journey_pid_cmdline "$pid")" >&2
+      done
+      return 1
+    fi
+  done
+}
+
+cleanup_gradle_after_timeout() {
+  local fqcn="$1"
+  local stop_rc writers_rc
+
+  echo "GRADLE_TIMEOUT_CLEANUP: $fqcn aborted; stopping Gradle daemons before any retry"
+  # NOTE (issue #1840): the exit code is captured DIRECTLY, not read from `$?`
+  # after an `if`. The previous shape ran the stop inside `if ...; then return 0;
+  # fi` and then read `stop_rc=$?` — but the exit status of an `if` whose branch
+  # did not run is 0, so a FAILED daemon stop was reported as a clean cleanup and
+  # `cleanup_status=verified_clean` was written over it.
+  timeout --signal=TERM --kill-after=10 "${JOURNEY_GRADLE_STOP_TIMEOUT_SECS}s" \
+    "$GRADLEW" --stop
   stop_rc=$?
-  echo "GRADLE_TIMEOUT_CLEANUP_FAILED: Gradle daemon stop exited $stop_rc for $fqcn" >&2
-  return "$stop_rc"
+  if (( stop_rc == 0 )); then
+    echo "GRADLE_TIMEOUT_CLEANUP: Gradle daemon stop completed for $fqcn"
+  else
+    echo "GRADLE_TIMEOUT_CLEANUP_FAILED: Gradle daemon stop exited $stop_rc for $fqcn" >&2
+  fi
+
+  # Issue #1840: the daemon stop reaches the Gradle daemon and nothing else. Reap
+  # whatever the killed build left writing this checkout's build outputs BEFORE
+  # any retry starts, or the retry's own `compileDebugAndroidTestKotlin` races it
+  # and dies clearing its output directory.
+  cleanup_build_output_writers_after_abort "$fqcn"
+  writers_rc=$?
+
+  (( stop_rc != 0 )) && return "$stop_rc"
+  return "$writers_rc"
 }
 
 LAST_RUN_CLASS_TIMEOUT_HIT=0
@@ -98,7 +293,12 @@ LAST_RUN_CLASS_SNAPSHOT_STATUS=""
 # Gradle was still BUILDING, and that ambiguity is what made the shard-2
 # first-class timeout on run 30323508796 expensive to diagnose.
 LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE=""
+# Issue #1840: which PHASE a non-timeout FAILED attempt died in. A retry whose
+# Gradle BUILD died never ran the journey at all, so it must not read as "the
+# class failed twice" — see journey_attempt_phase.
+LAST_RUN_CLASS_ATTEMPT_FAILURE_PHASE=""
 BUILD_PHASE_TIMEOUT_ATTEMPTS=()
+BUILD_PHASE_FAILURE_ATTEMPTS=()
 JOURNEY_ABORT_ISOLATION_FAILED=0
 JOURNEY_HARNESS_FAILURE_RC=125
 declare -A JOURNEY_CLASS_ATTEMPT_COUNTS=()
@@ -115,31 +315,50 @@ needs_gradle_cleanup_after_class_abort() {
   [[ "$1" -eq 124 || "$1" -eq 137 ]]
 }
 
-# journey_attempt_timeout_phase <attempt-log> <classification> — issue #1814.
+# journey_attempt_phase <attempt-log> <classification> <describes> [<raw-junit-count>]
+#   — issue #1814, generalised in issue #1840.
 #
-# An `outer_timeout` with `raw-junit count=0` is produced by two very different
-# situations that used to be indistinguishable in the artifacts:
+# #1814: an `outer_timeout` with `raw-junit count=0` is produced by two very
+# different situations that used to be indistinguishable in the artifacts:
 #   * the Gradle BUILD was still running when the wall cap fired (nothing about
 #     the journey was ever exercised — a build-cost artefact, not a verdict), and
 #   * instrumentation started and then wedged (a real on-device signal).
-# The attempt log is the only evidence that separates them, so read it: Gradle
-# prints `> Task :…` headers as it executes, and the connected-test task /
-# runner announce themselves when instrumentation begins.
+#
+# #1840: the SAME ambiguity exists one step over, for a plain non-timeout
+# `failure`. On run 30339688411 shard 0 the retry's Gradle build died clearing
+# `kotlin-classes/debugAndroidTest`, instrumentation never started, and the shard
+# reported the class as having "failed twice" — a build-level failure wearing a
+# product failure's clothes. Rather than invent a parallel scheme, this is the
+# same helper answering the same question for a second classification; the caller
+# says which one it is asking about via <describes>, so `outer_timeout_phase`
+# keeps EXACTLY the #1814 meaning and `attempt_failure_phase` is its sibling.
+#
+# The attempt log is the evidence: Gradle prints `> Task :…` headers as it
+# executes, and the connected-test task / runner announce themselves when
+# instrumentation begins.
 #
 # Fail-SAFE by construction: `build` is claimed only on POSITIVE evidence of
-# build activity WITH no instrumentation marker. No evidence at all stays
-# `unknown`, which is never downgraded or specially labelled — so this can only
-# ever add attribution, never remove a failure signal.
-journey_attempt_timeout_phase() {
+# build activity WITH no instrumentation marker AND — for a `failure` — with no
+# raw JUnit XML, since instrumentation that ran at all leaves result XML behind.
+# No evidence at all stays `unknown`, which is never downgraded or specially
+# labelled. This can only ever add attribution, never remove a failure signal.
+journey_attempt_phase() {
   local log="$1"
   local classification="$2"
+  local describes="$3"
+  local raw_junit_count="${4:-0}"
 
-  if [[ "$classification" != "outer_timeout" ]]; then
+  if [[ "$classification" != "$describes" ]]; then
     printf 'not_applicable\n'
     return 0
   fi
   if [[ ! -f "$log" ]]; then
     printf 'unknown\n'
+    return 0
+  fi
+  # Result XML is proof instrumentation ran, whatever the log says.
+  if [[ "$raw_junit_count" =~ ^[0-9]+$ ]] && (( raw_junit_count > 0 )); then
+    printf 'instrumentation\n'
     return 0
   fi
   if grep -qE '> Task :[^[:space:]]*:connected[A-Za-z]*AndroidTest|Starting [0-9]+ tests on|Installing APK|Installed on ' "$log"; then
@@ -165,6 +384,21 @@ record_build_phase_timeout_attempt() {
   [[ "${LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE:-}" == "build" ]] || return 0
   echo "JOURNEY_BUILD_PHASE_TIMEOUT: $fqcn attempt ${LAST_RUN_CLASS_ATTEMPT} was cut while Gradle was still BUILDING — instrumentation never started, so there is no raw JUnit XML (raw-junit count=${LAST_RUN_CLASS_RAW_JUNIT_COUNT}). Read this as a build-cost timeout, NOT as a journey verdict or a product defect (issue #1814)."
   BUILD_PHASE_TIMEOUT_ATTEMPTS+=("$fqcn (attempt ${LAST_RUN_CLASS_ATTEMPT})")
+}
+
+# record_build_phase_failure_attempt <selector> — issue #1840.
+#
+# The #1814 sibling for a NON-timeout failure: name a build-level death LOUDLY
+# and greppably at the moment it happens, so "the retry's build died" is never
+# again read off the artifacts as "this class failed twice". Attribution only:
+# the attempt's pass/fail bucket is untouched (softening it would be exactly the
+# masking D31/D32 forbid — a build that cannot run is a real problem).
+record_build_phase_failure_attempt() {
+  local fqcn="$1"
+
+  [[ "${LAST_RUN_CLASS_ATTEMPT_FAILURE_PHASE:-}" == "build" ]] || return 0
+  echo "JOURNEY_BUILD_PHASE_FAILURE: $fqcn attempt ${LAST_RUN_CLASS_ATTEMPT} died at the GRADLE BUILD level — instrumentation never started, so there is no raw JUnit XML (raw-junit count=${LAST_RUN_CLASS_RAW_JUNIT_COUNT}) and this attempt produced NO journey verdict. Read this as a build-level failure, NOT as the named journey failing (issue #1840)."
+  BUILD_PHASE_FAILURE_ATTEMPTS+=("$fqcn (attempt ${LAST_RUN_CLASS_ATTEMPT})")
 }
 
 journey_class_artifact_key() {
@@ -583,6 +817,7 @@ snapshot_connected_test_outputs() {
   local raw_junit_status
   local primary_classification
   local outer_timeout_phase
+  local attempt_failure_phase
   local -a build_roots=()
 
   mapfile -t build_roots < <(journey_module_build_roots "$module" "$suffix") || return 1
@@ -636,9 +871,15 @@ snapshot_connected_test_outputs() {
     primary_classification="failure"
   fi
   # Issue #1814: attribute an outer timeout to the phase it died in, from this
-  # attempt's own streamed log.
+  # attempt's own streamed log. Issue #1840: do the same for a plain failure, so
+  # a retry whose BUILD died is distinguishable from a genuine journey failure.
   outer_timeout_phase="$(
-    journey_attempt_timeout_phase "$attempt_dir/attempt.log" "$primary_classification"
+    journey_attempt_phase "$attempt_dir/attempt.log" "$primary_classification" \
+      outer_timeout "$raw_junit_count"
+  )"
+  attempt_failure_phase="$(
+    journey_attempt_phase "$attempt_dir/attempt.log" "$primary_classification" \
+      failure "$raw_junit_count"
   )"
 
   if serial="$(journey_resolve_device_serial)"; then
@@ -693,11 +934,13 @@ snapshot_connected_test_outputs() {
     printf 'raw_junit_status=%s\n' "$raw_junit_status"
     printf 'raw_junit_count=%s\n' "$raw_junit_count"
     printf 'outer_timeout_phase=%s\n' "$outer_timeout_phase"
+    printf 'attempt_failure_phase=%s\n' "$attempt_failure_phase"
     printf 'snapshotted_output_roots=%s\n' "$copied"
     printf 'snapshot_status=%s\n' "$([[ "$snapshot_failed" -eq 0 ]] && printf complete || printf failed)"
   } >> "$attempt_dir/manifest.txt" || snapshot_failed=1
 
   LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE="$outer_timeout_phase"
+  LAST_RUN_CLASS_ATTEMPT_FAILURE_PHASE="$attempt_failure_phase"
   LAST_RUN_CLASS_PRIMARY_CLASSIFICATION="$primary_classification"
   LAST_RUN_CLASS_RAW_JUNIT_STATUS="$raw_junit_status"
   LAST_RUN_CLASS_RAW_JUNIT_COUNT="$raw_junit_count"
@@ -943,6 +1186,7 @@ run_class() {
   LAST_RUN_CLASS_GRADLE_CLEANUP_RC="not_run"
   LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
   LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE=""
+  LAST_RUN_CLASS_ATTEMPT_FAILURE_PHASE=""
   if [[ -n "$app_id_suffix" ]]; then
     [[ "$app_id_suffix" =~ ^[A-Za-z0-9._]+$ ]] || {
       echo "JOURNEY_INVOCATION_IDENTITY_FAILED: invalid application id suffix '$app_id_suffix'" >&2
@@ -1011,6 +1255,8 @@ run_class() {
   fi
   # Issue #1814: name a still-building outer timeout for what it is.
   record_build_phase_timeout_attempt "$fqcn"
+  # Issue #1840: and name a build-level failure for what it is.
+  record_build_phase_failure_attempt "$fqcn"
   cleanup_status="not_required"
   if needs_gradle_cleanup_after_class_abort "$rc"; then
     cleanup_status="failed"
@@ -1056,6 +1302,7 @@ run_ct_class() {
   LAST_RUN_CLASS_GRADLE_CLEANUP_RC="not_run"
   LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
   LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE=""
+  LAST_RUN_CLASS_ATTEMPT_FAILURE_PHASE=""
   remaining="$(budget_remaining)"
   cap="$JOURNEY_CLASS_TIMEOUT_SECS"
   (( remaining < cap )) && cap="$remaining"
@@ -1094,6 +1341,8 @@ run_ct_class() {
   fi
   # Issue #1814: name a still-building outer timeout for what it is.
   record_build_phase_timeout_attempt "$fqcn"
+  # Issue #1840: and name a build-level failure for what it is.
+  record_build_phase_failure_attempt "$fqcn"
   cleanup_status="not_required"
   if needs_gradle_cleanup_after_class_abort "$rc"; then
     cleanup_status="failed"

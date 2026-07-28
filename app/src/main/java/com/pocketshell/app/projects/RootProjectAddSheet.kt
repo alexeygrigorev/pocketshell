@@ -52,6 +52,7 @@ fun RootProjectAddSheet(
     onCreateEmptyProject: () -> Unit,
     onCloneGitProject: () -> Unit,
     onCreateNamedProject: (String) -> Unit = {},
+    modifier: Modifier = Modifier,
 ) {
     // Issue #613: the search field auto-focuses, so the soft keyboard opens
     // immediately. Use a fully-expanded sheet (not a partial one) so the
@@ -63,7 +64,7 @@ fun RootProjectAddSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
-        modifier = Modifier.testTag(ROOT_PROJECT_ADD_SHEET_TAG),
+        modifier = modifier.testTag(ROOT_PROJECT_ADD_SHEET_TAG),
     ) {
         RootProjectAddSheetContent(
             root = root,

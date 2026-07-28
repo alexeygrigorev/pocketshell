@@ -92,6 +92,42 @@ class TmuxUnifiedPagerCoordinatorTest {
     }
 
     @Test
+    fun repeatedRejectedCachedPromotionReplaysStayRetryableUntilAcceptance() {
+        val f = fixture()
+        val coordinator = alignedCoordinator(f)
+
+        // Issue #1778 CI reopen: the pager-position write and the
+        // eligibility-token write are two snapshot writes, and whether Compose
+        // coalesces them into one measured frame is device timing. On the CI
+        // AVD they do NOT coalesce, so the SAME measured cached page is offered
+        // more than once while one continuous reveal hold is still rejecting.
+        // Every rejection must leave the key retryable: a rejection that
+        // consumed it would strand the #797 promotion forever once the hold
+        // clears, and a replay that stopped re-offering would do the same.
+        repeat(3) { replay ->
+            val rejected = coordinator.observe(f.observation(page = 1)).singleSettle()
+            assertEquals(
+                "replay $replay must re-offer the same measured cached key",
+                f.pages[1].key,
+                rejected.pageKey,
+            )
+            assertFalse(rejected.userDrivenFromAlignedTarget)
+            coordinator.onConfirmedSettleHandled(rejected, accepted = false)
+        }
+
+        val accepted = coordinator.observe(f.observation(page = 1)).singleSettle()
+        assertEquals(f.pages[1].key, accepted.pageKey)
+        coordinator.onConfirmedSettleHandled(accepted, accepted = true)
+
+        repeat(3) { replay ->
+            assertTrue(
+                "replay $replay after acceptance must stay deduped",
+                coordinator.observe(f.observation(page = 1)).isEmpty(),
+            )
+        }
+    }
+
+    @Test
     fun dragSnapBackRearmsTargetAlignment() {
         val f = fixture()
         val coordinator = alignedCoordinator(f)

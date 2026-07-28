@@ -160,10 +160,19 @@ class TmuxUnifiedPagerCoordinatorComposeTest {
         val acceptedPromotions = AtomicInteger(0)
         val initialAligned = AtomicBoolean(false)
         lateinit var heldState: MutableState<Boolean>
+        lateinit var replayNonce: MutableState<Int>
         lateinit var pagerState: PagerState
 
         compose.setContent {
             heldState = remember { mutableStateOf(false) }
+            // Issue #1778 CI reopen: production's settle-retry token is a
+            // composite (`UnifiedPagerSettleRetryToken`: terminalHeld PLUS the
+            // active page keys), so it can change while the reveal-hold
+            // eligibility does NOT. `replayNonce` is that second, non-hold
+            // dimension, controlled by the test so the frame-replay ordering
+            // this class must survive is injected deterministically instead of
+            // being left to device measure/apply timing (see below).
+            replayNonce = remember { mutableStateOf(0) }
             pagerState = rememberPagerState(pageCount = { initialPages.size })
             UnifiedPagerCoordinatorEffects(
                 pagerState = pagerState,
@@ -171,7 +180,10 @@ class TmuxUnifiedPagerCoordinatorComposeTest {
                 pages = initialPages,
                 sessionName = "A",
                 initialWindowIndex = null,
-                settleRetryToken = heldState.value,
+                settleRetryToken = HeldPromotionRetryToken(
+                    held = heldState.value,
+                    replay = replayNonce.value,
+                ),
             ) { _, page ->
                 if (page.key == initialPages[0].key) {
                     initialAligned.set(true)
@@ -206,24 +218,95 @@ class TmuxUnifiedPagerCoordinatorComposeTest {
             // promotes. The coordinator remains the only production writer.
             pagerState.requestScrollToPage(1)
         }
+        // The measured cached page must reach the production promotion
+        // predicate while the hold owns the surface, and must be rejected.
+        //
+        // How MANY times it is offered under one continuous hold is NOT a
+        // coordinator invariant, and pinning that count is exactly what turned
+        // `main` red (#1778 CI reopen, run 30323508796). The pager-position
+        // write and the settle-retry-token write are two snapshot writes, and
+        // whether Compose coalesces them into ONE measured `snapshotFlow` frame
+        // is device measure/apply timing, observed both ways on real devices:
+        //
+        //   dev-box AVD : Frame(page=1,key=null,token=held-false) -> no action
+        //                 Frame(page=1,key=B,   token=held-true)  -> 1 offer
+        //   CI AVD      : Frame(page=1,key=B,   token=held-false) -> 1 offer
+        //                 Frame(page=1,key=B,   token=held-true)  -> 2nd offer
+        //
+        // Both are correct: the retry token exists precisely so a replayed
+        // measured frame re-reaches the predicate when the token changes, and
+        // the production token also carries the active page keys, which change
+        // independently of the hold. So this test does NOT wait for the device
+        // to produce the multi-offer ordering — it injects it (`replayNonce`)
+        // and HARD-waits for it, the #780 synthetic-state model. The durable
+        // contracts are the three asserted below: never promoted through a
+        // hold, retried exactly once when the hold clears, and permanently
+        // deduped by acceptance.
         compose.waitUntil(timeoutMillis = 5_000) {
-            pagerState.settledPage == 1 && cachedAttempts == listOf(true)
+            pagerState.settledPage == 1 && cachedAttempts.isNotEmpty()
         }
-        assertEquals(0, acceptedPromotions.get())
+        compose.waitForIdle()
 
+        // Inject the CI ordering: replay the SAME measured pager frame under
+        // the SAME hold. A rejected key must stay retryable across that replay
+        // — a rejection that consumed it would strand the #797 promotion once
+        // the hold clears, and a replay that stopped re-offering would too.
+        var attemptsBeforeReplay = 0
+        compose.runOnIdle {
+            attemptsBeforeReplay = cachedAttempts.size
+            replayNonce.value += 1
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            cachedAttempts.size > attemptsBeforeReplay
+        }
+        compose.waitForIdle()
+
+        var attemptsUnderHold = 0
+        compose.runOnIdle {
+            assertTrue(
+                "every promotion offered under the hold must observe the hold",
+                cachedAttempts.isNotEmpty() && cachedAttempts.all { it },
+            )
+            assertEquals(
+                "the reveal hold must never be promoted through",
+                0,
+                acceptedPromotions.get(),
+            )
+            attemptsUnderHold = cachedAttempts.size
+            heldState.value = false
+        }
+
+        compose.waitUntil(timeoutMillis = 5_000) { acceptedPromotions.get() == 1 }
+        compose.runOnIdle {
+            assertEquals(
+                "clearing the hold must retry the rejected key exactly once",
+                listOf(false),
+                cachedAttempts.drop(attemptsUnderHold),
+            )
+        }
+
+        // Further eligibility changes AND pure frame replays both re-drive the
+        // measured pager frame, but acceptance — and only acceptance —
+        // permanently dedupes this measured B key.
+        var attemptsAfterAcceptance = 0
+        compose.runOnIdle {
+            attemptsAfterAcceptance = cachedAttempts.size
+            heldState.value = true
+        }
         compose.runOnIdle { heldState.value = false }
-        compose.waitUntil(timeoutMillis = 5_000) {
-            cachedAttempts == listOf(true, false) &&
-                acceptedPromotions.get() == 1
-        }
-
-        // Further eligibility changes replay the pager frame but acceptance,
-        // and only acceptance, permanently dedupes this measured B key.
         compose.runOnIdle { heldState.value = true }
         compose.runOnIdle { heldState.value = false }
+        compose.runOnIdle { replayNonce.value += 1 }
+        compose.runOnIdle { replayNonce.value += 1 }
         compose.waitForIdle()
-        assertEquals(listOf(true, false), cachedAttempts.toList())
-        assertEquals(1, acceptedPromotions.get())
+        compose.runOnIdle {
+            assertEquals(
+                "acceptance must permanently dedupe the measured cached key",
+                attemptsAfterAcceptance,
+                cachedAttempts.size,
+            )
+            assertEquals(1, acceptedPromotions.get())
+        }
     }
 
     @Test
@@ -564,6 +647,17 @@ class TmuxUnifiedPagerCoordinatorComposeTest {
             assertTrue(confirmedKeys.none { it == initialPages[0].key })
         }
     }
+
+    /**
+     * Issue #1778: the shape of the production settle-retry token — the reveal
+     * hold PLUS a second dimension that changes independently of it (production
+     * carries the active page keys there). `replay` lets this test replay one
+     * measured pager frame with the hold unchanged.
+     */
+    private data class HeldPromotionRetryToken(
+        val held: Boolean,
+        val replay: Int,
+    )
 
     private data class PageSpec(
         val sessionName: String,

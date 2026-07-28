@@ -390,6 +390,20 @@ Minimum pre-push gate:
   and it was only caught when an unrelated PR's rebase compiled the androidTest
   set. When you privatize/rename/remove any API, grep the `androidTest` tree for
   callers and compile that source set before merge.
+- **A NEW journey/connected test wired into `scripts/ci-journey-suite.sh` in the
+  SAME commit has never executed on CI before merge — compiling it is not
+  running it (2026-07-28).** The per-PR required checks compile `main` + unit
+  `test` only; the journey suite runs in the batched `main` emulator job. So a
+  test that is both *added* and *registered* in one commit gets its first-ever
+  CI execution **after** it has already landed, and any behaviour that differs
+  under swiftshader frame timing (Compose `waitUntil`, IME, drag/fling, cold
+  boot) surfaces as a red `main`. #1778's new
+  `TmuxUnifiedPagerCoordinatorComposeTest` did exactly this: the orchestrator's
+  pre-merge `:app:compileDebugAndroidTestKotlin` passed, and the class then
+  failed 2/2 on shard 2 at its first CI run. **Run any newly-registered journey
+  class on a real emulator before merge** — `scripts/connected-test.sh --suffix
+  i<issue> <gradle args>` — not just the local unit gate. Compiling proves it
+  links; only running proves it passes.
 - **For connection-core transport/storm/reconnect/lease fixes, an OBSERVED
   headless real-transport reproduction (JVM + Docker/toxiproxy
   `:shared:core-ssh:integrationTest`) is first-class D33 proof (D34); the

@@ -15,6 +15,19 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
 
+    /**
+     * Issue #1778: the pager hands the ViewModel the IMMUTABLE owner of the
+     * measured page, not a numeric index into a list that republishes
+     * independently. These fixtures resolve the owner the same way the
+     * production page model does.
+     */
+    private fun TmuxSessionViewModel.settleOn(pane: TmuxPaneState) {
+        val sessionName = sessionNameForUnifiedPane(pane) ?: return
+        onUnifiedPageSettled(
+            UnifiedPagerSettledPage(paneId = pane.paneId, sessionName = sessionName),
+        )
+    }
+
     private fun unifiedTestPane(
         paneId: String,
         windowId: String = "@0",
@@ -153,8 +166,8 @@ class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
 
         // Settling on either real page must NOT emit a switch request - both
         // belong to the active "work" session.
-        vm.onUnifiedPageSettled(0)
-        vm.onUnifiedPageSettled(1)
+        vm.settleOn(unified[0])
+        vm.settleOn(unified[1])
         advanceUntilIdle()
     }
 
@@ -224,8 +237,8 @@ class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
 
         // Settling on the active "work" pages must NOT emit a switch - if it
         // did, firstSwitch would resolve to "work" instead of "deploy".
-        vm.onUnifiedPageSettled(0)
-        vm.onUnifiedPageSettled(1)
+        vm.settleOn(unified[0])
+        vm.settleOn(unified[1])
         advanceUntilIdle()
         assertTrue(
             "settling on active-session pages must not switch yet",
@@ -234,7 +247,7 @@ class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
 
         // Settling on the deploy page switches to "deploy" - the CORRECT
         // session, never the foreign/random twin.
-        vm.onUnifiedPageSettled(2)
+        vm.settleOn(deployPane)
         advanceUntilIdle()
         assertEquals("deploy", firstSwitch.await())
     }

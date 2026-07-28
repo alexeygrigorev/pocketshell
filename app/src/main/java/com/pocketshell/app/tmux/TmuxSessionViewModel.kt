@@ -674,13 +674,17 @@ public class TmuxSessionViewModel @Inject constructor(
      * Issue #626: called by the Screen when the unified pager settles on a
      * page. If the pane belongs to a different session, emit a
      * [sessionSwitchRequest] so the Screen triggers a warm switch.
+     *
+     * Issue #1778: [settled] is the IMMUTABLE owner the pager coordinator
+     * measured and confirmed, never a numeric page index. [_unifiedPanes]
+     * republishes independently of the Compose snapshot that was measured, so
+     * re-resolving an index here silently swallowed or mis-routed a completed
+     * swipe. There is no index path left (D22 hard cut).
      */
-    public fun onUnifiedPageSettled(pageIndex: Int) {
-        val pane = _unifiedPanes.value.getOrNull(pageIndex) ?: return
+    internal fun onUnifiedPageSettled(settled: UnifiedPagerSettledPage) {
         val active = activeTarget ?: return
-        // Check if this pane belongs to a different session
-        val paneSessionName = sessionNameForUnifiedPane(pane)
-        if (paneSessionName == null || paneSessionName == active.sessionName) return
+        val paneSessionName = settled.sessionName
+        if (paneSessionName == active.sessionName) return
         // Issue #661 / #634 / #636: suppress a settle-driven auto-switch that
         // would yank the user back to the session they are LEAVING while a
         // deliberate connect to a DIFFERENT session is still in flight. The

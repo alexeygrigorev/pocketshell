@@ -95,7 +95,7 @@ private fun SessionBoundaryDivider(sessionName: String) {
  */
 @Composable
 internal fun TmuxTerminalPager(
-    unifiedPanes: List<TmuxPaneState>,
+    pages: List<UnifiedPagerPage>,
     pagerState: PagerState,
     sessionName: String,
     terminalKeyboardMode: TerminalKeyboardMode,
@@ -111,7 +111,6 @@ internal fun TmuxTerminalPager(
     // the default agent view), so the raw Terminal tab is render-only for an agent
     // pane. A shell / non-agent pane keeps full tappability (the flag is false).
     isAgentPane: Boolean,
-    sessionNameForUnifiedPane: (TmuxPaneState) -> String?,
     onTerminalSizeChanged: (columns: Int, rows: Int) -> Unit,
     onSurfaceError: (paneId: String, cause: Throwable) -> Unit,
     onRecreateSurface: (paneId: String) -> Unit,
@@ -125,12 +124,27 @@ internal fun TmuxTerminalPager(
     TmuxTerminalPagerRecompositionProbe.Record()
     HorizontalPager(
         state = pagerState,
-        key = { pageIndex -> unifiedPanes[pageIndex].paneId },
-        modifier = Modifier.fillMaxSize(),
+        // Issue #1778: pane IDs are reusable. The exact composite key observed
+        // by the coordinator is also the key Foundation measures/retains.
+        // Foundation may ask its retained nearest-range provider for one old
+        // index during a list shrink. Give that transient slot a unique,
+        // saveable placeholder instead of indexing past the new snapshot.
+        key = { pageIndex ->
+            pages.getOrNull(pageIndex)?.key?.saveableValue
+                ?: "ps-pager-removed:$pageIndex"
+        },
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag(TMUX_UNIFIED_TERMINAL_PAGER_TAG),
     ) { pageIndex ->
-        val pane = unifiedPanes[pageIndex]
+        val page = pages.getOrNull(pageIndex)
+        if (page == null) {
+            SessionSurfaceMaskPlaceholder()
+            return@HorizontalPager
+        }
+        val pane = page.pane
         // Issue #626: compute session boundary per-page.
-        val paneSession = sessionNameForUnifiedPane(pane)
+        val paneSession = page.owner.sessionName
         // EPIC #687 P1 (#686/#658): the rendered screen is keyed
         // STRICTLY to the target session id — a pane belonging to ANY
         // non-target session must never paint its terminal surface OR
@@ -143,16 +157,16 @@ internal fun TmuxTerminalPager(
         // screen-level overlay owns that connection chrome. A labelled loader
         // here was measured inside the pager's shorter/unbounded geometry and
         // jumped to the screen centre when the surface hold took over.
-        val paneIsForTarget = paneSession == null ||
-            paneSession == sessionName
+        val paneIsForTarget = paneSession == sessionName
         if (!paneIsForTarget) {
             SessionSurfaceMaskPlaceholder()
             return@HorizontalPager
         }
-        val prevSession = unifiedPanes.getOrNull(pageIndex - 1)
-            ?.let { sessionNameForUnifiedPane(it) }
+        val prevSession = pages.getOrNull(pageIndex - 1)
+            ?.owner
+            ?.sessionName
         val boundarySession = paneSession
-            ?.takeIf { it != prevSession && it != sessionName }
+            .takeIf { it != prevSession && it != sessionName }
         // Issue #626: session boundary marker above the
         // terminal surface for the first pane of a different
         // session.
@@ -230,6 +244,14 @@ internal fun TmuxTerminalPager(
         }
     }
 }
+
+/**
+ * The production cross-session/window terminal pager. Kept distinct from
+ * [TMUX_SESSION_PAGER_TAG], which belongs to the swipe-down session-picker
+ * overlay and does not exercise this pager's measured-key ownership.
+ */
+internal const val TMUX_UNIFIED_TERMINAL_PAGER_TAG =
+    "tmux:unified-terminal-pager"
 
 /**
  * Issue #423: actionable terminal-surface error state. Shown when the local

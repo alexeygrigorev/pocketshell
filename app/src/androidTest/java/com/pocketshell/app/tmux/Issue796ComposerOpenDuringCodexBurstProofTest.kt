@@ -297,7 +297,17 @@ class Issue796ComposerOpenDuringCodexBurstProofTest {
         composerOpen: () -> Boolean,
     ) {
         val pagerState = rememberPagerState(pageCount = { panes.size })
-        val sessionNameForUnifiedPane: (TmuxPaneState) -> String? = remember { { null } }
+        val pages = remember(panes) {
+            unifiedPagerPages(
+                panes = panes,
+                targetEpoch = UnifiedPagerTargetEpoch(
+                    com.pocketshell.core.connection.SessionId("codex"),
+                    1L,
+                ),
+                targetSessionName = "codex",
+                sessionNameForPane = { null },
+            )
+        }
         val onTerminalSizeChanged: (Int, Int) -> Unit = remember { { _, _ -> } }
         val onSurfaceError: (String, Throwable) -> Unit = remember { { _, _ -> } }
         val onRecreateSurface: (String) -> Unit = remember { { } }
@@ -313,7 +323,7 @@ class Issue796ComposerOpenDuringCodexBurstProofTest {
 
         Column(modifier = Modifier.fillMaxSize()) {
             TmuxTerminalPager(
-                unifiedPanes = panes,
+                pages = pages,
                 pagerState = pagerState,
                 sessionName = "codex",
                 terminalKeyboardMode = TerminalKeyboardMode.RawCommand,
@@ -322,7 +332,6 @@ class Issue796ComposerOpenDuringCodexBurstProofTest {
                 // skips the per-frame viewport scanners for it. A stable Boolean,
                 // so the pager stays skippable (the H3 property under test).
                 isAgentPane = true,
-                sessionNameForUnifiedPane = sessionNameForUnifiedPane,
                 onTerminalSizeChanged = onTerminalSizeChanged,
                 onSurfaceError = onSurfaceError,
                 onRecreateSurface = onRecreateSurface,

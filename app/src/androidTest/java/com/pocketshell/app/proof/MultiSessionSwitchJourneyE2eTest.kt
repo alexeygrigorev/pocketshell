@@ -8,6 +8,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -16,6 +17,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeWithVelocity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
@@ -37,6 +40,7 @@ import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_PROJECT_SWITCHER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_UNIFIED_TERMINAL_PAGER_TAG
 import com.pocketshell.app.tmux.CachedTmuxRuntime
 import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
 import com.pocketshell.app.tmux.TmuxSessionViewModel
@@ -121,9 +125,11 @@ import java.io.FileOutputStream
  *
  * Shape notes (mirroring [TmuxSessionSwitchE2eTest] / #151 and
  * [TmuxSessionSwitchSameHostReusesSshE2eTest] / #178):
- *  - We drive the switch from the More menu -> "Switch session" drawer and a
- *    named-session pager-page click, hitting the same `showSessionDrawer`
- *    production path the user uses, instead of a flaky `pointerInput` swipe.
+ *  - The legacy ring methods use deterministic Back + named-session taps,
+ *    hitting the same `showSessionDrawer` production path the user uses.
+ *    [unifiedTerminalPagerSwipeToAdjacentCachedSessionSwitchesExactlyOnce]
+ *    deliberately adds the missing real gesture on the production terminal
+ *    pager once A is cached beside B (#1778).
  *  - The three sessions are seeded fresh every run via a sidecar SSH exec so
  *    the test is hermetic against earlier runs and sibling tests.
  *  - Content is matched with [TerminalTextMatcher.containsWrapTolerant] because
@@ -321,6 +327,126 @@ class MultiSessionSwitchJourneyE2eTest {
                 "switches_asserted=${ring.size}",
                 "expectation=each switch shows correct (non-stale) content, no Disconnected band, " +
                     "pane re-seeded, no spurious SSH re-dial, input routed to shown session",
+            ),
+        )
+        writeTimings()
+        Unit
+    } }
+
+    /**
+     * Issue #1778 — true connected unified-terminal-pager adjacency.
+     *
+     * The long-standing multi-session journey above intentionally switches by
+     * Back + named-row tap for deterministic target selection. That does not
+     * touch [com.pocketshell.app.tmux.TmuxTerminalPager]: the older
+     * [com.pocketshell.app.tmux.TMUX_SESSION_PAGER_TAG] swipe journey likewise
+     * drives the separate swipe-down picker overlay. This method first visits
+     * A then B so A is a real adjacent cached page in B's production terminal
+     * pager, performs one physical leftward swipe on that pager, and proves
+     * that exactly one logical switch lands on A with A's visible terminal and
+     * input ownership.
+     */
+    @Test
+    fun unifiedTerminalPagerSwipeToAdjacentCachedSessionSwitchesExactlyOnce() { runBlocking {
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady(hostRowTag)
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalContains(SESSION_A_MARKER, "issue1778 initial attach to A")
+
+        expectedMarker[SESSION_A] = SESSION_A_MARKER
+        expectedMarker[SESSION_B] = SESSION_B_MARKER
+        expectedMarker[SESSION_C] = SESSION_C_MARKER
+        assertInputRoutesToShownSession(SESSION_A, "issue1778 initial A")
+
+        // Visit B through the existing deterministic path. Once B is active,
+        // the warm runtime cache contributes A as the adjacent unified page:
+        // [B, A, ...]. The next gesture therefore exercises the real terminal
+        // pager's cross-session settle path, not a picker proxy.
+        switchAndAssert(
+            step = 1,
+            fromSession = SESSION_A,
+            toSession = SESSION_B,
+        )
+        val markerA = requireNotNull(expectedMarker[SESSION_A])
+        val markerB = requireNotNull(expectedMarker[SESSION_B])
+        val tmuxConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
+        val reconnectTriggerBefore = reconnectTriggerConnectCount()
+        val swipeAt = SystemClock.elapsedRealtime()
+
+        compose.onNodeWithTag(
+            TMUX_UNIFIED_TERMINAL_PAGER_TAG,
+            useUnmergedTree = true,
+        ).performTouchInput {
+            swipeWithVelocity(
+                start = Offset(right - UNIFIED_PAGER_EDGE_INSET_PX, centerY),
+                end = Offset(left + UNIFIED_PAGER_EDGE_INSET_PX, centerY),
+                endVelocity = UNIFIED_PAGER_SWIPE_VELOCITY,
+                durationMillis = UNIFIED_PAGER_SWIPE_DURATION_MS,
+            )
+        }
+
+        waitForTmuxConnectCountAbove(tmuxConnectBefore)
+        waitForTerminalContains(markerA, "issue1778 unified pager swipe B to A")
+        waitForTerminalViewAttached()
+        val connectDelta = TMUX_CONNECT_ATTEMPTS.get() - tmuxConnectBefore
+        val visibleAfterSwipe = visibleTerminalText()
+        recordTiming(
+            "issue1778_unified_pager_swipe_ms",
+            SystemClock.elapsedRealtime() - swipeAt,
+        )
+        recordTiming("issue1778_unified_pager_switch_count", connectDelta.toLong())
+        captureViewport("issue1778-unified-pager-swiped-to-$SESSION_A")
+
+        assertEquals(
+            "one physical unified-terminal-pager swipe must emit exactly one " +
+                "logical tmux session switch",
+            1,
+            connectDelta,
+        )
+        assertTrue(
+            "the unified terminal pager must show adjacent cached A after the swipe",
+            TerminalTextMatcher.containsWrapTolerant(
+                visibleAfterSwipe,
+                markerA,
+                terminalCols = terminalGridSize().columns,
+            ),
+        )
+        assertFalse(
+            "the settled A page must not retain B's stale terminal content",
+            TerminalTextMatcher.containsWrapTolerant(
+                visibleAfterSwipe,
+                markerB,
+                terminalCols = terminalGridSize().columns,
+            ),
+        )
+        assertEquals(
+            "a user pager swipe must not enter an app-reconnect path",
+            reconnectTriggerBefore,
+            reconnectTriggerConnectCount(),
+        )
+        assertHeaderShowsSession(
+            step = 2,
+            fromSession = SESSION_B,
+            toSession = SESSION_A,
+        )
+        assertNoDisconnectBand("issue1778 unified pager swipe to A")
+        assertNoBrokenTransportText(
+            "issue1778 unified pager swipe to A",
+            visibleAfterSwipe,
+        )
+        assertInputRoutesToShownSession(SESSION_A, "issue1778 unified pager")
+
+        writeSummary(
+            lines = listOf(
+                "journey=A -> B by named switch -> A by real unified terminal pager swipe",
+                "unified_pager_switches=$connectDelta",
+                "visible_target=$SESSION_A",
+                "stale_source_absent=$SESSION_B",
+                "input_routed_to=$SESSION_A",
             ),
         )
         writeTimings()
@@ -2125,6 +2251,14 @@ class MultiSessionSwitchJourneyE2eTest {
         // emulator settle still lands deterministically rather than failing the
         // whole journey on one slow switch.
         const val SWITCH_DEADLINE_MS: Long = 60_000L
+
+        // Issue #1778: physical gesture parameters for the production unified
+        // terminal pager. The inset avoids the system back edge; a bounded
+        // multi-frame fling makes Foundation publish real Drag Start/Stop and
+        // settle exactly one adjacent page on the Pixel-7 CI viewport.
+        const val UNIFIED_PAGER_EDGE_INSET_PX: Float = 48f
+        const val UNIFIED_PAGER_SWIPE_VELOCITY: Float = 1_500f
+        const val UNIFIED_PAGER_SWIPE_DURATION_MS: Long = 400L
 
         // The connect-attempt trigger values that mean an APP-initiated
         // reconnect (as opposed to a user-tap / fast-switch). Any of these

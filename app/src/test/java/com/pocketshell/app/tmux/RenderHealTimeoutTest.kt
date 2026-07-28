@@ -28,6 +28,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -194,6 +195,69 @@ class RenderHealTimeoutTest {
         advanceUntilIdle()
         h1.cancel()
         h2.cancel()
+    }
+
+    // -------------------------------------------------------------------------
+    // (3) Issue #1516 — the capture bound must COMPOSE with the #1494 budgets.
+    // -------------------------------------------------------------------------
+
+    @Test
+    fun healCaptureBoundComposesUnderTheWatchdogTickAndTheHeldTooLongReset() {
+        // Issue #1516 acceptance: the exec-lane capture bound (now a REAL caller
+        // deadline — see `TmuxExecLane.runBoundedExecLane`) has to sit strictly
+        // UNDER the #1494 per-tick ceiling, which in turn sits under the per-pane
+        // single-flight force-reset. Otherwise a wedged capture is abandoned by the
+        // tick (scored Unverified with no result) instead of returning its own
+        // definite failure inside the tick.
+        assertTrue(
+            "the exec-lane capture bound (${SEED_CAPTURE_TIMEOUT_MS}ms) must be strictly under " +
+                "the #1494 watchdog tick (${RENDER_HEAL_WATCHDOG_TICK_TIMEOUT_MS}ms)",
+            SEED_CAPTURE_TIMEOUT_MS < RENDER_HEAL_WATCHDOG_TICK_TIMEOUT_MS,
+        )
+        assertTrue(
+            "the #1494 watchdog tick (${RENDER_HEAL_WATCHDOG_TICK_TIMEOUT_MS}ms) must be strictly " +
+                "under the per-pane held-too-long force-reset " +
+                "(${RenderHealCoordinator.HELD_TOO_LONG_MS}ms)",
+            RENDER_HEAL_WATCHDOG_TICK_TIMEOUT_MS < RenderHealCoordinator.HELD_TOO_LONG_MS,
+        )
+    }
+
+    @Test
+    fun bothRenderHealCaptureSitesCarryTheBoundedSeedCeiling() = runVmTest {
+        // Issue #1516 / G9: the bound is only real if BOTH render-heal capture
+        // sites actually hand it to the exec lane — the oracle-gated heal AND the
+        // force-mode reattach reseed (the latter is NOT wrapped by #1494's tick at
+        // all, so it depends entirely on this bound).
+        val client = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        val vm = connectVm(client)
+        val pane = vm.panes.value.single { it.paneId == "%1" }
+        vm.resizeRemotePty(80, 40)
+        advanceUntilIdle()
+        pane.terminalState.appendRemoteOutput(
+            (CLEAR_ONLY + "ISSUE1516-LIVE-LINE 7\r\n").toByteArray(Charsets.US_ASCII),
+        )
+        advanceUntilIdle()
+        assertTrue("precondition: the render looks suspect so the heal reseeds", pane.terminalState.renderLooksSuspect())
+
+        // Site 1 — the oracle-gated stale-render heal.
+        client.lastCaptureTimeoutMs = null
+        vm.healActivePaneIfStaleRenderForTest()
+        advanceUntilIdle()
+        assertEquals(
+            "the oracle-gated heal capture must carry the bounded seed ceiling",
+            SEED_CAPTURE_TIMEOUT_MS,
+            client.lastCaptureTimeoutMs,
+        )
+
+        // Site 2 — the force-mode reattach reseed.
+        client.lastCaptureTimeoutMs = null
+        vm.reseedActivePaneForReattachForTest(vm.currentRuntimeGuardForTest())
+        advanceUntilIdle()
+        assertEquals(
+            "the force-mode reattach reseed capture must carry the bounded seed ceiling",
+            SEED_CAPTURE_TIMEOUT_MS,
+            client.lastCaptureTimeoutMs,
+        )
     }
 
     // ------------------------------------------------------------------ Frames

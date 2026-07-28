@@ -8,11 +8,14 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
@@ -32,6 +35,27 @@ import java.nio.charset.StandardCharsets
 import java.util.Collections
 
 private const val ASYNC_AWAIT_TIMEOUT_MS = 15_000L
+
+/**
+ * Issue #1516 — the caller-visible bound handed to an exec-lane call in the
+ * wedged-teardown tests. Short so the tests stay fast; the production render-heal
+ * value is `SEED_CAPTURE_TIMEOUT_MS` = 2 500 ms.
+ */
+private const val SHORT_BOUND_MS = 300L
+
+/**
+ * Issue #1516 — how long the modelled `NonCancellable` channel-close teardown
+ * wedges after the read is cancelled. Production's equivalent is the transport
+ * dispatcher's 8 s per-op wall-clock ceiling on a half-open socket.
+ */
+private const val WEDGED_TEARDOWN_MS = 3_000L
+
+/**
+ * Issue #1516 — the load-bearing ceiling: comfortably above [SHORT_BOUND_MS] plus
+ * scheduling slack on a contended box, and far below [WEDGED_TEARDOWN_MS], so the
+ * assertion is red exactly when the caller waits for the teardown tail.
+ */
+private const val BOUND_ASSERT_CEILING_MS = 1_000L
 
 class TmuxClientExecLaneTest {
 
@@ -960,6 +984,196 @@ class TmuxClientExecLaneTest {
             wedger.cancel()
         } finally {
             client.close()
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #1516 — the exec-lane BOUND was not a bound.
+    //
+    // Every exec-lane call was `withTimeoutOrNull(bound) { session.exec(cmd) }`,
+    // i.e. a STRUCTURED CHILD. `withTimeoutOrNull` cancels its child and then
+    // cannot return until the child has fully completed — and
+    // `RealSshSession.exec`'s `finally` closes the exec channel under
+    // `withContext(NonCancellable)` through the single-writer TransportDispatcher,
+    // whose per-op wall-clock ceiling is 8 s. On a genuinely half-open socket
+    // (no FIN/RST) that close never gets an answer, so the "2.5 s" render-heal
+    // capture parked its caller for bound + 8 s.
+    //
+    // Measured on the REAL transport (Docker sshd behind a paused in-JVM TCP
+    // relay): 10 506 ms for the render-heal-shaped call — 4x its nominal bound
+    // and 2.6x the #1494 4 s watchdog tick it must sit under. See the
+    // `Issue1516HealCaptureHalfOpenBoundIntegrationTest` Docker proof; these JVM
+    // tests pin the same mechanism per lane in the per-PR Unit gate.
+    //
+    // [wedgedTeardownExecHandler] models exactly that shape: the read parks until
+    // the caller's bound cancels it (production: `runInterruptible` interrupts the
+    // blocking JDK read), and only THEN does a NonCancellable teardown run for a
+    // long time. It is NOT the older `CompletableDeferred.await()` proxy, whose
+    // cancellation is free and therefore cannot reproduce the reported park.
+    // ---------------------------------------------------------------------
+
+    @Test
+    fun `issue1516 heal capture returns a definite failure within its own bound when the exec teardown wedges`() =
+        runBlocking {
+            val shell = FakeShell()
+            val wedge = WedgedTeardownExec(teardownMs = WEDGED_TEARDOWN_MS)
+            val session = FakeSession(shell, execHandler = wedge.handler())
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                val startedAtMs = System.currentTimeMillis()
+                val thrown = runCatching {
+                    client.captureWithCursor("%3", scrollbackLines = 200, timeoutMs = SHORT_BOUND_MS)
+                }.exceptionOrNull()
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+
+                // Non-vacuity: this capture really reached the exec lane and parked
+                // there, so the elapsed time below is this call's own cost.
+                assertTrue(
+                    "the capture must have entered the exec lane (it did not park on the read)",
+                    wedge.entered.isCompleted,
+                )
+                assertTrue(
+                    "a wedged heal capture must surface a DEFINITE TmuxClientException failure, " +
+                        "never a hang or a silent success (was $thrown)",
+                    thrown is TmuxClientException,
+                )
+                // LOAD-BEARING (#1516): the caller must be freed by ITS OWN bound, not
+                // by the exec's NonCancellable channel-teardown tail.
+                assertTrue(
+                    "the heal capture must return by its own ${SHORT_BOUND_MS}ms bound, not after " +
+                        "the wedged NonCancellable channel teardown (${WEDGED_TEARDOWN_MS}ms). " +
+                        "elapsed=${elapsedMs}ms",
+                    elapsedMs < BOUND_ASSERT_CEILING_MS,
+                )
+                // Resource reclamation (the read/exec-drain-permit half): cancelling at
+                // the bound is what unparks the blocking read in production, and it
+                // happens AT the bound in both the broken and fixed shapes — which is
+                // precisely why #1516 needs no extra per-call read watchdog.
+                // The exec now unwinds OFF the caller, so poll (bounded, hard-failing)
+                // for the cancellation to reach the parked read.
+                assertTrue(
+                    "the parked exec read must be unparked by the cancellation the bound raised",
+                    withTimeoutOrNull(ASYNC_AWAIT_TIMEOUT_MS) {
+                        while (wedge.readUnparkedAtMs.get() < 0L) delay(10)
+                        true
+                    } == true,
+                )
+                val unparkedAfterMs = wedge.readUnparkedAtMs.get() - startedAtMs
+                assertTrue(
+                    "the parked exec read must be unparked at the bound, not deferred to the " +
+                        "teardown tail (was ${unparkedAfterMs}ms)",
+                    unparkedAfterMs in 0 until BOUND_ASSERT_CEILING_MS,
+                )
+                // No orphan: the detached teardown still runs to completion off-caller.
+                assertTrue(
+                    "the detached exec teardown must still complete after the caller was freed",
+                    withTimeoutOrNull(ASYNC_AWAIT_TIMEOUT_MS) { wedge.teardownDone.await() } != null,
+                )
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `issue1516 every exec lane bound is enforced when the exec teardown wedges`() = runBlocking {
+        // Class coverage (G2): the broken `withTimeoutOrNull { session.exec }` shape
+        // was duplicated at EVERY exec-lane call site, so the fix must hold for the
+        // whole class, not only the render-heal capture the issue reported.
+        val lanes: List<Pair<String, suspend (TmuxClient) -> Unit>> = listOf(
+            "captureWithCursor" to { c ->
+                c.captureWithCursor("%3", scrollbackLines = 200, timeoutMs = SHORT_BOUND_MS)
+                Unit
+            },
+            "capturePaneTextViaExec" to { c ->
+                c.capturePaneTextViaExec("%3", timeoutMs = SHORT_BOUND_MS)
+                Unit
+            },
+            "listPanesViaExec" to { c ->
+                c.listPanesViaExec("list-panes -a -F x", timeoutMs = SHORT_BOUND_MS)
+                Unit
+            },
+            "sendKeysViaExec" to { c ->
+                c.sendKeysViaExec("send-keys -l -t %0 -- 'hi'", timeoutMs = SHORT_BOUND_MS)
+                Unit
+            },
+            "sendLifecycleViaExec" to { c ->
+                c.sendLifecycleViaExec("list-sessions -F x", timeoutMs = SHORT_BOUND_MS)
+                Unit
+            },
+        )
+        for ((lane, call) in lanes) {
+            val shell = FakeShell()
+            val wedge = WedgedTeardownExec(teardownMs = WEDGED_TEARDOWN_MS)
+            val session = FakeSession(shell, execHandler = wedge.handler())
+            val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+            try {
+                client.connect()
+                val startedAtMs = System.currentTimeMillis()
+                val thrown = runCatching { call(client) }.exceptionOrNull()
+                val elapsedMs = System.currentTimeMillis() - startedAtMs
+                assertTrue("$lane must have entered the exec lane", wedge.entered.isCompleted)
+                assertTrue(
+                    "$lane must surface a definite TmuxClientException (was $thrown)",
+                    thrown is TmuxClientException,
+                )
+                assertTrue(
+                    "$lane must return by its own ${SHORT_BOUND_MS}ms bound, not after the wedged " +
+                        "NonCancellable teardown (${WEDGED_TEARDOWN_MS}ms). elapsed=${elapsedMs}ms",
+                    elapsedMs < BOUND_ASSERT_CEILING_MS,
+                )
+            } finally {
+                client.close()
+            }
+        }
+    }
+
+    @Test
+    fun `issue1516 a healthy exec still returns its result through the bounded lane`() = runBlocking {
+        // The ownership change must not break the success path: a normal capture
+        // still resolves through the bound and returns real content.
+        val shell = FakeShell()
+        val session = FakeSession(
+            shell,
+            execHandler = healExecHandler(cursor = "7,3", captureLines = listOf("alive")),
+        )
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 30_000L)
+        try {
+            client.connect()
+            val combined = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.captureWithCursor("%3", scrollbackLines = 200, timeoutMs = 2_500L)
+            }
+            assertFalse(combined.capture.isError)
+            assertEquals(listOf("alive"), combined.capture.output)
+            assertEquals("7,3", combined.cursorReply)
+        } finally {
+            client.close()
+        }
+    }
+
+    /**
+     * Issue #1516 — a `RealSshSession.exec` that models the MEASURED half-open
+     * production shape: the blocking read parks until the caller's bound cancels
+     * it, and only then does the channel-close teardown run under
+     * `NonCancellable` for a long wall-clock window (production: the transport
+     * dispatcher's 8 s per-op ceiling on a socket that never answers).
+     */
+    private class WedgedTeardownExec(private val teardownMs: Long) {
+        val entered = CompletableDeferred<Unit>()
+        val teardownDone = CompletableDeferred<Unit>()
+        val readUnparkedAtMs = java.util.concurrent.atomic.AtomicLong(-1L)
+
+        fun handler(): suspend (String) -> ExecResult = {
+            entered.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                readUnparkedAtMs.set(System.currentTimeMillis())
+                withContext(NonCancellable) {
+                    delay(teardownMs)
+                    teardownDone.complete(Unit)
+                }
+            }
         }
     }
 

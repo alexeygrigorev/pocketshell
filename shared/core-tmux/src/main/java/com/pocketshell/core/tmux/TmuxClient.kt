@@ -1257,14 +1257,11 @@ internal class RealTmuxClient(
         }
         val execResult =
             try {
-                // The exec lane is independent of the busy `-CC` channel, so this
-                // returns fast under a burst. The ceiling is the safety bound for
-                // a genuinely wedged/half-open transport (both channels dead);
-                // cancelling the exec closes its own channel (RealSshSession.exec
-                // cancellation handler), never the `-CC` shell.
-                withTimeoutOrNull(effectiveTimeoutMs) {
-                    session.exec(command)
-                }
+                // #1297: independent of the busy `-CC` channel, so this returns fast
+                // under a burst. #1516: [runBoundedExecLane] makes the ceiling a REAL
+                // caller deadline on a half-open transport, and still closes only this
+                // exec's own channel, never the `-CC` shell.
+                runBoundedExecLane(clientScope, session, command, effectiveTimeoutMs)
             } catch (t: Throwable) {
                 throw TmuxClientException(
                     "tmux heal capture exec failed for pane $paneId: ${t.message}",
@@ -1298,9 +1295,8 @@ internal class RealTmuxClient(
         else "tmux capture-pane -p -t $quotedPane"
         val execResult =
             try {
-                withTimeoutOrNull(effectiveTimeoutMs) {
-                    session.exec(command)
-                }
+                // Issue #1516: a REAL caller deadline (see [runBoundedExecLane]).
+                runBoundedExecLane(clientScope, session, command, effectiveTimeoutMs)
             } catch (t: Throwable) {
                 throw TmuxClientException(
                     "tmux text capture exec failed for pane $paneId: ${t.message}",
@@ -1352,13 +1348,10 @@ internal class RealTmuxClient(
         val command = "tmux $listPanesCommand"
         val execResult =
             try {
-                // Independent of the busy `-CC` channel, so this returns fast under
-                // a burst. The ceiling is the safety bound for a genuinely
-                // wedged/half-open transport; cancelling the exec closes its OWN
-                // channel (RealSshSession.exec cancellation handler), never `-CC`.
-                withTimeoutOrNull(effectiveTimeoutMs) {
-                    session.exec(command)
-                }
+                // Independent of the busy `-CC` channel (fast under a burst); #1516's
+                // [runBoundedExecLane] makes the ceiling a REAL caller deadline and
+                // closes only its OWN channel, never `-CC`.
+                runBoundedExecLane(clientScope, session, command, effectiveTimeoutMs)
             } catch (t: Throwable) {
                 throw TmuxClientException(
                     "tmux list-panes exec (attach reconcile lane) failed: ${t.message}",
@@ -1405,13 +1398,10 @@ internal class RealTmuxClient(
         val command = "tmux $sendKeysCommand"
         val execResult =
             try {
-                // Independent of the busy `-CC` channel, so this returns fast under
-                // a burst. The ceiling is the safety bound for a genuinely
-                // wedged/half-open transport; cancelling the exec closes its OWN
-                // channel (RealSshSession.exec cancellation handler), never `-CC`.
-                withTimeoutOrNull(effectiveTimeoutMs) {
-                    session.exec(command)
-                }
+                // Independent of the busy `-CC` channel (fast under a burst); #1516's
+                // [runBoundedExecLane] makes the ceiling a REAL caller deadline and
+                // closes only its OWN channel, never `-CC`.
+                runBoundedExecLane(clientScope, session, command, effectiveTimeoutMs)
             } catch (t: Throwable) {
                 throw TmuxClientException(
                     "tmux send-keys exec (interactive send lane) failed: ${t.message}",
@@ -1452,13 +1442,10 @@ internal class RealTmuxClient(
         val command = "tmux $sessionCommand"
         val execResult =
             try {
-                // Independent of the busy `-CC` channel, so this returns fast under
-                // a burst. The ceiling is the safety bound for a genuinely
-                // wedged/half-open transport; cancelling the exec closes its OWN
-                // channel (RealSshSession.exec cancellation handler), never `-CC`.
-                withTimeoutOrNull(effectiveTimeoutMs) {
-                    session.exec(command)
-                }
+                // Independent of the busy `-CC` channel (fast under a burst); #1516's
+                // [runBoundedExecLane] makes the ceiling a REAL caller deadline and
+                // closes only its OWN channel, never `-CC`.
+                runBoundedExecLane(clientScope, session, command, effectiveTimeoutMs)
             } catch (t: Throwable) {
                 throw TmuxClientException(
                     "tmux session-lifecycle exec (dashboard/rename lane) failed: ${t.message}",

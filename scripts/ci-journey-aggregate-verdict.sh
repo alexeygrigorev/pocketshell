@@ -13,10 +13,35 @@
 #   ci-journey-aggregate-verdict.sh [VERDICT_DIR]
 #     VERDICT_DIR  directory holding the downloaded per-shard verdict artifacts
 #                  (default: artifacts/ci-journey-verdicts). Each shard artifact
-#                  contributes a file whose contents are a single token:
-#                  CLEAN | INFRA | RED. Files may sit directly under VERDICT_DIR
-#                  or one level down (download-artifact per-shard subdirs) — any
-#                  regular file named `shard-verdict*.txt` (recursively) counts.
+#                  contributes a file whose FIRST non-empty line is the verdict
+#                  token — CLEAN | INFRA | RED — followed by `key=value`
+#                  provenance lines (`shard`, `run_id`, `run_attempt`,
+#                  `written_at`) written by
+#                  scripts/ci-journey-write-shard-verdict.sh. Files may sit
+#                  directly under VERDICT_DIR or one level down
+#                  (download-artifact per-shard subdirs) — any regular file
+#                  named `shard-verdict*.txt` (recursively) counts.
+#
+# Issue #1809 (G5 re-run provenance): a re-run of ONE shard leaves the shards
+# that were NOT re-run reporting their earlier attempt's token — that is
+# correct, but until now it was invisible, so nobody could tell a fresh re-run
+# verdict from a replay of stale tokens. Every token is therefore stamped with
+# its `run_attempt`, and this script PRINTS, per shard, which attempt its
+# verdict came from (and says so in the step summary). Two loud cases:
+#   * some tokens carried over from an earlier attempt -> ::notice naming them,
+#     so an on-call's "clean re-run" claim is backed by an artifact, not a
+#     memory of which button was pressed;
+#   * run_attempt > 1 and NOT ONE token is from this attempt -> ::warning: the
+#     aggregation job was re-run WITHOUT re-running any shard, so this verdict
+#     is a replay of unchanged data, not a re-run result. That is exactly the
+#     "confusing second red" the on-call hit: because the per-shard classify
+#     step is `continue-on-error`, a shard whose token is RED still finishes
+#     `success`, so GitHub's "Re-run failed jobs" used to re-run ONLY this
+#     aggregation job. The shard job now fails on a RED token (see tests.yml)
+#     so the standard re-run button re-runs the offending shard too, and this
+#     warning is the backstop that names the replay if it ever happens again.
+# Provenance NEVER changes the verdict — it is reporting only. The verdict is
+# still the honest rollup of the freshest token per shard.
 #   EXPECTED_SHARDS (env, optional) the number of shards that should have
 #                  reported. When set and fewer tokens are found, the missing
 #                  shards downgrade the verdict to at least RE-RUN (a missing
@@ -49,13 +74,53 @@ have_red=0
 have_unknown=0
 count=0
 tokens=()
+provenance=()
+carried_over=()
+fresh_tokens=0
+
+current_attempt="${GITHUB_RUN_ATTEMPT:-}"
+[[ "$current_attempt" =~ ^[0-9]+$ ]] || current_attempt=""
 
 if [[ -d "$verdict_dir" ]]; then
   while IFS= read -r -d '' f; do
-    raw="$(cat "$f" 2>/dev/null || true)"
+    # The verdict is the FIRST non-empty line; everything after it is the #1809
+    # `key=value` provenance stamp. Reading only line 1 is what keeps a stamped
+    # token from being mangled into an UNKNOWN (which would fail closed to RED).
+    raw="$(awk 'NF { print; exit }' "$f" 2>/dev/null || true)"
     # Normalise: strip whitespace, upper-case.
     token="$(printf '%s' "$raw" | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
     [[ -z "$token" ]] && token="UNKNOWN"
+
+    tok_shard="$(sed -n 's/^shard=//p' "$f" 2>/dev/null | head -n 1)"
+    tok_attempt="$(sed -n 's/^run_attempt=//p' "$f" 2>/dev/null | head -n 1)"
+    tok_run="$(sed -n 's/^run_id=//p' "$f" 2>/dev/null | head -n 1)"
+    if [[ -z "$tok_shard" ]]; then
+      # No stamp (a token from a job that died before the pre-seed, or a foreign
+      # artifact): fall back to the download-artifact per-shard subdir name.
+      dir_name="$(basename "$(dirname "$f")")"
+      case "$dir_name" in
+        *shard-*) tok_shard="${dir_name##*shard-}" ;;
+        *)        tok_shard="?" ;;
+      esac
+    fi
+    [[ -n "$tok_attempt" ]] || tok_attempt="?"
+    [[ -n "$tok_run" ]] || tok_run="?"
+
+    origin="attempt ${tok_attempt}"
+    if [[ -n "$current_attempt" && "$tok_attempt" =~ ^[0-9]+$ ]]; then
+      if (( tok_attempt == current_attempt )); then
+        origin="attempt ${tok_attempt} (this attempt)"
+        fresh_tokens=$((fresh_tokens + 1))
+      else
+        origin="attempt ${tok_attempt} (carried over; this run is on attempt ${current_attempt})"
+        carried_over+=("shard ${tok_shard}=${token} from attempt ${tok_attempt}")
+      fi
+    elif [[ "$tok_attempt" == "?" ]]; then
+      origin="attempt unknown (token carries no #1809 provenance stamp)"
+    fi
+
+    provenance+=("shard ${tok_shard}: ${token} — run ${tok_run}, ${origin}")
+
     count=$((count + 1))
     tokens+=("$token")
     case "$token" in
@@ -75,6 +140,26 @@ fi
 echo "per-shard verdict tokens found: ${count} ${tokens[*]:-<none>}"
 echo "  CLEAN=$have_clean  INFRA=$have_infra  RED=$have_red  UNKNOWN=$have_unknown  MISSING=$missing (expected ${expected_shards})"
 
+# Issue #1809: per-shard provenance, so a G5 "clean re-run" claim is backed by
+# the artifact rather than by which button someone remembers pressing.
+echo "verdict provenance (issue #1809; this run is on attempt ${current_attempt:-unknown}):"
+if (( count == 0 )); then
+  echo "  <no tokens>"
+else
+  for line in "${provenance[@]}"; do
+    echo "  $line"
+  done
+fi
+
+if (( ${#carried_over[@]} > 0 )); then
+  echo "::notice title=Emulator journey verdict — some shard verdicts carried over::${#carried_over[@]} shard verdict(s) come from an earlier attempt of this run (that shard was not re-run): ${carried_over[*]}. This is expected when a single shard is re-run; it is reported so the aggregate verdict's provenance is auditable (issue #1809, G5)."
+fi
+
+# The replay backstop: the aggregation job was re-run but not one shard was.
+if [[ -n "$current_attempt" ]] && (( current_attempt > 1 && count > 0 && fresh_tokens == 0 )); then
+  echo "::warning title=Emulator journey verdict — REPLAY, no shard was re-run::This is attempt ${current_attempt}, but every per-shard verdict token was produced by an earlier attempt. The aggregation job was re-run WITHOUT re-running any emulator-journey shard, so this verdict is a replay of unchanged data — it is NOT evidence that a re-run reached a different result. To satisfy G5, re-run the failing shard job itself (its job now fails on a RED token, so 'Re-run failed jobs' picks it up) and let this job aggregate the fresh token (issue #1809)."
+fi
+
 emit_summary() {
   local verdict="$1" detail="$2"
   if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
@@ -90,6 +175,17 @@ emit_summary() {
       echo "| RED | $have_red |"
       echo "| UNKNOWN | $have_unknown |"
       echo "| MISSING | $missing |"
+      echo
+      echo "Verdict provenance (issue #1809) — this run is on attempt ${current_attempt:-unknown}:"
+      echo
+      if (( count == 0 )); then
+        echo "- _no per-shard verdict tokens_"
+      else
+        local line
+        for line in "${provenance[@]}"; do
+          echo "- ${line}"
+        done
+      fi
     } >> "$GITHUB_STEP_SUMMARY"
   fi
 }

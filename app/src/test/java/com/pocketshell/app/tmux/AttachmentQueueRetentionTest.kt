@@ -17,18 +17,10 @@ import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.TmuxClientFactory
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -50,12 +42,8 @@ import java.util.concurrent.ConcurrentHashMap
 @Config(manifest = Config.NONE, sdk = [33])
 class AttachmentQueueRetentionTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
     @Test
     fun issue1548_uploadPruneRetainsOldQueuedAttachmentBytesAndDeletesOldUnreferencedPeer() =
@@ -210,16 +198,7 @@ class AttachmentQueueRetentionTest {
             )
         }
 
-    private fun runVmTest(body: suspend TestScope.() -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
-        try {
-            body()
-        } finally {
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
-    }
+    private fun runVmTest(body: suspend TestScope.() -> Unit) = fixture.runVmTest(body = body)
 
     private fun TestScope.newVm(store: InMemoryOutboundQueueStore): TmuxSessionViewModel =
         TmuxSessionViewModel(
@@ -230,6 +209,10 @@ class AttachmentQueueRetentionTest {
                 connector = SshLeaseConnector { target ->
                     error("unexpected SSH lease connect for ${target.leaseKey}")
                 },
+                // Issue #1765: SshLeaseManager's DEFAULT scope is a fresh unowned
+                // CoroutineScope(SupervisorJob() + Dispatchers.IO) that nothing cancels.
+                // Bind it to the fixture-owned root so teardown cancels AND joins it.
+                scope = fixture.leaseScope,
                 idleTtlMillis = 0L,
                 connectTimeoutContext = StandardTestDispatcher(testScheduler),
                 nowMillis = { testScheduler.currentTime },
@@ -238,6 +221,7 @@ class AttachmentQueueRetentionTest {
             applicationContext = ApplicationProvider.getApplicationContext(),
             outboundQueueStore = store,
         ).also {
+            fixture.track(it)
             it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
         }
 

@@ -13,21 +13,13 @@ import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
-import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -82,13 +74,8 @@ import java.io.InputStream
 @Config(manifest = Config.NONE, sdk = [33])
 class HealCaptureUnverifiedWatchdogTest {
 
-    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val createdVms = mutableListOf<TmuxSessionViewModel>()
-
-    @After
-    fun tearDown() {
-        factoryScope.cancel()
-    }
+    private val fixture = StandaloneTmuxVmFixture()
+    private val factoryScope get() = fixture.factoryScope
 
     // -------------------------------------------------------------------------
     // Criterion 1 (LOAD-BEARING) — a black pane whose heal captures FAIL every tick keeps the
@@ -394,23 +381,12 @@ class HealCaptureUnverifiedWatchdogTest {
     private fun FakeTmuxClient.captureCount(): Int =
         sentCommands.count { it.startsWith("capture-pane") }
 
-    private fun runVmTest(body: suspend TestScope.(RecordingSink) -> Unit) = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
-        LivenessProbeTestOverride.setAutoStartEnabledForTest(false)
+    private fun runVmTest(body: suspend TestScope.(RecordingSink) -> Unit) = fixture.runVmTest {
         val sink = installRecordingDiagnosticSink()
-        try {
-            body(RecordingSink(sink))
-        } finally {
-            sink.close()
-            for (vm in createdVms) {
-                runCatching { vm.setProcessForegroundForClearedForTest(false) }
-                runCatching { vm.clearForTest() }
-            }
-            advanceUntilIdle()
-            createdVms.clear()
-            LivenessProbeTestOverride.clear()
-            Dispatchers.resetMain()
-        }
+        // Issue #1765: the sink must close BEFORE the VMs are cleared and while
+        // Main is still installed, exactly as the pre-migration `finally` did.
+        fixture.onTeardown { sink.close() }
+        body(RecordingSink(sink))
     }
 
     private class RecordingSink(
@@ -434,7 +410,7 @@ class HealCaptureUnverifiedWatchdogTest {
         // loop so capture counts + timings stay deterministic.
         it.setStaleRenderWatchdogAutoArmEnabledForTest(false)
         it.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
-        createdVms.add(it)
+        fixture.track(it)
     }
 
     private fun TestScope.connectVm(client: FakeTmuxClient): TmuxSessionViewModel {

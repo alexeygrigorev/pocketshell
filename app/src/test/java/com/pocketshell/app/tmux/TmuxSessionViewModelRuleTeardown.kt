@@ -9,13 +9,14 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 
 /**
- * Shared #1355 teardown for standalone [MainDispatcherRule] consumers that
- * construct [TmuxSessionViewModel].
+ * Shared #1355 teardown registry for JVM fixtures that construct
+ * [TmuxSessionViewModel] directly and later reset the process-global
+ * `Dispatchers.Main`.
  *
  * `clearForTest()` invokes `onCleared()` directly, so it does not perform the
  * framework-owned `viewModelScope` cancellation. A bare `CoroutineScope.cancel`
  * also returns before a real-IO child has necessarily unwound. Both can leave a
- * continuation that reads `Dispatchers.Main` after the rule resets the global
+ * continuation that reads `Dispatchers.Main` after the fixture resets the global
  * delegate, recreating the `TestMainDispatcher:72` race in an unrelated test.
  *
  * This registry makes the ordering structural:
@@ -23,12 +24,28 @@ import kotlinx.coroutines.withTimeout
  * 1. clear every tracked VM while Main is installed;
  * 2. cancel every VM-owned root and every explicitly owned collaborator root;
  * 3. cancel-and-join the collaborator roots;
- * 4. use only `runCurrent()` (never virtual-time advancement) to drain all VM
+ * 4. use only [runCurrent] (never virtual-time advancement) to drain all VM
  *    roots to zero; and
- * 5. return to [MainDispatcherRule], which only then resets Main.
+ * 5. return to the caller, which only then resets Main.
+ *
+ * Issue #1765: it has exactly TWO bindings, so the drain algorithm above is
+ * written once rather than copied per fixture:
+ *
+ *  - [MainDispatcherRule] consumers bind it through
+ *    [tmuxSessionViewModelTeardown], which registers [drain] on the rule's
+ *    `beforeResetMain` boundary; and
+ *  - standalone `runTest` fixtures bind it through [StandaloneTmuxVmFixture],
+ *    which owns its own `TestCoroutineScheduler` and calls [drain] after the
+ *    `runTest` body returns — still inside the `runTest` block — but before
+ *    `Dispatchers.resetMain()`.
+ *
+ * [runCurrent] is injected rather than taken from a rule because those two
+ * bindings own different schedulers; it must only run already-due work and must
+ * never advance virtual time (the #1110 lesson: advancing the clock trips the
+ * #793 re-seed watchdog).
  */
 internal class TmuxSessionViewModelRuleTeardown(
-    private val rule: MainDispatcherRule,
+    private val runCurrent: () -> Unit,
     private val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
 ) {
     private data class TrackedVm(
@@ -49,7 +66,6 @@ internal class TmuxSessionViewModelRuleTeardown(
 
     init {
         require(timeoutMs > 0L) { "timeoutMs must be > 0, was $timeoutMs" }
-        rule.beforeResetMain(::drain)
     }
 
     fun track(vm: TmuxSessionViewModel): TmuxSessionViewModel =
@@ -119,7 +135,7 @@ internal class TmuxSessionViewModelRuleTeardown(
         // after starting reconnect(); cancelling first can strand that
         // reconnect inside its NonCancellable close cascade. This is
         // runCurrent-only: watchdog deadlines never advance.
-        capture(rule::runCurrent)
+        capture(runCurrent)
         vms.forEach { vm -> capture(vm.cancelOwnScopes) }
         roots.forEach { root -> capture(root.job::cancel) }
 
@@ -170,7 +186,7 @@ internal class TmuxSessionViewModelRuleTeardown(
         val deadlineNanos = System.nanoTime() + timeoutMs * NANOS_PER_MILLISECOND
         while (true) {
             cancel()
-            rule.runCurrent()
+            runCurrent()
             val active = remaining()
             if (active == 0) return
             if (System.nanoTime() >= deadlineNanos) {
@@ -205,6 +221,6 @@ internal fun MainDispatcherRule.tmuxSessionViewModelTeardown(
     timeoutMs: Long = 30_000L,
 ): TmuxSessionViewModelRuleTeardown =
     TmuxSessionViewModelRuleTeardown(
-        rule = this,
+        runCurrent = ::runCurrent,
         timeoutMs = timeoutMs,
-    )
+    ).also { registry -> beforeResetMain(registry::drain) }

@@ -1,32 +1,133 @@
 #!/usr/bin/env bash
 # Result classification and markdown summary helpers for scripts/ci-journey-suite.sh.
 
+# ---------------------------------------------------------------------------
+# Issue #1827: every reader of the core-terminal proof set derives from the ONE
+# registry declared in scripts/ci-journey-core-terminal-functions.sh
+# (CORE_TERMINAL_PROOFS). The red/green condition and the failed-BOTH-attempts
+# evidence section used to be two hand-maintained lists; they drifted, and a
+# proof that reddened the suite but had no bullet made the workflow classifier
+# read `first_failure=false` and type a genuine failure as EMULATOR INFRA
+# UNAVAILABLE (a green run). Deriving both from one list removes the drift by
+# construction. `ci_journey_assert_red_has_evidence` below is the belt-and-braces
+# backstop for any FUTURE red cause that is not a registered proof.
+
+# ci_journey_core_terminal_all_passed — true iff every registered proof is PASS.
+ci_journey_core_terminal_all_passed() {
+  local entry status_var
+  for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+    status_var="${entry%%|*}"
+    [[ "${!status_var}" == "PASS" ]] || return 1
+  done
+  return 0
+}
+
+# ci_journey_core_terminal_none_failed — true iff no registered proof is FAIL.
+# (A SKIPPED proof is not a FAIL; it only happens when the #835 budget was
+# exhausted, which writes its own JOURNEY_STEP_TIMEOUT evidence section.)
+ci_journey_core_terminal_none_failed() {
+  local entry status_var
+  for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+    status_var="${entry%%|*}"
+    [[ "${!status_var}" != "FAIL" ]] || return 1
+  done
+  return 0
+}
+
+# ci_journey_core_terminal_status_lines — the per-proof status block, in
+# registry order. Emitted BEFORE the classifier's arming headers, so it can
+# never be mistaken for failing-class evidence.
+ci_journey_core_terminal_status_lines() {
+  local entry status_var class_var label
+  for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+    IFS='|' read -r status_var class_var label <<<"$entry"
+    echo
+    echo "$label (\`shared:core-terminal\`): **${!status_var}**"
+    echo "- \`${!class_var}\`"
+  done
+}
+
+# ci_journey_core_terminal_failed_bullets — one `- \`FQCN\` (label)` bullet per
+# FAILED registered proof, for the failed-BOTH-attempts section. Empty output
+# means no registered proof failed.
+ci_journey_core_terminal_failed_bullets() {
+  local entry status_var class_var label
+  for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+    IFS='|' read -r status_var class_var label <<<"$entry"
+    [[ "${!status_var}" == "FAIL" ]] || continue
+    echo "- \`${!class_var}\` (${label#Core-terminal })"
+  done
+}
+
+# ci_journey_core_terminal_any_failed — true iff at least one registered proof
+# is FAIL, i.e. iff the failed-both section must be written for the proofs.
+ci_journey_core_terminal_any_failed() {
+  ! ci_journey_core_terminal_none_failed
+}
+
+# ci_journey_assert_red_has_evidence <summary> <exit>
+#
+# THE INVARIANT, enforced after the summary is written: a red suite MUST leave
+# an evidence section the workflow classifier can read. The classify step only
+# reaches a RED verdict through `JOURNEY_FAILED` / `Failed BOTH attempts` or
+# `JOURNEY_STEP_TIMEOUT` / `Suite step time budget exhausted`; a red summary
+# carrying neither falls through every RED branch to EMULATOR INFRA UNAVAILABLE,
+# which types the shard INFRA, greens the shard job, and reports the run
+# successful. That is exactly how #1827 (and, by a different mechanism, #1822)
+# laundered a real failure into a green.
+#
+# The registry above makes that unreachable for the proofs it declares. This
+# check is the backstop for anything else that might redden the suite in future:
+# it appends a fail-safe failed-both section naming whatever is not PASS, so the
+# failure is always CLASSIFIABLE. Fail-safe direction is toward RED, never green.
+ci_journey_assert_red_has_evidence() {
+  local summary="$1" exit_code="$2"
+  (( exit_code != 0 )) || return 0
+  if grep -qE 'JOURNEY_FAILED|Failed BOTH attempts|JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' \
+      "$summary" 2>/dev/null; then
+    return 0
+  fi
+  local entry status_var class_var label wrote=0
+  {
+    echo
+    echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
+  } >> "$summary"
+  for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+    IFS='|' read -r status_var class_var label <<<"$entry"
+    [[ "${!status_var}" == "PASS" ]] && continue
+    echo "- \`${!class_var}\` (${label#Core-terminal } — status ${!status_var})" >> "$summary"
+    wrote=1
+  done
+  if (( wrote == 0 )); then
+    # No named cause at all. Emit an entry the #1822 bullet parser cannot read,
+    # which it records as missing evidence and reports `unclassified` — RED.
+    echo "- unexplained-suite-red (the suite exited non-zero with no failed-both or budget-timeout evidence — issue #1827)" \
+      >> "$summary"
+  fi
+  echo "JOURNEY_EVIDENCE_FAILSAFE: the suite was red with no classifier-readable evidence section; one was appended (issue #1827)" >&2
+}
+
 finish_ci_journey_suite() {
   local journey_status
 
   SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
-  # The job is red iff at least one class failed BOTH attempts, OR the #803
-  # append-burst proof failed, OR the #796 output-burst-IME proof failed, OR the
-  # #866 multi-chunk seed attach proof failed, OR the suite-level budget was
+  # The job is red iff at least one class failed BOTH attempts, OR any
+  # registered core-terminal proof failed, OR the suite-level budget was
   # exhausted by a #470 stall (issue #835). A budget timeout is NOT green — it
   # still turns the job red — but it is labelled distinctly below so the
   # classifier reports "journey timeout / #470 stall" instead of "EMULATOR INFRA
   # UNAVAILABLE".
-  if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 \
-        && "$APPEND_BURST_STATUS" == "PASS" && "$OUTPUT_BURST_IME_STATUS" == "PASS" \
-        && "$MULTICHUNK_SEED_STATUS" == "PASS" && "$AGENT_LINK_AFFORDANCE_STATUS" == "PASS" \
-        && "$REATTACH_REPAINT_STATUS" == "PASS" && "$SESSION_BINDING_STATUS" == "PASS" \
-        && "$OVERLAY_UNBOUNDED_STATUS" == "PASS" \
-        && "$SURFACE_REPAINT_STATUS" == "PASS" && "$SHELL_SNAPSHOT_STATUS" == "PASS" ]]; then
+  #
+  # Issue #1827: the proof half of both conditions is derived from the ONE
+  # CORE_TERMINAL_PROOFS registry that also drives the failed-both bullets, so a
+  # proof cannot redden the suite while writing no evidence.
+  if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 ]] \
+     && ci_journey_core_terminal_all_passed; then
     JOURNEY_EXIT=0
     journey_status="PASS"
-  elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 \
-          && "$APPEND_BURST_STATUS" != "FAIL" && "$OUTPUT_BURST_IME_STATUS" != "FAIL" \
-          && "$MULTICHUNK_SEED_STATUS" != "FAIL" && "$AGENT_LINK_AFFORDANCE_STATUS" != "FAIL" \
-          && "$REATTACH_REPAINT_STATUS" != "FAIL" && "$SESSION_BINDING_STATUS" != "FAIL" \
-          && "$OVERLAY_UNBOUNDED_STATUS" != "FAIL" \
-          && "$SURFACE_REPAINT_STATUS" != "FAIL" && "$SHELL_SNAPSHOT_STATUS" != "FAIL" ]]; then
+  elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 ]] \
+       && ci_journey_core_terminal_none_failed; then
     # Only the budget timeout fired (no class failed BOTH attempts on its own
     # merits): a pure #470-stall time-budget casualty.
     JOURNEY_EXIT=1
@@ -61,33 +162,8 @@ finish_ci_journey_suite() {
     for c in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
       echo "- \`$c\`"
     done
-    echo
-    echo "Core-terminal #803 append-burst proof (\`shared:core-terminal\`): **$APPEND_BURST_STATUS**"
-    echo "- \`$CORE_TERMINAL_APPEND_BURST_CLASS\`"
-    echo
-    echo "Core-terminal #796 output-burst-IME ANR proof (\`shared:core-terminal\`): **$OUTPUT_BURST_IME_STATUS**"
-    echo "- \`$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS\`"
-    echo
-    echo "Core-terminal #866 multi-chunk seed attach ANR proof (\`shared:core-terminal\`): **$MULTICHUNK_SEED_STATUS**"
-    echo "- \`$CORE_TERMINAL_MULTICHUNK_SEED_CLASS\`"
-    echo
-    echo "Core-terminal #871 agent-pane link-affordance off-main proof (\`shared:core-terminal\`): **$AGENT_LINK_AFFORDANCE_STATUS**"
-    echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\`"
-    echo
-    echo "Core-terminal #879 beyond-grace reattach-repaint proof (\`shared:core-terminal\`): **$REATTACH_REPAINT_STATUS**"
-    echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\`"
-    echo
-    echo "Core-terminal #959 mounted session-binding proof (\`shared:core-terminal\`): **$SESSION_BINDING_STATUS**"
-    echo "- \`$CORE_TERMINAL_SESSION_BINDING_CLASS\`"
-    echo
-    echo "Core-terminal v0.4.17 overlay-unbounded-measure crash proof (\`shared:core-terminal\`): **$OVERLAY_UNBOUNDED_STATUS**"
-    echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\`"
-    echo
-    echo "Core-terminal #1203 surface-only-black recovery proof (\`shared:core-terminal\`): **$SURFACE_REPAINT_STATUS**"
-    echo "- \`$CORE_TERMINAL_SURFACE_REPAINT_CLASS\`"
-    echo
-    echo "Core-terminal #1233 shell-pane single-snapshot affordance-scan proof (\`shared:core-terminal\`): **$SHELL_SNAPSHOT_STATUS**"
-    echo "- \`$CORE_TERMINAL_SHELL_SNAPSHOT_CLASS\`"
+    # Issue #1827: one block per registered proof, from CORE_TERMINAL_PROOFS.
+    ci_journey_core_terminal_status_lines
     if [[ "${#RECOVERED_CLASSES[@]}" -gt 0 ]]; then
       echo
       echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
@@ -144,48 +220,37 @@ finish_ci_journey_suite() {
       fi
     fi
     # Emit the `JOURNEY_FAILED` / "Failed BOTH attempts" section whenever ANY
-    # load-bearing check failed twice — the journey classes AND/OR the #803
-    # append-burst proof. The workflow's classify step
+    # load-bearing check failed twice — the journey classes AND/OR any registered
+    # core-terminal proof. The workflow's classify step
     # (.github/workflows/tests.yml "Classify emulator-journey result") greps this
     # summary for `JOURNEY_FAILED|Failed BOTH attempts` to distinguish a genuine
     # test regression from a #771 EMULATOR INFRA UNAVAILABLE abort, and its `awk`
-    # extracts the failing class names from under this exact header. If the
-    # append-burst proof failed but all journey classes passed, FAILED_CLASSES is
-    # empty — so we MUST still write the header (with the append-burst class)
-    # here, otherwise an append-burst-only regression falls through to the grep's
-    # else-branch and is mislabeled as an infra abort, burying the real cause.
-    if [[ "${#FAILED_CLASSES[@]}" -gt 0 || "$APPEND_BURST_STATUS" == "FAIL" || "$OUTPUT_BURST_IME_STATUS" == "FAIL" \
-          || "$MULTICHUNK_SEED_STATUS" == "FAIL" || "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" \
-          || "$REATTACH_REPAINT_STATUS" == "FAIL" || "$SESSION_BINDING_STATUS" == "FAIL" \
-          || "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
+    # extracts the failing class names from under this exact header. If a proof
+    # failed but all journey classes passed, FAILED_CLASSES is empty — so we MUST
+    # still write the header (with that proof's class) here, otherwise a
+    # proof-only regression falls through to the grep's else-branch and is
+    # mislabeled as an infra abort, burying the real cause.
+    #
+    # Issue #1827: BOTH the condition and the bullets come from the same
+    # CORE_TERMINAL_PROOFS registry as the red condition above, so this section
+    # cannot fall out of step with what actually reddens the suite. It used to be
+    # a second hand-maintained list, and #1203's SURFACE_REPAINT_STATUS and
+    # #1233's SHELL_SNAPSHOT_STATUS were never added to it — a failure in either
+    # reddened the suite while writing no section, and the classifier typed the
+    # shard INFRA (green run) instead of RED.
+    if [[ "${#FAILED_CLASSES[@]}" -gt 0 ]] || ci_journey_core_terminal_any_failed; then
       echo
       echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
       for c in "${FAILED_CLASSES[@]}"; do
         echo "- \`$c\`"
       done
-      if [[ "$APPEND_BURST_STATUS" == "FAIL" ]]; then
-        echo "- \`$CORE_TERMINAL_APPEND_BURST_CLASS\` (#803 append-burst proof)"
-      fi
-      if [[ "$OUTPUT_BURST_IME_STATUS" == "FAIL" ]]; then
-        echo "- \`$CORE_TERMINAL_OUTPUT_BURST_IME_CLASS\` (#796 output-burst-IME ANR proof)"
-      fi
-      if [[ "$MULTICHUNK_SEED_STATUS" == "FAIL" ]]; then
-        echo "- \`$CORE_TERMINAL_MULTICHUNK_SEED_CLASS\` (#866 multi-chunk seed attach ANR proof)"
-      fi
-      if [[ "$AGENT_LINK_AFFORDANCE_STATUS" == "FAIL" ]]; then
-        echo "- \`$CORE_TERMINAL_AGENT_LINK_AFFORDANCE_CLASS\` (#871 agent-pane link-affordance off-main proof)"
-      fi
-      if [[ "$REATTACH_REPAINT_STATUS" == "FAIL" ]]; then
-        echo "- \`$CORE_TERMINAL_REATTACH_REPAINT_CLASS\` (#879 reattach-repaint proof)"
-      fi
-      if [[ "$SESSION_BINDING_STATUS" == "FAIL" ]]; then
-        echo "- \`$CORE_TERMINAL_SESSION_BINDING_CLASS\` (#959 mounted session-binding proof)"
-      fi
-      if [[ "$OVERLAY_UNBOUNDED_STATUS" == "FAIL" ]]; then
-        echo "- \`$CORE_TERMINAL_OVERLAY_UNBOUNDED_CLASS\` (v0.4.17 overlay-unbounded-measure crash proof)"
-      fi
+      ci_journey_core_terminal_failed_bullets
     fi
   } > "$SUMMARY"
+
+  # Issue #1827 backstop: a red suite must never leave a summary the classifier
+  # cannot route to RED. See ci_journey_assert_red_has_evidence.
+  ci_journey_assert_red_has_evidence "$SUMMARY" "$JOURNEY_EXIT"
 
   echo "----------------------------------------------------------"
   cat "$SUMMARY"

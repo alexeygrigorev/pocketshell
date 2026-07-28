@@ -196,6 +196,25 @@ finish_ci_journey_suite() {
         echo "- \`$c\`"
       done
     fi
+    # Issue #1840: the #1814 sibling for a NON-timeout build-level death. On run
+    # 30339688411 shard 0 the RETRY's Gradle build failed clearing
+    # `kotlin-classes/debugAndroidTest` while an orphaned build process was still
+    # writing there, so instrumentation never started and the class was reported
+    # as having failed twice. Same placement discipline as the section above: it
+    # is emitted BEFORE the STEP_TIMEOUT / Failed-BOTH sections (whose headers the
+    # classifier's `awk` arms on) and its wording contains none of the
+    # classifier's trigger strings, so it can never flip a verdict.
+    if [[ "${#BUILD_PHASE_FAILURE_ATTEMPTS[@]}" -gt 0 ]]; then
+      echo
+      echo "Attempts that died at the Gradle BUILD level (\`JOURNEY_BUILD_PHASE_FAILURE\` — issue #1840):"
+      echo "These attempts never started instrumentation, so they produced no raw JUnit XML and NO"
+      echo "journey verdict at all. Read them as build-level failures, NOT as the listed journey"
+      echo "failing. A recurrence here means the build could not run — investigate the build and the"
+      echo "inter-attempt cleanup, not the listed journey."
+      for c in "${BUILD_PHASE_FAILURE_ATTEMPTS[@]}"; do
+        echo "- \`$c\`"
+      done
+    fi
     # Issue #835: emit the `JOURNEY_STEP_TIMEOUT` section whenever the suite-level
     # time budget was exhausted (typically by the recurring #470 in-emulator tmux
     # `list-sessions` enumeration stall). The workflow's classify step greps this

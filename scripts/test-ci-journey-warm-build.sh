@@ -394,6 +394,16 @@ manifest_phases() {
     | xargs -r -0 sed -n 's/^outer_timeout_phase=//p' | sort -u | tr '\n' ' '
 }
 
+# Issue #1840 class coverage: the #1814 phase field gained a sibling for
+# NON-timeout failures. The two must never bleed into each other, so every case
+# below asserts BOTH.
+manifest_failure_phases() {
+  find "$FIXED_REPO/artifacts/ci-journey/class-attempts" -type f -name manifest.txt \
+    -exec grep -l "^class=.*$WEDGE_CLASS$" {} + 2>/dev/null \
+    | tr '\n' '\0' \
+    | xargs -r -0 sed -n 's/^attempt_failure_phase=//p' | sort -u | tr '\n' ' '
+}
+
 # (b1) THE REPORTED SHAPE: cut while Gradle was still building.
 wedge_run build "$SANDBOX/wedge-build.log"
 build_log="$SANDBOX/wedge-build.log"
@@ -403,6 +413,9 @@ grep -q "JOURNEY_BUILD_PHASE_TIMEOUT: .*$WEDGE_CLASS attempt 1" "$build_log" \
 phases="$(manifest_phases)"
 [[ "$phases" == "build " ]] \
   || fail "(b1) manifests recorded phases '$phases', expected only 'build'"
+failure_phases="$(manifest_failure_phases)"
+[[ "$failure_phases" == "not_applicable " ]] \
+  || fail "(b1) an outer TIMEOUT leaked into attempt_failure_phase ('$failure_phases') — #1840's field must stay not_applicable here"
 grep -q 'Attempts cut short while Gradle was still BUILDING' "$summary" \
   || { cat "$summary"; fail "(b1) the summary has no build-phase section"; }
 grep -q "^- \`.*$WEDGE_CLASS (attempt 1)\`$" "$summary" \
@@ -433,6 +446,9 @@ fi
 phases="$(manifest_phases)"
 [[ "$phases" == "instrumentation " ]] \
   || fail "(b2) manifests recorded phases '$phases', expected only 'instrumentation'"
+failure_phases="$(manifest_failure_phases)"
+[[ "$failure_phases" == "not_applicable " ]] \
+  || fail "(b2) an outer TIMEOUT leaked into attempt_failure_phase ('$failure_phases')"
 scan_out="$(bash "$BUILD_PHASE" "$FIXED_REPO/artifacts")"
 grep -qx 'build_phase_timeout_attempts=0' <<<"$scan_out" \
   || { printf '%s\n' "$scan_out"; fail "(b2) the scanner claimed build-phase evidence for an instrumentation wedge"; }
@@ -456,6 +472,14 @@ fi
 phases="$(manifest_phases)"
 [[ "$phases" == "not_applicable " ]] \
   || fail "(b3) manifests recorded phases '$phases', expected only 'not_applicable'"
+# G6/#1840: a GENUINE journey failure ran instrumentation and left JUnit XML, so
+# it must be attributed to instrumentation and never to the build.
+failure_phases="$(manifest_failure_phases)"
+[[ "$failure_phases" == "instrumentation " ]] \
+  || fail "(b3) a genuine journey failure recorded attempt_failure_phase '$failure_phases', expected only 'instrumentation'"
+grep -qx 'build_phase_failure_attempts=0' \
+  <<<"$(bash "$REPO_ROOT/scripts/ci-journey-build-phase-failure.sh" "$FIXED_REPO/artifacts")" \
+  || fail "(b3) the #1840 build-level scanner claimed evidence for a genuine journey failure"
 scan_out="$(bash "$BUILD_PHASE" "$FIXED_REPO/artifacts")"
 grep -qx 'build_phase_timeout_attempts=0' <<<"$scan_out" \
   || { printf '%s\n' "$scan_out"; fail "(b3) the scanner claimed build-phase evidence for a genuine failure"; }

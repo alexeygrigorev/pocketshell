@@ -845,6 +845,110 @@ run_agg "$clean_token_dir"
   || { printf '%s\n' "$AGG_OUT"; fail "(w) a missing shard token must downgrade CLEAN to RE-RUN, got $AGG_VERDICT/exit$AGG_RC"; }
 pass "(w) #1458/#1800 preserved: first-attempt success -> CLEAN -> aggregate CLEAN; a missing token still forces RE-RUN"
 
+# (x) #1840, THROUGH THE REAL STEP BODY: a shard whose RETRY died at the GRADLE
+#     BUILD level must stay RED (never softened) but must be DISTINGUISHABLE in
+#     the verdict from a class that genuinely failed twice. On run 30339688411
+#     shard 0 this exact cascade — a per-class timeout, the suite's own
+#     `gradlew --stop`, then a retry whose `compileDebugAndroidTestKotlin` died
+#     clearing `kotlin-classes/debugAndroidTest` — was typed
+#     `journey_failure_both_attempts`, i.e. reported as a product defect.
+#
+# write_attempt_manifest <root> <class> <attempt> <key>=<value>...
+write_attempt_manifest() {
+  local root="$1" class="$2" attempt="$3"; shift 3
+  local key="${class##*.}"
+  local dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt"
+  mkdir -p "$dir"
+  {
+    printf 'format_version=1\n'
+    printf 'module=app\n'
+    printf 'class=%s\n' "$class"
+    printf 'attempt=%s\n' "$attempt"
+    local pair
+    for pair in "$@"; do
+      printf '%s\n' "$pair"
+    done
+  } > "$dir/manifest.txt"
+}
+
+BUILD_FAIL_CLASS="com.pocketshell.app.proof.TmuxSessionScreenArtVerifyE2eTest"
+
+sandbox="$SANDBOX/wf-build-failure"; mkdir -p "$sandbox/artifacts"
+write_summary "$sandbox/artifacts" 2870 "$BUILD_FAIL_CLASS"
+# Attempt 1 was cut by the wall cap while Gradle was still building; attempt 2's
+# BUILD then failed outright, so instrumentation never started and neither
+# attempt produced a journey verdict.
+write_attempt_manifest "$sandbox/artifacts" "$BUILD_FAIL_CLASS" 1 \
+  'primary_classification=outer_timeout' 'raw_junit_count=0' \
+  'outer_timeout_phase=build' 'attempt_failure_phase=not_applicable'
+write_attempt_manifest "$sandbox/artifacts" "$BUILD_FAIL_CLASS" 2 \
+  'primary_classification=failure' 'raw_junit_count=0' \
+  'outer_timeout_phase=not_applicable' 'attempt_failure_phase=build'
+snapshot_first_attempt "$sandbox"
+run_classify_body "$sandbox" "$(classify_expressions failure)"
+printf '%s\n' "$CLASSIFY_OUT" | sed 's/^/    body: /'
+[[ "$CLASSIFY_TOKEN" == "RED" ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(x) a build-level retry failure must stay RED, got '$CLASSIFY_TOKEN' — naming it must never soften it"; }
+[[ "$CLASSIFY_RC" -ne 0 ]] || fail "(x) a RED classify body must exit non-zero"
+grep -q '^shard_verdict=RED$' <<<"$CLASSIFY_GH_OUTPUT" \
+  || { printf '%s\n' "$CLASSIFY_GH_OUTPUT"; fail "(x) the step must export shard_verdict=RED so the #1809 shard RED gate fires"; }
+grep -q '^shard_verdict_reason=build_level_failure$' <<<"$CLASSIFY_GH_OUTPUT" \
+  || { printf '%s\n' "$CLASSIFY_GH_OUTPUT"; fail "(x) THE ACCEPTANCE: a build-level retry failure was not distinguishable in the shard verdict"; }
+grep -Fqx 'verdict_reason=build_level_failure' \
+  "$sandbox/artifacts/ci-journey-shard-verdict/shard-verdict.txt" \
+  || { cat "$sandbox/artifacts/ci-journey-shard-verdict/shard-verdict.txt"; fail "(x) the verdict token does not carry the build-level reason"; }
+grep -q '::warning title=Emulator journey — an attempt died at the Gradle BUILD level' <<<"$CLASSIFY_OUT" \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(x) the build-level failure was not annotated"; }
+grep -q "$BUILD_FAIL_CLASS" <<<"$CLASSIFY_OUT" \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(x) the annotation does not name the class"; }
+build_fail_token_dir="$SANDBOX/wf-verdicts-build-failure"; rm -rf "$build_fail_token_dir"; mkdir -p "$build_fail_token_dir"
+write_shard_token "$build_fail_token_dir" 0 CLEAN
+write_shard_token "$build_fail_token_dir" 1 "$CLASSIFY_TOKEN"
+write_shard_token "$build_fail_token_dir" 2 CLEAN
+run_agg "$build_fail_token_dir"
+[[ "$AGG_VERDICT" == "RED" && "$AGG_RC" -eq 1 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(x) a build-level failure must still aggregate RED/exit1, got $AGG_VERDICT/exit$AGG_RC"; }
+pass "(x) #1840: a retry that died at the BUILD level -> RED with reason build_level_failure (not journey_failure_both_attempts), aggregate RED"
+
+# (y) THE LOAD-BEARING CONTROL (G6): a class that GENUINELY failed twice — its
+#     attempts ran instrumentation and produced JUnit XML — must keep the plain
+#     `journey_failure_both_attempts` reason. The new attribution must not
+#     relabel real regressions as build problems.
+sandbox="$SANDBOX/wf-genuine-twice"; mkdir -p "$sandbox/artifacts"
+write_summary "$sandbox/artifacts" 2870 "$OCCLUSION_CLASS#$OCCLUSION_METHOD"
+for attempt in 1 2; do
+  write_case_xml "$sandbox/artifacts" "$OCCLUSION_CLASS" "$attempt" "$OCCLUSION_METHOD:composetimeout"
+  write_attempt_manifest "$sandbox/artifacts" "$OCCLUSION_CLASS" "$attempt" \
+    'primary_classification=failure' 'raw_junit_count=1' \
+    'outer_timeout_phase=not_applicable' 'attempt_failure_phase=instrumentation'
+done
+snapshot_first_attempt "$sandbox"
+run_classify_body "$sandbox" "$(classify_expressions failure)"
+[[ "$CLASSIFY_TOKEN" == "RED" ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(y) a genuine twice-failure must stay RED, got '$CLASSIFY_TOKEN'"; }
+grep -q '^shard_verdict_reason=first_attempt_journey_failure$' <<<"$CLASSIFY_GH_OUTPUT" \
+  || { printf '%s\n' "$CLASSIFY_GH_OUTPUT"; fail "(y) a genuine twice-failure lost its own verdict reason"; }
+grep -q '::warning title=Emulator journey — an attempt died at the Gradle BUILD level' <<<"$CLASSIFY_OUT" \
+  && { printf '%s\n' "$CLASSIFY_OUT"; fail "(y) a genuine twice-failure was annotated as a build-level failure"; }
+grep -qx 'build_phase_failure_attempts=0' \
+  <<<"$(bash "$REPO_ROOT/scripts/ci-journey-build-phase-failure.sh" "$sandbox/artifacts")" \
+  || fail "(y) the build-level scanner claimed evidence for a genuine twice-failure"
+pass "(y) #1840 control: a genuine twice-failure keeps reason first_attempt_journey_failure and is never annotated build-level"
+
+# (z) #1814 PRESERVED: with no build-level failure present, a cold-build timeout
+#     still wins the reason. The two attributions must not cannibalise each other.
+sandbox="$SANDBOX/wf-cold-build"; mkdir -p "$sandbox/artifacts"
+write_summary "$sandbox/artifacts" 2870 "$BUILD_FAIL_CLASS"
+write_attempt_manifest "$sandbox/artifacts" "$BUILD_FAIL_CLASS" 1 \
+  'primary_classification=outer_timeout' 'raw_junit_count=0' \
+  'outer_timeout_phase=build' 'attempt_failure_phase=not_applicable'
+snapshot_first_attempt "$sandbox"
+run_classify_body "$sandbox" "$(classify_expressions failure)"
+grep -q '^shard_verdict_reason=cold_build_timeout$' <<<"$CLASSIFY_GH_OUTPUT" \
+  || { printf '%s\n' "$CLASSIFY_GH_OUTPUT"; fail "(z) #1814's cold-build attribution regressed"; }
+pass "(z) #1814 preserved: a cold-build timeout with no build-level failure still reports cold_build_timeout"
+
+
 echo
 echo "== #1800 synthetic coverage is present and wired =="
 

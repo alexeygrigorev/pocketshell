@@ -4,6 +4,7 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
+import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.ssh.ExecResult
@@ -95,6 +96,98 @@ class AppAssistantActionsTest {
 
     private val hostEntity = HostEntity(id = 1, name = "dev", hostname = "1.2.3.4", username = "dev", keyId = 1)
 
+    /**
+     * Issue #1820: a [FolderListGateway] fake that **HONOURS** [SessionNamePolicy]
+     * instead of discarding it.
+     *
+     * A fake that returns `Result.success(sessionName)` whatever the policy is
+     * cannot fail when a caller passes the wrong one — and "each call site
+     * declares its intent" is the entire fix, so that declaration is the
+     * load-bearing state. This one models what the real gateway does against a
+     * host that already has [liveSessions]:
+     *
+     *  - [SessionNamePolicy.UniqueOnHost] → resolve the smallest free
+     *    `<base>`/`<base>-2`/`<base>-3`… (what `freeSessionNameCommand` does on
+     *    the host) and create it.
+     *  - [SessionNamePolicy.ExactName] → use the name verbatim; a LAUNCH
+     *    (`startCommand != null`) onto a taken name is refused exactly as the
+     *    #976 `has-session` routing guard refuses it, rather than typing into a
+     *    live pane.
+     *
+     * So a caller that regresses to `ExactName` here produces the user-visible
+     * `Failed to start session: …` the maintainer would see on device.
+     */
+    private class NameResolvingGateway(
+        liveSessions: Set<String> = emptySet(),
+    ) : FolderListGateway {
+        val live = liveSessions.toMutableSet()
+        val policies = mutableListOf<SessionNamePolicy>()
+        val createdNames = mutableListOf<String>()
+
+        override suspend fun listSessionsWithFolder(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            watchedRoots: List<ProjectRootEntity>,
+        ) = FolderListResult.Sessions(emptyList())
+
+        override suspend fun createSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+            cwd: String,
+            startCommand: String?,
+            namePolicy: SessionNamePolicy,
+        ): Result<String> {
+            policies += namePolicy
+            val resolved = when (namePolicy) {
+                SessionNamePolicy.ExactName -> sessionName
+                SessionNamePolicy.UniqueOnHost -> {
+                    if (sessionName !in live) {
+                        sessionName
+                    } else {
+                        var n = 2
+                        while ("$sessionName-$n" in live) n++
+                        "$sessionName-$n"
+                    }
+                }
+            }
+            if (startCommand != null && resolved in live) {
+                // Mirrors the gateway's #976 routing-safety guard.
+                return Result.failure(
+                    RuntimeException("session '$resolved' already exists on this host"),
+                )
+            }
+            live += resolved
+            createdNames += resolved
+            return Result.success(resolved)
+        }
+
+        override suspend fun createEmptyProject(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            parentPath: String,
+            folderName: String,
+        ): Result<String> = Result.success("$parentPath/$folderName")
+
+        override suspend fun importFile(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            folderPath: String,
+            payload: FolderImportPayload,
+        ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
+
+        override suspend fun killSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+        ): Result<Unit> = Result.success(Unit)
+    }
+
     private fun actions(
         bridge: SessionActionBridge = RecordingBridge(),
         responder: (String) -> ExecResult,
@@ -113,6 +206,7 @@ class AppAssistantActionsTest {
                 sessionName: String,
                 cwd: String,
                 startCommand: String?,
+                namePolicy: SessionNamePolicy,
             ): Result<String> = Result.success(sessionName)
 
             override suspend fun createEmptyProject(
@@ -332,6 +426,7 @@ class AppAssistantActionsTest {
                 sessionName: String,
                 cwd: String,
                 startCommand: String?,
+                namePolicy: SessionNamePolicy,
             ): Result<String> = Result.success(sessionName)
             override suspend fun createEmptyProject(
                 host: HostEntity,
@@ -384,5 +479,153 @@ class AppAssistantActionsTest {
         assertTrue(result.ok)
         assertTrue(heredoc.contains("cat >"))
         assertTrue(heredoc.contains("hello"))
+    }
+
+    // --- Issue #1820: the voice/assistant "start a <agent> session in <cwd>"
+    // path. It derives its name from the directory ALONE and has never had a
+    // known-names list to subtract, so before #1820 it always requested the bare
+    // base — and in an occupied folder the gateway's #976 routing guard threw and
+    // the user got `Failed to start session: …`. Nothing pinned this path.
+    // These use [NameResolvingGateway], which HONOURS the policy, so a caller
+    // that regresses to `ExactName` reproduces exactly that failure. ---
+
+    @Test
+    fun startSessionInAnOccupiedFolderCreatesASuffixedSessionInsteadOfFailing() = runTest {
+        // The reported state: `proj` already has a live session with the name
+        // this path derives from the directory.
+        val gateway = NameResolvingGateway(liveSessions = setOf("proj"))
+        val bridge = RecordingBridge()
+        val actions = actions(
+            bridge = bridge,
+            responder = { ExecResult("", "", 0) },
+            gateway = gateway,
+        )
+
+        val result = actions.startSession(host = "dev", cwd = "/home/dev/proj", agent = "claude")
+
+        assertTrue(
+            "starting an agent in an ALREADY-OCCUPIED folder must succeed; got ${result.message}",
+            result.ok,
+        )
+        assertEquals(listOf("proj-2"), gateway.createdNames)
+        assertTrue(
+            "the confirmation must name the RESOLVED session, not the requested base: ${result.message}",
+            result.message.contains("proj-2"),
+        )
+        // And the app must navigate to the session that actually exists.
+        val destination = bridge.navigated.filterIsInstance<AppDestination.TmuxSession>().single()
+        assertEquals("proj-2", destination.sessionName)
+    }
+
+    @Test
+    fun startSessionAsksTheHostToResolveTheName() = runTest {
+        val gateway = NameResolvingGateway()
+        val actions = actions(responder = { ExecResult("", "", 0) }, gateway = gateway)
+
+        actions.startSession(host = "dev", cwd = "/home/dev/proj", agent = "codex")
+
+        // The declaration itself is the fix; pin it so a flip to ExactName
+        // cannot land silently.
+        assertEquals(listOf(SessionNamePolicy.UniqueOnHost), gateway.policies)
+    }
+
+    @Test
+    fun startSessionInAFreeFolderStillUsesTheBareDerivedName() = runTest {
+        // The `-2` walk must not fire when the base is free — host-side
+        // resolution has to be a no-op in the common case.
+        val gateway = NameResolvingGateway(liveSessions = setOf("unrelated"))
+        val actions = actions(responder = { ExecResult("", "", 0) }, gateway = gateway)
+
+        val result = actions.startSession(host = "dev", cwd = "/home/dev/proj", agent = "opencode")
+
+        assertTrue(result.ok)
+        assertEquals(listOf("proj"), gateway.createdNames)
+    }
+
+    @Test
+    fun sendPromptSshFallbackTargetsTheSessionExactlyNotBySiblingPrefix() = runTest {
+        // Issue #1820 sweep: when the in-app bridge cannot deliver, the prompt
+        // is typed over SSH with `tmux send-keys -t <session>`. A BARE target
+        // prefix-matches, so with `proj` gone and `proj-2` alive the user's
+        // prompt is typed into the NEIGHBOUR's pane — the #976 misroute class,
+        // and `<base>` + `<base>-2` is now the routine outcome of a second
+        // same-folder create. `=<session>:` is the exact pane form (a bare
+        // `=<session>` is rejected outright by tmux for a pane target).
+        val bridge = RecordingBridge().apply {
+            sendPromptResult = Result.failure(RuntimeException("bridge not attached"))
+        }
+        val execed = mutableListOf<String>()
+        val actions = actions(
+            bridge = bridge,
+            responder = { cmd -> execed += cmd; ExecResult("", "", 0) },
+        )
+
+        val result = actions.sendPromptToSession("proj", "ship it")
+
+        assertTrue(result.ok)
+        val command = execed.single()
+        assertTrue(
+            "both send-keys must use the EXACT pane target '=proj:'; got $command",
+            command.split("send-keys -t ").drop(1).all { it.startsWith("'=proj:'") },
+        )
+        assertEquals(
+            "there must be exactly two send-keys (literal text, then Enter); got $command",
+            2,
+            command.split("send-keys -t ").size - 1,
+        )
+    }
+
+    @Test
+    fun startSessionSurfacesAGenuineGatewayFailure() = runTest {
+        // Fail-safe direction: a real create failure still reports cleanly
+        // rather than being masked by the resolution.
+        val failing = object : FolderListGateway {
+            override suspend fun listSessionsWithFolder(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                watchedRoots: List<ProjectRootEntity>,
+            ) = FolderListResult.Sessions(emptyList())
+            override suspend fun createSession(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                sessionName: String,
+                cwd: String,
+                startCommand: String?,
+                namePolicy: SessionNamePolicy,
+            ): Result<String> = Result.failure(RuntimeException("start directory does not exist"))
+            override suspend fun createEmptyProject(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                parentPath: String,
+                folderName: String,
+            ): Result<String> = error("not used")
+            override suspend fun importFile(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                folderPath: String,
+                payload: FolderImportPayload,
+            ): Result<String> = error("not used")
+            override suspend fun killSession(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                sessionName: String,
+            ): Result<Unit> = error("not used")
+        }
+        val bridge = RecordingBridge()
+        val actions = actions(bridge = bridge, responder = { ExecResult("", "", 0) }, gateway = failing)
+
+        val result = actions.startSession(host = "dev", cwd = "/nope", agent = "claude")
+
+        assertFalse(result.ok)
+        assertTrue(result.message.contains("start directory does not exist"))
+        assertTrue(
+            "a failed create must not navigate anywhere",
+            bridge.navigated.filterIsInstance<AppDestination.TmuxSession>().isEmpty(),
+        )
     }
 }

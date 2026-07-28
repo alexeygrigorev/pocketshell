@@ -162,10 +162,12 @@ fun RepoBrowserScreen(
             },
             onCreate = { choice ->
                 pickerRepoPath = null
+                // Issue #1820: same shape as the folder tree — this list was
+                // empty whenever `sessionState` was not `Ready`, and it is the
+                // host that must decide uniqueness at create time.
                 val newName = derivedSessionName(
                     choice = choice,
                     homeDirectory = conventionalRemoteHome(username),
-                    existingNames = knownSessionNames(sessionState),
                 )
                 sessionViewModel.createSession(
                     sessionName = newName,

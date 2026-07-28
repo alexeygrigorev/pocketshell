@@ -223,6 +223,7 @@ class FolderListViewModelStaleSessionTest {
             sessionName: String,
             cwd: String,
             startCommand: String?,
+            namePolicy: SessionNamePolicy,
         ): Result<String> {
             createdSessions.add(sessionName to cwd)
             return Result.success(sessionName)

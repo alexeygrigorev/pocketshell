@@ -164,6 +164,7 @@ class AgentLaunchCommandDockerTest {
                     sessionName = case.name,
                     cwd = cwd,
                     startCommand = startCommand,
+                    namePolicy = SessionNamePolicy.UniqueOnHost,
                 ).getOrThrow()
             }
 

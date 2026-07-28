@@ -22,20 +22,18 @@ class SessionNameDerivationTest {
 
     @Test
     fun agentUnderHomeYieldsPurePathPrefixNoAgentDecoration() {
-        val name = SessionNameDerivation.derive(
+        val name = SessionNameDerivation.baseName(
             startDirectory = "~/git/pocketshell",
             homeDirectory = home,
-            agentCommand = "claude",
         )
         assertEquals("git-pocketshell", name)
     }
 
     @Test
     fun agentUnderHomeAbsolutePathMatchesTildeForm() {
-        val name = SessionNameDerivation.derive(
+        val name = SessionNameDerivation.baseName(
             startDirectory = "/home/alexey/git/pocketshell",
             homeDirectory = home,
-            agentCommand = "claude",
         )
         assertEquals("git-pocketshell", name)
     }
@@ -44,15 +42,13 @@ class SessionNameDerivationTest {
     fun agentAndShellInSameDirDeriveSameBaseName() {
         // #642: the name is a pure path-prefix; the agent CLI no longer
         // decorates it, so agent + shell in the same dir share a base.
-        val agent = SessionNameDerivation.derive(
+        val agent = SessionNameDerivation.baseName(
             startDirectory = "~/git/pocketshell",
             homeDirectory = home,
-            agentCommand = "claude",
         )
-        val shell = SessionNameDerivation.derive(
+        val shell = SessionNameDerivation.baseName(
             startDirectory = "~/git/pocketshell",
             homeDirectory = home,
-            agentCommand = null,
         )
         assertEquals("git-pocketshell", agent)
         assertEquals(agent, shell)
@@ -63,10 +59,9 @@ class SessionNameDerivationTest {
         // The exact regression the maintainer reported (#642): an agent
         // session in `~/git/data-engineering-zoomcamp` must read
         // `git-data-engineering-zoomcamp`, NOT `claude-git-…`.
-        val name = SessionNameDerivation.derive(
+        val name = SessionNameDerivation.baseName(
             startDirectory = "~/git/data-engineering-zoomcamp",
             homeDirectory = home,
-            agentCommand = "claude",
         )
         assertEquals("git-data-engineering-zoomcamp", name)
     }
@@ -75,20 +70,18 @@ class SessionNameDerivationTest {
 
     @Test
     fun shellOutsideHomeUsesAbsoluteComponents() {
-        val name = SessionNameDerivation.derive(
+        val name = SessionNameDerivation.baseName(
             startDirectory = "/var/log",
             homeDirectory = home,
-            agentCommand = null,
         )
         assertEquals("var-log", name)
     }
 
     @Test
     fun outsideHomeWithoutKnownHomeStillUsesAbsoluteComponents() {
-        val name = SessionNameDerivation.derive(
+        val name = SessionNameDerivation.baseName(
             startDirectory = "/var/log",
             homeDirectory = null,
-            agentCommand = null,
         )
         assertEquals("var-log", name)
     }
@@ -161,10 +154,9 @@ class SessionNameDerivationTest {
     fun dottedProjectNameIsSanitised() {
         // #642: even for an agent session, the name is the sanitised
         // path-prefix only — no `codex-` decoration.
-        val name = SessionNameDerivation.derive(
+        val name = SessionNameDerivation.baseName(
             startDirectory = "~/my.project.v2",
             homeDirectory = home,
-            agentCommand = "codex",
         )
         assertEquals("my_project_v2", name)
         assertNoTmuxForbidden(name)
@@ -181,137 +173,116 @@ class SessionNameDerivationTest {
     @Test
     fun derivedNamesNeverContainDotOrColon() {
         val samples = listOf(
-            SessionNameDerivation.derive("~/a.b:c", home, "claude"),
-            SessionNameDerivation.derive("/etc/ssh.d", null, null),
-            SessionNameDerivation.derive("~", home, "opencode"),
+            SessionNameDerivation.baseName("~/a.b:c", home),
+            SessionNameDerivation.baseName("/etc/ssh.d", null),
+            SessionNameDerivation.baseName("~", home),
         )
         samples.forEach { assertNoTmuxForbidden(it) }
     }
 
-    // --- Acceptance criterion: collision disambiguation ---
+    // --- Issue #1820, D22 hard cut: the client-side collision-disambiguation
+    // cases are DELETED along with the code they covered
+    // (`SessionNameDerivation.derive(…, existingNames)` and the private
+    // `disambiguate(…)`). They asserted a behaviour that no longer exists and
+    // must not come back: `collisionAppendsDeterministicSuffix`,
+    // `agentCollidesWithExistingShellInSameDir`, `collisionWalksUpUntilFreeSlot`,
+    // `noCollisionKeepsBaseName`, `customNameCollidingWithExistingIsDisambiguated`,
+    // `customNameCollisionWalksUpUntilFreeSlot`.
+    //
+    // The `-2`/`-3` walk itself is NOT untested — it moved to where it now runs:
+    // the host-side resolver (`FolderListGatewayFallbackTest`'s
+    // `freeSessionNameCommand` + UniqueOnHost cases, incl. the exact-match
+    // assertion) and the connected `TmuxInSessionNewSessionCollisionDockerTest`.
+    //
+    // `emptyExistingNamesDerivesTheBareCollidingBase` (#976) survives below as
+    // `derivationNeverDisambiguatesEvenForAKnownLiveBase`: its point — the
+    // deriver hands back the bare colliding base — is now the ONLY behaviour
+    // rather than the empty-cache edge, so it is worth pinning permanently. ---
 
     @Test
-    fun collisionAppendsDeterministicSuffix() {
-        // A genuine second session in the same dir (#642 keeps this):
-        // `git-pocketshell` is taken, so the next one gets `-2`.
-        val name = SessionNameDerivation.derive(
-            startDirectory = "~/git/pocketshell",
-            homeDirectory = home,
-            agentCommand = "claude",
-            existingNames = setOf("git-pocketshell"),
+    fun derivationNeverDisambiguatesEvenForAKnownLiveBase() {
+        // Issue #976 -> #1820. The old bug: the de-dupe input came from a UI
+        // cache that collapsed to ∅ whenever the picker was not `Ready`, so the
+        // deriver returned the bare base, which COLLIDED with the live
+        // same-folder session. #1820 removed the client-side opinion entirely —
+        // so the bare base is now the deliberate, always-taken output, and the
+        // HOST turns it into `-2` at create time. Pinning it here means anyone
+        // reintroducing a client-side `existingNames` parameter breaks a test.
+        assertEquals(
+            "git-pocketshell",
+            SessionNameDerivation.baseName("~/git/pocketshell", home),
         )
-        assertEquals("git-pocketshell-2", name)
-    }
-
-    @Test
-    fun agentCollidesWithExistingShellInSameDir() {
-        // Because the base no longer carries the agent CLI (#642), an
-        // agent session lands on the SAME base as a shell in the same dir
-        // and so disambiguates against it: shell took `git-pocketshell`,
-        // the agent becomes `git-pocketshell-2`.
-        val name = SessionNameDerivation.derive(
-            startDirectory = "~/git/pocketshell",
-            homeDirectory = home,
-            agentCommand = "claude",
-            existingNames = setOf("git-pocketshell"),
+        assertEquals(
+            "git-pocketshell",
+            SessionNameDerivation.resolveSessionName(
+                customName = null,
+                startDirectory = "~/git/pocketshell",
+                homeDirectory = home,
+            ),
         )
-        assertEquals("git-pocketshell-2", name)
-    }
-
-    @Test
-    fun emptyExistingNamesDerivesTheBareCollidingBase() {
-        // Issue #976: when the picker isn't `Ready` (a #974 drop / still-loading
-        // list) the de-dupe input collapses to ∅, so the deriver CANNOT add a
-        // `-2` suffix — it returns the bare base, which COLLIDES with the live
-        // same-folder session. This is the input that triggers the misroute; the
-        // server-side has-session guard in the gateway is what then refuses the
-        // launch instead of typing it into the existing pane.
-        val name = SessionNameDerivation.derive(
-            startDirectory = "~/git/pocketshell",
-            homeDirectory = home,
-            agentCommand = "codex",
-            existingNames = emptySet(),
-        )
-        assertEquals("git-pocketshell", name)
-    }
-
-    @Test
-    fun collisionWalksUpUntilFreeSlot() {
-        val name = SessionNameDerivation.derive(
-            startDirectory = "/var/log",
-            homeDirectory = home,
-            agentCommand = null,
-            existingNames = setOf("var-log", "var-log-2", "var-log-3"),
-        )
-        assertEquals("var-log-4", name)
-    }
-
-    @Test
-    fun noCollisionKeepsBaseName() {
-        val name = SessionNameDerivation.derive(
-            startDirectory = "/var/log",
-            homeDirectory = home,
-            agentCommand = null,
-            existingNames = setOf("something-else"),
-        )
-        assertEquals("var-log", name)
     }
 
     @Test
     fun noRandomTimestampSuffix() {
         // The old behaviour appended a 6-digit `currentTimeMillis()`
         // suffix; the name must now be fully deterministic.
-        val a = SessionNameDerivation.derive("~/git/pocketshell", home, "claude")
-        val b = SessionNameDerivation.derive("~/git/pocketshell", home, "claude")
+        val a = SessionNameDerivation.baseName("~/git/pocketshell", home)
+        val b = SessionNameDerivation.baseName("~/git/pocketshell", home)
         assertEquals(a, b)
         assertEquals("git-pocketshell", a)
     }
 
-    // --- Issue #898 (Finding 1): the public derivedSessionName(choice, …)
-    // wrapper is exactly what BOTH the host screen AND the in-session kebab "+
-    // New session" sheet now call. These pin that the wrapper threads
-    // `existingNames` into the deterministic `-2` suffix so a same-folder second
-    // session does NOT collide (the in-session path previously omitted
-    // `existingNames`, so a second "New session" in the current folder derived
-    // the IDENTICAL name and the `tmux new-session -A` create silently no-op'd
-    // onto the existing session). ---
+    // --- Issue #1820: the public derivedSessionName(choice, …) wrapper — what
+    // BOTH the host screen AND the in-session "+ New session" sheet call — now
+    // returns the BASE name and nothing else.
+    //
+    // It used to take an `existingNames` set from the screen's own UI cache and
+    // subtract it, which is how a stale/empty cache produced a colliding name
+    // (#1820: the picker published `Ready` with a list that omitted the session
+    // the app was attached to, so the "second session in this folder" asked for
+    // the name that was already taken). Collision resolution moved to the host,
+    // at create time, in FolderListGateway with SessionNamePolicy.UniqueOnHost.
+    //
+    // So these pin the SPLIT, which is the property that keeps the two deciders
+    // from coming back: the wrapper is purely a name DERIVER, it never claims a
+    // name is free. The suffix behaviour itself is covered where it now lives
+    // (FolderListGatewayFallbackTest's UniqueOnHost cases + the connected
+    // TmuxInSessionNewSessionCollisionDockerTest). ---
 
     @Test
-    fun derivedSessionNameWrapperSuffixesWhenFolderNameIsKnown() {
+    fun derivedSessionNameWrapperReturnsTheBaseAndNeverDisambiguates() {
         val choice = SessionTypeChoice(
             type = SessionType.Shell,
             agent = null,
             startDirectory = "/tmp/issue898",
             skipPermissions = false,
         )
-        // Same folder, but the base name is already taken on the host → the
-        // wrapper must return the `-2` variant, not the colliding base.
-        val name = derivedSessionName(
-            choice = choice,
-            homeDirectory = "/home/testuser",
-            existingNames = setOf("tmp-issue898"),
-        )
-        assertEquals("tmp-issue898-2", name)
-    }
-
-    @Test
-    fun derivedSessionNameWrapperWithoutKnownNamesCollidesOnBase() {
-        // This is the PRE-FIX behaviour the in-session path had: no known names
-        // passed in, so a second session in the same folder derives the SAME
-        // base — which `new-session -A` collapses onto the existing session.
-        // The fix is to pass the known names (the test above); this pins the
-        // contrast so a regression that drops `existingNames` is visible.
-        val choice = SessionTypeChoice(
-            type = SessionType.Shell,
-            agent = null,
-            startDirectory = "/tmp/issue898",
-            skipPermissions = false,
-        )
+        // Even for a folder whose base name is already live on the host, the
+        // wrapper hands back the bare base: it has no way to know, and pretending
+        // otherwise is exactly the defect. The gateway suffixes it.
         val name = derivedSessionName(
             choice = choice,
             homeDirectory = "/home/testuser",
         )
         assertEquals("tmp-issue898", name)
+    }
+
+    @Test
+    fun derivedSessionNameWrapperIsStableAcrossRepeatedCallsForTheSameFolder() {
+        // Two "+ New session" taps in the same folder derive the IDENTICAL base.
+        // That is now correct-by-design rather than the bug it used to be: the
+        // host turns the second one into `-2`. Pinning the equality stops anyone
+        // reintroducing a client-side "remember what I just created" set.
+        val choice = SessionTypeChoice(
+            type = SessionType.Shell,
+            agent = null,
+            startDirectory = "/tmp/issue898",
+            skipPermissions = false,
+        )
+        val first = derivedSessionName(choice = choice, homeDirectory = "/home/testuser")
+        val second = derivedSessionName(choice = choice, homeDirectory = "/home/testuser")
+        assertEquals(first, second)
+        assertEquals("tmp-issue898", first)
     }
 
     // --- Issue #1184: user-entered custom session label (resolveSessionName /
@@ -368,28 +339,25 @@ class SessionNameDerivationTest {
     }
 
     @Test
-    fun customNameCollidingWithExistingIsDisambiguated() {
-        // Acceptance: a custom label that collides with an existing session
-        // must be disambiguated, never silently attach to a different
-        // session's tmux (which `new-session -A` would otherwise do).
-        val name = SessionNameDerivation.resolveSessionName(
+    fun customLabelIsReturnedVerbatimWithNoCollisionSuffix() {
+        // Issue #1184's "a duplicate label must never silently attach to another
+        // session's tmux" acceptance still holds — but #1820 moved WHERE it is
+        // enforced. `resolveSessionName` no longer takes `existingNames` and no
+        // longer suffixes; the host does, at create time, against its live
+        // session list. Repeated calls therefore return the SAME label, and that
+        // is correct-by-design.
+        val first = SessionNameDerivation.resolveSessionName(
             customName = "review",
             startDirectory = "~/git/pocketshell",
             homeDirectory = home,
-            existingNames = setOf("review"),
         )
-        assertEquals("review-2", name)
-    }
-
-    @Test
-    fun customNameCollisionWalksUpUntilFreeSlot() {
-        val name = SessionNameDerivation.resolveSessionName(
+        val second = SessionNameDerivation.resolveSessionName(
             customName = "review",
             startDirectory = "~/git/pocketshell",
             homeDirectory = home,
-            existingNames = setOf("review", "review-2", "review-3"),
         )
-        assertEquals("review-4", name)
+        assertEquals("review", first)
+        assertEquals(first, second)
     }
 
     @Test
@@ -432,7 +400,7 @@ class SessionNameDerivationTest {
     }
 
     @Test
-    fun derivedSessionNameWrapperDisambiguatesCustomLabel() {
+    fun derivedSessionNameWrapperKeepsCustomLabelVerbatim() {
         val choice = SessionTypeChoice(
             type = SessionType.Shell,
             agent = null,
@@ -442,9 +410,13 @@ class SessionNameDerivationTest {
         val name = derivedSessionName(
             choice = choice,
             homeDirectory = home,
-            existingNames = setOf("review"),
         )
-        assertEquals("review-2", name)
+        // Issue #1820: a custom label is sanitised and returned as-is; whether
+        // "review" is already taken is the host's call at create time, not this
+        // function's. `SessionNameDerivation.resolveSessionName` still carries
+        // the disambiguation primitive (tested above) — the gateway is what
+        // feeds it the live names now.
+        assertEquals("review", name)
     }
 
     @Test
@@ -462,7 +434,7 @@ class SessionNameDerivationTest {
         assertEquals("git-pocketshell", name)
     }
 
-    // --- conventionalRemoteHome / knownSessionNames helpers ---
+    // --- conventionalRemoteHome helper (issue #1820 deleted knownSessionNames) ---
 
     @Test
     fun conventionalHomeForNamedUser() {

@@ -115,6 +115,7 @@ class AgentRecordedKindReadBackDockerTest {
                     sessionName = sessionName,
                     cwd = cwd,
                     startCommand = startCommand,
+                    namePolicy = SessionNamePolicy.UniqueOnHost,
                 ).getOrThrow()
             }
 

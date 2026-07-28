@@ -571,8 +571,14 @@ class TmuxClientTest {
             withTimeout(2_000) {
                 while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
             }
+            // Issue #1820: the target is the EXACT pane form (`=<name>:`), not a
+            // bare name. `sessionId` here is really a session NAME (the VM passes
+            // `target.sessionName`), and a bare `-t` prefix-matches: on tmux 3.4
+            // with only `foo-2` alive, `set-window-option -t 'foo' window-size
+            // latest` returned 0 after writing the policy onto the NEIGHBOUR.
+            // Shell-quoting is still the caller's job and must survive the `=`/`:`.
             assertEquals(
-                "set-window-option -t 'it isn'\\''t work' window-size latest\n",
+                "set-window-option -t '=it isn'\\''t work:' window-size latest\n",
                 shell.stdinAsString(),
             )
 
@@ -607,7 +613,7 @@ class TmuxClientTest {
 
             val sent = scope.async { runCatching { client.setWindowSizeLatest("work") } }
             withTimeout(2_000) {
-                while (shell.stdinAsString() != "set-window-option -t 'work' window-size latest\n") {
+                while (shell.stdinAsString() != "set-window-option -t '=work:' window-size latest\n") {
                     yield(); delay(10)
                 }
             }
@@ -621,7 +627,7 @@ class TmuxClientTest {
                 "timeout message must identify set-window-option without logging full arguments",
                 ex.message?.contains("tmux command `set-window-option` timed out") == true,
             )
-            assertEquals("set-window-option -t 'work' window-size latest\n", shell.stdinAsString())
+            assertEquals("set-window-option -t '=work:' window-size latest\n", shell.stdinAsString())
             assertFalse("setWindowSizeLatest timeout must not close the shell", shell.closed)
             assertFalse(
                 "setWindowSizeLatest timeout must not trip disconnected latch",

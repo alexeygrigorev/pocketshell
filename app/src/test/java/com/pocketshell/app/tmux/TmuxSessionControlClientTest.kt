@@ -45,8 +45,8 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
         advanceUntilIdle()
 
         assertTrue(client.sentCommands.contains("new-session -d -s 'next' -c '~'"))
-        assertTrue(client.sentCommands.contains("rename-session -t 'work' 'renamed'"))
-        assertTrue(client.sentCommands.contains("kill-session -t 'work'"))
+        assertTrue(client.sentCommands.contains("rename-session -t '=work' 'renamed'"))
+        assertTrue(client.sentCommands.contains("kill-session -t '=work'"))
         // No window-management commands are ever issued (#782 hard-cut).
         assertFalse(client.sentCommands.any { it.startsWith("new-window") })
         assertFalse(client.sentCommands.any { it.startsWith("select-window") })
@@ -81,7 +81,7 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
         // path, sendLifecycleViaExecCalls would be empty. It carries the exact
         // rename command, so the round-trip rode the exec lane.
         assertEquals(
-            listOf("rename-session -t 'work' 'renamed'"),
+            listOf("rename-session -t '=work' 'renamed'"),
             client.sendLifecycleViaExecCalls,
         )
     }
@@ -140,7 +140,7 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
 
         assertEquals(
             listOf(
-                "set-window-option -t 'work' window-size latest",
+                "set-window-option -t '=work:' window-size latest",
                 "refresh-client -C 85x30",
             ),
             client.sentCommands,
@@ -195,7 +195,7 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
 
         assertEquals(
             listOf(
-                "set-window-option -t 'work' window-size latest",
+                "set-window-option -t '=work:' window-size latest",
                 "refresh-client -C 48x95",
                 "refresh-client -C 50x95",
                 "refresh-client -C 50x94",
@@ -260,7 +260,7 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(
-            "set-window-option -t 'it'\\''s work' window-size latest",
+            "set-window-option -t '=it'\\''s work:' window-size latest",
             client.sentCommands.single { it.startsWith("set-window-option") },
         )
     }

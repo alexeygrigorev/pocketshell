@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.projects.FolderListGateway
+import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.core.storage.dao.HostDao
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -157,6 +158,12 @@ class StaleSessionPromptController internal constructor(
             sessionName = sessionName,
             cwd = cwd,
             startCommand = null,
+            // Issue #1820: recovery recreates the session the user is trying to
+            // get BACK, under the name they are recovering. Disambiguating here
+            // would hand them `<name>-2` and leave the recovery navigate
+            // pointing at a name that does not exist, so this is the one create
+            // path that means its name exactly.
+            namePolicy = SessionNamePolicy.ExactName,
         )
     }
 

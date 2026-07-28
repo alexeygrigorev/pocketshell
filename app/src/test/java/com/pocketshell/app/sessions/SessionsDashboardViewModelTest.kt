@@ -513,8 +513,8 @@ class SessionsDashboardViewModelTest {
         advanceUntilIdle()
 
         assertTrue(client.sentCommands.contains("new-session -d -s 'next' -c '~'"))
-        assertTrue(client.sentCommands.contains("rename-session -t 'next' 'renamed'"))
-        assertTrue(client.sentCommands.contains("kill-session -t 'renamed'"))
+        assertTrue(client.sentCommands.contains("rename-session -t '=next' 'renamed'"))
+        assertTrue(client.sentCommands.contains("kill-session -t '=renamed'"))
         assertNull(
             "successful kill should not produce a killError banner",
             vm.killError.value,
@@ -569,11 +569,11 @@ class SessionsDashboardViewModelTest {
         )
         assertTrue(
             "Rename must ride the exec lane; calls=${client.sendLifecycleViaExecCalls}",
-            client.sendLifecycleViaExecCalls.any { it == "rename-session -t 'next' 'renamed'" },
+            client.sendLifecycleViaExecCalls.any { it == "rename-session -t '=next' 'renamed'" },
         )
         assertTrue(
             "Kill must ride the exec lane; calls=${client.sendLifecycleViaExecCalls}",
-            client.sendLifecycleViaExecCalls.any { it == "kill-session -t 'renamed'" },
+            client.sendLifecycleViaExecCalls.any { it == "kill-session -t '=renamed'" },
         )
         assertTrue(
             "the list-sessions poll must ride the exec lane; calls=${client.sendLifecycleViaExecCalls}",
@@ -724,7 +724,7 @@ class SessionsDashboardViewModelTest {
         // only the kill command should be on the wire.
         assertEquals(
             "only the kill command should be in flight before %sessions-changed",
-            listOf("kill-session -t 'stale'"),
+            listOf("kill-session -t '=stale'"),
             client.sentCommands,
         )
         // tmux finishes the teardown and emits the deterministic event.

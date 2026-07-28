@@ -152,6 +152,7 @@ class AgentStateReadBackDockerTest {
                 sessionName = absent,
                 cwd = cwd,
                 startCommand = null,
+                namePolicy = SessionNamePolicy.UniqueOnHost,
             ).getOrThrow()
         }
 

@@ -12,35 +12,38 @@ package com.pocketshell.app.projects
  *  - `/var/log` (shell)                   -> `var-log`
  *  - `$HOME` itself                       -> `home-<homeBasename>`
  *
+ * The result is the BASE name only. Collision disambiguation (`-2`, `-3`, …)
+ * is NOT done here — issue #1820 moved it to
+ * [FolderListGateway.createSession] with [SessionNamePolicy.UniqueOnHost],
+ * which resolves the free name against the host's live session list at create
+ * time. The screens used to pass their own `existingNames` set from a UI cache;
+ * that cache could be stale or (when the picker/tree was not `Ready`) simply
+ * empty, and then the "second session in this folder" silently requested a
+ * colliding name. There is deliberately no client-side second opinion left.
+ *
  * @param homeDirectory the remote `$HOME` if known, so paths under home
  *   collapse to their home-relative form (and `~` is recognised). May be
  *   `null` when home is unknown, in which case absolute paths are named
  *   from their full components.
- * @param existingNames session names already present on the host. A
- *   genuinely different second session in the same directory gets a
- *   deterministic `-2`, `-3`, ... suffix instead of colliding; an exact
- *   re-pick still attaches via the gateway's `tmux new-session -A`.
  */
 internal fun derivedSessionName(
     choice: SessionTypeChoice,
     homeDirectory: String? = null,
-    existingNames: Set<String> = emptySet(),
 ): String = SessionNameDerivation.resolveSessionName(
     // Issue #1184: honour a user-entered custom label when present; a blank
-    // custom name falls back to the directory-derived default (#429/#642),
-    // and either base is disambiguated against [existingNames].
+    // custom name falls back to the directory-derived default (#429/#642).
     customName = choice.customName,
     startDirectory = choice.startDirectory,
     homeDirectory = homeDirectory,
-    existingNames = existingNames,
 )
 
 /**
  * The directory-derived DEFAULT session name (no collision suffix) used to
  * prefill the "Session name" field in the new-session picker - issue #1184.
  * The picker keeps this in sync with the chosen start folder until the user
- * types their own label; the final collision `disambiguate` still runs at
- * create time in [derivedSessionName].
+ * types their own label. Issue #1820: there is no client-side collision step
+ * after this — the host resolves the free name at create time
+ * ([SessionNamePolicy.UniqueOnHost]).
  */
 internal fun defaultSessionBaseName(
     startDirectory: String,
@@ -65,14 +68,9 @@ internal fun conventionalRemoteHome(username: String): String? {
     }
 }
 
-/**
- * Session names already discovered for this host, used so a genuinely new
- * second session in the same directory gets a deterministic `-2`/`-3`
- * suffix rather than colliding (issue #429).
- */
-internal fun knownSessionNames(state: FolderListUiState): Set<String> =
-    when (state) {
-        is FolderListUiState.Ready ->
-            state.folders.flatMap { it.sessions }.map { it.sessionName }.toSet()
-        else -> emptySet()
-    }
+// Issue #1820, D22 hard cut: `knownSessionNames(FolderListUiState)` is DELETED.
+// It answered "what names are taken?" from the screen's own UI state, returning
+// an EMPTY set for every non-`Ready` state, and callers fed that straight into
+// the create name. The host answers that question now, at create time, in
+// FolderListGateway with SessionNamePolicy.UniqueOnHost. Nothing client-side
+// should re-derive it — two deciders for one fact is the defect this removed.

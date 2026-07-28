@@ -1777,7 +1777,7 @@ class ShareViewModelTest {
         assertFalse("stale target must fail before opening staging SSH", openedStagingSession)
         assertTrue(
             "identity revalidation must target the selected session, got ${client.sentCommands}",
-            client.sentCommands.single().contains("display-message -p -t 'scratch'"),
+            client.sentCommands.single().contains("display-message -p -t '=scratch:'"),
         )
     }
 
@@ -1820,7 +1820,7 @@ class ShareViewModelTest {
         val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
         assertTrue(failed.message.contains("save to inbox", ignoreCase = true))
         assertFalse("vanished target must fail before opening staging SSH", openedStagingSession)
-        assertEquals("has-session -t 'scratch'", client.sentCommands.single())
+        assertEquals("has-session -t '=scratch'", client.sentCommands.single())
     }
 
     @Test

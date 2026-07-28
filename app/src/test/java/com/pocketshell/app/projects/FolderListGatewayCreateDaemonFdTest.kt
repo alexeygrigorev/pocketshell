@@ -67,6 +67,7 @@ class FolderListGatewayCreateDaemonFdTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "pocketshell agent claude --dir '$CWD'",
+                namePolicy = SessionNamePolicy.ExactName,
             )
 
             // Create returned promptly with no false timeout.
@@ -90,7 +91,7 @@ class FolderListGatewayCreateDaemonFdTest {
             assertTrue(
                 "send-keys must type the agent launch line into the new session: $sendKeys",
                 sendKeys.contains("agent claude") &&
-                    sendKeys.contains("send-keys -t ${escapedInWrapper(SESSION_NAME)}"),
+                    sendKeys.contains("send-keys -t ${escapedInWrapper("=$SESSION_NAME:")}"),
             )
         }
     }
@@ -108,6 +109,7 @@ class FolderListGatewayCreateDaemonFdTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "htop",
+                namePolicy = SessionNamePolicy.ExactName,
             )
 
             assertEquals(SESSION_NAME, name)
@@ -139,6 +141,7 @@ class FolderListGatewayCreateDaemonFdTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "pocketshell agent codex --dir '$CWD'",
+                namePolicy = SessionNamePolicy.ExactName,
             )
 
             assertEquals(SESSION_NAME, name)
@@ -173,6 +176,7 @@ class FolderListGatewayCreateDaemonFdTest {
                     sessionName = SESSION_NAME,
                     cwd = CWD,
                     startCommand = "pocketshell agent claude --dir '$CWD'",
+                    namePolicy = SessionNamePolicy.ExactName,
                 )
             }.exceptionOrNull()
 

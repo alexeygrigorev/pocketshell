@@ -681,6 +681,7 @@ private class StaticGateway(
         sessionName: String,
         cwd: String,
         startCommand: String?,
+        namePolicy: SessionNamePolicy,
     ): Result<String> = Result.success(sessionName)
 
     override suspend fun createEmptyProject(

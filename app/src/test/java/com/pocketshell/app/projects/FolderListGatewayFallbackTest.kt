@@ -90,6 +90,7 @@ class FolderListGatewayFallbackTest {
             sessionName = SESSION_NAME,
             cwd = CWD,
             startCommand = null,
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         assertEquals(SESSION_NAME, name)
@@ -151,6 +152,7 @@ class FolderListGatewayFallbackTest {
             sessionName = SESSION_NAME,
             cwd = CWD,
             startCommand = null,
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         assertEquals(SESSION_NAME, name)
@@ -196,6 +198,7 @@ class FolderListGatewayFallbackTest {
             sessionName = SESSION_NAME,
             cwd = CWD,
             startCommand = null,
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         assertEquals(SESSION_NAME, name)
@@ -232,6 +235,7 @@ class FolderListGatewayFallbackTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = null,
+                namePolicy = SessionNamePolicy.ExactName,
             )
         }.exceptionOrNull()
         assertTrue("expected a surfaced RuntimeException, got $ex", ex is RuntimeException)
@@ -261,6 +265,7 @@ class FolderListGatewayFallbackTest {
             sessionName = SESSION_NAME,
             cwd = CWD,
             startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         val sendKeys = session.execCommands.single { it.contains("send-keys") }
@@ -269,7 +274,7 @@ class FolderListGatewayFallbackTest {
         // `Enter'` of the wrapper's closing quote.
         assertTrue(
             "send-keys must target the quoted session name and end with Enter: $sendKeys",
-            sendKeys.contains("tmux send-keys -t ${escapedInWrapper(SESSION_NAME)}") &&
+            sendKeys.contains("tmux send-keys -t ${escapedInWrapper("=$SESSION_NAME:")}") &&
                 sendKeys.endsWith("Enter'"),
         )
         // The capped create still ran before send-keys.
@@ -316,6 +321,7 @@ class FolderListGatewayFallbackTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
+                namePolicy = SessionNamePolicy.ExactName,
             )
         }.exceptionOrNull()
 
@@ -388,6 +394,7 @@ class FolderListGatewayFallbackTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
+                namePolicy = SessionNamePolicy.ExactName,
             )
         }.exceptionOrNull()
 
@@ -444,6 +451,7 @@ class FolderListGatewayFallbackTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
+                namePolicy = SessionNamePolicy.ExactName,
             )
         }.exceptionOrNull()
 
@@ -481,6 +489,7 @@ class FolderListGatewayFallbackTest {
             sessionName = SESSION_NAME,
             cwd = CWD,
             startCommand = "htop",
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         assertFalse(
@@ -520,6 +529,7 @@ class FolderListGatewayFallbackTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
+                namePolicy = SessionNamePolicy.ExactName,
             )
         }.exceptionOrNull()
 
@@ -569,6 +579,7 @@ class FolderListGatewayFallbackTest {
             sessionName = freshName,
             cwd = CWD,
             startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         assertTrue(
@@ -578,7 +589,7 @@ class FolderListGatewayFallbackTest {
         val sendKeys = session.execCommands.single { it.contains("send-keys") }
         assertTrue(
             "send-keys must target the fresh suffixed name: $sendKeys",
-            sendKeys.contains("tmux send-keys -t ${escapedInWrapper(freshName)}"),
+            sendKeys.contains("tmux send-keys -t ${escapedInWrapper("=$freshName:")}"),
         )
     }
 
@@ -605,6 +616,7 @@ class FolderListGatewayFallbackTest {
             sessionName = "var-log",
             cwd = "/var/log",
             startCommand = "pocketshell agent claude --dir '/var/log'",
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         assertTrue(session.execCommands.any { it.contains("create-detached") })
@@ -632,6 +644,7 @@ class FolderListGatewayFallbackTest {
                 sessionName = SESSION_NAME,
                 cwd = CWD,
                 startCommand = "htop",
+                namePolicy = SessionNamePolicy.ExactName,
             )
         }.exceptionOrNull()
 
@@ -660,6 +673,7 @@ class FolderListGatewayFallbackTest {
             sessionName = SESSION_NAME,
             cwd = CWD,
             startCommand = null,
+            namePolicy = SessionNamePolicy.ExactName,
         )
 
         assertFalse(
@@ -670,6 +684,181 @@ class FolderListGatewayFallbackTest {
             "a no-launch re-pick must still run the idempotent create",
             session.execCommands.any { it.contains("create-detached") },
         )
+    }
+
+    // --- Issue #1820: session-name uniqueness is resolved on the HOST -------
+    //
+    // The reported defect: the in-session "+ New session" picker published
+    // `Ready` with a session list that OMITTED the very session the app was
+    // attached to over `-CC`, so the screen derived the colliding base name and
+    // the create either silently attached to the existing session or failed
+    // (`open terminal failed: not a terminal`). No new session for the user.
+    //
+    // The client can no longer make that decision at all — these pin that the
+    // gateway asks the host, at create time, and threads the ANSWER through the
+    // create, the launch and the return value. (The remote script itself runs
+    // against a real tmux in the connected
+    // TmuxInSessionNewSessionCollisionDockerTest; a fake session can only prove
+    // the wiring around it.)
+
+    @Test
+    fun uniqueOnHostCreatesTheNameTheHostSaysIsFreeNotTheRequestedBase() = runTest {
+        // The host answers the free-name probe with the `-2` variant, i.e. the
+        // requested base is already live there. Every downstream step must use
+        // THAT name — this is the load-bearing assertion for #1820.
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(
+                    match = "__ps_n=",
+                    result = ExecResult(stdout = "$SESSION_NAME-2\n", stderr = "", exitCode = 0),
+                ),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val resolved = gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = null,
+            namePolicy = SessionNamePolicy.UniqueOnHost,
+        )
+
+        assertEquals("$SESSION_NAME-2", resolved)
+        val create = session.execCommands.single { it.contains("create-detached") }
+        assertTrue(
+            "the create must target the host-resolved name, got: $create",
+            create.contains("'$SESSION_NAME-2'"),
+        )
+    }
+
+    @Test
+    fun uniqueOnHostLaunchSendsKeysToTheResolvedNameNotTheCollidingBase() = runTest {
+        // Class coverage: the AGENT/shell LAUNCH path. Before #1820 a colliding
+        // base here was the #976 misroute — `send-keys` typing the launch line
+        // into the already-attached pane — and latterly a hard refusal. With the
+        // host resolving the name, the launch proceeds into the NEW session.
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(
+                    match = "__ps_n=",
+                    result = ExecResult(stdout = "$SESSION_NAME-3\n", stderr = "", exitCode = 0),
+                ),
+                // has-session on the RESOLVED name: free, so the #976 guard
+                // passes and the launch is allowed to proceed.
+                CreateSessionFake.Rule(match = "has-session", result = ExecResult("", "", 1)),
+                CreateSessionFake.Rule(match = "agent --help", result = ok()),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+                CreateSessionFake.Rule(match = "send-keys", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val resolved = gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = "htop",
+            namePolicy = SessionNamePolicy.UniqueOnHost,
+        )
+
+        assertEquals("$SESSION_NAME-3", resolved)
+        val sendKeys = session.execCommands.single { it.contains("send-keys") }
+        // The command is wrapped in `/bin/sh -lc '...'`, so the inner single
+        // quotes are shell-escaped; match the quoted NAME token rather than the
+        // `-t '<name>'` pair. Since #1820 round 2 the pane target is also EXACT
+        // (`=<name>:`), so the token to look for is `'=work session-3:'`. The
+        // negative is the one that carries the bug: `=work session:` (separator
+        // straight after the base) can only appear if the launch went to the
+        // colliding base instead.
+        assertTrue(
+            "the launch must be typed into the RESOLVED session, got: $sendKeys",
+            sendKeys.contains("'=$SESSION_NAME-3:'"),
+        )
+        assertFalse(
+            "the launch must NOT target the colliding base, got: $sendKeys",
+            sendKeys.contains("'=$SESSION_NAME:'"),
+        )
+        val guard = session.execCommands.single { it.contains("has-session") && !it.contains("__ps_n=") }
+        assertTrue(
+            "the #976 guard must probe the resolved name by EXACT match, got: $guard",
+            guard.contains("'=$SESSION_NAME-3'"),
+        )
+    }
+
+    @Test
+    fun exactNameSkipsTheHostProbeEntirely() = runTest {
+        // The stale-session recovery path names the session the user is getting
+        // back. It must NOT be handed a `-2`, and it must not pay for a probe.
+        val session = CreateSessionFake(
+            results = listOf(CreateSessionFake.Rule(match = "create-detached", result = ok())),
+        )
+        val gateway = SshFolderListGateway()
+
+        val resolved = gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = null,
+            namePolicy = SessionNamePolicy.ExactName,
+        )
+
+        assertEquals(SESSION_NAME, resolved)
+        assertFalse(
+            "ExactName must not run the free-name walk",
+            session.execCommands.any { it.contains("__ps_n=") },
+        )
+    }
+
+    @Test
+    fun uniqueOnHostFallsBackToTheRequestedBaseWhenTheProbeFails() = runTest {
+        // Fail-safe: a create must never be BLOCKED by the uniqueness probe. On
+        // a probe error we degrade to exactly the pre-#1820 behaviour (request
+        // the base, let the idempotent create attach) rather than erroring out.
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(
+                    match = "__ps_n=",
+                    result = ExecResult(stdout = "", stderr = "tmux: not found", exitCode = 127),
+                ),
+                CreateSessionFake.Rule(match = "create-detached", result = ok()),
+            ),
+        )
+        val gateway = SshFolderListGateway()
+
+        val resolved = gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = null,
+            namePolicy = SessionNamePolicy.UniqueOnHost,
+        )
+
+        assertEquals(SESSION_NAME, resolved)
+        assertTrue(
+            "a failed probe must still create",
+            session.execCommands.any { it.contains("create-detached") },
+        )
+    }
+
+    @Test
+    fun freeSessionNameCommandUsesExactMatchAndABoundedWalk() {
+        // `-t "=$n"` is load-bearing: without the `=`, tmux falls back to prefix
+        // matching, so probing `foo` while only `foo-2` exists answers "taken"
+        // and the walk skips a genuinely free name. The bound stops a
+        // pathological host spinning the remote shell forever.
+        val command = SshFolderListGateway.freeSessionNameCommand("'work session'")
+
+        assertTrue("must exact-match: $command", command.contains("has-session -t \"=\$__ps_n\""))
+        assertTrue("must seed from the quoted base: $command", command.contains("__ps_n='work session'"))
+        assertTrue("must build the suffix from the quoted base: $command", command.contains("__ps_n='work session'-\$__ps_i"))
+        assertTrue("must start at -2: $command", command.contains("__ps_i=2"))
+        assertTrue(
+            "must bound the walk: $command",
+            command.contains("-gt ${SshFolderListGateway.FREE_SESSION_NAME_MAX_SUFFIX}"),
+        )
+        assertTrue("must emit the chosen name: $command", command.contains("printf '%s\\n' \"\$__ps_n\""))
     }
 
     /**

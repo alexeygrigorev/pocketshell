@@ -650,6 +650,7 @@ class FolderListViewModelWindowCloseTest {
             sessionName: String,
             cwd: String,
             startCommand: String?,
+            namePolicy: SessionNamePolicy,
         ): Result<String> = error("not used")
 
         override suspend fun createEmptyProject(

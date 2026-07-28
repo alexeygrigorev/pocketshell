@@ -376,8 +376,19 @@ print_journey_class_selection
 #   JOURNEY_CLASS_KILL_AFTER_SECS
 #                              — SIGKILL backstop after the per-class timeout
 #                                sends TERM (default 30s).
+#   JOURNEY_WARM_BUILD_TIMEOUT_SECS
+#                              — issue #1814: hard cap for the ONE up-front warm
+#                                build (default 900s). The cold Gradle build is
+#                                paid BEFORE the per-class clock starts so the
+#                                FIRST class on a shard is not charged for
+#                                `:app:compileDebugKotlin` inside its own
+#                                per-class budget. It is charged to the SUITE
+#                                budget (where that build time already lived),
+#                                so the job-cap arithmetic above is unchanged,
+#                                and NO per-class budget is raised.
 JOURNEY_STEP_BUDGET_SECS="${JOURNEY_STEP_BUDGET_SECS:-4200}"
 JOURNEY_CLASS_TIMEOUT_SECS="${JOURNEY_CLASS_TIMEOUT_SECS:-420}"
+JOURNEY_WARM_BUILD_TIMEOUT_SECS="${JOURNEY_WARM_BUILD_TIMEOUT_SECS:-900}"
 JOURNEY_GRADLE_STOP_TIMEOUT_SECS="${JOURNEY_GRADLE_STOP_TIMEOUT_SECS:-60}"
 JOURNEY_CLASS_KILL_AFTER_SECS="${JOURNEY_CLASS_KILL_AFTER_SECS:-30}"
 
@@ -428,6 +439,16 @@ if [[ "${POCKETSHELL_JOURNEY_SHARD:-0}" == "1" ]]; then
     exit 1
   fi
 fi
+
+# Issue #1814: the up-front warm build lives in its own sourced helper. It runs
+# INSIDE the suite budget but OUTSIDE every per-class cap, so the first class on
+# a shard is no longer charged for the cold `:app:compileDebugKotlin`.
+# shellcheck source=scripts/ci-journey-warm-build-functions.sh
+CI_JOURNEY_WARM_BUILD_HELPER="$REPO_ROOT/scripts/ci-journey-warm-build-functions.sh"
+if [[ ! -f "$CI_JOURNEY_WARM_BUILD_HELPER" && -f "$INVOCATION_DIR/scripts/ci-journey-warm-build-functions.sh" ]]; then
+  CI_JOURNEY_WARM_BUILD_HELPER="$INVOCATION_DIR/scripts/ci-journey-warm-build-functions.sh"
+fi
+source "$CI_JOURNEY_WARM_BUILD_HELPER"
 
 # Journey class retry loop and result buckets live in a sourced helper. The
 # helper preserves the existing budget log phrase "workflow job cap: 95 min",

@@ -47,6 +47,12 @@ LAST_RUN_CLASS_PRIMARY_CLASSIFICATION=""
 LAST_RUN_CLASS_RAW_JUNIT_STATUS=""
 LAST_RUN_CLASS_RAW_JUNIT_COUNT=0
 LAST_RUN_CLASS_SNAPSHOT_STATUS=""
+# Issue #1814: which PHASE an outer-timeout attempt died in. A zero-test
+# `outer_timeout` reads identically whether the runner was killed mid-journey or
+# Gradle was still BUILDING, and that ambiguity is what made the shard-2
+# first-class timeout on run 30323508796 expensive to diagnose.
+LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE=""
+BUILD_PHASE_TIMEOUT_ATTEMPTS=()
 JOURNEY_ABORT_ISOLATION_FAILED=0
 JOURNEY_HARNESS_FAILURE_RC=125
 declare -A JOURNEY_CLASS_ATTEMPT_COUNTS=()
@@ -61,6 +67,58 @@ class_attempt_hit_time_budget() {
 
 needs_gradle_cleanup_after_class_abort() {
   [[ "$1" -eq 124 || "$1" -eq 137 ]]
+}
+
+# journey_attempt_timeout_phase <attempt-log> <classification> — issue #1814.
+#
+# An `outer_timeout` with `raw-junit count=0` is produced by two very different
+# situations that used to be indistinguishable in the artifacts:
+#   * the Gradle BUILD was still running when the wall cap fired (nothing about
+#     the journey was ever exercised — a build-cost artefact, not a verdict), and
+#   * instrumentation started and then wedged (a real on-device signal).
+# The attempt log is the only evidence that separates them, so read it: Gradle
+# prints `> Task :…` headers as it executes, and the connected-test task /
+# runner announce themselves when instrumentation begins.
+#
+# Fail-SAFE by construction: `build` is claimed only on POSITIVE evidence of
+# build activity WITH no instrumentation marker. No evidence at all stays
+# `unknown`, which is never downgraded or specially labelled — so this can only
+# ever add attribution, never remove a failure signal.
+journey_attempt_timeout_phase() {
+  local log="$1"
+  local classification="$2"
+
+  if [[ "$classification" != "outer_timeout" ]]; then
+    printf 'not_applicable\n'
+    return 0
+  fi
+  if [[ ! -f "$log" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  if grep -qE '> Task :[^[:space:]]*:connected[A-Za-z]*AndroidTest|Starting [0-9]+ tests on|Installing APK|Installed on ' "$log"; then
+    printf 'instrumentation\n'
+    return 0
+  fi
+  if grep -qE '> Task :' "$log"; then
+    printf 'build\n'
+    return 0
+  fi
+  printf 'unknown\n'
+}
+
+# record_build_phase_timeout_attempt <selector> — issue #1814.
+#
+# Name a build-phase timeout LOUDLY and greppably at the moment it happens, and
+# collect it for its own summary section, so nobody has to reverse-engineer
+# "exit 124 / count=0" into "the build had not finished yet" again. This is
+# attribution only: the attempt's pass/fail bucket is untouched.
+record_build_phase_timeout_attempt() {
+  local fqcn="$1"
+
+  [[ "${LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE:-}" == "build" ]] || return 0
+  echo "JOURNEY_BUILD_PHASE_TIMEOUT: $fqcn attempt ${LAST_RUN_CLASS_ATTEMPT} was cut while Gradle was still BUILDING — instrumentation never started, so there is no raw JUnit XML (raw-junit count=${LAST_RUN_CLASS_RAW_JUNIT_COUNT}). Read this as a build-cost timeout, NOT as a journey verdict or a product defect (issue #1814)."
+  BUILD_PHASE_TIMEOUT_ATTEMPTS+=("$fqcn (attempt ${LAST_RUN_CLASS_ATTEMPT})")
 }
 
 journey_class_artifact_key() {
@@ -478,6 +536,7 @@ snapshot_connected_test_outputs() {
   local raw_junit_count=0
   local raw_junit_status
   local primary_classification
+  local outer_timeout_phase
   local -a build_roots=()
 
   mapfile -t build_roots < <(journey_module_build_roots "$module" "$suffix") || return 1
@@ -530,6 +589,11 @@ snapshot_connected_test_outputs() {
   else
     primary_classification="failure"
   fi
+  # Issue #1814: attribute an outer timeout to the phase it died in, from this
+  # attempt's own streamed log.
+  outer_timeout_phase="$(
+    journey_attempt_timeout_phase "$attempt_dir/attempt.log" "$primary_classification"
+  )"
 
   if serial="$(journey_resolve_device_serial)"; then
     if capture_required_nonempty \
@@ -582,10 +646,12 @@ snapshot_connected_test_outputs() {
     printf 'primary_classification=%s\n' "$primary_classification"
     printf 'raw_junit_status=%s\n' "$raw_junit_status"
     printf 'raw_junit_count=%s\n' "$raw_junit_count"
+    printf 'outer_timeout_phase=%s\n' "$outer_timeout_phase"
     printf 'snapshotted_output_roots=%s\n' "$copied"
     printf 'snapshot_status=%s\n' "$([[ "$snapshot_failed" -eq 0 ]] && printf complete || printf failed)"
   } >> "$attempt_dir/manifest.txt" || snapshot_failed=1
 
+  LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE="$outer_timeout_phase"
   LAST_RUN_CLASS_PRIMARY_CLASSIFICATION="$primary_classification"
   LAST_RUN_CLASS_RAW_JUNIT_STATUS="$raw_junit_status"
   LAST_RUN_CLASS_RAW_JUNIT_COUNT="$raw_junit_count"
@@ -830,6 +896,7 @@ run_class() {
   LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=0
   LAST_RUN_CLASS_GRADLE_CLEANUP_RC="not_run"
   LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
+  LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE=""
   if [[ -n "$app_id_suffix" ]]; then
     [[ "$app_id_suffix" =~ ^[A-Za-z0-9._]+$ ]] || {
       echo "JOURNEY_INVOCATION_IDENTITY_FAILED: invalid application id suffix '$app_id_suffix'" >&2
@@ -896,6 +963,8 @@ run_class() {
     LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
     JOURNEY_ABORT_ISOLATION_FAILED=1
   fi
+  # Issue #1814: name a still-building outer timeout for what it is.
+  record_build_phase_timeout_attempt "$fqcn"
   cleanup_status="not_required"
   if needs_gradle_cleanup_after_class_abort "$rc"; then
     cleanup_status="failed"
@@ -940,6 +1009,7 @@ run_ct_class() {
   LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=0
   LAST_RUN_CLASS_GRADLE_CLEANUP_RC="not_run"
   LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
+  LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE=""
   remaining="$(budget_remaining)"
   cap="$JOURNEY_CLASS_TIMEOUT_SECS"
   (( remaining < cap )) && cap="$remaining"
@@ -976,6 +1046,8 @@ run_ct_class() {
     LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED=1
     JOURNEY_ABORT_ISOLATION_FAILED=1
   fi
+  # Issue #1814: name a still-building outer timeout for what it is.
+  record_build_phase_timeout_attempt "$fqcn"
   cleanup_status="not_required"
   if needs_gradle_cleanup_after_class_abort "$rc"; then
     cleanup_status="failed"

@@ -1,0 +1,52 @@
+# Re-keying SSH test image for PocketShell (`pocketshell-test:ssh-rekeyed`).
+#
+# Issue #1799 — prerequisite fixture for #1639 §H1 (SSH host-key verification).
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT `Dockerfile.ssh` WITH A FLAG
+# ----------------------------------------------------------------
+# `tests/docker/Dockerfile.ssh` runs `ssh-keygen -A` in a `RUN` layer, so its
+# host keys are baked into the image. Every container started from that image
+# presents the SAME host key forever. That makes two scenarios unreachable in
+# tests today:
+#
+#   * "the client has never seen this host key before"  (it has — every other
+#     fixture container in the repo shares the one baked key), and
+#   * "the host key CHANGED between two connects to the same endpoint".
+#
+# This image deliberately ships with NO host keys in any layer. The entrypoint
+# (`ssh-rekeyed-entrypoint.sh`) mints a fresh set at container START, so two
+# successive starts of this ONE image present DIFFERENT host keys. That is the
+# fixture property the #1639 §H1 work needs and cannot get anywhere else.
+#
+# Everything else — the `testuser` account, the committed ed25519 client key in
+# `tests/docker/test_key`, `sshd_config` — is identical to `Dockerfile.ssh`, so
+# a test can swap fixtures without changing its auth path. Only the host-key
+# lifetime differs.
+FROM alpine:latest
+
+# NOTE: intentionally NO `ssh-keygen -A` here. Adding it would bake a stable
+# host key into the image and silently turn this fixture back into
+# `Dockerfile.ssh`, defeating the entire point (the tests that consume it would
+# still pass — they would just stop proving anything about a CHANGED key).
+RUN apk add --no-cache openssh-server openssh-client \
+    && adduser -D -s /bin/sh testuser \
+    && passwd -u testuser \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh
+
+COPY sshd_config /etc/ssh/sshd_config
+COPY test_key.pub /home/testuser/.ssh/authorized_keys
+# Same rationale as Dockerfile.ssh (issue #150): the matching private key lets
+# the compose healthcheck run an end-to-end SSH probe from inside the
+# container. It is a committed test fixture and authenticates against nothing
+# outside this disposable image.
+COPY test_key /root/test_key
+COPY ssh-rekeyed-entrypoint.sh /usr/local/bin/ssh-rekeyed-entrypoint.sh
+
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
+    && chown -R testuser:testuser /home/testuser/.ssh \
+    && chmod 755 /usr/local/bin/ssh-rekeyed-entrypoint.sh
+
+EXPOSE 22
+
+CMD ["/usr/local/bin/ssh-rekeyed-entrypoint.sh"]

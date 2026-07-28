@@ -191,7 +191,14 @@ public fun TmuxSessionScreen(
         tmuxSessionId = tmuxSessionId,
         sessionCreated = sessionCreated,
     )
-    val pagerState = rememberPagerState(pageCount = { conn.unifiedPanes.size })
+    // Issue #1778: one immutable page snapshot feeds measurement + ownership.
+    val unifiedPager = rememberUnifiedPagerModel(
+        conn = conn,
+        sessionName = sessionName,
+        initialWindowIndex = initialWindowIndex,
+        viewModel = viewModel,
+    )
+    val pagerState = rememberPagerState(pageCount = { unifiedPager.pages.size })
     // Issue #1685: the pager-relative pane selection in its own frame.
     val panesSel = rememberTmuxSessionPaneSelection(conn, viewModel, pagerState)
     // Epic #821 Slice 1: the active session's RECORDED `@ps_agent_kind`.
@@ -294,6 +301,7 @@ public fun TmuxSessionScreen(
         panesSel = panesSel,
         overlay = overlay,
         pagerState = pagerState,
+        unifiedPager = unifiedPager,
         hostId = hostId,
         hostName = hostName,
         host = host,
@@ -373,6 +381,7 @@ public fun TmuxSessionScreen(
                 agent = agent,
                 overlay = overlay,
                 pagerState = pagerState,
+                unifiedPagerPages = unifiedPager.pages,
                 tabState = tabState,
                 agentConversationsState = agentConversationsState,
                 sessionCards = sessionCards,
@@ -498,6 +507,7 @@ private fun TmuxSessionScreenEffects(
     panesSel: TmuxSessionPaneSelection,
     overlay: TmuxSessionOverlayState,
     pagerState: PagerState,
+    unifiedPager: UnifiedPagerModel,
     hostId: Long,
     hostName: String,
     host: String,
@@ -531,7 +541,6 @@ private fun TmuxSessionScreenEffects(
     val targetSessionId = conn.targetSessionId
     val sessionLive = conn.sessionLive
     val status = conn.status
-    val unifiedPanes = conn.unifiedPanes
     val activeSessionCardsTargetKey = conn.activeSessionCardsTargetKey
     val surfacePane = panesSel.surfacePane
 
@@ -748,19 +757,6 @@ private fun TmuxSessionScreenEffects(
         onDispose { sessionPickerViewModel.clearProjectSiblings() }
     }
 
-    // Issue #782: scroll the warm unified pager to an externally-created window.
-    var consumedInitialWindowTarget by remember(sessionName, initialWindowIndex) { mutableStateOf(false) }
-    LaunchedEffect(unifiedPanes, initialWindowIndex, consumedInitialWindowTarget) {
-        val requestedIndex = initialWindowIndex ?: return@LaunchedEffect
-        if (consumedInitialWindowTarget) return@LaunchedEffect
-        val targetPane = unifiedPanes.firstOrNull { it.windowIndex == requestedIndex } ?: return@LaunchedEffect
-        consumedInitialWindowTarget = true
-        val page = unifiedPanes.indexOfFirst { it.windowId == targetPane.windowId }
-        if (page >= 0) {
-            pagerState.scrollToPage(page)
-        }
-    }
-
     // Issue #626: warm-switch when the unified pager settles on another session.
     LaunchedEffect(Unit) {
         viewModel.sessionSwitchRequest.collect { targetSessionName ->
@@ -784,8 +780,10 @@ private fun TmuxSessionScreenEffects(
 
     TmuxUnifiedPagerSettleEffects(
         pagerState = pagerState,
-        unifiedPanes = unifiedPanes,
+        targetEpoch = unifiedPager.targetEpoch,
+        pages = unifiedPager.pages,
         sessionName = sessionName,
+        initialWindowIndex = initialWindowIndex,
         terminalHeld = conn.terminalHeld,
         viewModel = viewModel,
     )
@@ -1058,6 +1056,7 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
     agent: TmuxSessionAgentSignals,
     overlay: TmuxSessionOverlayState,
     pagerState: PagerState,
+    unifiedPagerPages: List<UnifiedPagerPage>,
     tabState: TmuxSessionTabState,
     agentConversationsState: androidx.compose.runtime.State<Map<String, com.pocketshell.app.session.AgentConversationUiState>>,
     sessionCards: List<com.pocketshell.app.cards.SessionCardsRemoteSource.SessionCard>,
@@ -1108,8 +1107,6 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
     // Issue #796 (H3): STABLE callback instances for the hoisted, skippable
     // [TmuxTerminalPager], so the terminal subtree stays skipped across overlay
     // toggles.
-    val stableSessionNameForUnifiedPane: (TmuxPaneState) -> String? =
-        remember(viewModel) { viewModel::sessionNameForUnifiedPane }
     val stableResizeRemotePty: (Int, Int) -> Unit =
         remember(viewModel) { viewModel::resizeRemotePty }
     val stableReportTerminalSurfaceFailure: (String, Throwable) -> Unit =
@@ -1226,13 +1223,12 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
                 presumedAgent = presumedAgent,
             )
             TmuxTerminalPager(
-                unifiedPanes = unifiedPanes,
+                pages = unifiedPagerPages,
                 pagerState = pagerState,
                 sessionName = sessionName,
                 terminalKeyboardMode = appSettings.terminalKeyboardMode,
                 engineCommands = engineCommandSet,
                 isAgentPane = terminalIsAgentPane,
-                sessionNameForUnifiedPane = stableSessionNameForUnifiedPane,
                 onTerminalSizeChanged = stableResizeRemotePty,
                 onSurfaceError = stableReportTerminalSurfaceFailure,
                 onRecreateSurface = stableRecreateTerminalSurface,

@@ -152,14 +152,20 @@ class TmuxConnectingStatesScreenshotTest {
                     ) {
                         if (!midAttach.value) {
                             TmuxTerminalPager(
-                                unifiedPanes = panes,
+                                pages = unifiedPagerPages(
+                                    panes = panes,
+                                    targetEpoch = UnifiedPagerTargetEpoch(
+                                        com.pocketshell.core.connection.SessionId("screenshot-target"),
+                                        1L,
+                                    ),
+                                    targetSessionName = "git-dap",
+                                    sessionNameForPane = { "previous-session" },
+                                ),
                                 pagerState = pagerState,
                                 sessionName = "git-dap",
                                 terminalKeyboardMode = TerminalKeyboardMode.RawCommand,
                                 engineCommands = emptySet(),
                                 isAgentPane = false,
-                                // Force the real non-target-pane masking branch.
-                                sessionNameForUnifiedPane = { "previous-session" },
                                 onTerminalSizeChanged = { _, _ -> },
                                 onSurfaceError = { _, _ -> },
                                 onRecreateSurface = {},

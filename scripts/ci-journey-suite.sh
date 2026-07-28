@@ -168,6 +168,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerRecordingNoLockJourneyTest"  # #1245 the hands-free lock was REMOVED from the composer entirely
   "com.pocketshell.app.voice.ComposerLauncherHoldSwipeUpJourneyTest"  # #585 the TRUE desired behavior): the ENTRY gesture on the
   "com.pocketshell.app.composer.ComposerDraftDurabilityE2eTest"  # #832 #638 #691 durable per-session composer draft store): a draft authored…
+  "com.pocketshell.app.tmux.TmuxUnifiedPagerCoordinatorComposeTest"  # #1778 real Foundation pager drag + republish and initial-window single-owner proof
   "$FQCN_PREFIX.SwitchStaleCaptureSessionBodyJourneyE2eTest"  # #687 #686 #658 epic Phase 1 / P1 — the device-truth gate
   "$FQCN_PREFIX.WithinGraceSocketDropForegroundJourneyE2eTest"  # #687 #635 epic Phase 2 / P2 — the device-truth gate
   "$FQCN_PREFIX.ReconnectPartialBlankReseedJourneyE2eTest"  # #687 #553 epic Phase 3 / P3 — the device-truth gate

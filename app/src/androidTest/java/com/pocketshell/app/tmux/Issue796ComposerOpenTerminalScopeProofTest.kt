@@ -195,8 +195,17 @@ class Issue796ComposerOpenTerminalScopeProofTest {
         val pagerState = rememberPagerState(pageCount = { panes.size })
         // Stable, remembered callbacks — identical to the production body's
         // `stable*` lambdas. Built once, so the pager's args never change identity.
-        val sessionNameForUnifiedPane: (TmuxPaneState) -> String? =
-            remember { { null } }
+        val pages = remember(panes) {
+            unifiedPagerPages(
+                panes = panes,
+                targetEpoch = UnifiedPagerTargetEpoch(
+                    com.pocketshell.core.connection.SessionId(SESSION_NAME),
+                    1L,
+                ),
+                targetSessionName = SESSION_NAME,
+                sessionNameForPane = { null },
+            )
+        }
         val onTerminalSizeChanged: (Int, Int) -> Unit = remember { { _, _ -> } }
         val onSurfaceError: (String, Throwable) -> Unit = remember { { _, _ -> } }
         val onRecreateSurface: (String) -> Unit = remember { { } }
@@ -212,7 +221,7 @@ class Issue796ComposerOpenTerminalScopeProofTest {
 
         Column(modifier = Modifier.fillMaxSize()) {
             TmuxTerminalPager(
-                unifiedPanes = panes,
+                pages = pages,
                 pagerState = pagerState,
                 sessionName = SESSION_NAME,
                 terminalKeyboardMode = TerminalKeyboardMode.RawCommand,
@@ -221,7 +230,6 @@ class Issue796ComposerOpenTerminalScopeProofTest {
                 // per-frame viewport scanners. A stable Boolean, so the pager stays
                 // skippable (the property under test).
                 isAgentPane = true,
-                sessionNameForUnifiedPane = sessionNameForUnifiedPane,
                 onTerminalSizeChanged = onTerminalSizeChanged,
                 onSurfaceError = onSurfaceError,
                 onRecreateSurface = onRecreateSurface,

@@ -211,9 +211,19 @@ exit 0
 STUB
 chmod +x "$SANDBOX/gradlew"
 
-# The suite shells out to `scripts/connected-test.sh` only on the --pool sharded
-# path (not exercised here) and to `adb` near the top. Stub `adb` on PATH so the
-# top-of-script `settings put` loop is a harmless no-op.
+# The suite shells out to `scripts/connected-test.sh` for the --pool sharded
+# path and for #1741's dedicated external-permission fixture in serial mode.
+# Forward both sandbox paths into the same stub Gradle so the existing timeout /
+# daemon-cleanup mutations still govern every selected class.
+cat > "$SANDBOX/scripts/connected-test.sh" <<'STUB'
+#!/usr/bin/env bash
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$root_dir/gradlew" :app:connectedDebugAndroidTest "$@"
+STUB
+chmod +x "$SANDBOX/scripts/connected-test.sh"
+
+# Stub `adb` on PATH so the top-of-script `settings put` loop is a harmless
+# no-op.
 STUBBIN="$SANDBOX/stubbin"
 mkdir -p "$STUBBIN"
 cat > "$STUBBIN/adb" <<'STUB'

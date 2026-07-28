@@ -1,5 +1,8 @@
 package com.pocketshell.app.notifications
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.SystemClock
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -8,6 +11,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.core.storage.AppDatabase
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -39,9 +43,11 @@ import java.io.InputStreamReader
  * place, a re-added `onCreate` trigger early-returns
  * (`ContextCompat.checkSelfPermission(...) == GRANTED`) and NO dialog pops — so
  * every one of those tests stays green while the reported bug returns. This
- * regression MUST therefore run with POST_NOTIFICATIONS explicitly REVOKED so
- * the app-open trigger, if it ever comes back, actually pops the dialog and
- * fails this test.
+ * regression MUST therefore run with POST_NOTIFICATIONS explicitly REVOKED by
+ * the external connected-test fixture before instrumentation starts. Revoking
+ * it here would make Android kill this test's own target/instrumentation UID
+ * before [MainActivity] launches, producing a runner crash instead of a product
+ * verdict.
  *
  * ## The load-bearing assertion (red→green)
  *
@@ -72,10 +78,8 @@ class NoNotificationPromptOnAppOpenE2eTest {
     @Before
     fun setUp() {
         // Deterministic empty state: zero hosts so app open lands on the host
-        // list (never an auto-resolved default host / session), and REVOKE
-        // POST_NOTIFICATIONS so a re-added app-open trigger would actually pop
-        // the system dialog (the reported symptom) instead of early-returning on
-        // an already-granted permission (the #1509 masking gap).
+        // list (never an auto-resolved default host / session). Permission state
+        // is owned by scripts/connected-test.sh before this process starts.
         val db = Room.databaseBuilder(
             instrumentation.targetContext,
             AppDatabase::class.java,
@@ -83,21 +87,30 @@ class NoNotificationPromptOnAppOpenE2eTest {
         ).fallbackToDestructiveMigration(dropAllTables = true).build()
         runCatching { db.clearAllTables() }
         db.close()
-        runShell("pm revoke $targetPackage android.permission.POST_NOTIFICATIONS")
     }
 
     @After
     fun tearDown() {
         scenario?.close()
         scenario = null
-        // Hygiene: re-grant so a subsequent journey class on the shared emulator
-        // is not surprised by the revoked runtime grant (most declare
-        // PreGrantPermissionsRule which re-grants anyway, but leave it clean).
-        runShell("pm grant $targetPackage android.permission.POST_NOTIFICATIONS")
     }
 
     @Test
     fun appOpenDoesNotPopNotificationPermissionDialog() {
+        assertTrue(
+            "POST_NOTIFICATIONS regression requires Android 13+; API ${Build.VERSION.SDK_INT} " +
+                "cannot exercise the reported permission dialog",
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU,
+        )
+        assertEquals(
+            "POST_NOTIFICATIONS must be DENIED by the external pre-instrumentation " +
+                "fixture; never grant/revoke it from this target process",
+            PackageManager.PERMISSION_DENIED,
+            instrumentation.targetContext.checkSelfPermission(
+                Manifest.permission.POST_NOTIFICATIONS,
+            ),
+        )
+
         scenario = ActivityScenario.launch(MainActivity::class.java)
         // Let onCreate + first composition + any (unwanted) permission request
         // settle. A revoked-grant app-open trigger pops GrantPermissionsActivity

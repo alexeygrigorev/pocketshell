@@ -261,6 +261,22 @@ jobs:
             scripts/test-ci-journey-infra-signature.sh
           scripts/test-ci-journey-infra-signature.sh
 
+      # Issue #1814: the first journey class on a shard used to pay for the cold
+      # `:app:compileDebugKotlin` INSIDE its own per-class budget, so it could
+      # time out for a reason unrelated to the test — and an `exit 124 /
+      # outer_timeout / raw-junit count=0` build-phase timeout is
+      # indistinguishable from a genuine journey failure. This guard drives the
+      # REAL suite with a gradle stub that models a cold build, MEASURES
+      # first-class vs mid-shard elapsed on all three shards, proves the same
+      # fixture is RED against a mutant with the warm-build call removed, and
+      # observes the build-phase attribution end to end (suite -> manifest ->
+      # verdict token -> aggregate). Cheap (no emulator, no Gradle, no JVM).
+      - name: CI journey warm-build + build-phase attribution guard (issue #1814)
+        run: |
+          chmod +x scripts/ci-journey-build-phase-timeout.sh \
+            scripts/test-ci-journey-warm-build.sh
+          scripts/test-ci-journey-warm-build.sh
+
       # Issue #1781: fast, JVM-free artifact packaging fixture. Proves the
       # first-cold-boot preservation scan keeps real module Android outputs and
       # canonical per-attempt evidence without recursively nesting
@@ -653,7 +669,9 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/ci-journey-write-shard-verdict.sh
-          scripts/ci-journey-write-shard-verdict.sh INFRA
+          # Issue #1814: the seed carries its own reason so a carried-over token
+          # says why it exists ("this attempt died before classifying").
+          scripts/ci-journey-write-shard-verdict.sh INFRA preseed_before_classify
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -1255,7 +1273,37 @@ jobs:
           # stamp (run id / run attempt / shard) can never drift between the
           # pre-seed and the classifier, and so a later step can gate on the
           # `shard_verdict` output the helper exports.
-          write_verdict() { bash scripts/ci-journey-write-shard-verdict.sh "$1"; }
+          # Issue #1814: the token also carries WHY it has this value. Every
+          # branch below passes a short machine reason; the aggregation job
+          # prints it per shard. The reason NEVER changes severity.
+          write_verdict() { bash scripts/ci-journey-write-shard-verdict.sh "$1" "${2:-unspecified}"; }
+          # Issue #1814: an attempt cut by its per-class wall cap while Gradle
+          # was still BUILDING writes `exit 124 / outer_timeout / raw-junit
+          # count=0` — byte-for-byte what a killed mid-journey runner writes. On
+          # run 30323508796 shard 2 that ambiguity sent an investigation after a
+          # healthy journey class. Read the suite's own per-attempt manifests so
+          # this shard's verdict can NAME the build-cost case instead of leaving
+          # it looking like a product defect. Reporting only: the verdict's
+          # severity is unchanged (a build that outgrows its bound is a real
+          # problem and must stay visible — softening it would be #1458-style
+          # masking in reverse).
+          build_phase_out="$(bash scripts/ci-journey-build-phase-timeout.sh artifacts 2>&1 || true)"
+          printf '%s\n' "$build_phase_out" | sed 's/^/journey build-phase timeout: /'
+          build_phase_attempts="$(sed -n 's/^build_phase_timeout_attempts=//p' <<<"$build_phase_out" | tail -n 1)"
+          [[ "$build_phase_attempts" =~ ^[0-9]+$ ]] || build_phase_attempts=0
+          build_phase_classes="$(sed -n 's/^build_phase_timeout_classes=//p' <<<"$build_phase_out" | tail -n 1)"
+          if (( build_phase_attempts > 0 )); then
+            echo "::warning title=Emulator journey — an attempt was cut during the Gradle BUILD phase (#1814)::${build_phase_attempts} attempt(s) on this shard hit their per-class wall cap while Gradle was still BUILDING: ${build_phase_classes:-<unnamed>}. Instrumentation never started, so there is no JUnit XML and the zero-test outer timeout is a BUILD-COST artefact — it is NOT evidence that the named journey is broken. The cold build is paid up front by the suite's warm-build step, so a recurrence means the build outgrew its bound; investigate the build, not the journey."
+          fi
+          # verdict_reason_for <fallback> — prefer the cold-build attribution
+          # when this shard carries that evidence, else the branch's own reason.
+          verdict_reason_for() {
+            if (( build_phase_attempts > 0 )); then
+              printf 'cold_build_timeout\n'
+            else
+              printf '%s\n' "$1"
+            fi
+          }
           echo "first attempt outcome:  $first"
           echo "retry attempt outcome:  ${retry:-<skipped>}"
           echo "first attempt conclusion:  $first_concl"
@@ -1268,12 +1316,12 @@ jobs:
           echo "cold-boot retry cost model: ${retry_cost_model:-worst_case} (issue #1800)"
           if [[ "$first" == "success" ]]; then
             echo "Emulator journey passed on the first cold boot."
-            write_verdict CLEAN
+            write_verdict CLEAN passed_first_attempt
             exit 0
           fi
           if [[ "$retry" == "success" ]]; then
             echo "::warning title=Emulator infra flake recovered::The first emulator bringup failed but a second cold boot passed (issue #760). Treating as a recovered infra flake, NOT a test failure. Watch for a degrading trend."
-            write_verdict CLEAN
+            write_verdict CLEAN infra_flake_recovered
             exit 0
           fi
           # Issue #1800: ONE captured environment signature is not a product
@@ -1300,19 +1348,19 @@ jobs:
           signature_verdict="$(sed -n 's/^shard_signature_verdict=//p' <<<"$signature_out" | tail -n 1)"
           if [[ "$signature_verdict" == "INFRA" && "${first_timeout:-false}" != "true" ]]; then
             echo "::warning title=Emulator journey INFRA — real system IME unavailable on this AVD::The ONLY failure(s) on this shard were the physical input-method-window PRECONDITION (\"The real system input-method window never became visible.\"), which the CI swiftshader AVD cannot satisfy. This is a captured environment signature (G5), NOT a product regression: the same class's anchor/containment properties are asserted with hard failures on its synthetic Type.ime() path, which ran in this same suite. Typed INFRA so aggregation requests RE-RUN. Any containment/anchor assertion failure would have stayed RED (issue #1800)."
-            write_verdict INFRA
+            write_verdict INFRA real_ime_precondition
             exit 1
           fi
           if [[ "${first_failure:-false}" == "true" ]]; then
             echo "::error title=Emulator journey FAILED — first attempt genuine failure::The first cold boot wrote a JOURNEY_FAILED / Failed BOTH attempts summary, and the retry did not pass cleanly. Refusing to downgrade this run to advisory timeout even if the retry overwrote summary.md with a timeout-only artifact."
-            write_verdict RED
+            write_verdict RED "$(verdict_reason_for first_attempt_journey_failure)"
             exit 1
           fi
           if [[ "${first_timeout:-false}" == "true" ]]; then
             timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
             echo "::error title=Emulator journey TIMEOUT — load-bearing classes cut short (#835/#470)::The journey suite booted and ran, but exhausted its own 4200s time budget before every load-bearing class reached a verdict (issue #835 / #470). This is now a HARD RED durable guard (#835 REOPENED, D31): a budget timeout means a load-bearing class was silently cut short, which used to be masked as advisory-green. The retry is skipped because a budget timeout is deterministic. Either the enumeration stall has returned or the selection no longer fits the budget — investigate; do NOT treat as a flake. Class(es) cut short / not run:"
             [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
-            write_verdict RED
+            write_verdict RED "$(verdict_reason_for suite_budget_timeout)"
             exit 1
           fi
           # Issue #1458: no trustworthy first-attempt verdict and insufficient
@@ -1323,7 +1371,7 @@ jobs:
           # their existing RED semantics.
           if [[ "${retry_allowed:-false}" != "true" ]]; then
             echo "::warning title=Emulator journey retry skipped — insufficient remaining job wall::The first attempt did not produce a clean verdict, but a complete fresh-cold-boot retry no longer fits before the absolute 95-minute job deadline (reason=${retry_reason:-missing_decision}, remaining=${retry_remaining_ms:-0}ms, required=${retry_required_ms:-5400000}ms). The retry was not started; this shard is typed INFRA so aggregation requests RE-RUN, while classifier and artifacts retain time to finish (issue #1458)."
-            write_verdict INFRA
+            write_verdict INFRA retry_wall_exhausted
             exit 1
           fi
           # If a cold-boot attempt was cancelled, do not trust summary.md for a
@@ -1332,7 +1380,7 @@ jobs:
           # attempt did not produce a trustworthy final suite verdict.
           if [[ "$first" == "cancelled" || "$retry" == "cancelled" || "$first_concl" == "cancelled" || "$retry_concl" == "cancelled" ]]; then
             echo "::error title=Emulator journey TIMEOUT — step cancelled (#470 stall)::A journey cold-boot attempt was CANCELLED before producing a trustworthy final suite verdict. Any existing artifacts/ci-journey/summary.md may be stale from an earlier attempt, so this is NOT reported as a genuine failed-on-both-cold-boots test regression. This is the recurring enumeration-stall/step-timeout infra class (issue #835 / #470). Re-run."
-            write_verdict INFRA
+            write_verdict INFRA attempt_cancelled
             exit 1
           fi
           # Both attempts failed — classify from the suite's own summary artifact.
@@ -1343,7 +1391,7 @@ jobs:
             failed_classes="$(awk '/Failed BOTH attempts/{f=1; next} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
             echo "::error title=Emulator journey FAILED — genuine test failure::A load-bearing journey class failed on BOTH cold-boot attempts AFTER the emulator booted and the suite ran to a verdict. This is a real test regression (NOT a #771 emulator-infra abort). Failing class(es):"
             [[ -n "$failed_classes" ]] && printf '%s\n' "$failed_classes"
-            write_verdict RED
+            write_verdict RED "$(verdict_reason_for journey_failure_both_attempts)"
             exit 1
           fi
           # Issue #835 (REOPENED, DURABLE GUARD): the suite ran (the emulator
@@ -1362,7 +1410,7 @@ jobs:
             timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
             echo "::error title=Emulator journey TIMEOUT — load-bearing classes cut short (#835/#470)::The journey suite booted and ran, but exhausted its 4200s time budget before every load-bearing class reached a verdict (issue #835 / #470). This is now a HARD RED durable guard (#835 REOPENED, D31), NOT an advisory-green: a budget timeout means a load-bearing class was silently cut short. Either the in-emulator enumeration stall has returned or the selection no longer fits the budget — investigate. This is distinct from a never-booted emulator (#771) and from a genuine test regression. Class(es) cut short / not run:"
             [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
-            write_verdict RED
+            write_verdict RED "$(verdict_reason_for suite_budget_timeout)"
             exit 1
           fi
           # No suite summary at all: the script aborted before any class reached
@@ -1370,7 +1418,7 @@ jobs:
           # so gradle could not run. This is the EMULATOR INFRA UNAVAILABLE
           # class (#771).
           echo "::error title=EMULATOR INFRA UNAVAILABLE::Both cold-boot attempts failed and the journey suite wrote NO summary (artifacts/ci-journey/summary.md missing), so no journey class ever ran to a verdict — the emulator never reached 'device' / adb never came up (boot/adb infra, issue #771). This is an infra abort, NOT a test regression."
-          write_verdict INFRA
+          write_verdict INFRA emulator_never_booted
           exit 1
 
       - name: Collect Docker logs

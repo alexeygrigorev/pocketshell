@@ -76,6 +76,7 @@ count=0
 tokens=()
 provenance=()
 carried_over=()
+cold_build_shards=()
 fresh_tokens=0
 
 current_attempt="${GITHUB_RUN_ATTEMPT:-}"
@@ -94,6 +95,10 @@ if [[ -d "$verdict_dir" ]]; then
     tok_shard="$(sed -n 's/^shard=//p' "$f" 2>/dev/null | head -n 1)"
     tok_attempt="$(sed -n 's/^run_attempt=//p' "$f" 2>/dev/null | head -n 1)"
     tok_run="$(sed -n 's/^run_id=//p' "$f" 2>/dev/null | head -n 1)"
+    # Issue #1814: WHY this shard has this verdict. Absent on a token written
+    # before the reason existed, which stays a plain `unspecified`.
+    tok_reason="$(sed -n 's/^verdict_reason=//p' "$f" 2>/dev/null | head -n 1)"
+    [[ -n "$tok_reason" ]] || tok_reason="unspecified"
     if [[ -z "$tok_shard" ]]; then
       # No stamp (a token from a job that died before the pre-seed, or a foreign
       # artifact): fall back to the download-artifact per-shard subdir name.
@@ -119,7 +124,10 @@ if [[ -d "$verdict_dir" ]]; then
       origin="attempt unknown (token carries no #1809 provenance stamp)"
     fi
 
-    provenance+=("shard ${tok_shard}: ${token} — run ${tok_run}, ${origin}")
+    provenance+=("shard ${tok_shard}: ${token} — run ${tok_run}, ${origin}, reason ${tok_reason}")
+    if [[ "$tok_reason" == "cold_build_timeout" ]]; then
+      cold_build_shards+=("shard ${tok_shard} (${token})")
+    fi
 
     count=$((count + 1))
     tokens+=("$token")
@@ -149,6 +157,16 @@ else
   for line in "${provenance[@]}"; do
     echo "  $line"
   done
+fi
+
+# Issue #1814: a verdict caused (at least in part) by an attempt that was cut
+# short while Gradle was still BUILDING must SAY so. Such an attempt reports
+# `exit 124 / outer_timeout / raw-junit count=0` — indistinguishable from a
+# killed mid-journey runner — and on run 30323508796 that ambiguity sent an
+# investigation after a healthy journey class. The verdict's SEVERITY is
+# untouched (naming a failure is not softening it); only its readability is.
+if (( ${#cold_build_shards[@]} > 0 )); then
+  echo "::notice title=Emulator journey verdict — includes a cold-BUILD-phase timeout (#1814)::${#cold_build_shards[@]} shard verdict(s) were reported with reason 'cold_build_timeout': ${cold_build_shards[*]}. At least one attempt there hit its per-class wall cap while Gradle was still BUILDING — instrumentation never started and no JUnit XML exists, so the zero-test outer timeout is a BUILD-COST artefact, not evidence that the named journey is broken. Investigate the build cost (the cold build is paid up front by the suite's warm-build step), not the journey."
 fi
 
 if (( ${#carried_over[@]} > 0 )); then
@@ -185,6 +203,10 @@ emit_summary() {
         for line in "${provenance[@]}"; do
           echo "- ${line}"
         done
+      fi
+      if (( ${#cold_build_shards[@]} > 0 )); then
+        echo
+        echo "**Cold-build-phase timeout (issue #1814):** ${cold_build_shards[*]} — an attempt there was cut while Gradle was still BUILDING (no instrumentation, no JUnit XML). That is a build-cost artefact, not a defect in the named journey."
       fi
     } >> "$GITHUB_STEP_SUMMARY"
   fi

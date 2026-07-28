@@ -41,6 +41,14 @@ run_journey_classes_with_retry() {
   echo ">>> Suite-level time budget (issue #835): ${JOURNEY_STEP_BUDGET_SECS}s"
   echo "    (per-class attempt cap: ${JOURNEY_CLASS_TIMEOUT_SECS}s; workflow job cap: 95 min)"
 
+  # Issue #1814: pay the cold Gradle build ONCE, here, BEFORE the first class's
+  # per-class clock starts. The suite budget clock (SUITE_START, just above) is
+  # already running, so this does NOT move build time out of the suite budget —
+  # it only stops the first class from being charged for shared, once-per-shard
+  # work no later class pays. Non-fatal by design (see the helper's FAIL-SAFE
+  # note): a failed warm build leaves the class loop exactly as it was.
+  warm_journey_build
+
   local fqcn class_start rc retry_start
   for fqcn in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
     # Issue #835: stop launching new classes once the suite-level budget is spent.

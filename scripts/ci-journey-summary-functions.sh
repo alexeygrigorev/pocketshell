@@ -53,6 +53,10 @@ finish_ci_journey_suite() {
     echo "| --- | --- | --- | --- | --- |"
     echo "| ${#EFFECTIVE_JOURNEY_CLASSES[@]} load-bearing journey classes (shard ${JOURNEY_CI_SHARD_INDEX}/${JOURNEY_CI_SHARD_TOTAL}; per-class retry-once) | \`pocketshellCi=true\` | $JOURNEY_EXIT | ${SUITE_ELAPSED}s | **$journey_status** |"
     echo
+    # Issue #1814: the cold Gradle build is paid ONCE, up front, so the first
+    # class on this shard is measured on the same terms as every later class.
+    echo "Warm build (issue #1814): **${JOURNEY_WARM_BUILD_STATUS:-not_run}** in ${JOURNEY_WARM_BUILD_ELAPSED:-0}s — paid before the per-class budget clock, charged to the suite budget."
+    echo
     echo "Classes exercised:"
     for c in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
       echo "- \`$c\`"
@@ -88,6 +92,31 @@ finish_ci_journey_suite() {
       echo
       echo "Recovered on retry (CI-AVD flake — \`JOURNEY_FLAKE_RECOVERED\`):"
       for c in "${RECOVERED_CLASSES[@]}"; do
+        echo "- \`$c\`"
+      done
+    fi
+    # Issue #1814: name every attempt whose outer timeout fired while Gradle was
+    # still BUILDING. Such an attempt reports `exit 124 / outer_timeout /
+    # raw-junit count=0` — byte-for-byte what a killed mid-journey runner
+    # reports — so without this section a build-cost timeout reads exactly like a
+    # genuine journey failure (that ambiguity is what made run 30323508796's
+    # shard-2 first-class timeout expensive to diagnose).
+    #
+    # This section is deliberately emitted BEFORE the STEP_TIMEOUT / Failed-BOTH
+    # sections: the workflow classifier's `awk` arms on those headers and then
+    # prints every following `- ` line, so a section placed after them would be
+    # mis-read as a failing class. Its wording also contains none of the
+    # classifier's trigger strings, so it can never flip a verdict — it is
+    # attribution only.
+    if [[ "${#BUILD_PHASE_TIMEOUT_ATTEMPTS[@]}" -gt 0 ]]; then
+      echo
+      echo "Attempts cut short while Gradle was still BUILDING (\`JOURNEY_BUILD_PHASE_TIMEOUT\` — issue #1814):"
+      echo "These attempts hit their per-class wall cap before instrumentation ever started, so they"
+      echo "produced no raw JUnit XML. Read them as build-cost timeouts, NOT as journey verdicts and"
+      echo "NOT as product defects. The cold build is paid up front (see \"Warm build\" above), so a"
+      echo "recurrence here means the build itself outgrew its bound — investigate the build, not the"
+      echo "listed journey."
+      for c in "${BUILD_PHASE_TIMEOUT_ATTEMPTS[@]}"; do
         echo "- \`$c\`"
       done
     fi

@@ -47,26 +47,47 @@
 # ordering. The reports upload still packages this directory, so the token stays
 # in the forensic bundle.
 #
+# Issue #1814 (verdict REASON): the token now also carries WHY it has the value
+# it has. The concrete miss: an `exit 124 / outer_timeout / raw-junit count=0`
+# attempt is what a killed mid-journey runner produces AND what a class cut
+# short while Gradle was still BUILDING produces, so a shard RED caused by the
+# cold build read exactly like a product defect (run 30323508796, shard 2). The
+# reason is a short machine token (`cold_build_timeout`,
+# `journey_failure_both_attempts`, `emulator_never_booted`, …) that the
+# aggregation job prints per shard.
+#
+# The reason NEVER changes the verdict: line 1 stays the bare CLEAN|INFRA|RED
+# token and every consumer's severity is unchanged. Labelling a failure is not
+# the same as softening it — softening a build-cost timeout to a re-run signal
+# would be exactly the masking D31/D32 forbid.
+#
 # Usage:
-#   ci-journey-write-shard-verdict.sh <CLEAN|INFRA|RED>
+#   ci-journey-write-shard-verdict.sh <CLEAN|INFRA|RED> [REASON]
 # Env:
 #   SHARD_VERDICT_FILE                     output path (default
 #                                          artifacts/ci-journey-shard-verdict/shard-verdict.txt)
+#   SHARD_VERDICT_REASON                   fallback for the REASON argument
 #   POCKETSHELL_JOURNEY_CI_SHARD_INDEX     shard index (set by the matrix)
 #   GITHUB_RUN_ID / GITHUB_RUN_ATTEMPT     provenance (set by Actions)
 #   GITHUB_OUTPUT                          when set, also exports
-#                                          `shard_verdict=<token>` so a later
-#                                          step can gate on it
+#                                          `shard_verdict=<token>` (so a later
+#                                          step can gate on it) and
+#                                          `shard_verdict_reason=<reason>`
 set -uo pipefail
 
 verdict="${1:-}"
 case "$verdict" in
   CLEAN | INFRA | RED) ;;
   *)
-    echo "usage: ci-journey-write-shard-verdict.sh <CLEAN|INFRA|RED>" >&2
+    echo "usage: ci-journey-write-shard-verdict.sh <CLEAN|INFRA|RED> [REASON]" >&2
     exit 2
     ;;
 esac
+
+# The reason is advisory metadata, so it fails SOFT to `unspecified` rather than
+# rejecting the write: a typo'd label must never cost the run its verdict token.
+reason="${2:-${SHARD_VERDICT_REASON:-unspecified}}"
+[[ "$reason" =~ ^[a-z][a-z0-9_]{0,63}$ ]] || reason="unspecified"
 
 out="${SHARD_VERDICT_FILE:-artifacts/ci-journey-shard-verdict/shard-verdict.txt}"
 if ! mkdir -p "$(dirname "$out")"; then
@@ -83,14 +104,16 @@ if ! {
   printf 'shard=%s\n' "$shard"
   printf 'run_id=%s\n' "$run_id"
   printf 'run_attempt=%s\n' "$run_attempt"
+  printf 'verdict_reason=%s\n' "$reason"
   printf 'written_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$out"; then
   echo "ci-journey-write-shard-verdict.sh: cannot write $out" >&2
   exit 1
 fi
 
-echo "SHARD_VERDICT=$verdict (shard $shard, run $run_id attempt $run_attempt)"
+echo "SHARD_VERDICT=$verdict (shard $shard, run $run_id attempt $run_attempt, reason $reason)"
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
   printf 'shard_verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
+  printf 'shard_verdict_reason=%s\n' "$reason" >> "$GITHUB_OUTPUT"
 fi

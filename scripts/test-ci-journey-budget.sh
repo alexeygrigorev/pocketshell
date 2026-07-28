@@ -1431,20 +1431,69 @@ pass "(l) immediate SIGKILL remains JOURNEY_FAILED even when cleanup spends the 
 # wall cap — and still route the class through the STEP_TIMEOUT classifier so a
 # trustworthy timeout-only summary is always written.
 #
-# This models ONE class that wedges SILENTLY (emits NOTHING, hangs 30s) on BOTH
-# attempts, under a LARGE wall cap (30s) and generous budget, with a tiny 2s
-# silence window. If the wall cap (not silence) were the only bound, this run
-# would take ~60s (2 attempts × 30s); the watchdog must cut each attempt at ~2s.
-# `exec sleep` so the watchdog's TERM terminates the wedge immediately (no
-# lingering child). All OTHER classes pass instantly so the run stays fast.
+# This models ONE class that wedges SILENTLY (emits NOTHING) on BOTH attempts,
+# under a LARGE wall cap (30s) and generous budget, with a tiny 2s silence
+# window. If the wall cap (not silence) were the only bound, each attempt would
+# burn the full 30s; the watchdog must cut each attempt at ~2s. All OTHER
+# classes pass instantly so the run stays fast.
+#
+# Issue #1802 — the "silence beat the wall cap" proof is STRUCTURAL, never a
+# wall-clock bound on the machine running the test. The previous (o2) asserted
+# that the WHOLE suite run finished in under 25s. But that run also spawns ~89
+# instant-pass gradle/adb stub invocations plus per-attempt artifact
+# snapshotting, so the number it measured was this host's process-spawn
+# throughput, not the watchdog: on an idle box it read 22s against the 25s
+# ceiling, and on a contended box (load 14-19) it read 49-59s while EVERY
+# attempt was still being cut at 2s by the silence watchdog. It therefore failed
+# on unmodified `main` for a reason unrelated to the behaviour under test. The
+# bound is replaced by two signals no machine load can move:
+#
+#   CAUSE  — each attempt's OWN attempt.log carries the silence-watchdog marker
+#            for the exact injected 2s window (the wall-cap path never logs it),
+#            and its manifest records the attempt as an outer_timeout. Asserted
+#            per attempt, so a watchdog that fired only on the first attempt and
+#            let the retry run to the wall cap is caught too.
+#   EFFECT — the wedge child is SELF-WITNESSING: it records on the FILESYSTEM
+#            (not on stdout, which nobody reads once run_bounded returns) if it
+#            SURVIVES JOURNEY_WEDGE_SURVIVAL_SECS. That milestone sits at HALF
+#            the wall cap and 5x the silence bound, and the child only advances
+#            through `sleep` (a kernel timer, not host throughput), so a
+#            correctly cut attempt can never reach it and a wall-cap-bounded
+#            attempt always does. Machine load can only slow the child down,
+#            i.e. it can only push this assertion further from failing.
+#
+# (o2-live) below proves that milestone really is reachable, so the EFFECT
+# assertion can never pass vacuously.
 echo "== #1056 no-output watchdog: a SILENT wedge is hard-killed at the silence bound =="
+wedge_survival_secs=15
+wedge_witness_dir="$SANDBOX/wedge-witness"
+rm -rf "$wedge_witness_dir"
 cat > "$SANDBOX/gradlew" <<'STUB'
 #!/usr/bin/env bash
 set -u
 [[ "${1:-}" == "--stop" ]] && exit 0
 if [[ "$*" == *":app:connectedDebugAndroidTest"* && "$*" == *"DeepLinkSessionSwitchE2eTest"* ]]; then
-  # SILENT wedge: emit NOTHING and hang far past the 2s silence window.
-  exec sleep 30
+  # SILENT wedge (emits NOTHING) that would run far past the 2s silence window
+  # and on to the wall cap. It is SELF-WITNESSING (issue #1802): it records its
+  # attempt number, and creates a survival witness FILE only if it is still
+  # alive after JOURNEY_WEDGE_SURVIVAL_SECS. A filesystem witness is used
+  # deliberately — stdout is unreadable once run_bounded has closed the fifo.
+  witness_dir="${JOURNEY_WEDGE_WITNESS_DIR:?}"
+  mkdir -p "$witness_dir"
+  wedge_attempt="$(cat "$witness_dir/attempts" 2>/dev/null || printf '0')"
+  wedge_attempt=$((wedge_attempt + 1))
+  printf '%s' "$wedge_attempt" > "$witness_dir/attempts"
+  # Sleep in 1s slices, not one long sleep, so the watchdog's TERM is honoured
+  # within a second instead of being deferred behind the whole wedge.
+  trap 'exit 143' TERM
+  for _ in $(seq "${JOURNEY_WEDGE_SURVIVAL_SECS:?}"); do sleep 1; done
+  : > "$witness_dir/survived-attempt-$wedge_attempt"
+  # The (o2-live) liveness probe opts out of the trailing hang so the probe is
+  # bounded by the child's OWN completion rather than by a wall cap, leaving no
+  # host-throughput term anywhere in it.
+  [[ "${JOURNEY_WEDGE_EXIT_AFTER_WITNESS:-0}" == "1" ]] && exit 0
+  for _ in $(seq 60); do sleep 1; done
+  exit 0
 fi
 exit 0
 STUB
@@ -1459,6 +1508,8 @@ PATH="$STUBBIN:$PATH" \
   JOURNEY_NO_OUTPUT_TIMEOUT_SECS=2 \
   JOURNEY_CLASS_KILL_AFTER_SECS=1 \
   JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+  JOURNEY_WEDGE_WITNESS_DIR="$wedge_witness_dir" \
+  JOURNEY_WEDGE_SURVIVAL_SECS="$wedge_survival_secs" \
   bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_wedge" 2>&1
 rc_wedge=$?
 set -e
@@ -1471,13 +1522,58 @@ grep -q 'JOURNEY_NO_OUTPUT_WATCHDOG: no output for 2s' "$out_wedge" \
   || { sed -n '1,80p' "$out_wedge"; fail "(o) no-output watchdog did not fire on a silent wedge"; }
 pass "(o1) silence watchdog fired (JOURNEY_NO_OUTPUT_WATCHDOG logged for the 2s window)"
 
-# (o2) the silence watchdog — NOT the 30s wall cap — killed the wedge: each of the
-#      two attempts was cut at ~2s, so the whole run finished far under 2×30s. A
-#      generous ceiling (25s) still proves the watchdog beat the wall cap while
-#      tolerating the instant-pass tail + cleanup.
-[[ "$wedge_elapsed" -lt 25 ]] \
-  || { sed -n '1,80p' "$out_wedge"; fail "(o) run took ${wedge_elapsed}s — the wall cap, not the 2s silence watchdog, bounded the wedge"; }
-pass "(o2) run finished in ${wedge_elapsed}s (< 25s) — the silence watchdog, not the 30s wall cap, killed the wedge"
+# (o2) STRUCTURAL (issue #1802): the 2s SILENCE watchdog — NOT the 30s wall cap —
+#      ended EVERY attempt of the wedged class. Asserted on per-attempt cause
+#      markers plus a filesystem survival witness; NOT on how long this box took.
+wedge_attempt_root="$SANDBOX/artifacts/ci-journey/class-attempts/app/$deep_artifact_key"
+# Anti-vacuous first: the wedge really ran, on the attempt AND the retry. Without
+# this, every assertion below would pass trivially if the stub never executed.
+wedge_attempts_run="$(cat "$wedge_witness_dir/attempts" 2>/dev/null || printf '0')"
+[[ "$wedge_attempts_run" -eq 2 ]] \
+  || { sed -n '1,80p' "$out_wedge"; fail "(o) the wedged class ran $wedge_attempts_run attempt(s), expected 2 — the fixture never exercised the watchdog on both the attempt and the retry"; }
+for wedge_attempt in 1 2; do
+  wedge_attempt_log="$wedge_attempt_root/attempt-$wedge_attempt/attempt.log"
+  wedge_attempt_manifest="$wedge_attempt_root/attempt-$wedge_attempt/manifest.txt"
+  [[ -f "$wedge_attempt_log" && -f "$wedge_attempt_manifest" ]] \
+    || fail "(o) attempt $wedge_attempt of the wedged class left no per-attempt artifacts under $wedge_attempt_root"
+  grep -qxF 'JOURNEY_NO_OUTPUT_WATCHDOG: no output for 2s' "$wedge_attempt_log" \
+    || { cat "$wedge_attempt_log"; fail "(o) attempt $wedge_attempt was NOT ended by the 2s silence watchdog — its own attempt.log carries no silence marker, so the coarse wall cap bounded it"; }
+  grep -qxF 'primary_classification=outer_timeout' "$wedge_attempt_manifest" \
+    || { cat "$wedge_attempt_manifest"; fail "(o) attempt $wedge_attempt was not recorded as an outer_timeout"; }
+done
+shopt -s nullglob
+wedge_survivors=("$wedge_witness_dir"/survived-attempt-*)
+shopt -u nullglob
+[[ "${#wedge_survivors[@]}" -eq 0 ]] \
+  || { sed -n '1,80p' "$out_wedge"; fail "(o) ${#wedge_survivors[@]} wedge attempt(s) SURVIVED ${wedge_survival_secs}s — half the 30s wall cap and 5x the 2s silence bound — so the watchdog logged but did not actually cut the attempt short"; }
+pass "(o2) both attempts were cut by the 2s silence watchdog, not the 30s wall cap (per-attempt silence markers + outer_timeout manifests, and no attempt survived ${wedge_survival_secs}s) [diagnostic only, deliberately NOT asserted: whole-run wall time ${wedge_elapsed}s]"
+
+# (o2-live) LIVENESS of the (o2) EFFECT assertion. "No survival witness" is only
+# meaningful if the milestone is actually reachable — otherwise (o2) would pass
+# for the wrong reason (dead stub, unreachable milestone, broken witness path).
+# Drive the REAL run_bounded once with the silence window widened to the wall cap
+# (run_bounded clamps it there), so the watchdog can no longer cut the wedge
+# short: the SAME child with the SAME milestone must now reach it. The child opts
+# out of its trailing hang and the bound is a deliberately loose 120s, so this
+# probe is bounded by the child finishing its own 15s of `sleep` (a kernel timer)
+# with 8x headroom — no host-throughput term, in either direction.
+live_witness_dir="$SANDBOX/wedge-liveness-witness"
+rm -rf "$live_witness_dir"
+(
+  set +e
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=120
+  JOURNEY_CLASS_KILL_AFTER_SECS=1
+  JOURNEY_WEDGE_WITNESS_DIR="$live_witness_dir"
+  JOURNEY_WEDGE_SURVIVAL_SECS="$wedge_survival_secs"
+  JOURNEY_WEDGE_EXIT_AFTER_WITNESS=1
+  export JOURNEY_WEDGE_WITNESS_DIR JOURNEY_WEDGE_SURVIVAL_SECS JOURNEY_WEDGE_EXIT_AFTER_WITNESS
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  run_bounded 120 "$SANDBOX/gradlew" :app:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.DeepLinkSessionSwitchE2eTest
+) > /dev/null 2>&1 || true
+[[ -f "$live_witness_dir/survived-attempt-1" ]] \
+  || fail "(o2-live) the wedge never reached its ${wedge_survival_secs}s survival milestone even with the silence watchdog widened to the wall cap — (o2)'s no-survivor assertion is unreachable and would pass vacuously"
+pass "(o2-live) the ${wedge_survival_secs}s survival witness IS reachable when the silence watchdog is not tight — (o2)'s no-survivor assertion is live, not vacuous"
 
 # (o3) despite the wedge, summary.md was written (the verdict is NEVER lost to a
 #      job-level wall) and carries the STEP_TIMEOUT marker for the wedged class.
@@ -1516,9 +1612,13 @@ cat > "$SANDBOX/gradlew" <<'STUB'
 set -u
 [[ "${1:-}" == "--stop" ]] && exit 0
 if [[ "$*" == *":app:connectedDebugAndroidTest"* && "$*" == *"DeepLinkSessionSwitchE2eTest"* ]]; then
-  # Emit a line each second for 4s — longer than the 2s silence window, but every
-  # line resets the timer so the watchdog must NOT fire.
-  for i in 1 2 3 4; do echo "PS_STREAM_LINE_$i"; sleep 1; done
+  # Stream for ~4s — longer than the 2s silence window, so the class only
+  # survives because every emitted line resets the silence timer. Issue #1802:
+  # emit every 0.4s rather than every 1s. The assertion is unchanged (the
+  # watchdog must NOT fire); the smaller gap just puts 5x margin, instead of 2x,
+  # between the fixture's silence gaps and the injected 2s window, so a
+  # scheduling hiccup on a contended box cannot manufacture a false positive.
+  for i in 1 2 3 4 5 6 7 8 9 10; do echo "PS_STREAM_LINE_$i"; sleep 0.4; done
   exit 0
 fi
 exit 0
@@ -1542,7 +1642,7 @@ if grep -q 'JOURNEY_NO_OUTPUT_WATCHDOG' "$out_stream"; then
   fail "(n) watchdog FALSELY killed a class that streamed output within the window"
 fi
 # The streamed lines were echoed live (proves run_bounded relays output).
-grep -q 'PS_STREAM_LINE_4' "$out_stream" \
+grep -q 'PS_STREAM_LINE_10' "$out_stream" \
   || { sed -n '1,80p' "$out_stream"; fail "(n) streamed output was not relayed live by run_bounded"; }
 [[ -f "$summary_stream" ]] || fail "(n) streaming control did not write summary.md"
 if grep -q 'JOURNEY_STEP_TIMEOUT' "$summary_stream"; then
@@ -1680,16 +1780,39 @@ pass "(shard) round-robin partition: 3 shards each ~1/3, disjoint, union = all $
 # 28307686762 and ran until the JOB cap SIGKILLed the step, producing a
 # "cancelled" with NO trustworthy summary.md (the exact reopen symptom). Model a
 # proof that HANGS (the core-terminal task sleeps far longer than the per-class
-# cap). With the bound, the suite must SELF-FINISH (write summary, exit red)
-# inside an outer wall-clock guard; WITHOUT the bound the suite would hang and
-# the outer `timeout` would have to KILL it (rc 124) — exactly the cancel we are
-# eliminating.
+# cap). With the bound, the suite must SELF-FINISH (write summary, exit red);
+# WITHOUT the bound the hung proof would run to completion and the suite would
+# never surface it as red — exactly the cancel we are eliminating.
+#
+# Issue #1802 G2 sweep: this was the ONE sibling of the old (o2) that carried the
+# same bare wall-clock shape — the load-bearing assertion was `rc_ct != 124`,
+# i.e. "the outer 150s guard did not fire", which measures this host's
+# process-spawn throughput across ~89 instant-pass stub invocations rather than
+# whether the proofs are bounded. The proof stub is now SELF-WITNESSING in the
+# same way as the (o2) wedge: it records on the filesystem if it SURVIVES
+# JOURNEY_CT_SURVIVAL_SECS (15s — 7.5x the injected 2s per-class cap, and reached
+# only via `sleep`, a kernel timer). A bounded proof can never reach it; an
+# unbounded one always does. The outer `timeout` is demoted to a pure runaway
+# guard so this test cannot hang forever, and is sized so it cannot fire on
+# correct behaviour.
 echo "== Core-terminal proofs are bounded: a hung proof cannot hang the suite =="
+ct_survival_secs=15
+ct_witness_dir="$SANDBOX/ct-witness"
+rm -rf "$ct_witness_dir"
 cat > "$SANDBOX/gradlew" <<'STUB'
 #!/usr/bin/env bash
+set -u
 if [[ "${1:-}" == "--stop" ]]; then exit 0; fi
 if [[ "$*" == *":shared:core-terminal:connectedDebugAndroidTest"* ]]; then
-  sleep 30
+  # Hung proof, SELF-WITNESSING (issue #1802): creates a survival witness FILE
+  # only if it is still alive after JOURNEY_CT_SURVIVAL_SECS, which is far past
+  # the injected per-class cap. Sleeps in 1s slices so the cap's TERM is honoured
+  # within a second rather than deferred behind one long sleep.
+  witness_dir="${JOURNEY_CT_WITNESS_DIR:?}"
+  mkdir -p "$witness_dir"
+  trap 'exit 143' TERM
+  for _ in $(seq "${JOURNEY_CT_SURVIVAL_SECS:?}"); do sleep 1; done
+  : > "$witness_dir/ct-survived-$$"
   exit 0
 fi
 exit 0
@@ -1697,25 +1820,63 @@ STUB
 chmod +x "$SANDBOX/gradlew"
 
 out_ct="$SANDBOX/run-ct-bound.log"
+summary_ct="$SANDBOX/artifacts/ci-journey/summary.md"
+# Force summary.md to be produced by THIS run, so a stale summary from an earlier
+# fixture in this sandbox can never stand in for one this run failed to write.
+rm -f "$summary_ct"
 set +e
-timeout --signal=TERM --kill-after=10 150s \
+# Runaway guard ONLY — deliberately not a bound the assertions rely on. Correct
+# behaviour finishes in well under a minute; a genuinely unbounded suite would
+# run ~6 proofs x 2 attempts x the wedge, so this can only fire on a real hang.
+timeout --signal=TERM --kill-after=10 600s \
   env PATH="$STUBBIN:$PATH" \
     JOURNEY_STEP_BUDGET_SECS=3600 \
     JOURNEY_CLASS_TIMEOUT_SECS=2 \
     JOURNEY_CLASS_KILL_AFTER_SECS=1 \
     JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
+    JOURNEY_CT_WITNESS_DIR="$ct_witness_dir" \
+    JOURNEY_CT_SURVIVAL_SECS="$ct_survival_secs" \
     bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$out_ct" 2>&1
 rc_ct=$?
 set -e
 
 [[ "$rc_ct" -ne 124 ]] \
-  || { sed -n '1,60p' "$out_ct"; fail "(m) the outer guard had to KILL the suite — a core-terminal proof was NOT bounded (the #835 unbounded-proof regression that caused the 95-min cancel)"; }
-summary_ct="$SANDBOX/artifacts/ci-journey/summary.md"
+  || { sed -n '1,60p' "$out_ct"; fail "(m) the runaway guard had to KILL the suite — it never self-finished (a real hang, not a slow box)"; }
+shopt -s nullglob
+ct_survivors=("$ct_witness_dir"/ct-survived-*)
+shopt -u nullglob
+[[ "${#ct_survivors[@]}" -eq 0 ]] \
+  || { sed -n '1,60p' "$out_ct"; fail "(m) ${#ct_survivors[@]} core-terminal proof invocation(s) SURVIVED ${ct_survival_secs}s under a 2s per-class cap — the proofs are NOT timeout-bounded (the #835 unbounded-proof regression that caused the 95-min cancel)"; }
 [[ -f "$summary_ct" ]] \
   || fail "(m) a bounded hung proof must still write summary.md (the artifact the classifier needs — no silent cancel)"
 grep -qE 'output-burst-IME ANR proof.*\*\*FAIL\*\*' "$summary_ct" \
   || { cat "$summary_ct"; fail "(m) the hung #796 proof must surface as FAIL in the summary (classifiable red, not a cancel)"; }
-pass "(m) core-terminal proofs are timeout-bounded — a hung proof yields a classifiable summary, never a job-cap cancel"
+pass "(m) core-terminal proofs are timeout-bounded — no proof invocation survived ${ct_survival_secs}s under the 2s cap, and the hung proof yields a classifiable summary"
+
+# (m-live) LIVENESS of the (m) survival assertion: with the per-class cap widened
+# past the milestone the SAME proof stub DOES reach it, so "no ct-survived
+# witness" above cannot pass vacuously. Drives the real run_ct_class bound
+# (run_bounded) once, directly. The stub exits as soon as it writes the witness
+# and the bound is a deliberately loose 120s, so this probe is bounded by the
+# child's own 15s of `sleep` with 8x headroom — no host-throughput term.
+ct_live_witness_dir="$SANDBOX/ct-liveness-witness"
+rm -rf "$ct_live_witness_dir"
+(
+  set +e
+  JOURNEY_NO_OUTPUT_TIMEOUT_SECS=120
+  JOURNEY_CLASS_KILL_AFTER_SECS=1
+  JOURNEY_CT_WITNESS_DIR="$ct_live_witness_dir"
+  JOURNEY_CT_SURVIVAL_SECS="$ct_survival_secs"
+  export JOURNEY_CT_WITNESS_DIR JOURNEY_CT_SURVIVAL_SECS
+  source "$SCRIPT_DIR/ci-journey-budget-functions.sh"
+  run_bounded 120 "$SANDBOX/gradlew" :shared:core-terminal:connectedDebugAndroidTest
+) > /dev/null 2>&1 || true
+shopt -s nullglob
+ct_live_survivors=("$ct_live_witness_dir"/ct-survived-*)
+shopt -u nullglob
+[[ "${#ct_live_survivors[@]}" -eq 1 ]] \
+  || fail "(m-live) the core-terminal proof stub never reached its ${ct_survival_secs}s survival milestone even with a 30s bound — (m)'s no-survivor assertion is unreachable and would pass vacuously"
+pass "(m-live) the ${ct_survival_secs}s survival witness IS reachable under a loose bound — (m)'s no-survivor assertion is live, not vacuous"
 
 echo
 echo "ALL TESTS PASSED"

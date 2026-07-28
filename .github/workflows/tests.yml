@@ -286,6 +286,23 @@ jobs:
           chmod +x scripts/ci-journey-preserve-android-outputs.sh scripts/test-ci-journey-artifact-packaging.sh
           scripts/test-ci-journey-artifact-packaging.sh
 
+      # Issue #1827: every condition that turns the journey suite RED must leave
+      # evidence the classify step can read. The suite's red condition and the
+      # summary's failed-BOTH-attempts section used to be two hand-maintained
+      # lists; they drifted, and #1203's SURFACE_REPAINT_STATUS / #1233's
+      # SHELL_SNAPSHOT_STATUS reddened the suite while writing NO section — so
+      # the classifier read `first_failure=false`, fell through every RED branch
+      # and typed the shard EMULATOR INFRA UNAVAILABLE (green run). Both halves
+      # now derive from ONE registry; this guard drives the REAL suite (stubbed
+      # gradle/adb) into every registered proof failing twice, then executes the
+      # REAL `Inspect first journey summary` + `Classify emulator-journey result`
+      # step bodies extracted from THIS file, and requires RED — with a per-proof
+      # mutant of the old writer as the red control. Cheap, no emulator, no JVM.
+      - name: CI journey red-evidence guard (issue #1827)
+        run: |
+          chmod +x scripts/test-ci-journey-summary-evidence.sh
+          scripts/test-ci-journey-summary-evidence.sh
+
       # Issue #1293: fast, JVM-free fixture test for the nightly-fault per-phase
       # test-report preservation helper (scripts/lib/nightly-phase-reports.sh).
       # The nightly-fault suite runs each phase as a separate connected-test

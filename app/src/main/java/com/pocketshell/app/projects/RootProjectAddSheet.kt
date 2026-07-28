@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -117,15 +116,23 @@ internal fun RootProjectAddSheetContent(
     // The fix splits the sheet into a PINNED header (label, path, search field,
     // quick actions, "New session here") that always stays visible while
     // typing, and a single weighted results LazyColumn that takes the remaining
-    // space and scrolls. `imePadding()` on the bounded-height outer Column
-    // shrinks that remaining space to sit right above the keyboard, so the
-    // matched folders stay visible and scrollable above the IME and the search
-    // field never scrolls away.
+    // space and scrolls.
+    //
+    // Issue #1812: the keyboard LIFT is Material3's, not this Column's.
+    // `ModalBottomSheet` wraps its whole window content in
+    // `Modifier.fillMaxSize().imePadding()` (ModalBottomSheet.kt:169 in
+    // material3 1.3.2), which CONSUMES the ime inset for everything below it,
+    // so a second content-level `imePadding()` here resolved to zero on every
+    // supported API level. What this Column contributes is the BOUND and the
+    // shrinkability — `fillMaxHeight(fraction)` + `heightIn(max)` over a
+    // `weight(1f)` results list — so the already-lifted sheet body spends its
+    // remaining height on the matched folders instead of overflowing them off
+    // the bottom. That is the lever #613 actually needs; do not re-add an ime
+    // modifier here to "make the keyboard work".
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .imePadding()
             .fillMaxHeight(ROOT_PROJECT_ADD_HEIGHT_FRACTION)
             .heightIn(max = ROOT_PROJECT_ADD_MAX_HEIGHT)
             .padding(horizontal = PocketShellSpacing.lg)

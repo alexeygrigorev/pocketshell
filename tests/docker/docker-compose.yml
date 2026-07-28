@@ -45,6 +45,40 @@ services:
       - "2222:22"
     healthcheck: *ssh-healthcheck
 
+  # Issue #1799 (prerequisite fixture for #1639 §H1 — SSH host-key
+  # verification): same as `sshd`, except its host keys are minted at container
+  # START rather than baked into an image layer, so two successive starts of the
+  # ONE image present DIFFERENT host keys. That is what makes an
+  # unknown-key / changed-key observation on the real SSH transport possible;
+  # with `sshd`/`Dockerfile.ssh` the key is fixed forever and the scenario is
+  # unreachable.
+  #
+  #   docker compose -f tests/docker/docker-compose.yml up -d --build sshd-rekeyed
+  #   ssh -i tests/docker/test_key -p 2246 -o StrictHostKeyChecking=no testuser@127.0.0.1
+  #   docker compose -f tests/docker/docker-compose.yml restart sshd-rekeyed
+  #   # ^ reconnect now and OpenSSH shouts REMOTE HOST IDENTIFICATION HAS CHANGED
+  #
+  # Host port 2246 is the first free port above the #724 journey pool
+  # (2243-2245); see the port map in the `agents-old-cli` / `agents-daemon`
+  # comments above.
+  #
+  # NOTE: `HostKeyTrustCharacterizationIntegrationTest` in
+  # `:shared:core-ssh:integrationTest` pins its Testcontainers fixture to this
+  # SAME host port (it needs a stable host:port so "the key for this endpoint
+  # changed" is the scenario under test). Run one or the other, not both — the
+  # same rule the `sshd` / `agents` pair already follows on 2222. Nothing in CI
+  # starts this service: the `integration` job is Testcontainers-only and builds
+  # `Dockerfile.ssh-rekeyed` itself, so there is no CI collision.
+  sshd-rekeyed:
+    build:
+      context: .
+      dockerfile: Dockerfile.ssh-rekeyed
+    image: pocketshell-test:ssh-rekeyed
+    container_name: pocketshell-test-ssh-rekeyed
+    ports:
+      - "2246:22"
+    healthcheck: *ssh-healthcheck
+
   # `pocketshell-test:tmux` extends the base SSH image with tmux +
   # tmuxctl. Host port 2224 keeps it distinct from `sshd`'s 2222 so
   # both can run in parallel for manual testing.

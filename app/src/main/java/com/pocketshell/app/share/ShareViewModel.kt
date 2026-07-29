@@ -10,6 +10,7 @@ import com.pocketshell.app.notifications.ShareUploadNotifications
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.sendBracketedPaste
+import com.pocketshell.app.tmux.tmuxQuotedArgument
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseKey
@@ -1247,11 +1248,14 @@ internal class ShareViewModel internal constructor(
             return
         }
         val cmd = run {
-            val literal = escapeSingleQuoted(text)
+            // Issue #1845: tmux deletes a TRAILING `;` from an argv element, so
+            // shared text ending in `;` lost that byte silently. Quote through
+            // the tmux-argv-safe helper, not bare single quotes.
+            val literal = tmuxQuotedArgument(text)
             if (paneId != null) {
-                "send-keys -l -t $paneId -- '$literal'"
+                "send-keys -l -t $paneId -- $literal"
             } else {
-                "send-keys -l -- '$literal'"
+                "send-keys -l -- $literal"
             }
         }
         val response = client.sendKeysViaExec(cmd)

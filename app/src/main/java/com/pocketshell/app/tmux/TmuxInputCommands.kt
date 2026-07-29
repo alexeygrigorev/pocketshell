@@ -8,13 +8,18 @@ import com.pocketshell.core.tmux.TmuxClient
  * Issue #1460: type a literal UTF-8 string into [paneId] via `send-keys -l` on
  * the interactive send EXEC lane (not the shared `-CC` channel), so it does not
  * head-of-line-block behind a live agent `%output` burst.
+ *
+ * Issue #1845: [text] MUST be quoted with [tmuxQuotedArgument], not merely
+ * single-quoted. tmux deletes a TRAILING `;` from an `argv` element (it is a
+ * command separator), so `send-keys -l -- 'abc;'` typed `abc` and reported
+ * success — silently dropping a byte out of the user's typed command.
  */
 internal suspend fun sendLiteralTextKeys(
     client: TmuxClient,
     paneId: String,
     text: String,
 ): CommandResponse =
-    client.sendKeysViaExec("send-keys -l -t $paneId -- '${escapeSingleQuoted(text)}'")
+    client.sendKeysViaExec("send-keys -l -t $paneId -- ${tmuxQuotedArgument(text)}")
 
 /**
  * Issue #1460: send a tmux named key (`Enter`, `Tab`, `BSpace`, `Up`, a
@@ -138,7 +143,11 @@ internal suspend fun sendBracketedPaste(
         // appending to the partial the cut left.
         val setFlags = if (index == 0) "-b" else "-ab"
         PasteChunkSeams.consumeFailAtFillChunk(index)
-        client.sendKeysViaExec("set-buffer $setFlags $bufferName -- '${escapeSingleQuoted(chunk)}'")
+        // Issue #1845: [tmuxQuotedArgument], not bare single-quoting — a chunk
+        // whose LAST byte is `;` would otherwise lose it to tmux's argv
+        // command-separator rule, silently corrupting a pasted prompt at a
+        // fixed-size chunk boundary.
+        client.sendKeysViaExec("set-buffer $setFlags $bufferName -- ${tmuxQuotedArgument(chunk)}")
             .throwIfTmuxError("fill paste buffer for pane ${paneId ?: "(active)"}")
     }
     // THE commit point: one exec, all-or-nothing server-side.

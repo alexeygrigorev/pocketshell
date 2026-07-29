@@ -165,6 +165,20 @@ internal fun SessionCardFeedContent(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            // Issue #1821 — LOAD-BEARING, do not delete by analogy with #1812.
+            // Inside [SessionCardFeedSheet]'s `ModalBottomSheet` these two are
+            // redundant (Material3 consumes both insets before the content is
+            // composed — measured byte-identical geometry with and without).
+            // But this content is ALSO composed STANDALONE, outside any sheet
+            // (`SessionCardFeedRegistryTest`), and there nothing has consumed
+            // them, so they are the only thing keeping the last card clear of
+            // the keyboard and the nav bar.
+            // `StandaloneContentImePaddingLivenessTest` goes RED if EITHER is
+            // removed, and it takes BOTH keyboard states to see that: dropping
+            // `imePadding()` collapses the keyboard-UP lift 648px -> 0px;
+            // dropping `navigationBarsPadding()` drops the last card 126px
+            // under the nav bar in the keyboard-DOWN state (invisible with the
+            // keyboard up, where the ime inset subsumes the nav bar).
             .navigationBarsPadding()
             .imePadding()
             .padding(horizontal = PocketShellSpacing.lg)
@@ -212,6 +226,19 @@ internal fun ChecklistCardsContent(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            // Issue #1821 — LOAD-BEARING, do not delete by analogy with #1812.
+            // This composable has NO production caller at all: it is composed
+            // only STANDALONE, from `SessionChecklistUiInteractionTest` and the
+            // gate-wired `SessionChecklistPushJourneyDockerTest`. Outside a
+            // `ModalBottomSheet` nothing has consumed these insets, so they are
+            // the only thing keeping the last item clear of the keyboard and the
+            // nav bar. `StandaloneContentImePaddingLivenessTest` goes RED if
+            // EITHER is removed, and it takes BOTH keyboard states to see that:
+            // dropping `imePadding()` collapses the keyboard-UP lift
+            // 648px -> 0px; dropping `navigationBarsPadding()` drops the last
+            // item 126px under the nav bar in the keyboard-DOWN state
+            // (invisible with the keyboard up, where the ime inset subsumes the
+            // nav bar).
             .navigationBarsPadding()
             .imePadding()
             .padding(horizontal = PocketShellSpacing.lg)

@@ -216,14 +216,30 @@ internal fun SnippetPickerContent(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            // Issue #253: consume the bottom system insets inside the sheet
-            // content so the lower snippet rows (the explicit Send / Send + ↵
-            // chips) are never drawn under the system navigation bar or the
-            // IME / terminal key-bar region. Without this the sheet content
-            // ran to the very bottom edge and the bottom-most chips rendered
-            // *behind* the bottom controls. `navigationBarsPadding` covers the
-            // gesture / 3-button nav bar; `imePadding` lifts the whole sheet
-            // above the soft keyboard when it is raised.
+            // Issue #253: consume the bottom system insets inside this content
+            // so the lower snippet rows (the explicit Send / Send + ↵ chips) are
+            // never drawn under the system navigation bar or the IME / terminal
+            // key-bar region. Without this the content ran to the very bottom
+            // edge and the bottom-most chips rendered *behind* the bottom
+            // controls. `navigationBarsPadding` covers the gesture / 3-button
+            // nav bar; `imePadding` lifts the content above the soft keyboard.
+            //
+            // Issue #1821 — LOAD-BEARING, do not delete by analogy with #1812.
+            // Inside [SnippetPickerSheet]'s `ModalBottomSheet` these two are
+            // redundant (Material3 consumes both insets before the content is
+            // composed — measured byte-identical geometry with and without), so
+            // in production it is Material, not this line, that delivers #253.
+            // But this content is ALSO composed STANDALONE
+            // (`SnippetPickerSendButtonsTest`, `SnippetPickerBodyPreviewTest`),
+            // and there nothing has consumed them, so they are the only thing
+            // keeping the send chips clear of the keyboard and the nav bar.
+            // `StandaloneContentImePaddingLivenessTest` goes RED if EITHER is
+            // removed, and it takes BOTH keyboard states to see that: dropping
+            // `imePadding()` collapses the keyboard-UP lift 648px -> 0px;
+            // dropping `navigationBarsPadding()` drops the send chips 126px
+            // under the nav bar in the keyboard-DOWN state (invisible with the
+            // keyboard up, where the ime inset subsumes the nav bar) — which is
+            // the #253 symptom above, so that modifier is not decorative here.
             .navigationBarsPadding()
             .imePadding()
             .padding(horizontal = PocketShellSpacing.lg)

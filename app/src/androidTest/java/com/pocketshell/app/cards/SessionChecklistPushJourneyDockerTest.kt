@@ -52,10 +52,17 @@ import java.io.FileOutputStream
  *  2. The app reads it through the PRODUCTION [SessionCardsRemoteSource.getCards]
  *     over the SAME warm [SshSession] (D21 — no new connection) and parses it to
  *     a [SessionCardsRemoteSource.ChecklistCard].
- *  3. The PRODUCTION checklist chip + bottom-sheet ([ChecklistChip] /
- *     [ChecklistCardsContent], the same composables the session screen mounts)
- *     render that real feed; the test asserts the card + its items ACTUALLY
- *     appear in the rendered feed (not a fabricated in-memory card).
+ *  3. [ChecklistChip] / [ChecklistCardsContent] render that real feed; the test
+ *     asserts the card + its items ACTUALLY appear in the rendered feed (not a
+ *     fabricated in-memory card). Correction (#1821): those two are NOT what the
+ *     session screen mounts — it mounts [SessionCardFeedSheet] ->
+ *     `SessionCardFeedContent` (`TmuxSessionSheets.kt:77`), and neither
+ *     [ChecklistChip] nor [ChecklistCardsContent] has any production caller. The
+ *     rows are drawn by the same [ChecklistCardRenderer] either way, so this
+ *     journey is not vacuous, but it proves that renderer through a wrapper the
+ *     product does not ship. Repointing it at `SessionCardFeedContent` is a
+ *     follow-up; it is a behavioural change to a gate-wired journey and was
+ *     deliberately kept out of #1821.
  *  4. Tapping an item drives the PRODUCTION
  *     [SessionCardsRemoteSource.setChecklistItemChecked] tick exec over the same
  *     warm session.

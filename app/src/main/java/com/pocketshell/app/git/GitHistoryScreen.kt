@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -995,7 +994,6 @@ private fun CreateIssueSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),
             verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.md),

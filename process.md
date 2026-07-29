@@ -1126,13 +1126,17 @@ verification checklist passes, merge through a protected PR:
    role):
 
    ```bash
-   git -C .worktrees/issue-<N> diff --no-color > /tmp/issue-<N>.patch
+   git -C .worktrees/issue-<N> diff --no-color HEAD > /tmp/issue-<N>.patch
    ```
 
-   **`git diff` only captures TRACKED files — it silently omits untracked
-   NEW files (commonly the new regression test).** Always list and copy the
-   untracked files too, or you will merge a fix WITHOUT its test (the exact
-   "shipped but not really fixed" failure D33 exists to prevent):
+   **A plain `git diff` shows only unstaged changes.** Staged edits and staged
+   deletions vanish from that patch. Use `git diff HEAD` so the patch captures
+   both staged and unstaged changes to tracked files.
+
+   **`git diff HEAD` still silently omits untracked NEW files** (commonly the
+   new regression test). Always list and copy the untracked files too, or you
+   will merge a fix WITHOUT its test (the exact "shipped but not really fixed"
+   failure D33 exists to prevent):
 
    ```bash
    WT=.worktrees/issue-<N>
@@ -1142,7 +1146,9 @@ verification checklist passes, merge through a protected PR:
    ```
 
    Verify the applied file set in `main` matches the implementer's reported
-   file list (modified + NEW) before running the gate.
+   file list before running the gate, including modified, new, and deleted
+   files. Check `git status --porcelain` explicitly and confirm every expected
+   deletion appears as a `D` entry.
 
    If the implementer committed inside the worktree, diff against `main`
    (a commit-based diff DOES include new files, so this caveat is moot):

@@ -114,8 +114,10 @@ class ConnectionControllerCoverageFirstTest {
         // error band; the live channel heals.
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
-        // And it resolves back to Live with no band ever shown.
+        // SSH recovery alone cannot reveal a dead/unattached control channel.
         controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
 
@@ -134,6 +136,9 @@ class ConnectionControllerCoverageFirstTest {
         assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
 
         controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
         assertEquals(RevealDecision.Reveal(a, inputEnabled = true), controller.revealGate.value)
     }
@@ -164,8 +169,10 @@ class ConnectionControllerCoverageFirstTest {
         assertEquals(a, controller.state.value.targetIdOrNull())
 
         controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(
-            "transport recovery must return to Live on the original target",
+            "target-tagged control-channel recovery must return to Live on the original target",
             ConnectionState.Live(host, a),
             controller.state.value,
         )

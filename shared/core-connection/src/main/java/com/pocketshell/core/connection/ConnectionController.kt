@@ -701,16 +701,27 @@ class ConnectionController(
     }
 
     /**
-     * Transport healed / lease connected. Reattaching and Reconnecting resolve to
-     * [Live] on the same target (silent recovery). A spurious live signal in
-     * another state is ignored.
+     * The SSH transport connected. This proves only that the carrier for the tmux
+     * control channel is available; it does NOT prove that the replacement `-CC`
+     * attach has completed or that a pane is safe to reveal.
+     *
+     * Issue #1887: recovery used to map Reattaching/Reconnecting straight to
+     * [ConnectionState.Live]. A fresh lease therefore reclaimed displayed
+     * `Connected` while the replacement tmux attach was still in flight — exactly
+     * the false-live window #1863's one-interval proof caught under full-suite load.
+     * Every transport-up path now waits in [ConnectionState.Attaching]. The
+     * target-tagged [ConnectionEvent.SeedLanded] (or the facade's explicit
+     * preserved-control-channel confirmation) is the sole recovery promotion to
+     * [ConnectionState.Live].
+     *
+     * A spurious live signal in another state is ignored.
      */
     private fun onTransportLive(current: ConnectionState): ConnectionState =
         when (current) {
-            // Issue #1633: entering Live starts the stability window — it does NOT commit
-            // the episode. "The dial succeeded" is not "the connection recovered".
-            is ConnectionState.Reattaching -> liveAt(current.host, current.targetId)
-            is ConnectionState.Reconnecting -> liveAt(current.host, current.targetId)
+            is ConnectionState.Reattaching ->
+                ConnectionState.Attaching(current.host, current.targetId)
+            is ConnectionState.Reconnecting ->
+                ConnectionState.Attaching(current.host, current.targetId)
             is ConnectionState.Connecting -> ConnectionState.Attaching(current.host, current.targetId)
             else -> current
         }

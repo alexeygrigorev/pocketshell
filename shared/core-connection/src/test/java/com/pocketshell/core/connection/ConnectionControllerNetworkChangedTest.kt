@@ -60,8 +60,11 @@ class ConnectionControllerNetworkChangedTest {
         // Proactive silent reconnect via the Reconnecting ladder — NOT Unreachable.
         assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1), controller.state.value)
 
-        // And it resolves back to Live with no error band ever shown.
+        // SSH is available again, but the replacement control channel is not
+        // displayable until its target-tagged seed lands.
         controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
 

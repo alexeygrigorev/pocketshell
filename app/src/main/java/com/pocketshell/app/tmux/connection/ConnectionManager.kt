@@ -319,11 +319,16 @@ class ConnectionManager(
 
     /**
      * Within-grace foreground reattach promotion: the warm `-CC` channel was NEVER torn down,
-     * so [ConnectionEvent.TransportLive] promotes [ConnectionState.Reattaching] →
-     * [ConnectionState.Live] WITHOUT any handshake. Idempotent for an already-Live target.
+     * so this explicit control-channel confirmation promotes [ConnectionState.Reattaching] →
+     * [ConnectionState.Live] WITHOUT any handshake. Issue #1887 deliberately does NOT use
+     * [ConnectionEvent.TransportLive] here: that event is the SSH lease-up signal and now
+     * stops at [ConnectionState.Attaching] until tmux is confirmed. A target-tagged synthetic
+     * seed is valid on this one preserved-runtime path because the already-rendered pane and
+     * its control channel both survived the grace window. Idempotent for an already-Live target.
      */
     fun observeForegroundReattachLive() {
-        controller.submit(ConnectionEvent.TransportLive)
+        val target = controller.state.value.targetIdOrNull() ?: return
+        controller.submit(ConnectionEvent.SeedLanded(target, paneId = "preserved-control-channel"))
     }
 
     /**

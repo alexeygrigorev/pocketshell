@@ -75,6 +75,15 @@ class LivenessProbeTest {
         }
 
         override fun transportProvenAliveRecently(): Boolean = transportProvenAliveRecently
+
+        /**
+         * Issue #1863 — the control channel is provably CLOSED (not merely
+         * unanswering). Default `false` so every existing case keeps exercising the
+         * ambiguity machinery (N-consecutive + keepalive deferral) unchanged.
+         */
+        var channelDefinitivelyClosed: Boolean = false
+
+        override fun channelDefinitivelyClosed(): Boolean = channelDefinitivelyClosed
     }
 
     @Test
@@ -762,6 +771,82 @@ class LivenessProbeTest {
             assertEquals(
                 "a %output-burst-parked probe with a provably-alive keepalive must NOT " +
                     "redial mid-work within the deferral bound (#964)",
+                0,
+                io.onProbeFailedCount,
+            )
+            probe.stop()
+        }
+
+    @Test
+    fun `issue 1863 a definitively CLOSED control channel declares the drop on the first failed tick`() =
+        runTest(StandardTestDispatcher()) {
+            // Issue #1863: the N-consecutive threshold + the #982/#984 keepalive
+            // deferral both exist to disambiguate a MISSED ping. A closed client is
+            // not ambiguous — the channel is gone and no further tick will make it
+            // answer. Detection must be bounded by ONE interval, not by a threshold.
+            val io = FakeProbeIo()
+            io.enqueue(false)
+            io.channelDefinitivelyClosed = true
+            val probe =
+                LivenessProbe(io, intervalMs = 100, perProbeTimeoutMs = 1_000, failureThreshold = 4)
+            probe.start(this)
+
+            advanceTimeBy(110) // exactly ONE interval
+            runCurrent()
+
+            assertEquals(
+                "issue #1863: a CLOSED control channel must declare the drop on the first " +
+                    "failed probe, without waiting out failureThreshold=4",
+                1,
+                io.onProbeFailedCount,
+            )
+            probe.stop()
+        }
+
+    @Test
+    fun `issue 1863 a live transport keepalive cannot veto a definitively CLOSED control channel`() =
+        runTest(StandardTestDispatcher()) {
+            // The #1863 state is exactly the one the keepalive vetoes forever: only the
+            // tmux `-CC` CHANNEL was closed, the SSH transport under it is perfectly
+            // alive, so `transportProvenAliveRecently` keeps returning true and the
+            // #982/#984 deferral would suppress the drop indefinitely. The
+            // definitively-closed arm must bypass that veto.
+            val io = FakeProbeIo(transportProvenAliveRecently = true)
+            io.enqueue(false, false, false)
+            io.channelDefinitivelyClosed = true
+            val probe =
+                LivenessProbe(io, intervalMs = 100, perProbeTimeoutMs = 1_000, failureThreshold = 2)
+            probe.start(this)
+
+            advanceTimeBy(110)
+            runCurrent()
+
+            assertEquals(
+                "issue #1863: a healthy transport keepalive must NOT keep a CLOSED control " +
+                    "channel alive on paper — the dead wire has to be declared",
+                1,
+                io.onProbeFailedCount,
+            )
+            probe.stop()
+        }
+
+    @Test
+    fun `issue 1863 an unanswering but OPEN channel still uses the full ambiguity machinery`() =
+        runTest(StandardTestDispatcher()) {
+            // Guard-rail (G6): the #1863 arm must NOT weaken the no-false-positive
+            // behaviour for a merely-slow channel. With `channelDefinitivelyClosed`
+            // false the threshold + keepalive deferral apply exactly as before.
+            val io = FakeProbeIo(transportProvenAliveRecently = true)
+            io.enqueue(false, false, false, false)
+            val probe =
+                LivenessProbe(io, intervalMs = 100, perProbeTimeoutMs = 1_000, failureThreshold = 2)
+            probe.start(this)
+
+            advanceTimeBy(450)
+            runCurrent()
+
+            assertEquals(
+                "a slow-but-OPEN channel with a live keepalive must still ride through",
                 0,
                 io.onProbeFailedCount,
             )

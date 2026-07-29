@@ -19,6 +19,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
@@ -238,6 +239,114 @@ class TmuxClientTest {
                 )
                 assertFalse(result.isError)
                 assertEquals(listOf("session 0: 1 windows"), result.output)
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `caller cancelled before its write completes must not close the control channel (issue 1863)`() =
+        runBlocking {
+            // Issue #1863 — THE ROOT CAUSE of the permanently-dead wire.
+            //
+            // Production shape: the user presses Back while a `[wN]` connect is still
+            // in flight. A composition/pane-scoped caller that had a tmux command in
+            // flight is cancelled while parked in `writeResult.await()`, i.e. BEFORE
+            // its line reached the wire (`writeCompleted == false`).
+            //
+            // On BASE the generic write-failure arm then treats that CALLER-side
+            // cancellation as a transport failure and calls `close()` on the SHARED
+            // `-CC` control client:
+            //
+            //   tmux-command-write-failed kind=... cause=JobCancellationException
+            //   tmux-refresh-client-size-error ... TmuxClientException: client is closed
+            //
+            // Because that close is self-inflicted (`ExplicitClose`), the passive-drop
+            // classifier IGNORES it (#1568/#1610 storm guard), so nothing recovers —
+            // and the still-running connect job goes on to publish `tmux-connect-ready`
+            // over the corpse. The wire is dead forever.
+            //
+            // ONE command's caller going away must never tear down the connection every
+            // other surface shares. RED on base (`disconnected` flips true and the
+            // follow-up command fails with "client is closed"); GREEN with the fix.
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope)
+            try {
+                client.connect()
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.resetStdin()
+
+                // Park the NEXT stdin write so the caller is cancelled strictly BEFORE
+                // its bytes reach the wire — the `writeCompleted == false` arm.
+                shell.blockFutureStdinWrites()
+                val cancelledCaller = scope.launch { client.sendCommand("list-panes") }
+                assertTrue(
+                    "the cancelled caller must actually reach the parked stdin write",
+                    shell.awaitBlockedStdinWrite(ASYNC_AWAIT_TIMEOUT_MS),
+                )
+                cancelledCaller.cancelAndJoin()
+                shell.unblockFutureStdinWrites()
+
+                assertFalse(
+                    "issue #1863: cancelling ONE command's caller must NOT close the shared " +
+                        "tmux -CC control channel — that is the permanently-dead wire",
+                    client.disconnected.value,
+                )
+
+                // ...and the channel is still USABLE: a follow-up command writes and
+                // correlates its own response block.
+                shell.resetStdin()
+                val followUp = scope.async { client.sendCommand("list-sessions") }
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                    while (!shell.stdinAsString().contains("list-sessions")) { yield(); delay(5) }
+                }
+                shell.feed(
+                    "%begin 1700000000 7 0\n" +
+                        "session 0: 1 windows\n" +
+                        "%end 1700000000 7 0\n",
+                )
+                val result = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { followUp.await() }
+                assertEquals(
+                    "the surviving control channel must correlate the follow-up command's " +
+                        "own response block",
+                    7L,
+                    result.number,
+                )
+                assertEquals(listOf("session 0: 1 windows"), result.output)
+            } finally {
+                client.close()
+            }
+        }
+
+    @Test
+    fun `a genuine write failure still closes the control channel (issue 244 preserved)`() =
+        runBlocking {
+            // Issue #1863 guard-rail: the #1863 fix narrows the write-failure close to
+            // NON-cancellation causes only. A REAL write failure (the #244 "fail stalled
+            // tmux send commands visibly" contract) must still close the channel so the
+            // recovery machinery sees a genuine drop. Without this the fix could silently
+            // turn every dead-wire write into an invisible no-op — the opposite mistake.
+            val shell = FakeShell()
+            val session = FakeSession(shell)
+            val client = RealTmuxClient(session, scope)
+            try {
+                client.connect()
+                withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                    while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+                }
+                shell.failFutureStdinWrites()
+                val failure = runCatching { client.sendCommand("list-panes") }
+                assertTrue(
+                    "a real write failure must surface to the caller",
+                    failure.exceptionOrNull() is TmuxClientException,
+                )
+                assertTrue(
+                    "a real write failure must still close the control channel (#244)",
+                    client.disconnected.value,
+                )
             } finally {
                 client.close()
             }
@@ -2242,6 +2351,9 @@ class TmuxClientTest {
         fun blockFutureStdinWrites() {
             stdinCapture.blockFutureWrites()
         }
+        fun unblockFutureStdinWrites() {
+            stdinCapture.unblockFutureWrites()
+        }
         fun awaitBlockedStdinWrite(timeoutMs: Long): Boolean =
             stdinCapture.awaitBlockedWrite(timeoutMs)
     }
@@ -2297,6 +2409,18 @@ class TmuxClientTest {
 
         fun blockFutureWrites() {
             blockWrites = true
+        }
+
+        /**
+         * Release a write parked by [blockFutureWrites] (issue #1863) so the same
+         * fake shell can serve a follow-up command after the parked caller was
+         * cancelled — the proof that the control channel survived the cancel.
+         */
+        fun unblockFutureWrites() {
+            synchronized(blockLock) {
+                blockWrites = false
+                blockLock.notifyAll()
+            }
         }
 
         fun awaitBlockedWrite(timeoutMs: Long): Boolean =

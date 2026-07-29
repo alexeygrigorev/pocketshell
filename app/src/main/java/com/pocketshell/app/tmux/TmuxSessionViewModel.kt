@@ -68,7 +68,13 @@ import com.pocketshell.app.tmux.connection.selectBackgroundArm
 import com.pocketshell.app.tmux.connection.ConnectionManager
 import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
+import com.pocketshell.app.tmux.connection.controlChannelAliveForReveal
 import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
+import com.pocketshell.app.tmux.connection.keepAliveProvenAliveRecently
+import com.pocketshell.app.tmux.connection.LivenessProbeGate
+import com.pocketshell.app.tmux.connection.livenessProbeIo
+import com.pocketshell.app.tmux.connection.requireControlChannelAliveForReveal
+import com.pocketshell.app.tmux.connection.selectLivenessProbeGate
 import com.pocketshell.app.tmux.connection.ForegroundReturnEffects
 import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
@@ -1049,17 +1055,12 @@ public class TmuxSessionViewModel @Inject constructor(
         if (livenessProbe != null) return
         if (!LivenessProbeTestOverride.autoStartEnabled) return
         val probe = LivenessProbe(
-            io = object : LivenessProbe.ProbeIo {
-                override fun shouldProbe(): Boolean = shouldRunLivenessProbe()
-
-                override suspend fun probe(): Boolean = runLivenessProbePing()
-
-                override fun onProbeFailed(consecutiveFailures: Int) =
-                    onLivenessProbeDeclaredDrop(consecutiveFailures)
-
-                override fun transportProvenAliveRecently(): Boolean =
-                    isTransportKeepAliveProvenAliveRecently()
-            },
+            io = livenessProbeIo(
+                gate = ::livenessProbeGate,
+                ping = { runLivenessProbePing() },
+                onDrop = ::onLivenessProbeDeclaredDrop,
+                keepAliveProvenAlive = ::isTransportKeepAliveProvenAliveRecently,
+            ),
             intervalMs = LivenessProbeTestOverride.intervalMs(),
             perProbeTimeoutMs = LivenessProbeTestOverride.perProbeTimeoutMs(),
             failureThreshold = LivenessProbeTestOverride.failureThreshold(),
@@ -1069,29 +1070,30 @@ public class TmuxSessionViewModel @Inject constructor(
         probe.start(viewModelScope)
     }
 
-    /**
-     * The probe gate (no-false-positive guard 1): probe ONLY when the session is
-     * genuinely FOREGROUNDED + `Live` on the CURRENT, non-disconnected control
-     * client. A backgrounded app, an in-grace detach, an in-flight
-     * attach/reconnect (controller not `Live`), or no client all return false, so
-     * the probe never competes with a reconnect, never trips while backgrounded,
-     * and never fights the single grace owner.
-     */
-    private fun shouldRunLivenessProbe(): Boolean {
+    /** The probe gate — the pure decision + why each term exists lives in [selectLivenessProbeGate]. */
+    private fun livenessProbeGate(): LivenessProbeGate {
         val bg = isProcessBackgroundedForGraceOwner()
         val hasClient = clientRef != null
         val disconnected = clientRef?.disconnected?.value ?: true
         val ctrl = connectionManager.state
-        val open = !bg && appActive && hasClient && !disconnected && ctrl is CoreConnectionState.Live
-        if (!open) {
+        val gate = selectLivenessProbeGate(
+            backgrounded = bg,
+            appActive = appActive,
+            hasClient = hasClient,
+            controlChannelDisconnected = disconnected,
+            controllerLive = ctrl is CoreConnectionState.Live,
+        )
+        if (gate == LivenessProbeGate.Closed) {
             Log.i(
                 LIVENESS_PROBE_TAG,
                 "gate closed bg=$bg appActive=$appActive hasClient=$hasClient " +
                     "disconnected=$disconnected ctrl=${ctrl::class.simpleName}",
             )
         }
-        return open
+        return gate
     }
+
+    private fun shouldRunLivenessProbe(): Boolean = livenessProbeGate() != LivenessProbeGate.Closed
 
     /**
      * One liveness ping over the warm control channel. Best-effort + non-fatal:
@@ -1119,40 +1121,18 @@ public class TmuxSessionViewModel @Inject constructor(
         return runCatching { client.probeLiveness(requireAnsweredRoundTrip) }.getOrDefault(false)
     }
 
-    /**
-     * Issue #964 — the keepalive-coordination guard the [LivenessProbe] consults
-     * before declaring a drop. Reports whether the always-on transport keepalive
-     * ([com.pocketshell.core.ssh.TransportKeepAlive], #945) has seen inbound
-     * transport activity within its ride-through window — i.e. the LINK is provably
-     * alive even though the tmux control-channel probe is momentarily failing. When
-     * true the probe DEFERS rather than force-redialing, so a slow-but-live link is
-     * ridden through by the single keepalive budget instead of two competing ones.
-     *
-     * Reads the live [sessionRef] (the transport the warm lease holds). No session
-     * → no keepalive signal → false, so the probe keeps its own authority exactly
-     * as before whenever there is no live transport to defer to.
-     */
-    private fun isTransportKeepAliveProvenAliveRecently(): Boolean {
-        // Test seam: a connected/unit proof can pin the keepalive "alive" state
-        // (a live-but-slow link) without driving the real 90s ride-through window.
-        // An EXPLICIT pin always wins (the #964 slow-but-live phase deliberately
-        // sets it true WHILE the `-CC` dead-seam is armed).
-        forceTransportProvenAliveForTest?.let { return it }
-        // Issue #866 / #822: the synthetic SILENT-drop seam ([forceLivenessProbeDeadForTest])
-        // models a genuine half-open link death — the dominant real #822 where BOTH the
-        // tmux `-CC` channel AND the SSH transport keepalive die together. Without this,
-        // arming only the `-CC` dead-seam on a healthy `agents:2222` fixture left the REAL
-        // keepalive "proven alive", so the #982/#984 deferral suppressed the drop forever
-        // and the connection-lost indicator never surfaced (the #822 detection contract
-        // regressed to a no-op on the deterministic fixture). When the `-CC` dead-seam is
-        // armed and no EXPLICIT keepalive verdict is pinned, the transport is NOT proven
-        // alive either — a silent drop is a WHOLE-link death. Production-neutral: the seam
-        // is test-only (always false in production), so this never changes real behaviour.
-        if (forceLivenessProbeDeadForTest) return false
-        val session = sessionRef ?: return false
-        return runCatching { session.isTransportProvenAliveWithinKeepAliveWindow() }
-            .getOrDefault(false)
-    }
+    /** Issue #964 keepalive-coordination guard — rationale + seam order in [keepAliveProvenAliveRecently]. */
+    private fun isTransportKeepAliveProvenAliveRecently(): Boolean =
+        keepAliveProvenAliveRecently(
+            pinnedVerdict = forceTransportProvenAliveForTest,
+            syntheticChannelDeathArmed = forceLivenessProbeDeadForTest,
+            transportKeepAliveAlive = {
+                sessionRef?.let { session ->
+                    runCatching { session.isTransportProvenAliveWithinKeepAliveWindow() }
+                        .getOrDefault(false)
+                } == true
+            },
+        )
 
     /**
      * Issue #1568 (P0-2): vouch the SSH transport alive (connected + async-close not initiated;
@@ -5603,6 +5583,15 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         cause: String,
     ) {
+        // Issue #1863 (G2): the ride-through re-asserts Live on the SURVIVING client. If that
+        // client is already CLOSED there is nothing to ride through, and clearing the band
+        // would republish the dead-wire lie the connect paths are guarded against. Bail before
+        // touching any state: the band stays up and `lifecycleReattachNetworkCoalesce` is left
+        // intact (no redial happened, so its coalescing window still stands). Recovery stays
+        // with whoever is ALREADY armed — the auto-reconnect ladder when the controller is off
+        // Live, otherwise the probe's DeadChannel arm within one interval. Nothing new is
+        // scheduled here (D28: no second writer).
+        clientRef?.let { if (!controlChannelAliveForReveal(it)) return }
         val reason = change.reason
         lifecycleReattachNetworkCoalesce = null
         Log.i(
@@ -6492,6 +6481,10 @@ public class TmuxSessionViewModel @Inject constructor(
             // keep the calm "Attaching…" hold and hand off to
             // [armConnectedBlankWatchdog].
             val activePaneSeeded = awaitActivePaneSeededOrLoading(blankReseedGuard)
+            // Issue #1863: never declare a wire live that died while this attach was
+            // in flight — the throw routes into the catch below as a stale-channel
+            // symptom (single ladder), instead of publishing `ready` over a corpse.
+            requireControlChannelAliveForReveal(client, target.sessionName, "connect")
             // EPIC #687 P1: when the active pane is seeded non-blank, the inline path
             // reveals the target's surface — promote the reveal machine to Live for
             // the target so the NEW-path reveal gate releases in lockstep.
@@ -7040,6 +7033,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 client = client,
             )
             val activePaneSeeded = awaitActivePaneSeededOrLoading(fastSwitchRevealGuard)
+            // Issue #1863: same guard on the warm entry point (G2) — the fast-switch
+            // catch below already routes a stale-channel symptom into the single ladder.
+            requireControlChannelAliveForReveal(client, target.sessionName, "fast switch")
             // EPIC #687 P1: the fast-switch reveal shows the target's seeded pane —
             // promote the reveal machine to Live for the target so the NEW-path reveal
             // gate releases in the same mutation (never holds on a warm switch).
@@ -8355,6 +8351,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 return false
             }
             reseedVisiblePanesForPassiveReattach(target, replacement, budgets)
+            requireControlChannelAliveForReveal(replacement, target.sessionName, "silent reattach") // #1863 G2
             clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -8589,6 +8586,7 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             val newClient = replacement ?: return false
             reseedVisiblePanesForPassiveReattach(target, newClient, budgets)
+            requireControlChannelAliveForReveal(newClient, target.sessionName, "transport reconnect") // #1863 G2
             clientRegistration = activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,

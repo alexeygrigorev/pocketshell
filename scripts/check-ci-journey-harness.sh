@@ -115,6 +115,14 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.proof.DisconnectFlapSoakE2eTest"
   "com.pocketshell.app.proof.EmulatorWorkflowE2eTest"
   "com.pocketshell.app.proof.FastResumeReconnectE2eTest"
+  # TEMPORARY (issue #1854) — REMOVE THIS ENTRY AND WIRE THE CLASS INTO
+  # scripts/ci-journey-suite.sh AT INTEGRATION. It is the reproduction for the
+  # `printf` -> `tf` typed-input corruption and belongs in the per-push gate; it
+  # uses the default `agents:2222` fixture, so no tests.yml change is needed. It
+  # is parked here only because #1854's implementer brief ruled
+  # ci-journey-suite.sh out of scope while #1846 (approved, awaiting
+  # integration) and #1851 (in flight) both edit that file's test array, and a
+  # third concurrent edit would clobber one of them on merge.
   # Nightly-extensive-only mobile-network self-inflicted storm reproduction
   # (#1681 / #1680 Track B). A NetworkFaultProofBase toxiproxy proof: it self-skips
   # on CI (assumeNetworkFaultProofsEnabled -> tests.yml leaves network-fault-proxy:2228

@@ -106,4 +106,58 @@ class BracketedPasteTest {
         assertFalse(BracketedPaste.containsLineBreak("a\rb"))
         assertFalse(BracketedPaste.containsLineBreak(""))
     }
+
+    /**
+     * Issue #1854: a SINGLE TRAILING newline is a SUBMIT, not paste content.
+     * An AOSP-family soft keyboard commits the Enter key as a literal `\n`
+     * appended to the text, so classifying "any LF" as a paste turned every
+     * "type a command, press Enter" into a bracketed paste — which is never run
+     * by a bracketed-paste-aware program, and whose markers made busybox `ash`
+     * swallow the command's leading bytes.
+     */
+    @Test
+    fun hasContentLineBreakIgnoresASingleTrailingSubmitNewline() {
+        // Content line breaks — still a paste.
+        assertTrue(BracketedPaste.hasContentLineBreak("a\nb"))
+        assertTrue(BracketedPaste.hasContentLineBreak("a\nb\n"))
+        assertTrue(BracketedPaste.hasContentLineBreak("\na"))
+        assertTrue(BracketedPaste.hasContentLineBreak("a\r\nb"))
+        assertTrue(BracketedPaste.hasContentLineBreak("a\nb".toByteArray(Charsets.UTF_8)))
+        // A trailing submit newline — NOT a paste.
+        assertFalse(BracketedPaste.hasContentLineBreak("printf \'x\'\n"))
+        assertFalse(BracketedPaste.hasContentLineBreak("\n"))
+        assertFalse(BracketedPaste.hasContentLineBreak("a"))
+        assertFalse(BracketedPaste.hasContentLineBreak(""))
+        assertFalse(BracketedPaste.hasContentLineBreak(null))
+        assertFalse(BracketedPaste.hasContentLineBreak("a\rb"))
+        assertFalse(BracketedPaste.hasContentLineBreak("printf \'x\'\n".toByteArray(Charsets.UTF_8)))
+        assertFalse(BracketedPaste.hasContentLineBreak(ByteArray(0)))
+    }
+
+    /**
+     * Issue #1854: the tmux lane must recognise an ALREADY-framed block so it
+     * delivers it instead of framing it a second time.
+     */
+    @Test
+    fun isFramedRecognisesACompletePasteBlockOnly() {
+        assertTrue(BracketedPaste.isFramed(BracketedPaste.frame("a\nb".toByteArray(Charsets.UTF_8))))
+        assertTrue(BracketedPaste.isFramed(BracketedPaste.frame(ByteArray(1) { 0x61 })))
+        assertFalse(BracketedPaste.isFramed("a\nb".toByteArray(Charsets.UTF_8)))
+        assertFalse(BracketedPaste.isFramed(ByteArray(0)))
+        // Start marker only, or end marker only, is not a complete block.
+        assertFalse(BracketedPaste.isFramed("\u001B[200~abc".toByteArray(Charsets.UTF_8)))
+        assertFalse(BracketedPaste.isFramed("abc\u001B[201~".toByteArray(Charsets.UTF_8)))
+    }
+
+    /**
+     * Issue #1854: [BracketedPaste.textChunks] is [BracketedPaste.frameTextChunks]
+     * without the framing step, and preserves the same rejoin invariant.
+     */
+    @Test
+    fun textChunksSplitAnAlreadyFramedBlockWithoutAddingMarkers() {
+        val framed = BracketedPaste.frame("alpha\nbeta".toByteArray(Charsets.UTF_8))
+        val chunks = BracketedPaste.textChunks(framed, 4)
+        assertEquals(String(framed, Charsets.UTF_8), chunks.joinToString(""))
+        assertEquals(emptyList<String>(), BracketedPaste.textChunks(ByteArray(0)))
+    }
 }

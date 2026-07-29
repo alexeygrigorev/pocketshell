@@ -106,15 +106,6 @@ import java.io.FileOutputStream
  * reproduce the LOSS on a HEALTHY recovery layer (per G10 they pass on v0.4.23
  * and mask the residual black). This one reproduces the recovery-layer FAILURE.
  *
- * ## The busy-agent lane (#1297 — reconcile under `-CC` saturation)
- *
- * The sibling `busy-agent-burst.sh` fixture (shipped in the `agents` image) floods
- * the `-CC` channel — the state that wedges the capture SPOF the heal funnels
- * through. Its FULL emulator run (an unbounded saturating flood while the client
- * attaches, plus the multi-session mutex-contention `--pool` run) is the expensive
- * BATCHED-lane acceptance per #1208 — it is intentionally NOT wired into this
- * per-PR journey, whose deterministic idle-incremental convergence is the per-push
- * gate. The fixture is delivered + Docker-verified for that batched run.
  */
 @RunWith(AndroidJUnit4::class)
 class IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest {
@@ -590,8 +581,7 @@ class IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest {
     /**
      * Seed the idle-incremental recovery session as a tmux new-session payload that
      * runs the shipped `idle-incremental-claude.sh` fixture on the `agents` image.
-     * REUSES the `agents:2222` service — no new port. The sibling `busy-agent-burst.sh`
-     * fixture is shipped for the batched-lane run (per #1208), not this per-PR journey.
+     * REUSES the `agents:2222` service — no new port.
      */
     private suspend fun seedTmuxSessions(key: String) {
         val script = buildString {
@@ -760,7 +750,7 @@ class IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest {
                 appendLine("fragment_marker=$FRAGMENT_MARKER")
                 appendLine("running_on_ci=${TerminalTestTimeouts.isRunningOnCi()}")
                 appendLine(
-                    "scenario=drive an idle-incremental / busy-agent pane into fragments-over-black " +
+                    "scenario=drive an idle-incremental pane into fragments-over-black " +
                         "on the LIVE emulator (tmux grid keeps the full banner), assert the periodic " +
                         "reconciler alone converges the visible pane to tmux's authoritative banner",
                 )

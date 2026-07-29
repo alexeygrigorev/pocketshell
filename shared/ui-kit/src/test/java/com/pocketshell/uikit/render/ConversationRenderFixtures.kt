@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -190,6 +191,81 @@ internal fun ConversationMarkdownTableRender() {
             color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
+        )
+    }
+}
+
+@Composable
+internal fun ConversationMarkdownCodeBlockCopyRender() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 18.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = "Run the first command:",
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        MarkdownCodeBlockCopyMirror(
+            payload = "printf '%s\\n' this-is-a-deliberately-long-command-that-scrolls-sideways",
+        )
+        Text(
+            text = "Then evaluate Kotlin:",
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        MarkdownCodeBlockCopyMirror(
+            payload = "val answer = 42\nprintln(answer)",
+        )
+    }
+}
+
+/**
+ * Visual mirror of `MarkdownText.CodeBlock` (#1888). The Copy row is outside
+ * the payload's horizontal scroller, so it stays fixed at the trailing edge
+ * and reserves its own vertical space instead of covering code.
+ */
+@Composable
+private fun MarkdownCodeBlockCopyMirror(payload: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(PocketShellColors.TermBg),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                    .padding(horizontal = 10.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "Copy code",
+                    color = PocketShellColors.Accent,
+                    fontSize = 11.sp,
+                )
+            }
+        }
+        Text(
+            text = payload,
+            color = PocketShellColors.TermText,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            maxLines = 2,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
         )
     }
 }

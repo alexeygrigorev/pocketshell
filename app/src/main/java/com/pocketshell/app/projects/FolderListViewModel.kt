@@ -23,6 +23,7 @@ import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.portfwd.ForwardingHostSnapshot
 import com.pocketshell.app.portfwd.InterestingPortFilter
 import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.ssh.SshLease
@@ -885,6 +886,7 @@ class FolderListViewModel internal constructor(
         keyPath: String,
         passphrase: CharArray?,
     ) {
+        requireMainThread("FolderListViewModel.bind")
         val params = BoundParams(
             hostId = hostId,
             hostName = hostName,
@@ -2446,11 +2448,6 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * Rebuild [FolderListUiState.Ready] from the most recent gateway
-     * snapshot + watched-folder overlay. Idempotent: every change in
-     * either input re-runs the grouping.
-     */
-    /**
      * EPIC #679: project the maintained [HostTreeModel] into
      * [FolderListUiState.Ready]. The visuals stay byte-identical because the
      * projection feeds the SAME pure builders (`groupSessionsIntoFolders` /
@@ -2459,6 +2456,8 @@ class FolderListViewModel internal constructor(
      * intrinsic to the held tree (no per-emit re-derivation, no flash).
      */
     private fun emitReady(synchronous: Boolean = false) {
+        // #1829: the Main-confined check-then-act seam over emitGeneration.
+        requireMainThread("FolderListViewModel.emitReady")
         if (bound == null) return
         if (!tree.hasSnapshot) return
         // Issue #965 (ANR off-Main): take a CHEAP immutable snapshot of the held
@@ -2498,12 +2497,13 @@ class FolderListViewModel internal constructor(
      * Apply a freshly-built [HostTreeModel.ProjectionResult] to the held tree and
      * publish the [FolderListUiState.Ready] state. Shared by the synchronous
      * cold-start seed ([hydrateFromClientCache]) and the off-Main reconcile-driven
-     * emit ([emitReady]). Must run on Main (it writes [_state]).
+     * emit ([emitReady]). Must run on Main (it writes [_state]) — #1829.
      */
     private fun applyReadyProjection(
         result: HostTreeModel.ProjectionResult,
         refreshing: Boolean,
     ) {
+        requireMainThread("FolderListViewModel.applyReadyProjection")
         tree.applyProjection(result)
         _state.value = folderListReadyState(
             projection = result.projection,

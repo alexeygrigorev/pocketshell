@@ -6,6 +6,7 @@ import com.pocketshell.app.repos.RepoEntry
 import com.pocketshell.app.repos.RepoPathResult
 import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -116,6 +117,7 @@ class RepoBrowserViewModel @Inject constructor(
      * visible list or an in-flight clone.
      */
     fun bind(credentials: SshCredentials) {
+        requireMainThread("RepoBrowserViewModel.bind")
         if (this.credentials == credentials) return
         this.credentials = credentials
         refresh()

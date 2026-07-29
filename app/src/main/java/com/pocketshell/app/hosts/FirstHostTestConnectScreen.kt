@@ -29,6 +29,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.bootstrap.BootstrapTool
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.bootstrap.HostBootstrapSheetState
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -289,6 +290,11 @@ class FirstHostTestConnectViewModel @Inject constructor(
     private var testingHostId: Long? = null
 
     fun start(hostId: Long, force: Boolean = false) {
+        // #1829: the guard reads `testingHostId` AND `_state.value`, then does
+        // a read-modify-write on the StateFlow (`current.copy(...)`) — the
+        // lost-update shape cited as the reason to guard
+        // WatchedFoldersViewModel.bind.
+        requireMainThread("FirstHostTestConnectViewModel.start")
         val current = _state.value
         if (!force &&
             testingHostId == hostId &&

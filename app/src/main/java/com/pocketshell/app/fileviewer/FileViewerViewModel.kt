@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.app.share.FilenameSanitiser
@@ -545,6 +546,7 @@ class FileViewerViewModel @Inject constructor(
      * A different request (fresh navigation) always loads.
      */
     fun bind(request: Request) {
+        requireMainThread("FileViewerViewModel.bind")
         val sameRequest = request == lastRequest
         lastRequest = request
         if (sameRequest && loadJob?.isActive == true) return

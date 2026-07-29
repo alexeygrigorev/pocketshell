@@ -2,6 +2,7 @@ package com.pocketshell.app.hosts
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
@@ -154,6 +155,11 @@ class AddEditHostViewModel @Inject constructor(
      * with the same id is a no-op the second time.
      */
     fun loadHost(hostId: Long) {
+        // #1829: guard-return on the bound identity, then install it — the same
+        // binding-seam shape as RepoBrowserViewModel.bind. Off Main the second
+        // caller can slip past the guard and double-load the form, clobbering
+        // the dirty-state `baseline`.
+        requireMainThread("AddEditHostViewModel.loadHost")
         if (editingHostId == hostId) return
         editingHostId = hostId
         viewModelScope.launch {
@@ -200,6 +206,9 @@ class AddEditHostViewModel @Inject constructor(
      * recomposition that happens before the user submits again.
      */
     fun consumeFirstInvalidField() {
+        // #1829: read-modify-write on `_state` from a LaunchedEffect. Off Main
+        // a concurrent form edit between the read and the write is lost.
+        requireMainThread("AddEditHostViewModel.consumeFirstInvalidField")
         val s = _state.value
         if (s.firstInvalidField != null) {
             _state.value = s.copy(firstInvalidField = null)
@@ -221,6 +230,9 @@ class AddEditHostViewModel @Inject constructor(
      * the save signal a true one-shot event.
      */
     fun consumeSaved() {
+        // #1829: same read-modify-write shape as consumeFirstInvalidField, on
+        // the one-shot save/navigate signal.
+        requireMainThread("AddEditHostViewModel.consumeSaved")
         val s = _state.value
         if (s.saved || s.savedHostId != null) {
             _state.value = s.copy(saved = false, savedHostId = null)

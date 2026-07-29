@@ -7,6 +7,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
 import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.RemotePort
@@ -191,6 +192,7 @@ class PortForwardPanelViewModel @Inject constructor(
         // we don't open two SSH sessions for the same host on entry.
         prefillRemotePort: Int? = null,
     ) {
+        requireMainThread("PortForwardPanelViewModel.load")
         if (
             currentHostId == hostId &&
             requestedKeyPath == initialKeyPath &&

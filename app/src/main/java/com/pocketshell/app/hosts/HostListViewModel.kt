@@ -18,6 +18,7 @@ import com.pocketshell.app.bootstrap.compareSemver
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.notifications.DefaultUpdateNotifier
 import com.pocketshell.app.notifications.UpdateNotifier
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.release.ReleaseCheckResult
 import com.pocketshell.app.release.ReleaseChecker
@@ -751,6 +752,9 @@ class HostListViewModel internal constructor(
      * until the user manually taps "Re-check setup".
      */
     fun reprobeUnknownHostsOnce() {
+        // #1829: `autoReprobeKicked` is a plain non-@Volatile once-latch read
+        // and written in the same window; off Main two callers both kick.
+        requireMainThread("HostListViewModel.reprobeUnknownHostsOnce")
         if (autoReprobeKicked) return
         autoReprobeKicked = true
         StartupTiming.mark("hostlist-reprobe-kicked")

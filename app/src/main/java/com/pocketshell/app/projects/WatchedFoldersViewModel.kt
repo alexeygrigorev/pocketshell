@@ -2,6 +2,7 @@ package com.pocketshell.app.projects
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -92,6 +93,7 @@ class WatchedFoldersViewModel @Inject constructor(
      * session), the screen renders the hint instead.
      */
     fun bind(hostId: Long, hostName: String, sshCredentials: SshCredentials? = null) {
+        requireMainThread("WatchedFoldersViewModel.bind")
         if (this.hostId == hostId && this.sshCredentials == sshCredentials) {
             // Same target — only refresh the display name in case it changed.
             if (_state.value.hostName != hostName) {

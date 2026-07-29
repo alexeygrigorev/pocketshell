@@ -158,6 +158,52 @@ class HostListViewModelTest {
         db.close()
     }
 
+    /**
+     * Issue #1829 (G2 class coverage). `reprobeUnknownHostsOnce` is in the
+     * Main-confinement class enumerated in
+     * [com.pocketshell.app.projects.Issue1829MainThreadConfinementTest]: it is a
+     * non-suspend, `LaunchedEffect`-driven entry point (`HostListScreen.kt:356`)
+     * whose check-then-act runs over the plain, non-`@Volatile`
+     * `autoReprobeKicked` once-latch — read and written in the same window, so
+     * off Main two callers both pass the guard and both kick a startup probe
+     * sweep. It is proven here rather than in the sibling table because this
+     * class already owns the ten-dependency construction harness.
+     *
+     * The load-bearing assertion is the loud failure itself; the guard must
+     * also fire BEFORE the latch is set, so a rejected off-Main call leaves a
+     * subsequent legitimate on-Main call still able to do its work.
+     */
+    @Test
+    fun reprobeUnknownHostsOnceFromOffMainFailsLoudlyBecauseTheOnceLatchIsMainConfined() = runTest {
+        val viewModel = newViewModel()
+
+        val captured = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val worker = Thread({
+            try {
+                viewModel.reprobeUnknownHostsOnce()
+            } catch (t: Throwable) {
+                captured.set(t)
+            }
+        }, "issue1829-off-main-hostlist")
+        worker.start()
+        // Bounded, HARD-failing join (process.md `runTest` convention, Shape B):
+        // the exit condition is asserted, never assumed.
+        worker.join(30_000L)
+        assertEquals(
+            "issue #1829: the off-Main reprobeUnknownHostsOnce call must finish within 30s — " +
+                "it is still running, so nothing asserted below would mean anything",
+            false,
+            worker.isAlive,
+        )
+
+        assertTrue(
+            "issue #1829: reprobeUnknownHostsOnce is Main-confined (plain autoReprobeKicked " +
+                "once-latch) and must fail loudly off Main. Got " +
+                "${captured.get() ?: "no exception at all"}",
+            captured.get() is com.pocketshell.app.MainThreadConfinementViolation,
+        )
+    }
+
     private fun newViewModel(
         applicationContext: Context = context,
         hostDao: HostDao = db.hostDao(),

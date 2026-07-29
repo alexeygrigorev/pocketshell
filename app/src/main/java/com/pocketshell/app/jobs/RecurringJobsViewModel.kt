@@ -3,6 +3,7 @@ package com.pocketshell.app.jobs
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.AppTeardownScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -95,6 +96,7 @@ public class RecurringJobsViewModel @Inject constructor(
         passphrase: CharArray?,
         sessionName: String,
     ) {
+        requireMainThread("RecurringJobsViewModel.load")
         val next = Target(hostId, hostName, hostname, port, username, keyPath, passphrase, sessionName)
         if (next == target) return
         targetGeneration += 1L

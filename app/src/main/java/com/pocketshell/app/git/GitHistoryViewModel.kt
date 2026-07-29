@@ -3,6 +3,7 @@ package com.pocketshell.app.git
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.AppTeardownScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -208,6 +209,10 @@ class GitHistoryViewModel @Inject constructor(
      * the same [Request] so a recomposition doesn't re-fetch.
      */
     fun start(request: Request) {
+        // #1829: structurally identical to RepoBrowserViewModel.bind — a
+        // check-then-act over the plain `request` field that decides whether
+        // the screen loads at all.
+        requireMainThread("GitHistoryViewModel.start")
         if (this.request == request) return
         this.request = request
         load()

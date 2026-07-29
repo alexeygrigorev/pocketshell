@@ -96,6 +96,17 @@ import kotlinx.coroutines.withTimeoutOrNull
  *     well under the two 60s transport-liveness windows (lease idle TTL,
  *     passive grace), and below the controller's 90s foreground grace.
  *
+ * **The one deliberate bypass (#1863).** Guards 2 and 3 — and the #982/#984
+ * keepalive deferral and the [absoluteWedgeBudgetMs] backstop — all exist to
+ * disambiguate a MISSED ping. [ProbeIo.channelDefinitivelyClosed] reports the one
+ * state where there is nothing to disambiguate: the channel the probe pings is
+ * already provably CLOSED. When it is true for a failed probe the loop declares on
+ * that tick and ALL of that machinery is skipped. This cannot false-positive on a
+ * slow-but-live channel (an open channel never reports closed), but it is a real
+ * bypass and the caller owns keeping the predicate honest — the app's gate returns
+ * it only for a foregrounded, controller-`Live` session over a latched-closed
+ * client. Guard 1 still applies: the bypass is unreachable while the gate is shut.
+ *
  * ## Determinism (the test seam)
  * The loop's cadence is driven entirely by [delay] on the [CoroutineScope]'s
  * dispatcher, so a `TestScope` virtual clock advances the probe window with zero
@@ -203,6 +214,27 @@ class LivenessProbe(
          * keepalive liveness.
          */
         fun transportProvenAliveRecently(): Boolean = false
+
+        /**
+         * Issue #1863 — the DEFINITIVE-death oracle: true iff the control channel
+         * the probe pings is already provably CLOSED (the current client's
+         * `disconnected` latch is set), not merely unanswering.
+         *
+         * The whole N-consecutive-failure + keepalive-deferral machinery above
+         * exists because a missed ping is an AMBIGUOUS signal — a busy channel, a
+         * slow link, one lost reply. A closed client is not ambiguous: the channel
+         * is gone, there is nothing to ride through, and no number of further ticks
+         * will make it answer. Conflating the two is what made the #1863 dead wire
+         * unrecoverable in practice — the keepalive still vouched for the SSH
+         * transport (only the `-CC` channel had been closed), so the #982/#984
+         * deferral would have suppressed the drop indefinitely.
+         *
+         * When this returns `true` for a failed probe the loop declares the drop on
+         * that tick: no threshold, no deferral. Detection is bounded by ONE probe
+         * interval. Default `false` so a probe fake that models a live-but-slow
+         * channel keeps the full ambiguity machinery.
+         */
+        fun channelDefinitivelyClosed(): Boolean = false
     }
 
     private var job: Job? = null
@@ -282,6 +314,29 @@ class LivenessProbe(
                     // A successful `-CC` probe clears the failure run: the control
                     // channel is answering again, so the slow-but-live blip is over
                     // and the absolute-wedge clock resets.
+                    consecutiveFailures = 0
+                    wedgedFailureTicks = 0
+                } else if (io.channelDefinitivelyClosed()) {
+                    // Issue #1863 — the control channel is provably CLOSED, not slow.
+                    // Skip the N-consecutive threshold AND the keepalive deferral: both
+                    // exist to disambiguate a MISSED ping, and there is nothing here to
+                    // disambiguate. Declaring now bounds detection of the "controller says
+                    // Live over a dead client" state at one probe interval instead of
+                    // leaving it terminal (the keepalive would keep vouching for the still
+                    // alive SSH transport forever).
+                    consecutiveFailures += 1
+                    log(
+                        "liveness-probe DECLARED DROP (control channel definitively closed) " +
+                            "consecutive=$consecutiveFailures",
+                    )
+                    ConnectionDiagnostics.record(
+                        "liveness_probe_tick",
+                        "result" to "channel_closed",
+                        "latencyMs" to latencyMs,
+                        "consecutiveMisses" to consecutiveFailures,
+                        "failureThreshold" to failureThreshold,
+                    )
+                    io.onProbeFailed(consecutiveFailures)
                     consecutiveFailures = 0
                     wedgedFailureTicks = 0
                 } else {

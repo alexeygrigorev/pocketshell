@@ -152,6 +152,85 @@ class TmuxSessionViewModelRestoreRideThroughTest : TmuxSessionViewModelTestBase(
             }
         }
 
+    // ---- 1b. #1863 G2: the ride-through must not re-assert Live over a CLOSED client ----
+
+    @Test
+    fun restoreRideThroughMustNotClearTheBandWhenTheControlChannelIsAlreadyClosed() =
+        runTest(scheduler) {
+            // Issue #1863 (G2 sweep of every `revealControllerLive()` publisher).
+            //
+            // The reader-activity vouch ([RestoreReaderActivityVerdict.isAlive]) reads ONLY
+            // `millisSinceLastReaderActivity` — it never consults `disconnected`. So a `-CC`
+            // client that was CLOSED moments ago (the #1863 cancelled-write close, whose
+            // self-inflicted `ExplicitClose` the passive-drop classifier deliberately
+            // ignores) still carries recent reader activity and still takes the ride-through
+            // arm. On base the ride-through then republished `ConnectionState.Live` over that
+            // corpse — the same dead-wire lie the connect paths were guarded against, reached
+            // through a different door.
+            val registry = ActiveTmuxClients()
+            val connector = QueueLeaseConnector(FakeSshSession())
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+            )
+            vm.setAutoReconnectDelaysForTest(listOf(0L))
+            val closedButRecentlyActiveClient = FakeTmuxClient().apply {
+                millisSinceLastReaderActivityValue = 100L
+            }
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = closedButRecentlyActiveClient,
+            )
+            runCurrent()
+            // The #1863 state: the control channel is closed by OUR OWN code, so the
+            // passive-drop classifier ignores it and nothing else arms recovery.
+            closedButRecentlyActiveClient.markDisconnectedForTest(
+                com.pocketshell.core.tmux.TmuxDisconnectEvent(
+                    reason = com.pocketshell.core.tmux.TmuxDisconnectReason.ExplicitClose,
+                    source = "local",
+                    intent = "local_close",
+                ),
+            )
+            runCurrent()
+
+            val diagnostics = installRecordingDiagnosticSink()
+            try {
+                val hook = registry.lifecycleHooksSnapshot().single()
+                hook.onNetworkChanged(networkLoss())
+                runCurrent()
+                hook.onNetworkChanged(networkRestore())
+                runCurrent()
+
+                // The load-bearing signal is the ride-through EFFECT itself: on base
+                // `rideThroughNetworkRestore` runs and records this diagnostic on its way
+                // to `revealControllerLive()` + `setConnectionState(Live)`. With the
+                // #1863 guard it returns before either. (The displayed status is not a
+                // discriminator here — the #1522 loss band is debounced, so it never left
+                // `Connected` in this window; the bug is precisely that the ride-through
+                // RE-ASSERTS liveness over a corpse.)
+                assertTrue(
+                    "issue #1863: the network-restore ride-through must NOT re-assert a " +
+                        "live connection over an already-CLOSED control channel; events=" +
+                        diagnostics.events.map { it.name },
+                    diagnostics.eventsNamed("network_restore_ride_through").isEmpty(),
+                )
+                assertSame(
+                    "the closed client is still the registered one — the guard suppresses the " +
+                        "false reveal, it does not swap or tear anything down",
+                    closedButRecentlyActiveClient,
+                    registry.clients.value[7L]?.client,
+                )
+            } finally {
+                diagnostics.close()
+            }
+        }
+
     // ---- 2. same-identity, actually-dead → AMORTIZED redial (not immediate unconditional) ----
 
     @Test

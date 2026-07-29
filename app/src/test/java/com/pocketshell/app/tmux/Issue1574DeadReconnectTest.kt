@@ -234,10 +234,23 @@ class Issue1574DeadReconnectTest {
         // fixture let this method return with reconnect parked inside its
         // NonCancellable teardown, which is the #1355 leak seen by the next
         // rule reset.
-        val client = FakeTmuxClient()
-            .withSinglePaneRow("work", "%1")
-            .withSinglePaneRow("work", "%1")
-        vm.setTmuxClientFactoryForTest { _, _, _ -> client }
+        //
+        // Issue #1863: hand the RECONNECT its own fresh client, as production does.
+        // `TmuxSessionViewModel.createTmuxClient` builds a NEW `RealTmuxClient` per
+        // attach, and the reconnect's teardown (`closeCurrentConnectionAndJoin`)
+        // closes the outgoing one. Re-serving the SAME `FakeTmuxClient` instance made
+        // the reconnect attach a client whose `disconnected` latch was already set —
+        // a state no real reconnect can produce, and one the #1863 reveal guard now
+        // (correctly) refuses to publish as live.
+        val clients = ArrayDeque(
+            listOf(
+                FakeTmuxClient().withSinglePaneRow("work", "%1"),
+                FakeTmuxClient().withSinglePaneRow("work", "%1"),
+            ),
+        )
+        vm.setTmuxClientFactoryForTest { _, _, _ ->
+            clients.removeFirstOrNull() ?: error("unexpected extra tmux client factory call")
+        }
         vm.connect(
             hostId = 1L,
             hostName = "alpha",

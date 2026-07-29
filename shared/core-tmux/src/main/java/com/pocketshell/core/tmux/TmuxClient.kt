@@ -5,6 +5,7 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.core.tmux.protocol.ControlEventStream
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -1643,6 +1644,39 @@ internal class RealTmuxClient(
                     abandonPendingResponse(pendingCmd, commandWasWritten = writeCompleted.get())
                 }
                 writeJob.cancel()
+                // Issue #1863 — a CALLER-side cancellation is NOT a transport failure, and
+                // must never tear down the connection every other surface shares.
+                //
+                // The #244 `close()` below exists for a STALLED/broken write ("fail stalled
+                // tmux send commands visibly"): the bytes could not reach tmux, so the wire
+                // is suspect and downstream recovery should see a drop. But this catch also
+                // fires when OUR CALLER simply went away — the user pressed Back while a
+                // `[wN]` connect was in flight, so a composition/pane-scoped coroutine that
+                // happened to have a command in flight was cancelled before its write
+                // completed. On base that logged
+                // `tmux-command-write-failed cause=JobCancellationException` and CLOSED the
+                // whole `-CC` client. Worse, that close is SELF-INFLICTED
+                // (`ReaderExitIntent.LocalClose` → `ExplicitClose`), so the passive-drop
+                // classifier deliberately IGNORES it (#1568/#1610 storm guard) — nothing
+                // recovers — while the still-running connect job goes on to publish
+                // `tmux-connect-ready` over the corpse. Permanently dead wire, no re-dial.
+                //
+                // Discriminated on the CALLER's own liveness, not merely on the exception
+                // type: `writeResult` can also complete exceptionally with a cancellation
+                // raised by OUR clientScope during teardown, and that path must keep the
+                // old behaviour (the client is already closing anyway).
+                //
+                // A genuinely wedged write is still covered: the transport dispatcher's
+                // per-op wall-clock ceiling fails it with a NON-cancellation
+                // `TransportOpTimeoutException`, which still closes here.
+                if (t is CancellationException && !currentCoroutineContext().isActive) {
+                    Log.w(
+                        ISSUE_244_DIAG_TAG,
+                        "tmux-command-caller-cancelled kind=${commandKind(cmd)} " +
+                            "writeCompleted=${writeCompleted.get()} (channel kept — #1863)",
+                    )
+                    throw t
+                }
                 if (!writeCompleted.get()) {
                     val kind = commandKind(cmd)
                     Log.w(

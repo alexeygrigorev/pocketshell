@@ -244,6 +244,7 @@ private fun MessageBody(
     onShowAll: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
     val displayBody = remember(text) { conversationExpandedMessageDisplayBody(text) }
     val baseFontSize = PocketShellType.bodyDense.fontSize
     val baseLineHeight = PocketShellType.bodyDense.lineHeight
@@ -263,6 +264,14 @@ private fun MessageBody(
                 fontSize = targetFontSp.sp,
                 fontFamily = FontFamily.Monospace,
                 onLinkTap = onLinkTap,
+                onCodeBlockCopy = { code ->
+                    copyConversationTextToClipboard(
+                        context = context,
+                        label = "conversation code block",
+                        text = code,
+                    )
+                },
+                codeBlockTestTagPrefix = CONVERSATION_CODE_BLOCK_TAG_PREFIX + messageId,
             )
         }
         if (displayBody.wasTruncated) {
@@ -283,6 +292,7 @@ internal val LocalConversationFontSizeSp: ProvidableCompositionLocal<Float> =
 internal const val CONVERSATION_TIMESTAMP_TAG_PREFIX: String = "conversation-timestamp-"
 internal const val CONVERSATION_PENDING_TAG_PREFIX: String = "conversation-pending-"
 internal const val CONVERSATION_RETRY_TAG_PREFIX: String = "conversation-retry-"
+internal const val CONVERSATION_CODE_BLOCK_TAG_PREFIX: String = "conversation-code-block-"
 
 // --- Design tokens from mockup CSS ---
 

@@ -756,6 +756,19 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1888: phone-width fenced blocks with their own fixed Copy action.
+     * The real renderer lives in `:app`, which this ui-kit render harness cannot
+     * import; [ConversationMarkdownCodeBlockCopyRender] mirrors its exact
+     * TermBg surface, 48dp trailing action row, spacing, and monospace payload.
+     * The connected journey is the acceptance proof for the production
+     * composable, clipboard behavior, horizontal scroll, and semantics.
+     */
+    @Test
+    fun conversationMarkdownCodeBlockCopy() = render("conversation-markdown-code-block-copy") {
+        ConversationMarkdownCodeBlockCopyRender()
+    }
+
+    /**
      * Issue #614: the "new session" type picker body, reconstructed from the
      * same ui-kit primitives the real [SessionTypePickerSheet] now composes
      * (`SectionHeader`, the shared cyan-fill `SegmentedToggle`, and a

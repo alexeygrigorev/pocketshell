@@ -77,6 +77,11 @@ run_generated_walkthrough() {
   ADB="$fake_adb"
   APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
   APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS=3
+  # The extracted region also reads the GL-reboot recovery knobs
+  # (scripts/pre-release-confidence-gate.sh). Undeclared, the sourced helper dies
+  # at `APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS: unbound variable`.
+  APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS=1
+  APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS=5
   FAKE_ADB_MODE="$mode"
   FAKE_ADB_STATE="$run_dir/adb-state"
   export FAKE_ADB_MODE FAKE_ADB_STATE

@@ -91,6 +91,11 @@ ADB="$fake_adb"
 DEVICE_ARTIFACT_DIR="/sdcard/fake-output/terminal-lab"
 INSTRUMENTATION_ARGS=(-e class com.pocketshell.app.FakeTerminalWorkbenchTest)
 WORKBENCH_INSTRUMENTATION_ATTEMPTS=2
+# The extracted region addresses the instrumentation runner and the app package
+# by name (scripts/terminal-workbench.sh). Undeclared, the sourced helper dies at
+# `TEST_PACKAGE: unbound variable` before either retry case is exercised.
+TEST_PACKAGE="com.pocketshell.app.test"
+PACKAGE="com.pocketshell.app"
 
 RUN_DIR="$tmpdir/exhausted"
 FAKE_ADB_STATE="$tmpdir/exhausted-state"

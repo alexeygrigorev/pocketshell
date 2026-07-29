@@ -94,6 +94,10 @@ run_readiness_script() {
   AVD_NAME="test"
   RUN_DIR="$run_dir"
   PRE_RELEASE_EMULATOR_START_ARGS="-no-window -no-audio"
+  # The extracted region interpolates $RUN_ID into the cgroup scope unit name
+  # (scripts/pre-release-confidence-gate.sh). The harness must declare it or the
+  # generated script dies at `RUN_ID: unbound variable` before doing any work.
+  RUN_ID="emulator-readiness-fixture"
   FAKE_EMULATOR_STATE="$tmpdir/emulator-started"
   FAKE_PS_MODE="empty"
   PATH="$tmpdir:$PATH"

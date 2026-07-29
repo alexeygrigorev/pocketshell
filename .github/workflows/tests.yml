@@ -89,6 +89,22 @@ jobs:
           scripts/check-test-validity.sh
           scripts/check-test-validity-selftest.sh
 
+      # Issue #1853: the quieter sibling of the vacuous green. check-test-validity
+      # asks whether a test that RUNS asserts anything real; this asks whether it
+      # runs at all. Twelve harnesses under tests/scripts/ were referenced by no
+      # workflow, Gradle task, script, or doc — they had never executed once, and
+      # four were already broken when finally run. Every tracked file under tests/
+      # must now be reachable from outside tests/, or transitively from a
+      # reachable test asset (compose -> Dockerfile -> entrypoint -> fixture).
+      # No allowlist: wire it into a gate, or delete it (D22). The self-test
+      # plants a dead fixture and proves the guard still goes red. Cheap, no
+      # emulator, no Docker.
+      - name: "Unreferenced-test-asset guard (issue #1853)"
+        run: |
+          chmod +x scripts/check-tests-referenced.sh
+          scripts/check-tests-referenced.sh --self-test
+          scripts/check-tests-referenced.sh
+
       # Issue #1355: MainDispatcherRule owns the global Dispatchers.Main reset.
       # Any standalone TmuxSessionViewModel test that leaves an unregistered VM
       # can race that reset from a still-unwinding coroutine and fail an

@@ -526,7 +526,7 @@ def test_healthy_long_running_emulator_shard_is_not_a_hang():
     assert outcome.exit_code == 0
 
 
-# ── The exit-code contract stays a single source of truth ────────────────────
+# ── The exit-code contract stays complete and distinct ───────────────────────
 
 
 def test_exit_code_contract_is_complete_and_distinct():
@@ -537,6 +537,15 @@ def test_exit_code_contract_is_complete_and_distinct():
     assert codes[wci.RESULT_UNRESOLVED] == 3
     assert codes[wci.RESULT_SUPERSEDED] == 4
     assert codes[wci.RESULT_NO_VERDICT] == 5
+    assert wci.EXIT_REQUIRED_CHECK_FAILED_FAST == 6
+    assert wci.EXIT_WALL_CLOCK_TIMEOUT == 7
+    assert len(
+        {
+            *codes.values(),
+            wci.EXIT_REQUIRED_CHECK_FAILED_FAST,
+            wci.EXIT_WALL_CLOCK_TIMEOUT,
+        }
+    ) == 8
     # Every result must render a headline (no KeyError on a new verdict).
     for result in codes:
         outcome = wci.WatchOutcome(

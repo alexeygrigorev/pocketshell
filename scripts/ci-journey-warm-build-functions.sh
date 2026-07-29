@@ -22,9 +22,13 @@
 #   * a first-class timeout looks EXACTLY like a genuine journey failure
 #     (`raw-junit count=0` is also what a killed runner produces), so it burns
 #     investigation time and pollutes attribution;
-#   * round-robin reshuffles shard membership whenever the class list changes,
-#     so WHICH class absorbs the cold build rotates — which is one mechanical
-#     contributor to the (now-disproven) "shard 0 is pathological" theory.
+#   * shard membership used to be round-robin by ARRAY INDEX, so it reshuffled
+#     whenever the class list changed and WHICH class absorbed the cold build
+#     rotated — one mechanical contributor to the (now-disproven) "shard 0 is
+#     pathological" theory. (Issue #1862 removed that reshuffle: membership is
+#     now derived from the class NAME, so the class that absorbs the cold build
+#     only changes when that class itself is added or removed. The accounting fix
+#     below is still the real cure — it stops any class paying for it at all.)
 #
 # THE FIX AND WHY THIS SHAPE
 # --------------------------

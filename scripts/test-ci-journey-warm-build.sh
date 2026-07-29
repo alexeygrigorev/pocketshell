@@ -49,6 +49,32 @@ trap 'rm -rf "$SANDBOX"' EXIT
 COLD_SECS=6
 SHARD_TOTAL=3
 
+# Issue #1862: shard membership is derived from the CLASS NAME, not the array
+# index, so a fixture that needs "the class shard N runs first" must ASK the real
+# selection instead of assuming array position. Drive the shipping selector so
+# this stays true if the partitioning is ever changed again.
+# shellcheck source=scripts/ci-journey-class-selection-functions.sh
+source "$SCRIPT_DIR/ci-journey-class-selection-functions.sh"
+journey_first_class_on_shard() {   # $1 = shard index, $2 = shard total
+  local FQCN_PREFIX="com.pocketshell.app.proof"
+  local -a JOURNEY_CLASSES=() EFFECTIVE_JOURNEY_CLASSES=()
+  local i
+  mapfile -t JOURNEY_CLASSES < <(
+    awk '
+      /^JOURNEY_CLASSES=\(/ { f = 1; next }
+      /^\)/                 { f = 0 }
+      f && match($0, /"[^"]+"/) { print substr($0, RSTART + 1, RLENGTH - 2) }
+    ' "$REAL_SUITE"
+  )
+  (( ${#JOURNEY_CLASSES[@]} > 0 )) || return 1
+  for i in "${!JOURNEY_CLASSES[@]}"; do
+    JOURNEY_CLASSES[$i]="${JOURNEY_CLASSES[$i]/\$FQCN_PREFIX/$FQCN_PREFIX}"
+  done
+  POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$2" POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$1" \
+    select_effective_journey_classes > /dev/null
+  printf '%s' "${EFFECTIVE_JOURNEY_CLASSES[0]:-}"
+}
+
 HELPERS=(
   ci-journey-suite.sh
   ci-journey-class-selection-functions.sh
@@ -365,13 +391,15 @@ echo "== #1814 AC3: a build-phase outer timeout is distinguishable from a journe
 
 # The first class of shard 0, read from the real allowlist so a reordering of
 # JOURNEY_CLASSES cannot silently make this fixture test a different class.
-first_entry="$(awk '
-  /^JOURNEY_CLASSES=\(/ { f=1; next }
-  /^\)/ { f=0 }
-  f && /^[[:space:]]*"/ { print; exit }
-' "$REAL_SUITE" | sed 's/^[[:space:]]*"\([^"]*\)".*/\1/')"
+#
+# Issue #1862: it is no longer the array's FIRST entry. Shard membership is now
+# assigned by class-name HASH, not by array index, so `index 0 -> shard 0` no
+# longer holds. Ask the REAL selection which class shard 0 runs first — that is
+# what this fixture has always meant, and it stays correct under any future
+# partitioning rather than encoding today's arithmetic.
+first_entry="$(journey_first_class_on_shard 0 "$SHARD_TOTAL")"
 WEDGE_CLASS="${first_entry##*.}"
-[[ -n "$WEDGE_CLASS" ]] || fail "(ac3) could not resolve the first journey class from the allowlist"
+[[ -n "$WEDGE_CLASS" ]] || fail "(ac3) could not resolve the first journey class of shard 0 from the allowlist"
 echo "    wedging the first class of shard 0: $WEDGE_CLASS"
 
 # wedge_run <mode> <log> — one shard-0 run whose first class behaves per <mode>.

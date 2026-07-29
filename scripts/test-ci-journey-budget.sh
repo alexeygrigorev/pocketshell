@@ -1769,15 +1769,289 @@ launched="$(grep -c '>>> JOURNEY CLASS:.*(attempt 1)' "$out2" || true)"
 pass "(neg-2) healthy run reaches a verdict for all $class_count load-bearing classes (none cut short)"
 
 # ---------------------------------------------------------------------------
+# (shard-stable) ACCEPTANCE — Issue #1862: shard membership is STABLE under
+# edits to the JOURNEY_CLASSES array.
+#
+# THE DEFECT: the partition used to be round-robin by array INDEX, so a class's
+# shard was a function of how many entries preceded it. On the #1845 merge
+# (f2aa9a8e) registering ONE class at index 36 moved 111 of 147 classes to a
+# different shard; two landed behind ~12 co-tenants they had never run behind,
+# hit a latent timing failure, and `main` went RED from a commit whose diff could
+# not reach either class. Worse than the red itself: the natural suspect is the
+# commit that went in, so the investigation starts from a false premise.
+#
+# The fix partitions by `hash(class_name) % total`, so a class's shard depends
+# only on its OWN name. This block drives the REAL helper over the REAL array and
+# asserts the load-bearing property directly: after inserting / removing an entry
+# ANYWHERE, ZERO other classes move.
+#
+# Every assertion below carries its RED CONTROL — the same fixture is re-run
+# through the OLD index reducer, which MUST move a large fraction. Without that,
+# "zero classes moved" would also pass against a hash that put everything on one
+# shard, or against a fixture that never actually differed (G6/G3).
+echo "== CI-matrix sharding: membership is stable under array insertion (#1862) =="
+
+SELECTION_HELPER="$SCRIPT_DIR/ci-journey-class-selection-functions.sh"
+[[ -f "$SELECTION_HELPER" ]] \
+  || fail "(shard-stable) cannot find ci-journey-class-selection-functions.sh at $SELECTION_HELPER"
+# shellcheck source=scripts/ci-journey-class-selection-functions.sh
+source "$SELECTION_HELPER"
+
+declare -F select_effective_journey_classes > /dev/null \
+  || fail "(shard-stable) the selection helper does not define select_effective_journey_classes"
+
+# The REAL array, parsed out of the REAL suite exactly as the harness guards do.
+mapfile -t REAL_JOURNEY_CLASSES < <(
+  awk '
+    /^JOURNEY_CLASSES=\(/ { f = 1; next }
+    /^\)/                 { f = 0 }
+    f && match($0, /"[^"]+"/) {
+      s = substr($0, RSTART + 1, RLENGTH - 2)
+      gsub(/\$FQCN_PREFIX/, "com.pocketshell.app.proof", s)
+      print s
+    }
+  ' "$REAL_SUITE"
+)
+real_class_count="${#REAL_JOURNEY_CLASSES[@]}"
+[[ "$real_class_count" -ge 80 ]] \
+  || fail "(shard-stable) parsed only $real_class_count journey classes from the real suite — enumeration changed unexpectedly"
+
+# Membership maps: "class<TAB>shard" lines, directly comparable.
+#
+# The SHIPPING map drives the REAL production entry point
+# `select_effective_journey_classes` once per shard index and records what it
+# actually selected — NOT the hash helper it happens to use internally. That
+# matters: the property under test is which classes a matrix leg RUNS, so the
+# assertion has to be on the function the suite calls (G6). If the partition is
+# ever reimplemented, this guard keeps testing the right thing.
+shard_map_shipping() {   # $1 = shard total; classes on stdin
+  local total="$1" idx
+  mapfile -t JOURNEY_CLASSES
+  for (( idx = 0; idx < total; idx++ )); do
+    EFFECTIVE_JOURNEY_CLASSES=()
+    POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$total" \
+      POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$idx" \
+      select_effective_journey_classes > /dev/null
+    (( ${#EFFECTIVE_JOURNEY_CLASSES[@]} > 0 )) || continue
+    printf "%s\t$idx\n" "${EFFECTIVE_JOURNEY_CLASSES[@]}"
+  done
+}
+shard_map_index() {      # RED CONTROL: the pre-#1862 `index % total` reducer
+  local total="$1" c i=0
+  while IFS= read -r c; do
+    [[ -n "$c" ]] || continue
+    printf '%s\t%s\n' "$c" "$(( i % total ))"
+    i=$((i + 1))
+  done
+}
+
+# How many of the ORIGINAL classes changed shard between two membership maps
+# (the inserted/removed class itself is excluded — it is expected to differ).
+moved_count() {       # $1 = before map file, $2 = after map file
+  join -t $'\t' -j 1 -o 1.1,1.2,2.2 \
+    <(sort -t $'\t' -k1,1 "$1") <(sort -t $'\t' -k1,1 "$2") \
+    | awk -F '\t' '$2 != $3 { n++ } END { print n + 0 }'
+}
+
+shard_total_probe=3
+NEW_ENTRY="com.pocketshell.app.proof.Issue1862SyntheticNewlyRegisteredJourneyE2eTest"
+printf '%s\n' "${REAL_JOURNEY_CLASSES[@]}" > "$SANDBOX/classes-base.txt"
+
+# The two baselines, computed ONCE.
+shard_map_shipping  "$shard_total_probe" < "$SANDBOX/classes-base.txt" > "$SANDBOX/map-hash-base.tsv"
+shard_map_index "$shard_total_probe" < "$SANDBOX/classes-base.txt" > "$SANDBOX/map-index-base.tsv"
+
+# Sanity: the baseline itself must not be degenerate — every shard must be used,
+# otherwise "nothing moved" below is trivially true.
+distinct_shards="$(cut -f2 "$SANDBOX/map-hash-base.tsv" | sort -u | wc -l)"
+[[ "$distinct_shards" -eq "$shard_total_probe" ]] \
+  || fail "(shard-stable) the hash partition used only $distinct_shards of $shard_total_probe shards on the real list — degenerate partition"
+
+# INSERTION at the head, at the #1845 position (36), and at the tail. Removal at
+# 36 too: an entry being deleted is the same class of edit and must not re-roll
+# the suite either.
+for edit in "insert:0" "insert:36" "insert:$real_class_count" "remove:36"; do
+  op="${edit%%:*}"
+  pos="${edit##*:}"
+  (( pos <= real_class_count )) || continue
+  edited="$SANDBOX/classes-$op-$pos.txt"
+  if [[ "$op" == "insert" ]]; then
+    { head -n "$pos" "$SANDBOX/classes-base.txt"
+      printf '%s\n' "$NEW_ENTRY"
+      tail -n +"$((pos + 1))" "$SANDBOX/classes-base.txt"
+    } > "$edited"
+    expected_len=$((real_class_count + 1))
+  else
+    { head -n "$pos" "$SANDBOX/classes-base.txt"
+      tail -n +"$((pos + 2))" "$SANDBOX/classes-base.txt"
+    } > "$edited"
+    expected_len=$((real_class_count - 1))
+  fi
+  [[ "$(wc -l < "$edited")" -eq "$expected_len" ]] \
+    || fail "(shard-stable) fixture build failed for $op at $pos (expected $expected_len entries)"
+  cmp -s "$edited" "$SANDBOX/classes-base.txt" \
+    && fail "(shard-stable) fixture for $op at $pos is IDENTICAL to the base list — the edit never happened, so the comparison below is vacuous"
+
+  shard_map_shipping  "$shard_total_probe" < "$edited" > "$SANDBOX/map-hash-$op-$pos.tsv"
+  shard_map_index "$shard_total_probe" < "$edited" > "$SANDBOX/map-index-$op-$pos.tsv"
+
+  moved_hash="$(moved_count "$SANDBOX/map-hash-base.tsv" "$SANDBOX/map-hash-$op-$pos.tsv")"
+  moved_index="$(moved_count "$SANDBOX/map-index-base.tsv" "$SANDBOX/map-index-$op-$pos.tsv")"
+
+  # The load-bearing assertion.
+  [[ "$moved_hash" -eq 0 ]] \
+    || fail "(shard-stable) $op at index $pos moved $moved_hash pre-existing classes to a different shard — membership must depend ONLY on the class name (#1862)"
+
+  # RED CONTROL: the same fixture through the OLD reducer must move a large
+  # fraction, proving the zero above is a real property and not a no-op fixture.
+  # A tail edit legitimately moves nothing under index sharding, so only the
+  # edits that precede other entries carry the control.
+  if [[ "$pos" -lt "$real_class_count" ]]; then
+    min_expected_moved=$(( (real_class_count - pos) / 2 ))
+    [[ "$moved_index" -ge "$min_expected_moved" ]] \
+      || fail "(shard-stable) red control is not live: the OLD index reducer moved only $moved_index classes for $op at $pos (expected >= $min_expected_moved) — the fixture cannot distinguish the two partitions"
+    echo "  ok: $op at $pos — hash moved 0, old index reducer moved $moved_index of $real_class_count (control live)"
+  else
+    echo "  ok: $op at $pos — hash moved 0 (tail edit; index reducer is trivially stable here, no control claimed)"
+  fi
+done
+pass "(shard-stable) inserting/removing a journey class anywhere moves ZERO other classes; the old index reducer re-rolls up to two thirds of the list"
+
+# (shard-stable-det) The partition must be a pure function of the class NAMES —
+# the same on every runner. Two runners disagreeing would break the disjoint/
+# complete property across the matrix (a class run twice, or never). The two
+# realistic ways that breaks are locale-dependent character semantics and a
+# dependency on evaluation order, so pin both, through the production entry
+# point rather than its internals.
+for det_locale in C C.UTF-8 en_US.UTF-8 POSIX; do
+  LC_ALL="$det_locale" shard_map_shipping "$shard_total_probe" \
+    < "$SANDBOX/classes-base.txt" > "$SANDBOX/map-det-$det_locale.tsv"
+  cmp -s <(sort "$SANDBOX/map-det-$det_locale.tsv") <(sort "$SANDBOX/map-hash-base.tsv") \
+    || fail "(shard-stable-det) the partition differs under LC_ALL=$det_locale — two runners could disagree about which shard owns a class"
+done
+# Order independence: reversing the input array must not change any assignment.
+tac "$SANDBOX/classes-base.txt" > "$SANDBOX/classes-reversed.txt"
+shard_map_shipping "$shard_total_probe" < "$SANDBOX/classes-reversed.txt" > "$SANDBOX/map-reversed.tsv"
+reversed_moved="$(moved_count "$SANDBOX/map-hash-base.tsv" "$SANDBOX/map-reversed.tsv")"
+[[ "$reversed_moved" -eq 0 ]] \
+  || fail "(shard-stable-det) reversing the array moved $reversed_moved classes — the partition still depends on position, not only on the class name"
+reversed_moved_index="$(moved_count "$SANDBOX/map-index-base.tsv" \
+  <(shard_map_index "$shard_total_probe" < "$SANDBOX/classes-reversed.txt"))"
+[[ "$reversed_moved_index" -ge $(( real_class_count / 2 )) ]] \
+  || fail "(shard-stable-det) red control is not live: reversing the array moved only $reversed_moved_index classes under the OLD index reducer"
+pass "(shard-stable-det) the partition is identical under 4 locales and under a fully reversed array (the old index reducer moves $reversed_moved_index of $real_class_count when reversed)"
+
+# (shard-balance) Hash partitioning trades EXACT balance (index round-robin was
+# +/-1) for stability. That trade must stay bounded. TWO different properties are
+# at stake and they need different bands, so both are asserted explicitly:
+#
+#   `uniform` — the hash behaves like a uniform partition at all. Band is 3
+#     standard deviations of the binomial (sd = sqrt(n*(T-1))/T), which is the
+#     right shape for a statistical partition and does NOT tighten as the list
+#     shrinks. A guard tighter than this is flaky-by-construction: a legitimate
+#     uniform draw would trip it on some future list. This is the control that
+#     actually catches a broken/collapsing hash.
+#
+#   `budget` — additionally, an UPPER cap at 125% of the ideal share, applied
+#     only to the total=3 configuration CI really runs. A shard 25% over its
+#     share spends 25% more wall-clock against the #835 suite budget, so it is
+#     worth a human look. Only the upper bound is capped: an UNDER-full shard
+#     costs nothing, and capping it too would double the false-trip surface for
+#     no benefit.
+#
+# Characterised over the REAL list at three totals and over synthetic 60/300-class
+# lists, so the property is measured across sizes rather than sampled once.
+assert_balanced() {   # $1 = label, $2 = total, $3 = budget|uniform, classes on stdin
+  local label="$1" total="$2" mode="$3" n ideal tol low high cap s count
+  local -a counts=()
+  local tmp="$SANDBOX/balance-$label-$total.tsv"
+  shard_map_shipping "$total" > "$tmp"
+  n="$(wc -l < "$tmp")"
+  ideal=$(( n / total ))
+  # 3 * sd of Binomial(n, 1/total): sd = sqrt(n*(total-1))/total.
+  tol="$(awk -v n="$n" -v t="$total" 'BEGIN { printf "%d", int(3 * sqrt(n * (t - 1)) / t) + 1 }')"
+  low=$(( ideal - tol ));  (( low < 0 )) && low=0
+  high=$(( ideal + tol ))
+  for (( s = 0; s < total; s++ )); do
+    count="$(awk -F '\t' -v s="$s" '$2 == s { n++ } END { print n + 0 }' "$tmp")"
+    counts+=("$count")
+    [[ "$count" -ge "$low" && "$count" -le "$high" ]] \
+      || fail "(shard-balance) $label total=$total: shard $s has $count of $n classes, outside the 3-sigma uniform band [$low,$high] (ideal $ideal) — the class hash is not partitioning uniformly"
+  done
+  if [[ "$mode" == "budget" ]]; then
+    cap=$(( (n * 125 + (total * 100) - 1) / (total * 100) ))
+    for (( s = 0; s < total; s++ )); do
+      [[ "${counts[$s]}" -le "$cap" ]] \
+        || fail "(shard-balance) $label total=$total: shard $s carries ${counts[$s]} of $n classes, over the $cap budget cap (125% of the $ideal ideal) — that leg spends >25% extra wall-clock against the #835 suite budget"
+    done
+    echo "  ok: balance $label total=$total -> ${counts[*]} (ideal $ideal, uniform band [$low,$high], budget cap $cap)"
+  else
+    echo "  ok: balance $label total=$total -> ${counts[*]} (ideal $ideal, uniform band [$low,$high])"
+  fi
+}
+assert_balanced "real" 3 budget  < "$SANDBOX/classes-base.txt"
+assert_balanced "real" 2 uniform < "$SANDBOX/classes-base.txt"
+assert_balanced "real" 4 uniform < "$SANDBOX/classes-base.txt"
+for synth_n in 60 300; do
+  seq 1 "$synth_n" \
+    | awk '{ printf "com.pocketshell.app.proof.Synthetic%04dJourneyE2eTest\n", $1 }' \
+      > "$SANDBOX/classes-synth-$synth_n.txt"
+  assert_balanced "synth$synth_n" 3 uniform < "$SANDBOX/classes-synth-$synth_n.txt"
+done
+# RED CONTROLS for the two bands. Each must fail, and must fail for ITS OWN
+# reason — a control that trips the other band would leave one of the two
+# assertions unproven (G6). Both shadow inside a subshell only.
+degen_out="$SANDBOX/balance-degenerate.log"
+(
+  journey_class_shard_hash() { printf '7'; }   # every class -> one shard
+  assert_balanced "degenerate" 3 uniform < "$SANDBOX/classes-base.txt"
+) > "$degen_out" 2>&1 \
+  && fail "(shard-balance) red control is not live: a hash that puts EVERY class on one shard passed the 3-sigma uniform band"
+grep -q 'uniform band' "$degen_out" \
+  || { cat "$degen_out"; fail "(shard-balance) the degenerate control failed for the wrong reason — it must trip the 3-sigma UNIFORM band"; }
+
+# A partition that is uniform-looking but ONE class over the 125% cap: it must
+# pass the 3-sigma band and still be rejected by the budget cap, proving the cap
+# is load-bearing on its own rather than shadowed by the wider uniform band.
+tilt_cap=$(( (real_class_count * 125 + 299) / 300 ))
+tilt_target=$(( tilt_cap + 1 ))
+tilt_out="$SANDBOX/balance-tilted.log"
+(
+  TILT_TARGET="$tilt_target"
+  shard_map_shipping() {
+    local _total="${1:-3}" c i=0
+    while IFS= read -r c; do
+      [[ -n "$c" ]] || continue
+      if (( i < TILT_TARGET )); then
+        printf '%s\t0\n' "$c"
+      else
+        printf '%s\t%s\n' "$c" "$(( 1 + (i % 2) ))"
+      fi
+      i=$((i + 1))
+    done
+  }
+  assert_balanced "tilted" 3 budget < "$SANDBOX/classes-base.txt"
+) > "$tilt_out" 2>&1 \
+  && fail "(shard-balance) red control is not live: a shard one class over the 125% budget cap passed the budget check"
+grep -q 'budget cap' "$tilt_out" \
+  || { cat "$tilt_out"; fail "(shard-balance) the tilted control ($tilt_target of $real_class_count on one shard) failed for the wrong reason — it must trip the 125% BUDGET CAP, not the uniform band"; }
+pass "(shard-balance) the partition is uniform to 3 sigma on the real list (totals 2/3/4) and on synthetic 60/300-class lists, and stays under the 125% budget cap at total=3; degenerate and tilted partitions are both rejected"
+
+# ---------------------------------------------------------------------------
 # (shard) ACCEPTANCE — Issue #835 (REOPENED): CI-matrix sharding partitions
-# JOURNEY_CLASSES round-robin so each leg runs a DISJOINT ~1/N slice and the
-# UNION of all legs is the FULL set. This is the structural fix that lets the
-# suite finish within the budget+cap (each leg ~1/N the wall-clock + a far
-# healthier emulator). Drive the REAL suite once per shard (instant gradle stub,
-# generous budget) and assert: (a) each shard launches ~class_count/N classes,
-# (b) the slices are pairwise DISJOINT (no class on two shards), (c) the UNION is
-# every class (none dropped), (d) the core-terminal proofs run on EVERY shard.
-echo "== CI-matrix sharding: round-robin partition is disjoint + complete =="
+# JOURNEY_CLASSES so each leg runs a DISJOINT ~1/N slice and the UNION of all
+# legs is the FULL set. This is the structural fix that lets the suite finish
+# within the budget+cap (each leg ~1/N the wall-clock + a far healthier
+# emulator). Drive the REAL suite once per shard (instant gradle stub, generous
+# budget) and assert: (a) each shard launches ~class_count/N classes, (b) the
+# slices are pairwise DISJOINT (no class on two shards), (c) the UNION is every
+# class (none dropped), (d) the core-terminal proofs run on EVERY shard.
+#
+# Issue #1862 widened (a)'s tolerance from +/-2 to +/-25%: the partition is now
+# by class-name hash, which is statistically rather than exactly balanced. The
+# tight per-shard spread is pinned separately by (shard-balance) above; what THIS
+# block owns is that the end-to-end suite really runs the partition it computes.
+echo "== CI-matrix sharding: hash partition is disjoint + complete =="
 cat > "$SANDBOX/gradlew" <<'STUB'
 #!/usr/bin/env bash
 exit 0
@@ -1802,10 +2076,10 @@ for shard_idx in 0 1 2; do
     || { sed -n '1,40p' "$shard_log"; fail "(shard) shard $shard_idx exited $rc_shard; expected clean pass on the instant stub"; }
   mapfile -t shard_classes < <(grep -E '>>> JOURNEY CLASS: [^ ]+ \(attempt 1\)' "$shard_log" | awk '{print $4}')
   shard_n="${#shard_classes[@]}"
-  lo=$(( class_count / shard_total - 2 ))
-  hi=$(( class_count / shard_total + 2 ))
+  lo=$(( class_count * 75 / (shard_total * 100) ))
+  hi=$(( (class_count * 125 + (shard_total * 100) - 1) / (shard_total * 100) ))
   [[ "$shard_n" -ge "$lo" && "$shard_n" -le "$hi" ]] \
-    || fail "(shard) shard $shard_idx launched $shard_n classes; expected ~$((class_count / shard_total)) (±2)"
+    || fail "(shard) shard $shard_idx launched $shard_n classes; expected ~$((class_count / shard_total)) (band [$lo,$hi] — #1862 hash partition)"
   for sc in "${shard_classes[@]}"; do
     [[ -z "${seen_class_shard[$sc]:-}" ]] \
       || fail "(shard) class $sc ran on BOTH shard ${seen_class_shard[$sc]} and shard $shard_idx — partition not disjoint"
@@ -1817,7 +2091,7 @@ for shard_idx in 0 1 2; do
 done
 [[ "$shard_union_count" -eq "$class_count" ]] \
   || fail "(shard) union of all shards = $shard_union_count classes, expected the full $class_count (a class ran on no shard or twice)"
-pass "(shard) round-robin partition: 3 shards each ~1/3, disjoint, union = all $class_count classes; proofs on every shard"
+pass "(shard) hash partition: 3 shards each ~1/3, disjoint, union = all $class_count classes; proofs on every shard"
 
 # ---------------------------------------------------------------------------
 # (m) ACCEPTANCE — Issue #835 (REOPENED): the six core-terminal proofs are now

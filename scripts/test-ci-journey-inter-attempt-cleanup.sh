@@ -83,19 +83,39 @@ HELPERS=(
   ci-journey-summary-functions.sh
 )
 
-# The class this fixture wedges: the first entry of the real allowlist, read from
-# the real file so a reordering of JOURNEY_CLASSES cannot silently make this test
-# exercise a different class.
-first_entry="$(awk '
-  /^JOURNEY_CLASSES=\(/ { f=1; next }
-  /^\)/ { f=0 }
-  f && /^[[:space:]]*"/ { print; exit }
-' "$REAL_SUITE" | sed 's/^[[:space:]]*"\([^"]*\)".*/\1/')"
-WEDGE_CLASS="${first_entry##*.}"
-[[ -n "$WEDGE_CLASS" ]] || fail "(setup) could not resolve the first journey class from the allowlist"
+# The class this fixture wedges: the class SHARD 0 RUNS FIRST, read from the real
+# file so a reordering of JOURNEY_CLASSES cannot silently make this test exercise
+# a different class.
+#
+# Issue #1862: that is no longer the array's first entry. Shard membership is now
+# assigned by class-name HASH rather than array index, so `index 0 -> shard 0` no
+# longer holds — and the run below drives shard 0. Ask the REAL selection instead
+# of assuming array position, so this stays correct under any future partitioning.
 FQCN_PREFIX="$(sed -n 's/^FQCN_PREFIX="\([^"]*\)"$/\1/p' "$REAL_SUITE" | head -n 1)"
 [[ -n "$FQCN_PREFIX" ]] || fail "(setup) could not resolve FQCN_PREFIX from the suite"
-WEDGE_FQCN="${first_entry/\$FQCN_PREFIX/$FQCN_PREFIX}"
+# shellcheck source=scripts/ci-journey-class-selection-functions.sh
+source "$SCRIPT_DIR/ci-journey-class-selection-functions.sh"
+resolve_first_class_on_shard() {   # $1 = shard index, $2 = shard total
+  local -a JOURNEY_CLASSES=() EFFECTIVE_JOURNEY_CLASSES=()
+  local i
+  mapfile -t JOURNEY_CLASSES < <(
+    awk '
+      /^JOURNEY_CLASSES=\(/ { f = 1; next }
+      /^\)/                 { f = 0 }
+      f && match($0, /"[^"]+"/) { print substr($0, RSTART + 1, RLENGTH - 2) }
+    ' "$REAL_SUITE"
+  )
+  (( ${#JOURNEY_CLASSES[@]} > 0 )) || return 1
+  for i in "${!JOURNEY_CLASSES[@]}"; do
+    JOURNEY_CLASSES[$i]="${JOURNEY_CLASSES[$i]/\$FQCN_PREFIX/$FQCN_PREFIX}"
+  done
+  POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$2" POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$1" \
+    select_effective_journey_classes > /dev/null
+  printf '%s' "${EFFECTIVE_JOURNEY_CLASSES[0]:-}"
+}
+WEDGE_FQCN="$(resolve_first_class_on_shard 0 3)"
+[[ -n "$WEDGE_FQCN" ]] || fail "(setup) could not resolve the first journey class of shard 0 from the allowlist"
+WEDGE_CLASS="${WEDGE_FQCN##*.}"
 command -v setsid >/dev/null 2>&1 \
   || fail "(setup) setsid is required: the fixture must detach its orphan writer into its OWN session, because GNU timeout signals the whole process GROUP and the real Gradle/Kotlin daemons are session-detached"
 echo "   wedging the first class of shard 0: $WEDGE_FQCN"

@@ -2,6 +2,7 @@ package com.pocketshell.app.composer
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,8 +19,13 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
@@ -106,6 +113,12 @@ public fun MarkdownText(
     // keeps existing callers (screenshot tests, the composer preview) rendering
     // plain, non-clickable text.
     onLinkTap: ((ConversationLink) -> Unit)? = null,
+    // Issue #1888: Conversation supplies both values so every fenced block gets
+    // its own copy affordance. Keeping the action callback generic leaves this
+    // Markdown renderer independent from Android clipboard APIs and lets other
+    // non-conversation callers retain their current read-only rendering.
+    onCodeBlockCopy: ((String) -> Unit)? = null,
+    codeBlockTestTagPrefix: String? = null,
 ) {
     val blocks = remember(text) { parseMarkdownBlocks(text) }
     SelectionContainer(modifier = modifier) {
@@ -113,9 +126,19 @@ public fun MarkdownText(
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            var codeBlockIndex = 0
             blocks.forEach { block ->
                 when (block) {
-                    is MarkdownBlock.CodeBlock -> CodeBlock(block.text)
+                    is MarkdownBlock.CodeBlock -> {
+                        val index = codeBlockIndex++
+                        CodeBlock(
+                            text = block.text,
+                            onCopy = onCodeBlockCopy?.let { callback ->
+                                { callback(block.text) }
+                            },
+                            testTagPrefix = codeBlockTestTagPrefix?.let { "$it-$index" },
+                        )
+                    }
                     is MarkdownBlock.Heading -> Text(
                         text = renderInline(block.text, onLinkTap),
                         color = color,
@@ -155,22 +178,65 @@ private fun headingSize(level: Int): TextUnit = when (level) {
 }
 
 @Composable
-private fun CodeBlock(text: String) {
+private fun CodeBlock(
+    text: String,
+    onCopy: (() -> Unit)?,
+    testTagPrefix: String?,
+) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(
                 color = PocketShellColors.TermBg,
                 shape = RoundedCornerShape(6.dp),
-            )
-            .padding(PaddingValues(horizontal = 10.dp, vertical = 8.dp))
-            .horizontalScroll(rememberScrollState()),
+            ),
     ) {
+        if (onCopy != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .sizeIn(minWidth = 48.dp, minHeight = 48.dp)
+                        .clickable(
+                            role = Role.Button,
+                            onClick = onCopy,
+                        )
+                        .semantics {
+                            contentDescription = "Copy code block"
+                        }
+                        .padding(horizontal = 10.dp)
+                        .let { base ->
+                            if (testTagPrefix == null) base else {
+                                base.testTag("$testTagPrefix-copy")
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "Copy code",
+                        color = PocketShellColors.Accent,
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+        }
         Text(
             text = text,
             color = PocketShellColors.TermText,
             fontFamily = FontFamily.Monospace,
             fontSize = 12.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
+                .padding(PaddingValues(start = 10.dp, end = 10.dp, bottom = 8.dp))
+                .let { base ->
+                    if (testTagPrefix == null) base else {
+                        base.testTag("$testTagPrefix-viewport")
+                    }
+                },
         )
     }
 }

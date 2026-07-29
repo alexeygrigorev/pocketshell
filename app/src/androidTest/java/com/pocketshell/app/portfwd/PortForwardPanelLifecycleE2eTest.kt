@@ -133,7 +133,15 @@ class PortForwardPanelLifecycleE2eTest {
             ).also { it.observeProcessLifecycle(ProcessLifecycleOwner.get()) }
         }
 
-        viewModel.load(hostId, "/tmp/e2e-key")
+        // #1829: `load` is Main-confined — it bumps the plain `loadGeneration`
+        // counter and check-then-acts on `currentHostId`, exactly as the
+        // screen's `LaunchedEffect { viewModel.load(...) }` does on Main. This
+        // test body is `runBlocking` on the instrumentation thread, so drive it
+        // through the same Main hop the ViewModel construction above already
+        // uses. This is the production thread, not a workaround.
+        withContext(Dispatchers.Main) {
+            viewModel.load(hostId, "/tmp/e2e-key")
+        }
 
         withTimeout(STATE_TIMEOUT_MS) {
             waitFor("panel host loaded") { viewModel.state.value.host?.id == hostId }

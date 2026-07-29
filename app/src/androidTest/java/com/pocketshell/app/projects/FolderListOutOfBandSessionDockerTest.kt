@@ -222,15 +222,22 @@ class FolderListOutOfBandSessionDockerTest {
             attachLifecycle = false,
         ).also { viewModelStore.put("FolderListViewModel", it) }
         vm.setProcessStartedForTest(true)
-        vm.bind(
-            hostId = host.id,
-            hostName = host.name,
-            hostname = host.hostname,
-            port = host.port,
-            username = host.username,
-            keyPath = keyFile.absolutePath,
-            passphrase = null,
-        )
+        // Issue #1829: FolderListViewModel is Main-confined and now ENFORCES it.
+        // Drive the REAL bind() on Main, exactly as FolderListScreen's
+        // LaunchedEffect does — off Main, bind()'s synchronous cold seed races
+        // the view model's own Main-dispatched emitReady and is dropped as
+        // stale (#1823: 23-25% of binds), leaving the #867/#1109 Loading flash.
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            vm.bind(
+                hostId = host.id,
+                hostName = host.name,
+                hostname = host.hostname,
+                port = host.port,
+                username = host.username,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+            )
+        }
 
         // Cold-open reconcile settles: the anchor session is shown, the
         // out-of-band one is NOT yet present.

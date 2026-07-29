@@ -70,6 +70,18 @@ class FileExplorerDockerTest {
     private fun newExplorerViewModel(): FileExplorerViewModel =
         FileExplorerViewModel(leaseManager)
 
+    /**
+     * Issue #1829: `FileExplorerViewModel.start` is Main-confined and now
+     * ENFORCES it — it check-then-acts on the plain `request` field and clears
+     * the non-thread-safe `listingCache` in the same window. The production
+     * caller is `FileExplorerScreen`'s `LaunchedEffect { viewModel.start(...) }`,
+     * i.e. Main; these test bodies are `runBlocking` on the instrumentation
+     * thread, so drive `start` through the screen's actual thread.
+     */
+    private fun startOnMain(viewModel: FileExplorerViewModel, request: FileExplorerViewModel.Request) {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync { viewModel.start(request) }
+    }
+
     @Before
     fun setUp(): Unit { runBlocking {
         val keyText = InstrumentationRegistry.getInstrumentation()
@@ -180,7 +192,8 @@ class FileExplorerDockerTest {
         }
 
         val viewModel = newExplorerViewModel()
-        viewModel.start(
+        startOnMain(
+            viewModel,
             FileExplorerViewModel.Request(
                 hostId = TEST_HOST_ID,
                 hostname = DEFAULT_HOST,
@@ -322,7 +335,8 @@ class FileExplorerDockerTest {
         assertEquals("pre-warm dials exactly one handshake", 1, afterWarm)
 
         val viewModel = newExplorerViewModel()
-        viewModel.start(
+        startOnMain(
+            viewModel,
             FileExplorerViewModel.Request(
                 hostId = TEST_HOST_ID,
                 hostname = DEFAULT_HOST,

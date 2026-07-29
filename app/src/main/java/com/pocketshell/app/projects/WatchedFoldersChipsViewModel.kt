@@ -2,6 +2,7 @@ package com.pocketshell.app.projects
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -47,6 +48,7 @@ class WatchedFoldersChipsViewModel @Inject constructor(
     private var hostId: Long? = null
 
     fun bind(hostId: Long?) {
+        requireMainThread("WatchedFoldersChipsViewModel.bind")
         if (this.hostId == hostId) return
         this.hostId = hostId
         observeJob?.cancel()

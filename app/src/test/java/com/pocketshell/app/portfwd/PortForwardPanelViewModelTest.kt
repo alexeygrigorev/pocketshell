@@ -78,6 +78,52 @@ class PortForwardPanelViewModelTest {
         db.close()
     }
 
+    /**
+     * Issue #1829 (G2 class coverage). [PortForwardPanelViewModel.load] is the
+     * same shape as the `FolderListViewModel.bind` defect this issue was filed
+     * for: a non-suspend, Main-confined entry point that does a check-then-act
+     * (`if (currentHostId == hostId && …) return`) and then bumps a plain,
+     * non-`@Volatile` generation counter (`++loadGeneration`) which a later
+     * resume re-checks to decide whether its result is stale. On Main that
+     * sequence is atomic; off Main a concurrent `load` / `leavePanel` can move
+     * the counter inside the window and the in-flight load silently discards
+     * itself, leaving the panel on a stale state with no crash and no log.
+     *
+     * That confinement used to be enforced by nothing. This proves it now fails
+     * loudly instead. RED before the guard: the off-Main `load` returns
+     * normally. The bounded, hard-failing join is the `process.md` `runTest`
+     * convention (Shape B) — the exit condition is asserted, never assumed.
+     */
+    @Test
+    fun loadFromOffMainFailsLoudlyBecauseTheGenerationCounterIsMainConfined() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val viewModel = newViewModel(FakeConnector(Result.success(FakeSshSession(ssOutput = ""))))
+
+        val captured = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val worker = Thread({
+            try {
+                viewModel.load(hostId, "/tmp/key")
+            } catch (t: Throwable) {
+                captured.set(t)
+            }
+        }, "issue1829-off-main-portfwd")
+        worker.start()
+        worker.join(30_000L)
+        assertFalse(
+            "issue #1829: the off-Main load() must finish within 30s — it is still running, " +
+                "so nothing asserted below would mean anything",
+            worker.isAlive,
+        )
+
+        val failure = captured.get()
+        assertTrue(
+            "issue #1829: PortForwardPanelViewModel.load is Main-confined (it does a " +
+                "check-then-act over the non-@Volatile loadGeneration) and must fail LOUDLY " +
+                "off Main. Got ${failure ?: "no exception at all"}",
+            failure is com.pocketshell.app.MainThreadConfinementViolation,
+        )
+    }
+
     @Test
     fun enablingAutoForward_connectsAndPublishesTunnelRows() = runTest {
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)

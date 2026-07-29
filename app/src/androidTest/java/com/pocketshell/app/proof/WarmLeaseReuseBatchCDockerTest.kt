@@ -111,16 +111,21 @@ class WarmLeaseReuseBatchCDockerTest {
                 reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
                 sshLeaseManager = leaseManager,
             )
-            repoVm.bind(
-                RepoBrowserViewModel.SshCredentials(
-                    hostId = HOST_ID,
-                    hostname = DEFAULT_HOST,
-                    port = DEFAULT_PORT,
-                    username = DEFAULT_USER,
-                    keyPath = keyPath,
-                    passphrase = null,
-                ),
-            )
+            // Issue #1829: the screen-scoped view models are Main-confined and
+            // now ENFORCE it. Drive bind() on Main, exactly as the screen's
+            // LaunchedEffect does.
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                repoVm.bind(
+                    RepoBrowserViewModel.SshCredentials(
+                        hostId = HOST_ID,
+                        hostname = DEFAULT_HOST,
+                        port = DEFAULT_PORT,
+                        username = DEFAULT_USER,
+                        keyPath = keyPath,
+                        passphrase = null,
+                    ),
+                )
+            }
             // Wait until the load settles to a terminal state (Ready / Failed /
             // ToolUnavailable) so the enumeration actually ran over the lease.
             withTimeout(30_000L) {
@@ -135,17 +140,20 @@ class WarmLeaseReuseBatchCDockerTest {
                 projectRootDao = db.projectRootDao(),
                 sshLeaseManager = leaseManager,
             )
-            watchedVm.bind(
-                hostId = HOST_ID,
-                hostName = host.name,
-                sshCredentials = WatchedFoldersViewModel.SshCredentials(
-                    hostname = DEFAULT_HOST,
-                    port = DEFAULT_PORT,
-                    username = DEFAULT_USER,
-                    keyPath = keyPath,
-                    passphrase = null,
-                ),
-            )
+            // Issue #1829: Main-confined bind (see the repo-browser note above).
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                watchedVm.bind(
+                    hostId = HOST_ID,
+                    hostName = host.name,
+                    sshCredentials = WatchedFoldersViewModel.SshCredentials(
+                        hostname = DEFAULT_HOST,
+                        port = DEFAULT_PORT,
+                        username = DEFAULT_USER,
+                        keyPath = keyPath,
+                        passphrase = null,
+                    ),
+                )
+            }
             watchedVm.discoverFromRemote()
             // Wait until discovery finishes (the discovering flag drops).
             withTimeout(30_000L) {

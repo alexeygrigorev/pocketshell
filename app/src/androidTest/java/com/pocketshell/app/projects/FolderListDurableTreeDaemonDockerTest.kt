@@ -248,8 +248,13 @@ class FolderListDurableTreeDaemonDockerTest {
             alphaFolder in ready1.expandedProjectPaths,
         )
 
-        // The user collapses the alpha folder.
-        vm1.toggleProjectExpanded(alphaFolder)
+        // The user collapses the alpha folder. #1829: `toggleProjectExpanded`
+        // calls `emitReady()` SYNCHRONOUSLY, and `emitReady` is the Main-confined
+        // check-then-act seam over `emitGeneration` — so this needs the same Main
+        // hop the `bind` helper below uses. In production this is a Compose tap
+        // callback (`FolderListScreen.kt` `onToggleProjectExpanded`), i.e. Main;
+        // running it on the instrumentation thread was never the real path.
+        onMain { vm1.toggleProjectExpanded(alphaFolder) }
         // The collapse is reflected locally immediately.
         withTimeout(10_000) {
             while (alphaFolder in readyExpanded(vm1)) delay(100L)
@@ -378,16 +383,32 @@ class FolderListDurableTreeDaemonDockerTest {
         )
     } }
 
+    /**
+     * Issue #1829: run a Main-confined view-model entry point on Main, the way
+     * every production caller does. Used for `bind` AND for the non-suspend
+     * members that reach `emitReady()` synchronously (`toggleProjectExpanded`).
+     */
+    private fun onMain(block: () -> Unit) {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(block)
+    }
+
     private fun bind(vm: FolderListViewModel, host: HostEntity) {
-        vm.bind(
-            hostId = host.id,
-            hostName = host.name,
-            hostname = host.hostname,
-            port = host.port,
-            username = host.username,
-            keyPath = keyFile.absolutePath,
-            passphrase = null,
-        )
+        // Issue #1829: FolderListViewModel is Main-confined and now ENFORCES it.
+        // Drive the REAL bind() on Main, exactly as FolderListScreen's
+        // LaunchedEffect does — off Main, bind()'s synchronous cold seed races
+        // the view model's own Main-dispatched emitReady and is dropped as
+        // stale (#1823: 23-25% of binds), leaving the #867/#1109 Loading flash.
+        onMain {
+            vm.bind(
+                hostId = host.id,
+                hostName = host.name,
+                hostname = host.hostname,
+                port = host.port,
+                username = host.username,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+            )
+        }
     }
 
     private fun readyExpanded(vm: FolderListViewModel): Set<String> =

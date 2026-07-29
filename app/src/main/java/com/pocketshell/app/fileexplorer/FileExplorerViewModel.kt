@@ -2,6 +2,7 @@ package com.pocketshell.app.fileexplorer
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.core.ssh.RemoteEntry
@@ -167,6 +168,9 @@ class FileExplorerViewModel @Inject constructor(
      * the same [Request] so a recomposition doesn't reset the user's navigation.
      */
     fun start(request: Request) {
+        // #1829: check-then-act over `request`, and `listingCache` is a plain
+        // LinkedHashMap (not thread-safe) cleared inside the same window.
+        requireMainThread("FileExplorerViewModel.start")
         if (this.request == request) return
         this.request = request
         currentDir = ""

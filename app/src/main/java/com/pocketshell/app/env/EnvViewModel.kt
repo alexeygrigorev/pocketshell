@@ -2,6 +2,7 @@ package com.pocketshell.app.env
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.storage.dao.HostDao
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -127,6 +128,7 @@ class EnvViewModel @Inject constructor(
         folderLabel: String,
         copySources: List<EnvCopySourceFolder>,
     ) {
+        requireMainThread("EnvViewModel.bind")
         val next = BoundParams(hostId, keyPath, passphrase, directory)
         if (params == next && _state.value.directory == directory) return
         params = next

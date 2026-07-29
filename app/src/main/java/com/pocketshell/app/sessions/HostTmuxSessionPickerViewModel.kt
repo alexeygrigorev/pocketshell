@@ -2,6 +2,7 @@ package com.pocketshell.app.sessions
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.requireMainThread
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
@@ -34,6 +35,12 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
     private var projectSwitcherJob: Job? = null
 
     fun load(request: HostTmuxSessionPickerRequest) {
+        // #1829: DECIDED IN (the review left this one open). The check-then-act
+        // has no `if`, which is exactly why a guard-shaped scan misses it: the
+        // `loadJob?.cancel()` … `loadJob = launch{}` pair IS the check-then-act,
+        // the same job-swap race cited for WatchedFoldersChipsViewModel.bind.
+        // Off Main two loads can both survive the cancel and race `_state`.
+        requireMainThread("HostTmuxSessionPickerViewModel.load")
         loadJob?.cancel()
         _state.value = HostTmuxSessionPickerState.Loading(request)
         loadJob = viewModelScope.launch {
@@ -120,6 +127,10 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
         currentSessionName: String,
         projectPath: String?,
     ) {
+        // #1829: same job-swap shape as [load], on the sibling list. Guarded
+        // together with it — splitting the pair would be exactly the
+        // enumerate-by-name mistake this round exists to fix.
+        requireMainThread("HostTmuxSessionPickerViewModel.refreshProjectSiblings")
         projectSwitcherJob?.cancel()
         projectSwitcherJob = viewModelScope.launch {
             val result = gateway.listSessionsFromLiveClient(host, keyPath)

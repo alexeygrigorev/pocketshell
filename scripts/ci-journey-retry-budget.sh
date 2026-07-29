@@ -24,9 +24,79 @@
 # retries the old rule refused — never refuse one it allowed. Without usable
 # measurements the flat 5400s worst case is used unchanged (fail-safe).
 #
+# Issue #1833 — the suite cost is now priced as a WARM retry.
+#
+# #1800's `1.10 x observed suite elapsed` charges the retry for EVERYTHING the
+# first attempt's suite did. After #1814 that includes the shard's whole cold
+# Gradle build, which the suite now pays as one named, separately MEASURED
+# up-front phase ("Warm build (issue #1814): **ok** in 464s"). A within-job retry
+# does not repeat that build: it re-creates the AVD and cold-boots a fresh
+# emulator, but it runs on the SAME runner against the `~/.gradle` and
+# `app/build` the first attempt already populated, so every assemble task is
+# UP-TO-DATE the second time.
+#
+# That is observed, not assumed — run 30318408377, job 90153112226 (shard 0), the
+# one recent run where the retry actually ran, same first class on both attempts:
+#
+#   attempt 1 (cold Gradle):            4200s -> 3889s  = 311s
+#   attempt 2 (the retry, warm Gradle): 4200s -> 4179s  =  21s
+#
+# and the retry's whole suite came in 379s cheaper (1987s -> 1608s) on the
+# identical 48-class selection. Post-#1814 the same work is measured directly:
+# 373s / 464s / 489s across run 30383504733's three shards — 15-19% of each
+# shard's entire suite elapsed, charged twice by the un-corrected model. On that
+# run ALL THREE shards refused their retry with `insufficient_remaining_budget`,
+# two of them by less than the cold build they were double-charged for.
+#
+# So when the caller supplies the measured warm-build seconds the suite cost
+# becomes:
+#   1.10 x (observed suite elapsed - measured warm build)   the work that repeats
+# + 120s warm-rebuild reserve                               the UP-TO-DATE pass
+# instead of `1.10 x observed suite elapsed`. The 120s reserve is ~6x the 21s a
+# whole warm first class cost on run 30318408377, so it is generous against the
+# thing it stands in for.
+#
+# This is a CORRECTION to the estimate, not a larger budget: JOURNEY_JOB_CAP_MS,
+# JOURNEY_RETRY_REQUIRED_MS, the 4200s suite budget and the 95-minute job cap are
+# all untouched (G6). It is also strictly optional — an absent, malformed,
+# zero, or not-smaller-than-the-suite warm-build reading leaves #1800's model
+# byte-for-byte unchanged, so the fail-safe direction stays "deny the retry".
+#
+# WHAT THIS CORRECTION DOES *NOT* FIX — read this before tuning anything here.
+#
+# It is a PARTIAL. Measured against every shard-run whose budget figures are
+# still retrievable — runs 30351095421, 30339688411, 30383504733 and 30392101105,
+# twelve shard-runs, ten of them denied — the correction restores THREE and
+# leaves SEVEN denied. It also widens run 30392101105 shard 0 from a 2688ms
+# ALLOWED margin (under 3 seconds of a 95-minute job) to 391988ms, which is real
+# value, but it does not change the shape of the problem.
+#
+# Holding each shard-run's fixed costs and sweeping the suite, affordability has
+# exactly one crossing point, and across all twelve it sits in a band only ~110s
+# wide: roughly 2500-2650s of suite elapsed. SEVEN of the twelve observed suites
+# are already past their own crossing. So the retry is affordable iff the suite
+# is short enough, and the observed distribution straddles the line.
+#
+# Worse, the three restorations survive only 24s / 72s / 79s of suite growth
+# (~1-3% of their suites), because the margin decays at 2100ms per second of
+# suite elapsed — remaining falls 1000ms and required rises 1100ms. ONE
+# twice-failing journey class cost 417s on run 30383504733. So the retry comes
+# back only on runs where nothing went wrong, and a retry that is affordable
+# only when it is not needed is not resilience.
+#
+# The binding constraint is therefore PER-SHARD LOAD, not this estimate. Do not
+# respond to a future denial by tuning JOURNEY_RETRY_WARM_REBUILD_MS or the
+# headrooms — that is the constant-chasing #1833 exists to end. The levers are
+# the shard count / class distribution and the flake cost driving suite elapsed
+# (#788 / #1819 / #1820), tracked as #1850. The scoreboard, the drift budgets and
+# the crossing-point band are all asserted in
+# scripts/test-ci-journey-retry-budget.sh cases (x), (x2), (y) and (z), so this
+# conclusion cannot quietly go stale.
+#
 # Usage:
 #   ci-journey-retry-budget.sh JOB_START_EPOCH_MS NOW_EPOCH_MS \
-#     [FIRST_ATTEMPT_START_EPOCH_MS] [FIRST_SUITE_ELAPSED_SECS]
+#     [FIRST_ATTEMPT_START_EPOCH_MS] [FIRST_SUITE_ELAPSED_SECS] \
+#     [FIRST_WARM_BUILD_SECS]
 #
 # Output is GitHub-step-output-compatible key=value lines. Invalid/missing clock
 # input fails safe by denying the retry while returning success, so the workflow
@@ -40,19 +110,35 @@ readonly JOURNEY_RETRY_MIN_BOOT_RESERVE_MS=120000
 readonly JOURNEY_RETRY_BOOT_HEADROOM_NUMERATOR=3
 readonly JOURNEY_RETRY_SUITE_HEADROOM_NUMERATOR=110
 readonly JOURNEY_RETRY_SUITE_HEADROOM_DENOMINATOR=100
+# Issue #1833: what the retry's own (UP-TO-DATE) warm build is allowed to cost.
+readonly JOURNEY_RETRY_WARM_REBUILD_MS=120000
 readonly MAX_SIGNED_INT64_DECIMAL=9223372036854775807
 readonly MAX_MEASURED_SUITE_SECS=86400
 
 RETRY_REQUIRED_MS="$JOURNEY_RETRY_REQUIRED_MS"
 RETRY_COST_MODEL="worst_case"
+# Issue #1833: how much measured cold-build cost was NOT charged a second time.
+# 0 whenever the warm-build reading was absent or unusable, i.e. whenever the
+# emitted requirement is #1800's unmodified one.
+RETRY_WARM_BUILD_DEDUCTED_MS=0
 
 emit_decision() {
-  local allowed="$1" reason="$2" remaining="$3"
+  local allowed="$1" reason="$2" remaining="$3" shortfall=0
+  # Issue #1833: the shortfall is the load-bearing number for the operator — it
+  # is what separates "denied by 224s" (an estimate worth correcting) from
+  # "denied by 22 minutes" (a shard that genuinely does not fit). Reported for
+  # every denial, including the malformed-clock fail-safes, where remaining=0 and
+  # the shortfall is therefore the whole flat reserve.
+  if [[ "$allowed" != "true" ]] && (( RETRY_REQUIRED_MS > remaining )); then
+    shortfall=$((RETRY_REQUIRED_MS - remaining))
+  fi
   printf 'retry_allowed=%s\n' "$allowed"
   printf 'retry_reason=%s\n' "$reason"
   printf 'retry_remaining_ms=%s\n' "$remaining"
   printf 'retry_required_ms=%s\n' "$RETRY_REQUIRED_MS"
   printf 'retry_cost_model=%s\n' "$RETRY_COST_MODEL"
+  printf 'retry_shortfall_ms=%s\n' "$shortfall"
+  printf 'retry_warm_build_deducted_ms=%s\n' "$RETRY_WARM_BUILD_DEDUCTED_MS"
 }
 
 canonical_decimal() {
@@ -62,13 +148,18 @@ canonical_decimal() {
   return 0
 }
 
-# measured_retry_required_ms <attempt_start_ms> <suite_elapsed_secs> <now_ms>
+# measured_retry_required_ms <attempt_start_ms> <suite_elapsed_secs> <now_ms> \
+#                            [warm_build_secs]
 #
-# Echoes the measured requirement, or nothing when the evidence is unusable.
-# Never exceeds the legacy flat worst case.
+# Echoes `<required_ms> <warm_build_deducted_ms>`, or nothing when the evidence
+# is unusable. Never exceeds the legacy flat worst case. The second field is 0
+# whenever the #1833 warm-build correction did not apply, i.e. whenever the first
+# field is #1800's unmodified requirement. Both are echoed (rather than set as
+# globals) so the function stays pure and callable from `$(...)`.
 measured_retry_required_ms() {
-  local attempt_start="${1-}" suite_secs="${2-}" now_value="$3"
+  local attempt_start="${1-}" suite_secs="${2-}" now_value="$3" warm_secs="${4-}"
   local attempt_value suite_ms attempt_elapsed boot_ms boot_reserve suite_cost required
+  local warm_ms repeat_ms rebuild_reserve deducted=0
 
   canonical_decimal "$attempt_start" || return 1
   canonical_decimal "$suite_secs" || return 1
@@ -88,13 +179,43 @@ measured_retry_required_ms() {
   boot_reserve=$((boot_ms * JOURNEY_RETRY_BOOT_HEADROOM_NUMERATOR))
   (( boot_reserve < JOURNEY_RETRY_MIN_BOOT_RESERVE_MS )) &&
     boot_reserve="$JOURNEY_RETRY_MIN_BOOT_RESERVE_MS"
+
   suite_cost=$((
     suite_ms * JOURNEY_RETRY_SUITE_HEADROOM_NUMERATOR /
       JOURNEY_RETRY_SUITE_HEADROOM_DENOMINATOR
   ))
+
+  # Issue #1833: re-price the suite as the part the retry actually REPEATS. The
+  # measured cold build (#1814) is deducted and replaced by a flat UP-TO-DATE
+  # reserve. Deliberately narrow: the reading must be a canonical, in-range,
+  # non-zero count that is STRICTLY SMALLER than the suite it is a phase of.
+  # Anything else — absent, malformed, zero, or nonsensically >= the suite —
+  # leaves #1800's arithmetic untouched.
+  #
+  # The `<` comparison below is what keeps #1800's one-way guarantee intact: the
+  # correction is adopted ONLY when it lowers the requirement. Without it, a
+  # deducted build smaller than the 120s reserve (1.10 x warm < reserve) would
+  # make the model demand MORE than #1800 did and could refuse a retry the old
+  # rule allowed — the exact inversion #1800's clamp exists to prevent.
+  if canonical_decimal "$warm_secs" \
+     && ! decimal_greater_than "$warm_secs" "$MAX_MEASURED_SUITE_SECS"; then
+    warm_ms=$(( (10#$warm_secs) * 1000 ))
+    if (( warm_ms > 0 && warm_ms < suite_ms )); then
+      repeat_ms=$((suite_ms - warm_ms))
+      rebuild_reserve=$((
+        repeat_ms * JOURNEY_RETRY_SUITE_HEADROOM_NUMERATOR /
+          JOURNEY_RETRY_SUITE_HEADROOM_DENOMINATOR
+        + JOURNEY_RETRY_WARM_REBUILD_MS
+      ))
+      if (( rebuild_reserve < suite_cost )); then
+        suite_cost="$rebuild_reserve"
+        deducted="$warm_ms"
+      fi
+    fi
+  fi
   required=$((boot_reserve + suite_cost + JOURNEY_RETRY_TEARDOWN_MS))
   (( required > JOURNEY_RETRY_REQUIRED_MS )) && required="$JOURNEY_RETRY_REQUIRED_MS"
-  printf '%s' "$required"
+  printf '%s %s' "$required" "$deducted"
 }
 
 # decimal_greater_than <canonical-decimal-a> <canonical-decimal-b>
@@ -118,10 +239,11 @@ epoch_out_of_range() {
 
 journey_retry_budget_decision() {
   local start="${1-}" now="${2-}"
-  local attempt_start="${3-}" suite_secs="${4-}"
+  local attempt_start="${3-}" suite_secs="${4-}" warm_secs="${5-}"
 
   RETRY_REQUIRED_MS="$JOURNEY_RETRY_REQUIRED_MS"
   RETRY_COST_MODEL="worst_case"
+  RETRY_WARM_BUILD_DEDUCTED_MS=0
 
   if [[ -z "$start" ]]; then
     emit_decision false missing_job_start 0
@@ -173,10 +295,23 @@ journey_retry_budget_decision() {
   # Issue #1800: prefer this job's own measured retry cost over the flat
   # worst case. The helper never returns MORE than the legacy requirement, so
   # a measurement can only ever unlock a retry the flat rule refused.
-  local measured
-  if measured="$(measured_retry_required_ms "$attempt_start" "$suite_secs" "$now_value")"; then
-    RETRY_REQUIRED_MS="$measured"
-    RETRY_COST_MODEL="measured_first_attempt"
+  #
+  # Issue #1833: when the measured cold build is also supplied, the same helper
+  # prices the suite as a WARM retry. `measured_retry_required_ms` adopts that
+  # correction only when it LOWERS the requirement, so the one-way guarantee
+  # above still holds and the model name reports which arithmetic was used.
+  local measured measured_required measured_deducted
+  if measured="$(
+    measured_retry_required_ms "$attempt_start" "$suite_secs" "$now_value" "$warm_secs"
+  )"; then
+    read -r measured_required measured_deducted <<<"$measured"
+    RETRY_REQUIRED_MS="$measured_required"
+    RETRY_WARM_BUILD_DEDUCTED_MS="$measured_deducted"
+    if (( RETRY_WARM_BUILD_DEDUCTED_MS > 0 )); then
+      RETRY_COST_MODEL="measured_warm_retry"
+    else
+      RETRY_COST_MODEL="measured_first_attempt"
+    fi
   fi
 
   if (( remaining >= RETRY_REQUIRED_MS )); then
@@ -187,5 +322,5 @@ journey_retry_budget_decision() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  journey_retry_budget_decision "${1-}" "${2-}" "${3-}" "${4-}"
+  journey_retry_budget_decision "${1-}" "${2-}" "${3-}" "${4-}" "${5-}"
 fi

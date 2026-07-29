@@ -77,6 +77,9 @@ tokens=()
 provenance=()
 carried_over=()
 cold_build_shards=()
+# Issue #1833: shards that reached their verdict unable to start a cold-boot
+# retry, i.e. shards whose result came from ONE attempt.
+one_shot_shards=()
 fresh_tokens=0
 
 current_attempt="${GITHUB_RUN_ATTEMPT:-}"
@@ -124,7 +127,22 @@ if [[ -d "$verdict_dir" ]]; then
       origin="attempt unknown (token carries no #1809 provenance stamp)"
     fi
 
-    provenance+=("shard ${tok_shard}: ${token} — run ${tok_run}, ${origin}, reason ${tok_reason}")
+    # Issue #1833: did this shard still have a cold-boot retry when it reached
+    # that verdict? Absent on a token written before the stamp existed, which
+    # reads `unknown` and is reported as neither affordable nor one-shot.
+    tok_affordable="$(sed -n 's/^retry_affordable=//p' "$f" 2>/dev/null | head -n 1)"
+    [[ "$tok_affordable" == "true" || "$tok_affordable" == "false" ]] || tok_affordable="unknown"
+    tok_shortfall="$(sed -n 's/^retry_shortfall_ms=//p' "$f" 2>/dev/null | head -n 1)"
+    [[ "$tok_shortfall" =~ ^[0-9]+$ ]] || tok_shortfall="?"
+    tok_retry_reason="$(sed -n 's/^retry_denied_reason=//p' "$f" 2>/dev/null | head -n 1)"
+    [[ -n "$tok_retry_reason" ]] || tok_retry_reason="unspecified"
+
+    provenance_line="shard ${tok_shard}: ${token} — run ${tok_run}, ${origin}, reason ${tok_reason}"
+    if [[ "$tok_affordable" == "false" ]]; then
+      provenance_line+=", ONE-SHOT (no cold-boot retry affordable: ${tok_retry_reason}, short by ${tok_shortfall}ms)"
+      one_shot_shards+=("shard ${tok_shard} (${token}, short by ${tok_shortfall}ms)")
+    fi
+    provenance+=("$provenance_line")
     if [[ "$tok_reason" == "cold_build_timeout" ]]; then
       cold_build_shards+=("shard ${tok_shard} (${token})")
     fi
@@ -169,6 +187,17 @@ if (( ${#cold_build_shards[@]} > 0 )); then
   echo "::notice title=Emulator journey verdict — includes a cold-BUILD-phase timeout (#1814)::${#cold_build_shards[@]} shard verdict(s) were reported with reason 'cold_build_timeout': ${cold_build_shards[*]}. At least one attempt there hit its per-class wall cap while Gradle was still BUILDING — instrumentation never started and no JUnit XML exists, so the zero-test outer timeout is a BUILD-COST artefact, not evidence that the named journey is broken. Investigate the build cost (the cold build is paid up front by the suite's warm-build step), not the journey."
 fi
 
+# Issue #1833: a verdict reached WITHOUT the cold-boot retry available must say
+# so. The retry is what turns a single #788-class swiftshader flake into a
+# recovered run; on run 30383504733 all three shards were denied it and all three
+# still reported a plain CLEAN/RED, so the batch that then went red on a blank
+# viewport looked exactly like a healthy gate finding a real regression. Severity
+# is untouched — this changes only what the evidence SAYS about how much
+# resilience produced it.
+if (( ${#one_shot_shards[@]} > 0 )); then
+  echo "::notice title=Emulator journey verdict — ${#one_shot_shards[@]} shard(s) ran ONE-SHOT, no cold-boot retry (#1833)::${one_shot_shards[*]} reached their verdict unable to start a second cold boot, so their result comes from a SINGLE attempt. The cold-boot retry is what normally absorbs a #788-class environmental flake; without it such a flake reddens this aggregate instead of recovering. Read a RED from a one-shot shard with that in mind, and read a CLEAN as having had less protection than usual."
+fi
+
 if (( ${#carried_over[@]} > 0 )); then
   echo "::notice title=Emulator journey verdict — some shard verdicts carried over::${#carried_over[@]} shard verdict(s) come from an earlier attempt of this run (that shard was not re-run): ${carried_over[*]}. This is expected when a single shard is re-run; it is reported so the aggregate verdict's provenance is auditable (issue #1809, G5)."
 fi
@@ -207,6 +236,10 @@ emit_summary() {
       if (( ${#cold_build_shards[@]} > 0 )); then
         echo
         echo "**Cold-build-phase timeout (issue #1814):** ${cold_build_shards[*]} — an attempt there was cut while Gradle was still BUILDING (no instrumentation, no JUnit XML). That is a build-cost artefact, not a defect in the named journey."
+      fi
+      if (( ${#one_shot_shards[@]} > 0 )); then
+        echo
+        echo "**Ran ONE-SHOT — no cold-boot retry (issue #1833):** ${one_shot_shards[*]} — these shards reached their verdict unable to start a second cold boot, so their result comes from a SINGLE attempt and a #788-class environmental flake there reddens this aggregate instead of recovering."
       fi
     } >> "$GITHUB_STEP_SUMMARY"
   fi

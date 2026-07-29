@@ -34,6 +34,63 @@ gh run list --repo alexeygrigorev/pocketshell --limit 20
 
 Identify all `failure` runs since the last known-green commit. Group consecutive failures — if 10 pushes in a row all fail at the same step, that's ONE infra problem, not 10 commit defects.
 
+### 1.1 Wait with the sanctioned watcher and preserve its evidence
+
+When the target run is still queued or in progress, run `scripts/watch-ci.py`
+once as a transient user unit. The unit survives if the agent harness kills the
+launching shell, while `--log-file` preserves both heartbeats and the watcher's
+final human summary + JSON:
+
+```bash
+unit="ps-ci-watch-<RUN_ID>"
+watch_log="$PWD/build/$unit.log"
+mkdir -p "$PWD/build"
+systemd-run --user --unit="$unit" --pipe --wait \
+  "$PWD/scripts/watch-ci.py" \
+  --run-id <RUN_ID> \
+  --repo alexeygrigorev/pocketshell \
+  --log-file "$watch_log"
+```
+
+Do not add `--collect` to this recipe. Immediate collection can reap and reset
+the transient unit before `ExecMainStatus` is read, turning a real non-zero
+watcher status into a misleading zero. If the launching shell survives, its
+return code is useful; if it does not, read the final JSON line from
+`"$watch_log"` and the unit journal. After recording the evidence, reap a
+failed retained unit explicitly:
+
+```bash
+tail -n 30 "$watch_log"
+systemctl --user show "$unit" -p ExecMainStatus -p SubState
+journalctl --user -u "$unit" -n 30 --no-pager
+systemctl --user reset-failed "$unit"
+```
+
+The watcher exit is never by itself proof that the GitHub Actions run finished.
+It deliberately fails fast when a required check fails. Always confirm
+`status=completed` directly before treating the conclusion or downloaded
+artifacts as final:
+
+```bash
+gh run view <RUN_ID> --repo alexeygrigorev/pocketshell \
+  --json status,conclusion,url
+```
+
+The final JSON's `exit_reason` and process exit code identify why watching
+stopped:
+
+| Exit | `exit_reason` | Meaning |
+|------|---------------|---------|
+| 0/1/4/5 | `run_completed` | The run completed; `result` distinguishes green, failed, superseded, or no-verdict |
+| 2 | `hang_detected` | No job-state progress for the effective timeout |
+| 3 | `unresolved` | The run or GitHub inputs could not be resolved |
+| 6 | `required_check_failed_fast` | A required check failed but the run is still in flight; artifacts are not final |
+| 7 | `wall_clock_timeout` | The watcher reached its wall-clock cap while the run was still in flight |
+
+For a single-job rerun, do not lower `--no-progress-timeout`. That shape has no
+intermediate job transition during the whole job; the watcher detects it and
+raises an unsafe short value to its job-cap-safe default.
+
 ### 2. Inspect the most-recent failed run
 
 ```bash
@@ -164,12 +221,8 @@ If the failure isn't small-fix material:
 ### 7. Verify your fix (if you pushed one)
 
 ```bash
-# Watch the latest run
+# Resolve the latest run, then use the transient-unit watcher recipe in §1.1.
 gh run list --repo alexeygrigorev/pocketshell --limit 3
-
-# Optionally block until done — the runtime notifies on completion if you use Monitor;
-# otherwise check periodically (NOT in a tight loop)
-gh run watch --repo alexeygrigorev/pocketshell --exit-status
 ```
 
 If new run passes:

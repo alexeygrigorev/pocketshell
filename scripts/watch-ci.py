@@ -38,15 +38,15 @@ Design goals (see issue #952):
    one. This matches the workflow's own classifier, which already states a
    cancelled attempt "is NOT ... a genuine ... regression".
 
-Exit-code contract (also the final JSON's `result`):
+Final JSON contract: `result` is the semantic CI outcome; `exit_code` and `exit_reason` identify why the watcher stopped, and `run_completed` says whether artifacts are final.
+
+Process exit-code contract (`exit_code`; the semantic `result` may be shared by
+more than one termination path):
 
     0  green       — all REQUIRED checks concluded `success` (or appropriately
                      skipped) and the run is complete.
-    1  failed      — a required check GENUINELY failed (`failure`/`timed_out`/
-                     `startup_failure`/`action_required`). A real failure
-                     outranks a later cancel: red CI is never softened.
-    2  hang         — no job-state progress for --no-progress-timeout, OR the run
-                     exceeded --max-wall-clock. Never wait forever.
+    1  failed      — the RUN COMPLETED with a genuine failure.
+    2  hang         — no job-state progress for --no-progress-timeout.
     3  unresolved  — the run / inputs couldn't be resolved, or `gh` stayed broken
                      past the retry budget.
     4  superseded  — the run was cancelled because a NEWER run for the same
@@ -55,6 +55,10 @@ Exit-code contract (also the final JSON's `result`):
     5  no_verdict  — the run was cancelled (user/API, or we could not tell why),
                      so it produced NO trustworthy verdict. Not a pass, not a
                      failure — unknown. Re-run to get a verdict.
+    6  failed_fast — a required check failed while the RUN IS STILL IN FLIGHT.
+                     Artifacts are not final; confirm the completed run.
+    7  wall_timeout — the watcher reached --max-wall-clock while the run was
+                      still in flight.
 
 This module is import-safe and dependency-injectable: tests construct a Watcher
 with a fake `gh` runner and a fake clock, so the whole state machine (including
@@ -114,6 +118,20 @@ EXIT_CODE = {
     RESULT_SUPERSEDED: 4,
     RESULT_NO_VERDICT: 5,
 }
+
+# Termination paths that deliberately cannot share the result-based codes above.
+# Issue #1873: an exit code must say WHY the watcher stopped, not merely suggest
+# a verdict. In particular, 1 means completed-red while 6 means failed-fast with
+# the run and its artifacts still in flight; 2 and 7 split the two timeout
+# mechanisms.
+EXIT_REQUIRED_CHECK_FAILED_FAST = 6
+EXIT_WALL_CLOCK_TIMEOUT = 7
+
+EXIT_REASON_RUN_COMPLETED = "run_completed"
+EXIT_REASON_REQUIRED_CHECK_FAILED_FAST = "required_check_failed_fast"
+EXIT_REASON_HANG_DETECTED = "hang_detected"
+EXIT_REASON_WALL_CLOCK_TIMEOUT = "wall_clock_timeout"
+EXIT_REASON_UNRESOLVED = "unresolved"
 
 # Terminal (completed) conclusions that mean the job GENUINELY failed.
 #
@@ -550,11 +568,15 @@ class WatchOutcome:
     run_id: Optional[str]
     polls: int
     elapsed_s: float
+    exit_reason: str = EXIT_REASON_RUN_COMPLETED
+    run_completed: bool = True
 
     def to_json(self) -> dict:
         return {
             "result": self.result,
             "exit_code": self.exit_code,
+            "exit_reason": self.exit_reason,
+            "run_completed": self.run_completed,
             "run_id": self.run_id,
             "required": {
                 name: {"status": rc.status, "conclusion": rc.conclusion}
@@ -829,6 +851,8 @@ class Watcher:
         last_state_key: Optional[tuple] = None
         last_progress_at = start
         polls = 0
+        effective_no_progress_timeout_s = self.no_progress_timeout_s
+        single_job_adjustment_reported = False
 
         while True:
             now = self._clock()
@@ -841,6 +865,8 @@ class Watcher:
                     start,
                     polls,
                     last_required={},
+                    exit_code=EXIT_WALL_CLOCK_TIMEOUT,
+                    exit_reason=EXIT_REASON_WALL_CLOCK_TIMEOUT,
                 )
 
             try:
@@ -853,6 +879,29 @@ class Watcher:
             jobs = data.get("jobs") or []
             run_status = str(data.get("status", ""))
             run_conclusion = data.get("conclusion") or None
+
+            # A one-job re-run normally has exactly one transition (running →
+            # completed), so there may be no observable progress for the whole
+            # job duration. Defensively reject a shorter caller override and use
+            # the #1650 job-cap-safe default. The adjustment is explicit so the
+            # caller knows its requested timeout was not applied.
+            if (
+                run_status != "completed"
+                and len(jobs) == 1
+                and effective_no_progress_timeout_s
+                < DEFAULT_NO_PROGRESS_TIMEOUT_S
+            ):
+                effective_no_progress_timeout_s = DEFAULT_NO_PROGRESS_TIMEOUT_S
+                if not single_job_adjustment_reported:
+                    adjustment = (
+                        "watch-ci: single-job rerun detected; raising unsafe "
+                        f"--no-progress-timeout from {self.no_progress_timeout_s:.0f}s "
+                        f"to {effective_no_progress_timeout_s:.0f}s because a "
+                        "single job has no intermediate state transitions"
+                    )
+                    self._notice(adjustment)
+                    self._heartbeat(adjustment)
+                    single_job_adjustment_reported = True
 
             state_key = job_state_key(jobs)
             if state_key != last_state_key:
@@ -868,15 +917,17 @@ class Watcher:
                 return self._finalize(verdict, jobs, run_id, start, polls, run=data)
 
             # No-progress timeout (catches queued-forever / no-runner too).
-            if now - last_progress_at >= self.no_progress_timeout_s:
+            if now - last_progress_at >= effective_no_progress_timeout_s:
                 return self._hang(
                     "no job-state progress for "
-                    f"--no-progress-timeout ({self.no_progress_timeout_s:.0f}s); "
+                    f"--no-progress-timeout ({effective_no_progress_timeout_s:.0f}s); "
                     f"run still {run_status or 'unknown'}",
                     run_id,
                     start,
                     polls,
                     last_required=verdict.required,
+                    exit_code=EXIT_CODE[RESULT_HANG],
+                    exit_reason=EXIT_REASON_HANG_DETECTED,
                 )
 
             self._sleep(self.interval_s)
@@ -888,6 +939,8 @@ class Watcher:
         reason = verdict.reason
         signature = None
         likely_infra = False
+        run_completed = str((run or {}).get("status") or "") == "completed"
+        failed_fast = result == RESULT_FAILED and not run_completed
 
         # A signature is ONLY ever captured for a genuine failure. A cancelled /
         # superseded run has no failure to diagnose, so any signature attached
@@ -915,7 +968,11 @@ class Watcher:
 
         return WatchOutcome(
             result=result,
-            exit_code=EXIT_CODE[result],
+            exit_code=(
+                EXIT_REQUIRED_CHECK_FAILED_FAST
+                if failed_fast
+                else EXIT_CODE[result]
+            ),
             required=verdict.required,
             failing_jobs=verdict.failing_jobs,
             signature=signature,
@@ -924,12 +981,28 @@ class Watcher:
             run_id=run_id,
             polls=polls,
             elapsed_s=self._clock() - start,
+            exit_reason=(
+                EXIT_REASON_REQUIRED_CHECK_FAILED_FAST
+                if failed_fast
+                else EXIT_REASON_RUN_COMPLETED
+            ),
+            run_completed=run_completed,
         )
 
-    def _hang(self, reason, run_id, start, polls, last_required) -> WatchOutcome:
+    def _hang(
+        self,
+        reason,
+        run_id,
+        start,
+        polls,
+        last_required,
+        *,
+        exit_code,
+        exit_reason,
+    ) -> WatchOutcome:
         return WatchOutcome(
             result=RESULT_HANG,
-            exit_code=EXIT_CODE[RESULT_HANG],
+            exit_code=exit_code,
             required=last_required,
             failing_jobs=[],
             signature=None,
@@ -938,6 +1011,8 @@ class Watcher:
             run_id=run_id,
             polls=polls,
             elapsed_s=self._clock() - start,
+            exit_reason=exit_reason,
+            run_completed=False,
         )
 
     def _unresolved(self, reason, run_id, start, polls) -> WatchOutcome:
@@ -952,6 +1027,8 @@ class Watcher:
             run_id=run_id,
             polls=polls,
             elapsed_s=self._clock() - start,
+            exit_reason=EXIT_REASON_UNRESOLVED,
+            run_completed=False,
         )
 
 
@@ -997,6 +1074,15 @@ def render_human_summary(outcome: WatchOutcome) -> str:
         ),
     }[outcome.result]
     lines.append(f"watch-ci: {headline}")
+    if outcome.exit_reason == EXIT_REASON_REQUIRED_CHECK_FAILED_FAST:
+        lines.append(
+            "  WARNING: RUN IS STILL IN FLIGHT; this is a required-check "
+            "failed-fast exit, and artifacts are not final."
+        )
+        lines.append(
+            "  action: confirm the run reaches status=completed before treating "
+            "its conclusion or artifacts as authoritative."
+        )
     if outcome.run_id:
         lines.append(
             f"  run: {outcome.run_id}  ({outcome.polls} polls, {outcome.elapsed_s:.0f}s)"
@@ -1036,10 +1122,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "Token-free, hang-proof GitHub Actions run watcher. Runs ONCE, blocks "
             "while the run is in flight (zero LLM tokens while waiting), then prints "
-            "a compact summary + a final JSON line. Exit: 0 green / 1 real-fail / "
+            "a compact summary + a final JSON line. The JSON result is the CI "
+            "semantic outcome; exit_code and exit_reason identify why watching "
+            "stopped. Exit: 0 green / 1 real-fail / "
             "2 hang / 3 unresolved / 4 superseded (a newer run replaced this one — "
             "routine on main, NOT a failure) / 5 no-verdict (cancelled, so nothing "
-            "was decided)."
+            "was decided) / 6 required-check failed-fast (run still in flight) / "
+            "7 wall-clock timeout."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -1065,13 +1154,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_NO_PROGRESS_TIMEOUT_S,
         help="Exit 2 (hang) if no job changes state for this many seconds "
-        "(also catches queued-forever / no-runner).",
+        "(also catches queued-forever / no-runner). Unsafe shorter values are "
+        "raised to the job-cap-safe default when a single-job rerun is detected.",
     )
     p.add_argument(
         "--max-wall-clock",
         type=float,
         default=DEFAULT_MAX_WALL_CLOCK_S,
-        help="Exit 2 (hang) if the run exceeds this many seconds total.",
+        help="Exit 7 (wall-clock timeout) if the run exceeds this many seconds total.",
     )
     p.add_argument(
         "--required-check",
@@ -1128,13 +1218,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             branch=args.branch,
             workflow=args.workflow,
         )
+        summary = render_human_summary(outcome)
+        final_json = json.dumps(outcome.to_json(), sort_keys=True)
+        if log_fh is not None:
+            # Issue #1873: the launching shell / `systemd-run --pipe` may vanish
+            # while the transient unit survives. Persist the verdict in the
+            # same durable file as the heartbeats before closing it.
+            log_fh.write(f"{summary}\n{final_json}\n")
+            log_fh.flush()
     finally:
         if log_fh is not None:
             log_fh.close()
 
     # Compact, token-cheap output: human summary then the final JSON line.
-    print(render_human_summary(outcome))
-    print(json.dumps(outcome.to_json(), sort_keys=True))
+    print(summary)
+    print(final_json)
     return outcome.exit_code
 
 

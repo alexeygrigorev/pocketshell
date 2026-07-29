@@ -10,10 +10,12 @@ Exit-code contract under test:
 
     0  green       — all required checks passed
     1  failed      — a required check GENUINELY failed
-    2  hang         — no progress past --no-progress-timeout OR wall-clock cap
+    2  hang         — no progress past --no-progress-timeout
     3  unresolved  — run / inputs couldn't be resolved (or gh stayed broken)
     4  superseded  — a newer run replaced this one (routine concurrency-cancel)
     5  no_verdict  — cancelled, so no verdict was reached (issue #1650)
+    6  failed_fast  — required check failed while the run is still in flight
+    7  wall_timeout — max wall-clock reached while the run is still in flight
 
 The load-bearing case is the HANG one: a run whose jobs NEVER change state must
 exit 2, not loop forever. The test drives a virtual clock so a stalled run is
@@ -33,6 +35,7 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WATCH_CI_PATH = _REPO_ROOT / "scripts" / "watch-ci.py"
+_ONCALL_PROMPT_PATH = _REPO_ROOT / ".claude" / "agents" / "oncall-engineer.md"
 
 
 def _load_module():
@@ -193,11 +196,37 @@ def test_required_failure_exits_1_and_names_job():
     outcome = watcher.watch(run_id="123")
     assert outcome.result == wci.RESULT_FAILED
     assert outcome.exit_code == 1
+    assert outcome.exit_reason == wci.EXIT_REASON_RUN_COMPLETED
+    assert outcome.run_completed is True
     assert "Unit tests" in outcome.failing_jobs
     # Signature captured from the failed-step log.
     assert outcome.signature is not None
     assert "FAILED" in outcome.signature
     assert outcome.likely_infra is False
+
+
+def test_required_failure_while_run_in_progress_has_distinct_fail_fast_exit():
+    """Issue #1873: an early required-check failure is not a completed run.
+
+    The distinct exit code + cause prevent an on-call from treating the
+    watcher's exit as evidence that artifacts are final.
+    """
+    gh = FakeGh()
+    jobs = _all_required_jobs("in_progress", None)
+    jobs[0] = _job("Unit tests", "completed", "failure", db_id=99)
+    gh.queue_run_state(status="in_progress", conclusion=None, jobs=jobs)
+    gh.log_text = "Unit tests\tRun pytest\t2026-07-29T10:00:00Z BUILD FAILED\n"
+    watcher, _ = _make_watcher(gh)
+
+    outcome = watcher.watch(run_id="123")
+
+    assert outcome.result == wci.RESULT_FAILED
+    assert outcome.exit_code == wci.EXIT_REQUIRED_CHECK_FAILED_FAST
+    assert outcome.exit_reason == wci.EXIT_REASON_REQUIRED_CHECK_FAILED_FAST
+    assert outcome.run_completed is False
+    summary = wci.render_human_summary(outcome)
+    assert "RUN IS STILL IN FLIGHT" in summary
+    assert "artifacts are not final" in summary
 
 
 def test_cancelled_run_is_not_a_failure():
@@ -246,6 +275,8 @@ def test_no_progress_stall_exits_2_does_not_loop_forever():
     outcome = watcher.watch(run_id="123")
     assert outcome.result == wci.RESULT_HANG
     assert outcome.exit_code == 2
+    assert outcome.exit_reason == wci.EXIT_REASON_HANG_DETECTED
+    assert outcome.run_completed is False
     assert "no job-state progress" in outcome.reason
     # Proven bounded: it stopped well before the wall-clock cap.
     assert clock.now() < 200.0
@@ -269,12 +300,11 @@ def test_progress_then_stall_resets_no_progress_window():
     assert outcome.exit_code == 2
 
 
-# ── 2 hang: wall-clock cap ───────────────────────────────────────────────────
+# ── 7 wall-clock timeout ─────────────────────────────────────────────────────
 
 
-def test_over_wall_clock_exits_2():
-    """A run that keeps making progress but never finishes hits the wall-clock
-    cap and exits 2 — never waits forever even while 'progressing'."""
+def test_over_wall_clock_exits_7():
+    """A progressing run that never finishes gets the distinct wall-time code."""
     gh = FakeGh()
     # Each poll reports a DIFFERENT job state so the no-progress timer keeps
     # resetting; only the wall-clock cap can stop it.
@@ -289,9 +319,47 @@ def test_over_wall_clock_exits_2():
     )
     outcome = watcher.watch(run_id="123")
     assert outcome.result == wci.RESULT_HANG
-    assert outcome.exit_code == 2
+    assert outcome.exit_code == wci.EXIT_WALL_CLOCK_TIMEOUT
+    assert outcome.exit_reason == wci.EXIT_REASON_WALL_CLOCK_TIMEOUT
     assert "wall-clock" in outcome.reason
     assert clock.now() >= 50.0
+
+
+def test_single_job_rerun_defensively_raises_too_short_no_progress_timeout():
+    """Issue #1873: a one-job rerun has no intermediate transitions.
+
+    A caller-provided 3000s timeout must not falsely classify a healthy
+    52-minute job as hung; detecting the one-job shape raises the effective
+    guard to the watcher-safe default.
+    """
+    gh = FakeGh()
+    single_job = [_job("Unit tests", "in_progress", None, db_id=99)]
+    for _ in range(313):
+        gh.queue_run_state(
+            status="in_progress",
+            conclusion=None,
+            jobs=single_job,
+        )
+    gh.queue_run_state(
+        status="completed",
+        conclusion="success",
+        jobs=[_job("Unit tests", "completed", "success", db_id=99)],
+    )
+    notices: list[str] = []
+    watcher, clock = _make_watcher(
+        gh,
+        interval_s=10.0,
+        no_progress_timeout_s=3000.0,
+        max_wall_clock_s=10000.0,
+        notice=notices.append,
+    )
+
+    outcome = watcher.watch(run_id="123")
+
+    assert clock.now() > 3000.0
+    assert outcome.result == wci.RESULT_GREEN
+    assert any("single-job rerun" in notice for notice in notices)
+    assert any("6000s" in notice for notice in notices)
 
 
 # ── 3 unresolved ─────────────────────────────────────────────────────────────
@@ -567,6 +635,39 @@ def test_help_documents_flags(capsys):
         assert flag in help_text
 
 
+def test_help_states_exact_wall_clock_exit_and_json_field_relationship():
+    """Reviewer follow-up: public wording is part of the exit contract.
+
+    Merely asserting that the flags exist let contradictory exit-2/exit-7 help
+    stay green. Assert the option and JSON-field contract at their sources so
+    argparse wrapping cannot weaken the check.
+    """
+    parser = wci.build_arg_parser()
+    max_wall_clock = next(
+        action
+        for action in parser._actions
+        if "--max-wall-clock" in action.option_strings
+    )
+
+    assert max_wall_clock.help == (
+        "Exit 7 (wall-clock timeout) if the run exceeds this many seconds total."
+    )
+    assert (
+        "The JSON result is the CI semantic outcome; exit_code and exit_reason "
+        "identify why watching stopped."
+    ) in parser.description
+
+
+def test_module_header_distinguishes_semantic_result_from_termination_contract():
+    """The module-level public contract must not equate result with exit cause."""
+    assert (
+        "Final JSON contract: `result` is the semantic CI outcome; `exit_code` "
+        "and `exit_reason` identify why the watcher stopped, and `run_completed` "
+        "says whether artifacts are final."
+    ) in wci.__doc__
+    assert "Exit-code contract (also the final JSON's `result`)" not in wci.__doc__
+
+
 def test_main_prints_compact_summary_and_json(monkeypatch, capsys):
     """main() should print a human summary + a final parseable JSON line and
     return the contract exit code, with stdout staying compact."""
@@ -589,6 +690,43 @@ def test_main_prints_compact_summary_and_json(monkeypatch, capsys):
     assert "required" in payload
 
 
+def test_main_writes_final_summary_and_json_to_log_file(monkeypatch, tmp_path, capsys):
+    """Issue #1873 owner follow-up: stdout may disappear with its wrapper.
+
+    The durable log must therefore contain the exact final human summary and
+    machine-readable JSON verdict, not only polling heartbeats.
+    """
+    gh = FakeGh()
+    gh.queue_run_state(status="completed", conclusion="success", jobs=_all_required_jobs())
+    monkeypatch.setattr(wci, "GhRunner", lambda *a, **k: gh)
+    log_path = tmp_path / "watch.log"
+
+    rc = wci.main(
+        ["--run-id", "123", "--quiet", "--log-file", str(log_path)]
+    )
+
+    assert rc == 0
+    stdout = capsys.readouterr().out.strip()
+    durable = log_path.read_text(encoding="utf-8")
+    assert stdout in durable
+    payload = json.loads(durable.strip().splitlines()[-1])
+    assert payload["result"] == "green"
+    assert payload["exit_reason"] == wci.EXIT_REASON_RUN_COMPLETED
+    assert payload["run_completed"] is True
+
+
+def test_oncall_recipe_preserves_verdict_and_requires_completed_confirmation():
+    """Issue #1873: the durable operating instructions must close both traps."""
+    prompt = _ONCALL_PROMPT_PATH.read_text(encoding="utf-8")
+
+    assert "Do not add `--collect`" in prompt
+    assert "--log-file" in prompt
+    assert "systemctl --user reset-failed" in prompt
+    assert "Always confirm\n`status=completed`" in prompt
+    assert "required_check_failed_fast" in prompt
+    assert "artifacts are not final" in prompt
+
+
 def test_render_human_summary_under_25_lines_on_failure():
     outcome = wci.WatchOutcome(
         result=wci.RESULT_FAILED,
@@ -601,6 +739,8 @@ def test_render_human_summary_under_25_lines_on_failure():
         run_id="123",
         polls=4,
         elapsed_s=42.0,
+        exit_reason=wci.EXIT_REASON_RUN_COMPLETED,
+        run_completed=True,
     )
     text = wci.render_human_summary(outcome)
     assert text.count("\n") < 25

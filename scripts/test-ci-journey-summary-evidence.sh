@@ -56,6 +56,75 @@ done
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
+# ---------------------------------------------------------------------------
+# The "exactly ONE journey class" selector (issue #1862).
+#
+# `run_real_suite` needs a run in which exactly ONE journey class is selected, so
+# the fixture's failing class is unambiguous and the budget cases below have no
+# second loop iteration. That used to be spelled `SHARD_TOTAL=400 / INDEX=0`,
+# which worked only because membership was `array_index % total` — index 0 was
+# the array's first entry and nothing else could land on bucket 0.
+#
+# Membership is now `hash(class_name) % total`, so bucket 0 of 400 is an
+# arbitrary (possibly empty, possibly multi-class) set. Ask the REAL selection
+# which bucket holds exactly one class, and use that bucket AND that class. The
+# fixture's intent is preserved exactly and is no longer coupled to the
+# partitioning arithmetic.
+SOLO_SHARD_TOTAL=400
+# shellcheck source=scripts/ci-journey-class-selection-functions.sh
+source "$SCRIPT_DIR/ci-journey-class-selection-functions.sh"
+declare -F journey_class_shard_hash > /dev/null \
+  || fail "(setup) the selection helper no longer exposes journey_class_shard_hash — re-derive the single-class shard below against whatever replaced it (do NOT fall back to array position, issue #1862)"
+
+SOLO_JOURNEY_CLASSES=()
+mapfile -t SOLO_JOURNEY_CLASSES < <(
+  awk '
+    /^JOURNEY_CLASSES=\(/ { f = 1; next }
+    /^\)/                 { f = 0 }
+    f && match($0, /"[^"]+"/) {
+      s = substr($0, RSTART + 1, RLENGTH - 2)
+      gsub(/\$FQCN_PREFIX/, "com.pocketshell.app.proof", s)
+      print s
+    }
+  ' "$SUITE"
+)
+(( ${#SOLO_JOURNEY_CLASSES[@]} > 0 )) \
+  || fail "(setup) could not parse JOURNEY_CLASSES out of $SUITE"
+
+# One O(N) pass to find a bucket holding exactly one class...
+declare -A solo_bucket_count=() solo_bucket_class=()
+for solo_c in "${SOLO_JOURNEY_CLASSES[@]}"; do
+  solo_b=$(( $(journey_class_shard_hash "$solo_c") % SOLO_SHARD_TOTAL ))
+  solo_bucket_count[$solo_b]=$(( ${solo_bucket_count[$solo_b]:-0} + 1 ))
+  solo_bucket_class[$solo_b]="$solo_c"
+done
+# Lowest singleton bucket, NOT the first one bash's hash order happens to yield:
+# associative-array iteration order is not guaranteed stable across bash builds,
+# and a fixture that silently tests a different class on a different runner is
+# exactly the kind of irreproducibility this suite exists to remove.
+SOLO_SHARD_INDEX=""; SOLO_CLASS=""
+for solo_b in $(printf '%s\n' "${!solo_bucket_count[@]}" | sort -n); do
+  if (( solo_bucket_count[$solo_b] == 1 )); then
+    SOLO_SHARD_INDEX="$solo_b"; SOLO_CLASS="${solo_bucket_class[$solo_b]}"
+    break
+  fi
+done
+[[ "$SOLO_SHARD_INDEX" =~ ^[0-9]+$ && -n "$SOLO_CLASS" ]] \
+  || fail "(setup) no shard of $SOLO_SHARD_TOTAL holds exactly ONE journey class — the single-class fixture below would be ambiguous"
+
+# ...then CONFIRM it against the REAL production selector, so the fixture never
+# runs on a bucket the shipping code disagrees about. A mismatch is a hard fail,
+# never a fallback.
+JOURNEY_CLASSES=("${SOLO_JOURNEY_CLASSES[@]}")
+EFFECTIVE_JOURNEY_CLASSES=()
+POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$SOLO_SHARD_TOTAL" \
+  POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$SOLO_SHARD_INDEX" \
+  select_effective_journey_classes > /dev/null
+(( ${#EFFECTIVE_JOURNEY_CLASSES[@]} == 1 )) && [[ "${EFFECTIVE_JOURNEY_CLASSES[0]}" == "$SOLO_CLASS" ]] \
+  || fail "(setup) the real selector runs ${#EFFECTIVE_JOURNEY_CLASSES[@]} class(es) on shard $SOLO_SHARD_INDEX of $SOLO_SHARD_TOTAL (${EFFECTIVE_JOURNEY_CLASSES[*]:-none}), not just $SOLO_CLASS — the single-class fixture below would be ambiguous"
+unset JOURNEY_CLASSES EFFECTIVE_JOURNEY_CLASSES
+echo "   single-class fixture: shard $SOLO_SHARD_INDEX of $SOLO_SHARD_TOTAL selects only $SOLO_CLASS"
+
 # The registry under test, read from the real helper.
 # shellcheck source=scripts/ci-journey-core-terminal-functions.sh
 source "$CORE_TERMINAL_FN"
@@ -430,8 +499,8 @@ run_real_suite() {
     JOURNEY_NO_OUTPUT_TIMEOUT_SECS=25 \
     JOURNEY_CLASS_KILL_AFTER_SECS=1 \
     JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
-    POCKETSHELL_JOURNEY_CI_SHARD_TOTAL=400 \
-    POCKETSHELL_JOURNEY_CI_SHARD_INDEX=0 \
+    POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$SOLO_SHARD_TOTAL" \
+    POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$SOLO_SHARD_INDEX" \
     "$@" \
     bash "$ws/scripts/ci-journey-suite.sh" > "$ws/suite.log" 2>&1
   SUITE_RC=$?
@@ -522,8 +591,9 @@ echo "== (c) the non-proof reddening conditions still carry their evidence =="
 # (c1) A journey CLASS that fails both attempts.
 ws="$SANDBOX/journey-class"
 make_workspace "$ws"
-first_class="$(sed -n 's/^  "\(com\.[A-Za-z0-9_.$#]*\)".*/\1/p;s/^  "\$FQCN_PREFIX\.\([A-Za-z0-9_.$#]*\)".*/com.pocketshell.app.proof.\1/p' "$SUITE" | head -n 1)"
-[[ -n "$first_class" ]] || fail "(c1) could not read the first journey class out of $SUITE"
+# Issue #1862: the ONE class this single-class run selects — resolved from the
+# real selection at the top of this file, not from the array's first entry.
+first_class="$SOLO_CLASS"
 run_real_suite "$ws" JOURNEY_STUB_FAIL_CLASS="$first_class"
 [[ "$SUITE_RC" -ne 0 ]] || fail "(c1) a journey class failing both attempts must redden the suite"
 grep -qE 'Failed BOTH attempts' "$ws/artifacts/ci-journey/summary.md" \
@@ -545,8 +615,8 @@ pass "(c1) FAILED_CLASSES -> failed-both section -> first_failure=true -> RED [$
 #   budget=1s elapsed=0s remaining=1s => NOT exhausted -> suite exits 0 -> FAIL
 #   budget=1s elapsed=1s remaining=0s => EXHAUSTED     -> suite RED     -> pass
 #
-# and `run_real_suite` pins POCKETSHELL_JOURNEY_CI_SHARD_TOTAL=400 so exactly ONE
-# class is selected — there is no second loop iteration to catch the budget
+# and `run_real_suite` pins the resolved single-class shard (SOLO_SHARD_INDEX of
+# SOLO_SHARD_TOTAL, issue #1862) so exactly ONE class is selected — there is no second loop iteration to catch the budget
 # later, making a single missed tick terminal. The hosted runner lost that race
 # 2/2 (red `main` @ ae368467) while the dev box won it 5/5 on the identical
 # commit. A guard whose whole purpose is to stop the gate reporting false greens

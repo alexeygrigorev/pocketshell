@@ -66,7 +66,7 @@ jobs:
           chmod +x scripts/render.sh scripts/render-selftest.sh
           scripts/render-selftest.sh
 
-      # Issue #657 (F4): test-validity grep-guard. Flags the highest-signal
+      # Issue #657/#1857 (F4): test-validity guard. Flags the highest-signal
       # test anti-patterns the #657 audit catalogued — chiefly an IME/keyboard/
       # geometry assertion gated behind an `assumeTrue(...)` self-skip, which on
       # the CI swiftshader AVD silently does NOT run (the real soft IME often
@@ -82,8 +82,12 @@ jobs:
       # the #1430 SEAM1 detector (unvetted connected-test state-injection seams —
       # the #1158 forceActivePaneAltBufferForTest cheat class), and its self-test
       # (below) plants a synthetic cheat + a vetted counterpart to prove SEAM1
-      # (and the other detectors) still fire red / stay green each push.
-      - name: Test-validity guard (issue #657/#848/#1048/#1154/#1430)
+      # (and the other detectors) still fire red / stay green each push. The
+      # #1857 A5L self-test also plants a topic-independent
+      # assumeTrue("x", false) mutant plus legal block/newline-comment callee
+      # trivia, so literal-boolean self-skips cannot hide behind the older
+      # IME/keyboard vocabulary filter or raw-source call formatting.
+      - name: Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1857)
         run: |
           chmod +x scripts/check-test-validity.sh scripts/check-test-validity-selftest.sh
           scripts/check-test-validity.sh

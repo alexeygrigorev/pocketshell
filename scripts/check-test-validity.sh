@@ -23,6 +23,16 @@
 #       `// JUSTIFIED:` comment (on the same line or the line directly above),
 #       e.g. an SDK-version `assumeTrue(Build.VERSION.SDK_INT >= ...)` guard.
 #
+#   A5L (HARD-FAIL on a NEW occurrence) — an `assumeTrue(...)` call whose
+#       condition argument is the literal `false`, or an `assumeFalse(...)`
+#       whose condition is literal `true`, in ANY test source. These calls make
+#       the remainder of the test unreachable regardless of topic or runtime.
+#       The detector lexes Kotlin strings/comments away, matches the call's
+#       closing parenthesis, and selects the last top-level argument, so nested
+#       calls, message overloads, multiline calls, redundant parentheses, and
+#       trailing commas do not hide an unconditional skip. Known survivors are
+#       baselined by exact file:line and must name a tracking issue.
+#
 #   A4 / A2 (ADVISORY warning) — a `*StandIn` / `*Proxy` class or composable used
 #       in a file whose name implies it is proving an occlusion / layout /
 #       attach-cost symptom (Latch / Squish / Reachability / Chrome / Occlusion).
@@ -136,7 +146,7 @@
 # intended direction of travel; a stale baseline entry is pruned + noted.
 #
 # Usage:
-#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/C1/J1/TIMING1/SEAM1 hard-fail smell
+#   scripts/check-test-validity.sh            # guard mode (CI): exit 1 on a NEW A5/A5L/C1/J1/TIMING1/SEAM1 hard-fail smell
 #   scripts/check-test-validity.sh --report   # report ALL findings incl. baseline; never fails
 #   scripts/check-test-validity.sh --self-test # run the synthetic red->green proof (delegates to check-test-validity-selftest.sh)
 #
@@ -232,6 +242,16 @@ fi
 A5_BASELINE=(
   "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerSheetImeReachabilityTest.kt"   # issue #615
   "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerImeLayoutRegressionTest.kt"    # issue #682
+)
+
+# --------------------------------------------------------------------------
+# BASELINE — A5L (#1857): unconditional literal-boolean self-skips. Unlike the
+# older path-only baselines, these are exact occurrence keys so a second skip in
+# the same file cannot hide behind the known survivor. Every entry MUST carry a
+# tracking issue after `|`; stale/malformed entries hard-fail.
+# --------------------------------------------------------------------------
+A5_LITERAL_BASELINE=(
+  "app/src/androidTest/java/com/pocketshell/app/proof/RideThroughInterruptionE2eTest.kt:61|#1678"
 )
 
 # --------------------------------------------------------------------------
@@ -443,6 +463,12 @@ assume_is_ime_skip() {
 declare -a A5_NEW=()
 declare -a A5_KNOWN=()
 declare -a A5_JUSTIFIED=()
+declare -a A5_LITERAL_NEW=()
+declare -a A5_LITERAL_KNOWN=()
+declare -a A5_LITERAL_STALE_BASELINE=()
+declare -a A5_LITERAL_BASELINE_ERRORS=()
+declare -A A5_LITERAL_BASELINE_ISSUE=()
+declare -A A5_LITERAL_BASELINE_SEEN=()
 
 scan_a5() {
   local file
@@ -476,6 +502,155 @@ scan_a5() {
         A5_NEW+=("$file:$lineno")
       fi
     done < <(grep -nE '(^|[^.[:alnum:]])(assumeTrue|Assume\.assumeTrue)[[:space:]]*\(' "$file" | cut -d: -f1)
+  done
+
+  scan_a5_literal
+}
+
+# Print `<line>:<assumeTrue|assumeFalse>` for calls whose final top-level
+# condition argument is the unconditional skip literal. The input is the CODE
+# view from sanitize_kotlin_source(), so strings and comments cannot spoof a
+# call or a literal while executable `${...}` template bodies remain visible.
+find_literal_assume_calls() {
+  local code_file="$1"
+  awk '
+    function trim(s) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      return s
+    }
+    function outer_parens_wrap_all(s,    i, depth, c) {
+      if (substr(s, 1, 1) != "(" || substr(s, length(s), 1) != ")") return 0
+      depth = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c == "(") depth++
+        else if (c == ")") {
+          depth--
+          if (depth == 0 && i < length(s)) return 0
+          if (depth < 0) return 0
+        }
+      }
+      return depth == 0
+    }
+    function literal_value(s) {
+      gsub(/[[:space:]]/, "", s)
+      while (outer_parens_wrap_all(s)) s = substr(s, 2, length(s) - 2)
+      return s
+    }
+    function is_ident(c) {
+      return c ~ /[[:alnum:]_]/
+    }
+    function line_for(pos,    prefix, count) {
+      prefix = substr(source, 1, pos - 1)
+      count = gsub(/\n/, "\n", prefix)
+      return count + 1
+    }
+    {
+      source = source $0 "\n"
+    }
+    END {
+      for (i = 1; i <= length(source); i++) {
+        name = ""
+        if (substr(source, i, 10) == "assumeTrue") name = "assumeTrue"
+        else if (substr(source, i, 11) == "assumeFalse") name = "assumeFalse"
+        else continue
+
+        before = (i > 1) ? substr(source, i - 1, 1) : ""
+        after = substr(source, i + length(name), 1)
+        if (is_ident(before) || is_ident(after)) continue
+
+        open = i + length(name)
+        while (substr(source, open, 1) ~ /[[:space:]]/) open++
+        if (substr(source, open, 1) != "(") continue
+
+        depth = 1
+        arg_start = open + 1
+        previous_arg = ""
+        close_pos = 0
+        for (j = open + 1; j <= length(source); j++) {
+          c = substr(source, j, 1)
+          if (c == "(") {
+            depth++
+          } else if (c == ")") {
+            depth--
+            if (depth == 0) {
+              current_arg = trim(substr(source, arg_start, j - arg_start))
+              condition = (current_arg != "") ? current_arg : previous_arg
+              close_pos = j
+              break
+            }
+          } else if (c == "," && depth == 1) {
+            current_arg = trim(substr(source, arg_start, j - arg_start))
+            if (current_arg != "") previous_arg = current_arg
+            arg_start = j + 1
+          }
+        }
+        if (close_pos == 0) continue
+
+        condition = literal_value(condition)
+        if ((name == "assumeTrue" && condition == "false") ||
+            (name == "assumeFalse" && condition == "true")) {
+          print line_for(i) ":" name
+        }
+      }
+    }
+  ' "$code_file"
+}
+
+scan_a5_literal() {
+  local entry key issue
+  for entry in "${A5_LITERAL_BASELINE[@]:-}"; do
+    [[ -n "$entry" ]] || continue
+    key="${entry%%|*}"
+    issue="${entry#*|}"
+    if [[ "$entry" != *"|"* || ! "$key" =~ ^.+\.kt:[0-9]+$ || ! "$issue" =~ ^#[0-9]+$ ]]; then
+      A5_LITERAL_BASELINE_ERRORS+=("$entry -> expected path.kt:line|#issue")
+      continue
+    fi
+    A5_LITERAL_BASELINE_ISSUE["$key"]="$issue"
+  done
+
+  local lex_dir
+  lex_dir="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-a5l-lex.XXXXXX")" || {
+    A5_LITERAL_BASELINE_ERRORS+=("could not create lexer scratch directory")
+    return
+  }
+
+  local file code_file comment_file hits hit line kind finding_key
+  for file in "${ALL_TEST_FILES[@]}"; do
+    [[ -n "$file" ]] || continue
+    # This is only an affordability prefilter. Do NOT require raw-source
+    # whitespace + `(` here: Kotlin permits comments between a callee and its
+    # argument list (`assumeTrue /* trivia */ (false)` and newline `//` trivia).
+    # sanitize_kotlin_source() turns that legal trivia into whitespace before
+    # find_literal_assume_calls() performs the authoritative call parse.
+    grep -Eq '(assumeTrue|assumeFalse)' "$file" || continue
+    code_file="$lex_dir/code"
+    comment_file="$lex_dir/comments"
+    sanitize_kotlin_source "$file" "$code_file" "$comment_file"
+    if ! hits="$(find_literal_assume_calls "$code_file" 2>&1)"; then
+      A5_LITERAL_BASELINE_ERRORS+=("$file -> literal-assume parser failed: $hits")
+      continue
+    fi
+    while IFS= read -r hit; do
+      [[ -n "$hit" ]] || continue
+      line="${hit%%:*}"
+      kind="${hit#*:}"
+      finding_key="$file:$line"
+      if [[ -n "${A5_LITERAL_BASELINE_ISSUE[$finding_key]:-}" ]]; then
+        A5_LITERAL_KNOWN+=("$finding_key ($kind; ${A5_LITERAL_BASELINE_ISSUE[$finding_key]})")
+        A5_LITERAL_BASELINE_SEEN["$finding_key"]=1
+      else
+        A5_LITERAL_NEW+=("$finding_key ($kind)")
+      fi
+    done <<< "$hits"
+  done
+  rm -rf -- "$lex_dir"
+
+  for key in "${!A5_LITERAL_BASELINE_ISSUE[@]}"; do
+    if [[ -z "${A5_LITERAL_BASELINE_SEEN[$key]:-}" ]]; then
+      A5_LITERAL_STALE_BASELINE+=("$key (${A5_LITERAL_BASELINE_ISSUE[$key]})")
+    fi
   done
 }
 
@@ -1466,7 +1641,7 @@ scan_seam1
 scan_void1
 
 echo "=============================================================="
-echo " Test-validity guard (issue #657 / F4; extended #848 / #850 / #1048)"
+echo " Test-validity guard (issue #657 / F4; extended #848 / #850 / #1048 / #1857)"
 echo " Scanned test roots:"
 for r in "${TEST_ROOTS[@]}"; do echo "   - $r/**/*.kt"; done
 echo " Connect-path RPC sources: $RPC_SOURCE_ROOT/**/*RemoteSource.kt (+ FolderListViewModel.kt)"
@@ -1496,6 +1671,10 @@ print_list() {
 print_list "A5 — NEW unjustified IME-availability assumeTrue self-skip [HARD FAIL]" "${A5_NEW[@]:-}"
 print_list "A5 — KNOWN baseline (catalogued by #657; rewrite is per-issue follow-up) [advisory]" "${A5_KNOWN[@]:-}"
 print_list "A5 — JUSTIFIED (opted out via // JUSTIFIED:) [advisory]" "${A5_JUSTIFIED[@]:-}"
+print_list "A5L — NEW unconditional literal-boolean assume self-skip [HARD FAIL]" "${A5_LITERAL_NEW[@]:-}"
+print_list "A5L — KNOWN exact-occurrence baseline (tracking issue required) [advisory]" "${A5_LITERAL_KNOWN[@]:-}"
+print_list "A5L — STALE exact-occurrence baseline [HARD FAIL]" "${A5_LITERAL_STALE_BASELINE[@]:-}"
+print_list "A5L — malformed baseline entry [HARD FAIL]" "${A5_LITERAL_BASELINE_ERRORS[@]:-}"
 print_list "A4/A2 — StandIn/Proxy in a smell-named proof file [advisory]" "${A4_FINDINGS[@]:-}"
 print_list "C1 — NEW unjustified assumeFalse(isRunningOnCi()) self-skip outside fault classes [HARD FAIL]" "${C1_NEW[@]:-}"
 print_list "C1 — KNOWN baseline (opt-in fault/Docker fixture skip; #848) [advisory]" "${C1_KNOWN[@]:-}"
@@ -1535,6 +1714,9 @@ echo "Corrective models:"
 echo " A5/C1  app/src/androidTest/java/com/pocketshell/app/composer/"
 echo "        PromptComposerImeSquishProofTest.kt (#780) — synthetic"
 echo "        inset + boundsInRoot containment + HARD assert, no skip."
+echo " A5L    remove unconditional assumeTrue(..., false) /"
+echo "        assumeFalse(..., true); a temporary exact-occurrence baseline"
+echo "        must name the issue that owns making the test executable (#1857)."
 echo " FAKE1  add a connect-RPC FAULT case (old/missing CLI -> non-zero,"
 echo "        never-returns/hang, timeout) so Loading must still resolve"
 echo "        (the v0.4.10 #847 gap; fixture work tracked in #849)."
@@ -1562,10 +1744,13 @@ echo "        opt-out). This is"
 echo "        the #1158 forceActivePaneAltBufferForTest cheat class (#1430/#848)."
 echo "--------------------------------------------------------------"
 
-# Collect the HARD-FAIL categories (A5 + C1 + J1 + TIMING1 + SEAM1 + V1).
+# Collect the HARD-FAIL categories (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1).
 real_hard_fail=()
 for x in \
   "${A5_NEW[@]:-}" \
+  "${A5_LITERAL_NEW[@]:-}" \
+  "${A5_LITERAL_STALE_BASELINE[@]:-}" \
+  "${A5_LITERAL_BASELINE_ERRORS[@]:-}" \
   "${C1_NEW[@]:-}" \
   "${J1_NEW[@]:-}" \
   "${J1_STALE_BASELINE[@]:-}" \
@@ -1585,12 +1770,12 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1 baselines when a class is promoted or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758/#1857)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An unconditional assumeTrue(..., false) / assumeFalse(..., true) makes the remainder of a test unreachable and must be removed; an exact survivor baseline requires a tracking issue (#1857). An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1/A5L baselines when a class or exact occurrence is promoted, moved, or deleted."
   echo
-  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + C1 + J1 + TIMING1 + SEAM1 + V1)."
+  echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
   exit 1
 fi
 
 echo
-echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep-before-assert flakes, unvetted state-injection seams, or non-void androidTest @Test methods (A5 + C1 + J1 + TIMING1 + SEAM1 + V1)."
+echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep-before-assert flakes, unvetted state-injection seams, or non-void androidTest @Test methods (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
 exit 0

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Self-test for scripts/check-test-validity.sh (issue #850).
 #
-# For each detector added for #848/#850 (C1, FAKE1, AWAIT1, J1) and the
-# pre-existing A5, this driver plants a BAD fixture (the smell) and a GOOD fixture (the
-# corrective shape), runs the guard, and asserts the bad fixture is reported as
-# a finding while the good fixture is NOT — the red->green proof for the
-# detector itself. It also asserts the guard HARD-FAILS (exit 1) when an
-# unjustified hard-fail smell (A5 / C1 / J1) is planted, and PASSES (exit 0) when
-# only the corrective shapes are present.
+# For each detector added for #848/#850 (C1, FAKE1, AWAIT1, J1), the
+# pre-existing A5, and #1857 A5L, this driver plants a BAD fixture (the smell)
+# and a GOOD fixture (the corrective shape), runs the guard, and asserts the bad
+# fixture is reported as a finding while the good fixture is NOT — the
+# red->green proof for the detector itself. It also asserts the guard HARD-FAILS
+# (exit 1) when an unjustified hard-fail smell (A5 / A5L / C1 / J1) is planted,
+# and PASSES (exit 0) when only the corrective shapes are present.
 #
 # Fixtures are planted under throwaway subdirectories of the REAL scanned test
 # roots (so the guard's `find` picks them up unchanged) and removed on exit.
@@ -392,11 +392,11 @@ assert_report present "Await1BadRemoteSource.kt" "AWAIT1 — NEW" "AWAIT1 fires 
 assert_report absent  "Await1GoodRemoteSource.kt" "AWAIT1 — NEW" "AWAIT1 spares a withTimeout-bounded connect-path RPC seam"
 
 # --------------------------------------------------------------------------
-# A5 — IME-availability assumeTrue self-skip (pre-existing detector; confirm it
-# still fires now that the scan covers every test root).
+# A5 — assumeTrue self-skip. Confirm the pre-existing IME detector and the
+# topic-independent literal-false detector both fire.
 # --------------------------------------------------------------------------
 echo
-echo "[A5] IME-availability assumeTrue self-skip (regression of pre-existing detector)"
+echo "[A5] assumeTrue self-skip (IME heuristic + topic-independent literal false)"
 
 cat > "$ANDROID_FIX_DIR/A5BadImeTest.kt" <<'KT'
 package com.pocketshell.app.validityselftest
@@ -407,6 +407,71 @@ class A5BadImeTest {
         assumeTrue(imeShown())
     }
     private fun imeShown() = false
+}
+KT
+
+cat > "$TEST_FIX_DIR/A5LBadGenericLiteralFalseTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+import org.junit.Assume.assumeTrue
+class A5LBadGenericLiteralFalseTest {
+    fun loadBearingAssertion() {
+        assumeTrue("x", false)
+        error("unreachable")
+    }
+}
+KT
+
+cat > "$TEST_FIX_DIR/A5LBadParenAwareLiteralTrueTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+import org.junit.Assume
+class A5LBadParenAwareLiteralTrueTest {
+    fun loadBearingAssertion() {
+        Assume.assumeFalse(
+            reasonWithNestedCall(listOf(1, 2)),
+            ((true)),
+        )
+        error("unreachable")
+    }
+    private fun reasonWithNestedCall(value: List<Int>) = value.toString()
+}
+KT
+
+cat > "$TEST_FIX_DIR/A5LBadBlockCommentCalleeTriviaTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+import org.junit.Assume.assumeTrue
+class A5LBadBlockCommentCalleeTriviaTest {
+    fun loadBearingAssertion() {
+        assumeTrue /* legal Kotlin callee trivia */ (false)
+        error("unreachable")
+    }
+}
+KT
+
+cat > "$TEST_FIX_DIR/A5LBadNewlineCommentCalleeTriviaTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+import org.junit.Assume
+class A5LBadNewlineCommentCalleeTriviaTest {
+    fun loadBearingAssertion() {
+        Assume.assumeFalse
+            // legal Kotlin newline/comment trivia before the argument list
+            (
+                true,
+            )
+        error("unreachable")
+    }
+}
+KT
+
+cat > "$TEST_FIX_DIR/A5LGoodDynamicAndDecoyTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+import org.junit.Assume.assumeTrue
+class A5LGoodDynamicAndDecoyTest {
+    fun loadBearingAssertion() {
+        // Literal booleans nested inside a dynamic condition are not unconditional.
+        assumeTrue("x", listOf(false, true).isNotEmpty())
+        assumeTrue("the text assumeTrue(false) is not executable", dynamicCondition())
+    }
+    private fun dynamicCondition() = true
 }
 KT
 
@@ -423,12 +488,23 @@ class A5GoodSdkGuardTest {
 KT
 
 assert_report present "A5BadImeTest.kt" "A5 — NEW" "A5 fires on an IME-availability assumeTrue self-skip"
+assert_report present "A5LBadGenericLiteralFalseTest.kt" "A5L — NEW" "A5L fires on a generic literal-false assumeTrue self-skip"
+assert_report present "A5LBadParenAwareLiteralTrueTest.kt" "A5L — NEW" "A5L matches a multiline assumeFalse with nested commas, redundant parens, and a trailing comma"
+assert_report present "A5LBadBlockCommentCalleeTriviaTest.kt" "A5L — NEW" "A5L matches legal block-comment trivia between the callee and opening parenthesis"
+assert_report present "A5LBadNewlineCommentCalleeTriviaTest.kt" "A5L — NEW" "A5L matches legal newline/comment trivia between the callee and opening parenthesis"
+assert_report absent  "A5LGoodDynamicAndDecoyTest.kt" "A5L — NEW" "A5L spares nested dynamic booleans and string/comment decoys"
+assert_report present "RideThroughInterruptionE2eTest.kt:61" "A5L — KNOWN" "A5L inventories the sole #1678 tracked survivor"
 assert_report absent  "A5GoodSdkGuardTest.kt" "A5 — NEW" "A5 spares a Build.VERSION SDK guard"
 # A5 bad + C1 GOOD-only present here -> A5 is a hard-fail category.
 assert_exit 1 "A5 unjustified IME skip hard-fails the guard"
 
 # Remove the A5 bad so the final clean-state assertion holds.
-rm -f "$ANDROID_FIX_DIR/A5BadImeTest.kt"
+rm -f \
+  "$ANDROID_FIX_DIR/A5BadImeTest.kt" \
+  "$TEST_FIX_DIR/A5LBadGenericLiteralFalseTest.kt" \
+  "$TEST_FIX_DIR/A5LBadParenAwareLiteralTrueTest.kt" \
+  "$TEST_FIX_DIR/A5LBadBlockCommentCalleeTriviaTest.kt" \
+  "$TEST_FIX_DIR/A5LBadNewlineCommentCalleeTriviaTest.kt"
 
 # --------------------------------------------------------------------------
 # TIMING1 — runTest virtual-clock-vs-real-dispatcher fragility (#1048).

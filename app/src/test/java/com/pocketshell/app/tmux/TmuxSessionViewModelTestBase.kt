@@ -119,6 +119,10 @@ abstract class TmuxSessionViewModelTestBase {
     // scope in @After (the drain is infinite, so cancel first) BEFORE the
     // rule's `resetMain()` runs — exactly the factoryScope rationale.
     private val agentTailScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Issue #1849 (class sweep): the default `newVm` lease manager's own scope,
+    // on the SHARED virtual scheduler rather than the production real-IO default.
+    // Cancelled in `@After` alongside the other per-test-instance scopes.
+    private val leaseScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler))
     private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
 
     protected fun newVm(
@@ -133,6 +137,20 @@ abstract class TmuxSessionViewModelTestBase {
             // Issue #708: keep the lease on the shared virtual clock even for the
             // never-connecting default so any bounded dial resolves under runTest.
             connectTimeoutContext = StandardTestDispatcher(scheduler),
+            // Issue #1849 (class sweep): the lease's OWN scope runs the idle-TTL
+            // close job, and that close publishes `SshLeaseConnectionState.Closed`
+            // -> a `TransportUpDown.Down` edge -> `ConnectionController.submit(
+            // TransportDropped)`. Left on the production real-`Dispatchers.IO`
+            // default that mutator would run off the confining dispatcher, the
+            // same escape class as the terminal producer this issue fixed. Pin it
+            // to the shared virtual scheduler like every other owned seam.
+            scope = leaseScope,
+            // Issue #1849 (class sweep): [SshLeaseManager.abortTimeoutContext]'s
+            // own KDoc says virtual-time unit tests must inject the test scheduler
+            // (cancelling a scheduler-hosted dial from a real IO thread is a
+            // cross-thread mutation of a single-threaded scheduler). Nothing was
+            // injecting it. Pin it here and in [testLeaseManager].
+            abortTimeoutContext = StandardTestDispatcher(scheduler),
             nowMillis = { scheduler.currentTime },
         ),
         sessionLifecycleSignals: SessionLifecycleSignals? = null,
@@ -241,6 +259,44 @@ abstract class TmuxSessionViewModelTestBase {
             // teardown coroutine leaks into the next test class. Individual F2
             // off-Main tests may override this with a virtual-clock scope.
             it.setTeardownScopeForTest(defaultTeardownScope)
+            // Issue #1849: pin the TERMINAL EXTERNAL-PRODUCER dispatcher to the
+            // shared virtual-clock scheduler. This was the LAST unpinned owned
+            // real-dispatcher root reachable from `newVm`, and it is the one that
+            // let a `ConnectionController` mutator escape its confining dispatcher.
+            //
+            // `TerminalSurfaceState()`'s no-arg constructor pins the producer feed
+            // job to a real `Dispatchers.IO` (correct for production: the terminal
+            // feed must never park the UI thread). The VM stores that job in
+            // `paneProducerJobs` and `closeCurrentConnectionAndJoin` — which every
+            // connect/reconnect runs FIRST — `cancelAndJoin()`s it. Because this
+            // harness's `Dispatchers.Main` is an `UnconfinedTestDispatcher`
+            // (`isDispatchNeeded == false`), that join resumed the Main-rooted
+            // `connect` coroutine INLINE on the IO worker, so the whole remainder of
+            // the connect path continued there: `runConnect` -> `acquireLeaseForTmux`
+            // -> `SshLeaseManager.acquire` -> `emitStateLocked` -> `tryEmit` ->
+            // `ConnectionEffectDriver.collectTransportEvents` (also unconfined Main,
+            // resumed inline) -> `ConnectionController.submit` ON THE IO THREAD.
+            // Racing the test thread's own scheduler pump, that tripped the #1234
+            // single-mutator confinement guard (#1849; measured: 760 of 763 lease
+            // emissions landed off the confining thread on `origin/main`).
+            //
+            // Production is unaffected and was never at risk: `viewModelScope` is
+            // `Dispatchers.Main.immediate`, whose `isDispatchNeeded()` is false ONLY
+            // when already on the Android main looper thread, so the same join
+            // re-posts to Main and the reducer stays confined.
+            //
+            // `StandardTestDispatcher` (not `testMainDispatcher`) on purpose: the
+            // producer collects from a flow whose upstream reader can live on the
+            // real-IO `factoryScope`, and only a DISPATCHING dispatcher guarantees
+            // the job's body — and its `finally`, which itself hops through
+            // `Dispatchers.Main.immediate` — resolves back on the pumping test
+            // thread instead of inline on that foreign emitter.
+            //
+            // [Issue1849ConnectionControllerConfinementTest] is the class-covering
+            // guard: it hard-fails if ANY future owned root re-opens this escape.
+            it.setTerminalSurfaceStateFactoryForTest {
+                TerminalSurfaceState(externalProducerDispatcher = StandardTestDispatcher(scheduler))
+            }
             createdViewModels += it
         }
 
@@ -365,6 +421,11 @@ abstract class TmuxSessionViewModelTestBase {
         // A bounded wait keeps a genuinely wedged coroutine from hanging the
         // suite — it would surface as a real failure rather than the flake.
         factoryScope.cancel()
+        // Issue #1849 (class sweep): the virtual-clock lease scope holds only
+        // scheduler-hosted work (no real thread to join), so a plain cancel is
+        // enough — but it MUST be cancelled so an idle-TTL close job cannot fire
+        // into the next test's scheduler.
+        leaseScope.cancel()
         runBlocking {
             // Issue #713: same real-`Dispatchers.IO` contention class as the
             // slow-feed drains — this is an await-for-quiescence join that

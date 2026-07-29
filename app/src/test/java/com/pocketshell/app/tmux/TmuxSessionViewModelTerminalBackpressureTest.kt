@@ -304,6 +304,25 @@ class TmuxSessionViewModelTerminalBackpressureTest : TmuxSessionViewModelTestBas
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
         )
         vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
+        // Issue #1849: restore the PRODUCTION real-`Dispatchers.IO` terminal
+        // external-producer dispatcher that [TmuxSessionViewModelTestBase] now pins
+        // to the shared virtual scheduler. This test's SUBJECT is that real
+        // off-Main producer draining a >=250 KB Codex-like burst CONCURRENTLY with
+        // the emitting reader ("must not block the reader/UI producer" / "some
+        // output should reach the terminal side-channel before local overflow
+        // recovery"); a scheduler-pinned producer cannot run concurrently with the
+        // sender at all, so the pin would delete the property under test rather
+        // than verify it. Same documented opt-out shape as
+        // [Issue926SeedIoOffMainTest] restoring a real seed-IO dispatcher.
+        //
+        // This does NOT re-open the #1849 confinement escape in a way that can
+        // race a reducer: the escape needs a CONNECT path (lease acquire ->
+        // transport edge -> `ConnectionController.submit`) to resume off the join
+        // fence, and this test asserts ZERO reconnect attempts and a single
+        // steady connect — it never drives one.
+        vm.setTerminalSurfaceStateFactoryForTest {
+            TerminalSurfaceState(externalProducerDispatcher = kotlinx.coroutines.Dispatchers.IO)
+        }
         val client = FakeTmuxClient()
         client.decoupleOutputForFromEvents = true
         client.reportOutputBacklogOverflowOnTryEmitFailure = true

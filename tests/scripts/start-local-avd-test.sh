@@ -85,16 +85,36 @@ esac
 EOF
 chmod +x "$fake_emulator"
 
+# `ps` has to model the emulator process's LIFETIME, not a constant.
+#
+# start-local-avd.sh reads it twice with opposite expectations: before launch a
+# non-empty `ps` means "already running, don't start", and during the boot poll
+# an empty `ps` combined with no adb device means "AVD exited before adb reported
+# a device" and aborts. A stub that always reports nothing loses the second read
+# (the poll begins before the backgrounded fake emulator has touched its state
+# file, so iteration 1 aborts); a stub that always reports a process loses the
+# first (the emulator is never launched at all). Neither is a start-local-avd
+# bug — both are the stub failing to model a process that does not exist, then
+# does.
+#
+# Gate it on the launch marker: start-local-avd.sh writes $RUN_DIR/emulator.log
+# synchronously after deciding to start and before backgrounding the emulator, so
+# "marker exists" is exactly "the emulator process is alive" with no race. Output
+# shape must match `ps -eo pid=,comm=,args=` as parsed by
+# list_emulator_processes().
 fake_ps="$tmpdir/ps"
 cat > "$fake_ps" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-exit 0
+if [[ -f "${FAKE_EMULATOR_LAUNCH_MARKER:?}" ]]; then
+  printf '%s\n' "424242 emulator emulator -avd test -no-window"
+fi
 EOF
 chmod +x "$fake_ps"
 
 run_dir="$tmpdir/run"
 FAKE_AVD_STATE="$state_file" \
+FAKE_EMULATOR_LAUNCH_MARKER="$run_dir/managed/emulator.log" \
 POCKETSHELL_AVD_LOCK_FILE="$tmpdir/avd.lock" \
 ANDROID_SDK="$tmpdir/android-sdk" \
 ADB="$fake_adb" \

@@ -28,6 +28,65 @@ object BracketedPaste {
         return false
     }
 
+    /**
+     * Issue #1854: true when the input carries a line break in its CONTENT —
+     * i.e. an LF that is not merely the FINAL byte.
+     *
+     * A single trailing LF is a **submit**, not paste content. An AOSP-family
+     * soft keyboard commits the Enter key as a literal `\n` appended to the
+     * committed text (see the `'\n'` -> `'\r'` conversion in
+     * `TerminalView.sendTextToTerminal`), so `containsLineBreak` alone
+     * misclassifies "one command, then Enter" as a multi-line paste. The
+     * consequences are silent and severe: against a bracketed-paste-aware
+     * program the newline is inserted as content and the command is never run,
+     * and against busybox `ash` — whose line editor buffers an unrecognised
+     * escape sequence in a fixed 16-byte keycode buffer and discards the whole
+     * buffer on no match — the paste markers swallow the command's LEADING
+     * bytes (`printf` arrived as `tf`).
+     *
+     * Multi-line content still pastes: `"a\nb"` and `"a\nb\n"` are both true.
+     */
+    @JvmStatic
+    fun hasContentLineBreak(text: CharSequence?): Boolean {
+        if (text == null || text.length < 2) return false
+        for (index in 0 until text.length - 1) {
+            if (text[index] == '\n') return true
+        }
+        return false
+    }
+
+    @JvmStatic
+    fun hasContentLineBreak(bytes: ByteArray): Boolean {
+        if (bytes.size < 2) return false
+        for (index in 0 until bytes.size - 1) {
+            if (bytes[index] == 0x0A.toByte()) return true
+        }
+        return false
+    }
+
+    /**
+     * Issue #1854: true when [bytes] is ALREADY a complete bracketed-paste block
+     * (`\e[200~` … `\e[201~`), i.e. some upstream producer has already framed it.
+     *
+     * `TerminalView` frames a multi-line IME commit before writing it to the
+     * session, because the raw-SSH terminal surface has no other framer. The
+     * tmux transport must therefore DELIVER such a block rather than [frame] it
+     * a second time — a doubled frame puts the inner markers into the receiving
+     * program as literal content.
+     */
+    @JvmStatic
+    fun isFramed(bytes: ByteArray): Boolean {
+        if (bytes.size < pasteStart.size + pasteEnd.size) return false
+        for (index in pasteStart.indices) {
+            if (bytes[index] != pasteStart[index]) return false
+        }
+        val tailStart = bytes.size - pasteEnd.size
+        for (index in pasteEnd.indices) {
+            if (bytes[tailStart + index] != pasteEnd[index]) return false
+        }
+        return true
+    }
+
     @JvmStatic
     fun frame(text: CharSequence): ByteArray =
         frame(text.toString().toByteArray(Charsets.UTF_8))
@@ -78,7 +137,21 @@ object BracketedPaste {
         bodyChunkBytes: Int = BODY_CHUNK_BYTES,
     ): List<String> {
         if (bytes.isEmpty()) return emptyList()
-        val framed = frame(bytes)
+        return textChunks(frame(bytes), bodyChunkBytes)
+    }
+
+    /**
+     * Issue #1854: [frameTextChunks] without the framing step — split an
+     * ALREADY-framed paste block into the same bounded, UTF-8-safe text chunks.
+     * Same load-bearing invariant: `chunks.joinToString("")` is byte-identical
+     * to [framed].
+     */
+    @JvmStatic
+    fun textChunks(
+        framed: ByteArray,
+        bodyChunkBytes: Int = BODY_CHUNK_BYTES,
+    ): List<String> {
+        if (framed.isEmpty()) return emptyList()
         val chunkSize = bodyChunkBytes.coerceAtLeast(1)
         val chunks = ArrayList<String>((framed.size + chunkSize - 1) / chunkSize + 1)
         var offset = 0

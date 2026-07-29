@@ -916,8 +916,25 @@ public final class TerminalView extends View {
         }
     }
 
+    /**
+     * Issue #529 routed a newline-carrying IME commit as a bracketed paste so a
+     * dictated multi-paragraph block is not torn into one submit per line.
+     * <p>
+     * Issue #1854: the predicate was "contains ANY LF", which also caught the
+     * ordinary "type a command, press Enter" gesture — the AOSP keyboard and its
+     * descendants commit the Enter key as a literal {@code \n} appended to the
+     * committed text (that is exactly the {@code '\n'} -> {@code '\r'} case
+     * {@link #sendTextToTerminal} converts). Pasting that block instead of
+     * typing it meant the command was never submitted at all on a
+     * bracketed-paste-aware program, and against busybox {@code ash} the paste
+     * markers swallowed the command's leading bytes ({@code printf} arrived as
+     * {@code tf}).
+     * <p>
+     * A single TRAILING newline is a submit, so it must not make a commit a
+     * paste; a line break in the commit's CONTENT still does.
+     */
     private boolean isMultiLinePasteText(CharSequence text) {
-        return text != null && text.length() > 1 && BracketedPaste.containsLineBreak(text);
+        return BracketedPaste.hasContentLineBreak(text);
     }
 
     private void sendBracketedPasteToTerminal(CharSequence text) {

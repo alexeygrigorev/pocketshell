@@ -125,6 +125,67 @@ class TerminalSurfaceInputInstrumentedTest {
         }
     } }
 
+    /**
+     * Issue #1854 — an AOSP-family soft keyboard commits the Enter key as a
+     * literal `\n` APPENDED to the text (see the `\n` -> `\r` conversion in
+     * `TerminalView.sendTextToTerminal`). Issue #529's paste classifier asked
+     * only "does the commit contain an LF", so that ordinary "type a command,
+     * press Enter" gesture became a bracketed PASTE: the command was never
+     * submitted, and its `ESC[200~` prefix made busybox `ash` swallow the
+     * command's leading bytes (`printf` arrived as `tf` — issue #1854).
+     *
+     * One line plus a trailing newline must therefore reach the remote as the
+     * text followed by a `\r` submit, with NO paste markers.
+     */
+    @Test
+    fun oneLineCommitWithTrailingNewlineSubmitsInsteadOfPasting() { runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val remoteStdin = RecordingOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = remoteStdin,
+        )
+        val client = PocketShellTerminalViewClient()
+
+        try {
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                view.requestFocus()
+
+                val inputConnection = requireNotNull(view.onCreateInputConnection(EditorInfo()))
+                // ONE commit carrying the command AND its submit newline — the
+                // exact ColdInstallE2eTest / AOSP-keyboard gesture.
+                inputConnection.commitText("printf 'i1854'\n", 1)
+            }
+
+            withTimeout(2_000) {
+                while (!remoteStdin.snapshot().contains("printf 'i1854'\r")) {
+                    delay(10)
+                }
+            }
+            assertEquals("printf 'i1854'\r", remoteStdin.snapshot())
+            assertTrue(
+                "a one-line command + Enter must not be framed as a bracketed paste",
+                !remoteStdin.snapshot().contains("\u001B[200~"),
+            )
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    } }
+
     @Test
     fun smartTextImeStagesCommittedTextUntilEnterConfirms() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

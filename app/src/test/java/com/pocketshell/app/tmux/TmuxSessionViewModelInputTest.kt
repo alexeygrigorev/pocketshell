@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.os.Looper
+import com.pocketshell.core.terminal.input.BracketedPaste
 import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -342,13 +343,57 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
-    fun containsLineBreakIsTrueOnlyForLf() {
+    fun pastesAsBlockOnlyForContentLineBreaksOrAlreadyFramedBlocks() {
         val vm = newVm()
-        assertTrue(vm.containsLineBreakForTest("a\nb".toByteArray(Charsets.UTF_8)))
-        assertTrue(vm.containsLineBreakForTest("a\r\nb".toByteArray(Charsets.UTF_8)))
-        assertFalse(vm.containsLineBreakForTest("a b".toByteArray(Charsets.UTF_8)))
-        assertFalse(vm.containsLineBreakForTest("a\rb".toByteArray(Charsets.UTF_8)))
-        assertFalse(vm.containsLineBreakForTest(ByteArray(0)))
+        // Multi-line CONTENT still pastes (issue #209).
+        assertTrue(vm.pastesAsBlockForTest("a\nb".toByteArray(Charsets.UTF_8)))
+        assertTrue(vm.pastesAsBlockForTest("a\r\nb".toByteArray(Charsets.UTF_8)))
+        assertTrue(vm.pastesAsBlockForTest("a\nb\n".toByteArray(Charsets.UTF_8)))
+        // The `\r` = submit / `\n` = paste-content convention on this lane is
+        // unchanged (#209/#1636); issue #1854's "one command + Enter" case is
+        // fixed at TerminalView, which converts that Enter to `\r`.
+        assertFalse(vm.pastesAsBlockForTest("printf \'x\'\r".toByteArray(Charsets.UTF_8)))
+        assertFalse(vm.pastesAsBlockForTest("a b".toByteArray(Charsets.UTF_8)))
+        assertFalse(vm.pastesAsBlockForTest("a\rb".toByteArray(Charsets.UTF_8)))
+        assertFalse(vm.pastesAsBlockForTest(ByteArray(0)))
+        // Issue #1854: an already-framed block still takes the paste route — but
+        // as a pass-through delivery, never a second framing (see
+        // [alreadyFramedPasteBlockIsDeliveredWithoutASecondFrame]).
+        assertTrue(
+            vm.pastesAsBlockForTest(
+                BracketedPaste.frame("printf \'x\'\n".toByteArray(Charsets.UTF_8)),
+            ),
+        )
+    }
+
+    /**
+     * Issue #1854 — the regression this pins on the received bytes.
+     *
+     * `TerminalView` frames a multi-line IME commit before it reaches the pane
+     * input sink (the raw-SSH terminal surface has no other framer). The tmux
+     * lane used to frame it AGAIN, so the pane received
+     * `ESC[200~ ESC[200~ ... ESC[201~ ESC[201~`. A readline receiver consumes
+     * ONE marker pair, so the inner markers land in the input box as literal
+     * content — and busybox `ash` (the `agents` fixture shell) discards a fixed
+     * 16-byte keycode buffer on that unrecognised escape run, which is exactly
+     * two 6-byte markers plus FOUR payload bytes: the reported `printf` -> `tf`.
+     */
+    @Test
+    fun alreadyFramedPasteBlockIsDeliveredWithoutASecondFrame() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxPaneServer()
+        vm.attachClientForTest(client)
+
+        val framed = BracketedPaste.frame("first\nsecond".toByteArray(Charsets.UTF_8))
+        vm.writeInputToPane("%0", framed)
+        advanceUntilIdle()
+
+        assertEquals(
+            "an already-framed paste block must reach the pane byte-exact " +
+                "(issue #1854); inputBox=" + client.inputBox("%0"),
+            "first\nsecond",
+            client.inputBox("%0"),
+        )
     }
 
     @Test

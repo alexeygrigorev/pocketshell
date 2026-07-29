@@ -191,18 +191,30 @@ time.
 
 For parallel emulator+Docker journey testing (the Docker half of the #674 AVD
 pool), the `agents` fixture is bringable up as N ISOLATED instances on distinct
-host ports — `2222 2243 2244 2245` by default — so two emulator lanes never
+host ports — `2243 2244 2245` by default — so two emulator lanes never
 share one container's tmux state. Each lane runs under its own
 `COMPOSE_PROJECT_NAME` + per-port container name, both defaulted to the legacy
 single-lane identity (`pocketshell-test-agents` on 2222) when no override is
 given.
 
-Bring lanes up / inspect / tear down with `scripts/agents-pool.sh`:
+**Port 2222 is deliberately NOT a pool candidate (issue #1842).** It is the
+default single-lane fixture, and a dozen scripts that know nothing about the
+pool recreate it unconditionally — some with `--force-recreate`
+(`terminal-workbench.sh`, `phone-walkthrough.sh`,
+`pre-release-confidence-gate.sh`, `capture-terminal-lab.sh`, ...). None of them
+takes the port lock and none of them can, so no lock is able to defend 2222: a
+lane handed that port held a lock nobody else consults while a sibling wiped its
+tmux server. Pool lanes therefore claim only ports whose sole writer is the
+pool. `--no-pool` and CI are unaffected — they never allocate from this list.
+
+Bring lanes up / inspect / tear down with `scripts/agents-pool.sh` (it still
+accepts 2222 explicitly for the legacy single-lane fixture; just don't hand it
+to a lane):
 
 ```bash
-scripts/agents-pool.sh up 2222 2243   # warm two isolated agents fixtures
+scripts/agents-pool.sh up 2243 2244   # warm two isolated agents fixtures
 scripts/agents-pool.sh status         # PORT / CLAIMED / HEALTH / CONTAINER
-scripts/agents-pool.sh down 2222 2243 # tear the lanes down (-v)
+scripts/agents-pool.sh down 2243 2244 # tear the lanes down (-v)
 ```
 
 `scripts/connected-test.sh --pool --suffix iN` then self-allocates a full lane —
@@ -210,7 +222,40 @@ a free emulator serial (per-serial flock, #674) AND a free agents port (per-port
 flock + brings the fixture up healthy) — and threads the port into the
 androidTest suite via
 `-Pandroid.testInstrumentationRunnerArguments.agentsPort=<port>`. Two concurrent
-invocations land on different `(emulator, port)` lanes with no cross-talk. The
+invocations land on different `(emulator, port)` lanes with no cross-talk.
+
+Both halves of that claim are anchored to the MACHINE
+(`$HOME/.cache/pocketshell/avd-locks/`), not to the checkout. Until #1842 the
+agents-port half was `"$root_dir/build/.agents-port-lock-$port"` — the worktree
+root — so two lanes driven from different worktrees flocked different inodes,
+both "won" the same port, and the second lane's `docker compose up` recreated
+the first lane's container mid-run. That is the same defect #1657 fixed for the
+emulator-serial half; the halves are now on one anchor so a future fix cannot
+repair only one of them.
+
+Because `docker` is machine-wide, a lock cannot make the claim unbreakable — so
+the claim is instead VERIFIABLE. `connected-test.sh` fingerprints the claimed
+container (`.Id` + `.State.StartedAt`) at claim time and re-checks it after the
+run. If it changed, the run exits **90** with a loud banner, overriding the
+Gradle verdict in BOTH directions: a wiped fixture presents as an empty session
+list (indistinguishable from #1810/#1820), so a disturbed PASS is as void as a
+disturbed FAIL. `scripts/test-agents-pool-isolation.sh` pins all of this in the
+per-push Unit job without an emulator or a docker daemon.
+
+If you write a new script that allocates a lane, call
+`pocketshell_claim_agents_port "$ROOT_DIR"` **directly** and read the result from
+`$POCKETSHELL_AGENTS_PORT`. It is not a value-returning function — it mutates the
+calling shell (exports plus the EXIT trap that holds the flock), so in a subshell
+(`port="$(...)"`, backticks, a pipeline, `( ... )`) all of that is discarded at
+the closing paren. It now detects that and refuses loudly rather than
+half-succeeding, and prints nothing on stdout so a capture can never look like it
+worked; both the runtime refusal and a static scan of every caller are pinned by
+the harness above. One such line would otherwise re-break all three of the
+failures described here at once: no lock, a silent fall back to 2222 (the
+`agentsPort` arg is gated on `$POCKETSHELL_AGENTS_PORT` being set), and no
+fingerprint, so a disturbed lane goes quiet again.
+
+The
 androidTest target host:port is centralized in `AgentsFixtureTarget`
 (`AndroidSshTestFixtures.kt`), defaulting to `10.0.2.2:2222`, so single-lane and
 CI runs (one emulator, one `agents` on 2222) are unchanged. `ci-journey-suite.sh`

@@ -223,6 +223,26 @@ jobs:
           chmod +x scripts/test-notification-permission-fixture.sh
           scripts/test-notification-permission-fixture.sh
 
+      # Issue #1842: `connected-test.sh --pool` promised concurrent journey
+      # lanes distinct (emulator, agents-port) fixtures and did not deliver —
+      # the agents-port flock was CHECKOUT-anchored (the #1657 defect, fixed in
+      # the AVD half but not the Docker half) and port 2222 was a pool candidate
+      # even though a dozen unlocked scripts recreate that fixture. A sibling
+      # recreated a claimed container mid-run twice, and because a wiped tmux
+      # server presents as an EMPTY SESSION LIST it framed two real product
+      # defects (#1810/#1820) that were not there, costing a review round each.
+      # Fast, JVM-free, no docker daemon and no emulator (docker stubbed, lock
+      # anchor sandboxed): proves two "worktrees" contend for one port, the lock
+      # is machine-anchored, no pool candidate is a port the unlocked scripts
+      # recreate, and a disturbed fixture voids the run in BOTH directions with
+      # an unmistakable signature. Cheap (< 30 s).
+      # Quoted: an unquoted ` #1842)` is a YAML comment, which silently truncates
+      # the rendered step name to "... (issue" (as it does for the siblings above).
+      - name: "Agents-pool lane isolation guard (issue #1842)"
+        run: |
+          chmod +x scripts/test-agents-pool-isolation.sh
+          scripts/test-agents-pool-isolation.sh
+
       # Issue #1458: fast, JVM-free fixture test for the emulator-journey
       # aggregate verdict (scripts/ci-journey-aggregate-verdict.sh) + the
       # per-shard token-writing / aggregation wiring in tests.yml. Proves the

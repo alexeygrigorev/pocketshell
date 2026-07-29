@@ -12,23 +12,30 @@ set -euo pipefail
 #   down [PORT...]   tear down the fixture lane(s) for each PORT (default: pool)
 #   status           show which candidate ports are claimed / fixture health
 #
-# Port scheme: candidate ports default to `2222 2243 2244 2245` (override via
-# POCKETSHELL_AGENTS_POOL_PORTS). Port 2222 reproduces the legacy single-lane
-# fixture (container `pocketshell-test-agents`) so existing tooling keeps
-# working; other ports run under per-port container names + compose projects.
+# Port scheme: candidate ports default to `2243 2244 2245` (override via
+# POCKETSHELL_AGENTS_POOL_PORTS). Each runs under its own container name +
+# compose project, so lanes are fully independent.
+#
+# 2222 IS NOT A CANDIDATE, and must not be added back to that list (issue
+# #1842). It is the legacy single-lane fixture (container
+# `pocketshell-test-agents`), and ~a dozen non-pool scripts recreate it
+# unconditionally without taking the port lock — so a lane handed 2222 holds a
+# lock nobody consults and gets its tmux server wiped mid-run. This CLI still
+# manages it on request (`up 2222` / `down 2222` reproduce the legacy identity
+# for the single-lane tooling); it is only barred from lane ALLOCATION.
 #
 # The per-lane allocation (claim a free port + flock it for a run's lifetime) is
 # done automatically by `scripts/connected-test.sh --pool`; this CLI is for
 # explicit pool warm-up / teardown / inspection.
 #
 # Example — bring up two lanes, run two journey classes in parallel, tear down:
-#   scripts/agents-pool.sh up 2222 2243
+#   scripts/agents-pool.sh up 2243 2244
 #   scripts/connected-test.sh --pool --suffix iA \
 #     -Pandroid.testInstrumentationRunnerArguments.class=...DeepLinkSessionSwitchE2eTest &
 #   scripts/connected-test.sh --pool --suffix iB \
 #     -Pandroid.testInstrumentationRunnerArguments.class=...ReconnectRepaintE2eTest &
 #   wait
-#   scripts/agents-pool.sh down 2222 2243
+#   scripts/agents-pool.sh down 2243 2244
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -46,7 +53,12 @@ distinct host ports so parallel emulator lanes get independent tmux state.
   down [PORT...]   tear down the fixture lane(s) per PORT (default pool)
   status           list candidate ports, claim state, and fixture health
 
-Env: POCKETSHELL_AGENTS_POOL_PORTS="2222 2243 2244 2245"
+Env: POCKETSHELL_AGENTS_POOL_PORTS="2243 2244 2245"   (lane candidates)
+
+Do NOT put 2222 in that list (issue #1842): it is the legacy single-lane
+fixture, which ~a dozen non-pool scripts recreate without taking the port
+lock, so no lock can defend a lane that was handed it. `up 2222` /
+`down 2222` still work for managing that fixture explicitly.
 USAGE
 }
 
@@ -105,11 +117,7 @@ cmd_status() {
     else
       claimed="no"
     fi
-    if [[ "$port" == "2222" ]]; then
-      container="pocketshell-test-agents"
-    else
-      container="$(pocketshell_agents_container_name_for_port "$port")"
-    fi
+    container="$(pocketshell_agents_container_for_port "$port")"
     health="$(docker inspect --format='{{.State.Health.Status}}' "$container" 2>/dev/null || echo "-")"
     [[ -z "$health" ]] && health="-"
     printf '%-8s %-10s %-12s %s\n' "$port" "$claimed" "$health" "$container"

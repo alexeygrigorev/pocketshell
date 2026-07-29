@@ -1058,4 +1058,19 @@ if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" \
   fi
 fi
 
+# Issue #1842: prove nobody recreated THIS lane's agents fixture while the run
+# was in flight. This runs for BOTH outcomes on purpose:
+#
+#   * a disturbed RED must not be read as a product defect — a wiped tmux server
+#     surfaces as an empty session list, which is indistinguishable from #1810 /
+#     #1820 and cost two review rounds to the two lanes that hit it;
+#   * a disturbed GREEN is no better. The run asserted against a fixture that
+#     stopped existing partway through, so the pass is vacuous in exactly the
+#     sense process.md's "green run that executed nothing" catalogue warns about.
+#     We overwrite a 0 here rather than let a void pass be reported.
+#
+# Only a claimed pool lane has a fingerprint, so single-lane / CI runs are
+# untouched (the helper returns 0 when there is nothing to compare).
+rc="$(pocketshell_agents_final_rc "$rc")"
+
 exit "$rc"

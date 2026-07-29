@@ -34,5 +34,15 @@ internal fun TestScope.testLeaseManager(
         scope = scope,
         idleTtlMillis = idleTtlMillis,
         connectTimeoutContext = StandardTestDispatcher(testScheduler),
+        // Issue #1849 (class sweep): [SshLeaseManager.abortTimeoutContext] defaults
+        // to a REAL `Dispatchers.IO` and its own KDoc says virtual-time unit tests
+        // must inject the test scheduler — "cancelling a coroutine that lives on a
+        // `TestCoroutineScheduler` from a real `Dispatchers.IO` thread is a
+        // cross-thread mutation of a scheduler kotlinx documents as
+        // single-thread-only — a heisenbug under CI load". Nothing was actually
+        // injecting it. It is the same escape class #1849 fixed for the terminal
+        // producer: an owned root left on a real dispatcher can resume a Main-rooted
+        // awaiter off-confinement and carry a `ConnectionController` mutator with it.
+        abortTimeoutContext = StandardTestDispatcher(testScheduler),
         nowMillis = { testScheduler.currentTime },
     )

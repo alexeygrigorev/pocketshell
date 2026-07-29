@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -170,9 +169,24 @@ private fun CommentableLineRow(
 
 /**
  * Renders whichever review sheet is open (issue #714). Split out so the scaffold
- * stays readable; each sheet is a `ModalBottomSheet` that floats above the soft
- * keyboard (`imePadding` + `navigationBarsPadding`) so the input is reachable
- * with the keyboard up (#641/#567 IME-occlusion rigor).
+ * stays readable; each sheet is a `ModalBottomSheet`, which floats its own
+ * content above the soft keyboard so the input is reachable with the keyboard up
+ * (#641/#567 IME-occlusion rigor).
+ *
+ * Issue #1821: that lift comes from Material3 itself — `ModalBottomSheet` wraps
+ * its window content in `Box(Modifier.fillMaxSize().imePadding())` and CONSUMES
+ * the inset — not from a content-level `imePadding()`. This KDoc used to credit
+ * one, and the sheets below used to carry one; measured on-device it changed
+ * nothing (byte-identical geometry with and without, four sheets), so it was
+ * deleted. Do NOT re-add an ime modifier to a sheet content column here: it
+ * resolves to zero today, and it would MASK a real regression tomorrow. The
+ * load-bearing assertion in `NestedImePaddingInSheetGeometryTest` is that the
+ * sheet lifts its bottom control by essentially the whole keyboard; a
+ * content-level `imePadding()` on a bottom-anchored column can supply that lift
+ * by itself, so it would keep the assertion green even if a Material3 upgrade
+ * stopped consuming the inset. With it gone, only Material can supply the lift,
+ * so that regression has to show up as a red test. (Mechanism, not a measured
+ * claim — nobody has run a Material3 that behaves that way.)
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -264,7 +278,6 @@ private fun CommentSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .imePadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(testTag),
@@ -368,7 +381,6 @@ private fun PendingTraySheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .imePadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_REVIEW_TRAY_SHEET_TAG),
@@ -468,7 +480,6 @@ internal fun ReviewSubmittedSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .imePadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG),
@@ -571,7 +582,6 @@ internal fun AnnotationSavedSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .navigationBarsPadding()
-                .imePadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG),

@@ -87,6 +87,20 @@ internal fun FolderContextActionContent(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            // Issue #1821 — LOAD-BEARING, do not delete by analogy with #1812.
+            // Inside [FolderContextActionSheet]'s `ModalBottomSheet` these two
+            // are redundant (Material3 consumes both insets before the content
+            // is composed — measured byte-identical geometry with and without).
+            // But this content is ALSO composed STANDALONE, in a plain `Box`
+            // (`FolderContextActionSheetScreenshotTest:39`), and there nothing
+            // has consumed them, so they are the only thing keeping the bottom
+            // "New empty project" row clear of the keyboard and the nav bar.
+            // `StandaloneContentImePaddingLivenessTest` goes RED if EITHER is
+            // removed, and it takes BOTH keyboard states to see that: dropping
+            // `imePadding()` collapses the keyboard-UP lift 648px -> 0px;
+            // dropping `navigationBarsPadding()` drops that row 126px under the
+            // nav bar in the keyboard-DOWN state (invisible with the keyboard
+            // up, where the ime inset subsumes the nav bar).
             .navigationBarsPadding()
             .imePadding()
             .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.lg),

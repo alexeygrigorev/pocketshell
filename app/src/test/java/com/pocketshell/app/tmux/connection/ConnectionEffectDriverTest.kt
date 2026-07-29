@@ -739,9 +739,11 @@ class ConnectionEffectDriverTest {
         )
 
         transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
+        assertEquals(ConnectionState.Attaching(host, sessionA), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, "%0"))
         assertEquals(ConnectionState.Live(host, sessionA), controller.state.value)
         assertEquals(
-            "healing lease Up returns to Live for the same target without re-firing recovery",
+            "target-tagged seed returns to Live without re-firing recovery",
             listOf(client to ConnectionState.Reattaching(host, sessionA)),
             effects,
         )
@@ -873,9 +875,11 @@ class ConnectionEffectDriverTest {
 
         transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
 
+        assertEquals(ConnectionState.Attaching(host, sessionA), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(sessionA, "%0"))
         assertEquals(ConnectionState.Live(host, sessionA), controller.state.value)
         assertEquals(
-            "the Down and the healing Up each re-project once; no duplicate Down effect",
+            "the Down and healing Up each re-project once; seed confirmation is controller-owned",
             2,
             projections,
         )
@@ -1005,6 +1009,51 @@ class ConnectionEffectDriverTest {
         h.controller.submit(ConnectionEvent.TransportDropped(DropCause.RemoteFailure("keepalive"))) // -> Reattaching
 
         assertEquals(listOf("Idle", "Attaching", "Live", "Reattaching"), h.stateNames())
+        scope.cancel()
+    }
+
+    /**
+     * Issue #1887 — a recovered SSH lease is only the carrier for the next tmux
+     * control-channel attach. It must not claim the session is Live before that
+     * attach has seeded/revealed its pane.
+     *
+     * #1863 made the race visible: the dead-channel probe correctly moved Live
+     * to Reattaching, then the reconnect acquired a fresh SSH lease while its
+     * replacement `-CC` attach was still in flight. The driver's lease-Up feed
+     * promoted Reattaching straight back to Live, so the UI briefly reclaimed
+     * Connected over the dead/unfinished control channel. Under full-suite load
+     * that false-Live window was where the one-interval oracle landed.
+     */
+    @Test
+    fun leaseUpDuringRecoveryWaitsInAttachingUntilTmuxReveal() = runTest {
+        val scope = driverScope()
+        val h = Harness(scope, TestClock(), warm = true)
+
+        h.controller.submit(ConnectionEvent.Enter(host, sessionA))
+        h.controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
+        h.controller.submit(
+            ConnectionEvent.TransportDropped(DropCause.RemoteFailure("dead_control_channel")),
+        )
+        assertTrue(h.controller.state.value is ConnectionState.Reattaching)
+
+        // RED on the #1863 base: lease Up was treated as a completed recovery
+        // and jumped directly to Live, before any replacement tmux seed landed.
+        h.transportPort.transportEventsFlow.emit(TransportUpDown.Up(host))
+
+        assertTrue(
+            "issue #1887: SSH lease Up must wait in Attaching; only the replacement " +
+                "tmux attach/reveal may publish Live — got ${h.controller.state.value}",
+            h.controller.state.value is ConnectionState.Attaching,
+        )
+        assertEquals(
+            listOf("Idle", "Attaching", "Live", "Reattaching", "Attaching"),
+            h.stateNames(),
+        )
+
+        // The real attach's target-tagged seed remains the sole successful-recovery
+        // reveal and still promotes the same target to Live.
+        h.controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%1"))
+        assertTrue(h.controller.state.value is ConnectionState.Live)
         scope.cancel()
     }
 

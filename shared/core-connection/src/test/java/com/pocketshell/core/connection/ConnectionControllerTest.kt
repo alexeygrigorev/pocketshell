@@ -93,8 +93,11 @@ class ConnectionControllerTest {
         controller.submit(ConnectionEvent.Foreground)
 
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
-        // It heals silently to Live, never entering Reconnecting.
+        // It heals silently, never entering Reconnecting. The preserved control
+        // channel must still be confirmed before the target is revealed.
         controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
 
@@ -127,8 +130,11 @@ class ConnectionControllerTest {
         controller.submit(ConnectionEvent.Foreground)
 
         assertEquals(ConnectionState.Reconnecting(host, a, attempt = 1), controller.state.value)
-        // Silent: no error band; resolves to Live on transport-live.
+        // Silent: no error band. SSH-up waits for the replacement control
+        // channel's target-tagged seed before resolving to Live.
         controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
 
@@ -251,6 +257,8 @@ class ConnectionControllerTest {
         assertEquals(ConnectionState.Reattaching(host, a), controller.state.value)
 
         controller.submit(ConnectionEvent.TransportLive)
+        assertEquals(ConnectionState.Attaching(host, a), controller.state.value)
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0"))
         assertEquals(ConnectionState.Live(host, a), controller.state.value)
     }
 
@@ -318,7 +326,10 @@ class ConnectionControllerTest {
         controller.submit(ConnectionEvent.Foreground) // Reconnecting
         assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
 
-        controller.submit(ConnectionEvent.TransportLive) // Live
+        controller.submit(ConnectionEvent.TransportLive) // Attaching
+        assertEquals(RevealDecision.Hold(a), controller.revealGate.value)
+
+        controller.submit(ConnectionEvent.SeedLanded(a, "%0")) // Live
         assertEquals(RevealDecision.Reveal(a, inputEnabled = true), controller.revealGate.value)
     }
 

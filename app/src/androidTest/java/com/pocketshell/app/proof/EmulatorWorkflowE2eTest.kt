@@ -37,7 +37,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -90,22 +89,29 @@ class EmulatorWorkflowE2eTest {
 
     @Test
     fun realAppTmuxJourneyAttachesSessionAndAcceptsTerminalInput() { runBlocking {
-        // STOPGAP — tracked in #207/#470/#835. The historical terminal-input
-        // assertion is wrap-tolerant now, but PR #905 proved the journey still
-        // reaches terminal input through the tmux picker enumeration path. On CI
-        // that path can stall before `claude-main` appears, so this method is not
-        // safe as a per-push load-bearing gate until the picker/list-sessions
-        // stall is fixed or the journey opens the seeded session directly.
-        Assume.assumeFalse(
-            "STOPGAP for #207/#470/#835 — picker enumeration can stall on CI before terminal input is reached.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
+        // Issue #1845: the `Assume.assumeFalse(isRunningOnCi())` STOPGAP that
+        // used to open this method is DELETED (process.md F3 — a self-skip on a
+        // load-bearing assertion means only the dev-box AVD ever asserts, so CI
+        // is green with zero protection). It hid a REAL product defect for
+        // months: tmux deletes a trailing `;` from a `send-keys -l` argument,
+        // so this journey's `d=$d;mkdir …;cd …;printf …;pwd` lost two `;`
+        // whenever a 4-character chunk ended on one.
+        //
+        // The stopgap's stated reason was that the picker/list-sessions
+        // ENUMERATION could stall on CI before terminal input was reached — an
+        // ENVIRONMENT budget problem, not a reason to stop asserting. It is
+        // handled the sanctioned way instead: every navigation PRESENCE poll on
+        // the route to terminal input now uses the CI-aware
+        // [TerminalTestTimeouts.screenRenderPresenceTimeoutMs] budget (150 s on
+        // CI, still far under the 300 s per-test journey watchdog) and HARD-FAILS
+        // on timeout.
+        //
         // #134 / #139: the typed command in sendCommandThroughTerminalInput()
         // wraps at the Compose grid width after #102's resize-window
         // propagation. The helper uses
         // TerminalTextMatcher.containsWrapTolerant(...) so the terminal-input
-        // assertion itself is no longer the CI blocker; the skip above is only
-        // for the picker enumeration route used to reach that assertion.
+        // assertion tolerates the soft wrap — and only the soft wrap. A missing
+        // byte still fails, which is exactly how #1845 was caught.
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         val marker = "t${System.currentTimeMillis().toString(36).takeLast(5)}"
@@ -190,7 +196,9 @@ class EmulatorWorkflowE2eTest {
     }
 
     private fun openHostPicker(hostRowTag: String, hostName: String) {
-        compose.waitUntil(timeoutMillis = 10_000) {
+        // Issue #1845: CI-aware PRESENCE budget instead of the deleted
+        // `assumeFalse(isRunningOnCi())` stopgap — hard-fails, never skips.
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -212,7 +220,7 @@ class EmulatorWorkflowE2eTest {
         // to `hostName` proves it is the folder list of the host row we
         // just tapped (`hostName` is data this test supplies, so a copy
         // rename cannot invalidate it).
-        compose.waitUntil(timeoutMillis = 20_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
             compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -222,7 +230,9 @@ class EmulatorWorkflowE2eTest {
     }
 
     private fun waitForPickerAction(text: String) {
-        compose.waitUntil(timeoutMillis = 20_000) {
+        // Issue #1845: the picker/list-sessions ENUMERATION budget the deleted
+        // stopgap used to skip over. CI-aware and hard-failing.
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
             compose.onAllNodesWithText(text, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -372,7 +382,7 @@ class EmulatorWorkflowE2eTest {
     }
 
     private fun waitForTerminalViewAttached() {
-        compose.waitUntil(timeoutMillis = 20_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
             var attached = false
             launchedActivity?.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()

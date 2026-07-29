@@ -8,6 +8,7 @@ import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
 import com.pocketshell.app.sessions.SharedSshLeaseManager
+import com.pocketshell.app.tmux.tmuxQuotedArgument
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
@@ -359,7 +360,13 @@ internal class AppAssistantActions(
             // with `<name>` gone and `<name>-2` alive the assistant's prompt would
             // be typed into the NEIGHBOUR's pane — the #976 misroute class.
             val target = shellQuote(TmuxTarget.pane(sessionName))
-            val command = "tmux send-keys -t $target -l ${shellQuote(prompt)} && tmux send-keys -t $target Enter"
+            // Issue #1845: the prompt is the LAST argv element of the first
+            // `tmux` command, and tmux deletes a trailing `;` from an argv
+            // element (command separator). Shell-quoting alone silently dropped
+            // that byte, so quote through the tmux-argv-safe helper.
+            val command =
+                "tmux send-keys -t $target -l ${tmuxQuotedArgument(prompt)} && " +
+                    "tmux send-keys -t $target Enter"
             val result = session.exec(command)
             if (result.exitCode == 0) {
                 ActionResult.ok("Sent prompt to session $sessionName.")

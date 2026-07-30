@@ -3,6 +3,7 @@ package com.pocketshell.app.hosts
 import com.pocketshell.app.tmux.LivenessProbeTestOverride
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -34,7 +35,12 @@ import org.junit.runner.Description
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainDispatcherRule(
-    internal val dispatcher: TestDispatcher = UnconfinedTestDispatcher(),
+    // Give every default rule its own scheduler explicitly. The implicit
+    // constructor adopts an already-installed test Main scheduler, which can
+    // bind a newly constructed test class to another class's clock in the
+    // long-lived full-suite worker (#1892).
+    internal val dispatcher: TestDispatcher =
+        UnconfinedTestDispatcher(TestCoroutineScheduler()),
 ) : TestRule {
     private val beforeResetMain = mutableListOf<() -> Unit>()
 

@@ -259,7 +259,8 @@ class PromptComposerSendDismissE2eTest {
             .assertIsDisplayed()
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
-            vm.uiState.value.attachments.isNotEmpty()
+            vm.uiState.value.attachments.isNotEmpty() &&
+                vm.uiState.value.attachmentUpload is PromptComposerViewModel.AttachmentUploadState.Idle
         }
         assertEquals(1, vm.uiState.value.attachments.size)
         assertEquals("", vm.uiState.value.draft)

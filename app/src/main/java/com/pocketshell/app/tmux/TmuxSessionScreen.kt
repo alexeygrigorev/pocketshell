@@ -56,11 +56,15 @@ import com.pocketshell.app.projects.conventionalRemoteHome
 import com.pocketshell.app.projects.defaultSessionBaseName
 import com.pocketshell.app.projects.derivedSessionName
 import com.pocketshell.app.session.ConversationLoadState
-import com.pocketshell.app.session.ConversationLinkAction
+import com.pocketshell.app.session.ConversationPathTapBanner
+import com.pocketshell.app.session.ConversationPathTapRequest
+import com.pocketshell.app.session.ConversationPathTapState
+import com.pocketshell.app.session.ConversationPathTapViewModel
+import com.pocketshell.app.session.ConversationTapTarget
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.SessionTab
-import com.pocketshell.app.session.conversationLinkAction
+import com.pocketshell.app.session.conversationTapTarget
 import com.pocketshell.app.session.cwdForDetectedFilePath
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
@@ -139,6 +143,8 @@ public fun TmuxSessionScreen(
     settingsViewModel: SettingsViewModel = hiltViewModel(),
     // Issue #842: loads transcript-referenced images for inline display.
     conversationImageViewModel: ConversationImageViewModel = hiltViewModel(),
+    // Issue #1890: resolves/stats Conversation path taps before navigation.
+    conversationPathTapViewModel: ConversationPathTapViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
     // Issue #666: the (re)attached session no longer exists on the server.
     onSessionEnded: (sessionName: String) -> Unit = { onBack() },
@@ -376,6 +382,7 @@ public fun TmuxSessionScreen(
                 sessionForwardingIndicatorViewModel = sessionForwardingIndicatorViewModel,
                 settingsViewModel = settingsViewModel,
                 conversationImageViewModel = conversationImageViewModel,
+                conversationPathTapViewModel = conversationPathTapViewModel,
                 conn = conn,
                 panesSel = panesSel,
                 agent = agent,
@@ -1052,6 +1059,7 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
     sessionForwardingIndicatorViewModel: com.pocketshell.app.portfwd.SessionForwardingIndicatorViewModel,
     settingsViewModel: SettingsViewModel,
     conversationImageViewModel: ConversationImageViewModel,
+    conversationPathTapViewModel: ConversationPathTapViewModel,
     conn: TmuxSessionConnectionRuntime,
     panesSel: TmuxSessionPaneSelection,
     agent: TmuxSessionAgentSignals,
@@ -1101,6 +1109,7 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
 
     val appSettings by settingsViewModel.state.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
+    val conversationPathTapState by conversationPathTapViewModel.state.collectAsState()
     val sessionCardFeedChipState = remember(sessionCards) {
         cardFeedChipState(sessionCards)
     }
@@ -1162,6 +1171,42 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
         conversationSurface == TmuxConversationSurface.Transcript
     val showConversationPlaceholder =
         conversationSurface == TmuxConversationSurface.Placeholder
+    val conversationPathScopeKey = surfaceConversationPaneId?.let { paneId ->
+        "$hostId:$sessionName:$paneId"
+    }
+    LaunchedEffect(conversationPathScopeKey) {
+        conversationPathTapViewModel.bindScope(conversationPathScopeKey)
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        conversationPathTapViewModel.cancel()
+    }
+    LaunchedEffect(conversationPathTapState) {
+        when (val state = conversationPathTapState) {
+            is ConversationPathTapState.OpenFile -> {
+                conversationPathTapViewModel.consume(state.requestId)
+                DiagnosticEvents.record(
+                    "action",
+                    "conversation_link_open",
+                    "mode" to "tmux",
+                    "kind" to "file",
+                    "paneId" to (surfaceConversationPaneId ?: ""),
+                )
+                onOpenFile(state.resolvedPath, null)
+            }
+            is ConversationPathTapState.BrowseDirectory -> {
+                conversationPathTapViewModel.consume(state.requestId)
+                DiagnosticEvents.record(
+                    "action",
+                    "conversation_link_open",
+                    "mode" to "tmux",
+                    "kind" to "directory",
+                    "paneId" to (surfaceConversationPaneId ?: ""),
+                )
+                onBrowseFiles(state.resolvedPath)
+            }
+            else -> Unit
+        }
+    }
     // Issue #605: hold the terminal AndroidView re-attach one frame on the
     // Conversation → Terminal edge.
     val deferTerminalAttachForSwap by rememberConversationToTerminalSwapLatch(
@@ -1306,28 +1351,8 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
                     },
                     onConversationLinkTap = { link ->
                         val cwd = currentPane!!.cwd.takeIf { it.isNotBlank() }
-                        when (val action = conversationLinkAction(link, cwd)) {
-                            is ConversationLinkAction.OpenFile -> {
-                                DiagnosticEvents.record(
-                                    "action",
-                                    "conversation_link_open",
-                                    "mode" to "tmux",
-                                    "kind" to "file",
-                                    "paneId" to paneIdForSend,
-                                )
-                                onOpenFile(action.path, action.cwd)
-                            }
-                            is ConversationLinkAction.BrowseDirectory -> {
-                                DiagnosticEvents.record(
-                                    "action",
-                                    "conversation_link_open",
-                                    "mode" to "tmux",
-                                    "kind" to "directory",
-                                    "paneId" to paneIdForSend,
-                                )
-                                onBrowseFiles(action.startDir)
-                            }
-                            is ConversationLinkAction.OpenUrl -> {
+                        when (val target = conversationTapTarget(link)) {
+                            is ConversationTapTarget.Url -> {
                                 DiagnosticEvents.record(
                                     "action",
                                     "conversation_link_open",
@@ -1335,7 +1360,24 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
                                     "kind" to "url",
                                     "paneId" to paneIdForSend,
                                 )
-                                handleUrlTap(action.url)
+                                handleUrlTap(target.value)
+                            }
+                            is ConversationTapTarget.RemotePath -> {
+                                conversationPathTapViewModel.open(
+                                    ConversationPathTapRequest(
+                                        scopeKey = "$hostId:$sessionName:$paneIdForSend",
+                                        rawPath = target.value,
+                                        cwd = cwd,
+                                        target = com.pocketshell.app.sessions.LeaseSessionTarget(
+                                            hostId = hostId,
+                                            hostname = host,
+                                            port = port,
+                                            username = user,
+                                            keyPath = keyPath,
+                                            passphrase = passphrase,
+                                        ),
+                                    ),
+                                )
                             }
                         }
                     },
@@ -1377,6 +1419,20 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
                         onTuiCommandNoticeChange(null)
                     },
                     onDismiss = { onTuiCommandNoticeChange(null) },
+                )
+            }
+        }
+        if (currentSelectedTab == SessionTab.Conversation &&
+            (conversationPathTapState is ConversationPathTapState.Checking ||
+                conversationPathTapState is ConversationPathTapState.Failed)
+        ) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.BottomCenter,
+            ) {
+                ConversationPathTapBanner(
+                    state = conversationPathTapState,
+                    onDismiss = conversationPathTapViewModel::consume,
                 )
             }
         }

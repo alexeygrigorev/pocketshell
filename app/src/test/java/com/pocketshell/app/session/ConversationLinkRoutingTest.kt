@@ -8,86 +8,27 @@ import org.junit.Test
 class ConversationLinkRoutingTest {
 
     @Test
-    fun fileLinkKeepsLiteralPathAndCwdForFileViewerResolution() {
-        val action = conversationLinkAction(
-            link = link("out/report.png", ConversationLinkKind.FILE),
-            cwd = "/home/alexey/git/pocketshell",
-        )
-
+    fun urlStaysOnUrlRouteWhileBothPathGuessesUseRemoteProbe() {
         assertEquals(
-            ConversationLinkAction.OpenFile(
-                path = "out/report.png",
-                cwd = "/home/alexey/git/pocketshell",
-            ),
-            action,
+            ConversationTapTarget.Url("https://example.test/report"),
+            conversationTapTarget(link("https://example.test/report", ConversationLinkKind.URL)),
+        )
+        assertEquals(
+            ConversationTapTarget.RemotePath("README"),
+            conversationTapTarget(link("README", ConversationLinkKind.FILE)),
+        )
+        assertEquals(
+            ConversationTapTarget.RemotePath("release.v2"),
+            conversationTapTarget(link("release.v2", ConversationLinkKind.DIRECTORY)),
         )
     }
 
     @Test
-    fun directoryLinkResolvesAgainstCwdBeforeOpeningBrowser() {
-        val action = conversationLinkAction(
-            link = link("../logs", ConversationLinkKind.DIRECTORY),
-            cwd = "/home/alexey/git/pocketshell",
-        )
-
+    fun rootedAttachmentPathIsPassedUnchangedToRemoteResolutionBoundary() {
+        val attachment = "~/.pocketshell/attachments/host/screenshot.png"
         assertEquals(
-            ConversationLinkAction.BrowseDirectory("/home/alexey/git/logs"),
-            action,
-        )
-    }
-
-    @Test
-    fun attachmentFileLinkDropsCwdSoItStaysHomeRooted() {
-        val attachment =
-            "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
-                "20260606-155901-01-Screenshot_20260606-155849.png"
-
-        val action = conversationLinkAction(
-            link = link(attachment, ConversationLinkKind.FILE),
-            cwd = "/home/alexey/git/pocketshell",
-        )
-
-        assertEquals(
-            ConversationLinkAction.OpenFile(
-                path = attachment,
-                cwd = null,
-            ),
-            action,
-        )
-    }
-
-    @Test
-    fun absoluteFileLinkDropsCwdSoItStaysServerRooted() {
-        val action = conversationLinkAction(
-            link = link("/home/alexey/.pocketshell/attachments/a.png", ConversationLinkKind.FILE),
-            cwd = "/home/alexey/git/pocketshell",
-        )
-
-        assertEquals(
-            ConversationLinkAction.OpenFile(
-                path = "/home/alexey/.pocketshell/attachments/a.png",
-                cwd = null,
-            ),
-            action,
-        )
-    }
-
-    @Test
-    fun localFileUriLinkDropsCwdSoItStaysServerRooted() {
-        val action = conversationLinkAction(
-            link = link(
-                "file:///home/alexey/.pocketshell/attachments/a%20b.png",
-                ConversationLinkKind.FILE,
-            ),
-            cwd = "/home/alexey/git/pocketshell",
-        )
-
-        assertEquals(
-            ConversationLinkAction.OpenFile(
-                path = "file:///home/alexey/.pocketshell/attachments/a%20b.png",
-                cwd = null,
-            ),
-            action,
+            ConversationTapTarget.RemotePath(attachment),
+            conversationTapTarget(link(attachment, ConversationLinkKind.FILE)),
         )
     }
 
@@ -99,19 +40,6 @@ class ConversationLinkRoutingTest {
         assertEquals(null, cwdForDetectedFilePath("~/out/report.png", cwd))
         assertEquals(null, cwdForDetectedFilePath("/home/alexey/out/report.png", cwd))
         assertEquals(null, cwdForDetectedFilePath("file:///home/alexey/out/report.png", cwd))
-    }
-
-    @Test
-    fun urlLinkRoutesToUrlAction() {
-        val action = conversationLinkAction(
-            link = link("https://github.com/alexeygrigorev/pocketshell/issues/583", ConversationLinkKind.URL),
-            cwd = "/home/alexey/git/pocketshell",
-        )
-
-        assertEquals(
-            ConversationLinkAction.OpenUrl("https://github.com/alexeygrigorev/pocketshell/issues/583"),
-            action,
-        )
     }
 
     private fun link(text: String, kind: ConversationLinkKind) =

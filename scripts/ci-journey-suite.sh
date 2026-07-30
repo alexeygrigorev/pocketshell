@@ -260,6 +260,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#goToDialogCancelDismissesWithoutNavigating"
   "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#failedStateShowsMessageAndRetry"
   "com.pocketshell.app.fileexplorer.FileExplorerScaffoldTest#successTransferShowsDismissibleBanner"
+  "com.pocketshell.app.session.ConversationPathTapBannerTest"  # #1890 G9: a failed Conversation path tap stays in place and names the exact resolved server path instead of silently no-oping
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewStateShowsMessageAndRetry"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#markdownRenderedPipeTableShowsCellsNotRawDelimiter"  # #921 D32 G9): rendered Markdown shows GFM pipe tables as

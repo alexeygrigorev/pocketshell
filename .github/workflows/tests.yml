@@ -419,6 +419,18 @@ jobs:
           scripts/full-jvm-gate.sh --profile-guard-self-test
           scripts/full-jvm-gate.sh --profile-guard-check
 
+      # Issue #1897: the #1646 result guard correctly rejects FROM-CACHE test
+      # tasks, but it cannot force the preceding Gradle invocation to execute.
+      # Keep the required Unit command aligned with the canonical forced local
+      # gate: rerun every task and disable cache restoration. The cheap
+      # self-test proves this wiring guard fails closed when either flag is
+      # removed, duplicated, contradicted, or moved off the complete test graph.
+      - name: CI Unit forced-execution wiring guard (issue #1897)
+        run: |
+          chmod +x scripts/check-ci-unit-forced-execution.sh
+          scripts/check-ci-unit-forced-execution.sh --self-test
+          scripts/check-ci-unit-forced-execution.sh
+
       # Issue #1646: the executed-test-count guard's OWN red->green self-test.
       # Proves — with synthetic result XML + synthetic Gradle console output, no
       # Gradle, no Android SDK, no emulator — that the guard FAILS a vacuous run
@@ -459,7 +471,8 @@ jobs:
         timeout-minutes: 35
         run: |
           set -o pipefail
-          ./gradlew test --no-daemon --stacktrace --console=plain \
+          ./gradlew test --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
             --max-workers=2 \
             -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
             2>&1 | tee "${RUNNER_TEMP}/unit-test-gradle.log"

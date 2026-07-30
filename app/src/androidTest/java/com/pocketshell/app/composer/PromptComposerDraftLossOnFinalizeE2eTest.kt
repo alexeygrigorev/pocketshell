@@ -52,6 +52,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -140,6 +141,149 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         outboundQueueStore = queue,
     ).also { viewModel = it }
 
+    /**
+     * Issue #695 recurrence: the production screen-scoped dispatcher must close
+     * the empty real sheet at local queue acceptance, not after the host's slow
+     * suspend delivery callback.
+     */
+    @Test
+    fun acceptedPromptDismissesBeforeTenSecondHostDeliveryCompletes() {
+        val drafts = InMemoryComposerDraftStore()
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newViewModel(drafts, queue)
+        val visible = mutableStateOf(true)
+        val sendEntered = CompletableDeferred<Unit>()
+        val sendCompleted = CompletableDeferred<Unit>()
+        val targetKey = "1/session-a"
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    PromptComposerSendDispatcher(
+                        viewModel = vm,
+                        onSend = {
+                            sendEntered.complete(Unit)
+                            delay(10_000)
+                            sendCompleted.complete(Unit)
+                            true
+                        },
+                        onDelivered = { visible.value = false },
+                    )
+                    if (visible.value) {
+                        PromptComposerSheet(
+                            onDismiss = { visible.value = false },
+                            onSend = { error("screen-scoped dispatcher owns delivery") },
+                            composerTargetKey = targetKey,
+                            sendTargetSnapshotProvider = {
+                                PromptComposerViewModel.SendTargetSnapshot(sessionKey = targetKey)
+                            },
+                            viewModel = vm,
+                            collectSendRequests = false,
+                        )
+                    }
+                }
+            }
+        }
+        compose.waitUntil(5_000) { vm.composerTarget == targetKey }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
+            .performClick()
+            .performTextInput("send without waiting")
+        val tappedAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
+
+        compose.waitUntil(2_000) { !visible.value }
+        val dismissedAfterMs = SystemClock.elapsedRealtime() - tappedAt
+        assertTrue(
+            "local acceptance must dismiss promptly, took ${dismissedAfterMs}ms",
+            dismissedAfterMs < 2_000,
+        )
+        compose.waitUntil(2_000) { sendEntered.isCompleted }
+        assertTrue("host delivery must have started", sendEntered.isCompleted)
+        assertFalse("dismissal must not await the injected 10s host callback", sendCompleted.isCompleted)
+        assertEquals("", vm.uiState.value.draft)
+        assertEquals(1, queue.itemsFor(targetKey).size)
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertDoesNotExist()
+    }
+
+    /**
+     * The local acceptance event and the dismissal reduction are distinct main
+     * loop turns. New typing in that window owns the sheet and must survive
+     * exactly, even while the accepted row continues delivering.
+     */
+    @Test
+    fun newDraftBeforeAcceptanceDismissReductionKeepsSheetOpenExactly() {
+        val drafts = InMemoryComposerDraftStore()
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newViewModel(drafts, queue)
+        val visible = mutableStateOf(true)
+        val reductionEntered = CompletableDeferred<Unit>()
+        val releaseReduction = CompletableDeferred<Unit>()
+        val releaseDelivery = CompletableDeferred<Unit>()
+        val targetKey = "1/session-a"
+        vm.beforeHandoffAutoCloseReductionForTest = {
+            reductionEntered.complete(Unit)
+            releaseReduction.await()
+        }
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    PromptComposerSendDispatcher(
+                        viewModel = vm,
+                        onSend = {
+                            releaseDelivery.await()
+                            true
+                        },
+                        onDelivered = { visible.value = false },
+                    )
+                    if (visible.value) {
+                        PromptComposerSheet(
+                            onDismiss = { visible.value = false },
+                            onSend = { error("screen-scoped dispatcher owns delivery") },
+                            composerTargetKey = targetKey,
+                            sendTargetSnapshotProvider = {
+                                PromptComposerViewModel.SendTargetSnapshot(sessionKey = targetKey)
+                            },
+                            viewModel = vm,
+                            collectSendRequests = false,
+                        )
+                    }
+                }
+            }
+        }
+        compose.waitUntil(5_000) { vm.composerTarget == targetKey }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
+            .performClick()
+            .performTextInput("accepted prompt")
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
+        compose.waitUntil(5_000) {
+            reductionEntered.isCompleted &&
+                vm.uiState.value.draft.isEmpty() &&
+                queue.itemsFor(targetKey).size == 1
+        }
+
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
+            .performClick()
+            .performTextInput("brand new draft")
+        compose.waitUntil(5_000) {
+            vm.uiState.value.draft == "brand new draft" &&
+                drafts.load(targetKey) == "brand new draft"
+        }
+        releaseReduction.complete(Unit)
+        compose.waitForIdle()
+
+        assertTrue("new input must retain ownership of the real sheet", visible.value)
+        assertEquals("brand new draft", vm.uiState.value.draft)
+        assertEquals("brand new draft", drafts.load(targetKey))
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
+            .assertIsDisplayed()
+            .assertTextContains("brand new draft", substring = true)
+        releaseDelivery.complete(Unit)
+        compose.waitUntil(5_000) { !vm.uiState.value.sendInFlight }
+        assertTrue("post-acceptance completion must not close over the new draft", visible.value)
+        assertEquals("brand new draft", vm.uiState.value.draft)
+    }
+
     @Test
     fun finalizingPreviousSendKeepsNewDraftVisibleDurableAndSheetOpen() {
         val drafts = InMemoryComposerDraftStore()
@@ -148,7 +292,13 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         val visible = mutableStateOf(true)
         val sendEntered = CompletableDeferred<Unit>()
         val releaseDelivery = CompletableDeferred<Unit>()
+        val reductionEntered = CompletableDeferred<Unit>()
+        val releaseReduction = CompletableDeferred<Unit>()
         val targetKey = "1/session-a"
+        vm.beforeHandoffAutoCloseReductionForTest = {
+            reductionEntered.complete(Unit)
+            releaseReduction.await()
+        }
 
         compose.activityRule.scenario.onActivity { activity ->
             WindowCompat.setDecorFitsSystemWindows(activity.window, false)
@@ -205,7 +355,9 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
-            sendEntered.isCompleted && vm.uiState.value.sendInFlight
+            sendEntered.isCompleted &&
+                reductionEntered.isCompleted &&
+                vm.uiState.value.sendInFlight
         }
         // The #971 handoff is real: prompt A moved into exactly one queue row,
         // leaving the editor empty and ready for prompt B.
@@ -218,6 +370,9 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
             vm.uiState.value.draft == "I can still report" &&
                 drafts.load(targetKey) == "I can still report"
         }
+        releaseReduction.complete(Unit)
+        compose.waitForIdle()
+        assertTrue("new typing must defeat the pending acceptance dismissal", visible.value)
         WalkthroughScreenshotArtifacts.capture("issue-1616-01-new-draft-during-send")
 
         // Previous prompt A finalizes in the background.

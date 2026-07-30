@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -32,6 +33,40 @@ internal class ComposerRevisionTracker {
     }
 }
 
+internal data class ComposerHandoffAcceptance(
+    val target: String,
+    val interactionEpoch: Long,
+    val outboundQueueItemId: String?,
+)
+
+/**
+ * One-shot local-acceptance events, split out of the already oversized
+ * composer ViewModel. The channel bridges the tiny commit-to-Compose gap; the
+ * epoch check below prevents a stale event from closing new composition.
+ */
+internal class ComposerHandoffAcceptanceCoordinator {
+    private val channel = kotlinx.coroutines.channels.Channel<ComposerHandoffAcceptance>(
+        capacity = kotlinx.coroutines.channels.Channel.UNLIMITED,
+    )
+    val events = channel.receiveAsFlow()
+
+    @androidx.annotation.VisibleForTesting
+    var beforeAutoCloseReductionForTest: suspend () -> Unit = {}
+
+    fun publish(acceptance: ComposerHandoffAcceptance) {
+        channel.trySend(acceptance)
+    }
+}
+
+internal val PromptComposerViewModel.handoffAcceptances
+    get() = handoffAcceptance.events
+
+internal var PromptComposerViewModel.beforeHandoffAutoCloseReductionForTest: suspend () -> Unit
+    get() = handoffAcceptance.beforeAutoCloseReductionForTest
+    set(value) {
+        handoffAcceptance.beforeAutoCloseReductionForTest = value
+    }
+
 internal fun PromptComposerViewModel.composerRevision(target: String): Long =
     composerRevisionTracker.revision(target)
 
@@ -42,6 +77,57 @@ internal fun PromptComposerViewModel.recordComposerMutation(target: String? = co
 
 internal fun PromptComposerViewModel.onComposerOpened() {
     composerInteractionEpoch++
+}
+
+internal fun PromptComposerViewModel.publishHandoffAcceptance(
+    target: String,
+    outboundQueueItemId: String?,
+) {
+    handoffAcceptance.publish(
+        ComposerHandoffAcceptance(
+            target = target,
+            interactionEpoch = composerInteractionEpoch,
+            outboundQueueItemId = outboundQueueItemId,
+        ),
+    )
+}
+
+/**
+ * Legacy delivery-quiescence query retained for queue/background-finalize
+ * callers and its class matrix. Issue #695 moves actual dismissal to the local
+ * acceptance reduction below.
+ */
+public fun PromptComposerViewModel.consumeQuiescenceForAutoClose(
+    request: SendRequest? = null,
+): Boolean {
+    val state = _uiState.value
+    val requestEpoch = request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::remove)
+        ?: legacyAutoCloseEpoch.also { legacyAutoCloseEpoch = null }
+    val ownsCurrentInteraction = request == null || requestEpoch == composerInteractionEpoch
+    return ownsCurrentInteraction && state.draft.isEmpty() &&
+        state.attachments.isEmpty() &&
+        state.recording == PromptComposerViewModel.RecordingState.Idle &&
+        !state.outboundHandoffInProgress &&
+        composerTarget?.let { target ->
+            outboundQueueStore.itemsFor(target).none { it.state != OutboundState.Delivered }
+        } != false
+}
+
+/**
+ * Consume a local-acceptance event for prompt composer dismissal without
+ * waiting for its durable queue row to deliver or prune.
+ */
+internal fun PromptComposerViewModel.consumeHandoffAcceptanceForAutoClose(
+    acceptance: ComposerHandoffAcceptance,
+): Boolean {
+    val state = _uiState.value
+    val ownsCurrentTarget = acceptance.target.isBlank() || acceptance.target == composerTarget
+    return ownsCurrentTarget &&
+        acceptance.interactionEpoch == composerInteractionEpoch &&
+        state.draft.isEmpty() &&
+        state.attachments.isEmpty() &&
+        state.recording == PromptComposerViewModel.RecordingState.Idle &&
+        !state.outboundHandoffInProgress
 }
 
 internal fun PromptComposerViewModel.finishOutboundHandoff(
@@ -160,6 +246,10 @@ internal fun PromptComposerViewModel.emitSendRequest(
                 activeRequest.outboundQueueItemId?.let {
                     outboundAutoCloseEpochs[it] = composerInteractionEpoch
                 }
+                publishHandoffAcceptance(
+                    target = durableTarget,
+                    outboundQueueItemId = activeRequest.outboundQueueItemId,
+                )
             }
             return
         }
@@ -173,9 +263,15 @@ internal fun PromptComposerViewModel.emitSendRequest(
                 backgroundDelivery.sendTarget,
             )
         ) {
-            clearComposerForHandoff(
+            val acknowledged = clearComposerForHandoff(
                 ComposerHandoffSnapshot(durableTarget, composerRevision(durableTarget)),
             )
+            if (acknowledged) {
+                publishHandoffAcceptance(
+                    target = durableTarget,
+                    outboundQueueItemId = backgroundDelivery.outboundQueueItemId,
+                )
+            }
             backgroundDeliveredRequest = null
             return
         }
@@ -214,10 +310,17 @@ internal fun PromptComposerViewModel.emitSendRequest(
                 }
                 withContext(Dispatchers.Main.immediate) {
                     if (outboundHandoffJob !== owner) return@withContext
-                    if (clearComposerForHandoff(snapshot)) {
+                    val acknowledged = clearComposerForHandoff(snapshot)
+                    if (acknowledged) {
                         queuedItem?.let { outboundAutoCloseEpochs[it.id] = composerInteractionEpoch }
                     }
                     finishOutboundHandoff(owner)
+                    if (acknowledged && queuedItem != null) {
+                        publishHandoffAcceptance(
+                            target = durableTarget,
+                            outboundQueueItemId = queuedItem.id,
+                        )
+                    }
                     refreshOutboundQueueItemsFor(durableTarget)
                     // The queue drain, never the handoff, claims delivery. If an
                     // older row is active this is intentionally a no-op; its

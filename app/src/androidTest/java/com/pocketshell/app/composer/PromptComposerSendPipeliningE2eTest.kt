@@ -60,12 +60,8 @@ class PromptComposerSendPipeliningE2eTest {
         compose.setContent {
             PocketShellTheme {
                 Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
-                    if (visible.value) {
-                        PromptComposerSheet(
-                        onDismiss = {
-                            dismissCount.incrementAndGet()
-                            visible.value = false
-                        },
+                    PromptComposerSendDispatcher(
+                        viewModel = vm,
                         onSend = { request ->
                             val payload = request.cleanDraft
                             callbackOrder.add(payload)
@@ -82,12 +78,22 @@ class PromptComposerSendPipeliningE2eTest {
                             }
                             true
                         },
-                        composerTargetKey = target,
-                        sendTargetSnapshotProvider = {
-                            PromptComposerViewModel.SendTargetSnapshot(sessionKey = target)
+                        onDelivered = {
+                            dismissCount.incrementAndGet()
+                            visible.value = false
                         },
-                        viewModel = vm,
                     )
+                    if (visible.value) {
+                        PromptComposerSheet(
+                            onDismiss = { visible.value = false },
+                            onSend = { error("screen-scoped dispatcher owns delivery") },
+                            composerTargetKey = target,
+                            sendTargetSnapshotProvider = {
+                                PromptComposerViewModel.SendTargetSnapshot(sessionKey = target)
+                            },
+                            viewModel = vm,
+                            collectSendRequests = false,
+                        )
                     }
                 }
             }
@@ -96,8 +102,18 @@ class PromptComposerSendPipeliningE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
             .performClick().performTextInput("prompt A")
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
-        compose.waitUntil(5_000) { firstEntered.isCompleted && vm.uiState.value.sendInFlight }
+        compose.waitUntil(5_000) {
+            firstEntered.isCompleted &&
+                vm.uiState.value.sendInFlight &&
+                dismissCount.get() == 1 &&
+                !visible.value
+        }
 
+        // Local acceptance closes the empty composer promptly. Reopening it
+        // while A is still delivering preserves #1621 pipelining: B can still
+        // enqueue behind A and closes promptly on its own acceptance.
+        compose.runOnUiThread { visible.value = true }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertExists()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
             .performClick().performTextInput("prompt B")
         compose.waitUntil(5_000) { vm.uiState.value.draft == "prompt B" }
@@ -109,8 +125,8 @@ class PromptComposerSendPipeliningE2eTest {
         assertEquals(listOf("prompt A", "prompt B"), queue.itemsFor(target).map { it.cleanText })
         assertEquals(listOf(OutboundState.InFlight, OutboundState.Queued), queue.itemsFor(target).map { it.state })
         assertEquals(listOf("prompt A"), callbackOrder.toList())
-        assertEquals(0, dismissCount.get())
-        assertTrue(visible.value)
+        assertEquals(2, dismissCount.get())
+        assertTrue(!visible.value)
         WalkthroughScreenshotArtifacts.capture("issue-1621-green-second-prompt-queued-during-first")
 
         releaseFirst.complete(Unit)
@@ -121,19 +137,17 @@ class PromptComposerSendPipeliningE2eTest {
         assertTrue(vm.uiState.value.sendInFlight)
         assertEquals(listOf("prompt A", "prompt B"), callbackOrder.toList())
         assertEquals(mapOf("prompt A" to 1, "prompt B" to 1), callbackOrder.groupingBy { it }.eachCount())
-        assertEquals(0, dismissCount.get())
-        assertTrue(visible.value)
+        assertEquals(2, dismissCount.get())
+        assertTrue(!visible.value)
         WalkthroughScreenshotArtifacts.capture("issue-1621-green-fifo-second-delivering")
         releaseSecond.complete(Unit)
         compose.waitUntil(5_000) {
             !vm.uiState.value.sendInFlight &&
-                queue.itemsFor(target).isEmpty() &&
-                dismissCount.get() == 1 &&
-                !visible.value
+                queue.itemsFor(target).isEmpty()
         }
         assertEquals(listOf("prompt A", "prompt B"), callbackOrder.toList())
         assertEquals(mapOf("prompt A" to 1, "prompt B" to 1), callbackOrder.groupingBy { it }.eachCount())
-        assertEquals(1, dismissCount.get())
+        assertEquals(2, dismissCount.get())
         assertEquals("", vm.uiState.value.draft)
         assertTrue(vm.uiState.value.attachments.isEmpty())
         assertTrue(queue.itemsFor(target).isEmpty())
@@ -161,31 +175,37 @@ class PromptComposerSendPipeliningE2eTest {
         compose.setContent {
             PocketShellTheme {
                 Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    PromptComposerSendDispatcher(
+                        viewModel = vm,
+                        onSend = { request ->
+                            when (request.cleanDraft) {
+                                "older queued prompt" -> {
+                                    olderEntered.complete(Unit)
+                                    releaseOlder.await()
+                                }
+                                "prompt B" -> {
+                                    newerEntered.complete(Unit)
+                                    releaseNewer.await()
+                                }
+                                else -> error("unexpected ${request.cleanDraft}")
+                            }
+                            true
+                        },
+                        onDelivered = {
+                            dismissCount.incrementAndGet()
+                            visible.value = false
+                        },
+                    )
                     if (visible.value) {
                         PromptComposerSheet(
-                            onDismiss = {
-                                dismissCount.incrementAndGet()
-                                visible.value = false
-                            },
-                            onSend = { request ->
-                                when (request.cleanDraft) {
-                                    "older queued prompt" -> {
-                                        olderEntered.complete(Unit)
-                                        releaseOlder.await()
-                                    }
-                                    "prompt B" -> {
-                                        newerEntered.complete(Unit)
-                                        releaseNewer.await()
-                                    }
-                                    else -> error("unexpected ${request.cleanDraft}")
-                                }
-                                true
-                            },
+                            onDismiss = { visible.value = false },
+                            onSend = { error("screen-scoped dispatcher owns delivery") },
                             composerTargetKey = target,
                             sendTargetSnapshotProvider = {
                                 PromptComposerViewModel.SendTargetSnapshot(sessionKey = target)
                             },
                             viewModel = vm,
+                            collectSendRequests = false,
                         )
                     }
                 }
@@ -203,9 +223,15 @@ class PromptComposerSendPipeliningE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
             .performClick().performTextInput("older queued prompt")
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
-        compose.waitUntil(5_000) { vm.uiState.value.draft.isEmpty() }
+        compose.waitUntil(5_000) {
+            vm.uiState.value.draft.isEmpty() &&
+                dismissCount.get() == 1 &&
+                !visible.value
+        }
         assertTrue(queue.itemsFor(target).isEmpty())
-        assertEquals(0, dismissCount.get())
+        assertEquals(1, dismissCount.get())
+
+        compose.runOnUiThread { visible.value = true }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertExists()
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
@@ -213,8 +239,8 @@ class PromptComposerSendPipeliningE2eTest {
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
         compose.waitUntil(5_000) { newerEntered.isCompleted }
         releaseNewer.complete(Unit)
-        compose.waitUntil(5_000) { dismissCount.get() == 1 && !visible.value }
-        assertEquals(1, dismissCount.get())
+        compose.waitUntil(5_000) { dismissCount.get() == 2 && !visible.value }
+        assertEquals(2, dismissCount.get())
     }
 
     private fun newViewModel(queue: OutboundQueueStore): PromptComposerViewModel =

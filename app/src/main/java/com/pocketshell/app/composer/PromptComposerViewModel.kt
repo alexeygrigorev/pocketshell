@@ -255,6 +255,7 @@ public class PromptComposerViewModel @Inject constructor(
      */
     internal val _sendRequests = Channel<SendRequest>(capacity = Channel.BUFFERED)
     public val sendRequests: Flow<SendRequest> = _sendRequests.receiveAsFlow()
+    internal val handoffAcceptance = ComposerHandoffAcceptanceCoordinator()
 
     /**
      * Issue #211: one-shot Send queued by the user while the FSM was
@@ -1012,6 +1013,7 @@ public class PromptComposerViewModel @Inject constructor(
         backgroundDeliveredRequest = request?.takeIf {
             it.outboundQueueItemId != null && closeEpoch != composerInteractionEpoch
         }
+        request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::remove)
         inFlightSendRequest = null
         _uiState.update { it.copy(sendInFlight = false) }
         markOutboundSendDelivered(request)
@@ -1020,30 +1022,6 @@ public class PromptComposerViewModel @Inject constructor(
         // on an outer screen's queue observer leaves an enqueue-behind row stuck
         // when the composer is mounted in another host/lifecycle boundary.
         if (!outboundHandoffInProgress) retryNextOutboundItem()
-    }
-
-    /**
-     * A delivery may auto-close only when no new composition is active.
-     *
-     * CONSUMING, not a pure query (issue #1621, round-three review follow-up: the
-     * old name `isQuiescentForAutoClose` promised purity it never had). Answering
-     * CONSUMES [request]'s auto-close epoch — the one-shot token proving this
-     * delivery, and not a newer composition, owns the current interaction — so a
-     * second call for the same request answers differently by design. Call it
-     * exactly ONCE per resolved delivery, right after [markSendDelivered].
-     */
-    public fun consumeQuiescenceForAutoClose(request: SendRequest? = null): Boolean {
-        val state = _uiState.value
-        val requestEpoch = request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::remove)
-            ?: legacyAutoCloseEpoch.also { legacyAutoCloseEpoch = null }
-        val ownsCurrentInteraction = request == null || requestEpoch == composerInteractionEpoch
-        return ownsCurrentInteraction && state.draft.isEmpty() &&
-            state.attachments.isEmpty() &&
-            state.recording == RecordingState.Idle &&
-            !state.outboundHandoffInProgress &&
-            composerTarget?.let { target ->
-                outboundQueueStore.itemsFor(target).none { it.state != OutboundState.Delivered }
-            } != false
     }
 
     /**

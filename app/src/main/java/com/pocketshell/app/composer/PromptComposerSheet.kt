@@ -1489,10 +1489,25 @@ internal fun SheetContent(
 public fun PromptComposerSendDispatcher(
     viewModel: PromptComposerViewModel,
     onSend: suspend (PromptComposerViewModel.SendRequest) -> Boolean,
+    // Historical name retained for source-compatible standalone harnesses.
+    // Durable production rows now invoke it at local handoff acceptance;
+    // no-store fallback rows still invoke it on successful delivery.
     onDelivered: () -> Unit = {},
 ) {
     val currentOnSend by rememberUpdatedState(onSend)
     val currentOnDelivered by rememberUpdatedState(onDelivered)
+    LaunchedEffect(viewModel) {
+        viewModel.handoffAcceptances.collect { acceptance ->
+            // Issue #695 recurrence: dismissal belongs to local acceptance,
+            // not the 5–10s host delivery callback. Pauseable test seam makes
+            // the post-acceptance/new-draft race deterministic; production is
+            // a no-op and reduces immediately.
+            viewModel.beforeHandoffAutoCloseReductionForTest()
+            if (viewModel.consumeHandoffAcceptanceForAutoClose(acceptance)) {
+                currentOnDelivered()
+            }
+        }
+    }
     LaunchedEffect(viewModel) {
         viewModel.sendRequests.collect { request ->
             // Issue #745: bound the send so the in-flight state can never hang.
@@ -1509,8 +1524,12 @@ public fun PromptComposerSendDispatcher(
             if (delivered) {
                 // Finalize the queue row without touching post-handoff input.
                 viewModel.markSendDelivered(request)
-                // A background finalize must not dismiss active composition.
-                if (viewModel.consumeQuiescenceForAutoClose(request)) {
+                // Standalone/legacy callers have no durable queue acceptance
+                // boundary. Keep their established success-only dismissal;
+                // production rows close earlier from handoffAcceptances.
+                if (request.outboundQueueItemId == null &&
+                    viewModel.consumeQuiescenceForAutoClose(request)
+                ) {
                     currentOnDelivered()
                 }
             } else {

@@ -1,10 +1,16 @@
 package com.pocketshell.app.tmux
 
+import android.app.Activity
+import android.app.Instrumentation
+import android.content.Intent
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -20,6 +26,11 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
+import com.pocketshell.app.fileexplorer.FILE_EXPLORER_PATH_TAG
+import com.pocketshell.app.fileexplorer.FILE_EXPLORER_SCREEN_TAG
+import com.pocketshell.app.fileviewer.FILE_VIEWER_BACK_TAG
+import com.pocketshell.app.fileviewer.FILE_VIEWER_SCREEN_TAG
+import com.pocketshell.app.fileviewer.FILE_VIEWER_TEXT_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -30,6 +41,8 @@ import com.pocketshell.app.proof.SeedBeforeLaunchRule
 import com.pocketshell.app.proof.clearLastSessionPrefs
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.session.CONVERSATION_PATH_TAP_DISMISS_TAG
+import com.pocketshell.app.session.CONVERSATION_PATH_TAP_STATUS_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
@@ -293,6 +306,171 @@ class ConversationTuiCommandJourneyDockerTest {
         Unit
     } }
 
+    /**
+     * Issue #1890 reproduce-first production journey. All taps originate in the
+     * real parsed Conversation transcript on [TmuxSessionScreen] and hit the
+     * live Docker filesystem over the screen's warm lease:
+     *
+     *  - a missing absolute path stays on Conversation and names the exact
+     *    resolved target (base silently navigated to a dead guessed destination);
+     *  - an inaccessible path reports permission denied in place;
+     *  - an extensionless regular file opens FileViewer despite its directory-
+     *    shaped syntax; and
+     *  - a dotted directory opens FileExplorer based on remote fact; while
+     *  - an HTTPS URL still bypasses the path probe and emits ACTION_VIEW.
+     */
+    @Test
+    fun conversationPathsStatBeforeRoutingAndMissingPathStaysVisible() { runBlocking {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        val sessionName = requireNotNull(seededSessionName)
+        attachToSeededSession(hostRowTag, sessionName)
+        waitForTerminalSessionAttached()
+        waitForVisibleTerminalText("issue1890-ready", VISIBLE_TIMEOUT_MS) {
+            "issue1890-ready" in it
+        }
+        val vm = currentViewModel()
+        requireNotNull(waitForDetectionBoundConversationPane(vm)) {
+            "#1890 precondition: real Conversation transcript did not bind: ${describeConversations(vm)}"
+        }
+        tapConversationSegment()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) { conversationPaneShown() }
+
+        // RED on current main: parser guesses DIRECTORY and navigates away, so
+        // no in-place resolved-path error exists. GREEN: the remote miss leaves
+        // Conversation mounted and shows the exact checked path.
+        compose.onNodeWithText(ISSUE1890_MISSING, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
+            compose.onAllNodesWithText(
+                "Path does not exist.",
+                substring = true,
+                useUnmergedTree = true,
+            )
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(CONVERSATION_PATH_TAP_STATUS_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+        compose.onNode(
+            hasText(ISSUE1890_MISSING, substring = true) and
+                hasAnyAncestor(hasTestTag(CONVERSATION_PATH_TAP_STATUS_TAG)),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNode(
+            hasText("Path does not exist.", substring = true) and
+                hasAnyAncestor(hasTestTag(CONVERSATION_PATH_TAP_STATUS_TAG)),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true).assertExists()
+        captureFullFrame("issue1890-01-missing-path-visible")
+        compose.onNodeWithTag(CONVERSATION_PATH_TAP_DISMISS_TAG, useUnmergedTree = true)
+            .performClick()
+
+        // The remote shell itself supplies the permission result. It remains an
+        // in-place, exact-path error rather than a guessed navigation.
+        compose.onNodeWithText(ISSUE1890_PERMISSION_DENIED, useUnmergedTree = true)
+            .performClick()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
+            compose.onAllNodesWithText(
+                "Permission denied.",
+                substring = true,
+                useUnmergedTree = true,
+            )
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(CONVERSATION_PATH_TAP_STATUS_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+        compose.onNode(
+            hasText("Permission denied.", substring = true) and
+                hasAnyAncestor(hasTestTag(CONVERSATION_PATH_TAP_STATUS_TAG)),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNode(
+            hasText(ISSUE1890_PERMISSION_DENIED, substring = true) and
+                hasAnyAncestor(hasTestTag(CONVERSATION_PATH_TAP_STATUS_TAG)),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true).assertExists()
+        captureFullFrame("issue1890-02-permission-denied-visible")
+        compose.onNodeWithTag(CONVERSATION_PATH_TAP_DISMISS_TAG, useUnmergedTree = true)
+            .performClick()
+
+        // URL routing must stay byte-for-byte outside the remote path probe.
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val urlMonitor = object : Instrumentation.ActivityMonitor() {
+            @Volatile
+            var startedIntent: Intent? = null
+
+            override fun onStartActivity(intent: Intent): Instrumentation.ActivityResult {
+                startedIntent = Intent(intent)
+                return Instrumentation.ActivityResult(Activity.RESULT_CANCELED, null)
+            }
+        }
+        instrumentation.addMonitor(urlMonitor)
+        try {
+            compose.onNodeWithText(ISSUE1890_URL, useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) { urlMonitor.startedIntent != null }
+            val started = requireNotNull(urlMonitor.startedIntent)
+            assertEquals(Intent.ACTION_VIEW, started.action)
+            assertEquals(ISSUE1890_URL, started.dataString)
+            compose.onNodeWithTag(CONVERSATION_PATH_TAP_STATUS_TAG, useUnmergedTree = true)
+                .assertDoesNotExist()
+            compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
+                .assertExists()
+            captureFullFrame("issue1890-03-url-bypasses-path-probe")
+        } finally {
+            instrumentation.removeMonitor(urlMonitor)
+        }
+
+        // The parser sees this explicit-root extensionless target as directory-
+        // shaped. Remote `-f` is authoritative, so the actual viewer opens.
+        compose.onNodeWithText(ISSUE1890_EXTENSIONLESS_FILE, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(FILE_VIEWER_TEXT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(FILE_VIEWER_SCREEN_TAG, useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_TEXT_TAG, useUnmergedTree = true).assertIsDisplayed()
+        captureFullFrame("issue1890-04-extensionless-file-viewer")
+        compose.onNodeWithTag(FILE_VIEWER_BACK_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) { conversationPaneShown() }
+        compose.waitForIdle()
+
+        // A normal cwd-relative link resolves against the active pane cwd before
+        // the same remote fact check and opens the viewer at that captured path.
+        compose.onNodeWithText(ISSUE1890_RELATIVE_FILE, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(FILE_VIEWER_TEXT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(FILE_VIEWER_SCREEN_TAG, useUnmergedTree = true).assertIsDisplayed()
+        captureFullFrame("issue1890-05-cwd-relative-file-viewer")
+        compose.onNodeWithTag(FILE_VIEWER_BACK_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) { conversationPaneShown() }
+        compose.waitForIdle()
+
+        // A dot in the final component does not make it a file: the server's
+        // directory fact opens the real browser at the exact path.
+        compose.onNodeWithText(ISSUE1890_DOTTED_DIRECTORY, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(FILE_EXPLORER_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(FILE_EXPLORER_SCREEN_TAG, useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag(FILE_EXPLORER_PATH_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+        compose.onNode(
+            hasText(ISSUE1890_DOTTED_DIRECTORY.substringAfterLast('/')) and
+                hasAnyAncestor(hasTestTag(FILE_EXPLORER_PATH_TAG)),
+            useUnmergedTree = true,
+        ).assertExists()
+        captureFullFrame("issue1890-06-dotted-directory-browser")
+        Unit
+    } }
+
     // -------------------------------------------------------------- seed-before-launch
 
     private suspend fun seedForMethod(methodName: String) {
@@ -303,6 +481,8 @@ class ConversationTuiCommandJourneyDockerTest {
         val sessionName = when (methodName) {
             "modelCommandFromConversationShowsNoticeNoEchoBubbleThenTapOpensTerminal" ->
                 seedMaskedLiveClaudeSession(key)
+            "conversationPathsStatBeforeRoutingAndMissingPathStaysVisible" ->
+                seedIssue1890PathSession(key)
             "confirmedShellShowsNoConversationNoticeOrPlaceholder" ->
                 seedPlainShellSession(key)
             else -> error("unexpected test method $methodName")
@@ -323,6 +503,57 @@ class ConversationTuiCommandJourneyDockerTest {
                 appendLine(
                     "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} -c /tmp " +
                         "\"printf 'issue1207-plain-ready\\r\\n'; exec sh\"",
+                )
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
+                appendLine("sleep 1")
+            },
+        )
+        return sessionName
+    }
+
+    private suspend fun seedIssue1890PathSession(key: String): String {
+        val suffix = unique()
+        val sessionName = "issue1890-paths-$suffix"
+        val transcript =
+            "/home/testuser/.claude/projects/-home-testuser/issue1890-paths-$suffix.jsonl"
+        cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
+        cleanupCommands +=
+            "rm -f ${shellQuote(transcript)} ${shellQuote(ISSUE1890_EXTENSIONLESS_FILE)} " +
+                "${shellQuote("/home/testuser/$ISSUE1890_RELATIVE_FILE")}"
+        cleanupCommands += "rm -rf ${shellQuote(ISSUE1890_DOTTED_DIRECTORY)}"
+        val messages = listOf(
+            ISSUE1890_MISSING,
+            ISSUE1890_PERMISSION_DENIED,
+            ISSUE1890_URL,
+            ISSUE1890_EXTENSIONLESS_FILE,
+            ISSUE1890_RELATIVE_FILE,
+            ISSUE1890_DOTTED_DIRECTORY,
+        ).mapIndexed { index, path ->
+            """{"uuid":"issue1890-$suffix-$index","timestamp":"2026-07-29T23:00:0${index}Z","message":{"role":"assistant","content":[{"type":"text","text":"$path"}]}}"""
+        }
+        execRemote(
+            key,
+            buildString {
+                appendLine("set -eu")
+                appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+                appendLine("mkdir -p /home/testuser/.claude/projects/-home-testuser")
+                appendLine("printf '%s\\n' 'extensionless viewer body' > ${shellQuote(ISSUE1890_EXTENSIONLESS_FILE)}")
+                appendLine(
+                    "printf '%s\\n' 'relative viewer body' > " +
+                        shellQuote("/home/testuser/$ISSUE1890_RELATIVE_FILE"),
+                )
+                appendLine("mkdir -p ${shellQuote(ISSUE1890_DOTTED_DIRECTORY)}")
+                appendLine(
+                    "cp /home/testuser/.claude/projects/-workspace-pocketshell/" +
+                        "pocketshell-claude.jsonl ${shellQuote(transcript)}",
+                )
+                for (message in messages) {
+                    appendLine("printf '%s\\n' ${shellQuote(message)} >> ${shellQuote(transcript)}")
+                }
+                appendLine("touch ${shellQuote(transcript)}")
+                appendLine(
+                    "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} " +
+                        "-c /home/testuser \"printf 'issue1890-ready\\r\\n'; exec sh\"",
                 )
                 appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
                 appendLine("sleep 1")
@@ -661,6 +892,12 @@ class ConversationTuiCommandJourneyDockerTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val HOST_NAME: String = "Issue1207 Agents"
         const val MODEL_COMMAND: String = "/model"
+        const val ISSUE1890_MISSING: String = "/home/testuser/issue1890-missing"
+        const val ISSUE1890_PERMISSION_DENIED: String = "/root/issue1890-denied"
+        const val ISSUE1890_URL: String = "https://example.test/issue1890"
+        const val ISSUE1890_EXTENSIONLESS_FILE: String = "/home/testuser/issue1890-extensionless"
+        const val ISSUE1890_RELATIVE_FILE: String = "./issue1890-relative.txt"
+        const val ISSUE1890_DOTTED_DIRECTORY: String = "/home/testuser/issue1890.folder"
         const val ATTACH_TIMEOUT_MS: Long = 30_000
         const val HOST_ROW_TIMEOUT_MS: Long = 60_000
         const val VISIBLE_TIMEOUT_MS: Long = 20_000

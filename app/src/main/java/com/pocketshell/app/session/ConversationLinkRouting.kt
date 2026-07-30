@@ -5,31 +5,22 @@ import com.pocketshell.core.terminal.selection.ConversationLink
 import com.pocketshell.core.terminal.selection.ConversationLinkKind
 import com.pocketshell.core.terminal.selection.decodeLocalFileUriPath
 
-internal sealed interface ConversationLinkAction {
-    data class OpenFile(val path: String, val cwd: String?) : ConversationLinkAction
-    data class BrowseDirectory(val startDir: String) : ConversationLinkAction
-    data class OpenUrl(val url: String) : ConversationLinkAction
+internal sealed interface ConversationTapTarget {
+    data class Url(val value: String) : ConversationTapTarget
+    data class RemotePath(val value: String) : ConversationTapTarget
 }
 
 /**
- * Issue #583: map a detected conversation URL/path to the same destination
- * shape used by terminal/file-preview taps. File paths keep their literal text
- * plus cwd so FileViewer can apply [RemotePathResolver]; directories are
- * resolved before opening the browser because it expects a concrete start dir.
+ * Preserve URL routing while treating every syntactic path kind as only a
+ * remote-path candidate. FILE vs DIRECTORY is deliberately absent: issue #1890
+ * makes the remote probe the sole authority for that distinction.
  */
-internal fun conversationLinkAction(
-    link: ConversationLink,
-    cwd: String?,
-): ConversationLinkAction = when (link.kind) {
-    ConversationLinkKind.FILE -> ConversationLinkAction.OpenFile(
-        path = link.text,
-        cwd = cwdForDetectedFilePath(link.text, cwd),
-    )
-    ConversationLinkKind.DIRECTORY -> ConversationLinkAction.BrowseDirectory(
-        startDir = RemotePathResolver.resolve(link.text, cwd),
-    )
-    ConversationLinkKind.URL -> ConversationLinkAction.OpenUrl(link.text)
-}
+internal fun conversationTapTarget(link: ConversationLink): ConversationTapTarget =
+    if (link.kind == ConversationLinkKind.URL) {
+        ConversationTapTarget.Url(link.text)
+    } else {
+        ConversationTapTarget.RemotePath(link.text)
+    }
 
 /**
  * Terminal and conversation file-link detectors surface both cwd-relative
@@ -38,6 +29,11 @@ internal fun conversationLinkAction(
  * FileViewer resolution. Passing cwd for rooted attachment paths is harmless
  * with today's resolver, but dropping it here keeps those links exact at the
  * routing boundary and prevents regressions like issue #609.
+ *
+ * Conversation path taps no longer call this helper: issue #1890 hard-cut the
+ * parser's FILE/DIRECTORY guess from that routing boundary. Conversation paths
+ * now resolve once and route from a bounded remote type probe; this helper
+ * remains solely for terminal file-path taps, which still open FileViewer.
  */
 internal fun cwdForDetectedFilePath(path: String, cwd: String?): String? {
     val usableCwd = cwd?.takeIf { it.isNotBlank() } ?: return null

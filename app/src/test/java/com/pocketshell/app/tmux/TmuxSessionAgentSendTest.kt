@@ -1768,6 +1768,17 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
             "reconnect scenario factory/tail/teardown scope must be fully cancelled",
             scenarioRoot.children.none { it.isActive },
         )
+        // Issue #1615 recurrence: joining an iteration's roots made it
+        // coroutine-quiescent, but the base harness still retained that entire
+        // dead VM until @After. Release only after the structural zero-work
+        // assertions above, so iteration N+1 begins with neither live work nor
+        // a strong reference to iteration N.
+        releaseDrainedViewModelForTest(vm)
+        assertEquals(
+            "a drained reconnect scenario must not remain strongly retained by the class harness",
+            0,
+            trackedViewModelCountForTest(),
+        )
     }
 
     /**

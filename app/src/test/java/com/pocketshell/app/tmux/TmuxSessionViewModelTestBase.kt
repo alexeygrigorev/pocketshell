@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.cards.SessionCardsRemoteSource
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.projects.FolderListGateway
@@ -124,6 +125,32 @@ abstract class TmuxSessionViewModelTestBase {
     // Cancelled in `@After` alongside the other per-test-instance scopes.
     private val leaseScope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler))
     private val createdViewModels = mutableListOf<TmuxSessionViewModel>()
+
+    protected fun trackedViewModelCountForTest(): Int = createdViewModels.size
+
+    /**
+     * Relinquish the class harness's safety-net reference after a scenario has
+     * already performed its stricter, iteration-local drain.
+     *
+     * The class-level list exists so ordinary tests cannot forget teardown. A
+     * stress test that explicitly clears, cancels, and joins a VM every
+     * iteration must remove that already-dead VM, though: retaining the whole
+     * batch until `@After` makes later iterations pay for an ever-growing object
+     * graph and repeats `clearForTest()` over every dead VM at method teardown.
+     */
+    protected fun releaseDrainedViewModelForTest(vm: TmuxSessionViewModel) {
+        check(!vm.viewModelScope.coroutineContext.job.isActive) {
+            "cannot release a TmuxSessionViewModel whose owned root is still active"
+        }
+        check(vm.activeOwnScopeChildCountForTest() == 0) {
+            "cannot release a TmuxSessionViewModel that still owns active children"
+        }
+        val trackedIndex = createdViewModels.indexOfFirst { it === vm }
+        check(trackedIndex >= 0) {
+            "cannot release an untracked TmuxSessionViewModel"
+        }
+        createdViewModels.removeAt(trackedIndex)
+    }
 
     protected fun newVm(
         registry: ActiveTmuxClients = ActiveTmuxClients(),

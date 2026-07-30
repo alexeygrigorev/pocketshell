@@ -316,8 +316,19 @@ class ForwardingService : Service() {
                 controller.flowOfTotalTunnelCount(),
                 controller.flowOfPrimaryHostName(),
                 controller.flowOfRestoringHostCount(),
-            ) { activeHosts, tunnels, primaryHost, restoringHosts ->
-                NotificationSnapshot(activeHosts, tunnels, primaryHost, restoringHosts)
+                controller.flowOfHostSnapshots(),
+            ) { activeHosts, tunnels, primaryHost, restoringHosts, snapshots ->
+                NotificationSnapshot(
+                    activeHosts = activeHosts,
+                    tunnels = tunnels,
+                    primaryHost = primaryHost,
+                    restoringHosts = restoringHosts,
+                    activePorts = snapshots.values
+                        .asSequence()
+                        .filter { it.active }
+                        .flatMap { it.activeRemotePorts.asSequence() }
+                        .toSortedSet(),
+                )
             }
                 .distinctUntilChanged()
                 .collect { snapshot ->
@@ -335,6 +346,7 @@ class ForwardingService : Service() {
                             snapshot.activeHosts,
                             snapshot.tunnels,
                             snapshot.restoringHosts,
+                            snapshot.activePorts,
                         )
                     }
                 }
@@ -402,8 +414,10 @@ class ForwardingService : Service() {
         hostCount: Int,
         tunnelCount: Int,
         restoringHostCount: Int = 0,
+        activePorts: Set<Int> = emptySet(),
     ) {
-        val notification = buildNotification(hostName, hostCount, tunnelCount, restoringHostCount)
+        val notification =
+            buildNotification(hostName, hostCount, tunnelCount, restoringHostCount, activePorts)
         if (!hasStartedForeground) {
             promoteToForegroundIfNeeded(notification)
             return
@@ -423,6 +437,7 @@ class ForwardingService : Service() {
         val tunnels: Int,
         val primaryHost: String,
         val restoringHosts: Int,
+        val activePorts: Set<Int> = emptySet(),
     )
 
     private fun initialNotification(): Notification = buildNotification(
@@ -447,6 +462,7 @@ class ForwardingService : Service() {
         hostCount: Int,
         tunnelCount: Int,
         restoringHostCount: Int = 0,
+        activePorts: Set<Int> = emptySet(),
         contentTextOverride: String? = null,
     ): Notification {
         // Issue #446: body-tap deep-links to the port-forward panel entry
@@ -515,7 +531,7 @@ class ForwardingService : Service() {
         // active background process the user controls.
         val contentText = "Running in the background · $detail"
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             // Issue #521: title explicitly says it's running (not just
             // "active"), matching Recorder's persistent-status headline.
             .setContentTitle("Port forwarding running")
@@ -570,7 +586,40 @@ class ForwardingService : Service() {
                 "Stop",
                 stopPendingIntent,
             )
-            .build()
+
+        // Issue #1487: Android 16 Live Update. A forward is user-initiated and
+        // exposes a local service through the phone until Stop is pressed; that
+        // security-relevant live exposure must remain glanceable outside the app.
+        // Always REQUEST promotion on API 36+. Android/OEM/user policy remains
+        // free to demote it to this same required ordinary D21 ongoing FGS
+        // notification; that is platform policy, not an application fallback.
+        // Pre-36 builds remain the ordinary ongoing notification with no hidden
+        // promotion contract.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+            val chipLabel =
+                forwardingChipShortLabel(tunnelCount, restoringHostCount, activePorts)
+            builder
+                .setShortCriticalText(chipLabel)
+                .setRequestPromotedOngoing(true)
+        }
+
+        var notification = builder.build()
+
+        // The original Android 16 (API 36) framework shipped the promoted-
+        // ongoing eligibility check with one extra requirement: non-CallStyle
+        // notifications had to request colorization. Android 16 QPR2 / API
+        // 36.1 reversed that rule and instead disqualifies colorized
+        // notifications. Probe the framework's own eligibility predicate so
+        // each Android 16 implementation gets the shape it requires: current
+        // releases keep the preferred non-colorized BigTextStyle, while the
+        // initial API-36 release gets its required colorized request.
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA &&
+            !notification.hasPromotableCharacteristics()
+        ) {
+            builder.setColorized(true)
+            notification = builder.build()
+        }
 
         // Issue #487 (reopened): make the non-clearable contract explicit on the
         // raw notification. NotificationCompat.setOngoing(true) already sets both
@@ -629,5 +678,25 @@ class ForwardingService : Service() {
             enableLights(false)
         }
         manager.createNotificationChannel(channel)
+    }
+}
+
+/**
+ * Android 16's short critical text has a suggested seven-character budget.
+ * A single known forward names its remote port (`:65535`); multiple forwards
+ * show a count (`2 ports`). Very large counts compact to `12345p` / `99999+p`.
+ */
+internal fun forwardingChipShortLabel(
+    tunnelCount: Int,
+    restoringHostCount: Int,
+    activePorts: Set<Int>,
+): String {
+    if (restoringHostCount > 0 || tunnelCount <= 0) return "…"
+    if (tunnelCount == 1 && activePorts.size == 1) return ":${activePorts.single()}"
+    if (tunnelCount == 1) return "1 port"
+    return when {
+        tunnelCount <= 9 -> "$tunnelCount ports"
+        tunnelCount <= 99_999 -> "${tunnelCount}p"
+        else -> "99999+p"
     }
 }

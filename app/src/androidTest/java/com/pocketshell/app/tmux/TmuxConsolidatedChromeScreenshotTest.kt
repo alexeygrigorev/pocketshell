@@ -22,6 +22,8 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
@@ -89,19 +91,9 @@ class TmuxConsolidatedChromeScreenshotTest {
         captureFullDevice(File(artifactDir(), "consolidated-chrome-single-window-no-agent.png"))
     }
 
-    /**
-     * Issue #601: regression guard. The maintainer's #601 feedback (the
-     * cyan-circled "/" forwarding chip in the header) is that the active
-     * port-forwarding status must NOT live in the session header row — it
-     * stole terminal chrome/content space. Active forwarding is surfaced ONLY
-     * via the kebab menu's "Port forwarding" status row (covered by
-     * [TmuxMoreMenuPortForwardingTest]); the header NEVER renders a forwarding
-     * chip, even when forwarding is active. This asserts the header carries no
-     * forwarding chip and that the terminal pane sits right under the bare
-     * header, reclaiming the rows the chip used to need.
-     */
+    /** Issue #1487 hard-cut: the header pill replaces kebab status decoration. */
     @Test
-    fun activeForwardingDoesNotRenderInHeaderChrome() {
+    fun activeForwardingRendersContainedHeaderPillWithLongTitleAndToggle() {
         compose.setContent {
             PocketShellTheme {
                 Column(
@@ -112,9 +104,17 @@ class TmuxConsolidatedChromeScreenshotTest {
                         .testTag(SCREENSHOT_ROOT_TAG),
                 ) {
                     ConsolidatedTopChrome(
-                        sessionName = "scratch",
+                        sessionName = "really-long-agent-session-title-that-overflows",
+                        agentName = "really-long-agent-session-title-that-overflows",
+                        tabLabels = listOf("Terminal", "Conversation"),
+                        selectedTabIndex = 0,
                         onBack = {},
                         onMore = {},
+                        forwardingState = SessionForwardingIndicatorState(
+                            active = true,
+                            tunnelCount = 2,
+                            activeRemotePorts = setOf(8080, 9090),
+                        ),
                     )
                     PaneProxy()
                 }
@@ -122,18 +122,19 @@ class TmuxConsolidatedChromeScreenshotTest {
         }
 
         compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
-        // The header row must expose its kebab (forwarding status moved inside
-        // it) but must NOT carry a standalone forwarding status chip.
         compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_PORT_FORWARD_PILL_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(TMUX_PORT_FORWARD_PILL_TAG)
+        compose.assertNodeFullyWithinRoot(TMUX_TABS_TAG)
         assertTrue(
-            "active port-forwarding status must NOT render as a header chrome chip (#601)",
+            "active forwarding must expose the status semantics in top chrome",
             compose.onAllNodesWithContentDescription(
                 "2 ports forwarding active for this host",
-            ).fetchSemanticsNodes().isEmpty(),
+            ).fetchSemanticsNodes().isNotEmpty(),
         )
         compose.waitForIdle()
         SystemClock.sleep(200)
-        captureFullDevice(File(artifactDir(), "consolidated-chrome-active-forwarding-no-header-chip.png"))
+        captureFullDevice(File(artifactDir(), "consolidated-chrome-active-forwarding-pill.png"))
     }
 
     @Test
@@ -259,12 +260,19 @@ class TmuxConsolidatedChromeScreenshotTest {
                         sessionName = "claude-main",
                         onBack = {},
                         onMore = {},
+                        forwardingState = SessionForwardingIndicatorState(
+                            active = true,
+                            tunnelCount = 1,
+                            activeRemotePorts = setOf(8080),
+                        ),
                     )
                     PaneProxy()
                 }
             }
         }
         compose.onNodeWithTag(SCREENSHOT_ROOT_TAG).assertExists()
+        compose.onNodeWithTag(TMUX_PORT_FORWARD_PILL_TAG).assertIsDisplayed()
+        compose.assertNodeFullyWithinRoot(TMUX_PORT_FORWARD_PILL_TAG)
         compose.waitForIdle()
         SystemClock.sleep(200)
         captureFullDevice(File(artifactDir(), "consolidated-chrome-ime-up-compact.png"))

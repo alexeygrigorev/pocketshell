@@ -61,6 +61,18 @@ class SessionForwardingIndicatorViewModelTest {
     }
 
     @Test
+    fun `projection carries the exact active remote ports for the pill`() = runTest {
+        val controller = ForwardingController(context)
+        val vm = SessionForwardingIndicatorViewModel(controller)
+
+        controller.registerActiveHost(hostId = 7L, hostName = "beta")
+        controller.updateActiveTunnels(7L, mapOf(8080 to 18080))
+
+        val state = vm.stateFor(hostId = 7L).first { it.tunnelCount == 1 }
+        assertEquals(setOf(8080), state.activeRemotePorts)
+    }
+
+    @Test
     fun `clears when the host unregisters`() = runTest {
         val controller = ForwardingController(context)
         val vm = SessionForwardingIndicatorViewModel(controller)

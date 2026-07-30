@@ -34,10 +34,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.app.portfwd.ForwardingGlyph
+import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -140,9 +144,10 @@ private fun TabsRowWithPulse(
  *   remaining width.
  * - optional inline Terminal/Conversation pill when an agent or locked
  *   conversation is available.
- * - 48dp more affordance (kebab), which owns the dropdown anchor. Active
- *   port-forwarding status lives INSIDE that kebab menu (issue #601), not in
- *   the header row, so it never steals terminal chrome/content space.
+ * - the active port-forwarding pill (issue #1487), which is the sole in-app
+ *   forwarding status surface and remains outside the menu.
+ * - 48dp more affordance (kebab), which owns the dropdown anchor and keeps the
+ *   navigation route to forwarding controls without duplicating status.
  *
  * The host segment is intentionally not surfaced - the host name is
  * already visible on the host list, the pre-session status line, and on
@@ -184,6 +189,9 @@ internal fun ConsolidatedTopChrome(
     // steady-state breadcrumb.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
+    // Issue #1487: active-only forwarding status for the host on screen.
+    // Default hidden keeps direct render/test callers source-compatible.
+    forwardingState: SessionForwardingIndicatorState = SessionForwardingIndicatorState(),
 ) {
     Row(
         modifier = modifier
@@ -286,6 +294,14 @@ internal fun ConsolidatedTopChrome(
             // to the toggle) so, under extreme width pressure, it clips AFTER
             // the title but BEFORE the toggle (#1320 - the toggle never yields).
             ConnectionStatusPill(connectionStatus)
+        }
+
+        // Issue #1487: reserve this compact status outside the yielding title
+        // region so it remains glanceable under realistic long-title pressure.
+        // The whole spacer+pill pair disappears when inactive, leaving no gap.
+        if (forwardingState.visible) {
+            Spacer(modifier = Modifier.width(6.dp))
+            ForwardingStatusPill(forwardingState)
         }
 
         // Issue #1320: the Terminal/Conversation toggle - a PRIMARY control that
@@ -522,6 +538,7 @@ internal fun CompactBreadcrumb(
     // be able to tell the session is not live before they dictate into it.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
+    forwardingState: SessionForwardingIndicatorState = SessionForwardingIndicatorState(),
 ) {
     Row(
         modifier = modifier
@@ -560,6 +577,10 @@ internal fun CompactBreadcrumb(
             modifier = compactSessionLabelModifier,
         )
         ConnectionStatusPill(connectionStatus)
+        if (forwardingState.visible) {
+            Spacer(modifier = Modifier.width(4.dp))
+            ForwardingStatusPill(forwardingState)
+        }
         Spacer(modifier = Modifier.width(4.dp))
         Box(
             modifier = Modifier
@@ -615,4 +636,44 @@ private fun ConnectionStatusPill(
             .padding(horizontal = 8.dp, vertical = 3.dp)
             .testTag(TMUX_CONNECTION_STATUS_PILL_TAG),
     )
+}
+
+/**
+ * Issue #1487: the sole in-app forwarding status surface. It mirrors the
+ * connection pill vocabulary while naming a single remote port or summarising
+ * multiple ports in at most seven characters. Restoring uses amber and an
+ * ellipsis so a transient reconnect never looks like forwarding disappeared.
+ */
+@Composable
+private fun ForwardingStatusPill(state: SessionForwardingIndicatorState) {
+    val tint = if (state.restoring) PocketShellColors.Amber else PocketShellColors.Accent
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .background(color = tint.copy(alpha = 0.14f), shape = PocketShellShapes.small)
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .semantics { contentDescription = state.contentDescription }
+            .testTag(TMUX_PORT_FORWARD_PILL_TAG),
+    ) {
+        ForwardingGlyph(modifier = Modifier.size(12.dp), color = tint)
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = forwardingPillLabel(state),
+            color = tint,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+        )
+    }
+}
+
+internal fun forwardingPillLabel(state: SessionForwardingIndicatorState): String = when {
+    state.restoring -> "…"
+    state.tunnelCount == 1 && state.activeRemotePorts.size == 1 ->
+        ":${state.activeRemotePorts.single()}"
+    state.tunnelCount == 1 -> "1 port"
+    state.tunnelCount in 2..9 -> "${state.tunnelCount} ports"
+    state.tunnelCount in 10..99_999 -> "${state.tunnelCount}p"
+    state.tunnelCount > 99_999 -> "99999+p"
+    else -> "…"
 }

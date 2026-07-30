@@ -21,7 +21,7 @@ plugins {
 // extraction slice wires it into `TmuxSessionViewModel`.
 android {
     namespace = "com.pocketshell.core.connection"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         minSdk = 26

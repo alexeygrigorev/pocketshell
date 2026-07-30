@@ -356,6 +356,105 @@ class ForwardingNotificationE2eTest {
     }
 
     /**
+     * Issue #1487: exercise the actual ForwardingService notification posted by
+     * the production controller. API 36 must carry the Live Update request,
+     * short label, and promotable shape; earlier APIs must remain the ordinary
+     * ongoing D21 foreground notification. Stop is part of the same contract:
+     * it tears down forwarding and removes the notification.
+     */
+    @Test
+    fun liveUpdateContract_isApi36Promotable_pre36Ordinary_andStopClears() {
+        val hostId = 1_487_036L
+        registeredHostId = hostId
+        controller().registerActiveHost(hostId = hostId, hostName = "Live Update Host")
+        controller().updateActiveTunnels(hostId, mapOf(2222 to 2222))
+
+        val deadline = System.currentTimeMillis() + POST_APPEARS_TIMEOUT_MS
+        var posted = forwardingNotification()
+        while (
+            (
+                posted == null ||
+                    posted.notification.extras
+                        .getCharSequence("android.text")
+                        .toString()
+                        .contains("Live Update Host")
+                        .not()
+                ) &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Thread.sleep(POLL_INTERVAL_MS)
+            posted = forwardingNotification()
+        }
+        val notification = requireNotNull(posted?.notification) {
+            "production ForwardingService notification did not settle; titles=${activeTitles()}"
+        }
+
+        assertTrue(
+            "forwarding notification must remain ongoing on every API",
+            notification.flags and android.app.Notification.FLAG_ONGOING_EVENT != 0,
+        )
+        assertTrue(
+            "forwarding notification must remain non-clearable on every API",
+            notification.flags and android.app.Notification.FLAG_NO_CLEAR != 0,
+        )
+        assertNotNull("forwarding notification must retain its panel content intent", notification.contentIntent)
+        assertTrue(
+            "forwarding notification must retain the working Stop action",
+            notification.actions?.any { it.title?.toString() == "Stop" } == true,
+        )
+
+        if (android.os.Build.VERSION.SDK_INT >= 36) {
+            assertEquals(
+                "API 36 Live Update must name the single remote port",
+                ":2222",
+                notification.extras.getString("android.shortCriticalText"),
+            )
+            assertTrue(
+                "API 36 forwarding notification must request promoted-ongoing treatment",
+                notification.extras.getBoolean("android.requestPromotedOngoing", false),
+            )
+            assertTrue(
+                "API 36 forwarding notification must satisfy the platform's promotable shape",
+                notificationHasPromotableCharacteristics(notification),
+            )
+        } else {
+            assertNull(
+                "pre-36 forwarding notification must not expose Live Update short text",
+                notification.extras.getString("android.shortCriticalText"),
+            )
+            assertFalse(
+                "pre-36 forwarding notification must remain an ordinary ongoing FGS notification",
+                notification.extras.getBoolean("android.requestPromotedOngoing", false),
+            )
+            assertFalse(
+                "pre-36 hasPromotableCharacteristics is unavailable/false by contract",
+                notificationHasPromotableCharacteristics(notification),
+            )
+        }
+
+        val stopAction = requireNotNull(
+            notification.actions?.firstOrNull { it.title?.toString() == "Stop" },
+        )
+        stopAction.actionIntent.send()
+        val stopDeadline = System.currentTimeMillis() + STOP_TEARDOWN_TIMEOUT_MS
+        while (
+            (
+                controller().activeHostIdsSnapshot().isNotEmpty() ||
+                    forwardingNotification() != null
+                ) &&
+            System.currentTimeMillis() < stopDeadline
+        ) {
+            Thread.sleep(POLL_INTERVAL_MS)
+        }
+        assertTrue(
+            "Stop must clear the production forwarding state",
+            controller().activeHostIdsSnapshot().isEmpty(),
+        )
+        assertNull("Stop/zero-forward must remove the Live Update notification", forwardingNotification())
+        registeredHostId = null
+    }
+
+    /**
      * Issue #1202 (on-device durable regression, G1/G10) — the maintainer's exact
      * reported state, on the REAL path, asserting the REAL notification tray.
      *
@@ -527,6 +626,15 @@ class ForwardingNotificationE2eTest {
                 ?.toString()
                 ?.contains("Port forwarding running") == true
         }
+
+    private fun notificationHasPromotableCharacteristics(
+        notification: android.app.Notification,
+    ): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < 36) return false
+        return android.app.Notification::class.java
+            .getMethod("hasPromotableCharacteristics")
+            .invoke(notification) as Boolean
+    }
 
     /**
      * The SECOND (stacked) notification from the session FGS. Identified by the

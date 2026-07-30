@@ -132,6 +132,12 @@ class DesignRenders {
         TerminalHotkeysPanelCollapsedRender()
     }
 
+    /** Issue #1487 fast visual check for single/multiple/restoring pill states. */
+    @Test
+    fun forwardingPill() = render("forwarding-pill") {
+        ForwardingPillStatesRender()
+    }
+
     /**
      * Issue #1449: the design-token / hex swatch sheet — the ONE coverage gap
      * ported over when the redundant IDE-only `@Preview` composables in

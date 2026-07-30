@@ -212,11 +212,6 @@ class TmuxChromeKebabReachableTest {
                                 TmuxMoreMenu(
                                     expanded = isOpen.value,
                                     onDismiss = { isOpen.value = false },
-                                    forwardingState =
-                                        com.pocketshell.app.portfwd.SessionForwardingIndicatorState(
-                                            active = true,
-                                            tunnelCount = 28,
-                                        ),
                                     onCreateSession = {},
                                     onRenameSession = {},
                                     onKillSession = {},
@@ -237,17 +232,13 @@ class TmuxChromeKebabReachableTest {
         compose.assertNodeFullyWithinRoot(TMUX_FULL_CHROME_MORE_BUTTON_TAG)
         compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG).performClick()
         compose.waitForIdle()
-        // The menu opened and the forwarding status row is reachable.
+        // The menu opened and the forwarding controls route is reachable.
         compose.onNodeWithTag(TMUX_PORT_FORWARDING_BUTTON_TAG).assertExists()
-        // #747 issue 2: the in-session port surface is the single legible count
-        // row inside the kebab — NOT a per-port list that overlaps with many
-        // ports. With 28 tunnels the row reads as one compact "active ports"
-        // line (deep-link to the full scrollable PortForwardPanelScreen), so
-        // there is nothing to overlap. Assert the count label is present, then
-        // capture the open menu for visual proof.
-        compose.onNodeWithText("28 active ports").assertExists()
+        // #1487 D22 hard cut: the menu is navigation only. It must not revive
+        // the old duplicate status/count decoration now owned by top chrome.
+        compose.onNodeWithText("28 active ports").assertDoesNotExist()
         captureFullDevice(
-            File(artifactDir(), "kebab-menu-open-28-ports.png"),
+            File(artifactDir(), "kebab-menu-open-navigation-only.png"),
         )
     }
 

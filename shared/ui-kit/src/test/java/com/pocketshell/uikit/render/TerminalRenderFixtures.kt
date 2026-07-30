@@ -1,5 +1,6 @@
 package com.pocketshell.uikit.render
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,12 +10,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.components.ButtonVariant
@@ -27,6 +32,7 @@ import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 
 @Composable
@@ -264,4 +270,67 @@ private fun TerminalLoadingLabel(text: String) {
         color = PocketShellColors.TextMuted,
         style = PocketShellType.labelMono,
     )
+}
+
+/**
+ * Faithful ui-kit-side replica of the app-private #1487 pill for the fast
+ * Roborazzi check. The production-session connected journey remains the
+ * acceptance proof.
+ */
+@Composable
+internal fun ForwardingPillStatesRender() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        TerminalLoadingLabel("Port forwarding — active and restoring")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PocketShellColors.Background)
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            ForwardingPillReplica(label = ":8080", tint = PocketShellColors.Accent)
+            ForwardingPillReplica(label = "3 ports", tint = PocketShellColors.Accent)
+            ForwardingPillReplica(label = "…", tint = PocketShellColors.Amber)
+        }
+    }
+}
+
+@Composable
+private fun ForwardingPillReplica(label: String, tint: Color) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .background(color = tint.copy(alpha = 0.14f), shape = PocketShellShapes.small)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+    ) {
+        ForwardingGlyphReplica(tint)
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            color = tint,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+@Composable
+private fun ForwardingGlyphReplica(tint: Color) {
+    Canvas(modifier = Modifier.size(12.dp)) {
+        val w = size.width
+        val h = size.height
+        val strokeWidth = w * 0.12f
+        drawLine(tint, Offset(0f, h * 0.3f), Offset(w, h * 0.3f), strokeWidth = strokeWidth)
+        drawLine(tint, Offset(w * 0.65f, h * 0.05f), Offset(w, h * 0.3f), strokeWidth = strokeWidth)
+        drawLine(tint, Offset(w * 0.65f, h * 0.55f), Offset(w, h * 0.3f), strokeWidth = strokeWidth)
+        drawLine(tint, Offset(0f, h * 0.7f), Offset(w, h * 0.7f), strokeWidth = strokeWidth)
+        drawLine(tint, Offset(w * 0.35f, h * 0.45f), Offset(0f, h * 0.7f), strokeWidth = strokeWidth)
+        drawLine(tint, Offset(w * 0.35f, h * 0.95f), Offset(0f, h * 0.7f), strokeWidth = strokeWidth)
+    }
 }

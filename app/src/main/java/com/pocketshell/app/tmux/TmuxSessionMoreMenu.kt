@@ -1,43 +1,21 @@
 package com.pocketshell.app.tmux
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
-import com.pocketshell.uikit.components.StatusDot
 import com.pocketshell.uikit.theme.PocketShellColors
-
-internal fun sessionForwardingMenuStatusLabel(
-    state: SessionForwardingIndicatorState,
-): String =
-    when {
-        !state.visible -> ""
-        state.restoring -> "Restoring"
-        state.tunnelCount == 1 -> "1 active port"
-        state.tunnelCount > 1 -> "${state.tunnelCount} active ports"
-        else -> "Active"
-    }
 
 @Composable
 internal fun TmuxMoreMenu(
     expanded: Boolean,
-    forwardingState: SessionForwardingIndicatorState = SessionForwardingIndicatorState(),
     onDismiss: () -> Unit,
     onCreateSession: () -> Unit,
     onRenameSession: () -> Unit,
@@ -177,44 +155,13 @@ internal fun TmuxMoreMenu(
         // --- Connection: per-host networking. ---
         HorizontalDivider()
         DropdownMenuSectionHeader(text = "Connection")
-        // Issue #445 (epic #432 slice A): per-host port-forward panel. Navigating
-        // away pushes onto the hand-rolled back-stack; back returns to this exact
-        // session/window.
+        // Issue #1487 hard-cut (D22): keep the navigation/control route, but
+        // remove its duplicate active/restoring/count decoration. The top-chrome
+        // pill is the sole in-app forwarding status surface.
         DropdownMenuItem(
-            text = {
-                if (forwardingState.visible) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        StatusDot(
-                            status = if (forwardingState.restoring) {
-                                com.pocketshell.uikit.model.ConnectionStatus.Connecting
-                            } else {
-                                com.pocketshell.uikit.model.ConnectionStatus.Connected
-                            },
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column {
-                            Text("Port forwarding")
-                            Text(
-                                text = sessionForwardingMenuStatusLabel(forwardingState),
-                                color = PocketShellColors.TextSecondary,
-                                style = MaterialTheme.typography.labelSmall,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
-                } else {
-                    Text("Port forwarding")
-                }
-            },
+            text = { Text("Port forwarding") },
             onClick = onOpenPortForwarding,
-            modifier = Modifier
-                .semantics {
-                    if (forwardingState.visible) {
-                        contentDescription = forwardingState.contentDescription
-                    }
-                }
-                .testTag(TMUX_PORT_FORWARDING_BUTTON_TAG),
+            modifier = Modifier.testTag(TMUX_PORT_FORWARDING_BUTTON_TAG),
         )
 
         // --- Host & app: cross-host / global affordances. ---

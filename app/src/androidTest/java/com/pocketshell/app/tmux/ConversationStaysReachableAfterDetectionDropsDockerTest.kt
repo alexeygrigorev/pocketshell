@@ -7,6 +7,7 @@ import android.view.ViewGroup
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -17,6 +18,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.App
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -25,6 +27,7 @@ import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.SeedBeforeLaunchRule
 import com.pocketshell.app.proof.clearLastSessionPrefs
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -116,12 +119,20 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
     private var seededKey: String? = null
     private var seededHostRowTag: String? = null
     private var seededSessionName: String? = null
+    private var seededHostId: Long? = null
+    private var forwardingRegistered = false
     private val cleanupCommands = mutableListOf<String>()
     private val stamps = mutableListOf<String>()
 
     @After
     fun tearDown() {
         runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+        if (forwardingRegistered) {
+            seededHostId?.let { hostId ->
+                runCatching { forwardingController().unregisterActiveHost(hostId) }
+            }
+            forwardingRegistered = false
+        }
         clearLastSessionPrefs()
         seededKey?.let { key ->
             if (cleanupCommands.isNotEmpty()) {
@@ -272,6 +283,102 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
         Unit
     } }
 
+    /**
+     * Issue #1487 production-screen journey. This is not an isolated chrome
+     * component: it opens a real Docker-backed TmuxSessionScreen, drives the
+     * production ForwardingController projection for the shown DB host, and
+     * proves the pill across Terminal + Conversation and every active state.
+     */
+    @Test
+    fun forwardingPillStaysVisibleAndContainedAcrossRealTerminalAndConversation() { runBlocking {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        val sessionName = requireNotNull(seededSessionName)
+        val hostId = requireNotNull(seededHostId)
+
+        attachToSeededSession(hostRowTag, sessionName)
+        waitForTerminalSessionAttached()
+        waitForVisibleTerminalText("issue1487-ready", VISIBLE_TIMEOUT_MS) {
+            "issue1057-ready" in it
+        }
+        val vm = currentViewModel()
+        requireNotNull(waitForLoadedConversationPane(vm)) {
+            "#1487 production journey needs a genuine loaded Conversation surface"
+        }
+        // Recorded agent sessions open in Conversation by default. Move to the
+        // real Terminal surface explicitly so the first half of this journey
+        // cannot accidentally exercise Conversation twice.
+        tapTerminalSegment()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) { !conversationPaneShown() }
+
+        // Inactive: no status node and no reserved gap.
+        compose.onNodeWithTag(PORT_FORWARD_PILL_TAG, useUnmergedTree = true)
+            .assertDoesNotExist()
+        val inactiveToggle = toggleBounds()
+
+        // Terminal + one settled tunnel: name the actual remote port.
+        forwardingController().registerActiveHost(hostId, "Issue1487 Long Forwarding Host")
+        forwardingRegistered = true
+        forwardingController().updateActiveTunnels(hostId, mapOf(8080 to 18080))
+        waitForPillDescription("1 port forwarding active for this host")
+        compose.onNodeWithText(":8080", useUnmergedTree = true).assertIsDisplayed()
+        assertPillContainedAndClearOfPrimaryControls()
+        captureFullFrame("issue1487-01-terminal-single-port")
+
+        // The fixed toggle stays anchored; the title yields to the pill instead
+        // of the primary control shifting or clipping.
+        val activeToggle = toggleBounds()
+        assertTrue(
+            "forwarding pill must not shift the fixed Terminal/Conversation toggle; " +
+                "inactive=$inactiveToggle active=$activeToggle",
+            kotlin.math.abs(inactiveToggle.left - activeToggle.left) <= compose.density.density &&
+                kotlin.math.abs(inactiveToggle.right - activeToggle.right) <= compose.density.density,
+        )
+
+        // Conversation is the same production screen/header, not a component
+        // proxy. The pill must remain contained when the transcript replaces
+        // the terminal surface.
+        tapConversationSegment()
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) { conversationPaneShown() }
+        waitForPillDescription("1 port forwarding active for this host")
+        assertPillContainedAndClearOfPrimaryControls()
+        captureFullFrame("issue1487-02-conversation-single-port")
+
+        // Multiple ports: count at a glance.
+        forwardingController().updateActiveTunnels(
+            hostId,
+            mapOf(2222 to 12222, 8080 to 18080, 9090 to 19090),
+        )
+        waitForPillDescription("3 ports forwarding active for this host")
+        compose.onNodeWithText("3 ports", useUnmergedTree = true).assertIsDisplayed()
+        assertPillContainedAndClearOfPrimaryControls()
+        captureFullFrame("issue1487-03-conversation-multiple-ports")
+
+        // Restoring: stays visible, changes semantics, and remains reachable.
+        forwardingController().setHostRestoring(hostId, true)
+        waitForPillDescription("Port forwarding restoring for this host")
+        assertPillContainedAndClearOfPrimaryControls()
+        captureFullFrame("issue1487-04-conversation-restoring")
+
+        // Stop/zero active host: the sole in-app status disappears and the
+        // fixed toggle returns to exactly the same geometry (no layout gap).
+        forwardingController().unregisterActiveHost(hostId)
+        forwardingRegistered = false
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(PORT_FORWARD_PILL_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty()
+        }
+        compose.onNodeWithTag(PORT_FORWARD_PILL_TAG, useUnmergedTree = true)
+            .assertDoesNotExist()
+        val stoppedToggle = toggleBounds()
+        assertTrue(
+            "inactive top chrome must leave no forwarding gap; before=$inactiveToggle after=$stoppedToggle",
+            kotlin.math.abs(inactiveToggle.left - stoppedToggle.left) <= compose.density.density &&
+                kotlin.math.abs(inactiveToggle.right - stoppedToggle.right) <= compose.density.density,
+        )
+        captureFullFrame("issue1487-05-conversation-inactive-no-gap")
+        Unit
+    } }
+
     // -------------------------------------------------------------- seed-before-launch
 
     private suspend fun seedForMethod(methodName: String) {
@@ -284,6 +391,8 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
                 seedMaskedLiveClaudeSession(key)
             "plainShellShowsNoConversationToggleEvenThroughTeardown" ->
                 seedPlainShellSession(key)
+            "forwardingPillStaysVisibleAndContainedAcrossRealTerminalAndConversation" ->
+                seedMaskedLiveClaudeSession(key)
             else -> error("unexpected test method $methodName")
         }
         seededSessionName = sessionName
@@ -379,6 +488,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
                     lastBootstrapAt = System.currentTimeMillis(),
                 ),
             )
+            seededHostId = hostId
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId
         } finally {
             db.close()
@@ -503,6 +613,42 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
         compose.waitForIdle()
     }
 
+    private fun forwardingController() =
+        (InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as App)
+            .forwardingController
+
+    private fun waitForPillDescription(description: String) {
+        compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
+            compose.onAllNodesWithContentDescription(description, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(PORT_FORWARD_PILL_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+    }
+
+    private fun assertPillContainedAndClearOfPrimaryControls() {
+        compose.assertNodeFullyWithinRoot(PORT_FORWARD_PILL_TAG)
+        compose.assertNodeFullyWithinRoot(TMUX_TABS_TAG)
+        compose.assertNodeFullyWithinRoot(TMUX_FULL_CHROME_MORE_BUTTON_TAG)
+        val pill = compose.onNodeWithTag(PORT_FORWARD_PILL_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        val tabs = toggleBounds()
+        val kebab = compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "forwarding pill must not overlap Terminal/Conversation: pill=$pill tabs=$tabs",
+            pill.right <= tabs.left,
+        )
+        assertTrue(
+            "Terminal/Conversation must not overlap kebab: tabs=$tabs kebab=$kebab",
+            tabs.right <= kebab.left,
+        )
+    }
+
+    private fun toggleBounds() =
+        compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+
     private fun conversationPaneShown(): Boolean =
         compose.onAllNodesWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
             .fetchSemanticsNodes()
@@ -625,6 +771,7 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
         const val SHELL_NO_TOGGLE_SETTLE_MS: Long = 8_000
         const val CONVERSATION_LOAD_TIMEOUT_MS: Long = 30_000
         const val SURFACE_TIMEOUT_MS: Long = 20_000
+        const val PORT_FORWARD_PILL_TAG: String = "tmux:chrome:port-forward-pill"
 
         // The Conversation segment is index 1 in the Terminal|Conversation pill
         // (index 0 is TMUX_TERMINAL_TAB_TAG; see ConsolidatedTabPill.segmentTag).

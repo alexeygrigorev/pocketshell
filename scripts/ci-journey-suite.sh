@@ -230,6 +230,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.portfwd.PortForwardDuplicateKeyRenderTest"
   "com.pocketshell.app.portfwd.ForwardingNetworkRideThroughE2eTest"  # #1058 #843 #981 #997 audit R1, trigger T11 / coverage gap C1, D33/G10
   "com.pocketshell.app.portfwd.ForwardingNotificationE2eTest#sessionPinnedForForward_hasExactlyOneForwardNotification_andStopTearsDownTunnels"  # #1202 #1198 D31/D32 durable-fix gate, on-device regression): the port-fo…
+  "com.pocketshell.app.portfwd.ForwardingNotificationE2eTest#liveUpdateContract_isApi36Promotable_pre36Ordinary_andStopClears"  # #1487 actual ForwardingService notification contract: API36 promoted request + short text + promotable shape, pre36 ordinary ongoing FGS, and Stop/zero-forward clears
   "$FQCN_PREFIX.SilentDropSyntheticSeamJourneyE2eTest"  # #792 #822 #823 #964 epic Slice D, /V7a + — D31 durable-fix gate
   "$FQCN_PREFIX.CleanOutageReattachResilienceE2eTest"  # #833 a CLEAN sustained outage (clean FIN/connection-refused for t…
   "$FQCN_PREFIX.ReconnectStormLivelockE2eTest"  # #1652 #1610 #1539 #1632 #1633 the LIVELOCK proof: N>=5 consecutive passive-grace cycles on the real path with a stalled tail + healthy dial; no handshaken transport killed, the counter walks, the machine terminates. Also in the pre-release confidence gate (red blocks a tag).

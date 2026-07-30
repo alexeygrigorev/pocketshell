@@ -51,6 +51,19 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!--
+        Issue #1487: an active forward is a user-initiated, security-relevant
+        live exposure that must remain glanceable until the user explicitly
+        presses Stop. Android 16 (API 36) can promote an eligible ongoing
+        foreground-service notification into the compact Live Update chip next
+        to the clock. Requesting that promotion requires this install-granted
+        permission; Android/OEM/user policy may still keep the required D21
+        notification as an ordinary ongoing icon. compileSdk is 36 for the API,
+        while targetSdk intentionally remains 35 so this change does not opt
+        into the unrelated Android-16 target behavior surface.
+    -->
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+
+    <!--
         Issue #203 expanded scope (round 3, foreground-service slice):
         the auto-forward feature carve-out (D21, see `docs/decisions.md`)
         allows a foreground service while ≥1 SSH tunnel is active so the

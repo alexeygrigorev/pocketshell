@@ -43,7 +43,7 @@ val duplicateJavaResourceExcludes = listOf(
 
 android {
     namespace = "com.pocketshell.app"
-    compileSdk = 35
+    compileSdk = 36
 
     // Issue #42: pin both debug and release APKs to a single committed
     // keystore so upgrading an existing install never trips the

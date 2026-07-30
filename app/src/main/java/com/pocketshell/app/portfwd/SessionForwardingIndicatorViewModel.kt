@@ -62,6 +62,7 @@ private fun ForwardingHostSnapshot?.toIndicatorState(): SessionForwardingIndicat
         active = true,
         tunnelCount = tunnelCount,
         restoring = restoring,
+        activeRemotePorts = activeRemotePorts,
     )
 }
 
@@ -78,6 +79,7 @@ data class SessionForwardingIndicatorState(
     val active: Boolean = false,
     val tunnelCount: Int = 0,
     val restoring: Boolean = false,
+    val activeRemotePorts: Set<Int> = emptySet(),
 ) {
     val visible: Boolean get() = active
 

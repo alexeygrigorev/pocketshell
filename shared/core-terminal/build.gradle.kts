@@ -25,7 +25,7 @@ android {
     // Picking the upstream namespace keeps the vendored source byte-identical
     // to upstream, which is the goal of issue #7. See VENDORED.md.
     namespace = "com.termux.view"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         // PocketShell's min SDK (26) is higher than upstream Termux's, so all

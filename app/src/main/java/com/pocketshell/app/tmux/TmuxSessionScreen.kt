@@ -878,7 +878,6 @@ private fun TmuxSessionHeaderRegion(
     fun AnchoredTmuxMoreMenu() {
         TmuxMoreMenu(
             expanded = overlay.moreExpanded,
-            forwardingState = sessionForwardingState,
             onDismiss = { overlay.moreExpanded = false },
             onCreateSession = {
                 overlay.moreExpanded = false
@@ -1010,6 +1009,7 @@ private fun TmuxSessionHeaderRegion(
                         )
                     },
                     connectionStatus = surfaceState.toUiStatus(),
+                    forwardingState = sessionForwardingState,
                     modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                 )
             }
@@ -1032,6 +1032,7 @@ private fun TmuxSessionHeaderRegion(
                     onMore = { overlay.moreExpanded = true },
                     moreMenu = { AnchoredTmuxMoreMenu() },
                     connectionStatus = surfaceState.toUiStatus(),
+                    forwardingState = sessionForwardingState,
                     modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                 )
             }

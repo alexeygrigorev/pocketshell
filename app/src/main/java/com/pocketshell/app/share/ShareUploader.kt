@@ -21,6 +21,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Orchestrates one share-target upload (issue #138). Pure business
@@ -113,6 +114,7 @@ internal class ShareUploader(
      * but injectable so tests can pin the value.
      */
     private val now: () -> Long = { System.currentTimeMillis() },
+    private val ioContext: CoroutineContext = Dispatchers.IO,
 ) : ShareItemUploader {
 
     /**
@@ -127,7 +129,7 @@ internal class ShareUploader(
         item: ShareableItem,
         target: ShareTarget,
         onProgress: ((SshUploadProgress) -> Unit)?,
-    ): Result<String> = withContext(Dispatchers.IO) {
+    ): Result<String> = withContext(ioContext) {
         val preparedUriFile = if (item is ShareableItem.UriItem) {
             val resolver = context.contentResolver
             withTimeoutOrNull(SHARE_SAF_TIMEOUT_MS) {

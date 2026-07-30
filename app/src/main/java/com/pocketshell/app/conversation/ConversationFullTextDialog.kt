@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -213,7 +214,7 @@ private fun FullTextAction(
         Text(
             text = label,
             color = PocketShellColors.Accent,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.Medium,
         )
     }

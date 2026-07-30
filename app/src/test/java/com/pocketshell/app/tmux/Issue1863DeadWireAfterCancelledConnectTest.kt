@@ -16,6 +16,7 @@ import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
+import com.pocketshell.testsupport.drainMainLooperUntil
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -111,9 +112,23 @@ class Issue1863DeadWireAfterCancelledConnectTest {
     fun connectMustNotPublishLiveWhenTheControlChannelDiedMidAttach() = fixture.runVmTest {
         val dying = FakeTmuxClient().withSinglePaneRow("work", "%1")
         val parked = dying.parkAttachAt(ATTACH_PARK_PREFIX, ATTACH_PARK_OCCURRENCE)
+        // Production creates a FRESH control client for the recovery. The old
+        // fixture returned `dying` forever, forcing every replacement attach over
+        // the same closed fake and leaving its recovery coroutine in teardown.
+        // Park a healthy replacement so the body can first assert the false-Live
+        // window is closed, then explicitly release and drain the spawned recovery.
+        val recovery = FakeTmuxClient().withSinglePaneRow("work", "%1")
+        val recoveryParked = recovery.parkAttachAt(ATTACH_PARK_PREFIX, occurrence = 1)
+        val recoveryFactoryCalled = CompletableDeferred<Unit>()
+        val clients = ArrayDeque(listOf(dying, recovery))
 
         val vm = freshVmForForegrounded()
-        vm.setTmuxClientFactoryForTest { _, _, _ -> dying }
+        vm.setTmuxClientFactoryForTest { _, _, _ ->
+            val client =
+                clients.removeFirstOrNull() ?: error("unexpected extra tmux client factory call")
+            if (client === recovery) recoveryFactoryCalled.complete(Unit)
+            client
+        }
         vm.doConnect()
         advanceUntilIdle()
 
@@ -127,13 +142,17 @@ class Issue1863DeadWireAfterCancelledConnectTest {
         advanceUntilIdle()
 
         assertTheReportedTerminalStateIsUnreachable(vm, dying)
-        drainRecoveryBeforeTheQuiescenceOracle(vm)
         // COLD-PATH-ONLY, and discriminating here (see the helper's KDoc): on base the
         // reveal lit the green dot over the corpse. This is the user-visible symptom.
         assertFalse(
             "issue #1863: a connect that resolved over a CLOSED control channel must not " +
                 "publish a live session — got ${vm.connectionStatus.value}",
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        completeSpawnedRecoveryBeforeTheQuiescenceOracle(
+            vm,
+            recoveryFactoryCalled,
+            recoveryParked,
         )
     }
 
@@ -145,11 +164,17 @@ class Issue1863DeadWireAfterCancelledConnectTest {
         val first = FakeTmuxClient().withSinglePaneRow("work", "%1")
         val dying = FakeTmuxClient().withSinglePaneRow("other", "%2")
         val parked = dying.parkAttachAt(ATTACH_PARK_PREFIX, ATTACH_PARK_OCCURRENCE)
-        val clients = ArrayDeque(listOf(first, dying))
+        val recovery = FakeTmuxClient().withSinglePaneRow("other", "%2")
+        val recoveryParked = recovery.parkAttachAt(ATTACH_PARK_PREFIX, occurrence = 1)
+        val recoveryFactoryCalled = CompletableDeferred<Unit>()
+        val clients = ArrayDeque(listOf(first, dying, recovery))
 
         val vm = freshVmForForegrounded()
         vm.setTmuxClientFactoryForTest { _, _, _ ->
-            clients.removeFirstOrNull() ?: error("unexpected extra tmux client factory call")
+            val client =
+                clients.removeFirstOrNull() ?: error("unexpected extra tmux client factory call")
+            if (client === recovery) recoveryFactoryCalled.complete(Unit)
+            client
         }
         vm.doConnect(sessionName = "work")
         advanceUntilIdle()
@@ -168,31 +193,70 @@ class Issue1863DeadWireAfterCancelledConnectTest {
         advanceUntilIdle()
 
         assertTheReportedTerminalStateIsUnreachable(vm, dying)
-        drainRecoveryBeforeTheQuiescenceOracle(vm)
+        completeSpawnedRecoveryBeforeTheQuiescenceOracle(
+            vm,
+            recoveryFactoryCalled,
+            recoveryParked,
+        )
     }
 
     /**
-     * Drain the recovery this journey deliberately provokes, BEFORE the fixture's #1355
-     * quiescence oracle runs.
+     * Prove the reveal-guard journey itself is complete, then release and drain the
+     * explicitly parked healthy recovery BEFORE the fixture's #1355 quiescence oracle.
      *
-     * Both journeys deliberately end with the connection core mid-recovery, and the
-     * fixture's drain loops `cancelOwnScopes()` + `runCurrent()` — it never ADVANCES the
-     * virtual clock. So any teardown work the cancellation schedules at a future virtual
-     * time can never complete there, and the oracle hard-fails on a still-`Cancelling`
-     * child after burning its 30s wall-clock budget. Measured, not theorised: with only
-     * `cancelConnect()` + `advanceUntilIdle()` in the body this failed 2 of 8 consecutive
-     * FULL `:app:testReleaseUnitTest` runs while passing every run in isolation.
+     * The pre-recurrence fixture returned the already-closed [FakeTmuxClient] for every
+     * factory call. Production never does that: recovery creates a fresh control client.
+     * The point-in-time reveal assertions therefore finished while a SECOND attach over
+     * the same corpse churned in the background. Release/full-graph ordering handed that
+     * job to generic teardown, where it intermittently stayed `Cancelling` for 30s.
      *
-     * `onTeardown` callbacks run INSIDE the `runTest` body (before the drain, while Main
-     * is installed), so this is the one place that can both cancel and advance the clock.
-     * Registered per test, after the assertions, so it can never mask one.
+     * The assertions below make both halves load-bearing: the false-Live assertions
+     * remain first, then recovery MUST be observed at the fresh-client factory before
+     * the VM's existing explicit own-scope cancel seam releases it for the generic
+     * drain. Both real-IO boundaries use the shared audited bounded pump and HARD-FAIL;
+     * no existing timeout is widened and no child is swallowed.
      */
-    private fun TestScope.drainRecoveryBeforeTheQuiescenceOracle(vm: TmuxSessionViewModel) {
-        fixture.onTeardown {
-            vm.cancelConnect()
-            vm.cancelOwnScopesForTest()
-            advanceUntilIdle()
+    private fun TestScope.completeSpawnedRecoveryBeforeTheQuiescenceOracle(
+        vm: TmuxSessionViewModel,
+        recoveryFactoryCalled: CompletableDeferred<Unit>,
+        recoveryParked: CompletableDeferred<Unit>,
+    ) {
+        val recoverySpawned = drainMainLooperUntil(
+            deadlineMs = RECOVERY_DRAIN_DEADLINE_MS,
+            sleepMs = 1L,
+            onTick = { runCurrent() },
+        ) {
+            recoveryFactoryCalled.isCompleted
         }
+        assertTrue(
+            "issue #1887 harness: the dead-channel guard must actually spawn its " +
+                "production recovery at the fresh-client factory",
+            recoverySpawned,
+        )
+        vm.cancelOwnScopesForTest()
+        recoveryParked.complete(Unit)
+        val vmReachedZeroChildren = drainMainLooperUntil(
+            deadlineMs = RECOVERY_DRAIN_DEADLINE_MS,
+            sleepMs = 1L,
+            onTick = { runCurrent() },
+        ) {
+            !vm.connectJobActiveForTest() && vm.activeOwnScopeChildCountForTest() == 0
+        }
+        assertTrue(
+            "issue #1887: explicit VM cancellation must drain the recovery and every " +
+                "VM-owned child before the #1355 quiescence boundary",
+            vmReachedZeroChildren,
+        )
+        assertFalse(
+            "issue #1887: the cancelled recovery must no longer be published as active " +
+                "before the #1355 quiescence boundary",
+            vm.connectJobActiveForTest(),
+        )
+        assertEquals(
+            "issue #1887: teardown handoff must start from zero VM-owned children",
+            0,
+            vm.activeOwnScopeChildCountForTest(),
+        )
     }
 
     /**
@@ -736,6 +800,9 @@ class Issue1863DeadWireAfterCancelledConnectTest {
          * measured GREEN on the guard-removed baseline.
          */
         const val ATTACH_PARK_OCCURRENCE = 2
+
+        /** Hard wall-clock bound for the real-IO recovery start and cancellation drain. */
+        const val RECOVERY_DRAIN_DEADLINE_MS = 10_000L
 
         /** Short, deterministic probe cadence for the post-guard half. */
         const val PROBE_INTERVAL_MS = 10L

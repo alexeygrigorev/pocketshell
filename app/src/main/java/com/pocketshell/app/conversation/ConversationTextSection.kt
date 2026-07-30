@@ -12,6 +12,10 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
@@ -35,8 +39,17 @@ internal fun ConversationTextSection(
     clipboardLabel: String = "conversation tool $label",
 ) {
     if (body.isEmpty()) return
-    val displayBody = conversationTextSectionDisplayBody(body)
+    val displayBody = remember(body) { conversationTextSectionDisplayBody(body) }
     val tooLong = displayBody.wasTruncated
+    val fullTextPresenter = LocalConversationFullTextPresenter.current
+    var showAll by remember(body) { mutableStateOf(false) }
+    val fullTextRequest = remember(label, body, clipboardLabel) {
+        ConversationFullTextRequest(
+            title = "$label — full output",
+            body = body,
+            clipboardLabel = clipboardLabel,
+        )
+    }
     Column(modifier = modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -77,6 +90,27 @@ internal fun ConversationTextSection(
                 fontFamily = FontFamily.Monospace,
             )
         }
+        if (tooLong) {
+            ConversationShowAllAction(
+                testTag = "$copyTestTag:show-all",
+                onClick = {
+                    if (fullTextPresenter != null) {
+                        fullTextPresenter(fullTextRequest)
+                    } else {
+                        showAll = true
+                    }
+                },
+                modifier = Modifier.align(Alignment.End),
+            )
+        }
+    }
+    if (showAll && fullTextPresenter == null) {
+        ConversationFullTextDialog(
+            title = fullTextRequest.title,
+            body = fullTextRequest.body,
+            clipboardLabel = fullTextRequest.clipboardLabel,
+            onDismissRequest = { showAll = false },
+        )
     }
 }
 
@@ -87,6 +121,8 @@ internal data class ConversationTextSectionDisplayBody(
 
 private const val CONVERSATION_RENDER_LINE_LIMIT = 200
 private const val CONVERSATION_RENDER_CHAR_LIMIT = 5_000
+private const val CONVERSATION_CLEANING_CHAR_LIMIT = CONVERSATION_RENDER_CHAR_LIMIT * 4
+private const val CONVERSATION_CLEANING_SCAN_LIMIT = 64 * 1_024
 
 /**
  * Compose still measures the whole `Text` inside a bounded verticalScroll. For
@@ -95,10 +131,7 @@ private const val CONVERSATION_RENDER_CHAR_LIMIT = 5_000
  * rendered preview to the same "too long" boundary the section already used.
  */
 internal fun conversationTextSectionDisplayBody(body: String): ConversationTextSectionDisplayBody {
-    return boundedConversationDisplayBody(
-        body = body,
-        truncatedNotice = "[Output truncated in view. Copy for full text.]",
-    )
+    return boundedConversationDisplayBody(body)
 }
 
 /**
@@ -108,18 +141,23 @@ internal fun conversationTextSectionDisplayBody(body: String): ConversationTextS
  */
 internal fun conversationExpandedMessageDisplayBody(body: String): ConversationTextSectionDisplayBody {
     // #704 req #1: never render raw internal-protocol XML (e.g. <task-id>…) in
-    // a message body — strip the noise wrappers before bounding for display.
-    val cleaned = ConversationTextFormatting.stripInternalProtocolNoise(body)
-    return boundedConversationDisplayBody(
-        body = cleaned,
-        truncatedNotice = "[Message truncated in view. Copy for full text.]",
+    // a message body. Keep that display-only cleanup bounded too: scanning a
+    // million-character exact body with every cleaner before applying the
+    // 5,000-character preview cap defeats #605's main-thread protection.
+    val cleaned = ConversationTextFormatting.stripInternalProtocolNoiseBounded(
+        text = body,
+        maxVisibleChars = CONVERSATION_CLEANING_CHAR_LIMIT,
+        maxScanChars = CONVERSATION_CLEANING_SCAN_LIMIT,
     )
+    val displayBody = boundedConversationDisplayBody(cleaned.text)
+    return if (!cleaned.consumedAllInput && !displayBody.wasTruncated) {
+        displayBody.copy(wasTruncated = true)
+    } else {
+        displayBody
+    }
 }
 
-private fun boundedConversationDisplayBody(
-    body: String,
-    truncatedNotice: String,
-): ConversationTextSectionDisplayBody {
+private fun boundedConversationDisplayBody(body: String): ConversationTextSectionDisplayBody {
     var newlineCount = 0
     var endExclusive = 0
     while (
@@ -135,7 +173,7 @@ private fun boundedConversationDisplayBody(
     }
     val preview = body.substring(0, endExclusive).trimEnd()
     return ConversationTextSectionDisplayBody(
-        text = "$preview\n\n$truncatedNotice",
+        text = preview,
         wasTruncated = true,
     )
 }

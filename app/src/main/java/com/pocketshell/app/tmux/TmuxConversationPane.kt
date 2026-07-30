@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -46,10 +47,13 @@ import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
 import com.pocketshell.app.conversation.ConversationDiagnostics
 import com.pocketshell.app.conversation.ConversationImages
 import com.pocketshell.app.conversation.ConversationInteractionCleanupEffect
+import com.pocketshell.app.conversation.ConversationFullTextDialog
+import com.pocketshell.app.conversation.ConversationFullTextRequest
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.conversation.ConversationTextSection
 import com.pocketshell.app.conversation.ConversationToolArgsSection
 import com.pocketshell.app.conversation.ConversationToolCardExpansion
+import com.pocketshell.app.conversation.LocalConversationFullTextPresenter
 import com.pocketshell.app.conversation.ToolResultPairing
 import com.pocketshell.app.conversation.conversationTimelineVisibleEvents
 import com.pocketshell.app.conversation.filterConversationRows
@@ -141,6 +145,10 @@ internal fun TmuxConversationPane(
     // collapsed by default, the user's choice is sticky for the lifetime
     // of the conversation pane.
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
+    var fullTextRequest by remember { mutableStateOf<ConversationFullTextRequest?>(null) }
+    val fullTextPresenter = remember {
+        { request: ConversationFullTextRequest -> fullTextRequest = request }
+    }
     val runningToolIds = remember(visibleEvents, toolResultPairing) {
         runningToolCallIds(visibleEvents, toolResultPairing)
     }
@@ -266,40 +274,44 @@ internal fun TmuxConversationPane(
                         } ?: false,
                         isSearchExpanded = event.id in filteredConversation.searchExpandedToolCallIds,
                     )
-                    ConversationEventRow(
-                        event = event,
-                        runningToolIds = runningToolIds,
-                        toolResultPairing = toolResultPairing,
-                        isExpanded = toolCallExpanded,
-                        onToggleExpand = { id ->
-                            ConversationDiagnostics.recordRowToggle(
-                                mode = "tmux",
-                                paneId = paneId,
-                                event = event,
-                                expanded = !toolCallExpanded,
-                                pairedToolResult = (event as? ConversationEvent.ToolCall)?.let { call ->
-                                    toolResultPairing.resultsByCallId[call.id]
-                                },
-                            )
-                            toolCallExpandOverrides.value = ConversationToolCardExpansion.toggle(
-                                overrides = toolCallExpandOverrides.value,
-                                id = id,
-                                currentlyExpanded = toolCallExpanded,
-                            )
-                        },
-                        isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
-                        onToggleSystemNoteExpand = { id ->
-                            ConversationDiagnostics.recordRowToggle(
-                                mode = "tmux",
-                                paneId = paneId,
-                                event = event,
-                                expanded = !expandedSystemNotes.value.contains(id),
-                            )
-                            expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
-                        },
-                        onRetryFailedSend = onRetryFailedSend,
-                        onLinkTap = onConversationLinkTap,
-                    )
+                    CompositionLocalProvider(
+                        LocalConversationFullTextPresenter provides fullTextPresenter,
+                    ) {
+                        ConversationEventRow(
+                            event = event,
+                            runningToolIds = runningToolIds,
+                            toolResultPairing = toolResultPairing,
+                            isExpanded = toolCallExpanded,
+                            onToggleExpand = { id ->
+                                ConversationDiagnostics.recordRowToggle(
+                                    mode = "tmux",
+                                    paneId = paneId,
+                                    event = event,
+                                    expanded = !toolCallExpanded,
+                                    pairedToolResult = (event as? ConversationEvent.ToolCall)?.let { call ->
+                                        toolResultPairing.resultsByCallId[call.id]
+                                    },
+                                )
+                                toolCallExpandOverrides.value = ConversationToolCardExpansion.toggle(
+                                    overrides = toolCallExpandOverrides.value,
+                                    id = id,
+                                    currentlyExpanded = toolCallExpanded,
+                                )
+                            },
+                            isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
+                            onToggleSystemNoteExpand = { id ->
+                                ConversationDiagnostics.recordRowToggle(
+                                    mode = "tmux",
+                                    paneId = paneId,
+                                    event = event,
+                                    expanded = !expandedSystemNotes.value.contains(id),
+                                )
+                                expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
+                            },
+                            onRetryFailedSend = onRetryFailedSend,
+                            onLinkTap = onConversationLinkTap,
+                        )
+                    }
                 }
             }
             JumpToLatestOverlay(
@@ -317,6 +329,14 @@ internal fun TmuxConversationPane(
         }
         // Issue #459: no in-pane composer / unsent-prompt banner any more —
         // the shared unified composer band at the screen level owns sending.
+    }
+    fullTextRequest?.let { request ->
+        ConversationFullTextDialog(
+            title = request.title,
+            body = request.body,
+            clipboardLabel = request.clipboardLabel,
+            onDismissRequest = { fullTextRequest = null },
+        )
     }
 }
 

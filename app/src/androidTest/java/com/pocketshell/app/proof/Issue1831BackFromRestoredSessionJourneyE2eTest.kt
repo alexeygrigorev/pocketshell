@@ -17,6 +17,7 @@ import com.pocketshell.app.hosts.HOST_LIST_CONTENT_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
@@ -233,6 +234,14 @@ class Issue1831BackFromRestoredSessionJourneyE2eTest {
             rule = compose,
             sessionName = SEEDED_SESSION,
             timeoutMs = pickerWaitMs,
+            onStateNote = ::recordPickerReadiness,
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                    onStateNote = ::recordPickerReadiness,
+                )
+            },
         )
         compose.onNodeWithText(SEEDED_SESSION, useUnmergedTree = true).performClick()
         waitForSessionScreen("initial open")
@@ -315,6 +324,13 @@ class Issue1831BackFromRestoredSessionJourneyE2eTest {
         trail += line
         Log.i(LOG_TAG, "ISSUE1831_TRAIL $line")
         println("ISSUE1831_TRAIL $line")
+    }
+
+    private fun recordPickerReadiness(note: String) {
+        val line = "picker_readiness=$note"
+        trail += line
+        Log.i(LOG_TAG, "ISSUE1831_PICKER $line")
+        println("ISSUE1831_PICKER $line")
     }
 
     // ---------------------------------------------------------------- Fixture

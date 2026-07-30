@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.SessionTab
@@ -26,7 +27,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
-import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -1542,32 +1543,38 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
             ),
         )
 
-        deadClient.disconnectedSignal.value = true
-        runCurrent()
+        var sendJob: Job? = null
+        try {
+            deadClient.disconnectedSignal.value = true
+            runCurrent()
 
-        val send = async {
-            vm.sendAgentPayloadToPaneResult("%0", "codex terminal send", AgentKind.Codex)
+            val send = async {
+                vm.sendAgentPayloadToPaneResult("%0", "codex terminal send", AgentKind.Codex)
+            }
+            sendJob = send
+            awaitReconnectSendCompletion(send)
+            val result = send.await()
+
+            assertTrue(
+                "Codex Terminal-tab Send+Enter must reconnect before send: " +
+                    "failure=${result.exceptionOrNull()} status=${vm.connectionStatus.value} " +
+                    "connectCount=${connector.connectCount} " +
+                    "registryClient=${registry.clients.value[7L]?.client}",
+                result.isSuccess,
+            )
+            assertEquals(1, connector.connectCount)
+            assertSame(reconnectClient, registry.clients.value[7L]?.client)
+            assertEquals(
+                listOf(
+                    "send-keys -l -t %0 -- 'codex terminal send'",
+                    "send-keys -t %0 Enter",
+                ),
+                reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
+            )
+        } finally {
+            sendJob?.cancelAndJoin()
+            drainReconnectScenario(vm, scenarioScope)
         }
-        awaitReconnectSendCompletion(send)
-        val result = send.await()
-
-        assertTrue(
-            "Codex Terminal-tab Send+Enter must reconnect before send: " +
-                "failure=${result.exceptionOrNull()} status=${vm.connectionStatus.value} " +
-                "connectCount=${connector.connectCount} " +
-                "registryClient=${registry.clients.value[7L]?.client}",
-            result.isSuccess,
-        )
-        assertEquals(1, connector.connectCount)
-        assertSame(reconnectClient, registry.clients.value[7L]?.client)
-        assertEquals(
-            listOf(
-                "send-keys -l -t %0 -- 'codex terminal send'",
-                "send-keys -t %0 Enter",
-            ),
-            reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
-        )
-        drainReconnectScenario(vm, scenarioScope)
     }
 
     /**
@@ -1677,32 +1684,39 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         vm.startAgentConversationForTest("%0", newClaudeDetection())
         vm.selectSessionTab("%0", SessionTab.Conversation)
 
-        deadClient.disconnectedSignal.value = true
-        runCurrent()
-        assertTrue(
-            "precondition: passive EOF should surface a recoverable disconnected state",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
-        )
+        var sendJob: Job? = null
+        try {
+            deadClient.disconnectedSignal.value = true
+            runCurrent()
+            assertTrue(
+                "precondition: passive EOF should surface a recoverable disconnected state",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
+            )
 
-        val send = async { vm.sendToAgentPaneResult("%0", "send after return") }
-        awaitReconnectSendCompletion(send)
-        val result = send.await()
+            val send = async { vm.sendToAgentPaneResult("%0", "send after return") }
+            sendJob = send
+            awaitReconnectSendCompletion(send)
+            val result = send.await()
 
-        assertTrue("send should reconnect and deliver instead of dead-ending", result.isSuccess)
-        assertEquals(1, connector.connectCount)
-        assertSame(reconnectClient, registry.clients.value[7L]?.client)
-        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
-        assertEquals(
-            listOf(
-                "send-keys -l -t %0 -- 'send after return'",
-                "send-keys -t %0 Enter",
-            ),
-            reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
-        )
-        val pending = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
-        assertEquals("send after return", pending.text)
-        assertEquals(MessageSendState.Pending, pending.sendState)
-        drainReconnectScenario(vm, scenarioScope)
+            assertTrue("send should reconnect and deliver instead of dead-ending", result.isSuccess)
+            assertEquals(1, connector.connectCount)
+            assertSame(reconnectClient, registry.clients.value[7L]?.client)
+            assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+            assertEquals(
+                listOf(
+                    "send-keys -l -t %0 -- 'send after return'",
+                    "send-keys -t %0 Enter",
+                ),
+                reconnectClient.sentCommands.filter { it.startsWith("send-keys") },
+            )
+            val pending =
+                vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
+            assertEquals("send after return", pending.text)
+            assertEquals(MessageSendState.Pending, pending.sendState)
+        } finally {
+            sendJob?.cancelAndJoin()
+            drainReconnectScenario(vm, scenarioScope)
+        }
     }
 
     /**
@@ -1719,27 +1733,32 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
      * collaborator roots to the class-level @After. This is load-bearing for
      * the 50x guards: iteration N+1 starts with zero live work from iteration N.
      */
-    private fun TestScope.drainReconnectScenario(
+    private suspend fun TestScope.drainReconnectScenario(
         vm: TmuxSessionViewModel,
         scenarioScope: CoroutineScope,
     ) {
+        vm.setProcessForegroundForClearedForTest(false)
         vm.clearForTest()
+        // Preserve the established cleanup order: let the just-enqueued
+        // off-Main teardown run to its next suspension before cancelling roots.
         runCurrent()
-        scenarioScope.cancel()
-        val drainDeadline = System.currentTimeMillis() + 5_000L
-        while (
-            vm.activeOwnScopeChildCountForTest() > 0 &&
-            System.currentTimeMillis() < drainDeadline
-        ) {
-            // Completion handlers may enqueue one final bridgeScope child. Keep
-            // cancelling and pumping the shared scheduler until that hand-back
-            // has also quiesced (the same #1355 shape as the base @After).
-            vm.cancelOwnScopesForTest()
-            runCurrent()
-            // A VM child may be unwinding from a genuine background dispatcher;
-            // yield wall time before pumping its Main continuation again.
-            Thread.sleep(1)
+        val vmRoot = requireNotNull(vm.viewModelScope.coroutineContext[Job]) {
+            "reconnect scenario VM must expose its owned viewModelScope root"
         }
+        val scenarioRoot = requireNotNull(scenarioScope.coroutineContext[Job]) {
+            "reconnect scenario collaborator scope must have an owned root"
+        }
+        // Issue #1615 recurrence: cancel the ROOTS, not a snapshot of their
+        // current children. Root cancellation prevents completion callbacks
+        // from re-arming a late bridgeScope child after cleanup observed zero.
+        vmRoot.cancel()
+        scenarioRoot.cancel()
+        runCurrent()
+        // Both roots are pinned to this TestScope's scheduler. Suspending joins
+        // therefore let runTest drive their cancellation continuations without
+        // a real-dispatcher race or a wall-clock polling deadline.
+        vmRoot.join()
+        scenarioRoot.join()
         assertEquals(
             "reconnect scenario must not retain VM work into its sibling/next iteration",
             0,
@@ -1747,15 +1766,17 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
         )
         assertTrue(
             "reconnect scenario factory/tail/teardown scope must be fully cancelled",
-            scenarioScope.coroutineContext[Job]?.children?.none { it.isActive } != false,
+            scenarioRoot.children.none { it.isActive },
         )
     }
 
     /**
-     * Drive reconnect polling in small virtual increments per wall-clock yield.
-     * `advanceUntilIdle()` leaps directly to the send timeout before a real
-     * dispatcher gets CPU under contention; `runCurrent()` alone never advances
-     * the reconnect poll delay. This bounded pump does both without either race.
+     * Drive reconnect polling in small virtual increments. Every owned
+     * collaborator hop in these scenarios is pinned to [scheduler], so yielding
+     * real wall time here only reintroduces the virtual-time/real-time race this
+     * guard exists to catch. `runCurrent()` alone never advances the reconnect
+     * poll delay; the bounded 10ms steps do so without leaping straight to the
+     * terminal send timeout.
      */
     private fun TestScope.awaitReconnectSendCompletion(send: Job) {
         repeat(2_000) {
@@ -1763,12 +1784,11 @@ class TmuxSessionAgentSendTest : TmuxSessionViewModelTestBase() {
             runCurrent()
             if (!send.isCompleted) {
                 advanceTimeBy(10L)
-                Thread.sleep(1)
             }
         }
         assertTrue(
             "reconnect send did not complete within 2,000 settle ticks under the " +
-                "virtual-clock/wall-clock settle pump",
+                "scheduler-confined virtual-clock settle pump",
             send.isCompleted,
         )
     }

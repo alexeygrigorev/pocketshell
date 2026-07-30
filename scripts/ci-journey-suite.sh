@@ -214,6 +214,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.tmux.ComposerUnsentBadgeContainmentProofTest"  # #1531 RC1: the docked-launcher UNSENT badge is present + fully within the window (containment, not assertIsDisplayed) on both the chip-cluster and conversation launchers, pending + failed states — a stuck send is SEEN, not silently dropped
   "com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#heldTerminalHidesQuickCommandBand_keepsComposerLauncher"  # #1672 the maintainer's Reconnecting/Attaching report: while the terminal is HELD the quick-command band (git status/tmux ls/…) + primary cluster are ABSENT (hidden, not disabled); the composer launcher stays present (#810)
   "com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#liveTerminalShowsRetainedPrimaryControlsWithoutGenericLiterals"  # #1672/#1754 Live returns only retained primary controls; generic command literals stay hard-deleted
+  "com.pocketshell.app.conversation.ConversationShowAllJourneyTest"  # #1889 capped messages retain a lazy in-app full-text route
 
   "com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest"  # #1320 #962 #975 #1057 the Terminal/Conversation TOGGLE-CLIP regression guard — the…
   "com.pocketshell.app.cards.SessionCardFeedRegistryTest"  # #859 B): the typed-card RENDERER REGISTRY proof. The session feed

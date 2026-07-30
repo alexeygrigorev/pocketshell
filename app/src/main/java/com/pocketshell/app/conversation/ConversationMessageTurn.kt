@@ -16,7 +16,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.ProvidableCompositionLocal
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,6 +67,15 @@ internal fun ConversationMessageTurn(
     val roleLabel = if (isUser) "USER" else "ASSISTANT"
     val timestamp = remember(event.atMillis) { event.timelineTimestamp() }
     val timeLabel = if (event.streaming) "· streaming" else timestamp?.let { "· $it" }
+    val fullTextPresenter = LocalConversationFullTextPresenter.current
+    var showFullText by remember(event.id, event.text) { mutableStateOf(false) }
+    val fullTextRequest = remember(event.id, event.text, isUser) {
+        ConversationFullTextRequest(
+            title = if (isUser) "User message" else "Assistant message",
+            body = event.text,
+            clipboardLabel = if (isUser) "user message" else "assistant message",
+        )
+    }
 
     Column(
         modifier = modifier
@@ -116,8 +128,16 @@ internal fun ConversationMessageTurn(
         // image-only turn (#842) doesn't render a blank text block.
         if (event.text.isNotBlank()) {
             MessageBody(
+                messageId = event.id,
                 text = event.text,
                 onLinkTap = onLinkTap,
+                onShowAll = {
+                    if (fullTextPresenter != null) {
+                        fullTextPresenter(fullTextRequest)
+                    } else {
+                        showFullText = true
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -126,6 +146,14 @@ internal fun ConversationMessageTurn(
         ConversationImages(
             images = event.images,
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+    if (showFullText && fullTextPresenter == null) {
+        ConversationFullTextDialog(
+            title = fullTextRequest.title,
+            body = fullTextRequest.body,
+            clipboardLabel = fullTextRequest.clipboardLabel,
+            onDismissRequest = { showFullText = false },
         )
     }
 }
@@ -210,8 +238,10 @@ private fun StreamingDot(roleColor: Color) {
  */
 @Composable
 private fun MessageBody(
+    messageId: String,
     text: String,
     onLinkTap: ((ConversationLink) -> Unit)?,
+    onShowAll: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val displayBody = remember(text) { conversationExpandedMessageDisplayBody(text) }
@@ -233,6 +263,15 @@ private fun MessageBody(
                 fontSize = targetFontSp.sp,
                 fontFamily = FontFamily.Monospace,
                 onLinkTap = onLinkTap,
+            )
+        }
+        if (displayBody.wasTruncated) {
+            ConversationShowAllAction(
+                testTag = CONVERSATION_SHOW_ALL_TAG_PREFIX + messageId,
+                onClick = onShowAll,
+                // Keep this primary recovery action clear of the pane's
+                // bottom-end "Latest" FAB while its hide animation settles.
+                modifier = Modifier.align(Alignment.Start),
             )
         }
     }

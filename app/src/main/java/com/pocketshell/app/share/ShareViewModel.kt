@@ -31,6 +31,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +85,7 @@ internal class ShareViewModel internal constructor(
     private val projectRootDao: ProjectRootDao,
     private val sshLeaseManager: SshLeaseManager,
     private val stageIntoSessionTimeoutMs: Long = STAGE_INTO_SESSION_TIMEOUT_MS,
+    private val stagingContext: CoroutineContext = Dispatchers.IO,
 ) : ViewModel() {
 
     @Inject
@@ -102,6 +104,7 @@ internal class ShareViewModel internal constructor(
         projectRootDao = projectRootDao,
         sshLeaseManager = sshLeaseManager,
         stageIntoSessionTimeoutMs = STAGE_INTO_SESSION_TIMEOUT_MS,
+        stagingContext = Dispatchers.IO,
     )
 
     val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
@@ -182,6 +185,7 @@ internal class ShareViewModel internal constructor(
     internal var uploader: ShareItemUploader = ShareUploader(
         context = applicationContext,
         connect = { host, key, keyPath, purpose -> connectForUpload(host, key, keyPath, purpose) },
+        ioContext = stagingContext,
     )
 
     private var lastShareAction: ShareRetryAction? = null
@@ -581,7 +585,7 @@ internal class ShareViewModel internal constructor(
         scopeKey: String,
         payload: List<ShareableItem>,
         sessionName: String,
-    ): Result<List<String>> = withContext(Dispatchers.IO) {
+    ): Result<List<String>> = withContext(stagingContext) {
         val openedSession = AtomicReference<SshSession?>()
         val deferred = async {
             val sshSession = connectForStaging(host, keyEntity).getOrThrow()
@@ -592,6 +596,7 @@ internal class ShareViewModel internal constructor(
                     PromptAttachmentStager(
                         resolver = applicationContext.contentResolver,
                         cacheDir = applicationContext.cacheDir,
+                        ioContext = stagingContext,
                     ).stage(live, scopeKey, stagedInput.uris).getOrThrow()
                 } finally {
                     stagedInput.deleteTempFiles()

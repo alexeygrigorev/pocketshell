@@ -2,6 +2,7 @@ package com.pocketshell.app.share
 
 import android.app.NotificationManager
 import android.content.Context
+import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
@@ -15,18 +16,23 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlin.coroutines.CoroutineContext
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -65,6 +71,9 @@ class ShareViewModelTest {
 
     private lateinit var db: AppDatabase
     private lateinit var context: Context
+    private val viewModelStore = ViewModelStore()
+    private var viewModelKey = 0
+    private val leaseManagers = linkedSetOf<SshLeaseManager>()
 
     @Before
     fun setUp() {
@@ -82,6 +91,13 @@ class ShareViewModelTest {
 
     @After
     fun tearDown() {
+        viewModelStore.clear()
+        leaseManagers.forEach(SshLeaseManager::close)
+        // close() can enqueue manager-owned cancellation/abort continuations
+        // onto the shared test dispatcher. Drain those due tasks while the
+        // rule still owns Main so no continuation crosses the reset boundary.
+        mainDispatcherRule.runCurrent()
+        leaseManagers.clear()
         db.close()
     }
 
@@ -957,7 +973,8 @@ class ShareViewModelTest {
         val keyPath = "/tmp/key-138"
         val fakeSession = FakeStagingSshSession()
         var connectCalls = 0
-        val leaseManager = SshLeaseManager(
+        val leaseManager = newTestLeaseManager(
+            dispatcher = StandardTestDispatcher(testScheduler),
             connector = { _: SshLeaseTarget ->
                 connectCalls += 1
                 if (connectCalls == 1) {
@@ -1010,7 +1027,8 @@ class ShareViewModelTest {
         val uploadSession = FakeStagingSshSession()
         val seenCredentialIds = mutableListOf<String>()
         var connectCalls = 0
-        val leaseManager = SshLeaseManager(
+        val leaseManager = newTestLeaseManager(
+            dispatcher = StandardTestDispatcher(testScheduler),
             connector = { target: SshLeaseTarget ->
                 seenCredentialIds += target.leaseKey.credentialId
                 connectCalls += 1
@@ -1045,51 +1063,42 @@ class ShareViewModelTest {
 
     @Test
     @Config(sdk = [28])
-    fun stageIntoSessionUsesShareStagingPurposeLease() {
-        kotlinx.coroutines.runBlocking {
-            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
-            try {
-                val registry = ActiveTmuxClients()
-                val host = seededHost(id = 140L, name = "hetzner")
-                val fakeSession = FakeStagingSshSession()
-                val seenCredentialIds = mutableListOf<String>()
-                val leaseManager = SshLeaseManager(
-                    connector = { target: SshLeaseTarget ->
-                        seenCredentialIds += target.leaseKey.credentialId
-                        Result.success(fakeSession)
-                    },
-                )
-                val vm = newVm(registry, sshLeaseManager = leaseManager)
-                registry.register(
-                    hostId = host.id,
-                    hostName = host.name,
-                    hostname = host.hostname,
-                    port = host.port,
-                    username = host.username,
-                    keyPath = "/tmp/key-140",
-                    client = FakeTmuxClient(),
-                )
-                vm.setItem(ShareableItem.TextItem(text = "attach me", displayName = "note"))
+    fun stageIntoSessionUsesShareStagingPurposeLease() = runTest {
+        val registry = ActiveTmuxClients()
+        val host = seededHost(id = 140L, name = "hetzner")
+        val fakeSession = FakeStagingSshSession()
+        val seenCredentialIds = mutableListOf<String>()
+        val leaseManager = newTestLeaseManager(
+            dispatcher = StandardTestDispatcher(testScheduler),
+            connector = { target: SshLeaseTarget ->
+                seenCredentialIds += target.leaseKey.credentialId
+                Result.success(fakeSession)
+            },
+        )
+        val vm = newVm(registry, sshLeaseManager = leaseManager)
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key-140",
+            client = FakeTmuxClient(),
+        )
+        vm.setItem(ShareableItem.TextItem(text = "attach me", displayName = "note"))
 
-                vm.stageIntoSession(
-                    host,
-                    ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
-                )
-                kotlinx.coroutines.withTimeout(5_000L) {
-                    fakeSession.uploadStarted.await()
-                }
+        vm.stageIntoSession(
+            host,
+            ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
+        )
+        advanceUntilIdle()
 
-                assertEquals(
-                    listOf("${host.id}:/tmp/key-140|purpose=share-staging"),
-                    seenCredentialIds,
-                )
-                leaseManager.close()
-            } finally {
-                kotlinx.coroutines.Dispatchers.setMain(
-                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
-                )
-            }
-        }
+        assertEquals(
+            listOf("${host.id}:/tmp/key-140|purpose=share-staging"),
+            seenCredentialIds,
+        )
+        assertTrue(fakeSession.uploadStarted.isCompleted)
+        leaseManager.close()
     }
 
     @Test
@@ -1104,7 +1113,8 @@ class ShareViewModelTest {
         // The first connect (the live app session's) succeeds; any SECOND
         // connect would mean the share re-authenticated instead of reusing
         // the warm lease, which the assertion below forbids.
-        val leaseManager = SshLeaseManager(
+        val leaseManager = newTestLeaseManager(
+            dispatcher = StandardTestDispatcher(testScheduler),
             connector = { _: SshLeaseTarget ->
                 connectCalls += 1
                 if (connectCalls == 1) {
@@ -1149,7 +1159,8 @@ class ShareViewModelTest {
         val fakeSession = FakeStagingSshSession()
         val seenPassphrases = mutableListOf<String?>()
         var connectCalls = 0
-        val leaseManager = SshLeaseManager(
+        val leaseManager = newTestLeaseManager(
+            dispatcher = StandardTestDispatcher(testScheduler),
             connector = { target: SshLeaseTarget ->
                 connectCalls += 1
                 seenPassphrases += target.passphrase?.concatToString()
@@ -1167,15 +1178,19 @@ class ShareViewModelTest {
             vm.startUpload(host)
             advanceUntilIdle()
 
-            val prompt = vm.uploadState.first { it is UploadState.NeedsPassphrase }
-                as UploadState.NeedsPassphrase
+            val promptState = vm.uploadState.value
+            assertTrue(
+                "fresh locked-key auth failure must settle at NeedsPassphrase, got $promptState",
+                promptState is UploadState.NeedsPassphrase,
+            )
+            val prompt = promptState as UploadState.NeedsPassphrase
             assertEquals("hetzner", prompt.hostName)
             assertEquals(1, connectCalls)
 
             vm.submitPassphrase("hunter2".toCharArray())
             advanceUntilIdle()
 
-            val success = vm.uploadState.first { it is UploadState.Success }
+            val success = vm.uploadState.value
             assertTrue("upload must succeed once unlocked", success is UploadState.Success)
             assertEquals(
                 "fresh connect retried with the entered passphrase",
@@ -1197,7 +1212,8 @@ class ShareViewModelTest {
         // is a genuine failure, not a missing passphrase. Show the normal
         // failure surface, never the passphrase prompt.
         val host = seededHost(id = 6542L, name = "hetzner", hasPassphrase = false)
-        val leaseManager = SshLeaseManager(
+        val leaseManager = newTestLeaseManager(
+            dispatcher = StandardTestDispatcher(testScheduler),
             connector = { _: SshLeaseTarget -> Result.failure(SshException("Authentication failed")) },
         )
         try {
@@ -1558,157 +1574,163 @@ class ShareViewModelTest {
         )
     }
 
-    // Note: NOT a `runTest`. `stageIntoSession` reuses the #544
-    // `PromptAttachmentStager`, whose upload runs on the real
-    // `Dispatchers.IO` (`withContext(Dispatchers.IO)`); the virtual
-    // `runTest` scheduler does not advance that real dispatcher, so this
-    // test drives the round-trip on a real scope and waits on the
-    // one-shot launch event with a timeout.
     @Test
     @Config(sdk = [28])
-    fun stageIntoSessionUploadsToSessionScopeAndEmitsLaunch() {
-        kotlinx.coroutines.runBlocking {
-            // The ViewModel's `viewModelScope` is bound to the
-            // [MainDispatcherRule] dispatcher; left at the default
-            // `UnconfinedTestDispatcher` it would not advance under plain
-            // runBlocking, so swap Main to the real default dispatcher for
-            // this one test.
-            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
-            try {
-                val registry = ActiveTmuxClients()
-                val vm = newVm(registry)
-                val host = seededHost(id = 51L, name = "gpu-box")
-                val manager = context.getSystemService(NotificationManager::class.java)
-                registry.register(
-                    hostId = host.id,
-                    hostName = host.name,
-                    hostname = host.hostname,
-                    port = host.port,
-                    username = host.username,
-                    keyPath = "/tmp/key",
-                    client = FakeTmuxClient(),
-                )
-                val fakeSession = FakeStagingSshSession()
-                vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
-                val tempFile =
-                    java.io.File.createTempFile("share-into-session", ".png", context.cacheDir)
-                tempFile.writeBytes(byteArrayOf(1, 2, 3, 4))
-                vm.setItem(
-                    ShareableItem.UriItem(
-                        uri = android.net.Uri.fromFile(tempFile),
-                        displayName = "shot.png",
-                        size = tempFile.length(),
-                        mimeType = "image/png",
-                        fallbackExtension = "png",
-                    ),
-                )
+    fun stageIntoSessionUploadsToSessionScopeAndEmitsLaunch() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 51L, name = "gpu-box")
+        val manager = context.getSystemService(NotificationManager::class.java)
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = FakeTmuxClient(),
+        )
+        val fakeSession = FakeStagingSshSession()
+        vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
+        val tempFile =
+            java.io.File.createTempFile("share-into-session", ".png", context.cacheDir)
+        tempFile.writeBytes(byteArrayOf(1, 2, 3, 4))
+        vm.setItem(
+            ShareableItem.UriItem(
+                uri = android.net.Uri.fromFile(tempFile),
+                displayName = "shot.png",
+                size = tempFile.length(),
+                mimeType = "image/png",
+                fallbackExtension = "png",
+            ),
+        )
 
-                val session = ActiveSessionTarget(
-                    sessionName = "scratch",
-                    cwd = "/home/alexey/git/live",
-                    label = "scratch",
-                    focused = true,
-                )
+        val session = ActiveSessionTarget(
+            sessionName = "scratch",
+            cwd = "/home/alexey/git/live",
+            label = "scratch",
+            focused = true,
+        )
 
-                vm.stageIntoSession(host, session)
-                val launch = kotlinx.coroutines.withTimeout(5_000L) {
-                    vm.sessionLaunch.first()
-                }
+        vm.stageIntoSession(host, session)
+        advanceUntilIdle()
+        val launch = vm.sessionLaunch.first()
 
-                assertEquals(host.id, launch.hostId)
-                assertEquals("scratch", launch.sessionName)
-                assertEquals("/tmp/key-51", launch.keyPath)
-                assertEquals(1, launch.attachmentPaths.size)
-                val staged = launch.attachmentPaths.single()
-                assertTrue(
-                    "staged path must land in the per-session #544 scope, got '$staged'",
-                    staged.contains(".pocketshell/attachments/host-51-scratch/"),
-                )
-                assertTrue(
-                    "the stager must create the per-session dir, got ${fakeSession.execCommands}",
-                    fakeSession.execCommands.any { it.contains("host-51-scratch") },
-                )
-                assertTrue(
-                    "the file bytes must have been uploaded",
-                    fakeSession.uploadedRemotePaths.isNotEmpty(),
-                )
-                assertTrue(
-                    "successful attachment shares must stay silent; active=" +
-                        manager.activeNotifications.map {
-                            it.notification.extras.getCharSequence("android.title")?.toString()
-                        },
-                    manager.activeNotifications.isEmpty(),
-                )
-                assertTrue("the staging session must be closed", fakeSession.closed)
-                tempFile.delete()
-            } finally {
-                // Restore a test Main so the [MainDispatcherRule]'s
-                // `finished()` resetMain still has an installed dispatcher to
-                // reset (calling resetMain twice would throw).
-                kotlinx.coroutines.Dispatchers.setMain(
-                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
-                )
-            }
-        }
+        assertEquals(host.id, launch.hostId)
+        assertEquals("scratch", launch.sessionName)
+        assertEquals("/tmp/key-51", launch.keyPath)
+        assertEquals(1, launch.attachmentPaths.size)
+        val staged = launch.attachmentPaths.single()
+        assertTrue(
+            "staged path must land in the per-session #544 scope, got '$staged'",
+            staged.contains(".pocketshell/attachments/host-51-scratch/"),
+        )
+        assertTrue(
+            "the stager must create the per-session dir, got ${fakeSession.execCommands}",
+            fakeSession.execCommands.any { it.contains("host-51-scratch") },
+        )
+        assertTrue(
+            "the file bytes must have been uploaded",
+            fakeSession.uploadedRemotePaths.isNotEmpty(),
+        )
+        assertTrue(
+            "successful attachment shares must stay silent; active=" +
+                manager.activeNotifications.map {
+                    it.notification.extras.getCharSequence("android.title")?.toString()
+                },
+            manager.activeNotifications.isEmpty(),
+        )
+        assertTrue("the staging session must be closed", fakeSession.closed)
+        tempFile.delete()
     }
 
     @Test
     @Config(sdk = [28])
-    fun stageIntoSessionMaterializesTextShareAsTxtAttachmentAndEmitsLaunch() {
-        kotlinx.coroutines.runBlocking {
-            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
-            try {
-                val registry = ActiveTmuxClients()
-                val vm = newVm(registry)
-                val host = seededHost(id = 53L, name = "gpu-box")
-                registry.register(
-                    hostId = host.id,
-                    hostName = host.name,
-                    hostname = host.hostname,
-                    port = host.port,
-                    username = host.username,
-                    keyPath = "/tmp/key",
-                    client = FakeTmuxClient(),
-                )
-                val fakeSession = FakeStagingSshSession()
-                vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
-                vm.setItem(
-                    ShareableItem.TextItem(
-                        text = "Exception summary: SshException\nTop frame: RealSshSession.ensureConnected",
-                        displayName = "crash-report",
-                    ),
-                )
+    fun stageIntoSessionOwnedBackgroundHopDrainsOnTheRunTestScheduler() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 1892L, name = "scheduler-host")
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = FakeTmuxClient(),
+        )
+        val fakeSession = FakeStagingSshSession()
+        vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
+        vm.setItem(
+            ShareableItem.TextItem(
+                text = "scheduler-owned staging",
+                displayName = "issue-1892",
+            ),
+        )
 
-                val session = ActiveSessionTarget(
-                    sessionName = "scratch",
-                    cwd = "/home/alexey/git/live",
-                    label = "scratch",
-                    focused = true,
-                )
+        vm.stageIntoSession(
+            host,
+            ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
+        )
+        advanceUntilIdle()
 
-                vm.stageIntoSession(host, session)
-                val launch = kotlinx.coroutines.withTimeout(5_000L) {
-                    vm.sessionLaunch.first()
-                }
+        val launch = withTimeoutOrNull(1L) { vm.sessionLaunch.first() }
+        assertTrue(
+            "all ShareViewModel-owned background hops must drain on the runTest scheduler; " +
+                "the launch was still pending after advanceUntilIdle",
+            launch != null,
+        )
+        assertEquals(1, launch!!.attachmentPaths.size)
+        assertTrue("the staging session must be closed", fakeSession.closed)
+    }
 
-                assertEquals(host.id, launch.hostId)
-                val staged = launch.attachmentPaths.single()
-                assertTrue(
-                    "text crash reports must stage as a .txt attachment, got '$staged'",
-                    staged.endsWith(".txt"),
-                )
-                assertTrue(
-                    "the staged text bytes must be uploaded",
-                    fakeSession.uploadedFileBytes.single().decodeToString()
-                        .contains("SshException"),
-                )
-                assertTrue("the staging session must be closed", fakeSession.closed)
-            } finally {
-                kotlinx.coroutines.Dispatchers.setMain(
-                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
-                )
-            }
-        }
+    @Test
+    @Config(sdk = [28])
+    fun stageIntoSessionMaterializesTextShareAsTxtAttachmentAndEmitsLaunch() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 53L, name = "gpu-box")
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = FakeTmuxClient(),
+        )
+        val fakeSession = FakeStagingSshSession()
+        vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
+        vm.setItem(
+            ShareableItem.TextItem(
+                text = "Exception summary: SshException\nTop frame: RealSshSession.ensureConnected",
+                displayName = "crash-report",
+            ),
+        )
+
+        val session = ActiveSessionTarget(
+            sessionName = "scratch",
+            cwd = "/home/alexey/git/live",
+            label = "scratch",
+            focused = true,
+        )
+
+        vm.stageIntoSession(host, session)
+        advanceUntilIdle()
+        val launch = vm.sessionLaunch.first()
+
+        assertEquals(host.id, launch.hostId)
+        val staged = launch.attachmentPaths.single()
+        assertTrue(
+            "text crash reports must stage as a .txt attachment, got '$staged'",
+            staged.endsWith(".txt"),
+        )
+        assertTrue(
+            "the staged text bytes must be uploaded",
+            fakeSession.uploadedFileBytes.single().decodeToString()
+                .contains("SshException"),
+        )
+        assertTrue("the staging session must be closed", fakeSession.closed)
     }
 
     @Test
@@ -1825,60 +1847,47 @@ class ShareViewModelTest {
 
     @Test
     @Config(sdk = [28])
-    fun stageIntoSessionTimeoutSurfacesFailureAndClearsRunning() {
-        kotlinx.coroutines.runBlocking {
-            kotlinx.coroutines.Dispatchers.setMain(kotlinx.coroutines.Dispatchers.Default)
-            try {
-                val registry = ActiveTmuxClients()
-                val vm = newVm(registry, stageIntoSessionTimeoutMs = 50L)
-                val host = seededHost(id = 55L, name = "gpu-box")
-                registry.register(
-                    hostId = host.id,
-                    hostName = host.name,
-                    hostname = host.hostname,
-                    port = host.port,
-                    username = host.username,
-                    keyPath = "/tmp/key",
-                    client = FakeTmuxClient(),
-                )
-                val fakeSession = FakeStagingSshSession(blockUploads = true)
-                vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
-                vm.setItem(
-                    ShareableItem.TextItem(
-                        text = "staging should time out instead of spinning forever",
-                        displayName = "timeout-note",
-                    ),
-                )
+    fun stageIntoSessionTimeoutSurfacesFailureAndClearsRunning() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry, stageIntoSessionTimeoutMs = 50L)
+        val host = seededHost(id = 55L, name = "gpu-box")
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = FakeTmuxClient(),
+        )
+        val fakeSession = FakeStagingSshSession(blockUploads = true)
+        vm.connectForStaging = { _, _ -> Result.success(fakeSession) }
+        vm.setItem(
+            ShareableItem.TextItem(
+                text = "staging should time out instead of spinning forever",
+                displayName = "timeout-note",
+            ),
+        )
 
-                vm.stageIntoSession(
-                    host,
-                    ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
-                )
-                kotlinx.coroutines.withTimeout(5_000L) {
-                    fakeSession.uploadStarted.await()
-                }
+        vm.stageIntoSession(
+            host,
+            ActiveSessionTarget(sessionName = "scratch", cwd = "/x", label = "scratch"),
+        )
+        advanceUntilIdle()
+        assertTrue(fakeSession.uploadStarted.isCompleted)
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
 
-                val failed = kotlinx.coroutines.withTimeout(5_000L) {
-                    vm.uploadState.first { it is UploadState.Failed }
-                } as UploadState.Failed
-
-                assertEquals("gpu-box", failed.hostName)
-                assertTrue(
-                    "timeout failure should explain the bounded staging failure, got: ${failed.message}",
-                    failed.message.contains("Timed out", ignoreCase = true) &&
-                        failed.message.contains("scratch"),
-                )
-                assertTrue(
-                    "the UI must leave Running after timeout",
-                    vm.uploadState.value is UploadState.Failed,
-                )
-                assertTrue("timed-out staging session must be closed", fakeSession.closed)
-            } finally {
-                kotlinx.coroutines.Dispatchers.setMain(
-                    kotlinx.coroutines.test.UnconfinedTestDispatcher(),
-                )
-            }
-        }
+        assertEquals("gpu-box", failed.hostName)
+        assertTrue(
+            "timeout failure should explain the bounded staging failure, got: ${failed.message}",
+            failed.message.contains("Timed out", ignoreCase = true) &&
+                failed.message.contains("scratch"),
+        )
+        assertTrue(
+            "the UI must leave Running after timeout",
+            vm.uploadState.value is UploadState.Failed,
+        )
+        assertTrue("timed-out staging session must be closed", fakeSession.closed)
     }
 
     @Test
@@ -2066,10 +2075,9 @@ class ShareViewModelTest {
     private fun newVm(
         registry: ActiveTmuxClients,
         stageIntoSessionTimeoutMs: Long = 90_000L,
-        sshLeaseManager: SshLeaseManager = SshLeaseManager(
-            connector = { Result.failure(SshException("unexpected SSH connect in share unit test")) },
-        ),
+        sshLeaseManager: SshLeaseManager = newTestLeaseManager(),
     ): ShareViewModel {
+        leaseManagers += sshLeaseManager
         return ShareViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
@@ -2078,8 +2086,27 @@ class ShareViewModelTest {
             projectRootDao = db.projectRootDao(),
             sshLeaseManager = sshLeaseManager,
             stageIntoSessionTimeoutMs = stageIntoSessionTimeoutMs,
-        )
+            stagingContext = mainDispatcherRule.dispatcher,
+        ).also { viewModel ->
+            // A real ViewModelStore owns every fixture VM just as an Activity
+            // would. Clearing it in @After cancels all stateIn/viewModelScope
+            // work before MainDispatcherRule resets the process-global Main.
+            viewModelStore.put("share-${viewModelKey++}", viewModel)
+        }
     }
+
+    private fun newTestLeaseManager(
+        dispatcher: CoroutineContext = mainDispatcherRule.dispatcher,
+        connector: SshLeaseConnector = SshLeaseConnector {
+            Result.failure(SshException("unexpected SSH connect in share unit test"))
+        },
+    ): SshLeaseManager =
+        SshLeaseManager(
+            connector = connector,
+            scope = CoroutineScope(SupervisorJob() + dispatcher),
+            connectTimeoutContext = dispatcher,
+            abortTimeoutContext = dispatcher,
+        )
 
     private suspend fun registerClient(
         registry: ActiveTmuxClients,

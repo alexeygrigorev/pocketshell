@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Issue #570: a multi-file attachment stage that partially failed (some
@@ -35,13 +36,14 @@ internal class PromptAttachmentStager(
     private val cacheDir: File,
     private val now: () -> Long = { System.currentTimeMillis() },
     private val attachmentPruner: RemoteAttachmentPruner = RemoteAttachmentPruner(now = now),
+    private val ioContext: CoroutineContext = Dispatchers.IO,
 ) {
     suspend fun stage(
         session: SshSession,
         scopeKey: String,
         uris: List<Uri>,
         retainedAttachmentNames: (remoteDir: String) -> Set<String> = { emptySet() },
-    ): Result<List<String>> = withContext(Dispatchers.IO) {
+    ): Result<List<String>> = withContext(ioContext) {
         if (uris.isEmpty()) return@withContext Result.success(emptyList())
         if (!session.isConnected) {
             return@withContext Result.failure(SshException("SSH session is not connected"))

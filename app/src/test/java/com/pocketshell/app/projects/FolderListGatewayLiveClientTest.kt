@@ -260,12 +260,103 @@ class FolderListGatewayLiveClientTest {
         )
     }
 
+    @Test
+    fun malformedOptionalRootPayloadKeepsTheCompleteRequiredSessionTree() = runTest {
+        val marker = SshFolderListGateway.ENUMERATION_MARKER
+        val client = FakeTmuxClient().apply {
+            responses += CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "git-cable-world::100::300::1::::::/home/testuser/git/cable-world",
+                ),
+                isError = false,
+            )
+            responses += CommandResponse(
+                number = 2L,
+                output = listOf(
+                    "git-cable-world::0::shell::1::1::/home/testuser/git/cable-world::/dev/pts/1::sh",
+                ),
+                isError = false,
+            )
+        }
+        activeTmuxClients.register(
+            hostId = HOST.id,
+            hostName = HOST.name,
+            hostname = HOST.hostname,
+            port = HOST.port,
+            username = HOST.username,
+            keyPath = KEY_PATH,
+            client = client,
+        )
+        val leaseSession = RecordingSshSession { command ->
+            when {
+                command.contains("pocketshell repos list") -> ExecResult(
+                    // Optional sections: empty project history followed by an
+                    // exit-0 but malformed watched-root JSON payload.
+                    stdout = "\n$marker 0\nnot-json\n$marker 0\n",
+                    stderr = "",
+                    exitCode = 0,
+                )
+                command.contains("pocketshell logs") -> error(
+                    "history and root scans must stay in the same optional batch",
+                )
+                command.contains("printf") -> ExecResult(
+                    stdout = "/home/testuser\n$marker 0\n",
+                    stderr = "",
+                    exitCode = 0,
+                )
+                else -> ExecResult(stdout = "", stderr = "", exitCode = 0)
+            }
+        }
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = SshLeaseManager(
+                connector = object : SshLeaseConnector {
+                    override suspend fun connect(target: SshLeaseTarget) =
+                        Result.success<SshSession>(leaseSession)
+                },
+                scope = this,
+                idleTtlMillis = 30_000L,
+            ),
+        )
+        val root = ProjectRootEntity(
+            id = 1L,
+            hostId = HOST.id,
+            label = "git",
+            path = "~/git",
+        )
+
+        val result = gateway.listSessionsWithFolder(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            watchedRoots = listOf(root),
+        )
+
+        assertTrue(
+            "malformed optional root JSON must not fail the required tree: $result",
+            result is FolderListResult.Sessions,
+        )
+        result as FolderListResult.Sessions
+        assertEquals(listOf("git-cable-world"), result.rows.map { it.sessionName })
+        assertEquals("/home/testuser/git", result.resolvedWatchedRootPaths["~/git"])
+        assertEquals(emptyList<String>(), result.projectFoldersByRoot["~/git"])
+    }
+
     private class RecordingSshSession : SshSession {
+        constructor() : this({ ExecResult(stdout = "", stderr = "", exitCode = 0) })
+
+        constructor(resultForCommand: (String) -> ExecResult) {
+            this.resultForCommand = resultForCommand
+        }
+
+        private val resultForCommand: (String) -> ExecResult
         val execCommands: MutableList<String> = mutableListOf()
         override val isConnected: Boolean = true
         override suspend fun exec(command: String): ExecResult {
             execCommands += command
-            return ExecResult(stdout = "", stderr = "", exitCode = 0)
+            return resultForCommand(command)
         }
         override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
         override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =

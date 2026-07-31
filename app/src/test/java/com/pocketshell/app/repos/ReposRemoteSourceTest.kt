@@ -213,6 +213,42 @@ class ReposRemoteSourceTest {
     }
 
     @Test
+    fun adoptMalformedExitZeroPayloadReturnsFailedWithoutPoisoningFreshCache() {
+        val root = "/home/alexey/git"
+        val namespace = "devbox"
+        val valid = source.adoptLocalRootPayload(
+            root = root,
+            cacheNamespace = namespace,
+            exitCode = 0,
+            stdout = """
+                [{
+                  "owner": "alexeygrigorev",
+                  "name": "pocketshell",
+                  "full_name": "alexeygrigorev/pocketshell",
+                  "local": {"path": "/home/alexey/git/pocketshell", "head": "main"},
+                  "remote": null
+                }]
+            """.trimIndent(),
+            stderr = "",
+        )
+
+        val malformed = source.adoptLocalRootPayload(
+            root = root,
+            cacheNamespace = namespace,
+            exitCode = 0,
+            stdout = "not-json",
+            stderr = "",
+        )
+
+        assertTrue(valid is ReposListResult.Success)
+        assertTrue("malformed optional JSON must be a typed failure", malformed is ReposListResult.Failed)
+        assertEquals(
+            listOf("/home/alexey/git/pocketshell"),
+            source.cachedLocalRoot(root, namespace)?.map { it.local?.path },
+        )
+    }
+
+    @Test
     fun listLocalRoot_missingPocketshellReturnsEmptySuccess() = runTest {
         val command = pathAware("pocketshell repos list --local --json --root '/home/alexey/git'")
         val session = FakeSshSession(

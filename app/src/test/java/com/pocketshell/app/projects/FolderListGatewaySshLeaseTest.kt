@@ -66,9 +66,13 @@ class FolderListGatewaySshLeaseTest {
     }
 
     private val ENUMERATION_COMMAND: String = ReposRemoteSource.pathAwareCommand(
-        "${SshFolderListGateway.LIST_SESSIONS_COMMAND} ; " +
-            "printf '%s\\n' ${SshFolderListGateway.ENUMERATION_MARKER} ; " +
+        listOf(
+            SshFolderListGateway.LIST_SESSIONS_COMMAND,
             SshFolderListGateway.LIST_PANES_COMMAND,
+        ).joinToString(" ; ") { command ->
+            "$command ; printf '\\n%s %s\\n' " +
+                "${SshFolderListGateway.ENUMERATION_MARKER} \"\$?\""
+        },
     )
 
     @Test

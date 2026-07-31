@@ -81,6 +81,66 @@ public class ReposRemoteSource @Inject constructor(
         return normalized
     }
 
+    /**
+     * Issue #1876: the already-cached expansion for [root], or `null` when the
+     * entry is absent or stale.
+     *
+     * The folder reconcile now fetches every watched root in one batched exec
+     * (see [com.pocketshell.app.projects.FolderListLandingProbeOwner]). If that
+     * optional batch fails as a whole, this preserves any still-fresh expansion
+     * already held by the normal poller. Same TTL and same key as
+     * [listLocalRoot]; this is a read of that cache, not a second one.
+     */
+    public fun cachedLocalRoot(root: String, cacheNamespace: String): List<RepoEntry>? {
+        val cleanRoot = root.trim()
+        if (cleanRoot.isEmpty()) return emptyList()
+        return freshLocalRootCache(LocalRootCacheKey(cacheNamespace, cleanRoot))
+    }
+
+    /**
+     * Issue #1876: parse + cache a `pocketshell repos list --local --json
+     * --root <root>` payload that a CALLER already fetched, applying exactly the
+     * normalisation [listLocalRoot] applies to its own exec.
+     *
+     * This exists so the folder reconcile can fold N per-root round trips into
+     * one batched exec without losing the app-side cache the poller relies on.
+     */
+    public fun adoptLocalRootPayload(
+        root: String,
+        cacheNamespace: String,
+        exitCode: Int,
+        stdout: String,
+        stderr: String,
+    ): ReposListResult {
+        val cleanRoot = root.trim()
+        if (cleanRoot.isEmpty()) return ReposListResult.Success(emptyList())
+        val raw = try {
+            when {
+                exitCode == 0 -> ReposListResult.Success(parser.parseList(stdout))
+                isPocketshellReposMissing(exitCode, stdout, stderr) -> ReposListResult.ToolMissing
+                else -> ReposListResult.Failed(
+                    stderr.ifBlank { stdout }.ifBlank { "pocketshell repos exited $exitCode" },
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            // The caller already completed the correctness-critical tmux
+            // enumeration. A drifted/older optional repos payload must have
+            // the same typed failure semantics as [runList], never escape and
+            // turn that required tree into ConnectFailed (#1876).
+            ReposListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+        }
+        val normalized = when (raw) {
+            ReposListResult.ToolMissing -> ReposListResult.Success(emptyList())
+            else -> raw
+        }
+        if (normalized is ReposListResult.Success) {
+            putLocalRootCache(LocalRootCacheKey(cacheNamespace, cleanRoot), normalized.repos)
+        }
+        return normalized
+    }
+
     private suspend fun runList(
         session: SshSession,
         command: String,
@@ -215,7 +275,10 @@ public class ReposRemoteSource @Inject constructor(
 private fun com.pocketshell.core.ssh.ExecResult.failureReason(fallback: String): String =
     stderr.ifBlank { stdout }.ifBlank { fallback }
 
-private fun com.pocketshell.core.ssh.ExecResult.isPocketshellReposMissing(): Boolean {
+private fun com.pocketshell.core.ssh.ExecResult.isPocketshellReposMissing(): Boolean =
+    isPocketshellReposMissing(exitCode, stdout, stderr)
+
+internal fun isPocketshellReposMissing(exitCode: Int, stdout: String, stderr: String): Boolean {
     if (exitCode == 127) return true
     val output = "$stderr\n$stdout"
     return output.contains("No such command 'repos'", ignoreCase = true) ||

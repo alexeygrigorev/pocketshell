@@ -246,6 +246,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.projects.ProfileChipRelaunchDockerTest"  # #889 D31/D32 G10): the FALSE z.ai chip on a session
   "com.pocketshell.app.projects.AgentLaunchVersionMismatchHintE2eTest"  # #853 #848 #759 epic ): the OUTDATED-host agent-launch friendly-hint guard…
   "com.pocketshell.app.projects.FolderListOldCliHydrateDockerTest"  # #849 #848 #847 epic ): the OLD-CLI cold-start tree-HYDRATE connect proof
+  "com.pocketshell.app.projects.Issue1876FolderListMobileRttDockerTest"  # #1876 D34/G9/G10: production FolderListViewModel + real sshj over ~400ms RTT, jitter, 5% loss must leave Loading with the full 18-session/3-root tree under the unchanged 12s reconcile bound
   "com.pocketshell.app.projects.FolderListBootstrapSkipTreeLoadsDockerTest"  # #849 #848 #847 #788 epic ): the OLD-CLI bootstrap-Skip → tree connect JOURNEY
   "com.pocketshell.app.projects.FolderListClientCacheInstantRenderDockerTest"  # #867 the stale-while-revalidate INSTANT-RENDER journey. A cold co…
   "com.pocketshell.app.projects.FolderListScaleAnrStrictModeDockerTest"  # #965 the SCALE ANR proof — the folder list at

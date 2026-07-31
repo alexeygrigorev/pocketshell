@@ -56,7 +56,7 @@ class FolderListGatewayKindAuthorityTest {
         val listPanes =
             "rec-claude${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/claude${SEP}/dev/pts/1${SEP}node${SEP}@0${SEP}111\n" +
                 "rec-codex${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/codex${SEP}/dev/pts/2${SEP}node${SEP}@1${SEP}222"
-        val session = FakeSshSession(enumerationStdout = "$listSessions\n$MARKER\n$listPanes")
+        val session = FakeSshSession(enumerationStdout = enumerationPayload(listSessions, listPanes))
         val gateway = gateway(session)
 
         val result = gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
@@ -89,7 +89,7 @@ class FolderListGatewayKindAuthorityTest {
         val listPanes =
             "zai-claude${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/zai${SEP}/dev/pts/1${SEP}node${SEP}@0${SEP}111\n" +
                 "def-claude${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/def${SEP}/dev/pts/2${SEP}node${SEP}@1${SEP}222"
-        val session = FakeSshSession(enumerationStdout = "$listSessions\n$MARKER\n$listPanes")
+        val session = FakeSshSession(enumerationStdout = enumerationPayload(listSessions, listPanes))
         val gateway = gateway(session)
 
         val rows = (gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
@@ -117,7 +117,7 @@ class FolderListGatewayKindAuthorityTest {
         val listPanes =
             "foreign${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/foreign${SEP}/dev/pts/3${SEP}node${SEP}@0${SEP}333"
         val session = FakeSshSession(
-            enumerationStdout = "$listSessions\n$MARKER\n$listPanes",
+            enumerationStdout = enumerationPayload(listSessions, listPanes),
             // The daemon guess for the foreign pane: claude.
             agentsKindStdout = """{"results":[{"pane_id":"foreign${SEP}0","agent_kind":"claude","scope":"x.scope","evidence_pid":3030}]}""",
         )
@@ -146,7 +146,7 @@ class FolderListGatewayKindAuthorityTest {
         val listPanes =
             "foreign${SEP}0${SEP}w${SEP}1${SEP}1${SEP}/work/foreign${SEP}/dev/pts/3${SEP}node${SEP}@0${SEP}333"
         val session = FakeSshSession(
-            enumerationStdout = "$listSessions\n$MARKER\n$listPanes",
+            enumerationStdout = enumerationPayload(listSessions, listPanes),
             agentsKindStdout = "tool missing",
             agentsKindExitCode = 127,
         )
@@ -213,6 +213,8 @@ class FolderListGatewayKindAuthorityTest {
     private companion object {
         val SEP: String = "::"
         val MARKER: String = SshFolderListGateway.ENUMERATION_MARKER
+        fun enumerationPayload(listSessions: String, listPanes: String): String =
+            "$listSessions\n$MARKER 0\n$listPanes\n$MARKER 0\n"
         const val KEY_PATH: String = "/tmp/pocketshell-test-key"
         val HOST: HostEntity = HostEntity(
             id = 42L,

@@ -1030,6 +1030,27 @@ jobs:
           wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
           cat /tmp/agents-health.log
 
+      # Issue #1876: the folder-tree landing path failed only under measured
+      # mobile RTT. Start the repository's tc-netem proxy at ~400 ms RTT with
+      # jitter/loss so the connected ViewModel journey cannot pass on LAN.
+      - name: Start Docker fixture (mobile RTT packet-loss proxy, issue #1876)
+        env:
+          PACKET_LOSS_DELAY_MS: "200"
+          PACKET_LOSS_JITTER_MS: "40"
+        run: |
+          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps packet-loss-proxy
+          for attempt in $(seq 1 30); do
+            if ssh -i tests/docker/test_key -p 2229 \
+              -o BatchMode=yes -o ConnectTimeout=3 \
+              -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              testuser@127.0.0.1 true; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker compose -f tests/docker/docker-compose.yml logs --no-color packet-loss-proxy
+          exit 1
+
       - name: Start Docker fixture (network-fault-proxy, issue #1733)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy

@@ -308,6 +308,17 @@ jobs:
             scripts/test-ci-journey-infra-signature.sh
           scripts/test-ci-journey-infra-signature.sh
 
+      # Issue #1883: #1863 made the old foreground `gate closed` wedge oracle
+      # structurally impossible. This pure fixture pins the surviving definitive
+      # dead-channel signal, canonical-only artifact traversal, max-of-log-sources
+      # rule, per-attempt output, ReconnectStorm specificity, fail-closed missing
+      # evidence, and the calibrated binary event-presence scale.
+      - name: CI journey dead-channel measurement-oracle guard (issue #1883)
+        run: |
+          chmod +x scripts/ci-journey-dead-channel-oracle.py \
+            scripts/test-ci-journey-dead-channel-oracle.sh
+          scripts/test-ci-journey-dead-channel-oracle.sh
+
       # Issue #1814: the first journey class on a shard used to pay for the cold
       # `:app:compileDebugKotlin` INSIDE its own per-class budget, so it could
       # time out for a reason unrelated to the test — and an `exit 124 /

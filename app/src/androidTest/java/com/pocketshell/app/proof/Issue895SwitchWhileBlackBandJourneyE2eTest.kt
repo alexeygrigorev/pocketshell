@@ -1,5 +1,6 @@
 package com.pocketshell.app.proof
 
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -17,11 +18,13 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.tmux.LivenessProbeTestOverride
 import com.pocketshell.app.tmux.TMUX_PULL_TO_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -101,6 +104,14 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
     @Before
     fun setUp() {
         clearLastSessionPrefs()
+        LivenessProbeTestOverride.setForTest(
+            intervalMs = PROBE_INTERVAL_MS,
+            perProbeTimeoutMs = PROBE_TIMEOUT_MS,
+            // #1863 bypasses this threshold only because the client is
+            // definitively closed. Keep the production value so the journey
+            // cannot pass through the ambiguous missed-ping path.
+            failureThreshold = 4,
+        )
     }
 
     @After
@@ -108,6 +119,7 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
         runCatching {
             compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         }
+        LivenessProbeTestOverride.clear()
         clearLastSessionPrefs()
         seededKey?.let { key ->
             runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }
@@ -166,6 +178,89 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
         writeTimings()
     } }
 
+    /**
+     * Issue #1883 empirical calibration: enter the exact post-#1863 foreground
+     * state the old oracle can no longer see — controller Live over a locally
+     * closed `-CC` client — and require the production liveness loop to emit its
+     * surviving declaration. This uses the real Docker SSH/tmux client and the
+     * real Android log, not a parser fixture or a copied message.
+     */
+    @Test
+    fun definitiveClosedControlChannelEmitsReplacementOracle() { runBlocking<Unit> {
+        val hostRowTag = requireNotNull(seededHostRowTag)
+        // Clear before attach so the production milestone below can only belong
+        // to this test's connect attempt.
+        execShellCommand("logcat -c")
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("definitive-close baseline") { it.contains(READY_MARKER) }
+        waitForConnected("definitive-close baseline")
+
+        // Controller Live is projected before the attach coroutine has finished
+        // revealing the session. Observe the real end-of-connect milestone, then
+        // independently require the public reveal/controller states, so the
+        // self-inflicted close cannot race the client handoff being calibrated.
+        val readyLog = waitForLogcatLine(
+            CONNECT_READY_MILESTONE,
+            CONNECTED_TIMEOUT_MS,
+            RECONNECT_LOG_FILTER,
+        )
+        assertTrue(
+            "precondition: the production attach pipeline must emit " +
+                "$CONNECT_READY_MILESTONE before the client is closed; logcat tail:\n$readyLog",
+            readyLog.contains(CONNECT_READY_MILESTONE),
+        )
+        val vm = currentViewModel()
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            vm.revealState.value is RevealState.Live &&
+                currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected
+        }
+        assertTrue(
+            "precondition: connect-ready must leave reveal/controller Live; " +
+                "reveal=${vm.revealState.value}, status=${currentConnectionStatus()}",
+            vm.revealState.value is RevealState.Live &&
+                currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+
+        var liveClient: com.pocketshell.core.tmux.TmuxClient? = null
+        compose.activityRule.scenario.onActivity {
+            liveClient = vm.liveTmuxClientForSendOrNullForTest()
+        }
+        // This is the #1863 self-inflicted ExplicitClose shape: the passive
+        // drop classifier deliberately ignores it, leaving the controller Live
+        // until the DeadChannel probe arm observes the closed wire. Close off
+        // main just as production teardown does.
+        val clientToClose = requireNotNull(liveClient) {
+            "precondition: Connected must own a live tmux control client"
+        }
+        assertTrue(
+            "precondition: connect-ready must own a connected control client",
+            !clientToClose.disconnected.value,
+        )
+        // Isolate the replacement-oracle observation from the readiness proof.
+        execShellCommand("logcat -c")
+        clientToClose.close()
+        compose.waitUntil(timeoutMillis = ORACLE_WINDOW_MS) {
+            vm.clientDisconnectedForTest()
+        }
+        assertTrue(
+            "precondition: the real control client must be definitively closed",
+            vm.clientDisconnectedForTest(),
+        )
+
+        val oracleLog = waitForLogcatLine(
+            REPLACEMENT_ORACLE,
+            ORACLE_WINDOW_MS,
+            LIVENESS_LOG_FILTER,
+        )
+        assertTrue(
+            "issue #1883: a foreground Live-over-closed-control-channel attempt " +
+                "must emit the surviving replacement oracle within one shortened " +
+                "probe interval; logcat tail:\n$oracleLog",
+            oracleLog.contains(REPLACEMENT_ORACLE),
+        )
+        writeTimings()
+    } }
+
     // -- escapable-band helpers ----------------------------------------------------
 
     private fun waitForEscapableBand(timeoutMillis: Long): Boolean {
@@ -200,6 +295,30 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
         compose.onAllNodesWithTag(tag, useUnmergedTree = true)
             .fetchSemanticsNodes()
             .isNotEmpty()
+
+    private fun waitForLogcatLine(
+        needle: String,
+        timeoutMillis: Long,
+        logcatFilter: String,
+    ): String {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
+        var last = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            last = execShellCommand("logcat -d -v threadtime -s $logcatFilter")
+            if (last.contains(needle)) return last
+            SystemClock.sleep(200)
+        }
+        return execShellCommand("logcat -d -v threadtime -s $logcatFilter")
+    }
+
+    private fun execShellCommand(command: String): String {
+        val descriptor = InstrumentationRegistry.getInstrumentation()
+            .uiAutomation
+            .executeShellCommand(command)
+        return ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+            .bufferedReader()
+            .use { it.readText() }
+    }
 
     // -- attach helpers ------------------------------------------------------------
 
@@ -414,8 +533,17 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
         const val DEVICE_DIR_NAME: String = "issue895-switch-while-black-band"
         const val SESSION_NAME: String = "issue895-band-proof"
         const val READY_MARKER: String = "ISSUE895-BAND-READY"
+        const val CONNECT_READY_MILESTONE: String = "tmux-connect-ready"
+        const val RECONNECT_LOG_FILTER: String = "PsTmuxReconnect:I"
+        const val LIVENESS_LOG_FILTER: String = "PsTmuxLiveness:I"
+        const val REPLACEMENT_ORACLE: String =
+            "liveness-probe DECLARED DROP (control channel definitively closed)"
+        const val PROBE_INTERVAL_MS: Long = 1_000L
+        const val PROBE_TIMEOUT_MS: Long = 2_000L
 
         val BAND_WINDOW_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 12_000L
+        val ORACLE_WINDOW_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 12_000L
         val HOST_ROW_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L

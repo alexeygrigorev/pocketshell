@@ -749,11 +749,32 @@ class FileViewerDockerTest {
         // unrelated File-viewer header "Copy" / body "Copy all" actions.
         composeRule.onNodeWithTag(unorderedBody).performTouchInput { longClick() }
         WalkthroughScreenshotArtifacts.capture("issue1714-fixed-selection")
-        InstrumentationRegistry.getInstrumentation()
-            .sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_COPY)
+        var copyAttempts = 0
+        var nextCopyAttemptAtMillis = 0L
         composeRule.waitUntil(timeoutMillis = 5_000) {
-            recordingClipboard.lastText != null
+            if (recordingClipboard.lastText != null) {
+                true
+            } else {
+                val nowMillis = android.os.SystemClock.uptimeMillis()
+                if (nowMillis >= nextCopyAttemptAtMillis) {
+                    copyAttempts += 1
+                    nextCopyAttemptAtMillis = nowMillis + 100
+                    // Deterministically model the captured race: the first key
+                    // action arrives before SelectionContainer owns a selection
+                    // and is therefore a no-op. The bounded pump must recover by
+                    // delivering a later real platform Copy action.
+                    if (copyAttempts > 1) {
+                        InstrumentationRegistry.getInstrumentation()
+                            .sendKeyDownUpSync(android.view.KeyEvent.KEYCODE_COPY)
+                    }
+                }
+                false
+            }
         }
+        assertTrue(
+            "copy pump must recover after the first action is dropped",
+            copyAttempts > 1,
+        )
         val copiedSelection = requireNotNull(recordingClipboard.lastText).trim()
         assertTrue(
             "system Copy must put non-blank Markdown text on the clipboard",

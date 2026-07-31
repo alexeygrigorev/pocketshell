@@ -25,6 +25,7 @@ cd "$REPO_ROOT" || exit 1
 
 SUITE="${POCKETSHELL_JOURNEY_HARNESS_SUITE:-scripts/ci-journey-suite.sh}"
 ANDROID_TEST_ROOT="${POCKETSHELL_JOURNEY_HARNESS_ANDROID_TEST_ROOT:-app/src/androidTest/java}"
+NIGHTLY_SUITE="${POCKETSHELL_JOURNEY_HARNESS_NIGHTLY_SUITE:-scripts/nightly-extensive-suite.sh}"
 REPORT_MODE=0
 if [[ "${1:-}" == "--report" ]]; then
   REPORT_MODE=1
@@ -292,6 +293,7 @@ declare -a MISSING_REQUIRED_PER_PUSH=()
 declare -a UNWIRED_ANDROID_E2E_DOCKER_NEW=()
 declare -a UNWIRED_ANDROID_E2E_DOCKER_KNOWN=()
 declare -a STALE_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=()
+declare -a NIGHTLY_FIXTURE_ROUTING_FAILURE=()
 
 if [[ "${#JOURNEY_CLASSES[@]}" -eq 0 ]]; then
   PARSER_FAILURE+=("NO_PROOF_CLASSES_PARSED")
@@ -309,6 +311,42 @@ for fqcn in "${REQUIRED_PER_PUSH_ANDROID_TEST_CLASSES[@]}"; do
     REQUIRED_PER_PUSH_WIRED+=("$fqcn")
   fi
 done
+
+# Issue #1866: this class has a deliberate hard precondition on the Toxiproxy
+# opt-in. Nightly phase 1 does not supply that fixture contract, so selecting it
+# there creates a guaranteed red with zero product signal. Pin the deliberate
+# routing decision: keep it hard-failing when the fixture is absent, include it
+# in the release-GATING phase-2 network-fault set, and exclude that whole set
+# from phase 1. This is intentionally specific to #1733 and does not broaden the
+# unrelated nightly selection.
+OUTBOUND_OFFSET_FQCN="com.pocketshell.app.proof.OutboundAttachmentOffsetResumeJourneyE2eTest"
+OUTBOUND_OFFSET_SOURCE="$(android_class_file_for "$OUTBOUND_OFFSET_FQCN")"
+if [[ -f "$OUTBOUND_OFFSET_SOURCE" ]]; then
+  if [[ ! -f "$NIGHTLY_SUITE" ]]; then
+    NIGHTLY_FIXTURE_ROUTING_FAILURE+=("missing nightly suite: $NIGHTLY_SUITE")
+  else
+    network_fault_block="$(sed -n '/^NETWORK_FAULT_CLASSES=(/,/^)$/p' "$NIGHTLY_SUITE")"
+    journey_excluded_block="$(sed -n '/^JOURNEY_EXCLUDED_CLASSES=(/,/^)$/p' "$NIGHTLY_SUITE")"
+    phase_two_block="$(sed -n '/phase 2: network-fault proofs/,/phase 2b:/p' "$NIGHTLY_SUITE")"
+
+    if ! grep -Fq '"$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"' <<<"$network_fault_block"; then
+      NIGHTLY_FIXTURE_ROUTING_FAILURE+=("$OUTBOUND_OFFSET_FQCN is not in nightly NETWORK_FAULT_CLASSES")
+    fi
+    if ! grep -Fq '"${NETWORK_FAULT_CLASSES[@]}"' <<<"$journey_excluded_block"; then
+      NIGHTLY_FIXTURE_ROUTING_FAILURE+=("nightly phase 1 no longer excludes NETWORK_FAULT_CLASSES")
+    fi
+    if ! grep -Fq 'pocketshellNetworkFaultProofs=true' <<<"$phase_two_block" ||
+       ! grep -Fq 'class="$NETWORK_FAULT_CLASS_ARG"' <<<"$phase_two_block"; then
+      NIGHTLY_FIXTURE_ROUTING_FAILURE+=("nightly phase 2 no longer selects NETWORK_FAULT_CLASSES with the Toxiproxy opt-in")
+    fi
+  fi
+
+  outbound_precondition_block="$(grep -B 3 -A 6 -F 'issue #1733 requires the explicitly opted-in Toxiproxy fixture' "$OUTBOUND_OFFSET_SOURCE" || true)"
+  if ! grep -Fq 'assertTrue(' <<<"$outbound_precondition_block" ||
+     grep -Fq 'assumeTrue(' <<<"$outbound_precondition_block"; then
+    NIGHTLY_FIXTURE_ROUTING_FAILURE+=("$OUTBOUND_OFFSET_FQCN no longer hard-fails its missing-Toxiproxy precondition")
+  fi
+fi
 
 while IFS= read -r file; do
   [[ -z "${file:-}" ]] && continue
@@ -449,6 +487,7 @@ print_list "MISSING REQUIRED - #848 per-push androidTest class not wired" "${MIS
 print_list "NEW FAIL - manual ActivityScenario/createEmptyComposeRule harness" "${MANUAL_NEW[@]:-}"
 print_list "NEW FAIL - createAndroidComposeRule without SeedBeforeLaunchRule" "${MISSING_SHARED_SEED_NEW[@]:-}"
 print_list "NEW FAIL - androidTest E2e/Docker class not wired into ci-journey-suite.sh" "${UNWIRED_ANDROID_E2E_DOCKER_NEW[@]:-}"
+print_list "FIXTURE ROUTING FAIL - #1733 nightly selection" "${NIGHTLY_FIXTURE_ROUTING_FAILURE[@]:-}"
 
 hard_fail=()
 for item in \
@@ -458,6 +497,7 @@ for item in \
   "${MANUAL_NEW[@]:-}" \
   "${MISSING_SHARED_SEED_NEW[@]:-}" \
   "${UNWIRED_ANDROID_E2E_DOCKER_NEW[@]:-}" \
+  "${NIGHTLY_FIXTURE_ROUTING_FAILURE[@]:-}" \
   "${STALE_BASELINE[@]:-}" \
   "${STALE_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]:-}"; do
   [[ -n "$item" ]] && hard_fail+=("$item")

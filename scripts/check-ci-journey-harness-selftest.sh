@@ -18,6 +18,23 @@ mkdir -p \
   "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/costs" \
   "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof"
 
+cat > "$SANDBOX/scripts/nightly-extensive-suite.sh" <<'SH'
+#!/usr/bin/env bash
+FQCN_PREFIX="com.pocketshell.app.proof"
+NETWORK_FAULT_CLASSES=(
+  "$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"
+)
+JOURNEY_EXCLUDED_CLASSES=(
+  "${NETWORK_FAULT_CLASSES[@]}"
+)
+NETWORK_FAULT_CLASS_ARG="classes"
+echo "phase 2: network-fault proofs"
+gradle \
+  -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true \
+  -Pandroid.testInstrumentationRunnerArguments.class="$NETWORK_FAULT_CLASS_ARG"
+echo "phase 2b: expected fail"
+SH
+
 cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
 #!/usr/bin/env bash
 FQCN_PREFIX="com.pocketshell.app.proof"
@@ -204,6 +221,52 @@ if [[ "$rc" -eq 0 ]]; then
 else
   note_fail "guard should pass after removing bad fixtures (got exit $rc)"
 fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/OutboundAttachmentOffsetResumeJourneyE2eTest.kt" <<'KT'
+package com.pocketshell.app.proof
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import com.pocketshell.app.MainActivity
+class OutboundAttachmentOffsetResumeJourneyE2eTest {
+    val compose = createAndroidComposeRule<MainActivity>()
+    val seed = SeedBeforeLaunchRule {
+        assertTrue(
+            "issue #1733 requires the explicitly opted-in Toxiproxy fixture",
+            true,
+        )
+    }
+}
+KT
+cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
+#!/usr/bin/env bash
+FQCN_PREFIX="com.pocketshell.app.proof"
+JOURNEY_CLASSES=(
+  "$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"
+  "$FQCN_PREFIX.GoodLaunchOwnedE2eTest"
+  "$FQCN_PREFIX.ExemptManualHarnessE2eTest"
+  "com.pocketshell.app.proof.DirectProofEntryE2eTest#singleMethod"
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+)
+SH
+sed -i '/OutboundAttachmentOffsetResumeJourneyE2eTest/d' "$SANDBOX/scripts/nightly-extensive-suite.sh"
+
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'is not in nightly NETWORK_FAULT_CLASSES'; then
+  note_pass "#1733 class selected without nightly Toxiproxy routing is a hard failure"
+else
+  note_fail "missing #1733 nightly fixture routing should fail (got exit $rc)"
+fi
+
+sed -i '/NETWORK_FAULT_CLASSES=(/a\  "$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"' \
+  "$SANDBOX/scripts/nightly-extensive-suite.sh"
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  note_pass "#1733 class passes when routed to the fixture-backed gating phase"
+else
+  note_fail "fixture-backed #1733 nightly routing should pass (got exit $rc)"
+fi
+rm -f "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/OutboundAttachmentOffsetResumeJourneyE2eTest.kt"
 
 cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
 #!/usr/bin/env bash

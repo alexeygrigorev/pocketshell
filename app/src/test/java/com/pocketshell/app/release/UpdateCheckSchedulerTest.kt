@@ -5,20 +5,19 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.notifications.UpdateNotifier
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -43,7 +42,10 @@ import org.robolectric.annotation.Config
 class UpdateCheckSchedulerTest {
 
     private lateinit var context: Context
-    private val dispatcher = StandardTestDispatcher()
+    private val dispatcher = StandardTestDispatcher(TestCoroutineScheduler())
+
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule(dispatcher)
 
     private fun release(tag: String) = ReleaseInfo(
         tagName = tag,
@@ -93,14 +95,8 @@ class UpdateCheckSchedulerTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        Dispatchers.setMain(dispatcher)
         context.getSharedPreferences("update_check_throttle", Context.MODE_PRIVATE)
             .edit().clear().commit()
-    }
-
-    @After
-    fun tearDown() {
-        Dispatchers.resetMain()
     }
 
     @Test

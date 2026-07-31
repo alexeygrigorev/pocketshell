@@ -47,7 +47,7 @@ class MainDispatcherRule(
     override fun apply(base: Statement, description: Description): Statement =
         object : Statement() {
             override fun evaluate() {
-                synchronized(mainDispatcherLock) {
+                MainDispatcherTestIsolation.withOwnership {
                     Dispatchers.setMain(dispatcher)
                     // EPIC #792 Slice D: the LivenessProbe is an infinite periodic
                     // `delay` loop. Under `runTest` + the virtual-clock Main set above,
@@ -108,7 +108,4 @@ class MainDispatcherRule(
         dispatcher.scheduler.runCurrent()
     }
 
-    private companion object {
-        private val mainDispatcherLock = Any()
-    }
 }

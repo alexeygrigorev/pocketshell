@@ -69,6 +69,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1184,6 +1185,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _best_effort_console_print(text: str, *, stream) -> None:
+    """Emit convenience output without letting a lost reader abort the watch.
+
+    Replacing the failed descriptor matters in addition to catching the write:
+    otherwise CPython can retry the buffered flush during interpreter shutdown
+    and replace the watcher's contractual exit status with 120.
+    """
+    try:
+        print(text, file=stream, flush=True)
+        return
+    except (BrokenPipeError, OSError, ValueError):
+        pass
+
+    try:
+        stream_fd = stream.fileno()
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+    except (AttributeError, OSError, ValueError):
+        return
+    try:
+        if devnull_fd != stream_fd:
+            os.dup2(devnull_fd, stream_fd)
+    except OSError:
+        pass
+    finally:
+        if devnull_fd != stream_fd:
+            os.close(devnull_fd)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -1199,7 +1228,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     def notice(msg: str) -> None:
         if not args.quiet:
-            print(msg, file=sys.stderr, flush=True)
+            _best_effort_console_print(msg, stream=sys.stderr)
 
     watcher = Watcher(
         GhRunner(),
@@ -1231,8 +1260,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             log_fh.close()
 
     # Compact, token-cheap output: human summary then the final JSON line.
-    print(summary)
-    print(final_json)
+    # Console output is a convenience, not the durable contract. In particular,
+    # a vanished `systemd-run --pipe` client must not turn a completed watch into
+    # CPython's broken-pipe exit 120 after the log-file verdict was persisted.
+    _best_effort_console_print(summary, stream=sys.stdout)
+    _best_effort_console_print(final_json, stream=sys.stdout)
     return outcome.exit_code
 
 

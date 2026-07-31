@@ -715,6 +715,59 @@ def test_main_writes_final_summary_and_json_to_log_file(monkeypatch, tmp_path, c
     assert payload["run_completed"] is True
 
 
+class _LostLauncherStream:
+    """A systemd-run --pipe stream whose launcher-side reader disappeared."""
+
+    def write(self, _text):
+        raise BrokenPipeError("launcher pipe is gone")
+
+    def flush(self):
+        raise BrokenPipeError("launcher pipe is gone")
+
+
+def test_main_finishes_durable_contract_after_launcher_streams_disappear(
+    monkeypatch, tmp_path
+):
+    """Issue #1873 recurrence: console loss must not abort the durable verdict.
+
+    The live watcher survived its launching shell, then died with status 120 on
+    a later state-change write. Reproduce both lost streams before the first
+    notice and require the log-file contract to finish independently.
+    """
+    gh = FakeGh()
+    gh.queue_run_state(
+        status="in_progress",
+        conclusion=None,
+        jobs=_all_required_jobs("in_progress", None),
+    )
+    gh.queue_run_state(
+        status="completed",
+        conclusion="success",
+        jobs=_all_required_jobs(),
+    )
+    monkeypatch.setattr(wci, "GhRunner", lambda *a, **k: gh)
+    monkeypatch.setattr(wci.sys, "stdout", _LostLauncherStream())
+    monkeypatch.setattr(wci.sys, "stderr", _LostLauncherStream())
+    log_path = tmp_path / "watch.log"
+
+    rc = wci.main(
+        [
+            "--run-id",
+            "123",
+            "--interval",
+            "0",
+            "--log-file",
+            str(log_path),
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(log_path.read_text(encoding="utf-8").strip().splitlines()[-1])
+    assert payload["result"] == "green"
+    assert payload["exit_reason"] == wci.EXIT_REASON_RUN_COMPLETED
+    assert payload["run_completed"] is True
+
+
 def test_oncall_recipe_preserves_verdict_and_requires_completed_confirmation():
     """Issue #1873: the durable operating instructions must close both traps."""
     prompt = _ONCALL_PROMPT_PATH.read_text(encoding="utf-8")
@@ -725,6 +778,17 @@ def test_oncall_recipe_preserves_verdict_and_requires_completed_confirmation():
     assert "Always confirm\n`status=completed`" in prompt
     assert "required_check_failed_fast" in prompt
     assert "artifacts are not final" in prompt
+
+
+def test_oncall_systemd_recipe_does_not_bind_watcher_output_to_launcher_pipe():
+    """Issue #1873 recurrence: the transient service must own its output sink."""
+    prompt = _ONCALL_PROMPT_PATH.read_text(encoding="utf-8")
+    recipe = prompt.split("```bash", 2)[2].split("```", 1)[0]
+
+    assert "systemd-run --user" in recipe
+    assert "--wait" in recipe
+    assert "--pipe" not in recipe
+    assert "stdout and stderr go to the unit journal" in prompt
 
 
 def test_render_human_summary_under_25_lines_on_failure():

@@ -1,9 +1,8 @@
 package com.pocketshell.app.projects
 
 import android.util.Log
-import com.pocketshell.app.repos.ReposRemoteSource
-import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposJsonParser
+import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.launchTargetCollisionMessage
@@ -30,6 +29,9 @@ import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -532,6 +534,7 @@ class SshFolderListGateway internal constructor(
     // daemon RPC ([AgentKindRemoteSource]) — "we think it's X", which the user
     // can confirm/pick. No per-attach output parsing remains in the list path.
     private val agentKindRemoteSource = com.pocketshell.app.agents.AgentKindRemoteSource()
+    private val landingProbeOwner = FolderListLandingProbeOwner(reposRemoteSource)
 
     override suspend fun listSessionsWithFolder(
         host: HostEntity,
@@ -562,35 +565,74 @@ class SshFolderListGateway internal constructor(
                 keyPath = keyPath,
                 passphrase = passphrase,
             ) { session ->
-                if (liveRows != null) {
-                    // Live client already enumerated the sessions/panes in one
-                    // control-mode round-trip, so the lease is used for the
-                    // watched-root expansion (project folders, history, ports)
-                    // — NOT a second list-sessions/list-panes pair. Issue #252's
-                    // per-session agent detection still runs over the lease and
-                    // is merged onto the live-client rows so the chips do not
-                    // regress just because a control client is attached (the
-                    // control channel can't run the host-wide ps/candidate scan
-                    // the detector needs).
-                    val annotated = annotateAgentKinds(session, liveRows)
-                    sessionsWithWatchedRootExpansion(
-                        session = session,
-                        host = host,
-                        watchedRoots = watchedRoots,
-                        rows = annotated,
-                    )
-                } else {
-                    // No live client: batch `list-sessions` + `list-panes` into
-                    // a single chained shell exec so the lease pays ONE
-                    // enumeration round-trip instead of two serial ones.
-                    val enumeration = execEnumeration(session)
-                    listSessionsFromNativeOrPocketshell(
-                        session = session,
-                        host = host,
-                        watchedRoots = watchedRoots,
-                        listSessions = enumeration.listSessions,
-                        listPanes = enumeration.listPanes,
-                    )
+                // Issue #1876: finish the small required landing batch before
+                // starting any best-effort channel on the shared mobile
+                // transport. Optional decoration, kind annotation, and port
+                // discovery then overlap under the unchanged 12-second bound.
+                supervisorScope {
+                    if (liveRows != null) {
+                        // Live client already enumerated the sessions/panes in
+                        // one control-mode round-trip, so the lease only carries
+                        // the watched-root expansion — NOT a second
+                        // list-sessions/list-panes pair. The foreign-kind guess
+                        // still runs over the lease so the chips do not regress
+                        // just because a control client is attached (the control
+                        // channel can't run the host-wide scan it needs), and it
+                        // is INDEPENDENT of the expansion, so the two overlap.
+                        val required = landingProbeOwner.executeRequired(
+                            watchedRoots = watchedRoots,
+                            includeEnumeration = false,
+                            exec = { command -> session.execBounded(pathAware(command)) },
+                        )
+                        val ports = async { PortScanner.scan(session) }
+                        val expansion = async {
+                            val decorated = landingProbeOwner.executeOptional(
+                                watchedRoots = watchedRoots,
+                                required = required,
+                                exec = { command -> session.execBounded(pathAware(command)) },
+                            )
+                            landingProbeOwner.buildWatchedRootExpansion(
+                                host,
+                                watchedRoots,
+                                decorated,
+                            )
+                        }
+                        val annotated = annotateAgentKinds(session, liveRows)
+                        val probes = ReconcileSideProbes(
+                            expansion = expansion,
+                            ports = ports,
+                        )
+                        probes.sessions(annotated)
+                    } else {
+                        val required = landingProbeOwner.executeRequired(
+                            watchedRoots = watchedRoots,
+                            includeEnumeration = true,
+                            exec = { command -> session.execBounded(pathAware(command)) },
+                        )
+                        val ports = async { PortScanner.scan(session) }
+                        val expansion = async {
+                            val decorated = landingProbeOwner.executeOptional(
+                                watchedRoots = watchedRoots,
+                                required = required,
+                                exec = { command -> session.execBounded(pathAware(command)) },
+                            )
+                            landingProbeOwner.buildWatchedRootExpansion(
+                                host,
+                                watchedRoots,
+                                decorated,
+                            )
+                        }
+                        val probes = ReconcileSideProbes(
+                            expansion = expansion,
+                            ports = ports,
+                        )
+                        listSessionsFromNativeOrPocketshell(
+                            session = session,
+                            listSessions = required.listSessions,
+                            listPanes = required.listPanes,
+                            probes = probes,
+                        )
+                    }
                 }
             }.fold(
                 onSuccess = { it },
@@ -602,53 +644,6 @@ class SshFolderListGateway internal constructor(
             FolderListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
         }
     }
-
-    /**
-     * Issue #692: run `list-sessions` + `list-panes` as ONE chained shell
-     * exec over the lease, split the two sections apart, and surface each as
-     * a separate [ExecResult]. tmux writes both blocks to stdout; we delimit
-     * them with a unique marker line printed between the two commands so the
-     * single round-trip can be parsed back into the two probes the native
-     * path expects. The `list-panes` half is best-effort — a marker-less or
-     * truncated read degrades to a blank panes section (the caller already
-     * tolerates an empty panes result), never to a wrong session list.
-     */
-    private suspend fun execEnumeration(session: SshSession): LeaseEnumeration {
-        val chained =
-            "$LIST_SESSIONS_COMMAND ; printf '%s\\n' $ENUMERATION_MARKER ; $LIST_PANES_COMMAND"
-        val result = session.execBounded(pathAware(chained))
-        // A non-zero exit (tmux missing / no server) is reported through the
-        // list-sessions half so the existing fallbacks (pocketshell, tmux
-        // absent) still trigger. The marker split is applied to stdout only.
-        val markerIndex = result.stdout.indexOf("\n$ENUMERATION_MARKER\n")
-            .let { if (it >= 0) it else result.stdout.indexOf("$ENUMERATION_MARKER\n") }
-        return if (markerIndex < 0) {
-            // No marker: treat the whole stdout as the session list and skip
-            // panes (degrade to session_path cwd). Preserves exit code/stderr
-            // so the tmux-absent / pocketshell fallbacks still fire.
-            LeaseEnumeration(
-                listSessions = result,
-                listPanes = ExecResult(stdout = "", stderr = "", exitCode = 0),
-            )
-        } else {
-            val before = result.stdout.substring(0, markerIndex)
-            val afterStart = result.stdout.indexOf('\n', markerIndex + 1)
-            val after = if (afterStart >= 0) result.stdout.substring(afterStart + 1) else ""
-            LeaseEnumeration(
-                listSessions = ExecResult(
-                    stdout = before,
-                    stderr = result.stderr,
-                    exitCode = result.exitCode,
-                ),
-                listPanes = ExecResult(stdout = after, stderr = "", exitCode = 0),
-            )
-        }
-    }
-
-    private data class LeaseEnumeration(
-        val listSessions: ExecResult,
-        val listPanes: ExecResult,
-    )
 
     /**
      * Run a session-enumeration probe with a bounded read timeout.
@@ -1037,31 +1032,29 @@ class SshFolderListGateway internal constructor(
 
     internal suspend fun listSessionsFromNativeOrPocketshell(
         session: SshSession,
-        host: HostEntity,
-        watchedRoots: List<ProjectRootEntity>,
         listSessions: ExecResult,
-        // Issue #692: the `list-panes` half is fetched in the SAME chained
-        // enumeration round-trip as `list-sessions` (see [execEnumeration]) and
-        // handed in here, so this method never issues a second serial probe.
+        // Issue #692/#1876: the `list-panes` half is fetched in the SAME
+        // sectioned landing-probe exec as `list-sessions` and handed in here,
+        // so this method never issues a second serial probe.
         // Null preserves the old behaviour for callers (tests) that only have a
         // list-sessions result — those re-fetch panes on demand.
         listPanes: ExecResult? = null,
+        // Issue #1876: the watched-root expansion + port scan, already RUNNING
+        // concurrently with the enumeration. Tests that
+        // exercise only the tmux-vs-pocketshell fallback branching pass their
+        // own probes via [serialSideProbes].
+        probes: ReconcileSideProbes,
     ): FolderListResult {
         return when {
             listSessions.exitCode == 127 ||
                 listSessions.stderr.contains("not found", ignoreCase = true) ->
-                listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
+                listSessionsWithFolderFromPocketshell(session, probes)
                     ?: FolderListResult.ToolUnavailable
             listSessions.isTmuxServerAbsent() ->
-                listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
-                    ?: sessionsWithWatchedRootExpansion(
-                        session = session,
-                        host = host,
-                        watchedRoots = watchedRoots,
-                        rows = emptyList(),
-                    )
+                listSessionsWithFolderFromPocketshell(session, probes)
+                    ?: probes.sessions(emptyList())
             listSessions.exitCode != 0 ->
-                listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
+                listSessionsWithFolderFromPocketshell(session, probes)
                     ?: FolderListResult.Failed(
                         listSessions.stderr.ifBlank { listSessions.stdout }
                             .ifBlank { "tmux exited ${listSessions.exitCode}" },
@@ -1090,38 +1083,54 @@ class SshFolderListGateway internal constructor(
                 // sole kind authority; foreign sessions get the one-shot daemon
                 // guess. No output-parsing detection on this list path.
                 val annotated = annotateAgentKinds(session, merged)
-                sessionsWithWatchedRootExpansion(
-                    session = session,
-                    host = host,
-                    watchedRoots = watchedRoots,
-                    rows = annotated,
-                )
+                probes.sessions(annotated)
             }
         }
     }
 
-    private suspend fun listSessionsWithFolderFromPocketshell(
+    /**
+     * Issue #1876 test seam: build a [ReconcileSideProbes] for the
+     * fallback-branch unit tests that call
+     * [listSessionsFromNativeOrPocketshell] directly. It runs the SAME batched
+     * landing probe + port scan production runs, just without the enumeration
+     * half (those tests supply their own `listSessions` result).
+     */
+    internal suspend fun serialSideProbes(
         session: SshSession,
         host: HostEntity,
         watchedRoots: List<ProjectRootEntity>,
+    ): ReconcileSideProbes = coroutineScope {
+        val required = landingProbeOwner.executeRequired(
+            watchedRoots = watchedRoots,
+            includeEnumeration = false,
+            exec = { command -> session.execBounded(pathAware(command)) },
+        )
+        ReconcileSideProbes(
+            expansion = async {
+                val decorated = landingProbeOwner.executeOptional(
+                    watchedRoots = watchedRoots,
+                    required = required,
+                    exec = { command -> session.execBounded(pathAware(command)) },
+                )
+                landingProbeOwner.buildWatchedRootExpansion(host, watchedRoots, decorated)
+            },
+            ports = async { runCatching { PortScanner.scan(session) }.getOrDefault(emptyList()) },
+        )
+    }
+
+    private suspend fun listSessionsWithFolderFromPocketshell(
+        session: SshSession,
+        probes: ReconcileSideProbes,
     ): FolderListResult.Sessions? {
         val pocketshell = session.execBounded(pathAware(POCKETSHELL_SESSIONS_COMMAND))
         if (pocketshell.exitCode != 0) {
             if (pocketshell.isTmuxServerAbsent()) {
-                return sessionsWithWatchedRootExpansion(
-                    session = session,
-                    host = host,
-                    watchedRoots = watchedRoots,
-                    rows = emptyList(),
-                )
+                return probes.sessions(emptyList())
             }
             return null
         }
-        return sessionsWithWatchedRootExpansion(
-            session = session,
-            host = host,
-            watchedRoots = watchedRoots,
-            rows = parsePocketshellSessionsRows(pocketshell.stdout, sessionListParser),
+        return probes.sessions(
+            parsePocketshellSessionsRows(pocketshell.stdout, sessionListParser),
         )
     }
 
@@ -1133,123 +1142,6 @@ class SshFolderListGateway internal constructor(
                     output.contains("tmux-", ignoreCase = true) &&
                     output.contains("No such file or directory", ignoreCase = true)
                 )
-    }
-
-    private suspend fun sessionsWithWatchedRootExpansion(
-        session: SshSession,
-        host: HostEntity,
-        watchedRoots: List<ProjectRootEntity>,
-        rows: List<FolderSessionRow>,
-    ): FolderListResult.Sessions {
-        val expansion = expandWatchedRootProjects(
-            session = session,
-            host = host,
-            watchedRoots = watchedRoots,
-        )
-        val discoveredPorts = runCatching { PortScanner.scan(session) }.getOrDefault(emptyList())
-        return FolderListResult.Sessions(
-            rows = rows,
-            projectFoldersByRoot = expansion.projectFoldersByRoot,
-            historyProjectFoldersByRoot = expansion.historyProjectFoldersByRoot,
-            resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
-            discoveredPorts = discoveredPorts,
-        )
-    }
-
-    private suspend fun expandWatchedRootProjects(
-        session: SshSession,
-        host: HostEntity,
-        watchedRoots: List<ProjectRootEntity>,
-    ): WatchedRootProjectExpansion {
-        if (watchedRoots.isEmpty()) return WatchedRootProjectExpansion()
-        val namespace = "${host.id}:${host.username}@${host.hostname}:${host.port}"
-        val rootPaths = watchedRoots
-            .mapNotNull { it.path.trim().takeIf { path -> path.isNotEmpty() } }
-            .distinct()
-        val remoteHome = if (rootPaths.any(::usesHomeShortcut)) remoteHomeDirectory(session) else null
-
-        val projectFoldersByRoot = mutableMapOf<String, List<String>>()
-        val historyProjectFoldersByRoot = mutableMapOf<String, List<String>>()
-        val resolvedWatchedRootPaths = mutableMapOf<String, String>()
-        val historyPaths = listProjectHistoryFromPocketshellLogs(session)
-        for (rootPath in rootPaths) {
-            val resolvedRootPath = expandRemoteHomeShortcut(rootPath, remoteHome)
-            resolvedWatchedRootPaths[rootPath] = resolvedRootPath
-            val paths = when (
-                val result = reposRemoteSource.listLocalRoot(
-                    session = session,
-                    root = resolvedRootPath,
-                    cacheNamespace = namespace,
-                )
-            ) {
-                is ReposListResult.Success -> result.repos.mapNotNull { repo ->
-                    repo.local?.path?.trim()?.takeIf { it.isNotEmpty() }
-                }
-                ReposListResult.ToolMissing,
-                is ReposListResult.Failed,
-                -> emptyList()
-            }
-            projectFoldersByRoot[rootPath] = paths.distinct()
-            historyProjectFoldersByRoot[rootPath] = historyPaths
-                .filter { pathWithinRoot(it, resolvedRootPath) }
-                .map { projectPathUnderRoot(it, resolvedRootPath) }
-                .distinct()
-        }
-        return WatchedRootProjectExpansion(
-            projectFoldersByRoot = projectFoldersByRoot,
-            historyProjectFoldersByRoot = historyProjectFoldersByRoot,
-            resolvedWatchedRootPaths = resolvedWatchedRootPaths,
-        )
-    }
-
-    private suspend fun listProjectHistoryFromPocketshellLogs(session: SshSession): List<String> {
-        val result = session.execBounded(pathAware(POCKETSHELL_PROJECT_HISTORY_COMMAND))
-        if (result.exitCode != 0 || result.isPocketshellLogsMissing()) return emptyList()
-        return parsePocketshellProjectHistory(result.stdout)
-    }
-
-    private suspend fun remoteHomeDirectory(session: SshSession): String? {
-        val result = session.execBounded(pathAware("printf '%s\\n' \"\$HOME\""))
-        if (result.exitCode != 0) return null
-        return result.stdout.lineSequence()
-            .firstOrNull { it.isNotBlank() }
-            ?.trim()
-            ?.trimEnd('/')
-            ?.takeIf { it.isNotEmpty() }
-    }
-
-    private fun usesHomeShortcut(path: String): Boolean =
-        path == "~" || path.startsWith("~/")
-
-    private fun expandRemoteHomeShortcut(path: String, remoteHome: String?): String {
-        val clean = path.trim().trimEnd('/').ifBlank { path.trim() }
-        val home = remoteHome?.trimEnd('/')?.takeIf { it.isNotEmpty() }
-        return when {
-            home == null -> clean
-            clean == "~" -> home
-            clean.startsWith("~/") -> home + "/" + clean.removePrefix("~/")
-            else -> clean
-        }
-    }
-
-    private fun pathWithinRoot(path: String, root: String): Boolean {
-        val cleanPath = canonicalRemotePath(path)
-        val cleanRoot = canonicalRemotePath(root)
-        return cleanPath == cleanRoot || cleanPath.startsWith(cleanRoot.trimEnd('/') + "/")
-    }
-
-    private fun projectPathUnderRoot(path: String, root: String): String {
-        val cleanPath = canonicalRemotePath(path)
-        val cleanRoot = canonicalRemotePath(root)
-        if (cleanPath == cleanRoot) return cleanRoot
-        val prefix = cleanRoot.trimEnd('/') + "/"
-        val child = cleanPath.removePrefix(prefix).substringBefore('/').ifBlank { return cleanRoot }
-        return prefix + child
-    }
-
-    private fun canonicalRemotePath(path: String): String {
-        val clean = path.trim().trimEnd('/')
-        return clean.ifEmpty { "/" }
     }
 
     override suspend fun createSession(
@@ -1958,12 +1850,6 @@ class SshFolderListGateway internal constructor(
         val windowName: String? = null,
     )
 
-    private data class WatchedRootProjectExpansion(
-        val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
-        val historyProjectFoldersByRoot: Map<String, List<String>> = emptyMap(),
-        val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
-    )
-
     internal companion object {
         /**
          * Logcat-grep tag for bounded folder-list SSH exec reads. Emitted only
@@ -2049,21 +1935,9 @@ class SshFolderListGateway internal constructor(
             }
 
         /**
-         * Upper bound on a single session-enumeration SSH-exec probe read
-         * ([execBounded]). The healthy `tmux list-sessions` /
-         * `list-panes` / `pocketshell sessions` reads complete in tens of
-         * milliseconds; this bound is generous enough to never trip a
-         * slow-but-progressing read, yet tight enough that a fully wedged
-         * read (issue #470's ~45s silent SLIRP hang) surfaces a retryable
-         * `ConnectError` panel in a few seconds instead of leaving the
-         * folder screen stuck in `Loading`.
-         *
-         * Kept small (3.5 s) so a fully wedged read surfaces a retryable
-         * `ConnectError` panel in a few seconds rather than leaving the folder
-         * screen stuck in `Loading`. (EPIC #679 replaced the legacy constant
-         * 5 s discovery poll with an infrequent maintained-tree reconcile, so
-         * there is no longer a tight poll cadence to stay below; this bound now
-         * just protects the single in-flight reconcile probe.)
+         * Upper bound on a single session-enumeration SSH-exec probe read.
+         * #1876 keeps this existing bound; batching removes serial round trips
+         * instead of moving the timeout cliff.
          */
         const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
 
@@ -2081,10 +1955,9 @@ class SshFolderListGateway internal constructor(
          * releases, an UNBOUNDED enumeration would park forever and pin the
          * picker in `Loading` — zero new SSH sockets, no `PsFolderProbe`, the
          * #470 wedge signature. This bound makes the live path degrade to the
-         * already-bounded SSH-lease enumeration ([execBounded]) instead. Sized
-         * the same as [EXEC_READ_TIMEOUT_MS] so a healthy control round-trip
-         * (tens of ms) is never tripped, yet a fully wedged channel surfaces the
-         * lease fall-through within a few seconds.
+         * already-bounded SSH-lease enumeration ([execBounded]) instead.
+         *
+         * #1876 keeps this existing fall-through bound unchanged.
          */
         const val LIVE_ENUM_TIMEOUT_MS: Long = 3_500L
 
@@ -2560,7 +2433,7 @@ class SshFolderListGateway internal constructor(
     }
 }
 
-private fun ExecResult.isPocketshellLogsMissing(): Boolean {
+internal fun ExecResult.isPocketshellLogsMissing(): Boolean {
     if (exitCode == 127) return true
     val output = "$stderr\n$stdout"
     return output.contains("No such command 'logs'", ignoreCase = true) ||

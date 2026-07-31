@@ -33,13 +33,12 @@ class FolderListGatewayFallbackTest {
 
         val result = gateway.listSessionsFromNativeOrPocketshell(
             session = session,
-            host = HOST,
-            watchedRoots = emptyList(),
             listSessions = ExecResult(
                 stdout = "",
                 stderr = "error connecting to /tmp/tmux-1000/default (No such file or directory)",
                 exitCode = 1,
             ),
+            probes = gateway.serialSideProbes(session, HOST, emptyList()),
         )
 
         assertTrue(result is FolderListResult.Sessions)
@@ -62,9 +61,8 @@ class FolderListGatewayFallbackTest {
 
         val result = gateway.listSessionsFromNativeOrPocketshell(
             session = session,
-            host = HOST,
-            watchedRoots = emptyList(),
             listSessions = socketMissing,
+            probes = gateway.serialSideProbes(session, HOST, emptyList()),
         )
 
         assertTrue(result is FolderListResult.Sessions)

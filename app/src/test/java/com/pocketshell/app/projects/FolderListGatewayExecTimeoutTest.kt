@@ -111,17 +111,20 @@ class FolderListGatewayExecTimeoutTest {
             "healthy sub-second enumeration must succeed, got $result",
             result is FolderListResult.Sessions,
         )
-        // Issue #692: the enumeration is now ONE chained exec (list-sessions +
-        // marker + list-panes) so the first exec is the chained command, with
-        // the list-sessions probe as its leading section.
-        assertEquals(
-            "the chained enumeration probe is the first exec on the healthy path",
-            ReposRemoteSource.pathAwareCommand(
-                "${SshFolderListGateway.LIST_SESSIONS_COMMAND} ; " +
-                    "printf '%s\\n' ${SshFolderListGateway.ENUMERATION_MARKER} ; " +
-                    SshFolderListGateway.LIST_PANES_COMMAND,
-            ),
-            session.execCommands.first(),
+        // #1876 extends #692's one enumeration exec into a sectioned required
+        // batch. Optional decoration runs concurrently, so command ordering is
+        // deliberately not asserted.
+        assertTrue(
+            "one required batch must carry both tmux enumeration commands",
+            session.execCommands.any { command ->
+                // The production path wraps the batch in a single-quoted
+                // POSIX shell command, so the format strings' embedded quotes
+                // are escaped at this boundary. Match the stable command heads
+                // here; FolderListLandingProbeTest pins the exact raw batch.
+                command.contains("tmux list-sessions") &&
+                    command.contains("tmux list-panes") &&
+                    command.contains(SshFolderListGateway.ENUMERATION_MARKER)
+            },
         )
     }
 

@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.hosts.MainDispatcherOwnershipRule
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
@@ -27,6 +28,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -74,6 +76,9 @@ import java.util.concurrent.Executors
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
 class Issue926SeedIoOffMainTest {
+
+    @get:Rule
+    val mainDispatcherOwnershipRule = MainDispatcherOwnershipRule()
 
     private val mainExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, MAIN_THREAD_NAME)

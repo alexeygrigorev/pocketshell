@@ -91,7 +91,8 @@ class PromptComposerWireOracleClogTest {
             com.pocketshell.app.settings.VoiceTranscriptionProvider.OpenAiWhisper
     }
 
-    private fun runTestDispatcher() = StandardTestDispatcher()
+    private fun runTestDispatcher() =
+        StandardTestDispatcher(mainDispatcherRule.dispatcher.scheduler)
 
     private fun newVm(outboundQueueStore: OutboundQueueStore): PromptComposerViewModel {
         val dispatcher = runTestDispatcher()

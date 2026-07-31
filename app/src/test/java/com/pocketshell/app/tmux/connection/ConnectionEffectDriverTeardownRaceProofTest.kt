@@ -16,6 +16,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -166,7 +167,8 @@ class ConnectionEffectDriverTeardownRaceProofTest {
         fun totalRecoveryWriters(): Int = reattachReseedCount + pendingReplayCount
     }
 
-    private fun scope(): CoroutineScope = CoroutineScope(Job() + UnconfinedTestDispatcher())
+    private fun scope(): CoroutineScope =
+        CoroutineScope(Job() + UnconfinedTestDispatcher(TestCoroutineScheduler()))
 
     /**
      * BASE-RED (characterization): a `Foreground` during a post-grace teardown-in-flight

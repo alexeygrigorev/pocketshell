@@ -9,6 +9,7 @@ import com.pocketshell.core.connection.SessionId
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -102,7 +103,7 @@ class TransportEffectsTest {
 
     @Test
     fun livenessProbeDeclaredDropWalksControllerAndDispatchesAutoReconnectOnly() {
-        runTest(StandardTestDispatcher()) {
+        runTest(StandardTestDispatcher(TestCoroutineScheduler())) {
             val host = HostKey("alice@example.com:22/7")
             val target = SessionId("7/main")
             val manager = ConnectionManager(warmSnapshot = { true })

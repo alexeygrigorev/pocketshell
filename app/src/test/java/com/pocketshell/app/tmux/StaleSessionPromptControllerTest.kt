@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
@@ -7,22 +8,20 @@ import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
-import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.Rule
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
@@ -56,10 +55,10 @@ import org.robolectric.annotation.Config
 @Config(manifest = Config.NONE, sdk = [33])
 class StaleSessionPromptControllerTest {
 
-    @After
-    fun tearDown() {
-        Dispatchers.resetMain()
-    }
+    private val mainDispatcher = StandardTestDispatcher(TestCoroutineScheduler())
+
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule(mainDispatcher)
 
     private val goneFolder = "/home/alex/git/pocketshell"
 
@@ -71,8 +70,7 @@ class StaleSessionPromptControllerTest {
      * recovery, instead of the silent recreate.
      */
     @Test
-    fun coldRestoreStaleEmitSurfacesPromptWithNoTreeBound() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun coldRestoreStaleEmitSurfacesPromptWithNoTreeBound() = runTest(mainDispatcher) {
         val signals = SessionLifecycleSignals()
         val controller = StaleSessionPromptController(signals)
         runCurrent()
@@ -99,8 +97,7 @@ class StaleSessionPromptControllerTest {
      * a second dialog.
      */
     @Test
-    fun openExistingStaleEmitSurfacesPrompt() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun openExistingStaleEmitSurfacesPrompt() = runTest(mainDispatcher) {
         val signals = SessionLifecycleSignals()
         val controller = StaleSessionPromptController(signals)
         runCurrent()
@@ -118,8 +115,7 @@ class StaleSessionPromptControllerTest {
      * dialog falls its label back to "home" and recreates in the host home dir.
      */
     @Test
-    fun nullFolderStaleEmitStillSurfacesPrompt() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun nullFolderStaleEmitStillSurfacesPrompt() = runTest(mainDispatcher) {
         val signals = SessionLifecycleSignals()
         val controller = StaleSessionPromptController(signals)
         runCurrent()
@@ -141,8 +137,7 @@ class StaleSessionPromptControllerTest {
      * at the delivery layer.
      */
     @Test
-    fun noBroadcastMeansNoPrompt() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun noBroadcastMeansNoPrompt() = runTest(mainDispatcher) {
         val signals = SessionLifecycleSignals()
         val controller = StaleSessionPromptController(signals)
         runCurrent()
@@ -157,8 +152,7 @@ class StaleSessionPromptControllerTest {
 
     /** The user resolving the prompt (recreate / go home) clears it. */
     @Test
-    fun clearResetsPrompt() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun clearResetsPrompt() = runTest(mainDispatcher) {
         val signals = SessionLifecycleSignals()
         val controller = StaleSessionPromptController(signals)
         runCurrent()
@@ -186,8 +180,7 @@ class StaleSessionPromptControllerTest {
      * cold-restore navigate no-op could not do. Returns the resolved session name.
      */
     @Test
-    fun createSessionInFolderCreatesInTheStaleFolderViaGateway() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun createSessionInFolderCreatesInTheStaleFolderViaGateway() = runTest(mainDispatcher) {
         val gateway = RecordingGateway(resolvedName = "work")
         val controller = StaleSessionPromptController(
             SessionLifecycleSignals(),
@@ -230,8 +223,7 @@ class StaleSessionPromptControllerTest {
      * gateway falls back to `~`.
      */
     @Test
-    fun createSessionInFolderNullFolderFallsBackToHome() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun createSessionInFolderNullFolderFallsBackToHome() = runTest(mainDispatcher) {
         val gateway = RecordingGateway(resolvedName = "orphan")
         val controller = StaleSessionPromptController(
             SessionLifecycleSignals(),
@@ -258,8 +250,7 @@ class StaleSessionPromptControllerTest {
      * nothing.
      */
     @Test
-    fun createSessionInFolderFailsWhenHostMissing() = runTest {
-        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+    fun createSessionInFolderFailsWhenHostMissing() = runTest(mainDispatcher) {
         val gateway = RecordingGateway(resolvedName = "x")
         val controller = StaleSessionPromptController(
             SessionLifecycleSignals(),

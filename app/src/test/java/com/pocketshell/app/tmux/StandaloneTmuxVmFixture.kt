@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.hosts.MainDispatcherTestIsolation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -196,6 +197,15 @@ internal class StandaloneTmuxVmFixture(
      */
     fun runVmTest(
         disableLivenessProbeAutoStart: Boolean = true,
+        body: suspend TestScope.() -> Unit,
+    ) {
+        MainDispatcherTestIsolation.withOwnership {
+            runVmTestWithMainOwnership(disableLivenessProbeAutoStart, body)
+        }
+    }
+
+    private fun runVmTestWithMainOwnership(
+        disableLivenessProbeAutoStart: Boolean,
         body: suspend TestScope.() -> Unit,
     ) {
         check(!started) {

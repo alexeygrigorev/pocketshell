@@ -15,6 +15,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -45,7 +46,7 @@ import org.robolectric.annotation.Config
 @Config(manifest = Config.NONE, sdk = [33])
 class FolderListViewModelProfilesTest {
 
-    private val testDispatcher = UnconfinedTestDispatcher()
+    private val testDispatcher = UnconfinedTestDispatcher(TestCoroutineScheduler())
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule(testDispatcher)

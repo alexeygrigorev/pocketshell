@@ -74,7 +74,7 @@ class PromptComposerOutboundQueueClogTest {
     private fun newVm(
         outboundQueueStore: OutboundQueueStore,
     ): PromptComposerViewModel {
-        val dispatcher = StandardTestDispatcher()
+        val dispatcher = StandardTestDispatcher(mainDispatcherRule.dispatcher.scheduler)
         val vm = PromptComposerViewModel(
             audioRecorder = MinimalMicCapture(),
             whisperClientFactory = WhisperClientFactory { fakeWhisperClient() },

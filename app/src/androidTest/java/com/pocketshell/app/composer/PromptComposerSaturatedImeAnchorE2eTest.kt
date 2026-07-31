@@ -60,6 +60,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -1086,6 +1087,9 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             .toList()
 
     private fun requestRealImeAndAssertVisible() {
+        if (!waitForAppWindowFocus()) {
+            fail(realImeFailure("before_show"))
+        }
         compose.activityRule.scenario.onActivity { activity ->
             val roots = activeAppWindowRoots(activity)
             val focusedView = roots.asReversed()
@@ -1097,14 +1101,46 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 ?.show(WindowInsetsCompat.Type.ime())
             inputMethodManager.showSoftInput(focusedView, InputMethodManager.SHOW_IMPLICIT)
         }
-        assertTrue(
-            "The real system input-method window never became visible.",
-            waitForPhysicalImeWindow(expected = true),
-        )
+        if (!waitForPhysicalImeWindow(expected = true)) {
+            fail(realImeFailure("after_show_timeout"))
+        }
         assertTrue(
             "The real IME never supplied a positive visible inset to an app window.",
             waitForAnyAppRootImeVisible(expected = true),
         )
+    }
+
+    /**
+     * Issue #1882: the #1800 sentence alone is app-influenceable. Establish
+     * window focus before asking the framework to show the IME, then include
+     * the active-window owner in either hard failure. The CI classifier may
+     * downgrade only a resolved non-PocketShell owner; app-owned, missing, and
+     * framework `android` owners stay loud.
+     */
+    private fun waitForAppWindowFocus(): Boolean =
+        waitForWallClock(WINDOW_FOCUS_TIMEOUT_MS) { appWindowHasFocus() }
+
+    private fun appWindowHasFocus(): Boolean {
+        var focused = false
+        compose.activityRule.scenario.onActivity { activity ->
+            focused = activeAppWindowRoots(activity).any { it.hasWindowFocus() }
+        }
+        return focused
+    }
+
+    private fun realImeFailure(stage: String): String {
+        val appFocused = appWindowHasFocus()
+        val activeWindowPackage =
+            InstrumentationRegistry.getInstrumentation()
+                .uiAutomation
+                .rootInActiveWindow
+                ?.packageName
+                ?.toString()
+                ?: ACTIVE_WINDOW_UNAVAILABLE
+        return "The real system input-method window never became visible. " +
+            "stage=$stage app_window_focused=$appFocused " +
+            "active_window_pkg=$activeWindowPackage " +
+            "physicalImeWindows=${visiblePhysicalImeWindows()}"
     }
 
     private fun hideRealImeAndAssertHidden(message: String) {
@@ -1274,7 +1310,9 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         const val RETURN_GEOMETRY_SLOP_DP = 2f
         const val MINIMUM_TERMINAL_FRACTION = 0.25f
         const val REAL_IME_TIMEOUT_MS = 30_000L
+        const val WINDOW_FOCUS_TIMEOUT_MS = 10_000L
         const val PHYSICAL_IME_ABSENCE_STABILITY_MS = 500L
+        const val ACTIVE_WINDOW_UNAVAILABLE = "<unavailable>"
         const val PRODUCTION_SHEET_TAG = "issue1744-production-composer-sheet"
         const val TERMINAL_MARKER_TAG = "issue1744-terminal-marker"
         const val TERMINAL_MARKER = "agent output remains visible above the composer"

@@ -5,7 +5,9 @@
 #
 # The only classification that changes a shard's verdict is
 # `real_ime_precondition` (the captured CI swiftshader "real system
-# input-method window never became visible" precondition -> INFRA / RE-RUN).
+# input-method window never became visible" precondition, plus an explicitly
+# resolved non-PocketShell active-window owner -> INFRA / RE-RUN). The assertion
+# sentence alone is app-influenceable and stays RED (#1882).
 # Everything else — including a missing python3, missing artifacts, an
 # unreadable result file, or ANY other assertion failure — reports
 # `unclassified` or `product_failure`, both of which keep the shard RED.

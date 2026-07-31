@@ -45,6 +45,7 @@ import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshSession
 import com.termux.view.TerminalView
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.runBlocking
@@ -55,6 +56,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 /**
  * Cold-install end-to-end coverage (issue #144).
@@ -88,10 +90,11 @@ import org.junit.runner.RunWith
  *    `opencode-lab`). We also pre-create a real tmux session with the
  *    same name via direct SSH so the subsequent attach has a live remote
  *    pane to join. This drops the user into [TmuxSessionScreen].
- * 7. Type `printf 'cold-install-pass\n'` through the live TerminalView
- *    `InputConnection`. Assert the marker shows up in the visible
- *    terminal text using [TerminalTextMatcher.containsWrapTolerant] so the
- *    assertion survives a soft-wrap at the right margin.
+ * 7. Type `printf 'cold-install-pass-<run>\n'` through the live TerminalView
+ *    `InputConnection`. Keep the visible-terminal assertion, then independently
+ *    inspect the real Docker pane over SSH: the echoed line must end with the
+ *    exact typed command, no bracketed-paste marker may leak into it, and a
+ *    separate pane line must equal the marker (proving `printf` actually ran).
  * 8. Re-launch the activity into the host list, open Settings, and
  *    assert the default settings snapshot matches [AppSettings] defaults
  *    (terminal font = 14sp, tmux-on-attach = true,
@@ -107,14 +110,17 @@ import org.junit.runner.RunWith
  *   navigation (would regress if a tmux-installed host stopped routing to
  *   the picker).
  * - `TmuxSessionScreen` attach + remote PTY plumbing (would regress if the
- *   typed command stopped reaching the remote pane).
+ *   typed command stopped reaching the remote pane byte-exactly or stopped
+ *   executing).
  * - `SettingsRepository` cold-read defaults (would regress if a default
  *   value drifted from [AppSettings]).
  *
  * Test infra it relies on:
  *
- * - `TerminalTextMatcher.containsWrapTolerant` (#139) for the command
- *   visibility assertion across soft-wrap boundaries.
+ * - `TerminalTextMatcher.containsWrapTolerant` (#139) for the user-visible
+ *   command assertion across soft-wrap boundaries. Issue #1871 deliberately
+ *   does NOT treat that substring as an execution oracle: under #1854 the
+ *   corrupt echo `tf '<marker>\\n'` retained the marker and passed 3/3.
  * - `waitForSshFixtureReady` from [AndroidSshTestFixtures.kt] so the test
  *   fails fast and loudly when the `agents` Docker fixture is not up,
  *   rather than burning the visibility deadline on a connect that never
@@ -137,6 +143,7 @@ class ColdInstallE2eTest {
     val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private val inputOracleObservations = mutableListOf<String>()
 
     /**
      * Issue #177: clear the fast-resume `last_session` snapshot before and
@@ -154,6 +161,7 @@ class ColdInstallE2eTest {
 
     @After
     fun closeLaunchedActivity() {
+        writeInputOracleReport()
         launchedActivity?.close()
         launchedActivity = null
         clearLastSessionPrefs()
@@ -324,11 +332,15 @@ class ColdInstallE2eTest {
 
         // ---------------------------------------------------------------
         // Phase 6 — send the command through the TerminalView input
-        // connection and assert the marker reaches the visible terminal
-        // text.
+        // connection. The visible marker remains a user-facing assertion, but
+        // is NOT sufficient evidence that the command arrived whole or ran:
+        // #1854 produced `tf '<marker>\\n'`, whose terminal echo still contains
+        // the marker. The independent Docker-pane oracle below makes exact
+        // received bytes and intended execution load-bearing.
         // ---------------------------------------------------------------
-        val marker = "cold-install-pass"
-        val command = "printf '$marker\\n'\n"
+        val marker = "cold-install-pass-${System.currentTimeMillis().toString(36).takeLast(6)}"
+        val typedCommand = "printf '$marker\\n'"
+        val command = "$typedCommand\n"
         val sendStart = SystemClock.elapsedRealtime()
         val committed = terminalInputConnection().commitText(command, 1)
         assertTrue("expected terminal input connection to commit the marker command", committed)
@@ -350,6 +362,14 @@ class ColdInstallE2eTest {
             "expected visible terminal text to contain '$marker' within deadline; " +
                 "elapsed_ms=$sendElapsed visible_terminal_text=`${lastVisible.take(500)}`",
             visible,
+        )
+        recordInputOracle("visible_terminal_text=\n$lastVisible")
+
+        assertExactCommandReceivedAndRan(
+            key = key,
+            sessionName = sessionName,
+            marker = marker,
+            typedCommand = typedCommand,
         )
 
         // ---------------------------------------------------------------
@@ -568,6 +588,124 @@ class ColdInstallE2eTest {
             exec?.exitCode == 0,
         )
     }
+
+    /**
+     * Issue #1871: observe the receiving pane through a second real SSH
+     * session that the app does not own. `capture-pane -J` joins soft-wrapped
+     * rows, so comparisons are against logical shell lines instead of the
+     * Android terminal grid.
+     *
+     * The assertions are intentionally complementary:
+     *
+     * 1. an echo ending with [typedCommand] proves the pane received every
+     *    leading byte in order;
+     * 2. a separate line equal to [marker] proves the intended command ran;
+     * 3. no raw paste marker proves framing bytes did not leak into the input.
+     *
+     * The old marker-substring assertion satisfied none of these contracts: a
+     * corrupt, never-executed echo still contained the marker.
+     */
+    private suspend fun assertExactCommandReceivedAndRan(
+        key: String,
+        sessionName: String,
+        marker: String,
+        typedCommand: String,
+    ) {
+        val observer = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 20_000,
+        ).getOrThrow()
+        try {
+            val deadline = SystemClock.elapsedRealtime() + inputOracleTimeoutMs
+            var lastCapture = ""
+            var echoLine: String? = null
+            var ranLine: String? = null
+            while (SystemClock.elapsedRealtime() < deadline) {
+                lastCapture = capturePane(observer, sessionName)
+                val lines = lastCapture.lineSequence().toList()
+                echoLine = lines.lastOrNull { line -> line.contains("$marker\\n'") }
+                ranLine = lines.lastOrNull { line -> line.trim() == marker }
+                if (echoLine != null && ranLine != null) break
+                SystemClock.sleep(250)
+            }
+
+            val paneTail = lastCapture.lines()
+                .filter { it.isNotBlank() }
+                .takeLast(8)
+                .joinToString(" | ")
+            recordInputOracle(
+                "marker=$marker\n" +
+                    "typed_command=$typedCommand\n" +
+                    "echo_line=${echoLine ?: "<none>"}\n" +
+                    "ran_line=${ranLine ?: "<none>"}\n" +
+                    "pane_tail=$paneTail",
+            )
+
+            assertTrue(
+                "the cold-install command never RAN on the remote pane; expected a " +
+                    "standalone line equal to `$marker`. A marker in the command echo " +
+                    "does not prove execution (issue #1871). pane_tail=$paneTail",
+                ranLine != null,
+            )
+            val exactEcho = echoLine
+            assertTrue(
+                "the remote pane never echoed the marker-scoped command; " +
+                    "pane_tail=$paneTail",
+                exactEcho != null,
+            )
+            requireNotNull(exactEcho)
+            assertTrue(
+                "the cold-install command reached the remote pane with corrupted bytes; " +
+                    "expected the echoed line to end with `$typedCommand`, got `$exactEcho`",
+                exactEcho.trimEnd().endsWith(typedCommand),
+            )
+            assertTrue(
+                "raw bracketed-paste framing leaked into the cold-install command echo: " +
+                    "`$exactEcho`",
+                "[200~" !in exactEcho && "[201~" !in exactEcho,
+            )
+        } finally {
+            runCatching { observer.close() }
+        }
+    }
+
+    private suspend fun capturePane(session: SshSession, sessionName: String): String {
+        val result = session.exec("tmux capture-pane -p -J -t ${shellQuote(sessionName)}")
+        assertTrue(
+            "expected independent tmux capture-pane to succeed, exit=${result.exitCode} " +
+                "stderr=`${result.stderr}`",
+            result.exitCode == 0,
+        )
+        return result.stdout
+    }
+
+    private fun recordInputOracle(value: String) {
+        inputOracleObservations += value
+        println("COLD_INSTALL_INPUT_ORACLE $value")
+    }
+
+    private fun writeInputOracleReport() {
+        if (inputOracleObservations.isEmpty()) return
+        runCatching {
+            val dir = File(
+                com.pocketshell.app.test.testArtifactsRoot(
+                    InstrumentationRegistry.getInstrumentation().targetContext,
+                ),
+                "additional_test_output/cold-install",
+            )
+            check(dir.exists() || dir.mkdirs()) { "could not create ${dir.absolutePath}" }
+            val report = File(dir, "exact-input-oracle.txt")
+            report.writeText(inputOracleObservations.joinToString("\n---\n", postfix = "\n"))
+            println("COLD_INSTALL_INPUT_ORACLE_REPORT ${report.absolutePath}")
+        }
+    }
+
+    private val inputOracleTimeoutMs: Long
+        get() = if (TerminalTestTimeouts.isRunningOnCi()) 90_000L else 30_000L
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"

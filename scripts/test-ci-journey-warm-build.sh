@@ -794,26 +794,54 @@ rm -f "$CLASSIFY_DIR/artifacts/ci-journey/summary.md"
 expect_classify "no summary at all"     INFRA emulator_never_booted         1 failure failure failure failure false false true
 pass "(x1) every classify branch writes the expected token + reason + exit code, executed from the real workflow body"
 
-# #1800's captured-signature branch must still fire, and now name itself. This
-# is the adjacency check: my edits sit in the same ladder.
+# #1800's captured-signature branch must still fire for a positively identified
+# foreign focus owner, and now name itself. Exercise the REAL workflow body for
+# both sides of #1882's owner boundary: app-owned and unsafe/ambiguous evidence
+# must remain RED rather than inheriting the foreign-owner relief valve.
 SATURATED_CLASS="com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"
-setup_classify_dir
-seed_summary \
-  '# Per-push CI journey suite — summary' \
-  'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
-  "- \`$SATURATED_CLASS\`"
-signature_dir="$CLASSIFY_DIR/artifacts/ci-journey/class-attempts/app/Saturated--0123456789abcdef/attempt-1/android-test-outputs/androidTest-results/connected"
-mkdir -p "$signature_dir"
-{
-  echo '<?xml version="1.0" encoding="UTF-8"?>'
-  echo "<testsuite name=\"$SATURATED_CLASS\" tests=\"1\">"
-  echo "  <testcase name=\"saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide\" classname=\"$SATURATED_CLASS[emulator-5554 - 15]\">"
-  echo '    <failure message="java.lang.AssertionError: The real system input-method window never became visible.">at org.junit.Assert.fail(Assert.java:89)</failure>'
-  echo '  </testcase>'
-  echo '</testsuite>'
-} > "$signature_dir/TEST-emulator-5554-15_Saturated-1.xml"
+seed_real_ime_classify_fixture() {
+  local owner_detail="$1"
+  local signature_dir
+  setup_classify_dir
+  seed_summary \
+    '# Per-push CI journey suite — summary' \
+    'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
+    "- \`$SATURATED_CLASS\`"
+  signature_dir="$CLASSIFY_DIR/artifacts/ci-journey/class-attempts/app/Saturated--0123456789abcdef/attempt-1/android-test-outputs/androidTest-results/connected"
+  mkdir -p "$signature_dir"
+  {
+    echo '<?xml version="1.0" encoding="UTF-8"?>'
+    echo "<testsuite name=\"$SATURATED_CLASS\" tests=\"1\">"
+    echo "  <testcase name=\"saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide\" classname=\"${SATURATED_CLASS}[emulator-5554 - 15]\">"
+    echo "    <failure message=\"java.lang.AssertionError: The real system input-method window never became visible. $owner_detail\">at org.junit.Assert.fail(Assert.java:89)</failure>"
+    echo '  </testcase>'
+    echo '</testsuite>'
+  } > "$signature_dir/TEST-emulator-5554-15_Saturated-1.xml"
+}
+
+seed_real_ime_classify_fixture \
+  'app_window_focused=false active_window_pkg=com.google.android.apps.nexuslauncher'
 expect_classify "#1800 real-IME signature" INFRA real_ime_precondition 1 failure failure failure failure false true true
-pass "(x1b) #1800's captured real-IME signature branch still fires (and now names itself)"
+pass "(x1b) #1800's captured real-IME signature fires only with an explicit foreign owner"
+
+seed_real_ime_classify_fixture \
+  'app_window_focused=false active_window_pkg=com.pocketshell.app.i1882'
+expect_classify "#1882 app-owned real-IME failure" RED first_attempt_journey_failure 1 failure failure failure failure false true true
+
+for unsafe_owner_case in \
+  "missing:" \
+  "malformed:active_window_pkg=not/a/package" \
+  "ambiguous:active_window_pkg=android"
+do
+  unsafe_owner_label="${unsafe_owner_case%%:*}"
+  unsafe_owner_detail="${unsafe_owner_case#*:}"
+  seed_real_ime_classify_fixture "$unsafe_owner_detail"
+  expect_classify \
+    "#1882 $unsafe_owner_label owner evidence" \
+    RED first_attempt_journey_failure 1 \
+    failure failure failure failure false true true
+done
+pass "(x1c) app-owned, missing, malformed, and ambiguous owner evidence stays RED through the real workflow body"
 
 # WITH build-phase evidence: only the failure branches switch to the
 # cold-build attribution — and their severity is UNCHANGED (still exit 1).

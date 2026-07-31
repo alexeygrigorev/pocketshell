@@ -39,25 +39,31 @@ Identify all `failure` runs since the last known-green commit. Group consecutive
 When the target run is still queued or in progress, run `scripts/watch-ci.py`
 once as a transient user unit. The unit survives if the agent harness kills the
 launching shell, while `--log-file` preserves both heartbeats and the watcher's
-final human summary + JSON:
+final human summary + JSON. Keep the transient service's output independent of
+the launcher: stdout and stderr go to the unit journal, never a launcher-owned
+`--pipe`:
 
 ```bash
 unit="ps-ci-watch-<RUN_ID>"
 watch_log="$PWD/build/$unit.log"
 mkdir -p "$PWD/build"
-systemd-run --user --unit="$unit" --pipe --wait \
+systemd-run --user --unit="$unit" --wait \
+  -p StandardOutput=journal \
+  -p StandardError=journal \
   "$PWD/scripts/watch-ci.py" \
   --run-id <RUN_ID> \
   --repo alexeygrigorev/pocketshell \
   --log-file "$watch_log"
 ```
 
-Do not add `--collect` to this recipe. Immediate collection can reap and reset
-the transient unit before `ExecMainStatus` is read, turning a real non-zero
-watcher status into a misleading zero. If the launching shell survives, its
-return code is useful; if it does not, read the final JSON line from
-`"$watch_log"` and the unit journal. After recording the evidence, reap a
-failed retained unit explicitly:
+Do not add `--collect` to this recipe. Do not add `--pipe` either: it makes the
+service's stdout/stderr depend on the `systemd-run` client's file descriptors,
+so a later watcher write can fail if the launching shell disappears even though
+the transient service survived. Immediate collection can reap and reset the
+unit before `ExecMainStatus` is read, turning a real non-zero watcher status
+into a misleading zero. If the launching shell survives, its return code is
+useful; if it does not, read the final JSON line from `"$watch_log"` and the unit
+journal. After recording the evidence, reap a failed retained unit explicitly:
 
 ```bash
 tail -n 30 "$watch_log"

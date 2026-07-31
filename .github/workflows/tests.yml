@@ -239,6 +239,16 @@ jobs:
           chmod +x scripts/test-notification-permission-fixture.sh
           scripts/test-notification-permission-fixture.sh
 
+      # Issue #1876 round 2: GitHub checks the committed Docker test key out as
+      # 0644, and OpenSSH rejects it before the mobile-RTT journey can start.
+      # Drive the workflow's real readiness block from that checkout mode and
+      # require owner-only permissions before its first SSH auth proof. Fast,
+      # JVM-free, Docker-free, and emulator-free (docker/ssh are stubbed).
+      - name: Mobile-RTT proxy SSH-readiness guard (issue #1876)
+        run: |
+          chmod +x scripts/test-ci-mobile-rtt-readiness.sh
+          scripts/test-ci-mobile-rtt-readiness.sh
+
       # Issue #1842: `connected-test.sh --pool` promised concurrent journey
       # lanes distinct (emulator, agents-port) fixtures and did not deliver —
       # the agents-port flock was CHECKOUT-anchored (the #1657 defect, fixed in
@@ -1038,6 +1048,10 @@ jobs:
           PACKET_LOSS_DELAY_MS: "200"
           PACKET_LOSS_JITTER_MS: "40"
         run: |
+          # GitHub checks repository files out as 0644. Secure the private key
+          # before the first OpenSSH readiness attempt; OpenSSH rejects it
+          # otherwise and no load-bearing journey reaches the proxy.
+          chmod 600 tests/docker/test_key
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps packet-loss-proxy
           for attempt in $(seq 1 30); do
             if ssh -i tests/docker/test_key -p 2229 \

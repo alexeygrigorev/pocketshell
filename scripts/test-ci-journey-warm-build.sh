@@ -32,13 +32,14 @@ REAL_SUITE="$SCRIPT_DIR/ci-journey-suite.sh"
 CLASS_LOOP="$SCRIPT_DIR/ci-journey-class-loop-functions.sh"
 WARM_HELPER="$SCRIPT_DIR/ci-journey-warm-build-functions.sh"
 BUILD_PHASE="$SCRIPT_DIR/ci-journey-build-phase-timeout.sh"
+BUILD_FAILURE="$SCRIPT_DIR/ci-journey-build-phase-failure.sh"
 WRITER="$SCRIPT_DIR/ci-journey-write-shard-verdict.sh"
 AGG="$SCRIPT_DIR/ci-journey-aggregate-verdict.sh"
 
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
-for required in "$REAL_SUITE" "$CLASS_LOOP" "$WARM_HELPER" "$BUILD_PHASE" \
+for required in "$REAL_SUITE" "$CLASS_LOOP" "$WARM_HELPER" "$BUILD_PHASE" "$BUILD_FAILURE" \
   "$WRITER" "$AGG" "$WORKFLOW"; do
   [[ -f "$required" ]] || fail "missing required file: $required"
 done
@@ -690,7 +691,8 @@ CLASSIFY_DIR="$SANDBOX/classify-run"
 setup_classify_dir() {
   rm -rf "$CLASSIFY_DIR"
   mkdir -p "$CLASSIFY_DIR/scripts" "$CLASSIFY_DIR/artifacts/ci-journey"
-  cp "$WRITER" "$BUILD_PHASE" "$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh" \
+  cp "$WRITER" "$BUILD_PHASE" "$BUILD_FAILURE" \
+    "$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh" \
     "$SCRIPT_DIR/ci-journey-infra-signature.sh" "$SCRIPT_DIR/ci-journey-infra-signature.py" \
     "$CLASSIFY_DIR/scripts/"
 }
@@ -739,6 +741,11 @@ run_classify() {
       bash "$CLASSIFY_BODY" 2>&1
   )"
   CLASSIFY_RC=$?
+  if grep -Fq 'ci-journey-build-phase-failure.sh: No such file or directory' \
+      <<<"$CLASSIFY_OUT"; then
+    printf '%s\n' "$CLASSIFY_OUT"
+    fail "(x) extracted classify body could not run the production build-phase-failure helper"
+  fi
   CLASSIFY_TOKEN="$(sed -n 's/^shard_verdict=//p' "$gh")"
   CLASSIFY_REASON="$(sed -n 's/^shard_verdict_reason=//p' "$gh")"
 }
@@ -799,6 +806,12 @@ pass "(x1) every classify branch writes the expected token + reason + exit code,
 # both sides of #1882's owner boundary: app-owned and unsafe/ambiguous evidence
 # must remain RED rather than inheriting the foreign-owner relief valve.
 SATURATED_CLASS="com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"
+SATURATED_KEY="$(
+  bash -c 'source "$1"; journey_class_artifact_key "$2"' \
+    _ "$SCRIPT_DIR/ci-journey-budget-functions.sh" "$SATURATED_CLASS"
+)" || fail "(x/#1800) could not derive the production artifact key for $SATURATED_CLASS"
+[[ "$SATURATED_KEY" == "$SATURATED_CLASS"--[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] ]] \
+  || fail "(x/#1800) malformed production artifact key: $SATURATED_KEY"
 seed_real_ime_classify_fixture() {
   local owner_detail="$1"
   local signature_dir
@@ -807,7 +820,7 @@ seed_real_ime_classify_fixture() {
     '# Per-push CI journey suite — summary' \
     'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
     "- \`$SATURATED_CLASS\`"
-  signature_dir="$CLASSIFY_DIR/artifacts/ci-journey/class-attempts/app/Saturated--0123456789abcdef/attempt-1/android-test-outputs/androidTest-results/connected"
+  signature_dir="$CLASSIFY_DIR/artifacts/ci-journey/class-attempts/app/$SATURATED_KEY/attempt-1/android-test-outputs/app/build/outputs/androidTest-results/connected/debug"
   mkdir -p "$signature_dir"
   {
     echo '<?xml version="1.0" encoding="UTF-8"?>'

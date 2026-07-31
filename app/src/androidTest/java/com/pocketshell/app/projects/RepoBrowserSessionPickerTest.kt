@@ -58,6 +58,13 @@ class RepoBrowserSessionPickerTest {
                     folderLabel = repoFolderLabel(repoPath),
                     onCancel = {},
                     onCreate = { choice = it },
+                    // Mirror RepoBrowserScreen's production picker wiring.
+                    // The standalone content fallback is only the trailing
+                    // basename and stopped representing this path when the
+                    // editable session-name field landed (#1184/#1868).
+                    deriveDefaultName = { path ->
+                        defaultSessionBaseName(path, conventionalRemoteHome("alexey"))
+                    },
                 )
             }
         }
@@ -101,6 +108,11 @@ class RepoBrowserSessionPickerTest {
                     folderLabel = repoFolderLabel(repoPath),
                     onCancel = {},
                     onCreate = { choice = it },
+                    // Keep this content-only fixture on the exact production
+                    // RepoBrowserScreen name-prefill path (#1184/#1868).
+                    deriveDefaultName = { path ->
+                        defaultSessionBaseName(path, conventionalRemoteHome("alexey"))
+                    },
                 )
             }
         }

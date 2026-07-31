@@ -383,13 +383,14 @@ class FolderListSessionClickTest {
 
     @Test
     fun multiWindowAgentSessionDoesNotRepeatAgentTypeOrBadges() {
-        // #675: a session with TWO Claude windows (w0, w1) is broken out into
+        // #675/#782: a session with TWO Claude windows (w0, w1) is broken out into
         // per-window child rows. The agent type used to render THREE times: the
         // parent's inline `w0 Claude · idle · w1 Claude` summary, the parent
         // badge, and each window-row badge. After the fix the parent drops the
         // summary + badge and the window rows drop their badges, so "Claude"
-        // appears once per window (in the `w0 claude` / `w1 claude` titles) and
-        // NO capitalized "Claude" badge/summary text survives.
+        // appears once per window as the command hint in the canonical
+        // `<session> [wN] <hint>` title, and NO capitalized "Claude"
+        // badge/summary text survives.
         runBlocking {
             db.projectRootDao().insert(
                 ProjectRootEntity(
@@ -466,7 +467,8 @@ class FolderListSessionClickTest {
             ).fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Both window rows are present, each titled `w<n> claude`.
+        // Both window rows are present, each using the #782 external-window
+        // title contract: `<session> [wN] <hint>`.
         compose.onNodeWithTag(
             folderSessionWindowRowTestTag(projectPath, sessionName, 0, "claude"),
             useUnmergedTree = true,
@@ -475,8 +477,8 @@ class FolderListSessionClickTest {
             folderSessionWindowRowTestTag(projectPath, sessionName, 1, "claude"),
             useUnmergedTree = true,
         ).assertExists()
-        compose.onNodeWithText("w0 claude").assertExists()
-        compose.onNodeWithText("w1 claude").assertExists()
+        compose.onNodeWithText("$sessionName [w0] claude").assertExists()
+        compose.onNodeWithText("$sessionName [w1] claude").assertExists()
 
         // The parent's trailing agent badge is gone.
         assertTrue(
@@ -488,8 +490,9 @@ class FolderListSessionClickTest {
         )
 
         // No capitalized "Claude" badge / inline-summary text survives — the
-        // agent type is conveyed only via the lowercase `w0 claude` titles and
-        // the status dots. (Window titles use the lowercase command.)
+        // agent type is conveyed only via the lowercase command hint in the
+        // `[wN]` titles and the status dots. (Window titles use the lowercase
+        // command.)
         assertTrue(
             "capitalized Claude badge/summary text should not appear thrice",
             compose.onAllNodesWithText("Claude", useUnmergedTree = true)

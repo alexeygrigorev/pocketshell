@@ -52,17 +52,12 @@ import java.io.FileOutputStream
  *  2. The app reads it through the PRODUCTION [SessionCardsRemoteSource.getCards]
  *     over the SAME warm [SshSession] (D21 — no new connection) and parses it to
  *     a [SessionCardsRemoteSource.ChecklistCard].
- *  3. [ChecklistChip] / [ChecklistCardsContent] render that real feed; the test
- *     asserts the card + its items ACTUALLY appear in the rendered feed (not a
- *     fabricated in-memory card). Correction (#1821): those two are NOT what the
- *     session screen mounts — it mounts [SessionCardFeedSheet] ->
- *     `SessionCardFeedContent` (`TmuxSessionSheets.kt:77`), and neither
- *     [ChecklistChip] nor [ChecklistCardsContent] has any production caller. The
- *     rows are drawn by the same [ChecklistCardRenderer] either way, so this
- *     journey is not vacuous, but it proves that renderer through a wrapper the
- *     product does not ship. Repointing it at `SessionCardFeedContent` is a
- *     follow-up; it is a behavioural change to a gate-wired journey and was
- *     deliberately kept out of #1821.
+ *  3. [SessionCardFeedChip] / [SessionCardFeedContent] render that real feed —
+ *     the same generic feed composables the session screen mounts — and the test
+ *     asserts the card + its items ACTUALLY appear (not a fabricated in-memory
+ *     card). Issue #1872 hard-cut the zero-production-caller checklist wrapper
+ *     that this journey used before, so the gate cannot pass against UI the
+ *     product does not ship.
  *  4. Tapping an item drives the PRODUCTION
  *     [SessionCardsRemoteSource.setChecklistItemChecked] tick exec over the same
  *     warm session.
@@ -178,9 +173,7 @@ class SessionChecklistPushJourneyDockerTest {
         //     the feed in app state and re-read it after each tick so the
         //     render reflects the host store, exactly like the VM does.
         // ---------------------------------------------------------------
-        var renderedCards by mutableStateOf(
-            feed.cards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>(),
-        )
+        var renderedCards by mutableStateOf(feed.cards)
 
         // The production toggle: tick over the warm session, then re-read the
         // host store (mirrors TmuxSessionViewModel.toggleChecklistItem).
@@ -201,21 +194,29 @@ class SessionChecklistPushJourneyDockerTest {
                 withTimeout(20_000) { source.getCards(s, sessionName) }
             }
             renderedCards = refreshed.cards
-                .filterIsInstance<SessionCardsRemoteSource.ChecklistCard>()
         }
 
         val toggleRequests = mutableListOf<Triple<String, String, Boolean>>()
+        val interactions = object : SessionCardInteractions {
+            override fun onToggleChecklistItem(
+                cardId: String,
+                itemId: String,
+                checked: Boolean,
+            ) {
+                toggleRequests += Triple(cardId, itemId, checked)
+            }
+
+            override fun onSetNoteRead(cardId: String, read: Boolean) = Unit
+        }
         composeRule.setContent {
             PocketShellTheme {
-                val chip = checklistChipState(renderedCards)
+                val chip = cardFeedChipState(renderedCards)
                 if (chip != null) {
-                    ChecklistChip(state = chip, onClick = {})
+                    SessionCardFeedChip(state = chip, onClick = {})
                 }
-                ChecklistCardsContent(
+                SessionCardFeedContent(
                     cards = renderedCards,
-                    onToggle = { cardId, itemId, isChecked ->
-                        toggleRequests += Triple(cardId, itemId, isChecked)
-                    },
+                    interactions = interactions,
                     onClose = {},
                 )
             }
@@ -223,7 +224,7 @@ class SessionChecklistPushJourneyDockerTest {
 
         // The chip is present (count chip over the real feed) and the card +
         // every pushed item are ACTUALLY rendered in the production sheet.
-        composeRule.onNodeWithTag(SESSION_CHECKLIST_CHIP_TAG).assertIsDisplayed()
+        composeRule.onNodeWithTag(SESSION_CARD_FEED_CHIP_TAG).assertIsDisplayed()
         composeRule.onNodeWithTag(SESSION_CHECKLIST_CARD_TAG_PREFIX + card.id)
             .assertIsDisplayed()
         composeRule.onNodeWithText("Build the app").assertIsDisplayed()
@@ -274,7 +275,8 @@ class SessionChecklistPushJourneyDockerTest {
         // The rendered sheet now shows that item checked (host-backed state).
         assertTrue(
             "the rendered card must reflect the checked item",
-            renderedCards.single().checkedIds.contains("run-the-tests-1"),
+            renderedCards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>()
+                .single().checkedIds.contains("run-the-tests-1"),
         )
 
         // ---------------------------------------------------------------
@@ -309,21 +311,20 @@ class SessionChecklistPushJourneyDockerTest {
             feed.cards.isEmpty(),
         )
 
-        val cards = feed.cards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>()
         assertNull(
-            "checklistChipState must be null for an empty feed (no chip)",
-            checklistChipState(cards),
+            "cardFeedChipState must be null for an empty feed (no chip)",
+            cardFeedChipState(feed.cards),
         )
 
         composeRule.setContent {
             PocketShellTheme {
-                val chip = checklistChipState(cards)
+                val chip = cardFeedChipState(feed.cards)
                 if (chip != null) {
-                    ChecklistChip(state = chip, onClick = {})
+                    SessionCardFeedChip(state = chip, onClick = {})
                 }
             }
         }
-        composeRule.onNodeWithTag(SESSION_CHECKLIST_CHIP_TAG).assertDoesNotExist()
+        composeRule.onNodeWithTag(SESSION_CARD_FEED_CHIP_TAG).assertDoesNotExist()
     } }
 
     /**
@@ -377,9 +378,7 @@ class SessionChecklistPushJourneyDockerTest {
         )
         assertNull(
             "no chip renders for the broken read path",
-            checklistChipState(
-                wrong.cards.filterIsInstance<SessionCardsRemoteSource.ChecklistCard>(),
-            ),
+            cardFeedChipState(wrong.cards),
         )
     } }
 

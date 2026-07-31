@@ -105,6 +105,72 @@ Look for the actual failure signal, not the framework chrome. Common patterns:
 - **Build failure (Kotlin compile error, missing import)** — almost always a commit defect from the last push. Easy to spot.
 - **Flaky network-dependent test** — repeatable across reruns means infra, one-off means flake. Use `gh run rerun <RUN_ID>` to confirm; if a rerun goes green, file as flake (or comment on existing flake-tracker issue) and exit.
 
+#### 2.1 Definitive dead-channel measurement (issue #1883)
+
+The former #1863 wedge oracle — foreground
+`gate closed bg=false appActive=true hasClient=true disconnected=true ctrl=Live`
+— is obsolete. After #1863, foreground `Live + disconnected` selects
+`LivenessProbeGate.DeadChannel`; `gate closed` is logged only for
+`LivenessProbeGate.Closed`. A zero count from the old grep therefore says
+nothing about whether the dead-wire state occurred.
+
+Use the surviving recovery-declaration signal:
+
+```text
+liveness-probe DECLARED DROP (control channel definitively closed)
+```
+
+After downloading one Android-report shard artifact into `<REPORT_ROOT>`, run:
+
+```bash
+scripts/ci-journey-dead-channel-oracle.py <REPORT_ROOT>
+```
+
+The counter deliberately enforces these evidence rules:
+
+- It scans only
+  `<REPORT_ROOT>/artifacts/ci-journey/class-attempts`. Do not also scan the
+  uploaded `artifacts/ci-journey-attempt-1` snapshot: that is a duplicate of
+  evidence already present in the canonical class-attempt tree.
+- A missing/empty canonical tree, or any attempt with neither a readable
+  `device-logcat.txt` nor readable per-method UTP logcat, is **no observation**,
+  not zero events. The tool exits non-zero; do not replace that error with a
+  hand-written zero row.
+- For each class attempt, count the signal in `device-logcat.txt`; separately
+  aggregate it across that attempt's per-method UTP `logcat-*.txt` files; report
+  the maximum of those two counts. Neither source is a guaranteed superset of
+  the other, and adding them double-counts events captured in both.
+- Keep attempts as separate rows. Never sum attempt 1 and attempt 2, and never
+  turn a retry pair into one larger number.
+- `ReconnectStormLivelockE2eTest` is the specificity control. Its expected
+  count is zero even when it emits many raw `gate closed` lines; a nonzero count
+  needs line-level inspection before any product claim.
+
+Empirical post-fix specificity evidence is preserved in exact-main run
+`30602512103`: ReconnectStorm attempt 1 has 40 raw `gate closed` lines in
+`device-logcat.txt`, 40 across its UTP method logcats (max = 40, never summed),
+and zero replacement events. The same green run's StableWifi and LongRunning
+healthy attempts also have zero replacement events.
+
+The post-#1863 scale is deliberately binary event presence:
+
+- `ZERO_OBSERVED` — zero definitive-close declarations in the observed attempt.
+  This is **not** a global “healthy” verdict; it only says this event was absent
+  from the available logs.
+- `DEAD_CHANNEL_OBSERVED` — one or more definitive-close declarations. The raw
+  count is the number of declarations, not a severity score.
+
+Calibration evidence: the production-faithful connected
+`Issue895SwitchWhileBlackBandJourneyE2eTest#definitiveClosedControlChannelEmitsReplacementOracle`
+waits for the real `tmux-connect-ready` milestone plus reveal/controller
+`Live`, then closes that Docker-backed `-CC` client. Five consecutive
+repository-wrapper attempts pass 1/1 with zero skips; each UTP log contains
+exactly one replacement declaration. The final attempt measures device=1 /
+aggregate UTP=1 / max=1: `DEAD_CHANNEL_OBSERVED`. Exact-main run
+`30602512103` supplies both zero controls named above. The old 26 / 4 / 0
+thresholds measured repeated emissions from a different, now-unreachable gate
+and must never be reused or mapped onto these categories.
+
 ### 3. Classify the failure
 
 #### 3.0 Diff-aware guard — run this BEFORE the table (mandatory, #806)

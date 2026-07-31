@@ -150,6 +150,37 @@ class PromptComposerAcceptanceDismissalTest {
         assertEquals(OutboundState.Queued, queue.itemsFor(target.sessionKey).single().state)
     }
 
+    @Test
+    fun deliveryBarrierReleasesAfterDecisionAndWhenScreenOwnerDisposes() = runTest {
+        val coordinator = ComposerHandoffAcceptanceCoordinator()
+        val decided = ComposerHandoffAcceptance("1/session-a", 1L, "decided")
+        val disposed = ComposerHandoffAcceptance("1/session-a", 2L, "disposed")
+        var decidedDeliveryReleased = false
+        var disposedDeliveryReleased = false
+        coordinator.publish(decided)
+        coordinator.publish(disposed)
+        backgroundScope.launch {
+            coordinator.awaitReduction(decided.outboundQueueItemId)
+            decidedDeliveryReleased = true
+        }
+        backgroundScope.launch {
+            coordinator.awaitReduction(disposed.outboundQueueItemId)
+            disposedDeliveryReleased = true
+        }
+        runCurrent()
+
+        assertFalse(decidedDeliveryReleased)
+        assertFalse(disposedDeliveryReleased)
+        coordinator.completeReduction(decided.outboundQueueItemId)
+        runCurrent()
+        assertTrue(decidedDeliveryReleased)
+        assertFalse(disposedDeliveryReleased)
+
+        coordinator.completeAllReductions()
+        runCurrent()
+        assertTrue(disposedDeliveryReleased)
+    }
+
     private fun kotlinx.coroutines.test.TestScope.collectAcceptances(
         vm: PromptComposerViewModel,
     ): MutableList<ComposerHandoffAcceptance> {

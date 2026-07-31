@@ -170,10 +170,10 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             .performClick()
         compose.waitUntil(5_000) {
             reductionEntered.isCompleted &&
-                sendEntered.isCompleted &&
                 vm.uiState.value.sendInFlight &&
                 queue.itemsFor(targetKey).size == 1
         }
+        assertFalse("delivery must wait for the saturated sheet's close-or-keep decision", sendEntered.isCompleted)
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performClick()
@@ -183,7 +183,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 drafts.load(targetKey) == LONG_DRAFT_B
         }
         reductionGate.complete(Unit)
-        compose.waitForIdle()
+        compose.waitUntil(5_000) { sendEntered.isCompleted }
         assertTrue("draft B must retain ownership of the saturated sheet", visible.value)
         assertPromptAExactlyOnce(queue, targetKey)
         hideRealImeAndAssertHidden(
@@ -542,10 +542,10 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             .performClick()
         compose.waitUntil(5_000) {
             reductionEntered.isCompleted &&
-                sendEntered.isCompleted &&
                 vm.uiState.value.sendInFlight &&
                 queue.itemsFor(targetKey).size == 1
         }
+        assertFalse("delivery must wait for the saturated sheet's close-or-keep decision", sendEntered.isCompleted)
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performClick()
             .performTextInput(LONG_DRAFT_B)
@@ -554,7 +554,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 drafts.load(targetKey) == LONG_DRAFT_B
         }
         reductionGate.complete(Unit)
-        compose.waitForIdle()
+        compose.waitUntil(5_000) { sendEntered.isCompleted }
         assertTrue("draft B must retain ownership of the saturated sheet", visible.value)
         assertPromptAExactlyOnce(queue, targetKey)
         hideRealImeAndAssertHidden(

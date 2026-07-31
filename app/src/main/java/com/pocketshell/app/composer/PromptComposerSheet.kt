@@ -59,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -1497,19 +1498,40 @@ public fun PromptComposerSendDispatcher(
     val currentOnSend by rememberUpdatedState(onSend)
     val currentOnDelivered by rememberUpdatedState(onDelivered)
     LaunchedEffect(viewModel) {
-        viewModel.handoffAcceptances.collect { acceptance ->
-            // Issue #695 recurrence: dismissal belongs to local acceptance,
-            // not the 5–10s host delivery callback. Pauseable test seam makes
-            // the post-acceptance/new-draft race deterministic; production is
-            // a no-op and reduces immediately.
-            viewModel.beforeHandoffAutoCloseReductionForTest()
-            if (viewModel.consumeHandoffAcceptanceForAutoClose(acceptance)) {
-                currentOnDelivered()
+        try {
+            viewModel.handoffAcceptances.collect { acceptance ->
+                try {
+                    // Issue #695 recurrence: dismissal belongs to local acceptance,
+                    // not the 5–10s host delivery callback. Pauseable test seam makes
+                    // the post-acceptance/new-draft race deterministic; production is
+                    // a no-op and reduces immediately.
+                    viewModel.beforeHandoffAutoCloseReductionForTest()
+                    if (viewModel.consumeHandoffAcceptanceForAutoClose(acceptance)) {
+                        currentOnDelivered()
+                        // The state write above only schedules recomposition. Do not
+                        // let a synchronous host write monopolise Main before the
+                        // screen owner has removed the accepted empty sheet.
+                        withFrameNanos { }
+                    }
+                } finally {
+                    // Target changes and newer drafts intentionally reject close;
+                    // that decision must release wire delivery immediately.
+                    viewModel.completeHandoffAcceptanceReduction(acceptance)
+                }
             }
+        } finally {
+            // Screen disposal cancels both collectors. Never strand a durable
+            // row behind a reduction whose UI owner no longer exists.
+            viewModel.completeAllHandoffAcceptanceReductions()
         }
     }
     LaunchedEffect(viewModel) {
         viewModel.sendRequests.collect { request ->
+            // A durable row may become drainable on another coroutine as soon
+            // as its queue commit lands. Keep host/TUI work behind the local
+            // acceptance reduction so a slow synchronous write cannot leave
+            // the empty sheet showing "Sending…" until terminal delivery.
+            viewModel.awaitHandoffAcceptanceReduction(request.outboundQueueItemId)
             // Issue #745: bound the send so the in-flight state can never hang.
             // The host `onSend` is a connect-on-action call (#548) that may kick
             // a reconnect and await the live client; cap it at [SEND_TIMEOUT_MS]

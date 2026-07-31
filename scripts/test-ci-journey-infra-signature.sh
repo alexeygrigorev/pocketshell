@@ -4,11 +4,13 @@
 # it can produce.
 #
 # The load-bearing property: a shard whose ONLY failure is the CI swiftshader
-# AVD's inability to raise a real system input-method window must aggregate to
-# RE-RUN (neutral green), while a shard carrying ANY genuine journey assertion
-# failure — including a containment/anchor failure in the SAME class, in the
-# same run — must still aggregate to RED. Both outcomes are DEMONSTRATED here by
-# driving the real classifier and then the real aggregate reducer, not argued.
+# AVD's inability to raise a real system input-method window under a resolved
+# foreign active-window owner must aggregate to RE-RUN (neutral green), while a
+# shard carrying ANY genuine journey assertion failure — including an app-owned
+# focus/serviceability failure or a containment/anchor failure in the SAME
+# class, in the same run — must still aggregate to RED. Both outcomes are
+# DEMONSTRATED here by driving the real classifier and then the real aggregate
+# reducer, not argued.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +34,10 @@ SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 REAL_IME_MESSAGE='java.lang.AssertionError: The real system input-method window never became visible.'
+APP_OWNED_REAL_IME_DETAIL='app_window_focused=false active_window_pkg=com.pocketshell.app.i1882 active_window_class=android.widget.FrameLayout composer_editor_served=false'
+FOREIGN_REAL_IME_DETAIL='app_window_focused=false active_window_pkg=com.google.android.apps.nexuslauncher active_window_class=com.android.launcher3.Launcher'
+AMBIGUOUS_ANR_REAL_IME_DETAIL='app_window_focused=false active_window_pkg=android active_window_class=com.android.server.am.AppNotRespondingDialog framework_error_dialog=android:id/aerr_wait'
+RESIDUAL_IME_DETAIL='physicalImeWindows=[package=com.google.android.inputmethod.latin active=false focused=false bounds=Rect(0, 1517 - 1080, 2400)]'
 CONTAINMENT_MESSAGE="java.lang.AssertionError: Node 'prompt-composer-send-enter' must stay above the same-root keyboard boundary. node=Rect.fromLTRB(0.0, 1500.0, 1080.0, 1654.0) keyboardTopPx=1626.0"
 SATURATED_CLASS="com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"
 
@@ -102,13 +108,48 @@ write_case_xml() {
     local spec method outcome
     for spec in "$@"; do
       method="${spec%%:*}"
-      outcome="${spec##*:}"
+      outcome="${spec#*:}"
       echo "  <testcase name=\"$method\" classname=\"$class[emulator-5554 - 15]\">"
       case "$outcome" in
         pass) ;;
         realime)
-          echo "    <failure message=\"$REAL_IME_MESSAGE\">at org.junit.Assert.fail(Assert.java:89)"
+          echo "    <failure message=\"$REAL_IME_MESSAGE $FOREIGN_REAL_IME_DETAIL\">at org.junit.Assert.fail(Assert.java:89)"
           echo "at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.requestRealImeAndAssertVisible(PromptComposerSaturatedImeAnchorE2eTest.kt:814)</failure>"
+          ;;
+        realime-app)
+          echo "    <failure message=\"$REAL_IME_MESSAGE $APP_OWNED_REAL_IME_DETAIL\">at org.junit.Assert.fail(Assert.java:89)"
+          echo "at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.requestRealImeAndAssertVisible(PromptComposerSaturatedImeAnchorE2eTest.kt:814)</failure>"
+          ;;
+        realime-app-residual)
+          echo "    <failure message=\"$REAL_IME_MESSAGE $APP_OWNED_REAL_IME_DETAIL $RESIDUAL_IME_DETAIL\">at org.junit.Assert.fail(Assert.java:89)"
+          echo "at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.requestRealImeAndAssertVisible(PromptComposerSaturatedImeAnchorE2eTest.kt:814)</failure>"
+          ;;
+        realime-anr-ambiguous)
+          echo "    <failure message=\"$REAL_IME_MESSAGE $AMBIGUOUS_ANR_REAL_IME_DETAIL\">at org.junit.Assert.fail(Assert.java:89)"
+          echo "at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.requestRealImeAndAssertVisible(PromptComposerSaturatedImeAnchorE2eTest.kt:814)</failure>"
+          ;;
+        realime-foreign-residual)
+          echo "    <failure message=\"$REAL_IME_MESSAGE $FOREIGN_REAL_IME_DETAIL $RESIDUAL_IME_DETAIL\">at org.junit.Assert.fail(Assert.java:89)"
+          echo "at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.requestRealImeAndAssertVisible(PromptComposerSaturatedImeAnchorE2eTest.kt:814)</failure>"
+          ;;
+        realime-no-owner)
+          echo "    <failure message=\"$REAL_IME_MESSAGE $RESIDUAL_IME_DETAIL\">at org.junit.Assert.fail(Assert.java:89)"
+          echo "at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.requestRealImeAndAssertVisible(PromptComposerSaturatedImeAnchorE2eTest.kt:814)</failure>"
+          ;;
+        realime-bare)
+          echo "    <failure message=\"$REAL_IME_MESSAGE\">at org.junit.Assert.fail(Assert.java:89)</failure>"
+          ;;
+        realime-unavailable-owner)
+          echo "    <failure message=\"$REAL_IME_MESSAGE app_window_focused=false active_window_pkg=&lt;unavailable&gt;\">at org.junit.Assert.fail(Assert.java:89)</failure>"
+          ;;
+        realime-malformed-owner)
+          echo "    <failure message=\"$REAL_IME_MESSAGE app_window_focused=false active_window_pkg=not/a/package\">at org.junit.Assert.fail(Assert.java:89)</failure>"
+          ;;
+        realime-prefix-owner)
+          echo "    <failure message=\"$REAL_IME_MESSAGE app_window_focused=false active_window_pkg=com.pocketshell.appspoof\">at org.junit.Assert.fail(Assert.java:89)</failure>"
+          ;;
+        realime-mixed-owners)
+          echo "    <failure message=\"$REAL_IME_MESSAGE $FOREIGN_REAL_IME_DETAIL later_active_window_pkg=com.pocketshell.app.i1882 active_window_pkg=com.pocketshell.app.i1882\">at org.junit.Assert.fail(Assert.java:89)</failure>"
           ;;
         containment)
           echo "    <failure message=\"$CONTAINMENT_MESSAGE\">at org.junit.Assert.fail(Assert.java:89)</failure>"
@@ -274,6 +315,138 @@ run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
 [[ "$SIG_CLASS" == "product_failure" ]] \
   || { printf '%s\n' "$SIG_OUT"; fail "(h) an <error> element must be product_failure, got '$SIG_CLASS'"; }
 pass "(h) a harness <error> element -> product_failure"
+
+echo
+echo "== #1882 real-IME signature owner gate =="
+
+# (x1) LOAD-BEARING RED. The existing #1800 classifier matches only the
+# assertion sentence, so it currently swallows this concrete product failure:
+# the composer editor lost serviceability to a PocketShell-owned window. The
+# applicationIdSuffix shape is the real per-worktree CI package family.
+root="$SANDBOX/x1-app-owned"; mkdir -p "$root"
+write_summary "$root" 2338 "$SATURATED_CLASS"
+write_case_xml "$root" "$SATURATED_CLASS" 1 \
+  "saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide:realime-app"
+write_case_xml "$root" "$SATURATED_CLASS" 2 \
+  "saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide:realime-app"
+run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+[[ "$SIG_CLASS" == "product_failure" ]] \
+  || { printf '%s\n' "$SIG_OUT"; fail "(x1) an app-owned composer focus/serviceability failure must stay product_failure, got '$SIG_CLASS'"; }
+mkdir -p "$root/ci-journey-attempt-1"
+cp -a "$root/ci-journey" "$root/ci-journey-attempt-1/ci-journey"
+shard_verdict_for "$root"
+[[ "$SHARD_TOKEN" == "RED" ]] \
+  || { printf '%s\n' "$SHARD_VERDICT_OUT"; fail "(x1) an app-owned failure must keep the shard RED, got '$SHARD_TOKEN'"; }
+verdicts="$SANDBOX/verdicts-x1"; mkdir -p "$verdicts"
+write_shard_token "$verdicts" 0 "$SHARD_TOKEN"
+write_shard_token "$verdicts" 1 CLEAN
+write_shard_token "$verdicts" 2 CLEAN
+run_agg "$verdicts"
+[[ "$AGG_VERDICT" == "RED" && "$AGG_RC" -eq 1 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(x1) app-owned evidence must aggregate RED/exit1, got $AGG_VERDICT/exit$AGG_RC"; }
+pass "(x1) app-owned real-IME failure -> product_failure -> shard/aggregate RED"
+
+# (x2) Control: the narrowing must not delete #1800's environment relief valve.
+# An explicitly identified non-PocketShell active-window owner remains the
+# captured environmental precondition.
+root="$SANDBOX/x2-foreign"; mkdir -p "$root"
+write_summary "$root" 2338 "$SATURATED_CLASS"
+write_case_xml "$root" "$SATURATED_CLASS" 1 \
+  "saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide:realime"
+run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+[[ "$SIG_CLASS" == "real_ime_precondition" ]] \
+  || { printf '%s\n' "$SIG_OUT"; fail "(x2) an explicitly foreign active-window owner must remain real_ime_precondition, got '$SIG_CLASS'"; }
+mkdir -p "$root/ci-journey-attempt-1"
+cp -a "$root/ci-journey" "$root/ci-journey-attempt-1/ci-journey"
+shard_verdict_for "$root"
+[[ "$SHARD_TOKEN" == "INFRA" ]] \
+  || { printf '%s\n' "$SHARD_VERDICT_OUT"; fail "(x2) genuinely foreign evidence must remain INFRA, got '$SHARD_TOKEN'"; }
+pass "(x2) genuinely foreign active-window owner remains real_ime_precondition -> INFRA"
+
+# (x3) Fail closed for every owner shape that is not positively identifiable as
+# foreign. This includes both PocketShell applicationIdSuffixes and malformed or
+# missing diagnostics. A missing parser input is never an environmental fact.
+for unsafe_case in \
+  "realime-app:the app under test owns focus" \
+  "realime-prefix-owner:the owner shares the protected com.pocketshell.app prefix" \
+  "realime-unavailable-owner:the owner could not be read" \
+  "realime-malformed-owner:the owner is not a package" \
+  "realime-bare:no owner reading was emitted"
+do
+  outcome="${unsafe_case%%:*}"
+  why="${unsafe_case#*:}"
+  root="$SANDBOX/x3-${outcome}"; mkdir -p "$root"
+  write_summary "$root" 2338 "$SATURATED_CLASS"
+  write_case_xml "$root" "$SATURATED_CLASS" 1 \
+    "saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide:$outcome"
+  run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+  [[ "$SIG_CLASS" == "product_failure" ]] \
+    || { printf '%s\n' "$SIG_OUT"; fail "(x3) $why must stay product_failure, got '$SIG_CLASS'"; }
+done
+pass "(x3) app-owned, unresolved, malformed, and absent owners all stay loud"
+
+# (x4) The observed #1879 ANR shape is deliberately NOT treated as genuinely
+# foreign from active-window data alone. Framework error-dialog windows belong
+# to package `android` whether the faulting process is Pixel Launcher or
+# PocketShell itself (#796). Downgrading this ambiguous reading would hide an
+# app-owned ANR product regression.
+root="$SANDBOX/x4-anr"; mkdir -p "$root"
+write_summary "$root" 2338 "$SATURATED_CLASS"
+write_case_xml "$root" "$SATURATED_CLASS" 1 \
+  "saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide:realime-anr-ambiguous"
+run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+[[ "$SIG_CLASS" == "product_failure" ]] \
+  || { printf '%s\n' "$SIG_OUT"; fail "(x4) active_window_pkg=android is ambiguous and must stay product_failure, got '$SIG_CLASS'"; }
+pass "(x4) observed framework ANR focus theft (active_window_pkg=android) stays loud"
+
+# (x5) The recurring #1818 residual/phantom IME shape is not itself proof of a
+# foreign focus owner. It must not launder an app-owned failure, nor compensate
+# for a missing owner reading. With a separately proven foreign active-window
+# owner, the original #1800 downgrade remains available.
+for residual_case in \
+  "realime-app-residual:product_failure" \
+  "realime-no-owner:product_failure" \
+  "realime-foreign-residual:real_ime_precondition"
+do
+  outcome="${residual_case%%:*}"
+  expected="${residual_case#*:}"
+  root="$SANDBOX/x5-${outcome}"; mkdir -p "$root"
+  write_summary "$root" 2338 "$SATURATED_CLASS"
+  write_case_xml "$root" "$SATURATED_CLASS" 1 \
+    "saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide:$outcome"
+  run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+  [[ "$SIG_CLASS" == "$expected" ]] \
+    || { printf '%s\n' "$SIG_OUT"; fail "(x5) residual shape $outcome expected '$expected', got '$SIG_CLASS'"; }
+done
+pass "(x5) residual-IME evidence never substitutes for a genuinely foreign owner"
+
+# (x6) Every owner reading in a failing element must be genuinely foreign. A
+# stale/earlier foreign reading cannot outvote a later app-owned focus owner.
+root="$SANDBOX/x6-mixed-owners"; mkdir -p "$root"
+write_summary "$root" 2338 "$SATURATED_CLASS"
+write_case_xml "$root" "$SATURATED_CLASS" 1 \
+  "saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide:realime-mixed-owners"
+run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+[[ "$SIG_CLASS" == "product_failure" ]] \
+  || { printf '%s\n' "$SIG_OUT"; fail "(x6) one app-owned reading among foreign readings must stay product_failure, got '$SIG_CLASS'"; }
+pass "(x6) one app-owned reading vetoes the downgrade across the whole failure"
+
+# (x7) The real journey must emit the evidence the classifier decides on and
+# hard-establish the app-window-focus precondition. Otherwise the foreign
+# control above would be a fixture-only value the production path cannot emit.
+grep -q 'private fun waitForAppWindowFocus' "$ANDROID_TEST" \
+  || fail "(x7) the real-IME journey does not hard-establish app window focus"
+grep -q 'activeAppWindowRoots(activity).any { it.hasWindowFocus() }' "$ANDROID_TEST" \
+  || fail "(x7) the precondition does not observe every app-owned window root"
+grep -q 'active_window_pkg=' "$ANDROID_TEST" \
+  || fail "(x7) the real failure does not emit the classifier's owner reading"
+grep -q 'physicalImeWindows=' "$ANDROID_TEST" \
+  || fail "(x7) the real failure does not preserve the observed #1818 residual-window shape"
+grep -q 'The real system input-method window never became visible\.' "$ANDROID_TEST" \
+  || fail "(x7) the exact #1800 signature sentence was removed"
+grep -qE '\bassume(True|False|NotNull|That)[[:space:]]*\(' "$ANDROID_TEST" \
+  && fail "(x7) no Assume self-skip may shield the load-bearing real-IME assertion"
+pass "(x7) production journey hardens focus and emits owner/residual evidence without a skip"
 
 echo
 echo "== #1822 method-scoped bullets and fail-safe-toward-RED parsing =="

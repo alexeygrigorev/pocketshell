@@ -4,25 +4,36 @@ evidence as either an environment-divergent capability precondition (INFRA) or a
 genuine product failure (RED).
 
 The ONE captured signature this recognises is the CI swiftshader AVD's inability
-to raise a *real system input-method window*:
+to raise a *real system input-method window while an explicitly identified
+foreign app owns the active window*:
 
     The real system input-method window never became visible.
+    ... active_window_pkg=com.example.foreign ...
 
-That assertion is not a product assertion. It is the physical-IME precondition
-of `PromptComposerSaturatedImeAnchorE2eTest`, i.e. exactly the
-environment-divergent capability `process.md` F3 / #780 says must be injected
-synthetically rather than required. The load-bearing anchor/containment
-properties of that class are independently asserted on its synthetic
-`Type.ime()` path with hard failures, so typing this precondition as INFRA loses
-no protection on CI.
+The message alone is NOT enough. It is emitted by a load-bearing assertion in
+`PromptComposerSaturatedImeAnchorE2eTest`, so an app-owned focus/serviceability
+regression produces the same sentence. Issue #1882 therefore requires every
+failure element carrying the sentence to also carry at least one resolvable
+`active_window_pkg=...` reading, and requires EVERY such reading to be outside
+the `com.pocketshell.app*` application-id family.
+
+`active_window_pkg=android` is deliberately unresolved, not foreign. Framework
+ANR/crash dialogs belong to package `android` whether the faulting process is a
+foreign launcher or PocketShell itself (#1879/#796), so treating it as INFRA
+would hide an app-owned ANR. Missing, malformed, `<unavailable>`, mixed
+app/foreign, and app-owned readings all stay `product_failure` (RED). The
+recurring residual-IME shape (`active=false focused=false` with non-empty
+bounds, #1818) is diagnostic only; it never substitutes for a genuinely foreign
+active-window owner.
 
 Narrowness is the whole point. The classifier reports `real_ime_precondition`
 ONLY when EVERY failing test case belonging to a class listed under the suite
-summary's "Failed BOTH attempts" section carries that exact message. A single
-containment / anchor / any other assertion failure — in the same class, in the
-same run, in any attempt — forces `product_failure`, which keeps the shard RED.
-Missing or unreadable evidence reports `unclassified`, which also keeps the
-shard RED (fail-safe toward the red verdict, never toward green).
+summary's "Failed BOTH attempts" section carries that exact message AND the
+genuinely-foreign owner proof above. A single containment / anchor / any other
+assertion failure — in the same class, in the same run, in any attempt — forces
+`product_failure`, which keeps the shard RED. Missing or unreadable evidence
+reports `unclassified`, which also keeps the shard RED (fail-safe toward the red
+verdict, never toward green).
 
 Usage:
     ci-journey-infra-signature.py SUMMARY_FILE ARTIFACT_ROOT [ARTIFACT_ROOT ...]
@@ -57,6 +68,13 @@ import xml.etree.ElementTree as ET
 REAL_IME_UNAVAILABLE_SIGNATURE = (
     "The real system input-method window never became visible."
 )
+ACTIVE_WINDOW_PACKAGE = re.compile(
+    r"(?<![\w])active_window_pkg=([^\s,;]+)",
+)
+ANDROID_PACKAGE = re.compile(
+    r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+",
+)
+POCKETSHELL_APP_PACKAGE_PREFIX = "com.pocketshell.app"
 
 # `- \`com.example.Foo\`` and `- \`com.example.Foo#someMethod\`` bullets under
 # the summary's failed-both header. The suite writes BOTH forms (issue #1822);
@@ -132,6 +150,32 @@ def _failure_text(element: ET.Element) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _has_only_genuinely_foreign_active_window_owners(text: str) -> bool:
+    """Whether the failure proves every observed active-window owner is foreign.
+
+    The classifier is a one-way safety gate: absence, ambiguity, or a mixture of
+    readings keeps the failure loud. In particular, `android` is not accepted
+    even though it is outside PocketShell's package prefix: it is the framework
+    package used by both foreign-app and PocketShell ANR dialogs.
+    """
+    owners = ACTIVE_WINDOW_PACKAGE.findall(text)
+    if not owners:
+        return False
+    return all(
+        ANDROID_PACKAGE.fullmatch(owner) is not None
+        and owner != "android"
+        and not owner.startswith(POCKETSHELL_APP_PACKAGE_PREFIX)
+        for owner in owners
+    )
+
+
+def _is_real_ime_environment_failure(text: str) -> bool:
+    return (
+        REAL_IME_UNAVAILABLE_SIGNATURE in text
+        and _has_only_genuinely_foreign_active_window_owners(text)
+    )
+
+
 def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
     classes, unreadable = failed_both_section(summary_path)
     failing = 0
@@ -163,7 +207,7 @@ def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
                 failing += 1
                 covered.add(base)
                 texts = [_failure_text(problem) for problem in problems]
-                if all(REAL_IME_UNAVAILABLE_SIGNATURE in text for text in texts):
+                if all(_is_real_ime_environment_failure(text) for text in texts):
                     matches += 1
                 else:
                     offenders.append(f"{base}#{case.get('name') or '<unknown>'}")

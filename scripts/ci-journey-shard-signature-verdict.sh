@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Issue #1800: decide whether an emulator-journey shard's failure evidence is
 # the ONE captured environment signature (the CI swiftshader AVD cannot raise a
-# real system input-method window) rather than a genuine journey failure.
+# real system input-method window while a resolved foreign app owns the active
+# window) rather than a genuine journey failure.
 #
 # This is the exact decision the workflow's classify step applies, extracted so
 # it can be driven — and observed — without an emulator
@@ -21,10 +22,13 @@
 #   shard_signature_detail=<per-summary classifications, space separated>
 #
 # INFRA is emitted ONLY when at least one summary was inspected AND every
-# inspected summary classified as `real_ime_precondition`. Anything else — a
-# genuine assertion failure, mixed evidence, missing/corrupt result XML, a
-# missing classifier — emits NONE, which leaves the caller's existing RED
-# branches in charge. Always exits 0.
+# inspected summary classified as `real_ime_precondition`. The classifier only
+# emits that value when every matching failure proves a genuinely foreign
+# `active_window_pkg`; app-owned, `android` (ambiguous framework ANR), missing,
+# or malformed owners remain RED (#1882). Anything else — a genuine assertion
+# failure, mixed evidence, missing/corrupt result XML, a missing classifier —
+# emits NONE, which leaves the caller's existing RED branches in charge. Always
+# exits 0.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"

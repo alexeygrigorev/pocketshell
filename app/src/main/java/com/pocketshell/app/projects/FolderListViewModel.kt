@@ -470,6 +470,7 @@ class FolderListViewModel internal constructor(
     private var assistantSshExecutor: AssistantSshExecutor = RealAssistantSshExecutor()
 
     private var bound: BoundParams? = null
+    private var profileFetchGeneration: Long = 0L
     private var warmJob: Job? = null
     private var warmReleaseJob: Job? = null
     private var warmLease: SshLease? = null
@@ -1028,12 +1029,13 @@ class FolderListViewModel internal constructor(
     /**
      * Issue #718: fetch the host-discovered agent profiles via
      * [ProfilesGateway] and split them by engine into the picker's
-     * [claudeProfiles] / [codexProfiles] flows. Foreground, on bind. Any
-     * non-success result (CLI missing, connect/parse failure, no gateway in
-     * tests) leaves the flows empty so the picker shows no profile selector —
-     * the safe default-only behaviour.
+     * [claudeProfiles] / [codexProfiles] flows. Foreground, on bind and whenever
+     * a new-session picker opens. Any non-success result (CLI missing,
+     * connect/parse failure, no gateway in tests) leaves the flows empty so the
+     * picker shows no profile selector — the safe default-only behaviour.
      */
     private fun fetchProfiles(params: BoundParams) {
+        val generation = ++profileFetchGeneration
         val gw = profilesGateway ?: run {
             _claudeProfiles.value = emptyList()
             _codexProfiles.value = emptyList()
@@ -1049,7 +1051,9 @@ class FolderListViewModel internal constructor(
                 )
             }
             // Ignore a stale result if the host changed while we were fetching.
-            if (bound?.hostId != params.hostId) return@launch
+            if (bound?.hostId != params.hostId || profileFetchGeneration != generation) {
+                return@launch
+            }
             when (result) {
                 is ProfilesResult.Profiles -> {
                     val profileLists = result.profiles.toFolderListProfileLists()
@@ -1062,6 +1066,15 @@ class FolderListViewModel internal constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Issue #1875: retry host profile discovery at the moment the user opens a
+     * new-session picker. A transient bind-time failure must not permanently
+     * hide non-default profiles for the lifetime of the host screen.
+     */
+    fun refreshProfilesForPicker() {
+        bound?.let(::fetchProfiles)
     }
 
     /**

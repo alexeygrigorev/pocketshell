@@ -1,0 +1,4 @@
+127.0.0.1 localhost
+::1 localhost
+::2 issue1877-fallback.test
+127.0.0.1 issue1877-fallback.test

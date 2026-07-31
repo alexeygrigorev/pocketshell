@@ -88,10 +88,13 @@ class PromptComposerSaturatedImeAnchorE2eTest {
 
     private var viewModel: PromptComposerViewModel? = null
     private var releaseDelivery: CompletableDeferred<Unit>? = null
+    private var releaseAutoCloseReduction: CompletableDeferred<Unit>? = null
 
     @After
     fun tearDown() {
         hideRealImeBestEffort()
+        releaseAutoCloseReduction?.complete(Unit)
+        releaseAutoCloseReduction = null
         releaseDelivery?.complete(Unit)
         releaseDelivery = null
         viewModel?.clearForTest()
@@ -106,24 +109,36 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         val visible = mutableStateOf(true)
         val sendEntered = CompletableDeferred<Unit>()
         val deliveryGate = CompletableDeferred<Unit>().also { releaseDelivery = it }
+        val reductionEntered = CompletableDeferred<Unit>()
+        val reductionGate =
+            CompletableDeferred<Unit>().also { releaseAutoCloseReduction = it }
         val sheetStateRef = AtomicReference<SheetState?>()
         val targetKey = "1/issue-1744"
+        vm.beforeHandoffAutoCloseReductionForTest = {
+            reductionEntered.complete(Unit)
+            reductionGate.await()
+        }
 
         prepareActivityWindow()
         compose.setContent {
             PocketShellTheme {
                 Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    PromptComposerSendDispatcher(
+                        viewModel = vm,
+                        onSend = {
+                            sendEntered.complete(Unit)
+                            deliveryGate.await()
+                            true
+                        },
+                        onDelivered = { visible.value = false },
+                    )
                     if (visible.value) {
                         val sheetState =
                             rememberModalBottomSheetState(skipPartiallyExpanded = false)
                         SideEffect { sheetStateRef.set(sheetState) }
                         PromptComposerSheet(
                             onDismiss = { visible.value = false },
-                            onSend = {
-                                sendEntered.complete(Unit)
-                                deliveryGate.await()
-                                true
-                            },
+                            onSend = { error("screen-scoped dispatcher owns delivery") },
                             composerTargetKey = targetKey,
                             sendTargetSnapshotProvider = {
                                 PromptComposerViewModel.SendTargetSnapshot(sessionKey = targetKey)
@@ -131,6 +146,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                             modifier = Modifier.observeProductionSheetIme(),
                             sheetState = sheetState,
                             viewModel = vm,
+                            collectSendRequests = false,
                         )
                     }
                 }
@@ -152,7 +168,10 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .performClick()
         compose.waitUntil(5_000) {
-            sendEntered.isCompleted && vm.uiState.value.sendInFlight
+            reductionEntered.isCompleted &&
+                sendEntered.isCompleted &&
+                vm.uiState.value.sendInFlight &&
+                queue.itemsFor(targetKey).size == 1
         }
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
@@ -162,6 +181,9 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             vm.uiState.value.draft == LONG_DRAFT_B &&
                 drafts.load(targetKey) == LONG_DRAFT_B
         }
+        reductionGate.complete(Unit)
+        compose.waitForIdle()
+        assertTrue("draft B must retain ownership of the saturated sheet", visible.value)
         assertPromptAExactlyOnce(queue, targetKey)
         hideRealImeAndAssertHidden(
             "Synthetic saturated proof must start with no physical keyboard window.",
@@ -446,24 +468,36 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         val visible = mutableStateOf(true)
         val sendEntered = CompletableDeferred<Unit>()
         val deliveryGate = CompletableDeferred<Unit>().also { releaseDelivery = it }
+        val reductionEntered = CompletableDeferred<Unit>()
+        val reductionGate =
+            CompletableDeferred<Unit>().also { releaseAutoCloseReduction = it }
         val sheetStateRef = AtomicReference<SheetState?>()
         val targetKey = "1/issue-1800-synthetic-reach"
+        vm.beforeHandoffAutoCloseReductionForTest = {
+            reductionEntered.complete(Unit)
+            reductionGate.await()
+        }
 
         prepareActivityWindow()
         compose.setContent {
             PocketShellTheme {
                 Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    PromptComposerSendDispatcher(
+                        viewModel = vm,
+                        onSend = {
+                            sendEntered.complete(Unit)
+                            deliveryGate.await()
+                            true
+                        },
+                        onDelivered = { visible.value = false },
+                    )
                     if (visible.value) {
                         val sheetState =
                             rememberModalBottomSheetState(skipPartiallyExpanded = false)
                         SideEffect { sheetStateRef.set(sheetState) }
                         PromptComposerSheet(
                             onDismiss = { visible.value = false },
-                            onSend = {
-                                sendEntered.complete(Unit)
-                                deliveryGate.await()
-                                true
-                            },
+                            onSend = { error("screen-scoped dispatcher owns delivery") },
                             composerTargetKey = targetKey,
                             sendTargetSnapshotProvider = {
                                 PromptComposerViewModel.SendTargetSnapshot(sessionKey = targetKey)
@@ -482,6 +516,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                             modifier = Modifier.observeProductionSheetIme(),
                             sheetState = sheetState,
                             viewModel = vm,
+                            collectSendRequests = false,
                         )
                     }
                 }
@@ -505,7 +540,10 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .performClick()
         compose.waitUntil(5_000) {
-            sendEntered.isCompleted && vm.uiState.value.sendInFlight
+            reductionEntered.isCompleted &&
+                sendEntered.isCompleted &&
+                vm.uiState.value.sendInFlight &&
+                queue.itemsFor(targetKey).size == 1
         }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performClick()
@@ -514,6 +552,9 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             vm.uiState.value.draft == LONG_DRAFT_B &&
                 drafts.load(targetKey) == LONG_DRAFT_B
         }
+        reductionGate.complete(Unit)
+        compose.waitForIdle()
+        assertTrue("draft B must retain ownership of the saturated sheet", visible.value)
         assertPromptAExactlyOnce(queue, targetKey)
         hideRealImeAndAssertHidden(
             "Synthetic reachability mirror must start with no physical keyboard window.",

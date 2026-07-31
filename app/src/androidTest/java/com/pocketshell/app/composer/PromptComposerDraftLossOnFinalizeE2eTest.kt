@@ -17,6 +17,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
@@ -50,6 +51,7 @@ import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -152,9 +154,17 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newViewModel(drafts, queue)
         val visible = mutableStateOf(true)
+        val reductionEntered = CompletableDeferred<Unit>()
+        val releaseReduction = CompletableDeferred<Unit>()
         val sendEntered = CompletableDeferred<Unit>()
         val sendCompleted = CompletableDeferred<Unit>()
+        val sheetMounted = AtomicBoolean(false)
+        val sheetMountedAtSendStart = AtomicReference<Boolean>()
         val targetKey = "1/session-a"
+        vm.beforeHandoffAutoCloseReductionForTest = {
+            reductionEntered.complete(Unit)
+            releaseReduction.await()
+        }
 
         compose.setContent {
             PocketShellTheme {
@@ -162,6 +172,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                     PromptComposerSendDispatcher(
                         viewModel = vm,
                         onSend = {
+                            sheetMountedAtSendStart.set(sheetMounted.get())
                             sendEntered.complete(Unit)
                             delay(10_000)
                             sendCompleted.complete(Unit)
@@ -170,6 +181,10 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                         onDelivered = { visible.value = false },
                     )
                     if (visible.value) {
+                        DisposableEffect(Unit) {
+                            sheetMounted.set(true)
+                            onDispose { sheetMounted.set(false) }
+                        }
                         PromptComposerSheet(
                             onDismiss = { visible.value = false },
                             onSend = { error("screen-scoped dispatcher owns delivery") },
@@ -188,21 +203,36 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
             .performClick()
             .performTextInput("send without waiting")
-        val tappedAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
 
+        compose.waitUntil(5_000) { reductionEntered.isCompleted }
+        assertFalse(
+            "downstream delivery must not overtake durable local-acceptance dismissal",
+            sendEntered.isCompleted,
+        )
+        assertTrue("the screen owner must remain until acceptance is reduced", visible.value)
+        assertEquals("", vm.uiState.value.draft)
+        WalkthroughScreenshotArtifacts.capture("issue-695-01-accepted-empty-before-reduction")
+
+        val releasedAt = SystemClock.elapsedRealtime()
+        releaseReduction.complete(Unit)
         compose.waitUntil(2_000) { !visible.value }
-        val dismissedAfterMs = SystemClock.elapsedRealtime() - tappedAt
+        val dismissedAfterMs = SystemClock.elapsedRealtime() - releasedAt
         assertTrue(
             "local acceptance must dismiss promptly, took ${dismissedAfterMs}ms",
             dismissedAfterMs < 2_000,
         )
         compose.waitUntil(2_000) { sendEntered.isCompleted }
         assertTrue("host delivery must have started", sendEntered.isCompleted)
+        assertFalse(
+            "the accepted empty sheet must leave composition before host delivery starts",
+            sheetMountedAtSendStart.get() ?: true,
+        )
         assertFalse("dismissal must not await the injected 10s host callback", sendCompleted.isCompleted)
         assertEquals("", vm.uiState.value.draft)
         assertEquals(1, queue.itemsFor(targetKey).size)
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertDoesNotExist()
+        WalkthroughScreenshotArtifacts.capture("issue-695-02-dismissed-before-delivery")
     }
 
     /**
@@ -355,10 +385,10 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
-            sendEntered.isCompleted &&
-                reductionEntered.isCompleted &&
+            reductionEntered.isCompleted &&
                 vm.uiState.value.sendInFlight
         }
+        assertFalse("delivery must wait for the close-or-keep decision", sendEntered.isCompleted)
         // The #971 handoff is real: prompt A moved into exactly one queue row,
         // leaving the editor empty and ready for prompt B.
         assertEquals("", vm.uiState.value.draft)
@@ -371,7 +401,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                 drafts.load(targetKey) == "I can still report"
         }
         releaseReduction.complete(Unit)
-        compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 5_000) { sendEntered.isCompleted }
         assertTrue("new typing must defeat the pending acceptance dismissal", visible.value)
         WalkthroughScreenshotArtifacts.capture("issue-1616-01-new-draft-during-send")
 

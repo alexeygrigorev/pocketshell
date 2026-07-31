@@ -8,6 +8,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel.StagedAttachment
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,20 +42,52 @@ internal data class ComposerHandoffAcceptance(
 
 /**
  * One-shot local-acceptance events, split out of the already oversized
- * composer ViewModel. The channel bridges the tiny commit-to-Compose gap; the
- * epoch check below prevents a stale event from closing new composition.
+ * composer ViewModel. The channel bridges the tiny commit-to-Compose gap; each
+ * durable row also owns a reduction barrier so its wire delivery cannot
+ * overtake the close-or-keep decision. The epoch check below prevents a stale
+ * event from closing new composition.
  */
 internal class ComposerHandoffAcceptanceCoordinator {
     private val channel = kotlinx.coroutines.channels.Channel<ComposerHandoffAcceptance>(
         capacity = kotlinx.coroutines.channels.Channel.UNLIMITED,
     )
+    private val pendingReductions = mutableMapOf<String, CompletableDeferred<Unit>>()
     val events = channel.receiveAsFlow()
 
     @androidx.annotation.VisibleForTesting
     var beforeAutoCloseReductionForTest: suspend () -> Unit = {}
 
     fun publish(acceptance: ComposerHandoffAcceptance) {
-        channel.trySend(acceptance)
+        val queueItemId = acceptance.outboundQueueItemId
+        if (queueItemId != null) {
+            synchronized(pendingReductions) {
+                pendingReductions.getOrPut(queueItemId) { CompletableDeferred() }
+            }
+        }
+        if (channel.trySend(acceptance).isFailure) {
+            completeReduction(queueItemId)
+        }
+    }
+
+    suspend fun awaitReduction(outboundQueueItemId: String?) {
+        val reduction = outboundQueueItemId?.let { queueItemId ->
+            synchronized(pendingReductions) { pendingReductions[queueItemId] }
+        }
+        reduction?.await()
+    }
+
+    fun completeReduction(outboundQueueItemId: String?) {
+        val reduction = outboundQueueItemId?.let { queueItemId ->
+            synchronized(pendingReductions) { pendingReductions.remove(queueItemId) }
+        }
+        reduction?.complete(Unit)
+    }
+
+    fun completeAllReductions() {
+        val reductions = synchronized(pendingReductions) {
+            pendingReductions.values.toList().also { pendingReductions.clear() }
+        }
+        reductions.forEach { it.complete(Unit) }
     }
 }
 
@@ -66,6 +99,22 @@ internal var PromptComposerViewModel.beforeHandoffAutoCloseReductionForTest: sus
     set(value) {
         handoffAcceptance.beforeAutoCloseReductionForTest = value
     }
+
+internal suspend fun PromptComposerViewModel.awaitHandoffAcceptanceReduction(
+    outboundQueueItemId: String?,
+) {
+    handoffAcceptance.awaitReduction(outboundQueueItemId)
+}
+
+internal fun PromptComposerViewModel.completeHandoffAcceptanceReduction(
+    acceptance: ComposerHandoffAcceptance,
+) {
+    handoffAcceptance.completeReduction(acceptance.outboundQueueItemId)
+}
+
+internal fun PromptComposerViewModel.completeAllHandoffAcceptanceReductions() {
+    handoffAcceptance.completeAllReductions()
+}
 
 internal fun PromptComposerViewModel.composerRevision(target: String): Long =
     composerRevisionTracker.revision(target)

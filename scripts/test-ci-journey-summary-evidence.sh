@@ -802,6 +802,8 @@ pass "(e1) #1458/#1800/#1814 preserved: all-CLEAN -> CLEAN -> aggregate CLEAN; m
 SATURATED_CLASS="com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"
 OCCLUSION_CLASS="com.pocketshell.app.tmux.TmuxShellComposerOcclusionE2eTest"
 REAL_IME_MSG="The real system input-method window never became visible."
+FOREIGN_REAL_IME_DETAIL="app_window_focused=false active_window_pkg=com.google.android.apps.nexuslauncher active_window_class=com.android.launcher3.Launcher"
+APP_OWNED_REAL_IME_DETAIL="app_window_focused=false active_window_pkg=com.pocketshell.app.i1882 active_window_class=android.widget.FrameLayout composer_editor_served=false"
 
 # write_synth_summary <ws> <failed-bullet...>
 write_synth_summary() {
@@ -834,7 +836,11 @@ write_synth_xml() {
     for spec in "$@"; do
       method="${spec%%:*}"; kind="${spec##*:}"
       case "$kind" in
-        realime) echo "  <testcase classname=\"$classname\" name=\"$method\"><failure message=\"$REAL_IME_MSG\"/></testcase>" ;;
+        realime-foreign) echo "  <testcase classname=\"$classname\" name=\"$method\"><failure message=\"$REAL_IME_MSG $FOREIGN_REAL_IME_DETAIL\"/></testcase>" ;;
+        realime-app) echo "  <testcase classname=\"$classname\" name=\"$method\"><failure message=\"$REAL_IME_MSG $APP_OWNED_REAL_IME_DETAIL\"/></testcase>" ;;
+        realime-missing) echo "  <testcase classname=\"$classname\" name=\"$method\"><failure message=\"$REAL_IME_MSG\"/></testcase>" ;;
+        realime-malformed) echo "  <testcase classname=\"$classname\" name=\"$method\"><failure message=\"$REAL_IME_MSG app_window_focused=false active_window_pkg=not/a/package\"/></testcase>" ;;
+        realime-ambiguous) echo "  <testcase classname=\"$classname\" name=\"$method\"><failure message=\"$REAL_IME_MSG app_window_focused=false active_window_pkg=android active_window_class=com.android.server.am.AppNotRespondingDialog\"/></testcase>" ;;
         *)       echo "  <testcase classname=\"$classname\" name=\"$method\"><failure message=\"androidx.compose.ui.test.ComposeTimeoutException: condition never became true\"/></testcase>" ;;
       esac
     done
@@ -851,7 +857,7 @@ snapshot_attempt1() {
 # (e2) #1800: a signature-only shard is still INFRA and still aggregates RE-RUN.
 ws="$SANDBOX/synth-infra"; make_workspace "$ws"
 write_synth_summary "$ws" "$SATURATED_CLASS"
-write_synth_xml "$ws" 1 "$SATURATED_CLASS" "realImeReachability:realime"
+write_synth_xml "$ws" 1 "$SATURATED_CLASS" "realImeReachability:realime-foreign"
 snapshot_attempt1 "$ws"
 run_journey_summary_step "$ws"
 run_classify_step "$ws" "$(classify_expressions failure "$FIRST_TIMEOUT" "$FIRST_FAILURE")"
@@ -864,12 +870,40 @@ aggregate_with "$CLASSIFY_TOKEN"
   || { printf '%s\n' "$AGG_OUT"; fail "(e2) no-RED-with-INFRA must stay RE-RUN/exit0, got $AGG_VERDICT/exit$AGG_RC"; }
 pass "(e2) #1800/#1809 preserved: real-IME precondition -> INFRA -> RE-RUN neutral green (exit 0)"
 
+# (e2b) #1882: only a positively identified foreign owner may use e2's INFRA
+# relief valve. App-owned, missing, malformed, and framework-ambiguous owner
+# evidence must remain product RED through the same summary + workflow bodies.
+for unsafe_owner_case in \
+  "app:realime-app" \
+  "missing:realime-missing" \
+  "malformed:realime-malformed" \
+  "ambiguous-android:realime-ambiguous"
+do
+  unsafe_owner_label="${unsafe_owner_case%%:*}"
+  unsafe_owner_kind="${unsafe_owner_case#*:}"
+  ws="$SANDBOX/synth-real-ime-$unsafe_owner_label"; make_workspace "$ws"
+  write_synth_summary "$ws" "$SATURATED_CLASS"
+  write_synth_xml "$ws" 1 "$SATURATED_CLASS" \
+    "realImeReachability:$unsafe_owner_kind"
+  snapshot_attempt1 "$ws"
+  run_journey_summary_step "$ws"
+  run_classify_step "$ws" "$(classify_expressions failure "$FIRST_TIMEOUT" "$FIRST_FAILURE")"
+  [[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_RC" -ne 0 ]] \
+    || {
+      printf '%s\n' "$CLASSIFY_OUT"
+      fail "(e2b/$unsafe_owner_label) unsafe owner evidence must stay RED, got '$CLASSIFY_TOKEN'/exit$CLASSIFY_RC"
+    }
+  grep -q '^shard_verdict=RED$' <<<"$CLASSIFY_GH_OUTPUT" \
+    || fail "(e2b/$unsafe_owner_label) shard RED output is missing"
+done
+pass "(e2b) #1882: app-owned, missing, malformed, and android-ambiguous real-IME evidence stays RED"
+
 # (e3) #1822: the mixed summary — the IME signature entry followed by a genuine
 #      method-scoped failure — is still RED, and still fails its own shard job.
 ws="$SANDBOX/synth-mixed"; make_workspace "$ws"
 write_synth_summary "$ws" "$SATURATED_CLASS" \
   "$OCCLUSION_CLASS#shellComposerControlsAreVisibleAndReachableInBothKeyboardStates"
-write_synth_xml "$ws" 1 "$SATURATED_CLASS" "realImeReachability:realime"
+write_synth_xml "$ws" 1 "$SATURATED_CLASS" "realImeReachability:realime-foreign"
 write_synth_xml "$ws" 2 "$OCCLUSION_CLASS" \
   "shellComposerControlsAreVisibleAndReachableInBothKeyboardStates:composetimeout"
 snapshot_attempt1 "$ws"
@@ -889,7 +923,7 @@ ws="$SANDBOX/synth-unreadable"; make_workspace "$ws"
 write_synth_summary "$ws" "$SATURATED_CLASS"
 printf '%s\n' '- `9NotAnIdentifier#weird` (an entry this parser cannot read)' \
   >> "$ws/artifacts/ci-journey/summary.md"
-write_synth_xml "$ws" 1 "$SATURATED_CLASS" "realImeReachability:realime"
+write_synth_xml "$ws" 1 "$SATURATED_CLASS" "realImeReachability:realime-foreign"
 snapshot_attempt1 "$ws"
 run_journey_summary_step "$ws"
 run_classify_step "$ws" "$(classify_expressions failure "$FIRST_TIMEOUT" "$FIRST_FAILURE")"

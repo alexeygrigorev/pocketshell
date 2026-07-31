@@ -333,6 +333,12 @@ dependencies {
     // `:shared:core-storage`'s own DAO tests.
     testImplementation(libs.room.testing)
 
+    // Issue #1879: the IME-service-state discriminator's DECISION is a pure
+    // function so it can be pinned by a fast JVM test in the required per-PR
+    // `Unit tests` job (`ImeServiceStateSignatureTest`), while the connected
+    // journey only does the `dumpsys` IO. Both source sets therefore need the
+    // shared test-only module.
+    androidTestImplementation(project(":shared:test-support"))
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.ext.junit)

@@ -4,10 +4,16 @@ plugins {
 }
 
 // Test-only support module (issue #1048). It is consumed exclusively as a
-// `testImplementation` dependency by other modules' unit-test source sets, so
-// nothing here ever ships into the app APK. It holds the ONE audited de-flake
-// settle-pump (`drainMainLooperUntil`) shared across modules so the historically
-// drifting hand-rolled wall-clock pumps converge on a single, reviewed boundary.
+// `testImplementation` / `androidTestImplementation` dependency by other
+// modules' TEST source sets, so nothing here ever ships into the app APK. It
+// holds the ONE audited de-flake settle-pump (`drainMainLooperUntil`) shared
+// across modules so the historically drifting hand-rolled wall-clock pumps
+// converge on a single, reviewed boundary.
+//
+// Issue #1879 added a second kind of tenant: a pure DECISION that both a JVM
+// unit test and a connected journey must agree on. `ImeServiceState.kt` parses
+// `dumpsys input_method` text, so the emulator-only IO stays in `androidTest`
+// while the discrimination it drives is pinned in the required per-PR Unit job.
 //
 // The pump itself is pure JVM (Long deadlines + lambdas) — it deliberately does
 // NOT depend on Robolectric or kotlinx-coroutines-test. The per-tick drain

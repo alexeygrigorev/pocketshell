@@ -22,6 +22,9 @@ RETRY_BUDGET="$SCRIPT_DIR/ci-journey-retry-budget.sh"
 AGG="$SCRIPT_DIR/ci-journey-aggregate-verdict.sh"
 WORKFLOW="${CI_JOURNEY_INFRA_SIGNATURE_WORKFLOW:-$REPO_ROOT/.github/workflows/tests.yml}"
 ANDROID_TEST="$REPO_ROOT/app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerSaturatedImeAnchorE2eTest.kt"
+SHOW_KEYBOARD_TEST="$REPO_ROOT/app/src/androidTest/java/com/pocketshell/app/session/ShowKeyboardChipE2eTest.kt"
+WINDOW_FOCUS_SIGNALS="$REPO_ROOT/app/src/androidTest/java/com/pocketshell/app/proof/signals/WindowFocusSignals.kt"
+CLASSIFIER_PY="$SCRIPT_DIR/ci-journey-infra-signature.py"
 
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
@@ -38,8 +41,12 @@ APP_OWNED_REAL_IME_DETAIL='app_window_focused=false active_window_pkg=com.pocket
 FOREIGN_REAL_IME_DETAIL='app_window_focused=false active_window_pkg=com.google.android.apps.nexuslauncher active_window_class=com.android.launcher3.Launcher'
 AMBIGUOUS_ANR_REAL_IME_DETAIL='app_window_focused=false active_window_pkg=android active_window_class=com.android.server.am.AppNotRespondingDialog framework_error_dialog=android:id/aerr_wait'
 RESIDUAL_IME_DETAIL='physicalImeWindows=[package=com.google.android.inputmethod.latin active=false focused=false bounds=Rect(0, 1517 - 1080, 2400)]'
+FOREIGN_FOCUS_SIGNATURE_XML='The app window never held input focus, so the system refused every showSoftInput() call (&quot;is not served&quot;).'
+FOREIGN_FOCUS_TAIL='The show-keyboard chip cannot be measured in that state, so this is NOT a chip failure (cycle 1): app_window_focused=false'
 CONTAINMENT_MESSAGE="java.lang.AssertionError: Node 'prompt-composer-send-enter' must stay above the same-root keyboard boundary. node=Rect.fromLTRB(0.0, 1500.0, 1080.0, 1654.0) keyboardTopPx=1626.0"
 SATURATED_CLASS="com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"
+SHOW_KEYBOARD_CLASS="com.pocketshell.app.session.ShowKeyboardChipE2eTest"
+SHOW_KEYBOARD_METHOD="foreignFocusOwnerIsNamedAsTheCauseInsteadOfBlamingTheChip"
 
 # Issue #1822 — the two genuinely-failing, METHOD-SCOPED entries that ran on
 # shard 1 of run 30334306297 alongside the real-IME precondition, and the exact
@@ -105,7 +112,7 @@ write_case_xml() {
   {
     echo '<?xml version="1.0" encoding="UTF-8"?>'
     echo "<testsuite name=\"$class\" tests=\"$#\">"
-    local spec method outcome
+    local spec method outcome owner
     for spec in "$@"; do
       method="${spec%%:*}"
       outcome="${spec#*:}"
@@ -150,6 +157,14 @@ write_case_xml() {
           ;;
         realime-mixed-owners)
           echo "    <failure message=\"$REAL_IME_MESSAGE $FOREIGN_REAL_IME_DETAIL later_active_window_pkg=com.pocketshell.app.i1882 active_window_pkg=com.pocketshell.app.i1882\">at org.junit.Assert.fail(Assert.java:89)</failure>"
+          ;;
+        focus:*)
+          owner="${outcome#focus:}"
+          echo "    <failure message=\"java.lang.AssertionError: $FOREIGN_FOCUS_SIGNATURE_XML $FOREIGN_FOCUS_TAIL active_window_pkg=$owner active_window_class=android.widget.FrameLayout.\">at org.junit.Assert.fail(Assert.java:89)"
+          echo "at com.pocketshell.app.session.ShowKeyboardChipE2eTest.runShowKeyboardCycle(ShowKeyboardChipE2eTest.kt:547)</failure>"
+          ;;
+        focus-no-owner)
+          echo "    <failure message=\"java.lang.AssertionError: $FOREIGN_FOCUS_SIGNATURE_XML $FOREIGN_FOCUS_TAIL\">at org.junit.Assert.fail(Assert.java:89)</failure>"
           ;;
         containment)
           echo "    <failure message=\"$CONTAINMENT_MESSAGE\">at org.junit.Assert.fail(Assert.java:89)</failure>"
@@ -447,6 +462,135 @@ grep -q 'The real system input-method window never became visible\.' "$ANDROID_T
 grep -qE '\bassume(True|False|NotNull|That)[[:space:]]*\(' "$ANDROID_TEST" \
   && fail "(x7) no Assume self-skip may shield the load-bearing real-IME assertion"
 pass "(x7) production journey hardens focus and emits owner/residual evidence without a skip"
+
+echo
+echo "== #1879 foreign-window focus is a loud label, never auto-INFRA =="
+
+# The #1879 diagnosis has a different safety contract from #1882's real-IME
+# signature. It reports the package of the WINDOW owning focus. A framework
+# ANR/crash dialog belongs to `android` whether the faulting process is the
+# launcher or PocketShell itself (#796), so no owner value can safely license
+# an automatic INFRA downgrade for this message. Every producible owner shape
+# therefore stays product_failure/RED.
+for owner_case in \
+  "android:framework error dialog, ambiguous between launcher and PocketShell ANR" \
+  "com.pocketshell.app.i1879:app-owned focus thief" \
+  "com.android.launcher3:foreign app own window" \
+  "&lt;unavailable&gt;:owner could not be read"
+do
+  owner="${owner_case%%:*}"
+  why="${owner_case#*:}"
+  root="$SANDBOX/n1-${owner//[^A-Za-z0-9]/_}"; mkdir -p "$root"
+  write_summary "$root" 2338 "$SHOW_KEYBOARD_CLASS"
+  write_case_xml "$root" "$SHOW_KEYBOARD_CLASS" 1 \
+    "$SHOW_KEYBOARD_METHOD:focus:$owner"
+  write_case_xml "$root" "$SHOW_KEYBOARD_CLASS" 2 \
+    "$SHOW_KEYBOARD_METHOD:focus:$owner"
+  run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+  [[ "$SIG_CLASS" == "product_failure" ]] \
+    || { printf '%s\n' "$SIG_OUT"; fail "(n1) active_window_pkg=$owner ($why) must stay product_failure, got '$SIG_CLASS'"; }
+  mkdir -p "$root/ci-journey-attempt-1"
+  cp -a "$root/ci-journey" "$root/ci-journey-attempt-1/ci-journey"
+  shard_verdict_for "$root"
+  [[ "$SHARD_TOKEN" == "RED" ]] \
+    || { printf '%s\n' "$SHARD_VERDICT_OUT"; fail "(n1) active_window_pkg=$owner ($why) must keep the shard RED, got '$SHARD_TOKEN'"; }
+done
+pass "(n1) every producible #1879 active-window owner, including android, stays RED"
+
+root="$SANDBOX/n2-no-owner"; mkdir -p "$root"
+write_summary "$root" 2338 "$SHOW_KEYBOARD_CLASS"
+write_case_xml "$root" "$SHOW_KEYBOARD_CLASS" 1 \
+  "$SHOW_KEYBOARD_METHOD:focus-no-owner"
+run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+[[ "$SIG_CLASS" == "product_failure" ]] \
+  || { printf '%s\n' "$SIG_OUT"; fail "(n2) the #1879 label without an owner must stay product_failure, got '$SIG_CLASS'"; }
+pass "(n2) the #1879 label without owner evidence stays RED"
+
+# Extract the production Kotlin constant, then prove the #1882-authoritative
+# classifier does not register it. AST string constants catch a future
+# split/implicitly-concatenated Python literal without tripping on comments.
+[[ -f "$WINDOW_FOCUS_SIGNALS" ]] || fail "(n3) missing $WINDOW_FOCUS_SIGNALS"
+KOTLIN_SIGNATURE="$(python3 - "$WINDOW_FOCUS_SIGNALS" <<'PYEOF'
+import re
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+match = re.search(
+    r'const val FOREIGN_WINDOW_FOCUS_SIGNATURE: String =\s*(.*?)\n\n',
+    text,
+    re.S,
+)
+if not match:
+    sys.exit("could not read FOREIGN_WINDOW_FOCUS_SIGNATURE")
+pieces = re.findall(r'"((?:[^"\\]|\\.)*)"', match.group(1))
+if not pieces:
+    sys.exit("the Kotlin constant has no string literal parts")
+print("".join(piece.replace('\\"', '"') for piece in pieces))
+PYEOF
+)" || fail "(n3) could not extract the Kotlin #1879 signature"
+python3 - "$CLASSIFIER_PY" "$KOTLIN_SIGNATURE" <<'PYEOF' \
+  || fail "(n3) the #1879 label was registered in the #1882 classifier; it must stay RED"
+import ast
+import sys
+
+source_path, signature = sys.argv[1], sys.argv[2]
+tree = ast.parse(open(source_path, encoding="utf-8").read())
+docstring_node = None
+if tree.body and isinstance(tree.body[0], ast.Expr):
+    value = tree.body[0].value
+    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+        docstring_node = value
+for node in ast.walk(tree):
+    if node is docstring_node:
+        continue
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        if signature in node.value:
+            raise SystemExit(1)
+PYEOF
+
+# The verdict layer must likewise refuse a hypothetical #1879 classification,
+# while retaining #1882's explicit-foreign real_ime_precondition control.
+root="$SANDBOX/n3-verdict"; mkdir -p "$root/ci-journey"
+: >"$root/ci-journey/summary.md"
+stub="$SANDBOX/stub-foreign-window-classifier.sh"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'echo journey_failure_classification=foreign_window_focus' >"$stub"
+chmod +x "$stub"
+stub_out="$(CI_JOURNEY_INFRA_SIGNATURE="$stub" bash "$SHARD_VERDICT" "$root")"
+[[ "$(sed -n 's/^shard_signature_verdict=//p' <<<"$stub_out" | tail -n 1)" != "INFRA" ]] \
+  || fail "(n3) foreign_window_focus must not downgrade a shard"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'echo journey_failure_classification=real_ime_precondition' >"$stub"
+stub_out="$(CI_JOURNEY_INFRA_SIGNATURE="$stub" bash "$SHARD_VERDICT" "$root")"
+[[ "$(sed -n 's/^shard_signature_verdict=//p' <<<"$stub_out" | tail -n 1)" == "INFRA" ]] \
+  || fail "(n3) #1882 real_ime_precondition control no longer reaches INFRA"
+pass "(n3) #1879 is unregistered while #1882 explicit-foreign real-IME stays live"
+
+# The precondition observes and diagnoses only. Acting on the UI or mutating
+# process-wide UiAutomation flags can dismiss an app-owned modal and mask a
+# genuine session-screen product regression.
+for banned in 'performGlobalAction' 'GLOBAL_ACTION_' 'ACTION_CLICK' 'performAction' 'serviceInfo'; do
+  grep -q "$banned" "$WINDOW_FOCUS_SIGNALS" \
+    && fail "(n4) $WINDOW_FOCUS_SIGNALS must observe only; found '$banned'"
+done
+pass "(n4) #1879 focus precondition has no UI action or shared-service mutation"
+
+[[ -f "$SHOW_KEYBOARD_TEST" ]] || fail "(n5) missing $SHOW_KEYBOARD_TEST"
+grep -qE '\bassume(True|False|NotNull|That)[[:space:]]*\(' "$SHOW_KEYBOARD_TEST" \
+  && fail "(n5) no Assume self-skip may guard the ShowKeyboardChip proof"
+grep -q 'expected the soft keyboard to be VISIBLE after ONE tap on the show-keyboard chip' \
+  "$SHOW_KEYBOARD_TEST" \
+  || fail "(n5) the hard post-tap acceptance assertion is gone"
+grep -q 'expected the soft keyboard to be HIDDEN before tapping the show-keyboard' \
+  "$SHOW_KEYBOARD_TEST" \
+  || fail "(n5) the hard keyboard-down precondition is gone"
+[[ "$(grep -c 'SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()' "$SHOW_KEYBOARD_TEST")" == "1" ]] \
+  || fail "(n5) the chip must be tapped from exactly one production site"
+grep -q "fun $SHOW_KEYBOARD_METHOD" "$SHOW_KEYBOARD_TEST" \
+  || fail "(n5) the #1879 connected reproduction is missing"
+grep -q "$SHOW_KEYBOARD_CLASS" "$REPO_ROOT/scripts/ci-journey-suite.sh" \
+  || fail "(n5) the #1879 class is not wired into the per-push journey gate"
+pass "(n5) hard assertions remain and the #1879 reproduction is gate-wired"
 
 echo
 echo "== #1822 method-scoped bullets and fail-safe-toward-RED parsing =="

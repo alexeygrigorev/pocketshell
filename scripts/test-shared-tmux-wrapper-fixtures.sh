@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SHARED_TMUX_COPY_REGEX='^COPY[[:space:]]+tests/docker/agent-bin/(?:[[:space:]]|tmux[[:space:]])'
+SHARED_TMUX_COPY_REGEX='^COPY[[:space:]]+tests/docker/agent-bin/([[:space:]]|tmux[[:space:]])'
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
@@ -15,7 +15,8 @@ fail() {
 }
 
 mapfile -t consumers < <(
-  rg -l "$SHARED_TMUX_COPY_REGEX" "$ROOT_DIR/tests/docker"/Dockerfile.* | sort
+  find "$ROOT_DIR/tests/docker" -maxdepth 1 -type f -name 'Dockerfile.*' \
+    -exec grep -El "$SHARED_TMUX_COPY_REGEX" {} + | sort
 )
 
 [[ ${#consumers[@]} -gt 0 ]] || fail "no Dockerfile consumers of the shared agent-bin/tmux shim found"

@@ -3,6 +3,7 @@ package com.pocketshell.app.portfwd
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -11,8 +12,16 @@ import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
+import com.pocketshell.app.proof.DEFAULT_HOST
+import com.pocketshell.app.proof.DEFAULT_PORT
+import com.pocketshell.app.proof.DEFAULT_USER
+import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
@@ -40,6 +49,10 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStreamReader
+import java.net.InetSocketAddress
+import java.net.ServerSocket
+import java.net.Socket
+import kotlinx.coroutines.runBlocking
 
 /**
  * Emulator evidence for issue #487, part 1 (polished in #521): the D21
@@ -363,31 +376,52 @@ class ForwardingNotificationE2eTest {
      * it tears down forwarding and removes the notification.
      */
     @Test
-    fun liveUpdateContract_isApi36Promotable_pre36Ordinary_andStopClears() {
+    fun liveUpdateContract_isApi36Promotable_pre36Ordinary_andStopClears() { runBlocking {
         val hostId = 1_487_036L
+        val secondHostId = 1_933_002L
         registeredHostId = hostId
         controller().registerActiveHost(hostId = hostId, hostName = "Live Update Host")
         controller().updateActiveTunnels(hostId, mapOf(2222 to 2222))
+        controller().registerActiveHost(hostId = secondHostId, hostName = "Second Host")
+        controller().updateActiveTunnels(secondHostId, mapOf(3333 to 3333))
 
-        val deadline = System.currentTimeMillis() + POST_APPEARS_TIMEOUT_MS
-        var posted = forwardingNotification()
-        while (
-            (
-                posted == null ||
-                    posted.notification.extras
-                        .getCharSequence("android.text")
-                        .toString()
-                        .contains("Live Update Host")
-                        .not()
-                ) &&
-            System.currentTimeMillis() < deadline
-        ) {
-            Thread.sleep(POLL_INTERVAL_MS)
-            posted = forwardingNotification()
-        }
+        val multiple = waitForExactForwardingNotificationText(TWO_FORWARD_NOTIFICATION_TEXT)
+        assertEquals(
+            "phase 01 must represent exactly two hosts and two forwarded ports",
+            TWO_FORWARD_NOTIFICATION_TEXT,
+            multiple?.notification?.extras?.getCharSequence("android.text")?.toString(),
+        )
+        captureNotificationLifecyclePhase("01-two-forwards")
+
+        // Partial stop: removing one of multiple forwards must retain the
+        // notification and accurately render the remaining topology.
+        controller().unregisterActiveHost(secondHostId)
+
+        val posted = waitForExactForwardingNotificationText(ONE_FORWARD_NOTIFICATION_TEXT)
         val notification = requireNotNull(posted?.notification) {
-            "production ForwardingService notification did not settle; titles=${activeTitles()}"
+            "production ForwardingService notification did not settle to exact partial-stop text; " +
+                "expected=$ONE_FORWARD_NOTIFICATION_TEXT actual=${forwardingNotificationText()} " +
+                "titles=${activeTitles()}"
         }
+        val partialStopText = notification.extras.getCharSequence("android.text")?.toString()
+        assertEquals(
+            "phase 02 must represent exactly the one remaining host and forwarded port",
+            ONE_FORWARD_NOTIFICATION_TEXT,
+            partialStopText,
+        )
+        assertFalse(
+            "phase 02 must not retain the stale multi-host suffix",
+            partialStopText.orEmpty().contains("+ 1 more"),
+        )
+        assertFalse(
+            "phase 02 must not retain the stale two-port count",
+            partialStopText.orEmpty().contains("2 ports forwarded"),
+        )
+        assertTrue(
+            "partial stop must leave exactly the first host active",
+            controller().activeHostIdsSnapshot() == listOf(hostId),
+        )
+        captureNotificationLifecyclePhase("02-partial-stop-one-forward")
 
         assertTrue(
             "forwarding notification must remain ongoing on every API",
@@ -452,7 +486,180 @@ class ForwardingNotificationE2eTest {
         )
         assertNull("Stop/zero-forward must remove the Live Update notification", forwardingNotification())
         registeredHostId = null
+        captureNotificationLifecyclePhase("03-stop-zero")
+
+        // Repeated Stop is idempotent and must not recreate the service row.
+        stopAction.actionIntent.send()
+        waitForZeroNotificationStable()
+        assertTrue("repeated Stop must leave controller state at zero", controller().activeHostIdsSnapshot().isEmpty())
+        assertNull("repeated Stop must leave the notification cleared", forwardingNotification())
+        captureNotificationLifecyclePhase("04-repeated-stop-zero")
+
+        // A sticky-style service recreation at zero may briefly promote to meet
+        // the platform deadline, but its first zero snapshot must tear it down
+        // and no old generation may republish afterward.
+        context.startService(
+            android.content.Intent(context, com.pocketshell.app.portfwd.service.ForwardingService::class.java)
+                .setAction(com.pocketshell.app.portfwd.service.ForwardingService.ACTION_START),
+        )
+        waitForZeroNotificationStable()
+        assertTrue("zero-state service recreation must not restore forwarding", controller().activeHostIdsSnapshot().isEmpty())
+        assertNull("zero-state service recreation must not repost the notification", forwardingNotification())
+        captureNotificationLifecyclePhase("05-zero-recreation-stays-cleared")
+
+        // Research gate for #1933: the controller-only topology above proves
+        // notification ordering, but it cannot prove that Stop closes a real
+        // SSH direct-tcpip channel. Adopt a Docker-backed sshj session into the
+        // production supervisor, drive bytes through the actual local forward,
+        // then fire the notification's real PendingIntent and prove that the
+        // listening socket disappears together with service + notification.
+        val realHostId = 1_933_006L
+        val remotePort = 8_765
+        val localPort = ServerSocket(0).use { it.localPort }
+        val fixtureKey = SshKey.Pem(
+            instrumentation.context.assets.open("test_key").bufferedReader().use { it.readText() },
+        )
+        waitForSshFixtureReady(fixtureKey, port = DEFAULT_PORT)
+        cleanupRemoteEchoFixture(fixtureKey)
+        val forwardingSession = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = fixtureKey,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).getOrThrow()
+        try {
+            val startResult = forwardingSession.exec(
+                "tmux new-session -d -s issue1933-forward " +
+                    "\"while true; do nc -l -p $remotePort -e cat; done\"",
+            )
+            assertEquals("Docker echo fixture must start", 0, startResult.exitCode)
+            controller().adoptForwardingSession(
+                host = HostEntity(
+                    id = realHostId,
+                    name = "Issue 1933 real forward",
+                    hostname = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    username = DEFAULT_USER,
+                    keyId = 0,
+                    maxAutoPort = remotePort,
+                    skipPortsBelow = remotePort - 1,
+                    scanIntervalSec = 1,
+                ),
+                keyPath = "",
+                passphrase = null,
+                firstSession = forwardingSession,
+                initialRemappings = mapOf(remotePort to localPort),
+            )
+            registeredHostId = realHostId
+
+            val realForwardDeadline = SystemClock.elapsedRealtime() + REAL_FORWARD_TIMEOUT_MS
+            while (
+                controller().flowOfHostSnapshots().value[realHostId]
+                    ?.forwardedPortMap?.get(remotePort) != localPort &&
+                SystemClock.elapsedRealtime() < realForwardDeadline
+            ) {
+                Thread.sleep(POLL_INTERVAL_MS)
+            }
+            assertEquals(
+                "production supervisor must expose the Docker-backed forward",
+                localPort,
+                controller().flowOfHostSnapshots().value[realHostId]
+                    ?.forwardedPortMap?.get(remotePort),
+            )
+            assertEquals(
+                "real forwarded socket must round-trip bytes through Docker",
+                "issue1933-real-traffic",
+                roundTripThroughForward(localPort, "issue1933-real-traffic"),
+            )
+            val realNotification = requireNotNull(waitForForwardingNotification()) {
+                "real forward must post the production notification; titles=${activeTitles()}"
+            }
+            captureNotificationLifecyclePhase("06-real-docker-forward-traffic")
+
+            requireNotNull(
+                realNotification.notification.actions?.firstOrNull {
+                    it.title?.toString() == "Stop"
+                },
+            ).actionIntent.send()
+            val realStopDeadline = SystemClock.elapsedRealtime() + STOP_TEARDOWN_TIMEOUT_MS
+            while (
+                (
+                    controller().activeHostIdsSnapshot().isNotEmpty() ||
+                        forwardingNotification() != null ||
+                        canConnectToLocalPort(localPort)
+                    ) &&
+                SystemClock.elapsedRealtime() < realStopDeadline
+            ) {
+                Thread.sleep(POLL_INTERVAL_MS)
+            }
+            assertTrue(
+                "real Stop must clear controller state",
+                controller().activeHostIdsSnapshot().isEmpty(),
+            )
+            assertFalse(
+                "real Stop must close the sshj local-forward socket on port $localPort",
+                canConnectToLocalPort(localPort),
+            )
+            assertNull(
+                "real Stop must remove the forwarding notification",
+                forwardingNotification(),
+            )
+            registeredHostId = null
+            captureNotificationLifecyclePhase("07-real-stop-socket-service-notification-zero")
+        } finally {
+            if (controller().isHostActive(realHostId)) {
+                controller().unregisterActiveHost(realHostId)
+            }
+            cleanupRemoteEchoFixture(fixtureKey)
+        }
+
+        context.startService(
+            android.content.Intent(context, com.pocketshell.app.portfwd.service.ForwardingService::class.java)
+                .setAction(com.pocketshell.app.portfwd.service.ForwardingService.ACTION_START),
+        )
+        waitForZeroNotificationStable()
+        assertFalse(
+            "zero-state recreation after real Stop must not reopen the local-forward socket",
+            canConnectToLocalPort(localPort),
+        )
+        assertNull(
+            "zero-state recreation after real Stop must not repost the notification",
+            forwardingNotification(),
+        )
+        captureNotificationLifecyclePhase("08-real-stop-recreation-stays-zero")
+    } }
+
+    private suspend fun cleanupRemoteEchoFixture(key: SshKey.Pem) {
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = key,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).getOrNull()?.use { session ->
+            session.exec("tmux kill-session -t issue1933-forward 2>/dev/null || true")
+        }
     }
+
+    private fun roundTripThroughForward(localPort: Int, payload: String): String =
+        Socket().use { socket ->
+            socket.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
+            socket.soTimeout = 5_000
+            val writer = socket.getOutputStream().bufferedWriter()
+            writer.appendLine(payload)
+            writer.flush()
+            socket.getInputStream().bufferedReader().readLine().orEmpty()
+        }
+
+    private fun canConnectToLocalPort(localPort: Int): Boolean =
+        runCatching {
+            Socket().use { socket ->
+                socket.connect(InetSocketAddress("127.0.0.1", localPort), 500)
+            }
+        }.isSuccess
 
     /**
      * Issue #1202 (on-device durable regression, G1/G10) — the maintainer's exact
@@ -627,6 +834,25 @@ class ForwardingNotificationE2eTest {
                 ?.contains("Port forwarding running") == true
         }
 
+    private fun forwardingNotificationText(): String? =
+        forwardingNotification()?.notification?.extras
+            ?.getCharSequence("android.text")?.toString()
+
+    private fun waitForExactForwardingNotificationText(
+        expectedText: String,
+    ): android.service.notification.StatusBarNotification? {
+        val deadline = SystemClock.elapsedRealtime() + POST_APPEARS_TIMEOUT_MS
+        var posted = forwardingNotification()
+        while (
+            posted?.notification?.extras?.getCharSequence("android.text")?.toString() != expectedText &&
+            SystemClock.elapsedRealtime() < deadline
+        ) {
+            Thread.sleep(POLL_INTERVAL_MS)
+            posted = forwardingNotification()
+        }
+        return posted
+    }
+
     private fun notificationHasPromotableCharacteristics(
         notification: android.app.Notification,
     ): Boolean {
@@ -667,6 +893,83 @@ class ForwardingNotificationE2eTest {
         notificationManager.activeNotifications.map {
             it.notification.extras.getCharSequence("android.title")
         }
+
+    private fun waitForZeroNotificationStable() {
+        val clearDeadline = System.currentTimeMillis() + STOP_TEARDOWN_TIMEOUT_MS
+        while (forwardingNotification() != null && System.currentTimeMillis() < clearDeadline) {
+            Thread.sleep(POLL_INTERVAL_MS)
+        }
+        val stableDeadline = System.currentTimeMillis() + ZERO_STABLE_SETTLE_MS
+        while (System.currentTimeMillis() < stableDeadline) {
+            assertNull(
+                "zero-forward notification must stay cleared across the settle window; " +
+                    "active titles=${activeTitles()}",
+                forwardingNotification(),
+            )
+            Thread.sleep(POLL_INTERVAL_MS)
+        }
+    }
+
+    /**
+     * Issue #1933 connected evidence: correlate visible notification state with
+     * controller topology, service records, platform notification records, and
+     * the app's generation/operation markers from one monotonic timestamp.
+     */
+    private fun captureNotificationLifecyclePhase(name: String) {
+        val artifactsDir = File(
+            com.pocketshell.app.test.testArtifactsRoot(context),
+            "additional_test_output/forwarding-notification-1933",
+        )
+        assertTrue(
+            "could not create artifact dir ${artifactsDir.absolutePath}",
+            artifactsDir.exists() || artifactsDir.mkdirs(),
+        )
+        val timestampMs = SystemClock.elapsedRealtime()
+        File(artifactsDir, "$name-summary.txt").writeText(
+            buildString {
+                appendLine("phase=$name")
+                appendLine("elapsed_realtime_ms=$timestampMs")
+                appendLine("controller_host_ids=${controller().activeHostIdsSnapshot()}")
+                appendLine("controller_host_count=${controller().flowOfActiveHostCount().value}")
+                appendLine("controller_tunnel_count=${controller().flowOfTotalTunnelCount().value}")
+                appendLine("controller_snapshots=${controller().flowOfHostSnapshots().value}")
+                appendLine("active_notification_titles=${activeTitles()}")
+                appendLine("forwarding_notification_present=${forwardingNotification() != null}")
+            },
+        )
+        File(artifactsDir, "$name-services.txt").writeText(
+            runShellCommand("dumpsys activity services ${context.packageName}"),
+        )
+        File(artifactsDir, "$name-notifications.txt").writeText(
+            runShellCommand("dumpsys notification --noredact"),
+        )
+        File(artifactsDir, "$name-statusbar.txt").writeText(runShellCommand("dumpsys statusbar"))
+        File(artifactsDir, "$name-service-logcat.txt").writeText(
+            runShellCommand("logcat -d -s PsForwardingService:I '*:S'"),
+        )
+
+        instrumentation.uiAutomation.executeShellCommand("cmd statusbar expand-notifications").close()
+        // SystemUI shade expansion is asynchronous. The exact-main failure's
+        // screenshot evidence is useful only when it agrees with the platform
+        // notification dump, so wait through the animation before capture.
+        Thread.sleep(2_000L)
+        val screenshot = requireNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "UiAutomation returned no notification-shade screenshot for phase $name"
+        }
+        val screenshotFile = File(artifactsDir, "$name-notification-shade.png")
+        FileOutputStream(screenshotFile).use { output ->
+            assertTrue(
+                "notification-shade screenshot compression failed for phase $name",
+                screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output),
+            )
+        }
+        instrumentation.uiAutomation.executeShellCommand("cmd statusbar collapse").close()
+        assertTrue(
+            "notification-shade screenshot was not written for phase $name",
+            screenshotFile.exists() && screenshotFile.length() > 0,
+        )
+        println("FORWARDING_NOTIFICATION_1933_PHASE $name elapsed=$timestampMs dir=${artifactsDir.absolutePath}")
+    }
 
     // True once the notification reflects the controller's settled host +
     // forwarded-port detail, i.e. it has moved past the initial "Connecting…"
@@ -768,6 +1071,11 @@ class ForwardingNotificationE2eTest {
         const val POLL_INTERVAL_MS: Long = 100L
         const val GRANT_PROPAGATION_TIMEOUT_MS: Long = 5_000L
         const val POST_APPEARS_TIMEOUT_MS: Long = 10_000L
+        const val REAL_FORWARD_TIMEOUT_MS: Long = 20_000L
+        const val TWO_FORWARD_NOTIFICATION_TEXT: String =
+            "Running in the background · Live Update Host + 1 more · 2 ports forwarded"
+        const val ONE_FORWARD_NOTIFICATION_TEXT: String =
+            "Running in the background · Live Update Host · 1 port forwarded"
 
         // Issue #1202 harness.
         const val SESSION_HOST_ID: Long = 1_202_001L
@@ -782,5 +1090,6 @@ class ForwardingNotificationE2eTest {
         const val PINNED_SETTLE_MS: Long = 6_000L
         const val STOP_TEARDOWN_TIMEOUT_MS: Long = 10_000L
         const val REESTABLISH_SETTLE_MS: Long = 2_000L
+        const val ZERO_STABLE_SETTLE_MS: Long = 1_000L
     }
 }

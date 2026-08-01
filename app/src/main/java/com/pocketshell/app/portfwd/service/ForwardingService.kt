@@ -15,6 +15,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.portfwd.DefaultDispatcher
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
@@ -117,6 +118,20 @@ class ForwardingService : Service() {
     private val scope: CoroutineScope by scopeDelegate
     private var observeJob: Job? = null
     private var hasStartedForeground = false
+    private var notificationGeneration = 0L
+
+    /**
+     * Test-only pause point immediately before a computed positive snapshot
+     * enters the serialized mutation authority. It makes the #1933 late-write
+     * race deterministic without replacing NotificationManager or the service
+     * lifecycle path with a proxy.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var beforeNotificationPublishForTest: (() -> Unit)? = null
+
+    private val notificationMutations = ForwardingNotificationMutationAuthority(
+        record = ::recordNotificationOperation,
+    )
 
     /** Issue #994 test seam: the observe coroutine, so a test can assert it is
      * active while observing and cancelled by `onDestroy()`. */
@@ -235,7 +250,7 @@ class ForwardingService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 controller.stopAllForwarding(requestServiceStop = false)
-                stopForwarding()
+                stopForwarding(reason = "action_stop")
                 return START_NOT_STICKY
             }
             else -> {
@@ -253,12 +268,17 @@ class ForwardingService : Service() {
                 // now contains that throw and returns false rather than
                 // promote-or-die; on failure we stop the service cleanly instead
                 // of crashing the process.
-                if (!promoteToForegroundIfNeeded(initialNotification())) {
-                    stopForwarding()
+                val controllerCount = controller.activeHostIdsSnapshot().size
+                var promoted = false
+                notificationGeneration = notificationMutations.open(controllerCount) {
+                    promoted = promoteToForegroundIfNeeded(initialNotification())
+                }
+                if (!promoted) {
+                    stopForwarding(reason = "promotion_rejected")
                     return START_NOT_STICKY
                 }
                 if (observeJob == null || observeJob?.isActive != true) {
-                    startObserving()
+                    startObserving(notificationGeneration)
                 }
             }
         }
@@ -275,6 +295,21 @@ class ForwardingService : Service() {
     override fun onDestroy() {
         observeJob?.cancel()
         observeJob = null
+        notificationMutations.close(
+            controllerCount = controllerCountForDiagnostics(),
+            reason = "service_destroy",
+        ) { generation ->
+            recordNotificationOperation(
+                ForwardingNotificationOperation(
+                    kind = ForwardingNotificationOperation.Kind.REMOVE,
+                    generation = generation,
+                    controllerCount = controllerCountForDiagnostics(),
+                    reason = "service_destroy",
+                ),
+            )
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            hasStartedForeground = false
+        }
         // Cancel the observe-loop scope so no coroutine outlives the service
         // (issue #994). Guarded so we don't force-create the lazy scope just to
         // cancel it on a service that never started observing.
@@ -298,7 +333,7 @@ class ForwardingService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
-    private fun startObserving() {
+    private fun startObserving(generation: Long) {
         observeJob = scope.launch {
             // Issue #994: record the dispatcher the collector actually resumed
             // on so a JVM test can assert the observe loop is confined to the
@@ -339,9 +374,10 @@ class ForwardingService : Service() {
                         // covers the edge case where the user toggled
                         // off before the service finished promoting to
                         // foreground.
-                        stopForwarding()
+                        stopForwarding(reason = "zero_snapshot")
                     } else {
                         updateNotification(
+                            generation,
                             snapshot.primaryHost,
                             snapshot.activeHosts,
                             snapshot.tunnels,
@@ -353,14 +389,33 @@ class ForwardingService : Service() {
         }
     }
 
-    private fun stopForwarding() {
+    private fun stopForwarding(reason: String) {
         observeJob?.cancel()
         observeJob = null
-        // STOP_FOREGROUND_REMOVE makes the notification disappear
-        // immediately. The constant has been stable since API 24.
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        hasStartedForeground = false
-        stopSelf()
+        val controllerCount = controller.activeHostIdsSnapshot().size
+        notificationMutations.close(controllerCount, reason) { generation ->
+            // STOP_FOREGROUND_REMOVE makes the notification disappear
+            // immediately. The constant has been stable since API 24.
+            recordNotificationOperation(
+                ForwardingNotificationOperation(
+                    kind = ForwardingNotificationOperation.Kind.REMOVE,
+                    generation = generation,
+                    controllerCount = controllerCount,
+                    reason = reason,
+                ),
+            )
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            hasStartedForeground = false
+            recordNotificationOperation(
+                ForwardingNotificationOperation(
+                    kind = ForwardingNotificationOperation.Kind.SERVICE_STOP,
+                    generation = generation,
+                    controllerCount = controllerCount,
+                    reason = reason,
+                ),
+            )
+            stopSelf()
+        }
     }
 
     /**
@@ -410,6 +465,7 @@ class ForwardingService : Service() {
     }
 
     private fun updateNotification(
+        generation: Long,
         hostName: String,
         hostCount: Int,
         tunnelCount: Int,
@@ -418,13 +474,43 @@ class ForwardingService : Service() {
     ) {
         val notification =
             buildNotification(hostName, hostCount, tunnelCount, restoringHostCount, activePorts)
-        if (!hasStartedForeground) {
-            promoteToForegroundIfNeeded(notification)
-            return
+        beforeNotificationPublishForTest?.invoke()
+        notificationMutations.publish(
+            expectedGeneration = generation,
+            controllerCount = hostCount,
+        ) {
+            if (!hasStartedForeground) {
+                promoteToForegroundIfNeeded(notification)
+                return@publish
+            }
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.notify(NOTIFICATION_ID, notification)
         }
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, notification)
     }
+
+    private fun recordNotificationOperation(operation: ForwardingNotificationOperation) {
+        val message = buildString {
+            append("notification-op=").append(operation.kind.name.lowercase())
+            append(" generation=").append(operation.generation)
+            operation.expectedGeneration?.let { append(" expectedGeneration=").append(it) }
+            append(" controllerCount=").append(operation.controllerCount)
+            append(" foreground=").append(hasStartedForeground)
+            operation.reason?.let { append(" reason=").append(it) }
+        }
+        Log.i(TAG, message)
+        DiagnosticEvents.record(
+            "portforward",
+            "notification_${operation.kind.name.lowercase()}",
+            "generation" to operation.generation,
+            "expectedGeneration" to operation.expectedGeneration,
+            "controllerCount" to operation.controllerCount,
+            "foreground" to hasStartedForeground,
+            "reason" to operation.reason,
+        )
+    }
+
+    private fun controllerCountForDiagnostics(): Int =
+        if (::controller.isInitialized) controller.activeHostIdsSnapshot().size else 0
 
     /**
      * Snapshot of the controller state the notification renders (issue

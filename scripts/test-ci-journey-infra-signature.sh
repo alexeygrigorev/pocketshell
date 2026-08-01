@@ -20,6 +20,7 @@ SHARD_VERDICT="$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh"
 ELAPSED="$SCRIPT_DIR/ci-journey-suite-elapsed.sh"
 RETRY_BUDGET="$SCRIPT_DIR/ci-journey-retry-budget.sh"
 AGG="$SCRIPT_DIR/ci-journey-aggregate-verdict.sh"
+BUDGET_FN="$SCRIPT_DIR/ci-journey-budget-functions.sh"
 WORKFLOW="${CI_JOURNEY_INFRA_SIGNATURE_WORKFLOW:-$REPO_ROOT/.github/workflows/tests.yml}"
 ANDROID_TEST="$REPO_ROOT/app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerSaturatedImeAnchorE2eTest.kt"
 SHOW_KEYBOARD_TEST="$REPO_ROOT/app/src/androidTest/java/com/pocketshell/app/session/ShowKeyboardChipE2eTest.kt"
@@ -29,9 +30,21 @@ CLASSIFIER_PY="$SCRIPT_DIR/ci-journey-infra-signature.py"
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
-for required in "$SIGNATURE" "$SHARD_VERDICT" "$ELAPSED" "$RETRY_BUDGET" "$AGG" "$WORKFLOW"; do
+for required in "$SIGNATURE" "$SHARD_VERDICT" "$ELAPSED" "$RETRY_BUDGET" "$AGG" "$WORKFLOW" "$BUDGET_FN"; do
   [[ -f "$required" ]] || fail "missing required file: $required"
 done
+
+journey_fixture_artifact_key() {
+  local classname="$1" key suffix
+  key="$(
+    bash -c 'source "$1"; journey_class_artifact_key "$2"' \
+      _ "$BUDGET_FN" "$classname"
+  )" || fail "could not derive the production artifact key for $classname"
+  suffix="${key#"$classname"--}"
+  [[ "$key" == "$classname"--* && "$suffix" =~ ^[0-9a-f]{16}$ ]] \
+    || fail "malformed production artifact key for $classname: $key"
+  printf '%s\n' "$key"
+}
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
@@ -105,8 +118,9 @@ append_summary_line() {
 #   outcome: pass | realime | containment | error
 write_case_xml() {
   local root="$1" class="$2" attempt="$3"; shift 3
-  local key="${class##*.}"
-  local dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt/android-test-outputs/androidTest-results/connected"
+  local key dir
+  key="$(journey_fixture_artifact_key "$class")"
+  dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt/android-test-outputs/app/build/outputs/androidTest-results/connected/debug"
   mkdir -p "$dir"
   local file="$dir/TEST-emulator-5554-15_$key-$attempt.xml"
   {
@@ -664,12 +678,14 @@ echo "== #1919 exact run 30665705369 foreign-framework-ANR fixture =="
 # own class-attempt activity-processes.txt and that snapshot proves the one
 # foreign ProcessRecord owns the framework AppNotRespondingDialog.
 root="$SANDBOX/issue1919-exact"; mkdir -p "$root"
+ISSUE1919_SAT_KEY="$(journey_fixture_artifact_key "$SATURATED_CLASS")"
+ISSUE1919_SHOW_KEY="$(journey_fixture_artifact_key "$SHOW_KEYBOARD_CLASS")"
 write_summary "$root" 2910 "$SATURATED_CLASS" "$SHOW_KEYBOARD_CLASS"
 for attempt in 1 2; do
   write_issue1919_attempt "$root" "$SATURATED_CLASS" \
-    "$SATURATED_CLASS--0301db8306ddbe3e" "$attempt"
+    "$ISSUE1919_SAT_KEY" "$attempt"
   write_issue1919_attempt "$root" "$SHOW_KEYBOARD_CLASS" \
-    "$SHOW_KEYBOARD_CLASS--8569a6475d403956" "$attempt"
+    "$ISSUE1919_SHOW_KEY" "$attempt"
 done
 run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
 printf '%s\n' "$SIG_OUT" | sed 's/^/    /'
@@ -692,8 +708,6 @@ run_agg "$verdicts"
 pass "(#1919) exact four-attempt launcher ANR -> INFRA -> RE-RUN"
 
 ISSUE1919_FIXTURE="$root"
-ISSUE1919_SAT_KEY="$SATURATED_CLASS--0301db8306ddbe3e"
-ISSUE1919_SHOW_KEY="$SHOW_KEYBOARD_CLASS--8569a6475d403956"
 issue1919_snapshot() {
   printf '%s/ci-journey/class-attempts/app/%s/attempt-%s/activity-processes.txt\n' \
     "$1" "$2" "$3"

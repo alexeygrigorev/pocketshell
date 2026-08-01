@@ -45,13 +45,26 @@ SUITE="$SCRIPT_DIR/ci-journey-suite.sh"
 CORE_TERMINAL_FN="$SCRIPT_DIR/ci-journey-core-terminal-functions.sh"
 SUMMARY_FN="$SCRIPT_DIR/ci-journey-summary-functions.sh"
 AGG="$SCRIPT_DIR/ci-journey-aggregate-verdict.sh"
+BUDGET_FN="$SCRIPT_DIR/ci-journey-budget-functions.sh"
 
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
-for required in "$WORKFLOW" "$SUITE" "$CORE_TERMINAL_FN" "$SUMMARY_FN" "$AGG"; do
+for required in "$WORKFLOW" "$SUITE" "$CORE_TERMINAL_FN" "$SUMMARY_FN" "$AGG" "$BUDGET_FN"; do
   [[ -f "$required" ]] || fail "missing required file: $required"
 done
+
+journey_fixture_artifact_key() {
+  local classname="$1" key suffix
+  key="$(
+    bash -c 'source "$1"; journey_class_artifact_key "$2"' \
+      _ "$BUDGET_FN" "$classname"
+  )" || fail "could not derive the production artifact key for $classname"
+  suffix="${key#"$classname"--}"
+  [[ "$key" == "$classname"--* && "$suffix" =~ ^[0-9a-f]{16}$ ]] \
+    || fail "malformed production artifact key for $classname: $key"
+  printf '%s\n' "$key"
+}
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
@@ -828,7 +841,9 @@ write_synth_summary() {
 # write_synth_xml <ws> <attempt> <classname> <method:kind>...
 write_synth_xml() {
   local ws="$1" attempt="$2" classname="$3"; shift 3
-  local dir="$ws/artifacts/ci-journey/class-attempts/app/synthetic-$attempt-${classname##*.}"
+  local key dir
+  key="$(journey_fixture_artifact_key "$classname")"
+  dir="$ws/artifacts/ci-journey/class-attempts/app/$key/attempt-$attempt/android-test-outputs/app/build/outputs/androidTest-results/connected/debug"
   mkdir -p "$dir"
   {
     echo "<testsuite tests=\"$#\" failures=\"$#\">"

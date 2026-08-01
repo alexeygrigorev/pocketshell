@@ -11,9 +11,14 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -22,9 +27,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.File
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.InputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Issue #697 — the explorer browse path must reuse the app-wide warm
@@ -41,6 +49,8 @@ class FileExplorerLeaseTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
+    private val fixture = FileExplorerViewModelTestFixture(mainDispatcherRule)
+
     @Test
     fun browseAcquiresLeaseOnceAndNeverClosesIt() = runBlocking {
         val session = FakeSshSession()
@@ -49,7 +59,7 @@ class FileExplorerLeaseTest {
             connector = connector,
             idleTtlMillis = 30_000L,
         )
-        val vm = FileExplorerViewModel(leaseManager)
+        val vm = fixture.create(leaseManager)
 
         vm.start(request("/srv"))
         val ready = vm.state.awaitReady()
@@ -63,11 +73,10 @@ class FileExplorerLeaseTest {
         assertEquals("explorer browse must dial exactly one handshake", 1, connector.connectCount)
         assertFalse("explorer must NOT close the shared warm transport", session.closed)
 
-        // Clearing the VM releases the lease but never closes it (the pool keeps
-        // it warm for its idle TTL so a sibling screen reuses it).
-        vm.callOnCleared()
+        // Clearing the VM cancels and joins its jobs but never closes the warm
+        // transport; the pool remains the transport owner.
+        fixture.clearAndJoin(vm)
         assertFalse("onCleared must release, not close, the warm transport", session.closed)
-        leaseManager.close()
     }
 
     @Test
@@ -77,7 +86,7 @@ class FileExplorerLeaseTest {
             connector = CountingConnector(session),
             idleTtlMillis = 30_000L,
         )
-        val vm = FileExplorerViewModel(leaseManager)
+        val vm = fixture.create(leaseManager)
 
         vm.start(request("/srv"))
         val root = vm.state.awaitReady()
@@ -96,7 +105,57 @@ class FileExplorerLeaseTest {
         )
         val reconciled = vm.state.awaitReady { it.currentPath == "/srv" }
         assertEquals("/srv", reconciled.currentPath)
-        leaseManager.close()
+    }
+
+    @Test
+    fun cachedReadyDoesNotLetTheLiveReconcileOutliveTheTest() = runBlocking {
+        val reconcileEntered = CountDownLatch(1)
+        val cancellationObserved = CountDownLatch(1)
+        val holdReconcile = CompletableDeferred<Unit>()
+        val allowCancelledWorkerToExit = CompletableDeferred<Unit>()
+        val session = FakeSshSession { call ->
+            if (call == 3) {
+                reconcileEntered.countDown()
+                try {
+                    holdReconcile.await()
+                } finally {
+                    withContext(NonCancellable) {
+                        cancellationObserved.countDown()
+                        allowCancelledWorkerToExit.await()
+                    }
+                }
+            }
+        }
+        val leaseManager = SshLeaseManager(
+            connector = CountingConnector(session),
+            idleTtlMillis = 30_000L,
+        )
+        val vm = fixture.create(leaseManager)
+
+        vm.start(request("/srv"))
+        val root = vm.state.awaitReady()
+        vm.openDirectory(root.entries.first { it.type == RemoteEntry.Type.DIRECTORY })
+        vm.state.awaitReady { it.currentPath.endsWith("/sub") }
+        vm.goUp()
+
+        assertTrue(
+            "the live cached-directory reconcile never entered its IO body",
+            withContext(Dispatchers.IO) { reconcileEntered.await(10, TimeUnit.SECONDS) },
+        )
+        vm.state.awaitReady { it.currentPath == "/srv" }
+
+        val close = async(Dispatchers.Default) { fixture.closeAndJoin() }
+        assertTrue(
+            "cancellation never reached the real-worker reconcile",
+            withContext(Dispatchers.IO) { cancellationObserved.await(10, TimeUnit.SECONDS) },
+        )
+        assertFalse(
+            "fixture returned before the cancelled real-worker reconcile exited",
+            close.isCompleted,
+        )
+        allowCancelledWorkerToExit.complete(Unit)
+        close.await()
+        assertFalse("joined reconcile remains active", vm.loadJobForTest().isActive)
     }
 
     @Test
@@ -110,7 +169,7 @@ class FileExplorerLeaseTest {
             connector = connector,
             idleTtlMillis = 30_000L,
         )
-        val vm = FileExplorerViewModel(leaseManager)
+        val vm = fixture.create(leaseManager)
 
         vm.start(request("/srv"))
         val ready = vm.state.awaitReady()
@@ -119,7 +178,6 @@ class FileExplorerLeaseTest {
         assertEquals("stale timeout must evict and retry on a fresh lease", 2, connector.connectCount)
         assertTrue("timed-out transport must be evicted", wedged.closed)
         assertFalse("healthy retry transport must remain warm", healthy.closed)
-        leaseManager.close()
     }
 
     @Test
@@ -130,7 +188,7 @@ class FileExplorerLeaseTest {
             connector = connector,
             idleTtlMillis = 30_000L,
         )
-        val vm = FileExplorerViewModel(leaseManager)
+        val vm = fixture.create(leaseManager)
 
         vm.start(request("/srv"))
         val ready = vm.state.awaitReady()
@@ -147,7 +205,6 @@ class FileExplorerLeaseTest {
             ),
             connector.credentialIds,
         )
-        leaseManager.close()
     }
 
     @Test
@@ -158,7 +215,7 @@ class FileExplorerLeaseTest {
             connector = SequenceConnector(listOf(browseSession, transferSession)),
             idleTtlMillis = 0L,
         )
-        val vm = FileExplorerViewModel(leaseManager)
+        val vm = fixture.create(leaseManager)
 
         vm.start(request("/srv"))
         val ready = vm.state.awaitReady()
@@ -173,7 +230,6 @@ class FileExplorerLeaseTest {
             "SAF destination write must run after the transfer lease is released",
             writeSawReleasedTransfer,
         )
-        leaseManager.close()
     }
 
     private suspend fun StateFlow<FileExplorerUiState>.awaitReady(
@@ -208,10 +264,10 @@ class FileExplorerLeaseTest {
         startDir = startDir,
     )
 
-    private fun FileExplorerViewModel.callOnCleared() {
-        val m = androidx.lifecycle.ViewModel::class.java.getDeclaredMethod("onCleared")
-        m.isAccessible = true
-        m.invoke(this)
+    private fun FileExplorerViewModel.loadJobForTest(): Job {
+        val field = FileExplorerViewModel::class.java.getDeclaredField("loadJob")
+        field.isAccessible = true
+        return checkNotNull(field.get(this) as? Job)
     }
 
     private class CountingConnector(
@@ -255,8 +311,10 @@ class FileExplorerLeaseTest {
      */
     private class FakeSshSession(
         private val listDirectoryFailure: Throwable? = null,
+        private val beforeListDirectory: suspend (Int) -> Unit = {},
     ) : SshSession {
         var closed: Boolean = false
+        private val listDirectoryCalls = AtomicInteger(0)
 
         override val isConnected: Boolean
             get() = !closed
@@ -272,6 +330,7 @@ class FileExplorerLeaseTest {
         }
 
         override suspend fun listDirectory(remotePath: String, maxEntries: Int): RemoteListing {
+            beforeListDirectory(listDirectoryCalls.incrementAndGet())
             listDirectoryFailure?.let { throw it }
             return RemoteListing(
                 entries = listOf(

@@ -300,6 +300,47 @@ class ReconnectStormLivelockE2eTest {
     }
 
     /**
+     * Issue #1940 — a failed post-STOP fixture assertion must not strand the shared tmux
+     * server for every journey class that follows this one in the shard.
+     *
+     * The exact main failure resolved the server pid and stopped it, but found no live
+     * `tmux -CC` client. [stallTmuxServerAndDropControlChannel] then asserted before it
+     * recorded that cleanup owed a SIGCONT, so [resumeTmuxServer] was a no-op and seven
+     * otherwise independent SSH journeys timed out behind the frozen server. Force that
+     * same missing-client branch deterministically, catch the expected fixture rejection,
+     * run the same cleanup hook, and prove a fresh tmux command can make progress.
+     */
+    @Test
+    fun missingControlClientAfterServerStopIsResumedBeforeSiblingSetup() {
+        runBlocking {
+            val key = requireNotNull(seededKey)
+            val failure = runCatching {
+                stallTmuxServerAndDropControlChannel(
+                    key = key,
+                    controlClientLookup = "true",
+                )
+            }.exceptionOrNull()
+
+            assertTrue(
+                "fixture must enter the exact missing-control-client rejection; got=$failure",
+                failure is AssertionError &&
+                    failure.message.orEmpty().contains("could not resolve the app's live `tmux -CC`"),
+            )
+
+            resumeTmuxServer()
+            val probe = execRemote(
+                key,
+                "tmux display-message -p -t ${shellQuote(SESSION_NAME)} '#{session_name}'",
+            )
+            assertEquals(
+                "a sibling remote setup must make progress after the failed stall fixture",
+                SESSION_NAME,
+                probe.stdout.trim(),
+            )
+        }
+    }
+
+    /**
      * The RECOVERY half of the class, and the load-bearing NEGATIVE case: making the app
      * stop killing transports must NOT make it stop recovering.
      *
@@ -445,19 +486,22 @@ class ReconnectStormLivelockE2eTest {
      *     the REAL passive-drop classifier fires. Ordering matters: stall first, then drop,
      *     or the loop can heal in the gap.
      */
-    private suspend fun stallTmuxServerAndDropControlChannel(key: String) {
-        // NOTE the `tmux[ ]-CC` bracket trick: a plain `pgrep -f 'tmux -CC'` also matches
-        // the shell running THIS very script (whose command line contains the literal text
-        // `tmux -CC`), so it kills itself and the exec returns exit=-1 with empty output.
-        // The bracketed regex still matches the real `tmux -CC ...` process while the
-        // script's own command line no longer contains the matched literal.
+    private suspend fun stallTmuxServerAndDropControlChannel(
+        key: String,
+        controlClientLookup: String = "pgrep -f 'tmux(\\.real)?[ ]-CC' | head -1",
+    ) {
+        // Match both the normal binary and the fixture wrapper's delegated
+        // `/usr/bin/tmux.real -CC` process. Keep `[ ]` in the regex: a plain literal
+        // `tmux -CC` also matches the shell running THIS script (its command line contains
+        // the lookup text), so it kills itself and the exec returns empty output. The
+        // bracketed form matches neither its own source text nor the shell command line.
         val script = buildString {
             appendLine("set -u")
             // Resolve BEFORE stalling: `#{pid}` needs a responsive server, and it is the
             // SERVER's pid (never a client's).
             appendLine("PID=\$(tmux display-message -p -t ${shellQuote(SESSION_NAME)} '#{pid}')")
             appendLine("echo \"tmux_server_pid=\$PID\"")
-            appendLine("CC=\$(pgrep -f 'tmux[ ]-CC' | head -1)")
+            appendLine("CC=\$($controlClientLookup)")
             appendLine("echo \"cc_client_pid=\$CC\"")
             // The app spawns `tmux -CC new-session -A -s <name>` by writing into an SSH
             // SHELL channel, so the control channel EOFs (and `disconnected` latches) when
@@ -471,24 +515,35 @@ class ReconnectStormLivelockE2eTest {
             appendLine("echo stalled_and_dropped")
         }
         val result = execRemote(key, script)
-        assertTrue(
-            "expected to stall the tmux server + drop the control channel; " +
-                "exit=${result.exitCode} stdout='${result.stdout}' stderr='${result.stderr}'",
-            result.exitCode == 0 && result.stdout.contains("stalled_and_dropped"),
-        )
         tmuxServerPid = Regex("tmux_server_pid=(\\d+)").find(result.stdout)?.groupValues?.get(1)
-        assertTrue(
-            "could not resolve the tmux server pid from '${result.stdout}' — without it the " +
-                "tail is not actually stalled and this test would run on a happy fixture",
-            tmuxServerPid != null,
-        )
-        assertTrue(
-            "could not resolve the app's live `tmux -CC` control-client pid from " +
-                "'${result.stdout}' — without dropping it there is no passive disconnect " +
-                "and the grace loop never runs",
-            Regex("cc_client_pid=(\\d+)").containsMatchIn(result.stdout),
-        )
-        serverStalled = true
+        // Record the cleanup debt BEFORE validating anything that happened after SIGSTOP.
+        // Exact-main #1940 reached this point with a valid server pid but an empty CC pid;
+        // the assertion below threw while serverStalled was still false, making @After's
+        // SIGCONT a no-op and freezing the shared fixture for seven following classes.
+        serverStalled = tmuxServerPid != null && result.stdout.contains("stalled_and_dropped")
+        try {
+            assertTrue(
+                "expected to stall the tmux server + drop the control channel; " +
+                    "exit=${result.exitCode} stdout='${result.stdout}' stderr='${result.stderr}'",
+                result.exitCode == 0 && result.stdout.contains("stalled_and_dropped"),
+            )
+            assertTrue(
+                "could not resolve the tmux server pid from '${result.stdout}' — without it the " +
+                    "tail is not actually stalled and this test would run on a happy fixture",
+                tmuxServerPid != null,
+            )
+            assertTrue(
+                "could not resolve the app's live `tmux -CC` control-client pid from " +
+                    "'${result.stdout}' — without dropping it there is no passive disconnect " +
+                    "and the grace loop never runs",
+                Regex("cc_client_pid=(\\d+)").containsMatchIn(result.stdout),
+            )
+        } catch (failure: Throwable) {
+            // Restore immediately as well as retaining @After as a second line of defence.
+            // A rejected fixture must never leak its destructive STOP into a sibling.
+            runCatching { resumeTmuxServer() }
+            throw failure
+        }
         recordTiming("fixture_tmux_server_pid", tmuxServerPid!!.toLong())
     }
 

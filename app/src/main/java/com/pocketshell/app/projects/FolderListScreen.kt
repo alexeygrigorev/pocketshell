@@ -265,6 +265,15 @@ fun FolderListScreen(
     var promptDictationEvent by remember { mutableStateOf<AssistantDictationTextEvent?>(null) }
     var correctionDictationEvent by remember { mutableStateOf<AssistantDictationTextEvent?>(null) }
 
+    // Issue #1875: profile discovery at bind can fail transiently while the
+    // rest of the host tree remains usable. Retry on every real picker open;
+    // the StateFlows update the already-open sheet when discovery completes.
+    LaunchedEffect(pickerFolder) {
+        if (pickerFolder != null) {
+            viewModel.refreshProfilesForPicker()
+        }
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->

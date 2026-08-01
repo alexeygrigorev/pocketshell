@@ -117,6 +117,36 @@ class FolderListViewModelProfilesTest {
     }
 
     @Test
+    fun pickerOpenRetriesTransientBindFailure() = runTest(testDispatcher) {
+        val gateway = FakeProfilesGateway(
+            ProfilesResult.ConnectFailed(IllegalStateException("transient bind failure")),
+        )
+        val vm = buildViewModel(gateway)
+        try {
+            bind(vm)
+            assertTrue(vm.claudeProfiles.value.isEmpty())
+
+            gateway.result = ProfilesResult.Profiles(
+                listOf(
+                    RemoteProfile("Claude", "claude", null, default = true),
+                    RemoteProfile("Claude (Z.AI)", "claude", "/home/u/.zlaude", default = false),
+                ),
+            )
+            vm.refreshProfilesForPicker()
+
+            assertEquals(
+                listOf(
+                    ClaudeProfile("Claude", default = true),
+                    ClaudeProfile("Claude (Z.AI)", default = false),
+                ),
+                vm.claudeProfiles.value,
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
     fun noGatewayKeepsProfilesEmpty() = runTest(testDispatcher) {
         // Null gateway = unit-test path with no profile fetch.
         val vm = buildViewModel(profilesGateway = null)
@@ -162,7 +192,7 @@ class FolderListViewModelProfilesTest {
         )
     }
 
-    private class FakeProfilesGateway(private val result: ProfilesResult) : ProfilesGateway {
+    private class FakeProfilesGateway(var result: ProfilesResult) : ProfilesGateway {
         var lastHostId: Long = -1L
         var lastKeyPath: String = ""
 

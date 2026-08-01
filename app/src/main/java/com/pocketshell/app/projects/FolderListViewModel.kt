@@ -440,26 +440,6 @@ class FolderListViewModel internal constructor(
      */
     private fun expectedPocketshellVersion(): String = expectedPocketshellVersionProvider()
 
-    /**
-     * Issue #718: Claude Code profiles for this host, DISCOVERED on the host
-     * and fetched via [ProfilesGateway] during [bind] (was the #627
-     * client-stored JSON, hard-cut per D22). Empty when the host has only the
-     * default profile, when the CLI is missing, or when the fetch fails (the
-     * picker then shows no profile selector).
-     */
-    private val _claudeProfiles: MutableStateFlow<List<ClaudeProfile>> =
-        MutableStateFlow(emptyList())
-    val claudeProfiles: StateFlow<List<ClaudeProfile>> = _claudeProfiles.asStateFlow()
-
-    /**
-     * Issue #718: Codex profiles for this host, discovered on the host and
-     * fetched via [ProfilesGateway] during [bind] (was the #631 client-stored
-     * JSON, hard-cut per D22). Empty for the default-only / unavailable cases.
-     */
-    private val _codexProfiles: MutableStateFlow<List<CodexProfile>> =
-        MutableStateFlow(emptyList())
-    val codexProfiles: StateFlow<List<CodexProfile>> = _codexProfiles.asStateFlow()
-
     private val assistant: SessionAssistantController =
         SessionAssistantController(scope = viewModelScope, sessionFactory = ::buildAssistantDeps)
     internal val assistantState: StateFlow<AssistantUiState> = assistant.state
@@ -470,6 +450,23 @@ class FolderListViewModel internal constructor(
     private var assistantSshExecutor: AssistantSshExecutor = RealAssistantSshExecutor()
 
     private var bound: BoundParams? = null
+
+    /**
+     * Issue #718/#1875: host profile discovery and latest-request state live in
+     * one focused owner rather than adding another responsibility to this
+     * already-large tree coordinator.
+     */
+    private val profileDiscovery = FolderListProfileDiscovery(
+        profilesGateway = profilesGateway,
+        hostDao = hostDao,
+        scope = viewModelScope,
+        ioDispatcher = { ioDispatcher },
+        isCurrentHost = { hostId -> bound?.hostId == hostId },
+    )
+
+    val claudeProfiles: StateFlow<List<ClaudeProfile>> = profileDiscovery.claudeProfiles
+    val codexProfiles: StateFlow<List<CodexProfile>> = profileDiscovery.codexProfiles
+
     private var warmJob: Job? = null
     private var warmReleaseJob: Job? = null
     private var warmLease: SshLease? = null
@@ -987,7 +984,7 @@ class FolderListViewModel internal constructor(
         // SSH lease (was the #627/#631 client-stored JSON, hard-cut per D22).
         // The default-only / CLI-missing / fetch-failure cases all collapse to
         // an empty list, so the picker simply shows no profile selector.
-        fetchProfiles(params)
+        profileDiscovery.refresh(params)
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {
@@ -1026,42 +1023,12 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * Issue #718: fetch the host-discovered agent profiles via
-     * [ProfilesGateway] and split them by engine into the picker's
-     * [claudeProfiles] / [codexProfiles] flows. Foreground, on bind. Any
-     * non-success result (CLI missing, connect/parse failure, no gateway in
-     * tests) leaves the flows empty so the picker shows no profile selector —
-     * the safe default-only behaviour.
+     * Issue #1875: retry host profile discovery at the moment the user opens a
+     * new-session picker. A transient bind-time failure must not permanently
+     * hide non-default profiles for the lifetime of the host screen.
      */
-    private fun fetchProfiles(params: BoundParams) {
-        val gw = profilesGateway ?: run {
-            _claudeProfiles.value = emptyList()
-            _codexProfiles.value = emptyList()
-            return
-        }
-        viewModelScope.launch {
-            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: return@launch
-            val result = withContext(ioDispatcher) {
-                gw.listProfiles(
-                    host = host,
-                    keyPath = params.keyPath,
-                    passphrase = params.passphrase,
-                )
-            }
-            // Ignore a stale result if the host changed while we were fetching.
-            if (bound?.hostId != params.hostId) return@launch
-            when (result) {
-                is ProfilesResult.Profiles -> {
-                    val profileLists = result.profiles.toFolderListProfileLists()
-                    _claudeProfiles.value = profileLists.claudeProfiles
-                    _codexProfiles.value = profileLists.codexProfiles
-                }
-                else -> {
-                    _claudeProfiles.value = emptyList()
-                    _codexProfiles.value = emptyList()
-                }
-            }
-        }
+    fun refreshProfilesForPicker() {
+        bound?.let(profileDiscovery::refresh)
     }
 
     /**

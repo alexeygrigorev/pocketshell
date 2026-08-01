@@ -129,12 +129,21 @@ fun RepoBrowserScreen(
         )
     }
     val state by viewModel.state.collectAsState()
-    val sessionState by sessionViewModel.state.collectAsState()
+    val claudeProfiles by sessionViewModel.claudeProfiles.collectAsState()
+    val codexProfiles by sessionViewModel.codexProfiles.collectAsState()
 
     // Pre-filled repo path the picker should open on. Set once a repo tap
     // resolves (clone-then-open or already-cloned), cleared on dismiss /
     // confirm. Replaces the old direct onOpenRepo → TmuxSession bypass.
     var pickerRepoPath by remember { mutableStateOf<String?>(null) }
+
+    // Issue #1875: keep this second host-screen new-session entry point on the
+    // same open-time discovery contract as FolderListScreen.
+    LaunchedEffect(pickerRepoPath) {
+        if (pickerRepoPath != null) {
+            sessionViewModel.refreshProfilesForPicker()
+        }
+    }
 
     RepoBrowserScaffold(
         hostName = hostName,
@@ -155,6 +164,8 @@ fun RepoBrowserScreen(
             folderLabel = repoFolderLabel(repoPath),
             onDismiss = { pickerRepoPath = null },
             suggestStartDirectories = suggestStartDirectories,
+            claudeProfiles = claudeProfiles,
+            codexProfiles = codexProfiles,
             // Issue #1184: prefill the editable "Session name" field with the
             // directory-derived default for the chosen start folder.
             deriveDefaultName = { dir ->
@@ -162,9 +173,7 @@ fun RepoBrowserScreen(
             },
             onCreate = { choice ->
                 pickerRepoPath = null
-                // Issue #1820: same shape as the folder tree — this list was
-                // empty whenever `sessionState` was not `Ready`, and it is the
-                // host that must decide uniqueness at create time.
+                // Issue #1820: the host decides uniqueness at create time.
                 val newName = derivedSessionName(
                     choice = choice,
                     homeDirectory = conventionalRemoteHome(username),
@@ -172,7 +181,7 @@ fun RepoBrowserScreen(
                 sessionViewModel.createSession(
                     sessionName = newName,
                     cwd = choice.startDirectory,
-                    startCommand = choice.startCommand(),
+                    startCommand = choice.startCommand(claudeProfiles, codexProfiles),
                     // Epic #821 Workstream A: record the picked kind onto the
                     // new tree node immediately (no detection round-trip).
                     chosenKind = choice.sessionAgentKind,

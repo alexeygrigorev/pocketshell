@@ -1,21 +1,39 @@
 package com.pocketshell.app.projects
 
+import android.graphics.Bitmap
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
+import androidx.lifecycle.ViewModelStore
+import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * UI proof for the multi-profile session-type picker (audit #657 Gap-3,
@@ -177,4 +195,226 @@ class SessionTypeProfilePickerUiTest {
 
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG).assertDoesNotExist()
     }
+
+    /**
+     * Issue #1875 production-path regression. A bind-time profile probe can fail
+     * transiently while the host tree itself goes on to become usable. Opening
+     * the REAL host-screen New session sheet must retry discovery, render the
+     * recovered Z.AI choice, and thread that choice into the command actually
+     * handed to [FolderListGateway.createSession].
+     *
+     * This deliberately uses [FolderListScreen], not the standalone picker
+     * content above: the old tests could stay green while the production screen
+     * supplied an empty list forever.
+     */
+    @Test
+    fun productionHostSheetRetriesTransientDiscoveryAndLaunchesSelectedProfile() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
+            .allowMainThreadQueries()
+            .build()
+        val viewModelStore = ViewModelStore()
+        val hostId = 1875L
+        runBlocking {
+            val keyId = db.sshKeyDao().insert(
+                SshKeyEntity(
+                    name = "issue1875-key",
+                    privateKeyPath = "/tmp/issue1875-key",
+                ),
+            )
+            db.hostDao().insert(
+                HostEntity(
+                    id = hostId,
+                    name = "issue1875-host",
+                    hostname = "profiles.example",
+                    port = 22,
+                    username = "alexey",
+                    keyId = keyId,
+                ),
+            )
+        }
+
+        val profilesGateway = TransientThenZaiProfilesGateway()
+        val sessionGateway = RecordingSessionGateway()
+        lateinit var viewModel: FolderListViewModel
+        instrumentation.runOnMainSync {
+            viewModel = FolderListViewModel(
+                gateway = sessionGateway,
+                hostDao = db.hostDao(),
+                projectRootDao = db.projectRootDao(),
+                sshLeaseManager = SshLeaseManager(
+                    connector = SshLeaseConnector {
+                        Result.failure(IllegalStateException("warm connect not used by fixture"))
+                    },
+                    idleTtlMillis = 0L,
+                ),
+                forwardingController = ForwardingController(context),
+                profilesGateway = profilesGateway,
+                attachLifecycle = false,
+            ).also {
+                it.setProcessStartedForTest(true)
+                viewModelStore.put("issue1875", it)
+            }
+        }
+
+        try {
+            compose.setContent {
+                PocketShellTheme {
+                    FolderListScreen(
+                        hostId = hostId,
+                        hostName = "issue1875-host",
+                        hostname = "profiles.example",
+                        port = 22,
+                        username = "alexey",
+                        keyPath = "/tmp/issue1875-key",
+                        passphrase = null,
+                        onBack = {},
+                        onOpenSession = { _, _, _, _ -> },
+                        onSessionCreated = { _, _ -> },
+                        onBrowseRepos = { _ -> },
+                        onEditEnv = { _, _, _ -> },
+                        modifier = Modifier.fillMaxSize(),
+                        viewModel = viewModel,
+                    )
+                }
+            }
+
+            compose.waitUntil(timeoutMillis = 10_000) {
+                profilesGateway.calls.get() >= 1 &&
+                    compose.onAllNodesWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG)
+                        .fetchSemanticsNodes().isNotEmpty()
+            }
+            assertTrue(
+                "the bind-time fixture must reproduce one transient profile failure",
+                viewModel.claudeProfiles.value.isEmpty(),
+            )
+
+            compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG)
+                .performScrollTo()
+                .performClick()
+
+            // Load-bearing UI assertion: this can only become true when the
+            // production host-screen open path retries the transient failure.
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(
+                    "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:Claude (Z.AI)",
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag(
+                "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:Claude (Z.AI)",
+                useUnmergedTree = true,
+            ).performScrollTo().assertIsDisplayed().performClick()
+            compose.waitForIdle()
+            captureFullDevice("issue1875-profile-picker-green.png")
+
+            compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
+            compose.waitUntil(timeoutMillis = 10_000) {
+                sessionGateway.lastStartCommand.get() != null
+            }
+            assertTrue(
+                "the command actually launched must carry the recovered Z.AI profile: " +
+                    sessionGateway.lastStartCommand.get(),
+                sessionGateway.lastStartCommand.get()
+                    ?.contains("--profile 'Claude (Z.AI)'") == true,
+            )
+            assertTrue(
+                "opening the sheet must retry after the bind-time failure",
+                profilesGateway.calls.get() >= 2,
+            )
+        } finally {
+            instrumentation.runOnMainSync { viewModel.stopPolling() }
+            viewModelStore.clear()
+            db.close()
+        }
+    }
+
+    private fun captureFullDevice(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        val bitmap: Bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        val root = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
+        val directory = File(root, "additional_test_output/issue1875-profile-picker")
+            .apply { mkdirs() }
+        FileOutputStream(File(directory, name)).use {
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+        }
+    }
+}
+
+private class TransientThenZaiProfilesGateway : ProfilesGateway {
+    val calls = AtomicInteger(0)
+
+    override suspend fun listProfiles(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        engine: String?,
+    ): ProfilesResult =
+        if (calls.incrementAndGet() == 1) {
+            ProfilesResult.ConnectFailed(IllegalStateException("transient bind-time failure"))
+        } else {
+            ProfilesResult.Profiles(
+                listOf(
+                    RemoteProfile(
+                        name = "Claude",
+                        engine = RemoteProfile.ENGINE_CLAUDE,
+                        default = true,
+                    ),
+                    RemoteProfile(
+                        name = "Claude (Z.AI)",
+                        engine = RemoteProfile.ENGINE_CLAUDE,
+                        configDir = "/home/alexey/.zlaude",
+                    ),
+                ),
+            )
+        }
+}
+
+private class RecordingSessionGateway : FolderListGateway {
+    val lastStartCommand = AtomicReference<String?>(null)
+
+    override suspend fun listSessionsWithFolder(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        watchedRoots: List<ProjectRootEntity>,
+    ): FolderListResult = FolderListResult.Sessions(rows = emptyList())
+
+    override suspend fun createSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        cwd: String,
+        startCommand: String?,
+        namePolicy: SessionNamePolicy,
+    ): Result<String> {
+        lastStartCommand.set(startCommand)
+        return Result.success(sessionName)
+    }
+
+    override suspend fun createEmptyProject(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        parentPath: String,
+        folderName: String,
+    ): Result<String> = Result.success("$parentPath/$folderName")
+
+    override suspend fun importFile(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        folderPath: String,
+        payload: FolderImportPayload,
+    ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
+
+    override suspend fun killSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+    ): Result<Unit> = Result.success(Unit)
 }

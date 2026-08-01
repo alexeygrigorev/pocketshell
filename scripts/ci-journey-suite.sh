@@ -141,6 +141,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.share.ShareTargetE2eTest"  # #727 #657 epic Wave 1 / S1): the share-auth journey pair
   "com.pocketshell.app.share.SharePassphraseDialogE2eTest"
   "com.pocketshell.app.projects.ProfileDiscoveryPickerDockerTest"  # #732 Finding B): the host server-PROFILE discovery journey. The p…
+  "com.pocketshell.app.projects.SessionTypeProfilePickerUiTest"  # #1875: production host sheet retries profile discovery, renders Z.AI, and launches with --profile; also runs the existing picker class coverage.
   "com.pocketshell.app.projects.RootProjectAddSheetKeyboardLayoutTest"  # #1742 deterministic modal-root IME layout proof
   "com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest"  # #898 reviewer Blocker B): the in-session + New session rich-sheet
   "com.pocketshell.app.composer.PromptComposerImeSquishProofTest"  # #736 #567 #638 #657 follow-up to the review): the composer keyboard-up SQUISH re…

@@ -35,6 +35,7 @@ FROM alpine:latest
 RUN apk add --no-cache \
         openssh-server openssh-client tmux procps bash sqlite git \
         python3 py3-click py3-pip \
+    && mv /usr/bin/tmux /usr/bin/tmux.real \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \
@@ -77,6 +78,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
     && rm -f /usr/local/bin/pocketshell \
+    && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && chown -R testuser:testuser /home/testuser/.ssh
 
 EXPOSE 22

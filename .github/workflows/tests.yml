@@ -646,6 +646,13 @@ jobs:
       - name: Verify Docker is available
         run: docker info
 
+      # Issue #1937: every image that copies the shared agent-bin/tmux shim
+      # must preserve Alpine's real tmux at /usr/bin/tmux.real and expose the
+      # shim at /usr/bin/tmux. Build and execute every discovered consumer so
+      # fixture drift fails before it can front-gate the emulator matrix.
+      - name: Smoke shared tmux-wrapper fixtures
+        run: scripts/test-shared-tmux-wrapper-fixtures.sh --docker
+
       # Issue #691: core-tmux:integrationTest (Testcontainers, no emulator) is
       # added here so the control-mode contract — `tmux -CC` spawns, structural
       # events surface, one-command-at-a-time framing, list-sessions/new-session

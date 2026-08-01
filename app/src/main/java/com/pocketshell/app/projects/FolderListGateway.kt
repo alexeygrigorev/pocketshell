@@ -1257,15 +1257,23 @@ class SshFolderListGateway internal constructor(
             val fallback = session.execBounded(
                 pathAware(fallbackCreateSessionCommand(quotedName, quotedCwd)),
             )
-            if (fallback.exitCode != 0 && fallback.stderr.isNotBlank()) {
-                throw RuntimeException(fallback.stderr.trim())
+            if (fallback.exitCode != 0) {
+                throw RuntimeException(
+                    fallback.stderr.trim().ifBlank {
+                        "tmux session create failed with exit code ${fallback.exitCode}."
+                    },
+                )
             }
-        } else if (createResult.exitCode != 0 && createResult.stderr.isNotBlank()) {
+        } else if (createResult.exitCode != 0) {
             // tmuxctl ran the real `create-detached` verb and it genuinely
             // failed (tmux/systemd-run runtime error). Surface it — do NOT
             // silently fall back, or the user loses the memory cap without
             // knowing why.
-            throw RuntimeException(createResult.stderr.trim())
+            throw RuntimeException(
+                createResult.stderr.trim().ifBlank {
+                    "tmuxctl create-detached failed with exit code ${createResult.exitCode}."
+                },
+            )
         }
         // Launch the start command via send-keys if requested. tmux's
         // `send-keys ... Enter` sequence pipes the literal command

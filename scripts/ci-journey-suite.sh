@@ -144,6 +144,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.projects.SessionTypeProfilePickerUiTest"  # #1875: production host sheet retries profile discovery, renders Z.AI, and launches with --profile; also runs the existing picker class coverage.
   "com.pocketshell.app.projects.RootProjectAddSheetKeyboardLayoutTest"  # #1742 deterministic modal-root IME layout proof
   "com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest"  # #898 reviewer Blocker B): the in-session + New session rich-sheet
+  "com.pocketshell.app.tmux.TmuxCreateAfterAttachFailureDockerTest"  # #1832 failed attach then Create must fail visibly, never silently create nothing
   "com.pocketshell.app.composer.PromptComposerImeSquishProofTest"  # #736 #567 #638 #657 follow-up to the review): the composer keyboard-up SQUISH re…
   "com.pocketshell.app.composer.PromptComposerLongDraftCaretVisibleTest"  # #1619/#765 D33/G10: synthetic + real-IME long-draft caret containment above sticky controls
   "com.pocketshell.app.composer.PromptComposerImeTightScreenSquishProofTest"  # #801 #567 #780 #657 the keyboard-up squish on a REALISTIC TIGHT screen

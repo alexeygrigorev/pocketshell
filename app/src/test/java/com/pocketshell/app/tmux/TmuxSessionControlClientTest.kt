@@ -39,12 +39,10 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
             client = client,
         )
 
-        vm.createSession("next")
         vm.renameCurrentSession("renamed")
         vm.killCurrentSession()
         advanceUntilIdle()
 
-        assertTrue(client.sentCommands.contains("new-session -d -s 'next' -c '~'"))
         assertTrue(client.sentCommands.contains("rename-session -t '=work' 'renamed'"))
         assertTrue(client.sentCommands.contains("kill-session -t '=work'"))
         // No window-management commands are ever issued (#782 hard-cut).
@@ -84,30 +82,6 @@ class TmuxSessionControlClientTest : TmuxSessionViewModelTestBase() {
             listOf("rename-session -t '=work' 'renamed'"),
             client.sendLifecycleViaExecCalls,
         )
-    }
-
-    @Test
-    fun lifecycleCommandsDeriveCreateNameButIgnoreBlankRenameNames() = runTest(scheduler) {
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        vm.replaceClientForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-            client = client,
-        )
-
-        vm.createSession(" ")
-        vm.renameCurrentSession("")
-        advanceUntilIdle()
-
-        val command = client.sentCommands.single()
-        assertTrue(command.startsWith("new-session -d -s 'pocketshell-"))
-        assertTrue(command.endsWith("' -c '~'"))
     }
 
     @Test

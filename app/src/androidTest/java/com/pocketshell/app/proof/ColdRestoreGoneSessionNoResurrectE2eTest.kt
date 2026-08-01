@@ -1,6 +1,8 @@
 package com.pocketshell.app.proof
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -42,6 +44,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Issue #666 — a tmux session the user killed elsewhere must NOT be
@@ -766,6 +769,76 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         Unit
     } }
 
+    /** Issue #1832: the real MainActivity recovery dialog must retain and report a failed create. */
+    @Test
+    fun staleDialogCreateFailureRemainsVisibleAndDoesNotNavigate() { runBlocking {
+        val key = fixtureKey
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+
+        // Produce the genuine stale-session prompt through OpenExisting, then
+        // remove the host row immediately before confirmation. The production
+        // MainActivity's production stale-recreate handler therefore fails its
+        // real host lookup without a synthetic UI seam or fake callback.
+        killRemoteSession(key)
+        assertTrue("session must be gone before opening the stale row", !sessionAlive(key))
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val hostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
+        deleteHostRow(hostId)
+        shellOutput("logcat -c")
+
+        val confirmAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(STALE_SESSION_CONFIRM_TAG, useUnmergedTree = true).performClick()
+        val expectedError = "Couldn't create session: Host $hostId not found for stale-session recreate"
+        compose.waitUntil(timeoutMillis = 10_000) {
+            runCatching {
+                compose.onAllNodesWithText(
+                    expectedError,
+                    substring = true,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val failureVisibleMs = SystemClock.elapsedRealtime() - confirmAt
+        val dialogRetained = compose
+            .onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes().isNotEmpty()
+        val sessionScreenShown = compose
+            .onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes().isNotEmpty()
+        val logcat = shellOutput("logcat -d -v threadtime -t 2000 MainActivity:W *:S")
+        captureFullDevice("issue1832-stale-recreate-failure")
+
+        assertTrue("failed stale recreate must retain the production dialog", dialogRetained)
+        assertTrue("failed stale recreate must not navigate to a session screen", !sessionScreenShown)
+        assertTrue("failed stale recreate must leave the host session absent", !sessionAlive(key))
+        assertTrue(
+            "failure must be logged by MainActivity; logcat=$logcat",
+            logcat.contains("stale-session-recreate-failed") &&
+                logcat.contains("Host $hostId not found for stale-session recreate"),
+        )
+        writeText(
+            "issue1832-stale-recreate-failure.txt",
+            buildString {
+                appendLine("journey=production stale dialog -> Create session -> MainActivity host-lookup failure")
+                appendLine("dialog_retained=$dialogRetained")
+                appendLine("visible_error=$expectedError")
+                appendLine("failure_visible_ms=$failureVisibleMs")
+                appendLine("session_screen_shown=$sessionScreenShown")
+                appendLine("host_session_exists=${sessionAlive(key)}")
+                appendLine("log_event=stale-session-recreate-failed")
+            },
+        )
+        Unit
+    } }
+
     /**
      * Issue #1155 REOPEN (2026-07-03) blocker 2 on the COLD-RESTORE path — the
      * maintainer's exact dogfood gesture for "Create session".
@@ -1021,6 +1094,18 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         }
     }
 
+    private suspend fun deleteHostRow(hostId: Long) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_NAME)
+            .fallbackToDestructiveMigration(dropAllTables = true)
+            .build()
+        try {
+            db.hostDao().deleteById(hostId)
+        } finally {
+            db.close()
+        }
+    }
+
     private suspend fun seedTmuxSession(key: String) {
         val script = buildString {
             appendLine("set -eu")
@@ -1130,6 +1215,27 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         file.writeText(text)
         println("ISSUE666_TEXT ${file.absolutePath}")
         return file
+    }
+
+    private fun shellOutput(command: String): String {
+        val descriptor = InstrumentationRegistry.getInstrumentation()
+            .uiAutomation.executeShellCommand(command)
+        return ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+            .bufferedReader().use { it.readText() }
+    }
+
+    private fun captureFullDevice(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        val file = artifactFile("$name-viewport.png")
+        try {
+            FileOutputStream(file).use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+            }
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     private fun writeTimings(): File {

@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+if { [ "${1:-}" = "-CC" ] || [ "${1:-}" = "list-panes" ]; } &&
+  [ -f /tmp/pocketshell-fail-tmux-control ]; then
+  echo "pocketshell-tmux-fail-shim: rejecting tmux ${1:-} for $USER" >&2
+  exit 86
+fi
+
 if [ "${1:-}" = "-CC" ] && [ -f "$HOME/.pocketshell-hang-tmux-control" ]; then
   echo "pocketshell-tmux-hang-shim: withholding tmux -CC response for $USER" >&2
   while true; do
@@ -8,4 +14,4 @@ if [ "${1:-}" = "-CC" ] && [ -f "$HOME/.pocketshell-hang-tmux-control" ]; then
   done
 fi
 
-exec /usr/bin/tmux "$@"
+exec /usr/bin/tmux.real "$@"

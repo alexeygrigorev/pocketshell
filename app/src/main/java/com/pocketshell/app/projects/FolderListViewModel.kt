@@ -1078,7 +1078,13 @@ class FolderListViewModel internal constructor(
         onResolved: (sessionName: String) -> Unit,
         onFinished: () -> Unit = {},
     ) {
-        val params = bound ?: return
+        val params = bound ?: run {
+            _actionStatus.value = FolderActionStatus.Failed(
+                "Session list isn't ready yet. Try again.",
+            )
+            onFinished()
+            return
+        }
         if (createSessionInFlight) return
         setCreateSessionInFlight(true)
         viewModelScope.launch {

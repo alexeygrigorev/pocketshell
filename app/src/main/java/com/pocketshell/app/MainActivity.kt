@@ -1844,18 +1844,21 @@ private fun AppNavigator(
     // session (never a transient reconnect blip), so this never appears spuriously.
     val recoveryScope = rememberCoroutineScope()
     val stalePrompt = staleSessionPromptController?.prompt?.collectAsState()?.value
+    var staleRecreateError by remember(stalePrompt?.hostId, stalePrompt?.sessionName) {
+        mutableStateOf<String?>(null)
+    }
     if (stalePrompt != null) {
         val base = lastTmuxDestination?.takeIf { it.hostId == stalePrompt.hostId }
         ConfirmDialog(
             title = "This session no longer exists",
             message = "The session “${stalePrompt.sessionName}” is gone on the host. " +
                 "Create a new session in “${staleSessionFolderLabel(stalePrompt.folderPath)}”, " +
-                "or go to the home screen?",
+                "or go to the home screen?" +
+                (staleRecreateError?.let { "\n\nCouldn't create session: $it" } ?: ""),
             confirmLabel = "Create session",
             dismissLabel = "Go to home",
             destructive = false,
             onConfirm = {
-                staleSessionPromptController.clear()
                 if (base != null) {
                     // Issue #1155 REOPEN (2026-07-03): recreate a FRESH session in
                     // the gone session's folder through the REAL create-in-folder
@@ -1869,40 +1872,35 @@ private fun AppNavigator(
                     // Creating server-side first makes the recovery deterministic on
                     // BOTH the cold-restore and the in-tree OpenExisting path.
                     recoveryScope.launch {
-                        val resolvedName = staleSessionPromptController
-                            .createSessionInFolder(
-                                hostId = stalePrompt.hostId,
-                                keyPath = base.keyPath,
-                                passphrase = base.passphrase,
-                                sessionName = stalePrompt.sessionName,
-                                folderPath = stalePrompt.folderPath,
-                            )
-                            .getOrElse {
-                                // Create exec failed (host briefly unreachable): fall
-                                // back to the session name we intended so the attach
-                                // path can still `new-session -A` it, and never leave
-                                // the user stuck on the dialog-less blank.
-                                stalePrompt.sessionName
-                            }
-                        // Attach to the freshly-created session. `openExisting = true`
-                        // makes this destination DISTINCT from the cold-restore
-                        // destination (which is `openExisting = false`), so it is
-                        // never re-classified as ColdRestore; its OpenExisting
-                        // preflight now finds the session ALIVE (we just created it)
-                        // and attaches instead of dropping back to the list.
-                        navigate(
-                            base.copy(
-                                sessionName = resolvedName,
-                                startDirectory = stalePrompt.folderPath,
-                                initialWindowIndex = null,
-                                tmuxSessionId = null,
-                                sessionCreated = null,
-                                openExisting = true,
-                            ),
+                        recreateStaleSession(
+                            create = {
+                                staleSessionPromptController.createSessionInFolder(
+                                    hostId = stalePrompt.hostId,
+                                    keyPath = base.keyPath,
+                                    passphrase = base.passphrase,
+                                    sessionName = stalePrompt.sessionName,
+                                    folderPath = stalePrompt.folderPath,
+                                )
+                            },
+                            onSuccess = { resolvedName ->
+                                staleSessionPromptController.clear()
+                                navigate(
+                                    base.copy(
+                                        sessionName = resolvedName,
+                                        startDirectory = stalePrompt.folderPath,
+                                        initialWindowIndex = null,
+                                        tmuxSessionId = null,
+                                        sessionCreated = null,
+                                        openExisting = true,
+                                    ),
+                                )
+                            },
+                            onFailure = { message -> staleRecreateError = message },
                         )
                     }
                 } else {
                     // No connection details to rebuild from — recover to the list.
+                    staleSessionPromptController.clear()
                     popToHostList()
                 }
             },
@@ -1916,6 +1914,25 @@ private fun AppNavigator(
             dismissTestTag = STALE_SESSION_GO_HOME_TAG,
         )
     }
+}
+
+internal suspend fun recreateStaleSession(
+    create: suspend () -> Result<String>,
+    onSuccess: (String) -> Unit,
+    onFailure: (String) -> Unit,
+) {
+    runCatching { create().getOrThrow() }.fold(
+        onSuccess = onSuccess,
+        onFailure = { error ->
+            val message = error.message?.takeIf { it.isNotBlank() }
+                ?: "The host did not report a reason."
+            Log.w(
+                "MainActivity",
+                "stale-session-recreate-failed err=${error.javaClass.simpleName}: ${error.message}",
+            )
+            onFailure(message)
+        },
+    )
 }
 
 /**

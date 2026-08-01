@@ -245,6 +245,64 @@ class FolderListGatewayFallbackTest {
     }
 
     @Test
+    fun cappedCreateBlankStderrNonzeroExitIsStillFailure() = runTest {
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(
+                    match = "create-detached",
+                    result = ExecResult(stdout = "", stderr = "", exitCode = 23),
+                ),
+            ),
+        )
+
+        val failure = runCatching {
+            SshFolderListGateway().createSessionOnSession(
+                session = session,
+                sessionName = SESSION_NAME,
+                cwd = CWD,
+                startCommand = null,
+                namePolicy = SessionNamePolicy.ExactName,
+            )
+        }.exceptionOrNull()
+
+        assertTrue("non-zero capped create must fail even when stderr is blank", failure is RuntimeException)
+        assertTrue("fallback error must name exit code 23: ${failure?.message}", failure?.message.orEmpty().contains("23"))
+    }
+
+    @Test
+    fun rawFallbackBlankStderrNonzeroExitIsStillFailure() = runTest {
+        val session = CreateSessionFake(
+            results = listOf(
+                CreateSessionFake.Rule(
+                    match = "create-detached",
+                    result = ExecResult(
+                        stdout = "",
+                        stderr = "",
+                        exitCode = SshFolderListGateway.TMUXCTL_UNSUPPORTED_EXIT_CODE,
+                    ),
+                ),
+                CreateSessionFake.Rule(
+                    match = "new-session -A -d",
+                    result = ExecResult(stdout = "", stderr = "", exitCode = 24),
+                ),
+            ),
+        )
+
+        val failure = runCatching {
+            SshFolderListGateway().createSessionOnSession(
+                session = session,
+                sessionName = SESSION_NAME,
+                cwd = CWD,
+                startCommand = null,
+                namePolicy = SessionNamePolicy.ExactName,
+            )
+        }.exceptionOrNull()
+
+        assertTrue("non-zero raw fallback must fail even when stderr is blank", failure is RuntimeException)
+        assertTrue("fallback error must name exit code 24: ${failure?.message}", failure?.message.orEmpty().contains("24"))
+    }
+
+    @Test
     fun startCommandSendKeysStillFiresAfterCappedCreate() = runTest {
         val session = CreateSessionFake(
             results = listOf(

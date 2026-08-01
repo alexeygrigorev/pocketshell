@@ -9,6 +9,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -21,6 +22,7 @@ import net.schmizz.sshj.userauth.keyprovider.KeyProvider
 import net.schmizz.sshj.userauth.password.PasswordUtils
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.IOException
+import java.net.SocketTimeoutException
 import java.security.Security
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.coroutines.resume
@@ -41,6 +43,9 @@ public object SshConnection {
     internal const val DEFAULT_TIMEOUT_MS: Int = 30_000
 
     private const val CANCEL_DISCONNECT_TIMEOUT_MS: Long = 2_000L
+
+    /** Never let one black-holed family consume the entire caller dial budget. */
+    internal const val MAX_PER_ADDRESS_CONNECT_TIMEOUT_MS: Int = 10_000
 
     /**
      * Wall-elapsed boot clock for the transport-liveness oracle (#1080 Doze fix):
@@ -108,6 +113,7 @@ public object SshConnection {
         knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
         connector: SshConnector<C>,
+        nowNanos: () -> Long = System::nanoTime,
     ): Result<SshSession> = coroutineScope {
         // Issue #173 round-2: install the process-wide
         // UncaughtExceptionHandler guard BEFORE we spawn any sshj
@@ -158,15 +164,72 @@ public object SshConnection {
 
             worker = launch(Dispatchers.IO) {
                 try {
-                    val client = connector.createClient()
-                    liveClient.set(client)
-                    connector.applyKnownHostsPolicy(client, knownHosts)
-                    connector.connect(
-                        client,
-                        host,
-                        port,
-                        timeoutMs,
-                    )
+                    require(timeoutMs > 0) { "SSH connect timeout must be positive" }
+                    val startedNanos = nowNanos()
+                    val deadlineNanos = startedNanos + timeoutMs.toLong() * 1_000_000L
+                    val targets = connector.resolve(host)
+                    if (targets.isEmpty()) throw IOException("No SSH addresses resolved for $host")
+                    val failures = mutableListOf<Pair<SshDialTarget, Throwable>>()
+
+                    var connectedClient: C? = null
+                    var connectedTarget: SshDialTarget? = null
+                    for ((index, target) in targets.withIndex()) {
+                        coroutineContext.ensureActive()
+                        if (!continuation.isActive) throw CancellationException("SSH connect cancelled")
+
+                        val remainingMs = remainingMillis(deadlineNanos, nowNanos)
+                        if (remainingMs <= 0) {
+                            failures += target to SocketTimeoutException(
+                                "overall ${timeoutMs}ms SSH dial budget exhausted before attempt",
+                            )
+                            break
+                        }
+                        val attemptsRemaining = targets.size - index
+                        val attemptTimeoutMs = minOf(
+                            MAX_PER_ADDRESS_CONNECT_TIMEOUT_MS,
+                            maxOf(1, remainingMs / attemptsRemaining),
+                        )
+                        val client = connector.createClient(target)
+                        liveClient.set(client)
+                        connector.applyKnownHostsPolicy(client, knownHosts)
+                        try {
+                            connector.connect(
+                                client,
+                                host,
+                                port,
+                                attemptTimeoutMs,
+                            )
+                            connectedClient = client
+                            connectedTarget = target
+                            break
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (t: Throwable) {
+                            failures += target to t
+                            disconnectClientBestEffort()
+                            if (!connector.isAddressFailureRetryable(t)) throw t
+                        }
+                    }
+
+                    val client = connectedClient ?: run {
+                        // Preserve the public no-double-wrap contract for a
+                        // connector that already classified its only failure.
+                        val soleFailure = failures.singleOrNull()?.second
+                        if (soleFailure is SshException) throw soleFailure
+                        throw AllSshAddressesFailedException(
+                            host = host,
+                            port = port,
+                            failures = failures,
+                        )
+                    }
+                    val authRemainingMs = remainingMillis(deadlineNanos, nowNanos)
+                    if (authRemainingMs <= 0) {
+                        throw SocketTimeoutException(
+                            "SSH dial reached ${connectedTarget?.diagnosticLabel ?: "resolved address"} " +
+                                "but exhausted the overall ${timeoutMs}ms budget before authentication",
+                        )
+                    }
+                    connector.prepareAuthentication(client, authRemainingMs)
                     connector.authenticate(client, user, key, passphrase)
 
                     val session = connector.toSession(client)
@@ -324,6 +387,8 @@ public object SshConnection {
 
     internal interface SshConnector<C : Any> {
         fun createClient(): C
+        fun resolve(host: String): List<SshDialTarget> = listOf(SshDialTarget.unresolved(host))
+        fun createClient(target: SshDialTarget): C = createClient()
         fun applyKnownHostsPolicy(client: C, policy: KnownHostsPolicy)
         suspend fun connect(
             client: C,
@@ -331,6 +396,8 @@ public object SshConnection {
             port: Int,
             timeoutMs: Int,
         )
+        fun isAddressFailureRetryable(failure: Throwable): Boolean = true
+        fun prepareAuthentication(client: C, timeoutMs: Int) = Unit
         suspend fun authenticate(client: C, user: String, key: SshKey, passphrase: CharArray?)
         fun toSession(client: C): SshSession
         fun disconnect(client: C)
@@ -338,6 +405,11 @@ public object SshConnection {
 
     internal object RealSshConnector : SshConnector<SSHClient> {
         override fun createClient(): SSHClient = SSHClient(createSshConfig())
+
+        override fun resolve(host: String): List<SshDialTarget> = SshDialPlanner.resolve(host)
+
+        override fun createClient(target: SshDialTarget): SSHClient =
+            target.address?.let { AddressPinnedSshClient(createSshConfig(), it) } ?: createClient()
 
         override fun applyKnownHostsPolicy(client: SSHClient, policy: KnownHostsPolicy) {
             SshConnection.applyKnownHostsPolicy(client, policy)
@@ -374,6 +446,16 @@ public object SshConnection {
             client.connect(host, port)
         }
 
+        override fun isAddressFailureRetryable(failure: Throwable): Boolean =
+            failure.causeSequence().none { cause ->
+                cause is net.schmizz.sshj.common.SSHException &&
+                    cause.disconnectReason == net.schmizz.sshj.common.DisconnectReason.HOST_KEY_NOT_VERIFIABLE
+            }
+
+        override fun prepareAuthentication(client: SSHClient, timeoutMs: Int) {
+            client.timeout = timeoutMs
+        }
+
         override suspend fun authenticate(
             client: SSHClient,
             user: String,
@@ -407,4 +489,13 @@ public object SshConnection {
             client.disconnect()
         }
     }
+
+    private fun remainingMillis(deadlineNanos: Long, nowNanos: () -> Long): Int {
+        val remainingNanos = deadlineNanos - nowNanos()
+        if (remainingNanos <= 0L) return 0
+        return minOf(Int.MAX_VALUE.toLong(), (remainingNanos + 999_999L) / 1_000_000L).toInt()
+    }
+
+    private fun Throwable.causeSequence(): Sequence<Throwable> =
+        generateSequence(this) { current -> current.cause?.takeUnless { it === current } }
 }

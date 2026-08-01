@@ -154,5 +154,16 @@ project.afterEvaluate {
             .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
             .get()
         systemProperty("api.version", apiVersion)
+
+        // Issue #1877: deterministic dual-family resolver fixture. The first
+        // address is an unreachable IPv6 loopback peer and the second is the
+        // IPv4 loopback where Testcontainers publishes sshd. Pinning the hosts
+        // file and family preference makes the real-transport RED independent
+        // of the developer machine's /etc/hosts and resolver policy.
+        systemProperty(
+            "jdk.net.hosts.file",
+            rootProject.file("tests/docker/issue1877-hosts").absolutePath,
+        )
+        systemProperty("java.net.preferIPv6Addresses", "true")
     }
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Issue #1800: decide whether an emulator-journey shard's failure evidence is
-# the ONE captured environment signature (the CI swiftshader AVD cannot raise a
-# real system input-method window while a resolved foreign app owns the active
-# window) rather than a genuine journey failure.
+# Issues #1800/#1919: decide whether an emulator-journey shard's failure evidence
+# is one of the two explicit captured environment signatures: the CI swiftshader
+# AVD cannot raise a real system input-method window while a resolved foreign app
+# owns the active window, or attempt-local ProcessRecord evidence proves a
+# foreign app owns the framework ANR dialog that stole focus.
 #
 # This is the exact decision the workflow's classify step applies, extracted so
 # it can be driven — and observed — without an emulator
@@ -22,13 +23,13 @@
 #   shard_signature_detail=<per-summary classifications, space separated>
 #
 # INFRA is emitted ONLY when at least one summary was inspected AND every
-# inspected summary classified as `real_ime_precondition`. The classifier only
-# emits that value when every matching failure proves a genuinely foreign
-# `active_window_pkg`; app-owned, `android` (ambiguous framework ANR), missing,
-# or malformed owners remain RED (#1882). Anything else — a genuine assertion
-# failure, mixed evidence, missing/corrupt result XML, a missing classifier —
-# emits NONE, which leaves the caller's existing RED branches in charge. Always
-# exits 0.
+# inspected summary is one of the explicit environmental classifications:
+# `real_ime_precondition` (#1800/#1882) or
+# `foreign_framework_anr_focus` (#1919). The latter requires attempt-local
+# ProcessRecord ownership proof; ambiguous `android` focus alone stays RED.
+# Anything else — a genuine assertion failure, mixed evidence, missing/corrupt
+# result XML, a missing classifier — emits NONE, which leaves the caller's
+# existing RED branches in charge. Always exits 0.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -47,13 +48,14 @@ if [[ -n "$artifacts" && -d "$artifacts" && -f "$SIGNATURE" ]]; then
     "$artifacts/ci-journey/summary.md"; do
     [[ -f "$summary" ]] || continue
     out="$(bash "$SIGNATURE" "$summary" \
-      "$artifacts/ci-journey" \
-      "$artifacts/ci-journey-attempt-1" 2>/dev/null || true)"
+      "$(dirname "$summary")" 2>/dev/null || true)"
     classification="$(sed -n 's/^journey_failure_classification=//p' <<<"$out" | tail -n 1)"
     [[ -n "$classification" ]] || classification="unclassified"
     seen=$((seen + 1))
     detail="${detail:+$detail }${summary}=${classification}"
-    [[ "$classification" == "real_ime_precondition" ]] || all_signature=false
+    [[ "$classification" == "real_ime_precondition" \
+      || "$classification" == "foreign_framework_anr_focus" ]] \
+      || all_signature=false
   done
   if (( seen > 0 )) && [[ "$all_signature" == "true" ]]; then
     verdict="INFRA"

@@ -3,9 +3,9 @@
 evidence as either an environment-divergent capability precondition (INFRA) or a
 genuine product failure (RED).
 
-The ONE captured signature this recognises is the CI swiftshader AVD's inability
-to raise a *real system input-method window while an explicitly identified
-foreign app owns the active window*:
+The original captured signature is the CI swiftshader AVD's inability to raise
+a *real system input-method window while an explicitly identified foreign app
+owns the active window*:
 
     The real system input-method window never became visible.
     ... active_window_pkg=com.example.foreign ...
@@ -26,20 +26,27 @@ recurring residual-IME shape (`active=false focused=false` with non-empty
 bounds, #1818) is diagnostic only; it never substitutes for a genuinely foreign
 active-window owner.
 
-Narrowness is the whole point. The classifier reports `real_ime_precondition`
+Issue #1919 adds one separate, equally narrow signature for framework-owned
+focus theft. `active_window_pkg=android` remains insufficient: every eligible
+failure must live in a canonical class-attempt bundle whose sibling
+`activity-processes.txt` proves exactly one valid non-PocketShell
+`ProcessRecord` owns the sole current `mNotResponding=true
+[AppNotRespondingDialog@id]`. Evidence from another class, attempt, summary,
+screenshot, or shard-global copy is never consulted.
+
+Narrowness is the whole point. The classifier reports an environmental value
 ONLY when EVERY failing test case belonging to a class listed under the suite
-summary's "Failed BOTH attempts" section carries that exact message AND the
-genuinely-foreign owner proof above. A single containment / anchor / any other
-assertion failure — in the same class, in the same run, in any attempt — forces
-`product_failure`, which keeps the shard RED. Missing or unreadable evidence
-reports `unclassified`, which also keeps the shard RED (fail-safe toward the red
-verdict, never toward green).
+summary's "Failed BOTH attempts" section satisfies one of those two complete
+proofs. A single containment / anchor / chip / any other assertion failure — in
+the same class, in the same run, in any attempt — forces `product_failure`,
+which keeps the shard RED. Missing or unreadable evidence also stays RED
+(fail-safe toward the red verdict, never toward green).
 
 Usage:
     ci-journey-infra-signature.py SUMMARY_FILE ARTIFACT_ROOT [ARTIFACT_ROOT ...]
 
 Output (GitHub step-output compatible key=value lines):
-    journey_failure_classification=real_ime_precondition|product_failure|unclassified
+    journey_failure_classification=real_ime_precondition|foreign_framework_anr_focus|product_failure|unclassified
     journey_failed_classes=<space separated FQCNs from the summary>
     journey_failing_testcases=<count of failing test cases attributed to them>
     journey_signature_matches=<count of those carrying the captured signature>
@@ -61,6 +68,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 import xml.etree.ElementTree as ET
 
@@ -68,13 +76,30 @@ import xml.etree.ElementTree as ET
 REAL_IME_UNAVAILABLE_SIGNATURE = (
     "The real system input-method window never became visible."
 )
+APP_WINDOW_FOCUS_SIGNATURE = (
+    "The app window never held input focus, so the system refused every "
+    'showSoftInput() call ("is not served").'
+)
 ACTIVE_WINDOW_PACKAGE = re.compile(
     r"(?<![\w])active_window_pkg=([^\s,;]+)",
+)
+APP_WINDOW_FOCUS_STATE = re.compile(
+    r"app_window_focused=(true|false)\s+active_window_pkg=([^\s,;.]+)",
 )
 ANDROID_PACKAGE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+",
 )
 POCKETSHELL_APP_PACKAGE_PREFIX = "com.pocketshell.app"
+ATTEMPT_DIRECTORY = re.compile(r"attempt-[1-9][0-9]*")
+PROCESS_HEADER = re.compile(
+    r"^\s*\*APP\*.*?\bProcessRecord\{[^{}\n]*?\s+[0-9]+:([^/\s}]+)/[^\s}]+\}",
+)
+ANY_PROCESS_HEADER = re.compile(r"^\s*\*APP\*.*?\bProcessRecord\{")
+ANR_DIALOG = re.compile(
+    r"mNotResponding=true\s+\[com\.android\.server\.am\."
+    r"AppNotRespondingDialog@[0-9A-Fa-f]+\]",
+)
+ANY_ANR_DIALOG = re.compile(r"AppNotRespondingDialog@")
 
 # `- \`com.example.Foo\`` and `- \`com.example.Foo#someMethod\`` bullets under
 # the summary's failed-both header. The suite writes BOTH forms (issue #1822);
@@ -134,20 +159,61 @@ def failed_both_section(summary_path: str) -> tuple[list[str], list[str]]:
     return classes, unreadable
 
 
-def _iter_result_xml(roots: list[str]):
+def _iter_attempt_bundles(roots: list[str]):
+    """Yield canonical class-attempt bundles, never shard-global XML copies.
+
+    A result XML may license only the sibling ``activity-processes.txt`` under
+    its own ``class-attempts/<module>/<key>/attempt-N`` directory. Restricting
+    discovery to that shape also excludes the copied module-wide Android
+    outputs that previously made the recursive scan see the same XML again.
+    """
+    seen: set[str] = set()
     for root in roots:
         if not os.path.isdir(root):
             continue
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                if name.startswith("TEST-") and name.endswith(".xml"):
-                    yield os.path.join(dirpath, name)
+        for dirpath, dirnames, _filenames in os.walk(root):
+            if not ATTEMPT_DIRECTORY.fullmatch(os.path.basename(dirpath)):
+                continue
+            parts = os.path.normpath(dirpath).split(os.sep)
+            if len(parts) < 4 or parts[-4] != "class-attempts":
+                continue
+            real = os.path.realpath(dirpath)
+            if real in seen:
+                dirnames[:] = []
+                continue
+            seen.add(real)
+            xml_paths: list[str] = []
+            for nested, _nested_dirs, filenames in os.walk(dirpath):
+                for name in filenames:
+                    if name.startswith("TEST-") and name.endswith(".xml"):
+                        xml_paths.append(os.path.join(nested, name))
+            yield dirpath, parts[-2], sorted(xml_paths)
+            dirnames[:] = []
+
+
+def _artifact_key_may_hold_class(key: str, classname: str) -> bool:
+    simple = classname.rsplit(".", 1)[-1]
+    return (
+        key == simple
+        or key.startswith(f"{simple}_")
+        or key == classname
+        or key.startswith(f"{classname}--")
+        or key.startswith(f"{classname}_")
+    )
 
 
 def _failure_text(element: ET.Element) -> str:
     """Full failure text: the `message` attribute plus the element body."""
     parts = [element.get("message") or "", element.text or ""]
     return "\n".join(part for part in parts if part)
+
+
+def _is_readable_regular_file(path: str) -> bool:
+    try:
+        mode = os.stat(path, follow_symlinks=False).st_mode
+    except OSError:
+        return False
+    return stat.S_ISREG(mode) and bool(mode & 0o444)
 
 
 def _has_only_genuinely_foreign_active_window_owners(text: str) -> bool:
@@ -176,16 +242,108 @@ def _is_real_ime_environment_failure(text: str) -> bool:
     )
 
 
+def _is_framework_focus_precondition(text: str) -> bool:
+    if (
+        REAL_IME_UNAVAILABLE_SIGNATURE not in text
+        and APP_WINDOW_FOCUS_SIGNATURE not in text
+    ):
+        return False
+    states = APP_WINDOW_FOCUS_STATE.findall(text)
+    return bool(states) and all(
+        focused == "false" and package == "android"
+        for focused, package in states
+    )
+
+
+def _foreign_anr_owner(snapshot_path: str) -> str | None:
+    """Return the sole proven foreign ANR owner, otherwise fail closed.
+
+    Ownership comes only from an ``*APP* ... ProcessRecord`` block whose own
+    body contains the exact ``mNotResponding=true [AppNotRespondingDialog@id]``
+    state. A dialog outside a parsed block, a second not-responding process, or
+    any package ambiguity returns ``None``.
+    """
+    if not _is_readable_regular_file(snapshot_path):
+        return None
+    try:
+        with open(snapshot_path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except (OSError, UnicodeError):
+        return None
+    if not text.strip():
+        return None
+
+    blocks: list[tuple[str | None, str]] = []
+    current_package: str | None = None
+    current_lines: list[str] = []
+    outside_lines: list[str] = []
+    for line in text.splitlines():
+        header = PROCESS_HEADER.match(line)
+        if ANY_PROCESS_HEADER.match(line):
+            if current_lines:
+                blocks.append((current_package, "\n".join(current_lines)))
+            current_package = None
+            current_lines = [line]
+            if header:
+                current_package = header.group(1).split(":", 1)[0]
+            continue
+        if current_lines and line and not line[0].isspace():
+            blocks.append((current_package, "\n".join(current_lines)))
+            current_package = None
+            current_lines = []
+        if current_lines:
+            current_lines.append(line)
+        else:
+            outside_lines.append(line)
+    if current_lines:
+        blocks.append((current_package, "\n".join(current_lines)))
+
+    if ANY_ANR_DIALOG.search("\n".join(outside_lines)):
+        return None
+    not_responding = [
+        (package, block)
+        for package, block in blocks
+        if "mNotResponding=true" in block
+    ]
+    if len(not_responding) != 1:
+        return None
+    package, block = not_responding[0]
+    if package is None or ANDROID_PACKAGE.fullmatch(package) is None:
+        return None
+    if package == "android" or package.startswith(POCKETSHELL_APP_PACKAGE_PREFIX):
+        return None
+    if len(ANR_DIALOG.findall(block)) != 1:
+        return None
+    if len(ANY_ANR_DIALOG.findall(text)) != 1:
+        return None
+    return package
+
+
 def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
     classes, unreadable = failed_both_section(summary_path)
     failing = 0
     matches = 0
     offenders: list[str] = [f"<unreadable-summary-entry>#{line}" for line in unreadable]
     covered: set[str] = set()
+    framework_matches = 0
 
     if classes:
         wanted = set(classes)
-        for xml_path in _iter_result_xml(roots):
+        for attempt_dir, artifact_key, xml_paths in _iter_attempt_bundles(roots):
+            possible = {
+                name for name in wanted if _artifact_key_may_hold_class(artifact_key, name)
+            }
+            if not possible:
+                continue
+            if len(xml_paths) != 1:
+                offenders.append(
+                    f"<invalid-attempt-xml-count>#{artifact_key}/{os.path.basename(attempt_dir)}"
+                )
+                continue
+            xml_path = xml_paths[0]
+            if not _is_readable_regular_file(xml_path):
+                offenders.append(f"<unreadable>#{os.path.basename(xml_path)}")
+                continue
             try:
                 tree = ET.parse(xml_path)
             except (ET.ParseError, OSError):
@@ -199,16 +357,45 @@ def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
                 # Parameterised runners append the device label, e.g.
                 # `com.example.Foo[emulator-5554 - 15]`.
                 base = classname.split("[", 1)[0].strip()
-                if base not in wanted:
-                    continue
                 problems = list(case.findall("failure")) + list(case.findall("error"))
+                if base not in possible:
+                    offenders.append(
+                        "<artifact-key-classname-mismatch>#"
+                        f"{artifact_key}/{os.path.basename(attempt_dir)}:"
+                        f"{base or '<missing-classname>'}#"
+                        f"{case.get('name') or '<unknown>'}",
+                    )
+                    # Keep a mismatched wanted failure visible in the totals and
+                    # out of `uncovered`: its XML exists, but its attempt-local
+                    # ownership proof is invalid. It is therefore a definite
+                    # product offender, not evidence that may borrow this
+                    # bundle's sibling activity-processes snapshot.
+                    if base in wanted and problems:
+                        failing += 1
+                        covered.add(base)
+                    continue
                 if not problems:
                     continue
                 failing += 1
                 covered.add(base)
                 texts = [_failure_text(problem) for problem in problems]
-                if all(_is_real_ime_environment_failure(text) for text in texts):
+                kinds: list[str] = []
+                snapshot_owner: str | None = None
+                for text in texts:
+                    if _is_real_ime_environment_failure(text):
+                        kinds.append("real_ime")
+                    elif _is_framework_focus_precondition(text):
+                        if snapshot_owner is None:
+                            snapshot_owner = _foreign_anr_owner(
+                                os.path.join(attempt_dir, "activity-processes.txt"),
+                            )
+                        kinds.append("framework_anr" if snapshot_owner else "offender")
+                    else:
+                        kinds.append("offender")
+                if all(kind != "offender" for kind in kinds):
                     matches += 1
+                    if "framework_anr" in kinds:
+                        framework_matches += 1
                 else:
                     offenders.append(f"{base}#{case.get('name') or '<unknown>'}")
 
@@ -226,6 +413,8 @@ def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
         classification = "unclassified"
     elif offenders or matches != failing:
         classification = "product_failure"
+    elif framework_matches:
+        classification = "foreign_framework_anr_focus"
     else:
         classification = "real_ime_precondition"
 

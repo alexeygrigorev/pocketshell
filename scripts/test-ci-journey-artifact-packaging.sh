@@ -11,6 +11,7 @@ HELPER="${CI_JOURNEY_ARTIFACT_HELPER:-$SCRIPT_DIR/ci-journey-preserve-android-ou
 SETTINGS_PARSER="${CI_JOURNEY_SETTINGS_PARSER:-$SCRIPT_DIR/ci-journey-settings-project-dirs.py}"
 WORKFLOW="${CI_JOURNEY_ARTIFACT_WORKFLOW:-$REPO_ROOT/.github/workflows/tests.yml}"
 SETTINGS="${CI_JOURNEY_SETTINGS_FILE:-$REPO_ROOT/settings.gradle.kts}"
+BUDGET_FUNCTIONS="$SCRIPT_DIR/ci-journey-budget-functions.sh"
 
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
@@ -31,6 +32,7 @@ hash_tree() {
 seed_fixture() {
   local root="$1"
   local attempt="$root/artifacts/ci-journey/class-attempts/app/com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest--dca691208a3658f4/attempt-1"
+  local focus_attempt="$root/artifacts/ci-journey/class-attempts/app/com.pocketshell.app.session.ShowKeyboardChipE2eTest--8569a6475d403956/attempt-2"
 
   mkdir -p \
     "$root/build/reports/androidTests/connected/debug" \
@@ -40,6 +42,7 @@ seed_fixture() {
     "$attempt/android-test-outputs/app/build/reports/androidTests/connected/debug" \
     "$attempt/android-test-outputs/app/build/outputs/androidTest-results/connected/debug" \
     "$attempt/android-test-outputs/app/build/outputs/connected_android_test_additional_output/debugAndroidTest/connected/emulator-5554 - 15/agent-conversation-reconnect" \
+    "$focus_attempt/android-test-outputs/app/build/outputs/androidTest-results/connected/debug" \
     "$root/artifacts/ci-journey-attempt-1"
 
   {
@@ -74,6 +77,10 @@ seed_fixture() {
     echo 'device_cleanup_exit_code=1'
     echo 'status=complete'
   } > "$attempt/manifest.txt"
+  printf '<testsuite name="ShowKeyboardChipE2eTest" tests="1" failures="1"/>\n' \
+    > "$focus_attempt/android-test-outputs/app/build/outputs/androidTest-results/connected/debug/TEST-emulator-5554 - 15-_app-.xml"
+  printf 'foreign launcher ANR owned dialog for show-keyboard attempt 2\n' \
+    > "$focus_attempt/activity-processes.txt"
   printf 'journey summary\n' > "$root/artifacts/ci-journey/summary.md"
   printf 'first-attempt metadata\n' > "$root/artifacts/ci-journey-attempt-1/attempt-metadata.md"
 }
@@ -169,6 +176,20 @@ assert_real_attempt_paths() {
     || fail "cleanup status was not modeled in the real manifest path"
   grep -qx 'device_cleanup_exit_code=1' "$first/manifest.txt" \
     || fail "cleanup exit evidence changed in the first-cold-boot manifest"
+
+  local focus_current="$root/artifacts/ci-journey/class-attempts/app/com.pocketshell.app.session.ShowKeyboardChipE2eTest--8569a6475d403956/attempt-2"
+  local focus_first="$root/artifacts/ci-journey-attempt-1/ci-journey/class-attempts/app/com.pocketshell.app.session.ShowKeyboardChipE2eTest--8569a6475d403956/attempt-2"
+  local focus_xml="android-test-outputs/app/build/outputs/androidTest-results/connected/debug/TEST-emulator-5554 - 15-_app-.xml"
+  [[ -f "$focus_current/$focus_xml" && -f "$focus_current/activity-processes.txt" ]] \
+    || fail "current #1919 class-attempt lost its paired XML/process snapshot"
+  [[ -f "$focus_first/$focus_xml" && -f "$focus_first/activity-processes.txt" ]] \
+    || fail "preserved #1919 class-attempt lost its paired XML/process snapshot"
+  cmp -s "$focus_current/$focus_xml" "$focus_first/$focus_xml" \
+    || fail "preserved #1919 class-attempt XML bytes changed"
+  cmp -s "$focus_current/activity-processes.txt" "$focus_first/activity-processes.txt" \
+    || fail "preserved #1919 attempt-local process snapshot bytes changed"
+  cmp -s "$current/activity-processes.txt" "$focus_current/activity-processes.txt" \
+    && fail "distinct class-attempt process snapshots were cross-associated"
 }
 
 echo "== #1781 legacy recursion reproduction =="
@@ -386,7 +407,7 @@ module_output_root_count="$(find "$snapshot_root/android-test-outputs" \
              -o -path '*/build/outputs/connected_android_test_additional_output' \) | wc -l)"
 fixed_archive_files="$(find "$fixed_root/artifacts" -type f | wc -l)"
 fixed_archive_bytes="$(du -sb "$fixed_root/artifacts" | awk '{print $1}')"
-[[ "$current_attempt_count" -eq 1 && "$first_attempt_count" -eq 1 ]] \
+[[ "$current_attempt_count" -eq 2 && "$first_attempt_count" -eq 2 ]] \
   || fail "canonical attempt counts changed: current=$current_attempt_count first=$first_attempt_count"
 [[ "$module_output_root_count" -eq 4 ]] \
   || fail "expected four checked-project output roots, got $module_output_root_count"
@@ -394,7 +415,7 @@ fixed_archive_bytes="$(du -sb "$fixed_root/artifacts" | awk '{print $1}')"
   || fail "corrected archive did not shrink: legacy=$legacy_archive_files/$legacy_archive_bytes fixed=$fixed_archive_files/$fixed_archive_bytes"
 pass "deep/space project and root project copied; hashes unchanged; recursive roots=0"
 pass "byte digests: attempt_tree_files=$current_tree_files attempt_tree=$current_tree_digest timings=$timings_hash root=$root_report_hash app=$app_report_hash deep_raw=$deep_raw_hash deep_logcat=$deep_logcat_hash"
-pass "archive counts: current_attempts=1 first_attempts=1 module_output_roots=4 legacy_files=$legacy_archive_files fixed_files=$fixed_archive_files"
+pass "archive counts: current_attempts=2 first_attempts=2 module_output_roots=4 legacy_files=$legacy_archive_files fixed_files=$fixed_archive_files"
 pass "archive bytes: legacy=$legacy_archive_bytes fixed=$fixed_archive_bytes"
 
 echo
@@ -516,6 +537,12 @@ pass "all pre-existing missing-evidence marker semantics are unchanged"
 
 echo
 echo "== #1781 actual workflow snapshot/upload guards =="
+[[ -f "$BUDGET_FUNCTIONS" ]] || fail "missing attempt capture helper: $BUDGET_FUNCTIONS"
+grep -Fq '"activity processes" "$attempt_dir/activity-processes.txt"' "$BUDGET_FUNCTIONS" \
+  || fail "failed attempts no longer capture activity-processes.txt inside their own class-attempt directory"
+grep -Fq 'journey_adb -s "$serial" shell dumpsys activity processes' "$BUDGET_FUNCTIONS" \
+  || fail "attempt-local activity-processes.txt is no longer sourced from dumpsys activity processes"
+pass "#1919 process ownership snapshot is captured inside each failed class-attempt bundle"
 preserve_step="$(sed -n \
   '/- name: Preserve first journey attempt diagnostics/,/- name: Check remaining job wall before journey retry/p' \
   "$WORKFLOW")"

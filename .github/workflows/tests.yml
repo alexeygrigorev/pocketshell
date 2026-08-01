@@ -300,15 +300,16 @@ jobs:
             scripts/test-ci-journey-retry-budget.sh
           scripts/test-ci-journey-retry-budget.sh
 
-      # Issue #1800: the failure-SIGNATURE classifier that types the CI
+      # Issues #1800/#1919: the failure-SIGNATURE classifier that types the CI
       # swiftshader "real system input-method window never became visible"
       # PRECONDITION as INFRA (-> RE-RUN) while keeping every genuine journey
       # assertion failure — including a containment/anchor failure in the SAME
       # class — hard RED. Drives the real classifier + the real aggregate
       # reducer over fixture artifacts so BOTH outcomes are observed, and pins
       # the measured cold-boot retry-cost model against the observed shard-0
-      # numbers from run 30305256109. Cheap (< 5 s), no emulator.
-      - name: CI journey infra-signature + measured retry-budget guard (issue #1800)
+      # numbers from run 30305256109, plus strict attempt-local ProcessRecord
+      # ownership for foreign framework ANRs. Cheap (< 15 s), no emulator.
+      - name: CI journey infra-signature + measured retry-budget guard (issues #1800, #1919)
         run: |
           chmod +x scripts/ci-journey-infra-signature.sh \
             scripts/ci-journey-infra-signature.py \
@@ -364,11 +365,12 @@ jobs:
             scripts/test-ci-journey-inter-attempt-cleanup.sh
           scripts/test-ci-journey-inter-attempt-cleanup.sh
 
-      # Issue #1781: fast, JVM-free artifact packaging fixture. Proves the
+      # Issues #1781/#1919: fast, JVM-free artifact packaging fixture. Proves the
       # first-cold-boot preservation scan keeps real module Android outputs and
       # canonical per-attempt evidence without recursively nesting
-      # artifacts/ci-journey or artifacts/ci-journey-attempt-1.
-      - name: CI journey artifact packaging guard (issue #1781)
+      # artifacts/ci-journey or artifacts/ci-journey-attempt-1, and keeps each
+      # activity-processes snapshot beside its correct attempt XML.
+      - name: CI journey artifact packaging guard (issues #1781, #1919)
         run: |
           chmod +x scripts/ci-journey-preserve-android-outputs.sh scripts/test-ci-journey-artifact-packaging.sh
           scripts/test-ci-journey-artifact-packaging.sh
@@ -1558,8 +1560,13 @@ jobs:
           printf '%s\n' "$signature_out" | sed 's/^/journey failure signature: /'
           signature_verdict="$(sed -n 's/^shard_signature_verdict=//p' <<<"$signature_out" | tail -n 1)"
           if [[ "$signature_verdict" == "INFRA" && "${first_timeout:-false}" != "true" ]]; then
-            echo "::warning title=Emulator journey INFRA — real system IME unavailable on this AVD::The ONLY failure(s) on this shard were the physical input-method-window PRECONDITION (\"The real system input-method window never became visible.\"), which the CI swiftshader AVD cannot satisfy. This is a captured environment signature (G5), NOT a product regression: the same class's anchor/containment properties are asserted with hard failures on its synthetic Type.ime() path, which ran in this same suite. Typed INFRA so aggregation requests RE-RUN. Any containment/anchor assertion failure would have stayed RED (issue #1800)."
-            write_verdict INFRA real_ime_precondition
+            if grep -q '=foreign_framework_anr_focus' <<<"$signature_out"; then
+              echo "::warning title=Emulator journey INFRA — foreign framework ANR owned focus::Every covered precondition failure was paired with its own readable class-attempt activity-processes.txt proving one non-PocketShell ProcessRecord owned the sole AppNotRespondingDialog. This is captured attempt-local foreign-framework-ANR evidence (G5), NOT a product regression. Typed INFRA so aggregation requests RE-RUN. PocketShell/applicationIdSuffix ANRs, ambiguous/multiple owners, missing or cross-attempt snapshots, and any containment/anchor/chip/unrelated failure stay RED (issue #1919)."
+              write_verdict INFRA foreign_framework_anr_focus
+            else
+              echo "::warning title=Emulator journey INFRA — real system IME unavailable on this AVD::The ONLY failure(s) on this shard were the physical input-method-window PRECONDITION (\"The real system input-method window never became visible.\"), which the CI swiftshader AVD cannot satisfy. This is a captured environment signature (G5), NOT a product regression: the same class's anchor/containment properties are asserted with hard failures on its synthetic Type.ime() path, which ran in this same suite. Typed INFRA so aggregation requests RE-RUN. Any containment/anchor assertion failure would have stayed RED (issue #1800)."
+              write_verdict INFRA real_ime_precondition
+            fi
             exit 1
           fi
           if [[ "${first_failure:-false}" == "true" ]]; then

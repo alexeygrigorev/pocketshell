@@ -20,6 +20,7 @@ SHARD_VERDICT="$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh"
 ELAPSED="$SCRIPT_DIR/ci-journey-suite-elapsed.sh"
 RETRY_BUDGET="$SCRIPT_DIR/ci-journey-retry-budget.sh"
 AGG="$SCRIPT_DIR/ci-journey-aggregate-verdict.sh"
+BUDGET_FN="$SCRIPT_DIR/ci-journey-budget-functions.sh"
 WORKFLOW="${CI_JOURNEY_INFRA_SIGNATURE_WORKFLOW:-$REPO_ROOT/.github/workflows/tests.yml}"
 ANDROID_TEST="$REPO_ROOT/app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerSaturatedImeAnchorE2eTest.kt"
 SHOW_KEYBOARD_TEST="$REPO_ROOT/app/src/androidTest/java/com/pocketshell/app/session/ShowKeyboardChipE2eTest.kt"
@@ -29,9 +30,21 @@ CLASSIFIER_PY="$SCRIPT_DIR/ci-journey-infra-signature.py"
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
-for required in "$SIGNATURE" "$SHARD_VERDICT" "$ELAPSED" "$RETRY_BUDGET" "$AGG" "$WORKFLOW"; do
+for required in "$SIGNATURE" "$SHARD_VERDICT" "$ELAPSED" "$RETRY_BUDGET" "$AGG" "$WORKFLOW" "$BUDGET_FN"; do
   [[ -f "$required" ]] || fail "missing required file: $required"
 done
+
+journey_fixture_artifact_key() {
+  local classname="$1" key suffix
+  key="$(
+    bash -c 'source "$1"; journey_class_artifact_key "$2"' \
+      _ "$BUDGET_FN" "$classname"
+  )" || fail "could not derive the production artifact key for $classname"
+  suffix="${key#"$classname"--}"
+  [[ "$key" == "$classname"--* && "$suffix" =~ ^[0-9a-f]{16}$ ]] \
+    || fail "malformed production artifact key for $classname: $key"
+  printf '%s\n' "$key"
+}
 
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
@@ -105,8 +118,9 @@ append_summary_line() {
 #   outcome: pass | realime | containment | error
 write_case_xml() {
   local root="$1" class="$2" attempt="$3"; shift 3
-  local key="${class##*.}"
-  local dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt/android-test-outputs/androidTest-results/connected"
+  local key dir
+  key="$(journey_fixture_artifact_key "$class")"
+  dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt/android-test-outputs/app/build/outputs/androidTest-results/connected/debug"
   mkdir -p "$dir"
   local file="$dir/TEST-emulator-5554-15_$key-$attempt.xml"
   {
@@ -116,7 +130,7 @@ write_case_xml() {
     for spec in "$@"; do
       method="${spec%%:*}"
       outcome="${spec#*:}"
-      echo "  <testcase name=\"$method\" classname=\"$class[emulator-5554 - 15]\">"
+      echo "  <testcase name=\"$method\" classname=\"${class}[emulator-5554 - 15]\">"
       case "$outcome" in
         pass) ;;
         realime)
@@ -184,6 +198,60 @@ write_case_xml() {
     done
     echo '</testsuite>'
   } > "$file"
+}
+
+# Issue #1919: write one of the four minimal class-attempt bundles preserved
+# from exact-main run 30665705369. The failure text and the decisive
+# ProcessRecord/mNotResponding ownership lines are byte-for-byte faithful to
+# that run; unrelated dumpsys/report noise is deliberately omitted.
+write_issue1919_attempt() {
+  local root="$1" class="$2" key="$3" attempt="$4"
+  local dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt"
+  local xml_dir="$dir/android-test-outputs/app/build/outputs/androidTest-results/connected/debug"
+  mkdir -p "$xml_dir"
+  if [[ "$class" == "$SATURATED_CLASS" ]]; then
+    cat > "$xml_dir/TEST-emulator-5554 - 15-_app-.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="$class" tests="1" failures="1">
+  <testcase name="saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide" classname="${class}[emulator-5554 - 15]">
+    <failure>java.lang.AssertionError: The real system input-method window never became visible. stage=before_show app_window_focused=false active_window_pkg=android physicalImeWindows=[]
+at org.junit.Assert.fail(Assert.java:89)
+at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.requestRealImeAndAssertVisible(PromptComposerSaturatedImeAnchorE2eTest.kt:1091)
+at com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest.saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide(PromptComposerSaturatedImeAnchorE2eTest.kt:762)
+</failure>
+  </testcase>
+</testsuite>
+EOF
+  else
+    cat > "$xml_dir/TEST-emulator-5554 - 15-_app-.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="$class" tests="2" failures="2">
+  <testcase name="showKeyboardChipBringsUpSoftInput" classname="${class}[emulator-5554 - 15]">
+    <failure>java.lang.AssertionError: The app window never held input focus, so the system refused every showSoftInput() call (&quot;is not served&quot;). The show-keyboard chip cannot be measured in that state, so this is NOT a chip failure (cycle 1): app_window_focused=false active_window_pkg=android active_window_class=android.widget.FrameLayout.
+at org.junit.Assert.fail(Assert.java:89)
+at com.pocketshell.app.session.ShowKeyboardChipE2eTest.runShowKeyboardCycle(ShowKeyboardChipE2eTest.kt:500)
+at com.pocketshell.app.session.ShowKeyboardChipE2eTest.showKeyboardChipBringsUpSoftInput(ShowKeyboardChipE2eTest.kt:241)
+</failure>
+  </testcase>
+  <testcase name="foreignFocusOwnerIsNamedAsTheCauseInsteadOfBlamingTheChip" classname="${class}[emulator-5554 - 15]">
+    <failure>java.lang.AssertionError: an app-owned focus thief is a PRODUCT signal and must be reported as such, never cleared by the harness; expected active_window_pkg=com.pocketshell.app in: The app window never held input focus, so the system refused every showSoftInput() call (&quot;is not served&quot;). The show-keyboard chip cannot be measured in that state, so this is NOT a chip failure (cycle 1): app_window_focused=false active_window_pkg=android active_window_class=android.widget.FrameLayout.
+at org.junit.Assert.fail(Assert.java:89)
+at org.junit.Assert.assertTrue(Assert.java:42)
+at com.pocketshell.app.session.ShowKeyboardChipE2eTest.foreignFocusOwnerIsNamedAsTheCauseInsteadOfBlamingTheChip(ShowKeyboardChipE2eTest.kt:426)
+</failure>
+  </testcase>
+</testsuite>
+EOF
+  fi
+  cat > "$dir/activity-processes.txt" <<'EOF'
+ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)
+  *APP* UID 10179 ProcessRecord{194efbc 1188:com.google.android.apps.nexuslauncher/u0a179}
+    user #0 uid=10179 gids={50179, 20179, 9997}
+    packageList={com.google.android.apps.nexuslauncher}
+    pid=1188
+    foregroundActivities=true (rep=true)
+     mCrashing=false null mNotResponding=true [com.android.server.am.AppNotRespondingDialog@8fc5bd] bad=false
+EOF
 }
 
 # run_signature <summary> <root> [<root>...] -> SIG_CLASS / SIG_OUT
@@ -506,9 +574,10 @@ run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
   || { printf '%s\n' "$SIG_OUT"; fail "(n2) the #1879 label without an owner must stay product_failure, got '$SIG_CLASS'"; }
 pass "(n2) the #1879 label without owner evidence stays RED"
 
-# Extract the production Kotlin constant, then prove the #1882-authoritative
-# classifier does not register it. AST string constants catch a future
-# split/implicitly-concatenated Python literal without tripping on comments.
+# Extract the production Kotlin constant, then prove the classifier registers
+# exactly that label. #1919 permits it only when the same class-attempt bundle
+# also proves foreign ProcessRecord ownership; the owner-less (n1/n2) cases
+# above remain the load-bearing anti-mask controls.
 [[ -f "$WINDOW_FOCUS_SIGNALS" ]] || fail "(n3) missing $WINDOW_FOCUS_SIGNALS"
 KOTLIN_SIGNATURE="$(python3 - "$WINDOW_FOCUS_SIGNALS" <<'PYEOF'
 import re
@@ -529,7 +598,7 @@ print("".join(piece.replace('\\"', '"') for piece in pieces))
 PYEOF
 )" || fail "(n3) could not extract the Kotlin #1879 signature"
 python3 - "$CLASSIFIER_PY" "$KOTLIN_SIGNATURE" <<'PYEOF' \
-  || fail "(n3) the #1879 label was registered in the #1882 classifier; it must stay RED"
+  || fail "(n3) the classifier does not use the production #1879 label"
 import ast
 import sys
 
@@ -540,16 +609,19 @@ if tree.body and isinstance(tree.body[0], ast.Expr):
     value = tree.body[0].value
     if isinstance(value, ast.Constant) and isinstance(value.value, str):
         docstring_node = value
+found = False
 for node in ast.walk(tree):
     if node is docstring_node:
         continue
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         if signature in node.value:
-            raise SystemExit(1)
+            found = True
+if not found:
+    raise SystemExit(1)
 PYEOF
 
-# The verdict layer must likewise refuse a hypothetical #1879 classification,
-# while retaining #1882's explicit-foreign real_ime_precondition control.
+# The verdict layer refuses the old owner-only hypothetical value, while
+# admitting only #1882 and #1919's explicit typed classifications.
 root="$SANDBOX/n3-verdict"; mkdir -p "$root/ci-journey"
 : >"$root/ci-journey/summary.md"
 stub="$SANDBOX/stub-foreign-window-classifier.sh"
@@ -564,7 +636,12 @@ printf '%s\n' '#!/usr/bin/env bash' \
 stub_out="$(CI_JOURNEY_INFRA_SIGNATURE="$stub" bash "$SHARD_VERDICT" "$root")"
 [[ "$(sed -n 's/^shard_signature_verdict=//p' <<<"$stub_out" | tail -n 1)" == "INFRA" ]] \
   || fail "(n3) #1882 real_ime_precondition control no longer reaches INFRA"
-pass "(n3) #1879 is unregistered while #1882 explicit-foreign real-IME stays live"
+printf '%s\n' '#!/usr/bin/env bash' \
+  'echo journey_failure_classification=foreign_framework_anr_focus' >"$stub"
+stub_out="$(CI_JOURNEY_INFRA_SIGNATURE="$stub" bash "$SHARD_VERDICT" "$root")"
+[[ "$(sed -n 's/^shard_signature_verdict=//p' <<<"$stub_out" | tail -n 1)" == "INFRA" ]] \
+  || fail "(n3) #1919 foreign_framework_anr_focus does not reach INFRA"
+pass "(n3) owner-only focus stays RED; only #1882/#1919 typed values reach INFRA"
 
 # The precondition observes and diagnoses only. Acting on the UI or mutating
 # process-wide UiAutomation flags can dismiss an app-owned modal and mask a
@@ -591,6 +668,250 @@ grep -q "fun $SHOW_KEYBOARD_METHOD" "$SHOW_KEYBOARD_TEST" \
 grep -q "$SHOW_KEYBOARD_CLASS" "$REPO_ROOT/scripts/ci-journey-suite.sh" \
   || fail "(n5) the #1879 class is not wired into the per-push journey gate"
 pass "(n5) hard assertions remain and the #1879 reproduction is gate-wired"
+
+echo
+echo "== #1919 exact run 30665705369 foreign-framework-ANR fixture =="
+
+# Regression-first: exact main 76f0c401 classified this four-attempt fixture as
+# product_failure because active_window_pkg=android is correctly ambiguous in
+# isolation. It may turn green only when each failure is associated with its
+# own class-attempt activity-processes.txt and that snapshot proves the one
+# foreign ProcessRecord owns the framework AppNotRespondingDialog.
+root="$SANDBOX/issue1919-exact"; mkdir -p "$root"
+ISSUE1919_SAT_KEY="$(journey_fixture_artifact_key "$SATURATED_CLASS")"
+ISSUE1919_SHOW_KEY="$(journey_fixture_artifact_key "$SHOW_KEYBOARD_CLASS")"
+write_summary "$root" 2910 "$SATURATED_CLASS" "$SHOW_KEYBOARD_CLASS"
+for attempt in 1 2; do
+  write_issue1919_attempt "$root" "$SATURATED_CLASS" \
+    "$ISSUE1919_SAT_KEY" "$attempt"
+  write_issue1919_attempt "$root" "$SHOW_KEYBOARD_CLASS" \
+    "$ISSUE1919_SHOW_KEY" "$attempt"
+done
+run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+printf '%s\n' "$SIG_OUT" | sed 's/^/    /'
+[[ "$SIG_CLASS" == "foreign_framework_anr_focus" ]] \
+  || fail "(#1919-red) exact four-attempt launcher-ANR fixture must classify foreign_framework_anr_focus, got '$SIG_CLASS'"
+grep -q '^journey_failing_testcases=6$' <<<"$SIG_OUT" \
+  || fail "(#1919-red) all six failure elements across the four attempts must be covered"
+mkdir -p "$root/ci-journey-attempt-1"
+cp -a "$root/ci-journey" "$root/ci-journey-attempt-1/ci-journey"
+shard_verdict_for "$root"
+[[ "$SHARD_TOKEN" == "INFRA" ]] \
+  || fail "(#1919-red) exact launcher-ANR shard must be INFRA, got $SHARD_TOKEN"
+verdicts="$SANDBOX/verdicts-1919"; mkdir -p "$verdicts"
+write_shard_token "$verdicts" 0 CLEAN
+write_shard_token "$verdicts" 1 "$SHARD_TOKEN"
+write_shard_token "$verdicts" 2 CLEAN
+run_agg "$verdicts"
+[[ "$AGG_VERDICT" == "RE-RUN" && "$AGG_RC" -eq 0 ]] \
+  || fail "(#1919-red) exact launcher-ANR run must aggregate RE-RUN/exit0, got $AGG_VERDICT/exit$AGG_RC"
+pass "(#1919) exact four-attempt launcher ANR -> INFRA -> RE-RUN"
+
+ISSUE1919_FIXTURE="$root"
+issue1919_snapshot() {
+  printf '%s/ci-journey/class-attempts/app/%s/attempt-%s/activity-processes.txt\n' \
+    "$1" "$2" "$3"
+}
+issue1919_xml() {
+  printf '%s/ci-journey/class-attempts/app/%s/attempt-%s/android-test-outputs/app/build/outputs/androidTest-results/connected/debug/TEST-emulator-5554 - 15-_app-.xml\n' \
+    "$1" "$2" "$3"
+}
+clone_issue1919_fixture() {
+  mkdir -p "$1"
+  cp -a "$ISSUE1919_FIXTURE/ci-journey" "$1/ci-journey"
+}
+assert_issue1919_red() {
+  local label="$1" case_root="$2"
+  run_signature "$case_root/ci-journey/summary.md" "$case_root/ci-journey"
+  [[ "$SIG_CLASS" == "product_failure" || "$SIG_CLASS" == "unclassified" ]] \
+    || { printf '%s\n' "$SIG_OUT"; fail "(#1919-$label) unsafe evidence classified '$SIG_CLASS'"; }
+  mkdir -p "$case_root/ci-journey-attempt-1"
+  cp -a "$case_root/ci-journey" "$case_root/ci-journey-attempt-1/ci-journey"
+  shard_verdict_for "$case_root"
+  [[ "$SHARD_TOKEN" == "RED" ]] \
+    || fail "(#1919-$label) unsafe evidence must keep shard RED, got $SHARD_TOKEN"
+}
+
+# PocketShell itself, including arbitrary connected-test applicationIdSuffix
+# variants, can own the same framework dialog (#796). They are never infra.
+for owner in com.pocketshell.app com.pocketshell.app.i1919; do
+  case_root="$SANDBOX/issue1919-owner-${owner##*.}"
+  clone_issue1919_fixture "$case_root"
+  sed -i "s/com.google.android.apps.nexuslauncher/$owner/g" \
+    "$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+  assert_issue1919_red "app-owner-${owner##*.}" "$case_root"
+done
+pass "(#1919-a) PocketShell and applicationIdSuffix ANR owners stay RED"
+
+# Every ownership ambiguity fails closed: a second app/foreign owner, malformed
+# ProcessRecord package, dialog outside the owner block, false not-responding
+# state, or missing dialog identity.
+case_root="$SANDBOX/issue1919-mixed-owner"; clone_issue1919_fixture "$case_root"
+snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+cat >> "$snapshot" <<'EOF'
+  *APP* UID 10200 ProcessRecord{bbbbbbb 2200:com.pocketshell.app.i1919/u0a200}
+    mNotResponding=true [com.android.server.am.AppNotRespondingDialog@bbbbbbb]
+EOF
+assert_issue1919_red mixed-owner "$case_root"
+
+case_root="$SANDBOX/issue1919-two-foreign"; clone_issue1919_fixture "$case_root"
+snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+cat >> "$snapshot" <<'EOF'
+  *APP* UID 10201 ProcessRecord{ccccccc 2201:com.example.second/u0a201}
+    mNotResponding=true [com.android.server.am.AppNotRespondingDialog@ccccccc]
+EOF
+assert_issue1919_red two-foreign "$case_root"
+
+for mutation in malformed false missing-id; do
+  case_root="$SANDBOX/issue1919-$mutation"; clone_issue1919_fixture "$case_root"
+  snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+  case "$mutation" in
+    malformed) sed -i 's/com.google.android.apps.nexuslauncher/not-a-package/g' "$snapshot" ;;
+    false) sed -i 's/mNotResponding=true/mNotResponding=false/' "$snapshot" ;;
+    missing-id) sed -i 's/AppNotRespondingDialog@8fc5bd/AppNotRespondingDialog/' "$snapshot" ;;
+  esac
+  assert_issue1919_red "$mutation" "$case_root"
+done
+
+case_root="$SANDBOX/issue1919-dialog-outside"; clone_issue1919_fixture "$case_root"
+snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+sed -i 's/mNotResponding=true \[com.android.server.am.AppNotRespondingDialog@8fc5bd\]/mNotResponding=true/' "$snapshot"
+sed -i '1i mNotResponding=true [com.android.server.am.AppNotRespondingDialog@8fc5bd]' "$snapshot"
+assert_issue1919_red dialog-outside "$case_root"
+pass "(#1919-b) mixed/multiple/malformed/out-of-block ownership stays RED"
+
+# Missing, empty, malformed, and cross-attempt evidence cannot borrow another
+# bundle's valid launcher snapshot.
+for mutation in missing empty malformed-bytes; do
+  case_root="$SANDBOX/issue1919-snapshot-$mutation"; clone_issue1919_fixture "$case_root"
+  snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+  case "$mutation" in
+    missing) rm "$snapshot" ;;
+    empty) : > "$snapshot" ;;
+    malformed-bytes) printf '\377\376\375' > "$snapshot" ;;
+  esac
+  assert_issue1919_red "snapshot-$mutation" "$case_root"
+done
+case_root="$SANDBOX/issue1919-snapshot-unreadable"; clone_issue1919_fixture "$case_root"
+snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+chmod 000 "$snapshot"
+run_signature "$case_root/ci-journey/summary.md" "$case_root/ci-journey"
+[[ "$SIG_CLASS" == "product_failure" ]] \
+  || fail "(#1919-snapshot-unreadable) unreadable snapshot must be product_failure"
+chmod 600 "$snapshot"
+mkdir -p "$case_root/ci-journey-attempt-1"
+cp -a "$case_root/ci-journey" "$case_root/ci-journey-attempt-1/ci-journey"
+chmod 000 "$snapshot" \
+  "$case_root/ci-journey-attempt-1/ci-journey/class-attempts/app/$ISSUE1919_SAT_KEY/attempt-1/activity-processes.txt"
+shard_verdict_for "$case_root"
+[[ "$SHARD_TOKEN" == "RED" ]] \
+  || fail "(#1919-snapshot-unreadable) unreadable snapshot must keep shard RED"
+for app_attempt in 1 2; do
+  case_root="$SANDBOX/issue1919-attempt-$app_attempt-app"; clone_issue1919_fixture "$case_root"
+  snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" "$app_attempt")"
+  sed -i 's/com.google.android.apps.nexuslauncher/com.pocketshell.app.i1919/g' "$snapshot"
+  assert_issue1919_red "attempt-$app_attempt-app" "$case_root"
+done
+case_root="$SANDBOX/issue1919-cross-class"; clone_issue1919_fixture "$case_root"
+rm "$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+assert_issue1919_red cross-class "$case_root"
+
+# A testcase may consume only the snapshot beside its OWN canonical class key.
+# This is deliberately one bundle: the SaturatedIme attempt XML is poisoned
+# with a wanted ShowKeyboard testcase while no ShowKeyboard attempt exists. A
+# classifier that checks only "testcase is wanted" launders both failures
+# through SaturatedIme's one valid launcher snapshot and incorrectly emits INFRA.
+case_root="$SANDBOX/issue1919-wrong-bundle-classname"
+mkdir -p "$case_root"
+write_summary "$case_root" 2910 "$SATURATED_CLASS" "$SHOW_KEYBOARD_CLASS"
+write_issue1919_attempt "$case_root" "$SATURATED_CLASS" "$ISSUE1919_SAT_KEY" 1
+xml="$(issue1919_xml "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+python3 - "$xml" "$SHOW_KEYBOARD_CLASS" <<'PYEOF'
+import sys
+import xml.etree.ElementTree as ET
+
+path, classname = sys.argv[1:]
+tree = ET.parse(path)
+suite = tree.getroot()
+case = ET.SubElement(
+    suite,
+    "testcase",
+    {
+        "name": "showKeyboardChipBringsUpSoftInput",
+        "classname": f"{classname}[emulator-5554 - 15]",
+    },
+)
+failure = ET.SubElement(case, "failure")
+failure.text = (
+    "java.lang.AssertionError: The app window never held input focus, so the "
+    "system refused every showSoftInput() call (\"is not served\"). The "
+    "show-keyboard chip cannot be measured in that state, so this is NOT a "
+    "chip failure (cycle 1): app_window_focused=false "
+    "active_window_pkg=android active_window_class=android.widget.FrameLayout."
+)
+suite.set("tests", "2")
+suite.set("failures", "2")
+tree.write(path, encoding="UTF-8", xml_declaration=True)
+PYEOF
+run_signature "$case_root/ci-journey/summary.md" "$case_root/ci-journey"
+printf '%s\n' "$SIG_OUT" | sed 's/^/    wrong-bundle: /'
+[[ "$SIG_CLASS" == "product_failure" ]] \
+  || { printf '%s\n' "$SIG_OUT"; fail "(#1919-wrong-bundle-classname) mismatched testcase must be product_failure, got '$SIG_CLASS'"; }
+grep -q '^journey_failing_testcases=2$' <<<"$SIG_OUT" \
+  || fail "(#1919-wrong-bundle-classname) both failing testcases must remain visible"
+grep -q 'artifact-key-classname-mismatch.*ShowKeyboardChipE2eTest' <<<"$SIG_OUT" \
+  || { printf '%s\n' "$SIG_OUT"; fail "(#1919-wrong-bundle-classname) mismatch offender is not explicit"; }
+mkdir -p "$case_root/ci-journey-attempt-1"
+cp -a "$case_root/ci-journey" "$case_root/ci-journey-attempt-1/ci-journey"
+shard_verdict_for "$case_root"
+[[ "$SHARD_TOKEN" == "RED" ]] \
+  || fail "(#1919-wrong-bundle-classname) mismatched testcase must keep shard RED, got $SHARD_TOKEN"
+
+case_root="$SANDBOX/issue1919-cross-attempt-symlink"; clone_issue1919_fixture "$case_root"
+snapshot="$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+rm "$snapshot"
+ln -s "$(issue1919_snapshot "$case_root" "$ISSUE1919_SAT_KEY" 2)" "$snapshot"
+assert_issue1919_red cross-attempt-symlink "$case_root"
+pass "(#1919-c) missing/malformed/wrong-attempt/cross-class/wrong-bundle evidence stays RED"
+
+# XML coverage remains all-or-nothing. Duplicate or corrupt attempt XML,
+# containment/anchor/chip/timeout text, and unrelated or uncovered classes all
+# veto the downgrade even beside valid foreign ANR snapshots.
+case_root="$SANDBOX/issue1919-duplicate-xml"; clone_issue1919_fixture "$case_root"
+xml="$(issue1919_xml "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+cp "$xml" "${xml%/*}/TEST-duplicate.xml"
+assert_issue1919_red duplicate-xml "$case_root"
+
+case_root="$SANDBOX/issue1919-corrupt-xml"; clone_issue1919_fixture "$case_root"
+xml="$(issue1919_xml "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+printf '<testsuite><testcase>' > "$xml"
+assert_issue1919_red corrupt-xml "$case_root"
+
+for mutation in containment chip timeout; do
+  case_root="$SANDBOX/issue1919-failure-$mutation"; clone_issue1919_fixture "$case_root"
+  if [[ "$mutation" == containment ]]; then
+    xml="$(issue1919_xml "$case_root" "$ISSUE1919_SAT_KEY" 1)"
+    sed -i 's/The real system input-method window never became visible\./Composer anchor escaped keyboard containment./' "$xml"
+  else
+    xml="$(issue1919_xml "$case_root" "$ISSUE1919_SHOW_KEY" 1)"
+    if [[ "$mutation" == chip ]]; then
+      sed -i '0,/The app window never held input focus/{s/The app window never held input focus/Show-keyboard chip remained hidden while the app window held focus/}' "$xml"
+    else
+      sed -i '0,/The app window never held input focus/{s/The app window never held input focus/androidx.compose.ui.test.ComposeTimeoutException: Condition still not satisfied after 15000 ms/}' "$xml"
+    fi
+  fi
+  assert_issue1919_red "failure-$mutation" "$case_root"
+done
+
+case_root="$SANDBOX/issue1919-unrelated"; clone_issue1919_fixture "$case_root"
+append_summary_line "$case_root" '- `com.pocketshell.app.proof.SomeOtherJourneyE2eTest`'
+write_case_xml "$case_root" com.pocketshell.app.proof.SomeOtherJourneyE2eTest 1 'unrelated:containment'
+assert_issue1919_red unrelated "$case_root"
+
+case_root="$SANDBOX/issue1919-uncovered"; clone_issue1919_fixture "$case_root"
+append_summary_line "$case_root" '- `com.pocketshell.app.proof.MissingJourneyE2eTest`'
+assert_issue1919_red uncovered "$case_root"
+pass "(#1919-d) corrupt/duplicate/uncovered and genuine co-located failures stay RED"
 
 echo
 echo "== #1822 method-scoped bullets and fail-safe-toward-RED parsing =="
@@ -934,17 +1255,18 @@ echo "== #1822 the REAL classify step run: body, executed end to end =="
 # `$GITHUB_OUTPUT` the shard's RED gate keys on. An unmapped expression is a HARD
 # failure, so a workflow edit cannot drift silently past this harness.
 
-# classify_expressions <journey-outcome> — the step-output map for one scenario.
+# classify_expressions <journey-outcome> [first-timeout] [first-failure] — the
+# step-output map for one scenario.
 classify_expressions() {
-  local journey_outcome="$1"
+  local journey_outcome="$1" first_timeout="${2:-false}" first_failure="${3:-true}"
   cat <<JSONEOF
 {
   "steps.journey.outcome": "$journey_outcome",
   "steps.journey_retry.outcome": "failure",
   "steps.journey.conclusion": "$journey_outcome",
   "steps.journey_retry.conclusion": "failure",
-  "steps.journey_summary.outputs.first_timeout": "false",
-  "steps.journey_summary.outputs.first_failure": "true",
+  "steps.journey_summary.outputs.first_timeout": "$first_timeout",
+  "steps.journey_summary.outputs.first_failure": "$first_failure",
   "steps.journey_retry_budget.outputs.retry_allowed": "true",
   "steps.journey_retry_budget.outputs.retry_reason": "sufficient_remaining_budget",
   "steps.journey_retry_budget.outputs.retry_remaining_ms": "3112241",
@@ -1090,6 +1412,31 @@ run_agg "$infra_token_dir"
   || { printf '%s\n' "$AGG_OUT"; fail "(t) an all-infra run must still aggregate RE-RUN/exit0, got $AGG_VERDICT/exit$AGG_RC"; }
 pass "(t) #1800 preserved: signature-only -> real body writes INFRA -> aggregate RE-RUN (neutral green)"
 
+# (#1919-t2) The exact four-attempt fixture must traverse the REAL workflow
+# body, receive the new typed reason/warning, and remain timeout-ineligible.
+sandbox="$SANDBOX/wf-foreign-framework-anr"; mkdir -p "$sandbox/artifacts"
+cp -a "$ISSUE1919_FIXTURE/ci-journey" "$sandbox/artifacts/ci-journey"
+snapshot_first_attempt "$sandbox"
+run_classify_body "$sandbox" "$(classify_expressions failure)"
+[[ "$CLASSIFY_TOKEN" == "INFRA" && "$CLASSIFY_RC" -ne 0 ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(#1919-t2) real body must write INFRA/nonzero for proven foreign ANR"; }
+grep -q '^shard_verdict_reason=foreign_framework_anr_focus$' <<<"$CLASSIFY_GH_OUTPUT" \
+  || { printf '%s\n' "$CLASSIFY_GH_OUTPUT"; fail "(#1919-t2) workflow lost the typed foreign-ANR reason"; }
+grep -q '::warning title=Emulator journey INFRA — foreign framework ANR owned focus' <<<"$CLASSIFY_OUT" \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(#1919-t2) workflow lost the typed foreign-ANR warning"; }
+grep -q '::error' <<<"$CLASSIFY_OUT" \
+  && fail "(#1919-t2) proven foreign ANR emitted a RED annotation"
+
+sandbox="$SANDBOX/wf-foreign-framework-anr-timeout"; mkdir -p "$sandbox/artifacts"
+cp -a "$ISSUE1919_FIXTURE/ci-journey" "$sandbox/artifacts/ci-journey"
+snapshot_first_attempt "$sandbox"
+run_classify_body "$sandbox" "$(classify_expressions failure true true)"
+[[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_RC" -ne 0 ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(#1919-t2) timeout must override foreign-ANR evidence and stay RED"; }
+grep -q 'foreign framework ANR owned focus' <<<"$CLASSIFY_OUT" \
+  && fail "(#1919-t2) timeout entered the foreign-ANR INFRA branch"
+pass "(#1919-t2) real workflow maps proven foreign ANR to INFRA, while timeout stays RED"
+
 # (u) THE #1822 UN-MASKING, through the real step body. The exact run
 #     30334306297 shard-1 shape: the IME signature entry FOLLOWED BY two
 #     method-scoped genuine Compose-timeout failures. On the base classifier the
@@ -1146,7 +1493,7 @@ pass "(v) #1822: an unreadable failed-both entry -> the real body writes RED"
 sandbox="$SANDBOX/wf-clean"; mkdir -p "$sandbox/artifacts"
 write_summary "$sandbox/artifacts" 2338
 snapshot_first_attempt "$sandbox"
-run_classify_body "$sandbox" "$(classify_expressions success)"
+run_classify_body "$sandbox" "$(classify_expressions success false false)"
 [[ "$CLASSIFY_TOKEN" == "CLEAN" && "$CLASSIFY_RC" -eq 0 ]] \
   || { printf '%s\n' "$CLASSIFY_OUT"; fail "(w) a first-attempt success must write CLEAN/exit0, got '$CLASSIFY_TOKEN'/exit$CLASSIFY_RC"; }
 clean_token_dir="$SANDBOX/wf-verdicts-clean"; rm -rf "$clean_token_dir"; mkdir -p "$clean_token_dir"

@@ -10,6 +10,7 @@ FROM alpine:latest
 # journey (`TmuxKeyBarCtrlComboE2eTest`) opens a real nano buffer and drives
 # `^O`/`^X` from the hotkeys panel, so the fixture must ship a real `nano`.
 RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git nano \
+    && mv /usr/bin/tmux /usr/bin/tmux.real \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \
@@ -48,6 +49,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
+    && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
     && test -n "$version" \
     && printf '%s\n' "$version" > /opt/pocketshell-agent-fixture-version \

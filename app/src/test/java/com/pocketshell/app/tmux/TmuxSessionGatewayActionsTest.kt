@@ -35,6 +35,85 @@ import java.io.InputStream
 @OptIn(ExperimentalCoroutinesApi::class)
 class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
     @Test
+    fun createSessionWithoutActiveTargetFailsVisiblyWithoutUsingGateway() = runTest(scheduler) {
+        val gateway = RecordingStopGateway(killSucceeds = true, createResolvedName = "unused")
+        val vm = newVm(
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val failure = async { vm.sessionCreateError.first() }
+        runCurrent()
+
+        vm.createSession(name = "new-work", cwd = "/srv/work")
+        runCurrent()
+
+        assertTrue(
+            "create after attach teardown must emit a user-visible failure instead of going silent",
+            failure.isCompleted,
+        )
+        assertEquals(
+            "Session isn't attached yet. Reconnect, then try again.",
+            failure.await(),
+        )
+        assertTrue("no target means no gateway create", gateway.createCalls.isEmpty())
+    }
+
+    @Test
+    fun createSessionWithoutProductionGatewayFailsInsteadOfUsingControlChannel() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        val failure = async { vm.sessionCreateError.first() }
+        runCurrent()
+
+        vm.createSession(name = "new-work", cwd = "/srv/work")
+        runCurrent()
+
+        assertTrue("missing production dependencies must be reported", failure.isCompleted)
+        assertEquals("Session creation isn't available.", failure.await())
+        assertFalse(
+            "the obsolete control-channel create fallback must be deleted",
+            client.sentCommands.any { it.startsWith("new-session") },
+        )
+    }
+
+    @Test
+    fun createSessionMissingHostFailsVisiblyWithoutUsingGateway() = runTest(scheduler) {
+        val gateway = RecordingStopGateway(killSucceeds = true, createResolvedName = "unused")
+        val vm = newVm(
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 8L),
+        )
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "missing",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        val failure = async { vm.sessionCreateError.first() }
+        runCurrent()
+
+        vm.createSession(name = "new-work", cwd = "/srv/work")
+        awaitCondition { failure.isCompleted }
+
+        assertEquals("Host not found. Return home and reconnect.", failure.await())
+        assertTrue("missing host means no gateway create", gateway.createCalls.isEmpty())
+    }
+
+    @Test
     fun killCurrentSessionBroadcastsSignalOnConfirmedKill() = runTest(scheduler) {
         val signals = SessionLifecycleSignals()
         val gateway = RecordingStopGateway(killSucceeds = true)

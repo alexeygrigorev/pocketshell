@@ -69,6 +69,29 @@ class FolderListViewModelCreateSessionTest {
     }
 
     @Test
+    fun createBeforeBindFailsVisiblyAndFinishes() = runTest {
+        val gateway = StubGateway(rows = emptyList())
+        val vm = newViewModel(gateway)
+        var finished = 0
+
+        vm.createSession(
+            sessionName = "early",
+            cwd = "/srv/early",
+            startCommand = null,
+            onResolved = { error("unbound create must not resolve") },
+            onFinished = { finished += 1 },
+        )
+        runCurrent()
+
+        assertEquals(1, finished)
+        assertEquals(
+            FolderActionStatus.Failed("Session list isn't ready yet. Try again."),
+            vm.actionStatus.value,
+        )
+        assertEquals(0, gateway.createCalls)
+    }
+
+    @Test
     fun createSessionAppearsOptimisticallyByIdWithoutBlankRebuild() = runTest {
         // The gateway accepts the create (returns the resolved name) but its
         // session probe still reports ONLY the pre-existing session — i.e. the

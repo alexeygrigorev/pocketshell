@@ -121,6 +121,7 @@ import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
 import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
+import com.pocketshell.app.sessions.TmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -15950,10 +15951,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * the new pane. On success [onResolved] fires with the resolved session name
      * so the screen can attach to it via navigation.
      *
-     * The legacy control-channel `new-session -d` send remains ONLY as a
-     * fallback for the narrow unit-test constructors built without a gateway /
-     * host DAO; production Hilt always injects both, so production always takes
-     * the verified gateway path (same dual-path shape as [killCurrentSession]).
+     * Creation requires the production gateway, host DAO, and an attached target.
+     * A missing dependency or target is an explicit failure: this method never
+     * falls back to an unaccounted fire-and-forget control-channel command.
      */
     public fun createSession(
         name: String,
@@ -15969,23 +15969,30 @@ public class TmuxSessionViewModel @Inject constructor(
         val gateway = folderListGateway
         val dao = hostDao
         val current = activeTarget
-        if (gateway == null || dao == null || current == null) {
-            // No gateway/host DAO/active target (unit-test constructor) —
-            // best-effort `new-session -d` over the control channel. This path
-            // cannot launch a startCommand; it exists only so the legacy unit
-            // tests keep exercising the name/cwd derivation.
-            sendLifecycleCommand(
-                "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +
-                    "-c '${escapeSingleQuoted(creation.startDirectory)}'",
+        if (gateway == null || dao == null) {
+            reportSessionCreateFailure(
+                reason = "missing_gateway",
+                creation = creation,
+                message = "Session creation isn't available.",
+            )
+            return
+        }
+        if (current == null) {
+            reportSessionCreateFailure(
+                reason = "no_active_target",
+                creation = creation,
+                message = "Session isn't attached yet. Reconnect, then try again.",
             )
             return
         }
         bridgeScope.launch {
             val host = withContext(Dispatchers.IO) { dao.getById(current.hostId) }
             if (host == null) {
-                Log.w(
-                    ISSUE_464_KILL_TAG,
-                    "create-session-host-missing host=${current.hostId} name=${creation.sessionName}",
+                reportSessionCreateFailure(
+                    reason = "host_missing",
+                    creation = creation,
+                    hostId = current.hostId,
+                    message = "Host not found. Return home and reconnect.",
                 )
                 return@launch
             }
@@ -16008,25 +16015,33 @@ public class TmuxSessionViewModel @Inject constructor(
                     onResolved(resolvedName)
                 },
                 onFailure = { error ->
-                    Log.w(
-                        ISSUE_464_KILL_TAG,
-                        "create-session-failed host=${current.hostId} name=${creation.sessionName} " +
-                            "err=${error.javaClass.simpleName}: ${error.message}",
-                    )
-                    // Issue #976: a refused launch (e.g. name-collision guard in
-                    // the gateway) must FAIL VISIBLY — never silently swallow it,
-                    // or the user is left wondering why nothing happened. The
-                    // launch line was NOT sent into the current pane; tell them
-                    // why so they can retry once the session list is known. We do
-                    // NOT call onResolved here, so no navigation/attach to a wrong
-                    // session occurs.
-                    _sessionCreateError.tryEmit(
-                        error.message?.takeIf { it.isNotBlank() }
+                    reportSessionCreateFailure(
+                        reason = "gateway_failure",
+                        creation = creation,
+                        hostId = current.hostId,
+                        error = error,
+                        message = error.message?.takeIf { it.isNotBlank() }
                             ?: "Couldn't create the session.",
                     )
                 },
             )
         }
+    }
+
+    private fun reportSessionCreateFailure(
+        reason: String,
+        creation: TmuxSessionCreation,
+        message: String,
+        hostId: Long? = null,
+        error: Throwable? = null,
+    ) {
+        Log.w(
+            ISSUE_464_KILL_TAG,
+            "create-session-failed reason=$reason host=${hostId ?: "none"} " +
+                "name=${creation.sessionName}" +
+                (error?.let { " err=${it.javaClass.simpleName}: ${it.message}" } ?: ""),
+        )
+        _sessionCreateError.tryEmit(message)
     }
 
     /**

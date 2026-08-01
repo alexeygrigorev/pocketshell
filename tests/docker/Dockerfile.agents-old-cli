@@ -26,6 +26,7 @@ ARG OLD_CLI_FIXTURE_VERSION=0.4.9
 ARG OLD_CLI_MODE=unknown
 
 RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git \
+    && mv /usr/bin/tmux /usr/bin/tmux.real \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \
@@ -62,6 +63,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-agent-entrypoint \
+    && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && printf '%s\n' "$OLD_CLI_FIXTURE_VERSION" > /opt/pocketshell-agent-fixture-version \
     && printf '%s\n' "$OLD_CLI_MODE" > /opt/pocketshell-old-cli-mode \
     && chown -R testuser:testuser /home/testuser/.ssh

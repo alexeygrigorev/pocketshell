@@ -273,6 +273,15 @@ jobs:
           chmod +x scripts/test-agents-pool-isolation.sh
           scripts/test-agents-pool-isolation.sh
 
+      # Issue #1937 recurrence: ubuntu-latest does not guarantee ripgrep. Run
+      # the real guard under a minimal no-rg PATH and prove it still discovers
+      # both a valid consumer and a dynamically added broken fourth consumer.
+      - name: "Shared tmux-wrapper discovery self-test (issue #1937)"
+        run: |
+          chmod +x scripts/test-shared-tmux-wrapper-fixtures.sh \
+            scripts/test-shared-tmux-wrapper-fixtures-selftest.sh
+          scripts/test-shared-tmux-wrapper-fixtures-selftest.sh
+
       # Issue #1458: fast, JVM-free fixture test for the emulator-journey
       # aggregate verdict (scripts/ci-journey-aggregate-verdict.sh) + the
       # per-shard token-writing / aggregation wiring in tests.yml. Proves the

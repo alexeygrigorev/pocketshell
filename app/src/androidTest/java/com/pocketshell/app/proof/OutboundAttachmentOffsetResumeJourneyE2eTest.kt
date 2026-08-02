@@ -43,6 +43,7 @@ import com.pocketshell.app.share.ShareUploader
 import com.pocketshell.app.tmux.QueueSidecarUploadJourneySeam
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.app.tmux.durableTmuxSessionKey
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -456,6 +457,7 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
                 countOccurrences(flattened, (FAKE_AGENT_SUBMITTED + PROMPT).filterNot(Char::isWhitespace)),
             )
 
+            selectTerminalTabForLiveEvidence()
             writeThroughTerminalSession(LIVE_INPUT_MARKER)
             val liveCapture = waitForCapture(killer, INPUT_TIMEOUT_MS) { it.contains(LIVE_INPUT_MARKER) }
             assertTrue(
@@ -463,7 +465,10 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
                     Issue1733JourneyContract.xmlSafeFailureText(liveCapture),
                 liveCapture.contains(LIVE_INPUT_MARKER),
             )
-            captureViewport("03-resumed-delivered-live")
+            captureViewport(
+                name = "03-resumed-delivered-live",
+                requiredVisibleText = LIVE_INPUT_MARKER,
+            )
             writeText("03-final-capture.txt", liveCapture)
             writeText("03-pane-output.txt", submitted)
             writeText("03-queue-final.txt", queueSnapshot())
@@ -972,6 +977,36 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
         assertTrue("expected a live TerminalView input session", wrote)
     }
 
+    private fun selectTerminalTabForLiveEvidence() {
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitForIdle()
+
+        var terminalState = "not inspected"
+        val deadline = SystemClock.elapsedRealtime() + UI_TIMEOUT_MS
+        var ready = false
+        while (!ready && SystemClock.elapsedRealtime() < deadline) {
+            compose.activityRule.scenario.onActivity { activity ->
+                val decor = activity.window.decorView
+                val terminal = decor.findTerminalView()
+                terminalState = if (terminal == null) {
+                    "missing; decorShown=${decor.isShown} decorBounds=${decor.width}x${decor.height}"
+                } else {
+                    "shown=${terminal.isShown} attached=${terminal.isAttachedToWindow} " +
+                        "bounds=${terminal.width}x${terminal.height} session=${terminal.currentSession != null}"
+                }
+                ready = terminal?.isShown == true &&
+                    terminal.width > 0 && terminal.height > 0 && terminal.currentSession != null
+            }
+            if (!ready) SystemClock.sleep(100)
+        }
+        assertTrue(
+            "Terminal tab did not expose a capturable live viewport; $terminalState",
+            ready,
+        )
+    }
+
     private fun visibleTerminalText(): String {
         var text = ""
         compose.activityRule.scenario.onActivity { activity ->
@@ -990,23 +1025,55 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
         return null
     }
 
-    private fun captureViewport(name: String) {
+    private fun captureViewport(name: String, requiredVisibleText: String? = null) {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        var bitmap: Bitmap? = null
+        lateinit var bitmap: Bitmap
+        var capturedVisibleScreenText = ""
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
+            val decor = activity.window.decorView
+            val view = requireNotNull(decor.findTerminalView()) {
+                "TerminalView was not found while capturing $name; " +
+                    "decorShown=${decor.isShown} decorBounds=${decor.width}x${decor.height}"
+            }
+            require(view.width > 0 && view.height > 0) {
+                "TerminalView has invalid bounds while capturing $name: " +
+                    "${view.width}x${view.height}; shown=${view.isShown} " +
+                    "attached=${view.isAttachedToWindow} decorShown=${decor.isShown} " +
+                    "decorBounds=${decor.width}x${decor.height}"
+            }
             bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also {
                 view.draw(Canvas(it))
             }
+            // Read rows 0..screenRows from the same emulator/View callback that drew the bitmap.
+            // transcriptText is forbidden here: it includes scrollback, so a marker scrolled off
+            // the captured frame would otherwise satisfy the semantic screenshot oracle.
+            capturedVisibleScreenText =
+                view.currentSession?.emulator?.screen?.visibleScreenText.orEmpty()
         }
-        bitmap?.let {
-            FileOutputStream(artifactFile("$name-viewport.png")).use { out ->
-                it.compress(Bitmap.CompressFormat.PNG, 100, out)
+        val artifact = artifactFile("$name-viewport.png")
+        try {
+            FileOutputStream(artifact).use { out ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                    "failed to encode ${artifact.absolutePath}"
+                }
             }
-            it.recycle()
+        } finally {
+            bitmap.recycle()
         }
-        writeText("$name-visible-terminal.txt", visibleTerminalText())
+        assertTrue(
+            "terminal screenshot artifact must exist and be nonempty: ${artifact.absolutePath}",
+            artifact.isFile && artifact.length() > 0L,
+        )
+        assertScreenshotNotBlank(artifact)
+        println("ISSUE1733_ARTIFACT ${artifact.absolutePath}")
+        if (requiredVisibleText != null) {
+            assertTrue(
+                "captured terminal viewport must contain $requiredVisibleText; text=\n" +
+                    Issue1733JourneyContract.xmlSafeFailureText(capturedVisibleScreenText),
+                capturedVisibleScreenText.contains(requiredVisibleText),
+            )
+        }
+        writeText("$name-visible-terminal.txt", capturedVisibleScreenText)
     }
 
     private fun captureDecorViewport(name: String): File {

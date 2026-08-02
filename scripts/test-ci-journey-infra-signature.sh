@@ -864,6 +864,26 @@ rebind_issue788_focus_snapshot() {
     -e "s/^activity_processes_size_bytes=.*/activity_processes_size_bytes=$size/" \
     "$manifest"
 }
+mutate_issue788_manifest_hex_field() {
+  local manifest="$1" field="$2"
+  local -a values=()
+  local original replacement mutated observed
+
+  mapfile -t values < <(sed -n "s/^${field}=//p" "$manifest")
+  [[ "${#values[@]}" -eq 1 && "${values[0]}" =~ ^[0-9a-f]{64}$ ]] \
+    || fail "(#788-focus-$field) expected exactly one valid 64-hex source value"
+  original="${values[0]}"
+  replacement=0
+  [[ "${original:0:1}" == 0 ]] && replacement=1
+  mutated="$replacement${original:1}"
+  [[ "$mutated" =~ ^[0-9a-f]{64}$ && "$mutated" != "$original" ]] \
+    || fail "(#788-focus-$field) mutation precondition did not guarantee a different valid value"
+
+  sed -i "s/^${field}=.*/${field}=$mutated/" "$manifest"
+  observed="$(sed -n "s/^${field}=//p" "$manifest")"
+  [[ "$observed" == "$mutated" && "$observed" != "$original" ]] \
+    || fail "(#788-focus-$field) manifest mutation was a no-op or changed the wrong value"
+}
 assert_issue788_focus_red() {
   local label="$1" case_root="$2"
   run_signature "$case_root/ci-journey/summary.md" "$case_root/ci-journey"
@@ -948,10 +968,10 @@ for mutation in missing-hash mismatched-hash mismatched-token stale-capture-time
   case "$mutation" in
     missing-hash) sed -i '/^activity_processes_sha256=/d' "$manifest" ;;
     mismatched-hash)
-      sed -i 's/^activity_processes_sha256=./activity_processes_sha256=0/' "$manifest"
+      mutate_issue788_manifest_hex_field "$manifest" activity_processes_sha256
       ;;
     mismatched-token)
-      sed -i 's/^capture_token=./capture_token=0/' "$manifest"
+      mutate_issue788_manifest_hex_field "$manifest" capture_token
       ;;
     stale-capture-time)
       sed -i 's/^activity_processes_captured_at_utc=.*/activity_processes_captured_at_utc=2026-08-02T12:00:00Z/' "$manifest"

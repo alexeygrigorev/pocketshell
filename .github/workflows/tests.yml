@@ -294,6 +294,16 @@ jobs:
             scripts/ci-journey-write-shard-verdict.sh
           scripts/test-ci-journey-aggregate-verdict.sh
 
+      # Issue #1913: drive the REAL workflow classifier body and aggregate
+      # reducer over a deterministic failure before either emulator action ran.
+      # A skipped journey is commit-bound setup RED, and a failed upstream
+      # matrix with no RED token fails closed; genuine #470/#771 INFRA under a
+      # successful matrix stays green RE-RUN. Cheap (< 5 s), no emulator.
+      - name: CI journey pre-journey phase-classification guard (issue #1913)
+        run: |
+          chmod +x scripts/test-ci-journey-pre-journey-classification.sh
+          scripts/test-ci-journey-pre-journey-classification.sh
+
       # Issue #1458: the 95-minute emulator job must not start a second cold boot
       # when the first attempt has already consumed the wall needed for a full
       # retry plus classifier/artifact teardown. Deterministic millisecond
@@ -1547,6 +1557,16 @@ jobs:
           SHARD_RETRY_DENIED_REASON="${retry_reason:-missing_decision}"
           SHARD_RETRY_SHORTFALL_MS="$retry_shortfall_ms"
           export SHARD_RETRY_AFFORDABLE SHARD_RETRY_DENIED_REASON SHARD_RETRY_SHORTFALL_MS
+          # Issue #1913: `skipped` means the first journey action was NEVER
+          # attempted. An earlier workflow/setup step failed, so absence of a
+          # suite summary cannot prove #771 emulator-never-booted infra. Fail
+          # closed with the stable failed phase; the native failed setup step
+          # retains the exact step-level diagnosis in the shard job log.
+          if [[ "$first" == "skipped" ]]; then
+            echo "::error title=Emulator journey PRE-JOURNEY SETUP FAILURE::The first emulator journey action was skipped, so an earlier workflow/setup step failed before emulator launch. This is a commit-bound workflow failure, NOT emulator_never_booted infra; refusing to downgrade it to environmental RE-RUN (issue #1913)."
+            write_verdict RED pre_journey_setup_failure
+            exit 1
+          fi
           if [[ "$first" == "success" ]]; then
             echo "Emulator journey passed on the first cold boot."
             write_verdict CLEAN passed_first_attempt
@@ -1808,6 +1828,10 @@ jobs:
         env:
           # Keep in sync with the length of the emulator-journey matrix.shard.
           EXPECTED_SHARDS: 3
+          # Issue #1913: a failed matrix with no RED token means the classifier
+          # lost a commit-bound failure. Genuine typed INFRA shards finish green,
+          # so their matrix result is success and remains neutral RE-RUN.
+          UPSTREAM_MATRIX_RESULT: ${{ needs.emulator-journey.result }}
         run: |
           chmod +x scripts/ci-journey-aggregate-verdict.sh
           scripts/ci-journey-aggregate-verdict.sh artifacts/ci-journey-verdicts

@@ -46,6 +46,11 @@
 #                  reported. When set and fewer tokens are found, the missing
 #                  shards downgrade the verdict to at least RE-RUN (a missing
 #                  verdict is not a clean signal), but never to RED on their own.
+#   UPSTREAM_MATRIX_RESULT (env, optional) the `needs.emulator-journey.result`
+#                  value. `failure` with no RED token is a classifier/upstream
+#                  mismatch and fails closed to RED (#1913). Genuine typed
+#                  INFRA shards finish successfully, so their upstream result
+#                  is `success` and their aggregate remains green RE-RUN.
 #
 # Verdict / exit code:
 #   CLEAN   every shard reported CLEAN (and none are missing). exit 0.
@@ -67,6 +72,7 @@ set -uo pipefail
 
 verdict_dir="${1:-artifacts/ci-journey-verdicts}"
 expected_shards="${EXPECTED_SHARDS:-0}"
+upstream_matrix_result="${UPSTREAM_MATRIX_RESULT:-unknown}"
 
 have_clean=0
 have_infra=0
@@ -244,6 +250,20 @@ emit_summary() {
     } >> "$GITHUB_STEP_SUMMARY"
   fi
 }
+
+# Issue #1913: the matrix job result is an independent phase signal. Typed
+# environmental INFRA is continue-on-error and only RED tokens trip the shard's
+# final fail gate, so a genuine all-INFRA run has upstream `success`. Conversely,
+# upstream `failure` with no RED token means a pre-journey/setup failure escaped
+# classification (the exact run-30659266867 blind spot). Fail closed even when
+# tokens are missing or all CLEAN; a deterministic workflow failure cannot be
+# presented as neutral RE-RUN.
+if [[ "$upstream_matrix_result" == "failure" ]] && (( have_red == 0 && have_unknown == 0 )); then
+  echo "::error title=Emulator journey verdict — RED (upstream/classifier mismatch)::The upstream emulator-journey matrix result was failure, but no shard verdict token reported RED. A commit-bound shard/setup failure escaped the classifier; refusing to downgrade the run to environmental RE-RUN (issue #1913)."
+  emit_summary "RED" "upstream matrix failed without a RED shard token — classifier mismatch"
+  echo "AGGREGATE_VERDICT=RED"
+  exit 1
+fi
 
 # No tokens at all AND none were expected: nothing ran (e.g. the emulator job was
 # skipped). Treat as RE-RUN/neutral rather than a false red — there is no

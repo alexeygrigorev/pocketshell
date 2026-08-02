@@ -143,6 +143,12 @@ class Issue895SwitchWhileBlackDropTest {
         )
 
         val fired = vm.triggerCleanPassiveDropForTest()
+
+        assertTrue("clean-drop fixture must latch the selected client disconnected", client.disconnected.value)
+        assertTrue(
+            "clean-drop fixture must make the wire oracle unavailable immediately",
+            vm.liveTmuxClientForSendOrNullForTest() == null,
+        )
         advanceUntilIdle()
 
         assertTrue("drop should have been dispatched", fired)

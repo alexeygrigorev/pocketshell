@@ -109,7 +109,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.supervisorScope
-import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * The Phase 1 prompt composer (issue #15). Visual target:
@@ -1526,55 +1525,11 @@ public fun PromptComposerSendDispatcher(
         }
     }
     LaunchedEffect(viewModel) {
-        viewModel.sendRequests.collect { request ->
-            // A durable row may become drainable on another coroutine as soon
-            // as its queue commit lands. Keep host/TUI work behind the local
-            // acceptance reduction so a slow synchronous write cannot leave
-            // the empty sheet showing "Sending…" until terminal delivery.
-            viewModel.awaitHandoffAcceptanceReduction(request.outboundQueueItemId)
-            // Issue #745: bound the send so the in-flight state can never hang.
-            // The host `onSend` is a connect-on-action call (#548) that may kick
-            // a reconnect and await the live client; cap it at [SEND_TIMEOUT_MS]
-            // so a truly dead link resolves to the "Not sent" banner promptly
-            // instead of leaving the composer stuck on "Sending...". A null
-            // (timeout) is treated exactly like a `false` (failed) send.
-            val delivered = runCatching {
-                withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
-                    currentOnSend(request)
-                } == true
-            }.getOrDefault(false)
-            if (delivered) {
-                // Finalize the queue row without touching post-handoff input.
-                viewModel.markSendDelivered(request)
-                // Standalone/legacy callers have no durable queue acceptance
-                // boundary. Keep their established success-only dismissal;
-                // production rows close earlier from handoffAcceptances.
-                if (request.outboundQueueItemId == null &&
-                    viewModel.consumeQuiescenceForAutoClose(request)
-                ) {
-                    currentOnDelivered()
-                }
-            } else {
-                // Issue #971/#987 (maintainer decision — Option A): a failed /
-                // timed-out send on a degraded link is a connection drop, not a
-                // permanent rejection — keep the prompt QUEUED and auto-send it on
-                // reconnect (the #900 flush wired in TmuxSessionScreen) instead of
-                // returning it to the composer. markOutboundSend* falls back to a
-                // composer-restore only when there is no durable queue row, so the
-                // prompt is never silently lost.
-                //
-                // Issue #1686 (failure taxonomy — the WIRE is the oracle): classify
-                // the failure at the point of knowledge. A live, writable transport
-                // handle RIGHT NOW ⇒ the send reached the wire and was REJECTED → burn
-                // the bounded budget (parks a poison row, #1602). No writable transport
-                // ⇒ transport-class → re-grant the budget so a flapping/prolonged outage
-                // never parks the row (the #1686 clog).
-                viewModel.markOutboundSendDeferred(
-                    request,
-                    resetAttemptBudget = !viewModel.isSendTransportWritable(),
-                )
-            }
-        }
+        collectPromptComposerSendRequests(
+            viewModel = viewModel,
+            onSend = { currentOnSend(it) },
+            onDelivered = { currentOnDelivered() },
+        )
     }
 }
 

@@ -11,6 +11,7 @@ import com.pocketshell.app.composer.ComposerQueueDiagnostics
 import com.pocketshell.app.composer.OutboundAttemptBudgetTracker
 import com.pocketshell.app.composer.OutboundDeliveryWindow
 import com.pocketshell.app.composer.OutboundLauncherBadge
+import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.outboundLauncherBadge
 import com.pocketshell.app.session.AgentConversationUiState
@@ -135,6 +136,18 @@ internal fun rememberOutboundLauncherBadge(
 ): OutboundLauncherBadge? {
     val items by promptComposerViewModel.outboundQueueItems.collectAsState()
     return remember(items, targetSessionKey) { items.outboundLauncherBadge(targetSessionKey) }
+}
+
+/** Close the promotion-before-snapshot race through the canonical drain owner. */
+internal fun requestOutboundDrainAfterPromotion(
+    promotedRows: List<OutboundItem>,
+    drainGateOpen: Boolean,
+    controller: OutboundQueueAutoFlushController,
+    hasPendingWork: () -> Boolean,
+    retryNext: (excludingIds: Set<String>) -> String?,
+): String? {
+    if (promotedRows.isEmpty()) return null
+    return controller.onQueueSnapshotChanged(drainGateOpen, hasPendingWork, retryNext)
 }
 
 @Composable
@@ -529,18 +542,21 @@ internal fun sessionSwitcherPages(
         -> listOf(current.copy(statusLabel = "loading same-host sessions"))
         is HostTmuxSessionPickerState.Ready -> {
             val rows = state.rows.map { row ->
+                val target = row.navigationTargetOrNull()
                 SessionSwitcherPage(
                     name = row.name,
                     statusLabel = when {
                         row.name == currentSessionName -> "current"
                         row.attached -> "attached"
+                        target == null -> "identity unavailable"
                         else -> "available"
                     },
-                    selectable = true,
+                    selectable = target != null,
+                    target = target,
                 )
             }
             val currentPage = rows.firstOrNull { it.name == currentSessionName }
-                ?.copy(statusLabel = "current", selectable = false)
+                ?.copy(statusLabel = "current", selectable = false, target = null)
                 ?: current
             listOf(currentPage) + rows.filterNot { it.name == currentSessionName }
         }

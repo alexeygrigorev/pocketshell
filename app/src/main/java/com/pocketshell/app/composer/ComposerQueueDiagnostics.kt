@@ -84,6 +84,33 @@ internal object ComposerQueueDiagnostics {
         )
     }
 
+    /** A pane-proven fallback -> durable identity recovery (issue #1944). */
+    fun identityPromotion(
+        oldSessionKey: String,
+        newSessionKey: String,
+        sourceRows: List<OutboundItem>,
+        rows: List<OutboundItem>,
+        reason: String,
+    ) {
+        val sourceById = sourceRows.associateBy { it.id }
+        val expectedFingerprints = rows.mapNotNull { row ->
+            sourceById[row.id]?.copy(sessionKey = newSessionKey)?.let(::outboundPromotionFingerprint)
+        }
+        val actualFingerprints = rows.map(::outboundPromotionFingerprint)
+        record(
+            "identity_promotion",
+            "oldFingerprint" to fingerprint(oldSessionKey),
+            "newFingerprint" to fingerprint(newSessionKey),
+            "rowCount" to rows.size,
+            "rowIds" to rows.map { it.id },
+            "expectedRowFingerprints" to expectedFingerprints,
+            "rowFingerprints" to actualFingerprints,
+            "preservedExceptOwner" to
+                (expectedFingerprints.size == rows.size && expectedFingerprints == actualFingerprints),
+            "reason" to reason,
+        )
+    }
+
     /**
      * One drain tick's outcome: `dispatched` (a row went to the wire), `not_live`
      * (the gate was shut — enum not-Connected — so nothing was attempted, the
@@ -99,6 +126,8 @@ internal object ComposerQueueDiagnostics {
         suppressedCount: Int = 0,
         parkedCount: Int = 0,
         sendInFlight: Boolean = false,
+        snapshotHeadState: String? = null,
+        snapshotStateCounts: String? = null,
     ) {
         record(
             "drain_attempt",
@@ -109,6 +138,30 @@ internal object ComposerQueueDiagnostics {
             "suppressedCount" to suppressedCount,
             "parkedCount" to parkedCount,
             "sendInFlight" to sendInFlight,
+            "snapshotHeadState" to snapshotHeadState,
+            "snapshotStateCounts" to snapshotStateCounts,
+        )
+    }
+
+    /** Why an already-selected FIFO head could not acquire the dispatch pipeline. */
+    fun dispatchRejected(
+        itemId: String,
+        reason: String,
+        activeOwnerId: String?,
+        itemSessionKey: String?,
+        targetSessionKey: String?,
+        sendInFlight: Boolean,
+        sidecarInFlight: Boolean,
+    ) {
+        record(
+            "dispatch_rejected",
+            "itemId" to itemId,
+            "reason" to reason,
+            "activeOwnerId" to activeOwnerId,
+            "itemSessionFingerprint" to itemSessionKey?.let(::fingerprint),
+            "targetSessionFingerprint" to targetSessionKey?.let(::fingerprint),
+            "sendInFlight" to sendInFlight,
+            "sidecarInFlight" to sidecarInFlight,
         )
     }
 
@@ -142,9 +195,11 @@ internal object ComposerQueueDiagnostics {
      * Record one auto-flush drain cycle from the VM in a SINGLE call (keeps the
      * ratcheted VM tiny): the per-row PARK (→`Failed`, `reason=budget_exhausted`)
      * for each budget-exhausted head, then the tick outcome — `dispatched` (a row
-     * went to the wire) or `all_suppressed` (every eligible row is within its
-     * re-dispatch backoff or is budget-parked). A no-op when the target has no
-     * undelivered row, so an idle poll tick records nothing.
+     * went to the wire), `all_suppressed` (every eligible row is within its
+     * re-dispatch backoff or is budget-parked), or `blocked_by_inflight_snapshot`
+     * (the snapshot still considers the FIFO head physically owned). The latter
+     * includes state counts so a stale pre-promotion snapshot is distinguishable
+     * from a retry backoff. A no-op when the target has no undelivered row.
      */
     fun recordDrainCycle(
         sessionKey: String,
@@ -153,7 +208,8 @@ internal object ComposerQueueDiagnostics {
         suppressedCount: Int,
         dispatched: Boolean,
     ) {
-        val queueDepth = items.count { it.sessionKey == sessionKey && it.isComposerQueueUndelivered() }
+        val targetRows = items.filter { it.sessionKey == sessionKey && it.isComposerQueueUndelivered() }
+        val queueDepth = targetRows.size
         if (queueDepth == 0) return
         val byId = items.associateBy { it.id }
         plan.parkIds.forEach { id ->
@@ -162,12 +218,24 @@ internal object ComposerQueueDiagnostics {
             }
         }
         drainAttempt(
-            outcome = if (dispatched) "dispatched" else "all_suppressed",
+            outcome = when {
+                dispatched -> "dispatched"
+                plan.nextId == null && targetRows.firstOrNull()?.state == OutboundState.InFlight ->
+                    "blocked_by_inflight_snapshot"
+                else -> "all_suppressed"
+            },
             sessionKey = sessionKey,
             dispatchedId = plan.nextId.takeIf { dispatched },
             queueDepth = queueDepth,
             suppressedCount = suppressedCount,
             parkedCount = plan.parkIds.size,
+            snapshotHeadState = targetRows.firstOrNull()?.state?.name,
+            snapshotStateCounts = targetRows
+                .groupingBy { it.state.name }
+                .eachCount()
+                .toSortedMap()
+                .entries
+                .joinToString(separator = ",") { (state, count) -> "$state:$count" },
         )
     }
 
@@ -197,6 +265,10 @@ internal object ComposerQueueDiagnostics {
         DiagnosticEvents.record(CATEGORY, event, *fields)
     }
 }
+
+/** Privacy-safe exact-row proof captured before promotion-triggered drain can mutate delivery fields. */
+internal fun outboundPromotionFingerprint(item: OutboundItem): String =
+    DiagnosticPrivacy.stableFingerprint(item.toString())
 
 /**
  * Issue #1682: thin call-site shim so the byte-ratcheted `PromptComposerViewModel`

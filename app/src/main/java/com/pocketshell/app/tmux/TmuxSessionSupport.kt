@@ -9,6 +9,7 @@ import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.LivenessProbe
+import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.terminal.input.BracketedPaste
@@ -1287,6 +1288,52 @@ internal val TmuxConnectTrigger.isReconnectTrigger: Boolean
         TmuxConnectTrigger.FastSwitch,
         -> false
     }
+
+/** Test-only outage contract consumed by the VM dial boundary. */
+internal fun syntheticUnrecoverableHostRejectsDial(
+    armed: Boolean,
+    trigger: TmuxConnectTrigger,
+): Boolean {
+    if (!armed) return false
+    return when (trigger) {
+        TmuxConnectTrigger.UserTap,
+        TmuxConnectTrigger.OpenExisting,
+        TmuxConnectTrigger.LifecycleReattach,
+        TmuxConnectTrigger.ColdRestore,
+        TmuxConnectTrigger.FastSwitch,
+        TmuxConnectTrigger.Reconnect,
+        TmuxConnectTrigger.AutoReconnect,
+        TmuxConnectTrigger.NetworkReconnect,
+        -> true
+    }
+}
+
+/** Test-only gate: an armed total outage may not reuse any warm transport. */
+internal fun syntheticUnrecoverableHostAllowsTransportReuse(armed: Boolean): Boolean = !armed
+
+internal fun acceptedRestoreTargetIsCurrent(
+    intentGeneration: Long,
+    currentGeneration: Long,
+    intentTargetId: SessionId,
+    displayedTargetId: SessionId?,
+): Boolean = intentGeneration == currentGeneration && intentTargetId == displayedTargetId
+
+internal fun TmuxSessionViewModel.connectAcceptedNetworkRestore(target: ConnectionTarget) {
+    connect(
+        hostId = target.hostId,
+        hostName = target.hostName,
+        host = target.host,
+        port = target.port,
+        user = target.user,
+        keyPath = target.keyPath,
+        passphrase = target.passphrase,
+        sessionName = target.sessionName,
+        startDirectory = target.startDirectory,
+        tmuxSessionId = target.tmuxSessionId,
+        sessionCreated = target.sessionCreated,
+        trigger = TmuxConnectTrigger.NetworkReconnect,
+    )
+}
 
 public data class TmuxRestoreIntentSnapshot(
     val hostId: Long,

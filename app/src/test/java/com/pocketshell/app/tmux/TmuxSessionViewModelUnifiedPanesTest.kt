@@ -81,6 +81,7 @@ class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
         sessionName: String,
         hostId: Long,
         paneIds: List<String>,
+        durableSessionKey: String? = null,
     ): CachedTmuxRuntime =
         CachedTmuxRuntime(
             key = TmuxRuntimeKey(
@@ -90,6 +91,7 @@ class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
                 username = "alex",
                 keyPath = "/keys/a",
                 sessionName = sessionName,
+                durableSessionKey = durableSessionKey,
             ),
             hostName = "alpha",
             startDirectory = null,
@@ -107,6 +109,65 @@ class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
             remoteRows = 0,
             lease = null,
         )
+
+    @Test
+    fun navigationPreservesDurableIdentityForActiveAndWarmCachedSessions() = runTest(scheduler) {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        runtimeCache.put(
+            foreignSessionRuntime(
+                sessionName = "deploy",
+                hostId = 1L,
+                paneIds = listOf("%5"),
+                durableSessionKey = "tmux:1:\$5:1700000005",
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            tmuxSessionId = "\$4",
+            sessionCreated = 1_700_000_004,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%4",
+                    windowId = "@4",
+                    sessionId = "\$4",
+                    title = "work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+
+        assertEquals(
+            TmuxSessionNavigationTarget("work", "\$4", 1_700_000_004),
+            vm.navigationTargetForKnownSession("work"),
+        )
+        val cachedDeployPane = vm.unifiedPanes.value.first { it.paneId == "%5" }
+        val correlatedRequest = async { vm.sessionSwitchRequest.first() }
+        runCurrent()
+        vm.settleOn(cachedDeployPane)
+        runCurrent()
+        assertEquals(
+            TmuxSessionNavigationTarget("deploy", "\$5", 1_700_000_005),
+            correlatedRequest.await(),
+        )
+        assertEquals(
+            TmuxSessionNavigationTarget("deploy", "\$5", 1_700_000_005),
+            vm.navigationTargetForKnownSession("deploy"),
+        )
+        // Resolution is race-safe and repeatable; it is not a consumptive side channel.
+        assertEquals(TmuxSessionNavigationTarget("deploy", "\$5", 1_700_000_005), vm.navigationTargetForKnownSession("deploy"))
+        assertEquals(TmuxSessionNavigationTarget("same-name-unknown"), vm.navigationTargetForKnownSession("same-name-unknown"))
+    }
 
     @Test
     fun unifiedPanesExcludesDriftedTwinOfActiveSessionSoNoPhantomPage() = runTest(scheduler) {
@@ -249,7 +310,7 @@ class TmuxSessionViewModelUnifiedPanesTest : TmuxSessionViewModelTestBase() {
         // session, never the foreign/random twin.
         vm.settleOn(deployPane)
         advanceUntilIdle()
-        assertEquals("deploy", firstSwitch.await())
+        assertEquals("deploy", firstSwitch.await().sessionName)
     }
 
     @Test

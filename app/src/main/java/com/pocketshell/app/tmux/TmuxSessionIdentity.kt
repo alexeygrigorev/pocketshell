@@ -1,6 +1,25 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.core.connection.SessionId
+
+internal data class DurableTmuxSessionIdentity(
+    val tmuxSessionId: String,
+    val sessionCreated: Long,
+)
+
+/** Correlated navigation payload; identity travels with the user action. */
+public data class TmuxSessionNavigationTarget(
+    val sessionName: String,
+    val tmuxSessionId: String? = null,
+    val sessionCreated: Long? = null,
+)
+
+internal fun HostTmuxSessionRow.navigationTargetOrNull(): TmuxSessionNavigationTarget? {
+    val id = tmuxSessionId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val created = createdAt?.takeIf { it > 0L } ?: return null
+    return TmuxSessionNavigationTarget(name, id, created)
+}
 
 internal fun durableTmuxSessionKey(
     hostId: Long,
@@ -19,6 +38,20 @@ internal fun tmuxTargetSessionId(
     sessionCreated: Long?,
 ): SessionId =
     SessionId(durableTmuxSessionKey(hostId, tmuxSessionId, sessionCreated) ?: "$hostId/$sessionName")
+
+internal fun parseDurableTmuxSessionIdentity(
+    hostId: Long,
+    durableSessionKey: String?,
+): DurableTmuxSessionIdentity? {
+    val body = durableSessionKey?.removePrefix("tmux:$hostId:")
+        ?.takeIf { it != durableSessionKey }
+        ?: return null
+    val separator = body.lastIndexOf(':')
+    if (separator <= 0 || separator == body.lastIndex) return null
+    val id = body.substring(0, separator).trim().takeIf { it.isNotEmpty() } ?: return null
+    val created = body.substring(separator + 1).toLongOrNull()?.takeIf { it > 0L } ?: return null
+    return DurableTmuxSessionIdentity(id, created)
+}
 
 internal fun sessionCardsTargetKey(
     hostId: Long,

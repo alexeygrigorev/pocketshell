@@ -8,6 +8,7 @@ import com.pocketshell.core.connection.RevealStateMachine
 import com.pocketshell.core.connection.Seed
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.classifyFailure
+import com.pocketshell.core.connection.targetIdOrNull
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -67,6 +68,8 @@ internal class TmuxRevealController(
             tmuxSessionId = target.tmuxSessionId,
             sessionCreated = target.sessionCreated,
         )
+
+    fun currentTargetId(): SessionId? = state.value.targetIdOrNull()
 
     fun setSilentHealInFlight(value: Boolean) {
         revealStateMachine.setSilentHealInFlight(value)

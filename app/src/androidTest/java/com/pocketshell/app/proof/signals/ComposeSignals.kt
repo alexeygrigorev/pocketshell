@@ -3,6 +3,7 @@ package com.pocketshell.app.proof.signals
 import android.os.SystemClock
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.test.junit4.ComposeTestRule
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
@@ -216,6 +217,30 @@ fun ComposeTestRule.assertNodeFullyWithinRoot(
                 "clipped even though assertIsDisplayed() passes. " +
                 "nodeBounds=$bounds rootBounds=$root slopPx=$slopPx " +
                 "(left=$withinLeft top=$withinTop right=$withinRight bottom=$withinBottom).",
+        )
+    }
+}
+
+/** Modal-safe containment: resolves the root that owns [tag] when multiple windows exist. */
+fun ComposeTestRule.assertNodeFullyWithinOwningRoot(
+    tag: String,
+    slopDp: Float = CONTAINMENT_SLOP_DP_DEFAULT,
+    useUnmergedTree: Boolean = false,
+) {
+    val slopPx = slopDp * density.density
+    val node = onNodeWithTag(tag, useUnmergedTree = useUnmergedTree).fetchSemanticsNode()
+    val root = onAllNodes(isRoot()).fetchSemanticsNodes().single { it.root === node.root }
+    val bounds = node.boundsInRoot
+    val rootBounds = root.boundsInRoot
+    if (
+        bounds.left < rootBounds.left - slopPx ||
+        bounds.top < rootBounds.top - slopPx ||
+        bounds.right > rootBounds.right + slopPx ||
+        bounds.bottom > rootBounds.bottom + slopPx
+    ) {
+        throw AssertionError(
+            "Node '$tag' is not fully within its owning Compose window root. " +
+                "nodeBounds=$bounds rootBounds=$rootBounds slopPx=$slopPx",
         )
     }
 }

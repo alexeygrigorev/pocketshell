@@ -180,10 +180,10 @@ class HostTmuxSessionPickerViewModelTest {
                 result = HostTmuxSessionListResult.Sessions(emptyList()),
                 liveResult = HostTmuxSessionListResult.Sessions(
                     listOf(
-                        HostTmuxSessionRow(name = "a", lastActivity = 10L, path = "/proj"),
-                        HostTmuxSessionRow(name = "b", lastActivity = 30L, path = "/proj"),
-                        HostTmuxSessionRow(name = "other", lastActivity = 99L, path = "/elsewhere"),
-                        HostTmuxSessionRow(name = "c", lastActivity = 20L, path = "/proj/"),
+                        HostTmuxSessionRow(name = "a", tmuxSessionId = "\$1", createdAt = 1L, lastActivity = 10L, path = "/proj"),
+                        HostTmuxSessionRow(name = "b", tmuxSessionId = "\$2", createdAt = 2L, lastActivity = 30L, path = "/proj"),
+                        HostTmuxSessionRow(name = "other", tmuxSessionId = "\$3", createdAt = 3L, lastActivity = 99L, path = "/elsewhere"),
+                        HostTmuxSessionRow(name = "c", tmuxSessionId = "\$4", createdAt = 4L, lastActivity = 20L, path = "/proj/"),
                     ),
                 ),
             ),

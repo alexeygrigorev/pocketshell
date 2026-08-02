@@ -1678,7 +1678,10 @@ private fun AppNavigator(
             initialWindowIndex = dest.initialWindowIndex,
             tmuxSessionId = dest.tmuxSessionId,
             sessionCreated = dest.sessionCreated,
-            onBack = ::back,
+            onBack = {
+                tmuxSessionViewModel.onSessionScreenLeft()
+                back()
+            },
             // Issue #666: the restored/last session no longer exists on the
             // server (killed elsewhere while backgrounded). Clear the persisted
             // snapshot so the next foreground does not retry-and-resurrect it,
@@ -1692,24 +1695,25 @@ private fun AppNavigator(
                 recoverToPreviousOrHostList()
             },
             onOpenTmuxSession = { sessionName, startDirectory ->
+                val target = tmuxSessionViewModel.navigationTargetForKnownSession(sessionName)
                 navigate(
                     dest.copy(
                         sessionName = sessionName,
                         startDirectory = startDirectory,
                         initialWindowIndex = null,
-                        tmuxSessionId = null,
-                        sessionCreated = null,
+                        tmuxSessionId = target.tmuxSessionId,
+                        sessionCreated = target.sessionCreated,
                     ),
                 )
             },
-            onReplaceTmuxSession = { sessionName ->
+            onReplaceTmuxSession = { target ->
                 replace(
                     dest.copy(
-                        sessionName = sessionName,
+                        sessionName = target.sessionName,
                         startDirectory = null,
                         initialWindowIndex = null,
-                        tmuxSessionId = null,
-                        sessionCreated = null,
+                        tmuxSessionId = target.tmuxSessionId,
+                        sessionCreated = target.sessionCreated,
                     ),
                 )
             },

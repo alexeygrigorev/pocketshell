@@ -14,9 +14,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal data class ComposerHandoffSnapshot(
     val target: String,
@@ -114,6 +116,100 @@ internal fun PromptComposerViewModel.completeHandoffAcceptanceReduction(
 
 internal fun PromptComposerViewModel.completeAllHandoffAcceptanceReductions() {
     handoffAcceptance.completeAllReductions()
+}
+
+/**
+ * Owns one mounted screen's producer-to-host send boundary. Cancellation is a
+ * non-delivering terminal result, not a false host response: unregister first
+ * so the deferral refresh cannot hand the same row back to the retiring
+ * collector, then durably requeue and rethrow.
+ */
+internal suspend fun collectPromptComposerSendRequests(
+    viewModel: PromptComposerViewModel,
+    onSend: suspend (SendRequest) -> Boolean,
+    onDelivered: () -> Unit = {},
+) {
+    val consumerGeneration = viewModel.outboundSendConsumers.register()
+    try {
+        // Rows may have stayed Queued while no screen consumer was mounted.
+        if (viewModel.isSendTransportWritable()) {
+            viewModel.retryNextOutboundItem()
+        }
+        viewModel.sendRequests.collect { request ->
+            val durableRequest = request.outboundQueueItemId != null
+            val accepted = if (!durableRequest) {
+                true
+            } else {
+                viewModel.outboundSendConsumers.accepts(
+                    generation = consumerGeneration,
+                    requestGeneration = request.outboundConsumerGeneration,
+                ) && viewModel.outboundDrainOwnership.acceptByConsumer(
+                    rowId = request.outboundQueueItemId,
+                    token = request.outboundDrainLeaseToken,
+                )
+            }
+            if (!accepted) {
+                // A retiring collector can receive an item tagged for its
+                // replacement (or vice versa). It must never perform host IO.
+                viewModel.markOutboundSendDeferred(
+                    request,
+                    resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                )
+                throw CancellationException("Prompt composer send consumer was superseded")
+            }
+
+            var terminalCallbackApplied = false
+            try {
+                viewModel.awaitHandoffAcceptanceReduction(request.outboundQueueItemId)
+                val delivered = try {
+                    withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
+                        onSend(request)
+                    } == true
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Throwable) {
+                    false
+                }
+                if (delivered) {
+                    viewModel.markSendDelivered(request)
+                    if (request.outboundQueueItemId == null &&
+                        viewModel.consumeQuiescenceForAutoClose(request)
+                    ) {
+                        onDelivered()
+                    }
+                } else {
+                    viewModel.markOutboundSendDeferred(
+                        request,
+                        resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                    )
+                }
+                terminalCallbackApplied = true
+            } catch (cancelled: CancellationException) {
+                // The crucial ordering: close this generation before refresh.
+                viewModel.outboundSendConsumers.unregister(consumerGeneration)
+                if (!terminalCallbackApplied) {
+                    viewModel.markOutboundSendDeferred(
+                        request,
+                        resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                    )
+                    terminalCallbackApplied = true
+                }
+                throw cancelled
+            } finally {
+                // Covers cancellation from any future suspension point added to
+                // the consumer without relying on a watchdog or wall-clock wait.
+                if (!terminalCallbackApplied) {
+                    viewModel.outboundSendConsumers.unregister(consumerGeneration)
+                    viewModel.markOutboundSendDeferred(
+                        request,
+                        resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                    )
+                }
+            }
+        }
+    } finally {
+        viewModel.outboundSendConsumers.unregister(consumerGeneration)
+    }
 }
 
 internal fun PromptComposerViewModel.composerRevision(target: String): Long =
@@ -592,6 +688,8 @@ internal suspend fun PromptComposerViewModel.enqueueSidecarBackedSend(
         paneId = sendTarget.paneId,
         route = sendTarget.route,
         agentKind = sendTarget.agentKind,
+        tmuxSessionId = sendTarget.tmuxSessionId,
+        tmuxSessionCreated = sendTarget.tmuxSessionCreated,
         // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
         // existing un-delivered row instead of minting a duplicate.
         sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
@@ -628,6 +726,8 @@ internal suspend fun PromptComposerViewModel.enqueueOutboundSend(
         paneId = sendTarget.paneId,
         route = sendTarget.route,
         agentKind = sendTarget.agentKind,
+        tmuxSessionId = sendTarget.tmuxSessionId,
+        tmuxSessionCreated = sendTarget.tmuxSessionCreated,
         // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
         // existing un-delivered row instead of minting a duplicate.
         sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),

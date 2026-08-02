@@ -438,6 +438,43 @@ if [[ "$USE_POOL" == "1" && -z "${POCKETSHELL_AGENTS_PORT:-}" ]]; then
   printf 'Pool mode: agents fixture on host port %s\n' "${POCKETSHELL_AGENTS_PORT:-?}" >&2
 fi
 
+# Optional same-run fixture evidence. The capture happens while this wrapper still
+# owns BOTH the emulator and agents-port locks, so the container fingerprint,
+# readiness probe, Docker logs, and instrumentation outputs describe one coherent
+# run rather than a later inspection of a reusable pool container.
+CONNECTED_EVIDENCE_DIR="${POCKETSHELL_CONNECTED_EVIDENCE_DIR:-}"
+CONNECTED_EVIDENCE_STARTED_AT=""
+CONNECTED_EVIDENCE_RUN_ID=""
+if [[ -n "$CONNECTED_EVIDENCE_DIR" ]]; then
+  mkdir -p "$CONNECTED_EVIDENCE_DIR"
+  CONNECTED_EVIDENCE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  CONNECTED_EVIDENCE_RUN_ID="${SUFFIX:-base}-${ANDROID_SERIAL:-unknown}-$$"
+  evidence_container="$(pocketshell_agents_container_for_port "${POCKETSHELL_AGENTS_PORT:-2222}")"
+  {
+    printf 'run_id=%s\n' "$CONNECTED_EVIDENCE_RUN_ID"
+    printf 'started_at=%s\n' "$CONNECTED_EVIDENCE_STARTED_AT"
+    printf 'android_serial=%s\n' "${ANDROID_SERIAL:-unknown}"
+    printf 'agents_port=%s\n' "${POCKETSHELL_AGENTS_PORT:-2222}"
+    printf 'container=%s\n' "$evidence_container"
+    printf 'claim_fingerprint=%s\n' "${POCKETSHELL_AGENTS_FIXTURE_IDENTITY:-unknown}"
+  } > "$CONNECTED_EVIDENCE_DIR/run-manifest-start.txt"
+  pocketshell_run_without_avd_lock_fd docker inspect "$evidence_container" \
+    > "$CONNECTED_EVIDENCE_DIR/docker-inspect-start.json" 2>&1
+  pocketshell_run_without_avd_lock_fd docker ps --no-trunc --filter "name=^/${evidence_container}$" \
+    > "$CONNECTED_EVIDENCE_DIR/docker-ps-start.txt" 2>&1
+  evidence_ssh_key="$(mktemp "${TMPDIR:-/tmp}/pocketshell-connected-evidence-key.XXXXXX")"
+  cp "$ROOT_DIR/tests/docker/test_key" "$evidence_ssh_key"
+  chmod 600 "$evidence_ssh_key"
+  {
+    printf '[%s] health=%s\n' "$(date -Is)" "$(docker inspect --format='{{.State.Health.Status}}' "$evidence_container")"
+    ssh -i "$evidence_ssh_key" -p "${POCKETSHELL_AGENTS_PORT:-2222}" \
+      -o BatchMode=yes -o ConnectTimeout=3 -o ConnectionAttempts=1 \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      testuser@127.0.0.1 "printf 'issue1944 ssh ready '; tmux -V"
+  } > "$CONNECTED_EVIDENCE_DIR/docker-ssh-readiness.log" 2>&1
+  rm -f "$evidence_ssh_key"
+fi
+
 resolved_serial_lock=""
 if [[ -n "${ANDROID_SERIAL:-}" && -z "${POCKETSHELL_AVD_LOCK_ACQUIRED:-}" ]]; then
   # The caller-pinned path is resolved before its serial FD is opened.
@@ -934,6 +971,38 @@ NOTIFICATION_PERMISSION_TARGET_APK="$NOTIFICATION_PERMISSION_BUILD_DIR/outputs/a
 # shellcheck disable=SC2317
 pocketshell_connected_test_exit_cleanup() {
   local original_rc=$?
+  if [[ -n "${CONNECTED_EVIDENCE_DIR:-}" && -n "${CONNECTED_EVIDENCE_STARTED_AT:-}" ]]; then
+    local evidence_port evidence_container evidence_final_identity evidence_output_root
+    evidence_port="${POCKETSHELL_AGENTS_PORT:-2222}"
+    evidence_container="$(pocketshell_agents_container_for_port "$evidence_port")"
+    evidence_final_identity="$(pocketshell_agents_fixture_identity "$evidence_port")"
+    pocketshell_run_without_avd_lock_fd docker inspect "$evidence_container" \
+      > "$CONNECTED_EVIDENCE_DIR/docker-inspect-end.json" 2>&1 || true
+    pocketshell_run_without_avd_lock_fd docker logs --timestamps \
+      --since "$CONNECTED_EVIDENCE_STARTED_AT" "$evidence_container" \
+      > "$CONNECTED_EVIDENCE_DIR/docker-agents.log" 2>&1 || true
+    pocketshell_run_without_avd_lock_fd docker ps --no-trunc --filter "name=^/${evidence_container}$" \
+      > "$CONNECTED_EVIDENCE_DIR/docker-ps-end.txt" 2>&1 || true
+    {
+      printf 'run_id=%s\n' "$CONNECTED_EVIDENCE_RUN_ID"
+      printf 'started_at=%s\n' "$CONNECTED_EVIDENCE_STARTED_AT"
+      printf 'ended_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'android_serial=%s\n' "${ANDROID_SERIAL:-unknown}"
+      printf 'agents_port=%s\n' "$evidence_port"
+      printf 'container=%s\n' "$evidence_container"
+      printf 'claim_fingerprint=%s\n' "${POCKETSHELL_AGENTS_FIXTURE_IDENTITY:-unknown}"
+      printf 'final_fingerprint=%s\n' "$evidence_final_identity"
+      printf 'wrapper_exit_rc=%s\n' "$original_rc"
+    } > "$CONNECTED_EVIDENCE_DIR/run-manifest-end.txt"
+    find "$CONNECTED_EVIDENCE_DIR" -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+      | sort -z \
+      | xargs -0 -r sha256sum \
+      > "$CONNECTED_EVIDENCE_DIR/SHA256SUMS" 2>/dev/null || true
+    evidence_output_root="$ROOT_DIR/app/build${SUFFIX:+/lane-$SUFFIX}/outputs/connected_android_test_additional_output"
+    while IFS= read -r evidence_target; do
+      cp -a "$CONNECTED_EVIDENCE_DIR" "$evidence_target/fixture-run-bundle"
+    done < <(find "$evidence_output_root" -type d -name issue1526-exactly-once 2>/dev/null || true)
+  fi
   if [[ "$NOTIFICATION_PERMISSION_RESTORE_NEEDED" == "1" \
         && -n "$NOTIFICATION_PERMISSION_SCRATCH" ]]; then
     notification_permission_restore \

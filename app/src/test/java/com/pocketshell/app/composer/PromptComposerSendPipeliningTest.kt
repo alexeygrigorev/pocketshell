@@ -659,6 +659,8 @@ class PromptComposerSendPipeliningTest {
                 route: OutboundRoute,
                 agentKind: String?,
                 sendKey: String,
+                tmuxSessionId: String?,
+                tmuxSessionCreated: Long?,
             ): OutboundItem {
                 if (cleanText == "prompt B") error("synthetic enqueue rejection")
                 return super.enqueue(
@@ -671,6 +673,8 @@ class PromptComposerSendPipeliningTest {
                     route,
                     agentKind,
                     sendKey,
+                    tmuxSessionId,
+                    tmuxSessionCreated,
                 )
             }
         }

@@ -101,6 +101,11 @@ internal data class DurableOutboundRowIdentity(
     }
 }
 
+internal fun durableAgentQueueSendMustDefer(
+    durableRow: DurableOutboundRowIdentity?,
+    transportWritable: Boolean,
+): Boolean = durableRow != null && !transportWritable
+
 /**
  * Composer-lane verify-before-resend gate: null when this (pane, payload) has no
  * ambiguous prior wire attempt (the common first-send case — no probe cost);
@@ -116,6 +121,23 @@ internal suspend fun verifyBeforeAgentResend(
     capturePane: OutboundPaneCapture? = null,
 ): DeliveryProbeOutcome? {
     if (!ledger.hasAmbiguousAttempt(paneId, sendToken, payload, durableRow)) return null
+    // Issue #1944: once Enter itself was attempted, the old payload-presence
+    // probe cannot distinguish "still typed" from "already submitted and shown
+    // in transcript". Either Enter-only or a fresh paste could duplicate/drop a
+    // turn, so fail closed and preserve the durable row for explicit recovery.
+    if (ledger.hasSubmitAttempt(paneId, sendToken, durableRow)) {
+        DiagnosticEvents.record(
+            "action",
+            "outbound_verify_before_resend",
+            "pane" to paneId,
+            "outcome" to DeliveryProbeOutcome.Unknown.name,
+            "reason" to "submit_attempt_unconfirmed",
+            "sendToken" to sendToken,
+            "durableSession" to (durableRow?.sessionKey ?: "none"),
+            "durableRowId" to (durableRow?.rowId ?: "none"),
+        )
+        return DeliveryProbeOutcome.Unknown
+    }
     // Issue #1577: compare the CURRENT needle count against the pre-send baseline
     // captured at the first wire attempt. `AlreadyLanded` requires the count to have
     // INCREASED (our paste actually added an occurrence) — so a payload that was
@@ -333,6 +355,7 @@ internal class OutboundDeliveryLedger(
     // so a VM-clear-rebuilt ledger reads it back (via [needleBaseline]).
     private val baselines = HashMap<String, Int>()
     private val collapsedMarkerBaselines = HashMap<String, Int>()
+    private val submitAttempts = HashSet<String>()
 
     // Issue #1529: the VOLATILE identity is the per-send-attempt token (pane + token),
     // NOT the payload. Two DISTINCT user sends of identical bytes get distinct tokens, so
@@ -368,6 +391,7 @@ internal class OutboundDeliveryLedger(
             entries.remove(evicted)
             baselines.remove(evicted)
             collapsedMarkerBaselines.remove(evicted)
+            submitAttempts.remove(evicted)
         }
         // Issue #1541: also persist on the durable row so the attempt survives a
         // VM-clear / back-navigation, not only this live VM. Issue #1577: the
@@ -391,6 +415,34 @@ internal class OutboundDeliveryLedger(
         entries.remove(key)
         baselines.remove(key)
         collapsedMarkerBaselines.remove(key)
+        submitAttempts.remove(key)
+    }
+
+    /**
+     * Issue #1944: Enter reached tmux, but agent-side turnover is still
+     * ambiguous. Persist before the Enter write so VM-clear/process death cannot
+     * turn that uncertainty into a blind second Enter.
+     */
+    fun recordSubmitAttempt(
+        paneId: String,
+        sendToken: String,
+        durableRow: DurableOutboundRowIdentity? = null,
+    ): Boolean = synchronized(lock) {
+        val durableAcknowledged = durableRow?.let { row ->
+            durable?.recordWireSubmitAttempt(row.sessionKey, row.rowId) == true
+        } ?: true
+        if (!durableAcknowledged) return false
+        submitAttempts += key(paneId, sendToken)
+        true
+    }
+
+    fun hasSubmitAttempt(
+        paneId: String,
+        sendToken: String,
+        durableRow: DurableOutboundRowIdentity? = null,
+    ): Boolean = synchronized(lock) {
+        key(paneId, sendToken) in submitAttempts ||
+            durableRow?.let { durable?.hasWireSubmitAttempt(it.sessionKey, it.rowId) } == true
     }
 
     fun hasAmbiguousAttempt(

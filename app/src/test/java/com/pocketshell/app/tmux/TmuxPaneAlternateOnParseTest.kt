@@ -33,24 +33,26 @@ class TmuxPaneAlternateOnParseTest {
         inMode: String = "0",
         panePid: Long = 4321L,
         alternateOn: String = "1",
+        sessionCreated: Long = 1_700_000_123L,
     ): String = listOf(
         paneId, windowId, windowIndex.toString(), sessionId, sessionName, title,
         paneIndex.toString(), cwd, currentCommand, paneTty, inMode, panePid.toString(),
         alternateOn,
+        sessionCreated.toString(),
     ).joinToString(LIST_PANES_FIELD_SEPARATOR)
 
     @Test
-    fun listingCommandRequestsAlternateOnAsLastField() {
+    fun listingCommandRequestsAlternateOnAndGenerationAsFinalFields() {
         val command = buildTmuxPaneListingCommand("work")
         assertTrue(
             "the reconcile must request the SERVER-TRUTH alt-buffer flag",
             "#{alternate_on}" in command,
         )
-        // `#{alternate_on}` is the LAST field so an older tmux that omits it leaves
-        // every earlier field's index unchanged (parser tolerates its absence).
+        // Generation is appended after alternate_on so every earlier field keeps
+        // its historical index.
         assertTrue(
-            "alternate_on must be the final requested field",
-            command.trimEnd().endsWith("#{alternate_on}'"),
+            "session_created must be the final requested field",
+            command.trimEnd().endsWith("#{session_created}'"),
         )
         assertTrue("pane_pid must still precede alternate_on", "#{pane_pid}" in command)
     }
@@ -68,6 +70,7 @@ class TmuxPaneAlternateOnParseTest {
         assertEquals(4321L, parsed.panePid)
         assertEquals("node", parsed.currentCommand)
         assertEquals("/dev/pts/5", parsed.paneTty)
+        assertEquals(1_700_000_123L, parsed.sessionCreated)
     }
 
     @Test

@@ -50,6 +50,8 @@ import com.pocketshell.app.conversation.ConversationImageViewModel
 import com.pocketshell.app.conversation.LocalConversationImageLoader
 import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.outboundLauncherBadge
+import com.pocketshell.app.composer.promoteFallbackOutboundIdentity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.layout.rememberTmuxImeLayoutState
 import com.pocketshell.app.projects.conventionalRemoteHome
@@ -68,6 +70,7 @@ import com.pocketshell.app.session.conversationTapTarget
 import com.pocketshell.app.session.cwdForDetectedFilePath
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
+import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.cards.SessionCardFeedChip
 import com.pocketshell.app.cards.SessionCardInteractions
@@ -149,7 +152,7 @@ public fun TmuxSessionScreen(
     // Issue #666: the (re)attached session no longer exists on the server.
     onSessionEnded: (sessionName: String) -> Unit = { onBack() },
     onOpenTmuxSession: (sessionName: String, startDirectory: String?) -> Unit = { _, _ -> },
-    onReplaceTmuxSession: (sessionName: String) -> Unit = {},
+    onReplaceTmuxSession: (target: TmuxSessionNavigationTarget) -> Unit = {},
     onOpenJobs: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
     onOpenSettings: () -> Unit = {},
@@ -209,6 +212,7 @@ public fun TmuxSessionScreen(
     val panesSel = rememberTmuxSessionPaneSelection(conn, viewModel, pagerState)
     // Epic #821 Slice 1: the active session's RECORDED `@ps_agent_kind`.
     val currentSessionRecordedKind by viewModel.currentSessionRecordedKind.collectAsState()
+    val recordedAgentRouteEvidence by viewModel.currentRecordedAgentRouteEvidence.collectAsState()
     // Issue #1085 (freeze F3 / R2): held as a `State<Map<...>>` (NOT a delegated
     // `by` read) so the screen root is never subscribed to the 60ms flush; the
     // high-frequency `events` list is read only inside `surfaceContent`.
@@ -221,6 +225,8 @@ public fun TmuxSessionScreen(
         panes = panesSel,
         agentConversationsState = agentConversationsState,
         currentSessionRecordedKind = currentSessionRecordedKind,
+        hostId = hostId,
+        recordedAgentRouteEvidence = recordedAgentRouteEvidence,
     )
     // Issue #145: gate the in-session Reconnect on whether the VM has a target.
     val canReconnect by viewModel.canReconnect.collectAsState()
@@ -232,8 +238,27 @@ public fun TmuxSessionScreen(
             emptyList()
         }
     }
-    // #1531 (RC1): DOCKED launcher unsent badge.
-    val outboundLauncherBadge = rememberOutboundLauncherBadge(promptComposerViewModel, conn.targetSessionId.value)
+    val outboundGenerationIsSettled = outboundGenerationSettled(
+        sessionLive = conn.sessionLive,
+        wireWritable = viewModel.isSendTransportWritable(),
+    )
+    val outboundQueueBinding = remember(
+        hostId, sessionName, conn.panes, tmuxSessionId, sessionCreated, outboundGenerationIsSettled,
+    ) {
+        tmuxOutboundQueueBinding(
+            hostId,
+            sessionName,
+            conn.panes,
+            tmuxSessionId,
+            sessionCreated,
+            outboundGenerationIsSettled,
+        )
+    }
+    // #1531/#1944: badge and every composer consumer share one canonical key.
+    val outboundLauncherBadge = rememberOutboundLauncherBadge(
+        promptComposerViewModel,
+        outboundQueueBinding.targetKey,
+    )
     // Issue #1158: the Terminal/Conversation tab state derived in its OWN frame.
     val tabState by rememberTmuxSessionTabState(
         viewModel = viewModel,
@@ -305,6 +330,7 @@ public fun TmuxSessionScreen(
         inlineDictationViewModel = inlineDictationViewModel,
         conn = conn,
         panesSel = panesSel,
+        outboundQueueBinding = outboundQueueBinding,
         overlay = overlay,
         pagerState = pagerState,
         unifiedPager = unifiedPager,
@@ -465,6 +491,7 @@ public fun TmuxSessionScreen(
         overlay = overlay,
         sessionCards = sessionCards,
         hostId = hostId,
+        outboundQueueBinding = outboundQueueBinding,
         onTuiCommandNoticeChange = { tuiCommandNotice = it },
         showCardFeedSheet = showCardFeedSheet,
         onShowCardFeedSheet = { showCardFeedSheet = it },
@@ -512,6 +539,7 @@ private fun TmuxSessionScreenEffects(
     inlineDictationViewModel: InlineDictationViewModel,
     conn: TmuxSessionConnectionRuntime,
     panesSel: TmuxSessionPaneSelection,
+    outboundQueueBinding: TmuxOutboundQueueBinding,
     overlay: TmuxSessionOverlayState,
     pagerState: PagerState,
     unifiedPager: UnifiedPagerModel,
@@ -541,7 +569,7 @@ private fun TmuxSessionScreenEffects(
     initialComposerPrompt: String,
     onInitialComposerPromptConsumed: () -> Unit,
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit,
-    onReplaceTmuxSession: (sessionName: String) -> Unit,
+    onReplaceTmuxSession: (target: TmuxSessionNavigationTarget) -> Unit,
     onSessionEnded: (sessionName: String) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -603,15 +631,42 @@ private fun TmuxSessionScreenEffects(
         )
     }
 
-    val outboundQueueAutoFlushController = remember(targetSessionId.value, promptComposerViewModel) {
+    val queueTargetSessionKey = outboundQueueBinding.targetKey
+    val outboundQueueAutoFlushController = remember(queueTargetSessionKey, promptComposerViewModel) {
         // #1635-A (D4): `boundTo` BINDS the retry budget to this screen's delivery
         // window, so a send that failed with the window closed burns zero attempts. It
         // reads the budget off the composer itself — the screen never names a tracker —
         // so the wiring can be neither dropped nor misdirected.
         OutboundQueueAutoFlushController.boundTo(promptComposerViewModel)
     }
-    LaunchedEffect(targetSessionId.value) {
-        promptComposerViewModel.onComposerTargetChanged(targetSessionId.value)
+    LaunchedEffect(queueTargetSessionKey) {
+        promptComposerViewModel.onComposerTargetChanged(queueTargetSessionKey)
+    }
+    LaunchedEffect(outboundQueueBinding) {
+        val durableKey = outboundQueueBinding.durableKey ?: return@LaunchedEffect
+        if (outboundQueueBinding.generationPaneIds.isEmpty()) return@LaunchedEffect
+        val promotedRows = promptComposerViewModel.promoteFallbackOutboundIdentity(
+            fallbackSessionKey = outboundQueueBinding.fallbackKey,
+            durableSessionKey = durableKey,
+            livePaneIds = outboundQueueBinding.generationPaneIds,
+            tmuxSessionId = outboundQueueBinding.tmuxSessionId ?: return@LaunchedEffect,
+            tmuxSessionCreated = outboundQueueBinding.sessionCreated ?: return@LaunchedEffect,
+        )
+        // Refresh even when another owner already completed the idempotent
+        // promotion between composition and this effect.
+        promptComposerViewModel.onComposerTargetChanged(durableKey)
+        requestOutboundDrainAfterPromotion(
+            promotedRows = promotedRows,
+            drainGateOpen = sessionLive || viewModel.isSendTransportWritable(),
+            controller = outboundQueueAutoFlushController,
+            hasPendingWork = {
+                promptComposerViewModel.outboundQueueItems.value
+                    .outboundLauncherBadge(durableKey) != null
+            },
+            retryNext = { excludingIds ->
+                promptComposerViewModel.retryNextOutboundItem(excludingIds)
+            },
+        )
     }
     DisposableEffect(promptComposerViewModel, viewModel) {
         promptComposerViewModel.setOutboundAttachmentSidecarUploader { refs ->
@@ -625,11 +680,11 @@ private fun TmuxSessionScreenEffects(
             promptComposerViewModel.setTransportWritableProbe { false }
         }
     }
-    LaunchedEffect(sessionLive, targetSessionId.value) {
+    LaunchedEffect(sessionLive, queueTargetSessionKey) {
         promptComposerViewModel.setConnectionDegraded(!sessionLive)
         outboundQueueAutoFlushController.onConnectionWindowChanged(
             sessionLive = sessionLive,
-            targetSessionId = targetSessionId.value,
+            targetSessionId = queueTargetSessionKey,
             connectionStatusLabel = connectionStatusDiagnosticLabel(conn.rawStatus), // #1682
         ) {
             promptComposerViewModel.requeueStaleOutboundInFlight()
@@ -640,7 +695,7 @@ private fun TmuxSessionScreenEffects(
     }
     TmuxOutboundQueueAutoFlushEffect(
         sessionLive = sessionLive,
-        targetSessionKey = targetSessionId.value,
+        targetSessionKey = queueTargetSessionKey,
         promptComposerViewModel = promptComposerViewModel,
         controller = outboundQueueAutoFlushController,
         transportWritable = { viewModel.isSendTransportWritable() }, // #1686
@@ -826,7 +881,7 @@ private fun TmuxSessionHeaderRegion(
     onOpenSettings: () -> Unit,
     onOpenPortForwarding: () -> Unit,
     onBrowseFiles: (startDir: String) -> Unit,
-    onReplaceTmuxSession: (sessionName: String) -> Unit,
+    onReplaceTmuxSession: (target: TmuxSessionNavigationTarget) -> Unit,
 ) {
     val terminalHeld = conn.terminalHeld
     val surfaceState = conn.surfaceState
@@ -1008,12 +1063,14 @@ private fun TmuxSessionHeaderRegion(
                         )
                     },
                     onSwitchToSibling = { selected ->
-                        handleTmuxSessionSelection(
-                            currentSessionName = sessionName,
-                            selectedSessionName = selected,
-                            onDismiss = {},
-                            onReplace = onReplaceTmuxSession,
-                        )
+                        selected.navigationTargetOrNull()?.let { target ->
+                            handleTmuxSessionSelection(
+                                currentSessionName = sessionName,
+                                selectedTarget = target,
+                                onDismiss = {},
+                                onReplace = onReplaceTmuxSession,
+                            )
+                        }
                     },
                     connectionStatus = surfaceState.toUiStatus(),
                     forwardingState = sessionForwardingState,
@@ -1617,7 +1674,7 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
     openNewSessionSheet: () -> Unit,
     onOpenFile: (path: String, cwd: String?) -> Unit,
     onOpenTmuxSession: (sessionName: String, startDirectory: String?) -> Unit,
-    onReplaceTmuxSession: (sessionName: String) -> Unit,
+    onReplaceTmuxSession: (target: TmuxSessionNavigationTarget) -> Unit,
     onBack: () -> Unit,
     onOpenPortForwardingWithPort: (remotePort: Int, autoOpenLocalhostUrl: LocalhostUrl?) -> Unit,
 ) {
@@ -1640,7 +1697,12 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
                     TmuxDialogMode.RenameSession -> {
                         val name = overlay.dialogText.trim()
                         viewModel.renameCurrentSession(name)
-                        if (name.isNotEmpty()) onReplaceTmuxSession(name)
+                        if (name.isNotEmpty()) {
+                            val activeIdentity = currentPane?.let { pane ->
+                                TmuxSessionNavigationTarget(name, pane.sessionId, pane.sessionCreated)
+                            } ?: viewModel.navigationTargetForKnownSession(name)
+                            onReplaceTmuxSession(activeIdentity)
+                        }
                     }
                     TmuxDialogMode.StopSession -> {
                         viewModel.killCurrentSession(currentPane?.windowIndex)
@@ -1725,10 +1787,10 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
             overlay.showSessionSwitcher = false
             sessionPickerViewModel.dismiss()
         },
-        onSelectSession = { selectedSessionName ->
+        onSelectSession = { selectedTarget ->
             handleTmuxSessionSelection(
                 currentSessionName = sessionName,
-                selectedSessionName = selectedSessionName,
+                selectedTarget = selectedTarget,
                 onDismiss = {
                     overlay.showSessionSwitcher = false
                     sessionPickerViewModel.dismiss()
@@ -1752,10 +1814,10 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
             overlay.showSessionDrawer = false
             sessionPickerViewModel.dismiss()
         },
-        onAttach = { selectedSessionName ->
+        onAttach = { selectedTarget ->
             handleTmuxSessionSelection(
                 currentSessionName = sessionName,
-                selectedSessionName = selectedSessionName,
+                selectedTarget = selectedTarget,
                 onDismiss = {
                     overlay.showSessionDrawer = false
                     sessionPickerViewModel.dismiss()
@@ -1816,6 +1878,7 @@ private fun TmuxSessionSheetsRegion(
     overlay: TmuxSessionOverlayState,
     sessionCards: List<com.pocketshell.app.cards.SessionCardsRemoteSource.SessionCard>,
     hostId: Long,
+    outboundQueueBinding: TmuxOutboundQueueBinding,
     onTuiCommandNoticeChange: (String?) -> Unit,
     showCardFeedSheet: Boolean,
     onShowCardFeedSheet: (Boolean) -> Unit,
@@ -1827,7 +1890,7 @@ private fun TmuxSessionSheetsRegion(
     val currentSelectedTab = agent.currentSelectedTab
     val paletteAgent = agent.paletteAgent
     val presumedAgentKind = agent.presumedAgentKind
-
+    val composerQueueSessionKey = outboundQueueBinding.targetKey
     val sessionCardInteractions = remember(viewModel) {
         object : SessionCardInteractions {
             override fun onToggleChecklistItem(cardId: String, itemId: String, checked: Boolean) {
@@ -1845,7 +1908,7 @@ private fun TmuxSessionSheetsRegion(
     val composerSendHandler: suspend (PromptComposerViewModel.SendRequest) -> Boolean = { request ->
         tmuxComposerSendResult(
             request = request,
-            targetSessionId = targetSessionId.value,
+            targetSessionId = composerQueueSessionKey,
             fallbackPaneId = surfacePane?.paneId.orEmpty(),
             sendAgentPayload = { paneId, text, agentKind, sendToken, durableRow ->
                 viewModel.sendAgentPayloadToPaneResult(
@@ -1888,7 +1951,7 @@ private fun TmuxSessionSheetsRegion(
         showMicSheet = overlay.showMicSheet,
         promptComposerViewModel = promptComposerViewModel,
         composerAgentKind = paletteAgent ?: presumedAgentKind,
-        composerTargetKey = targetSessionId.value,
+        composerTargetKey = composerQueueSessionKey,
         micSheetAutoStartRecording = overlay.micSheetAutoStartRecording,
         onDismissMicSheet = {
             overlay.showMicSheet = false
@@ -1898,20 +1961,70 @@ private fun TmuxSessionSheetsRegion(
         sendTargetSnapshotProvider = { withEnter ->
             val pane = surfacePane
             val liveAgent = currentDetection?.agent
+            // Read the liveness + durable host verdict at the instant Send is
+            // tapped. An already-open sheet can legitimately retain an older
+            // composition lambda across the disconnect recomposition boundary;
+            // queue routing must not snapshot that stale `sessionLive=true`.
+            val transportWritableNow = viewModel.isSendTransportWritable()
+            val latestRecordedEvidence = viewModel.currentRecordedAgentRouteEvidence.value
+            val evidenceDurableKey = durableTmuxSessionKey(
+                hostId,
+                outboundQueueBinding.tmuxSessionId,
+                outboundQueueBinding.sessionCreated,
+            )
+            val snapshotPaneId = tmuxComposerPaneIdForSnapshot(
+                surfacePaneId = pane?.paneId,
+                recordedEvidence = latestRecordedEvidence,
+                durableSessionKey = evidenceDurableKey ?: composerQueueSessionKey,
+            )
+            val disconnectedAgentKindNow = tmuxDisconnectedAgentKind(
+                currentDetection = currentDetection,
+                recordedEvidence = latestRecordedEvidence,
+                durableSessionKey = evidenceDurableKey ?: composerQueueSessionKey,
+                paneId = snapshotPaneId,
+            )
             val viewingConversationNow = currentDetection != null &&
                 currentSelectedTab == SessionTab.Conversation
-            val route = tmuxComposerSendRoute(
+            // Issue #1944: the Conversation row/tab can disappear with the
+            // transport while its exact-pane agent identity remains known.
+            // Snapshot a durable agent payload route for the queued row; do
+            // not let the live-Terminal RawBytes compatibility branch
+            // reinterpret a dictated prompt after reconnect.
+            val route = tmuxComposerSendRouteForConnection(
+                sessionLive = transportWritableNow,
+                disconnectedAgentKind = disconnectedAgentKindNow,
                 viewingConversation = viewingConversationNow,
                 liveAgent = liveAgent,
                 presumedAgentKind = presumedAgentKind,
                 withEnter = withEnter,
             )
-            tmuxComposerSendTargetSnapshot(
-                sessionKey = targetSessionId.value,
-                paneId = pane?.paneId,
-                route = route,
-                agentKind = liveAgent ?: presumedAgentKind,
+            DiagnosticEvents.record(
+                "action",
+                "composer_send_snapshot",
+                "composedSessionLive" to sessionLive,
+                "transportWritableNow" to transportWritableNow,
+                "sessionKey" to composerQueueSessionKey,
+                "surfacePaneId" to (pane?.paneId ?: "none"),
+                "snapshotPaneId" to (snapshotPaneId ?: "none"),
+                "evidenceSessionKey" to (latestRecordedEvidence?.durableSessionKey ?: "none"),
+                "evidencePaneId" to (latestRecordedEvidence?.paneId ?: "none"),
+                "evidenceAgentKind" to (latestRecordedEvidence?.agentKind?.name ?: "none"),
+                "detectionAgentKind" to (liveAgent?.name ?: "none"),
+                "route" to route.name,
             )
+            val currentTarget = tmuxComposerSendTargetSnapshot(
+                sessionKey = composerQueueSessionKey,
+                paneId = snapshotPaneId,
+                tmuxSessionId = pane?.sessionId ?: outboundQueueBinding.tmuxSessionId,
+                tmuxSessionCreated = pane?.sessionCreated ?: outboundQueueBinding.sessionCreated,
+                route = route,
+                agentKind = if (!transportWritableNow) {
+                    disconnectedAgentKindNow
+                } else {
+                    liveAgent ?: presumedAgentKind
+                },
+            )
+            currentTarget
         },
         onSend = composerSendHandler,
         composerHostId = hostId.takeIf { it != 0L },

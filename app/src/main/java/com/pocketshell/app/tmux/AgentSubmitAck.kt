@@ -92,6 +92,24 @@ internal const val AGENT_SUBMIT_ACK_POLL_INTERVAL_MS: Long = 40L
 internal const val AGENT_SUBMIT_ACK_TIMEOUT_MS: Long = 800L
 
 /**
+ * Issue #1944: after tmux accepts Enter, wait for the exact pane to render a
+ * different frame before declaring the durable row delivered. A successful
+ * `send-keys Enter` only acknowledges tmux's command parser; it does not prove
+ * the agent consumed the submit or reopened its input loop.
+ */
+internal const val AGENT_SUBMIT_TURNOVER_TIMEOUT_MS: Long = 800L
+
+/**
+ * Issue #1944: an authoritative JSONL acknowledgement rides remote `tail -F`.
+ * BusyBox tail polls file growth once per second, then the conversation bridge
+ * batches for 60ms. Two seconds covers one full poll phase plus batching, SSH
+ * RTT, and device scheduling. This larger ceiling is selected only when the
+ * pane has a transcript authority candidate; generic screen turnover retains
+ * the 800ms bound above.
+ */
+internal const val AGENT_TRANSCRIPT_TURNOVER_TIMEOUT_MS: Long = 2_000L
+
+/**
  * Issue #869: how many whitespace-stripped tail characters of the pasted prompt
  * the ack needle matches against `capture-pane`.
  */
@@ -254,7 +272,7 @@ internal suspend fun awaitAgentPasteIngested(
     capture: suspend (timeoutMs: Long, scrollbackLines: Int) -> AgentPaneCaptureResult,
     currentClientHash: () -> Int?,
     currentGeneration: () -> Long,
-) {
+): CommandResponse {
     val floorMs = if (agent == AgentKind.Codex) {
         maxOf(configuredFloorMs, CODEX_AGENT_SUBMIT_DELAY_MS)
     } else {
@@ -263,12 +281,16 @@ internal suspend fun awaitAgentPasteIngested(
     val needle = agentSubmitAckNeedle(payload)
     if (needle == null) {
         if (floorMs > 0L) delay(floorMs)
-        return
+        val pane = capture(ackTimeoutMs, 0)
+        return pane.response?.takeIf {
+            pane.status == AgentPaneCaptureStatus.Captured && !it.isError
+        } ?: throw IllegalStateException("Agent paste acknowledgement frame was unavailable; kept queued.")
     }
 
     val multiline = agentSubmitPayloadIsMultiLine(payload)
     var polls = 0
     var terminalResult = "ack_timeout"
+    var observedResponse: CommandResponse? = null
     val observed = withTimeoutOrNull(ackTimeoutMs.coerceAtLeast(1L)) {
         while (true) {
             val pane = capture(ackTimeoutMs, 0)
@@ -293,6 +315,110 @@ internal suspend fun awaitAgentPasteIngested(
                             currentClientHash = currentClientHash,
                             currentGeneration = currentGeneration,
                         )
+                        observedResponse = pane.response
+                        return@withTimeoutOrNull true
+                    }
+                }
+                AgentPaneCaptureStatus.TimedOut -> {
+                    terminalResult = "capture_timeout"
+                    return@withTimeoutOrNull false
+                }
+                AgentPaneCaptureStatus.Failed -> Unit
+                AgentPaneCaptureStatus.Disconnected -> {
+                    terminalResult = "disconnected"
+                    return@withTimeoutOrNull false
+                }
+                AgentPaneCaptureStatus.StaleRuntime -> {
+                    terminalResult = "stale_runtime"
+                    return@withTimeoutOrNull false
+                }
+            }
+            polls += 1
+            delay(AGENT_SUBMIT_ACK_POLL_INTERVAL_MS)
+        }
+    } == true
+    if (observed) return requireNotNull(observedResponse)
+
+    recordAgentSubmitAck(
+        identity = identity,
+        paneId = paneId,
+        result = terminalResult,
+        polls = polls,
+        currentClientHash = currentClientHash,
+        currentGeneration = currentGeneration,
+    )
+    throw IllegalStateException("Agent paste acknowledgement was not proven ($terminalResult); kept queued.")
+}
+
+/**
+ * Issue #1944: prove that the agent-side submit turn advanced after Enter. The
+ * pre-Enter frame came from [awaitAgentPasteIngested], bound to the immutable
+ * client/generation/session/pane identity. A changed authoritative capture is
+ * the narrow generic signal shared by full-screen agent TUIs and the readline
+ * fixture: the input/placeholder frame was consumed and the agent rendered its
+ * submitted/working/ready state. Timeout is ambiguous and MUST remain a durable
+ * row; callers must not translate tmux write completion into Delivered.
+ */
+internal suspend fun awaitAgentSubmitTurnover(
+    identity: AgentSendRuntimeIdentity,
+    paneId: String,
+    payload: String,
+    preEnterFrame: CommandResponse,
+    timeoutMs: Long,
+    transcriptAuthorityPresent: () -> Boolean = { false },
+    transcriptAcknowledged: () -> Boolean = { false },
+    capture: suspend (timeoutMs: Long, scrollbackLines: Int) -> AgentPaneCaptureResult,
+    currentClientHash: () -> Int?,
+    currentGeneration: () -> Long,
+) {
+    var polls = 0
+    var terminalResult = "turnover_timeout"
+    var consecutiveReadyCaptures = 0
+    val observed = withTimeoutOrNull(timeoutMs.coerceAtLeast(1L)) {
+        while (true) {
+            if (
+                transcriptAuthorityPresent() &&
+                currentClientHash() == System.identityHashCode(identity.client) &&
+                currentGeneration() == identity.generation &&
+                transcriptAcknowledged()
+            ) {
+                recordAgentSubmitTurnover(
+                    identity, paneId, "transcript_ack_observed", polls,
+                    currentClientHash, currentGeneration,
+                )
+                return@withTimeoutOrNull true
+            }
+            val pane = capture(timeoutMs, 0)
+            when (pane.status) {
+                AgentPaneCaptureStatus.Captured -> {
+                    val response = pane.response
+                    val inputState = response?.let { agentInputSurfaceState(it, payload) }
+                        ?: AgentInputSurfaceState.Unknown
+                    recordAgentSubmitTurnoverCapture(
+                        identity = identity,
+                        paneId = paneId,
+                        polls = polls,
+                        response = response,
+                        inputState = inputState,
+                        currentClientHash = currentClientHash,
+                        currentGeneration = currentGeneration,
+                    )
+                    consecutiveReadyCaptures = if (
+                        !transcriptAuthorityPresent() &&
+                        response != null &&
+                        !response.isError &&
+                        response.output != preEnterFrame.output &&
+                        inputState == AgentInputSurfaceState.Ready
+                    ) {
+                        consecutiveReadyCaptures + 1
+                    } else {
+                        0
+                    }
+                    if (consecutiveReadyCaptures >= 2) {
+                        recordAgentSubmitTurnover(
+                            identity, paneId, "ready_surface_observed", polls,
+                            currentClientHash, currentGeneration,
+                        )
                         return@withTimeoutOrNull true
                     }
                 }
@@ -315,16 +441,89 @@ internal suspend fun awaitAgentPasteIngested(
         }
     } == true
     if (observed) return
-
-    recordAgentSubmitAck(
-        identity = identity,
-        paneId = paneId,
-        result = terminalResult,
-        polls = polls,
-        currentClientHash = currentClientHash,
-        currentGeneration = currentGeneration,
+    recordAgentSubmitTurnover(
+        identity, paneId, terminalResult, polls, currentClientHash, currentGeneration,
     )
-    throw IllegalStateException("Agent paste acknowledgement was not proven ($terminalResult); kept queued.")
+    throw IllegalStateException("Agent submit turnover was not proven ($terminalResult); kept queued.")
+}
+
+/**
+ * Row-correlated #1944 turnover oracle. Agent transcripts commonly keep the
+ * submitted user text visible, so payload presence anywhere in the pane is not
+ * enough. Prefer the last conventional agent input prompt (`>` / `›`) and its
+ * wrapped tail. If no prompt can be identified, fail closed by treating payload
+ * presence anywhere as still-in-input; false negatives preserve the durable row.
+ */
+internal enum class AgentInputSurfaceState { PendingPayload, Ready, Unknown }
+
+internal fun agentInputSurfaceState(
+    response: CommandResponse,
+    payload: String,
+): AgentInputSurfaceState {
+    if (response.isError) return AgentInputSurfaceState.Unknown
+    val needle = agentSubmitAckNeedle(payload) ?: return AgentInputSurfaceState.Unknown
+    val promptIndex = response.output.indexOfLast { line ->
+        val trimmed = line.trimStart()
+        trimmed == ">" || trimmed.startsWith("> ") ||
+            trimmed == "›" || trimmed.startsWith("› ")
+    }
+    if (promptIndex < 0) return AgentInputSurfaceState.Unknown
+    val candidate = response.output.drop(promptIndex)
+    val pending = agentSubmitVisibleTextContainsNeedle(candidate, needle) ||
+        (
+            agentSubmitPayloadIsMultiLine(payload) &&
+                agentSubmitCollapsedPasteMarkerCount(candidate) > 0
+            )
+    return if (pending) AgentInputSurfaceState.PendingPayload else AgentInputSurfaceState.Ready
+}
+
+internal fun agentPaneShowsPayloadInInput(response: CommandResponse, payload: String): Boolean =
+    agentInputSurfaceState(response, payload) != AgentInputSurfaceState.Ready
+
+private fun recordAgentSubmitTurnoverCapture(
+    identity: AgentSendRuntimeIdentity,
+    paneId: String,
+    polls: Int,
+    response: CommandResponse?,
+    inputState: AgentInputSurfaceState,
+    currentClientHash: () -> Int?,
+    currentGeneration: () -> Long,
+) {
+    DiagnosticEvents.record(
+        "action",
+        "agent_submit_turnover_capture",
+        "pane" to paneId,
+        "poll" to polls,
+        "promptFound" to (inputState != AgentInputSurfaceState.Unknown),
+        "inputState" to inputState.name,
+        "frameFingerprint" to response?.output?.joinToString("\n").hashCode().toUInt().toString(16),
+        "clientHash" to System.identityHashCode(identity.client),
+        "currentClientHash" to currentClientHash(),
+        "generation" to identity.generation,
+        "currentGeneration" to currentGeneration(),
+    )
+}
+
+private fun recordAgentSubmitTurnover(
+    identity: AgentSendRuntimeIdentity,
+    paneId: String,
+    result: String,
+    polls: Int,
+    currentClientHash: () -> Int?,
+    currentGeneration: () -> Long,
+) {
+    DiagnosticEvents.record(
+        "action",
+        "agent_submit_turnover",
+        "pane" to paneId,
+        "result" to result,
+        "polls" to polls,
+        "clientHash" to System.identityHashCode(identity.client),
+        "currentClientHash" to currentClientHash(),
+        "generation" to identity.generation,
+        "currentGeneration" to currentGeneration(),
+        "session" to (identity.target?.sessionName ?: "test"),
+    )
 }
 
 private fun recordAgentSubmitAck(

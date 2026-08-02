@@ -86,6 +86,11 @@ class Issue1587SingleStoreWiringTest : TmuxSessionViewModelTestBase() {
             // The ack gate sees the pasted payload immediately (fresh payload ⇒ baseline 0).
             defaultCaptureResponse =
                 CommandResponse(number = 0L, output = listOf("> $payload"), isError = false)
+            onCommandSent = { command ->
+                if (command == "send-keys -t $paneId Enter") {
+                    defaultCaptureResponse = CommandResponse(0L, listOf(">"), false)
+                }
+            }
         }
         val vm = newVm(applicationContext = context, outboundQueueStore = store)
         vm.attachClientForTest(client)

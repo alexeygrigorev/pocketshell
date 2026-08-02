@@ -233,13 +233,21 @@ internal fun Iterable<OutboundItem>.firstComposerAutoFlushable(
     sessionKey: String,
     excludingIds: Set<String> = emptySet(),
     maxAutoAttempts: Int,
-): OutboundItem? =
-    firstOrNull { item ->
+): OutboundItem? {
+    // Preserve physical FIFO across identity promotion. An older InFlight or
+    // Uploading row may still own bytes already pasted into the same pane; it
+    // blocks every younger row until its terminal callback. Exhausted retryable
+    // rows are the sole exception: this cycle parks/surfaces them, so selection
+    // may continue to the next row without hiding a poison head forever.
+    val head = firstOrNull { item ->
         item.sessionKey == sessionKey &&
-            item.id !in excludingIds &&
-            item.isComposerQueueRetryable() &&
-            item.attemptCount < maxAutoAttempts
+            item.isComposerQueueUndelivered() &&
+            !(item.isComposerQueueRetryable() && item.attemptCount >= maxAutoAttempts)
+    } ?: return null
+    return head.takeIf {
+        it.isComposerQueueRetryable() && it.id !in excludingIds
     }
+}
 
 /**
  * Issue #1602: retryable rows for [sessionKey] whose bounded auto-retry budget is
@@ -263,6 +271,23 @@ internal fun Iterable<OutboundItem>.autoRetryExhaustedComposerRows(
 
 /** Issue #1602: the auto-flush decision — ids to park (exhausted heads) + the next dispatchable id. */
 internal data class ComposerAutoFlushPlan(val parkIds: List<String>, val nextId: String?)
+
+/**
+ * A host/name owner is only a parking identity for a row already stamped with
+ * an exact tmux generation and pane. Let the live pane binding promote that row
+ * to its durable `tmux:` owner before any auto-flush can claim it; otherwise a
+ * Connected edge can race the pane-list update and drain the fallback row
+ * without ever proving that it still belongs to this generation (#1944).
+ */
+internal fun Iterable<OutboundItem>.hasGenerationBoundRowsAwaitingPromotion(
+    sessionKey: String,
+): Boolean = !sessionKey.startsWith("tmux:") && any { item ->
+    item.sessionKey == sessionKey &&
+        item.isComposerQueueUndelivered() &&
+        !item.paneId.isNullOrBlank() &&
+        !item.tmuxSessionId.isNullOrBlank() &&
+        item.tmuxSessionCreated != null
+}
 
 /**
  * Issue #1602: plan one auto-flush cycle for [sessionKey]. Parking (Queued→Failed)

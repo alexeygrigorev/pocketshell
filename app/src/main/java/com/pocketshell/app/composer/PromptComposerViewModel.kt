@@ -280,6 +280,8 @@ public class PromptComposerViewModel @Inject constructor(
     internal var outboundAttachmentUploader: (suspend (List<LocalAttachmentSidecarRef>) -> Result<List<String>>)? =
         null
     internal var outboundSidecarDispatchInFlight: Boolean = false
+    internal val outboundDrainOwnership = OutboundDrainOwnership()
+    internal val outboundSendConsumers = OutboundSendConsumerRegistry()
     internal var outboundQueueDispatcher: CoroutineDispatcher = Dispatchers.IO
     private val draftPersistence = ComposerDraftPersistence(
         store = composerDraftStore,
@@ -1014,6 +1016,7 @@ public class PromptComposerViewModel @Inject constructor(
             it.outboundQueueItemId != null && closeEpoch != composerInteractionEpoch
         }
         request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::remove)
+        outboundDrainOwnership.release(request?.outboundQueueItemId, request?.outboundDrainLeaseToken)
         inFlightSendRequest = null
         _uiState.update { it.copy(sendInFlight = false) }
         markOutboundSendDelivered(request)
@@ -1046,6 +1049,7 @@ public class PromptComposerViewModel @Inject constructor(
         request: SendRequest,
         message: String = "Not sent. Reconnect, then send again or discard the draft.",
     ) {
+        outboundDrainOwnership.release(request.outboundQueueItemId, request.outboundDrainLeaseToken)
         if (request.text.isEmpty()) {
             watchdogs.disarmSend()
             inFlightSendRequest = null
@@ -1153,6 +1157,7 @@ public class PromptComposerViewModel @Inject constructor(
         watchdogs.disarmSend()
         inFlightSendRequest = null
         val id = request.outboundQueueItemId
+        outboundDrainOwnership.release(id, request.outboundDrainLeaseToken)
         id?.let(outboundAutoCloseEpochs::remove)
         val requeued = outboundQueueStore.requeueDeferredSend(
             id, request.sendTarget.sessionKey, request, outboundAttemptBudget, resetAttemptBudget,
@@ -1176,7 +1181,7 @@ public class PromptComposerViewModel @Inject constructor(
                 attachmentUpload = AttachmentUploadState.Idle,
             )
         }
-        request.sendTarget.sessionKey
+        requeued.sessionKey
             .takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }
     }
@@ -1260,6 +1265,7 @@ public class PromptComposerViewModel @Inject constructor(
             }
             return
         }
+        outboundDrainOwnership.forceRelease()
         _uiState.update { current ->
             if (error != null) {
                 current.copy(sendInFlight = false, error = error)
@@ -1471,6 +1477,7 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #1602: PARK an auto-retry-exhausted head (Failed, surfaced) so the
         // drain skips it and the healthy tail drains; per-row Retry re-drives it.
         val itemsSnapshot = _outboundQueueItems.value
+        if (itemsSnapshot.hasGenerationBoundRowsAwaitingPromotion(target)) return null
         val plan = itemsSnapshot.planComposerAutoFlush(target, excludingIds)
         if (plan.parkIds.isNotEmpty()) {
             plan.parkIds.forEach {
@@ -1557,57 +1564,20 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     internal fun dispatchOutboundItem(id: String): Boolean {
-        if (_uiState.value.sendInFlight) return false
-        if (outboundSidecarDispatchInFlight) return false
-        val sidecarStore = outboundAttachmentSidecarStore
-        if (sidecarStore != null) {
-            outboundSidecarDispatchInFlight = true
-            viewModelScope.launch(outboundQueueDispatcher) {
-                try {
-                    val sidecars = sidecarStore.refsFor(id)
-                    if (sidecars.isNotEmpty()) {
-                        dispatchPreparedOutboundItem(id)
-                    } else {
-                        claimAndEmitOutboundItem(id)
-                    }
-                } catch (cancelled: CancellationException) {
-                    // Issue #929: clear the in-flight gates on cancellation so a
-                    // recreated composer is not wedged, then rethrow.
-                    clearStrandedSendInFlight()
-                    throw cancelled
-                } catch (t: Throwable) {
-                    // Issue #929: an unexpected throw is a non-delivering exit —
-                    // clear the strand so the next send is not wedged.
-                    clearStrandedSendInFlight(
-                        error = "Send failed: reconnect, then send again or discard the draft.",
-                    )
-                } finally {
-                    outboundSidecarDispatchInFlight = false
-                }
-            }
-            return true
-        }
-        outboundSidecarDispatchInFlight = true
-        viewModelScope.launch(outboundQueueDispatcher) {
-            try {
-                claimAndEmitOutboundItem(id)
-            } catch (cancelled: CancellationException) {
-                clearStrandedSendInFlight()
-                throw cancelled
-            } catch (t: Throwable) {
-                clearStrandedSendInFlight(
-                    error = "Send failed: reconnect, then send again or discard the draft.",
-                )
-            } finally {
-                outboundSidecarDispatchInFlight = false
-            }
-        }
-        return true
+        return dispatchOutboundItemThroughDrain(id)
     }
 
-    internal suspend fun dispatchPreparedOutboundItem(id: String): Boolean {
+    internal fun launchOutboundDrain(block: suspend () -> Unit) {
+        viewModelScope.launch(outboundQueueDispatcher) { block() }
+    }
+
+    internal suspend fun dispatchPreparedOutboundItem(
+        id: String,
+        drainLease: OutboundDrainLease,
+        consumerGeneration: Long?,
+    ): Boolean {
         if (!uploadSidecarsForOutboundItem(id)) return false
-        return claimAndEmitOutboundItem(id)
+        return claimAndEmitOutboundItem(id, drainLease, consumerGeneration)
     }
 
     private suspend fun uploadSidecarsForOutboundItem(id: String): Boolean {
@@ -1701,7 +1671,11 @@ public class PromptComposerViewModel @Inject constructor(
         return true
     }
 
-    private fun claimAndEmitOutboundItem(id: String): Boolean {
+    internal fun claimAndEmitOutboundItem(
+        id: String,
+        drainLease: OutboundDrainLease,
+        consumerGeneration: Long?,
+    ): Boolean {
         // Issue #929: the claim lost the race (row already claimed/delivered/
         // gone). Non-delivering exit — clear the in-flight gates so the next
         // send is not wedged behind a stranded `sendInFlight`.
@@ -1731,8 +1705,12 @@ public class PromptComposerViewModel @Inject constructor(
                 paneId = active.paneId,
                 route = active.route,
                 agentKind = active.agentKind,
+                tmuxSessionId = active.tmuxSessionId,
+                tmuxSessionCreated = active.tmuxSessionCreated,
             ),
             outboundQueueItemId = active.id,
+            outboundDrainLeaseToken = drainLease.token,
+            outboundConsumerGeneration = consumerGeneration,
         )
         _uiState.update { it.copy(sendInFlight = true, error = null) }
         watchdogs.armSend()
@@ -1752,16 +1730,19 @@ public class PromptComposerViewModel @Inject constructor(
 
     private fun markOutboundSendDelivered(request: SendRequest?) {
         val id = request?.outboundQueueItemId ?: return
-        outboundQueueStore.item(id)?.recordQueueRowState("InFlight", "Sent", "delivered")
+        val currentOwner = outboundQueueStore.item(id)?.also {
+            it.recordQueueRowState("InFlight", "Sent", "delivered")
+        }?.sessionKey
         outboundQueueStore.markDelivered(id)
         launchSidecarRemoval(id)
-        request.sendTarget.sessionKey
-            .takeIf { it.isNotBlank() }
+        currentOwner
+            ?.takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }
     }
 
     private fun markOutboundSendFailed(request: SendRequest, message: String, keepRow: Boolean = false) {
         val id = request.outboundQueueItemId ?: return
+        val currentOwner = outboundQueueStore.item(id)?.sessionKey
         // Issue #971/#987: this is the GENUINE-permanent-failure path
         // ([restoreFailedSend]) — the prompt is returned to the composer as the
         // SINGLE representation, so REMOVE the queue row instead of leaving a
@@ -1779,8 +1760,8 @@ public class PromptComposerViewModel @Inject constructor(
             outboundQueueStore.remove(id)
             launchSidecarRemoval(id)
         }
-        request.sendTarget.sessionKey
-            .takeIf { it.isNotBlank() }
+        currentOwner
+            ?.takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }
     }
 
@@ -3014,20 +2995,14 @@ public class PromptComposerViewModel @Inject constructor(
         val mimeType: String? = null,
     )
 
-    /**
-     * Issue #900: tap-time snapshot of the route the Send action targeted.
-     * The composer captures this before any deferred work (dictation finish or
-     * attachment-upload wait) so the eventual [SendRequest] still points at the
-     * pane/session the user committed to when they tapped Send.
-     *
-     * Defaults are intentionally empty/safe so legacy callers can construct
-     * sends without knowing about the outbound queue metadata yet.
-     */
+    /** Tap-time route snapshot retained through deferred send work. */
     public data class SendTargetSnapshot(
         val sessionKey: String = "",
         val paneId: String = "",
         val route: OutboundRoute = OutboundRoute.RawBytes,
         val agentKind: String? = null,
+        val tmuxSessionId: String? = null,
+        val tmuxSessionCreated: Long? = null,
     )
 
     /**
@@ -3167,6 +3142,8 @@ public class PromptComposerViewModel @Inject constructor(
          */
         val sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
         val outboundQueueItemId: String? = null,
+        internal val outboundDrainLeaseToken: Long? = null,
+        internal val outboundConsumerGeneration: Long? = null,
     )
 
     /**

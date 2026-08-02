@@ -80,19 +80,12 @@ class SshHostTmuxSessionsGateway internal constructor(
             target = host.toLeaseSessionTarget(keyPath, passphrase),
             blockTimeoutMs = leaseBlockTimeoutMs,
         ) { session ->
-            val pocketshell = session.exec(pathAware("pocketshell sessions list --by activity"))
-            if (pocketshell.exitCode == 0) {
-                return@withSession HostTmuxSessionListResult.Sessions(
-                    parser.parsePocketshellSessionsList(pocketshell.stdout),
-                )
-            }
-
             val tmux = session.exec(
                 pathAware(
-                    // Keep this in the same structured wire shape as
-                    // the live-client dashboard poller; the shared
-                    // parser also accepts tab and fallback variants.
-                    "tmux list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
+                    // Issue #1944: picker navigation must carry a correlated
+                    // tmux generation. A name-only proxy row is unsafe after
+                    // runtime-cache eviction, so query id + created directly.
+                    "tmux list-sessions -F '#{session_id}::#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
                 ),
             )
             when {
@@ -101,8 +94,6 @@ class SshHostTmuxSessionsGateway internal constructor(
                     HostTmuxSessionListResult.ToolUnavailable
                 tmux.stderr.contains("no server running", ignoreCase = true) ->
                     HostTmuxSessionListResult.Sessions(emptyList())
-                pocketshell.exitCode == 127 || pocketshell.stderr.contains("not found", ignoreCase = true) ->
-                    HostTmuxSessionListResult.ToolUnavailable
                 else -> HostTmuxSessionListResult.Failed(
                     tmux.stderr.ifBlank { tmux.stdout }.ifBlank { "tmux exited ${tmux.exitCode}" },
                 )
@@ -193,7 +184,7 @@ class SshHostTmuxSessionsGateway internal constructor(
         // second SSH connect.
         const val LIVE_LIST_SESSIONS_COMMAND: String =
             "list-sessions -F " +
-                "'#{session_name}::#{session_created}::#{session_activity}::" +
+                "'#{session_id}::#{session_name}::#{session_created}::#{session_activity}::" +
                 "#{session_attached}::#{session_path}'"
     }
 }

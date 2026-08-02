@@ -13,6 +13,8 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
@@ -37,6 +39,104 @@ import java.util.concurrent.atomic.AtomicInteger
 class OutboundQueueStoreTest {
 
     private fun store() = InMemoryOutboundQueueStore()
+
+    /**
+     * Issue #1944 RED characterization: the same live tmux generation can first
+     * be bound through the pre-identity fallback and later through its durable
+     * identity after A -> home -> B -> A. Exact-key lookup used to hide both
+     * rows at that boundary even though neither had been delivered or pruned.
+     */
+    @Test
+    fun sameGenerationFallbackToDurableTransitionKeepsRowsVisibleAndFifo() {
+        val store = store()
+        val fallbackA = "7/project-a"
+        val durableA = "tmux:7:\$12:1700000000"
+        val durableB = "tmux:7:\$13:1700000001"
+        val first = store.enqueue(fallbackA, "first dictated prompt", createdAtMs = 10, paneId = "%192", tmuxSessionId = "\$12", tmuxSessionCreated = 1700000000)
+        store.claimNext(fallbackA)
+        store.markFailed(first.id, "transport unavailable", lastAttemptAtMs = 11)
+        store.requeueForRetry(first.id)
+        val second = store.enqueue(fallbackA, "second dictated prompt", createdAtMs = 20, paneId = "%192", tmuxSessionId = "\$12", tmuxSessionCreated = 1700000000)
+
+        assertTrue("session B must never see A rows", store.itemsFor(durableB).isEmpty())
+        val promoted = store.promoteSessionIdentity(fallbackA, durableA, setOf("%192"), "\$12", 1700000000)
+        assertEquals(listOf(first.id, second.id), promoted.map { it.id })
+        val reboundA = store.itemsFor(durableA)
+        assertEquals(
+            "old key has ${store.itemsFor(fallbackA).size}; rebound A has ${reboundA.size}",
+            listOf(first.id, second.id),
+            reboundA.map { it.id },
+        )
+        assertEquals(first.id, store.claimNext(durableA)?.id)
+        assertEquals(second.id, store.claimNext(durableA)?.id)
+    }
+
+    @Test
+    fun identityPromotionNeverUsesNameAloneOrMovesForeignPaneRows() {
+        val store = store()
+        val fallbackA = "7/project-a"
+        val sameNameSuccessor = "tmux:7:\$99:1800000000"
+        val old = store.enqueue(fallbackA, "belongs to old generation", paneId = "%192")
+
+        assertTrue(store.promoteSessionIdentity(fallbackA, sameNameSuccessor, emptySet(), "\$99", 1800000000).isEmpty())
+        assertTrue(store.promoteSessionIdentity(fallbackA, sameNameSuccessor, setOf("%999"), "\$99", 1800000000).isEmpty())
+        assertEquals(old, store.itemsFor(fallbackA).single())
+        assertTrue(store.itemsFor(sameNameSuccessor).isEmpty())
+    }
+
+    @Test
+    fun identityPromotionRejectsReusedPaneFromDifferentTmuxGeneration() {
+        val store = store()
+        val fallback = "7/work"
+        val destination = "tmux:7:\$9:200"
+        val staleServer = store.enqueue(fallback, "old server", paneId = "%1", tmuxSessionId = "\$9", tmuxSessionCreated = 100)
+        val sameCreatedDifferentId = store.enqueue(fallback, "other id", paneId = "%1", tmuxSessionId = "\$8", tmuxSessionCreated = 200)
+        val legacyUnproven = store.enqueue(fallback, "legacy", paneId = "%1")
+        val exact = store.enqueue(fallback, "exact", paneId = "%1", tmuxSessionId = "\$9", tmuxSessionCreated = 200)
+        val delivered = store.enqueueExisting(
+            OutboundItem(
+                id = "already-delivered",
+                sessionKey = fallback,
+                cleanText = "done",
+                state = OutboundState.Delivered,
+                createdAtMs = 5,
+                paneId = "%1",
+                tmuxSessionId = "\$9",
+                tmuxSessionCreated = 200,
+            ),
+        )
+
+        assertEquals(
+            listOf(exact.id),
+            store.promoteSessionIdentity(fallback, destination, setOf("%1"), "\$9", 200).map { it.id },
+        )
+        assertEquals(
+            listOf(delivered.id, staleServer.id, sameCreatedDifferentId.id, legacyUnproven.id),
+            store.itemsFor(fallback).map { it.id },
+        )
+    }
+
+    @Test
+    fun concurrentIdentityPromotionIsAtomicAndIdempotent() {
+        val store = store()
+        val fallback = "7/work"
+        val durable = "tmux:7:\$9:200"
+        val row = store.enqueue(fallback, "once", paneId = "%1", tmuxSessionId = "\$9", tmuxSessionCreated = 200)
+        val start = CountDownLatch(1)
+        val results = Collections.synchronizedList(mutableListOf<List<String>>())
+        val workers = List(2) {
+            Thread {
+                start.await()
+                results += store.promoteSessionIdentity(fallback, durable, setOf("%1"), "\$9", 200).map { it.id }
+            }.also { it.start() }
+        }
+        start.countDown()
+        workers.forEach { it.join() }
+
+        assertEquals(listOf(emptyList(), listOf(row.id)), results.sortedBy { it.size })
+        assertEquals(listOf(row.id), store.itemsFor(durable).map { it.id })
+        assertTrue(store.itemsFor(fallback).isEmpty())
+    }
 
     // --- Enqueue mints a stable id (the durable idempotency key) -----------
 

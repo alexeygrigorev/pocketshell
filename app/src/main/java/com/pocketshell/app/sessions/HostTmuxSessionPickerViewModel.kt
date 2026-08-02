@@ -203,7 +203,11 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
         val siblings: List<HostTmuxSessionRow> = emptyList(),
     ) {
         val hasSiblingsToSwitch: Boolean
-            get() = siblings.any { it.name != currentSessionName }
+            get() = siblings.any {
+                it.name != currentSessionName &&
+                    !it.tmuxSessionId.isNullOrBlank() &&
+                    (it.createdAt ?: 0L) > 0L
+            }
     }
 
     internal companion object {

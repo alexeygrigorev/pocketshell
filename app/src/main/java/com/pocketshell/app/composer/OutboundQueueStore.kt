@@ -114,6 +114,8 @@ public interface OutboundQueueStore {
         route: OutboundRoute = OutboundRoute.RawBytes,
         agentKind: String? = null,
         sendKey: String = "",
+        tmuxSessionId: String? = null,
+        tmuxSessionCreated: Long? = null,
     ): OutboundItem
 
     /**
@@ -142,6 +144,24 @@ public interface OutboundQueueStore {
 
     /** All items for [sessionKey], ordered oldest-first by [OutboundItem.createdAtMs]. */
     public fun itemsFor(sessionKey: String): List<OutboundItem>
+
+    /**
+     * Atomically move undelivered rows from a temporary [fromSessionKey] to the
+     * canonical [toSessionKey], but only when each row's tap-time pane belongs
+     * to [livePaneIds]. This is the bounded identity-promotion path for a live
+     * tmux generation first opened before its durable session id was known.
+     *
+     * Pane membership is mandatory: a session name alone is never proof, since
+     * a same-name successor must not inherit the previous generation's prompts.
+     * Stable row ids and every delivery/wire field are preserved.
+     */
+    public fun promoteSessionIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        livePaneIds: Set<String>,
+        tmuxSessionId: String,
+        tmuxSessionCreated: Long,
+    ): List<OutboundItem>
 
     /** The item with [id], or `null` if unknown (e.g. already delivered+pruned). */
     public fun item(id: String): OutboundItem?
@@ -347,6 +367,16 @@ public interface OutboundQueueStore {
     public fun hasWireAttempt(sessionKey: String, itemId: String): Boolean
 
     /**
+     * Issue #1944: durably record that submit Enter was written, but agent-side
+     * turnover has not yet been proven. A rebuilt sender must fail closed instead
+     * of issuing another Enter or pruning the row from tmux write completion.
+     */
+    public fun markWireSubmitAttempted(sessionKey: String, itemId: String): OutboundItem?
+
+    /** Whether Enter was attempted without a proven agent-side turnover. */
+    public fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean
+
+    /**
      * Issue #1577: the durable [OutboundItem.wireNeedleBaselineCount] recorded for
      * the exact row ([sessionKey], [itemId]), or `null` when none was captured. A
      * ledger rebuilt after a VM-clear reads this so a genuine resend can compare the
@@ -386,6 +416,11 @@ public interface OutboundWireAttemptDurableStore {
     /** Whether a durable wire attempt is recorded for exact ([sessionKey], [itemId]). */
     public fun hasWireAttempt(sessionKey: String, itemId: String): Boolean
 
+    /** Returns true only after the submit latch is durably acknowledged. */
+    public fun recordWireSubmitAttempt(sessionKey: String, itemId: String): Boolean
+
+    public fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean
+
     /** Issue #1577: durable pre-send needle baseline for exact row, or `null`. */
     public fun wireNeedleBaseline(sessionKey: String, itemId: String): Int?
 
@@ -414,6 +449,12 @@ public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDu
 
         override fun hasWireAttempt(sessionKey: String, itemId: String): Boolean =
             this@asWireAttemptDurableStore.hasWireAttempt(sessionKey, itemId)
+
+        override fun recordWireSubmitAttempt(sessionKey: String, itemId: String): Boolean =
+            this@asWireAttemptDurableStore.markWireSubmitAttempted(sessionKey, itemId) != null
+
+        override fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean =
+            this@asWireAttemptDurableStore.hasWireSubmitAttempt(sessionKey, itemId)
 
         override fun wireNeedleBaseline(sessionKey: String, itemId: String): Int? =
             this@asWireAttemptDurableStore.wireNeedleBaseline(sessionKey, itemId)
@@ -476,6 +517,13 @@ public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDu
  * @property wireCollapsedMarkerBaselineCount issue #1739: the pre-send count of
  *   Claude's collapsed multiline-paste chips. A retry may treat a higher current
  *   count as proof that the ambiguous paste landed, then submit Enter-only.
+ * @property wireSubmitAttempted issue #1944: durably records that Enter was sent
+ *   after the payload paste. If turnover could not be confirmed, a rebuilt VM
+ *   keeps the row unresolved and must not issue another blind Enter.
+ * @property tmuxSessionId tap-time tmux session id used to keep queued delivery
+ *   bound to the exact durable session generation.
+ * @property tmuxSessionCreated tap-time tmux creation epoch paired with
+ *   [tmuxSessionId]; both fields are required for identity promotion.
  */
 public data class OutboundItem(
     val id: String,
@@ -496,6 +544,10 @@ public data class OutboundItem(
     val wireAttemptedAtMs: Long? = null,
     val wireNeedleBaselineCount: Int? = null,
     val wireCollapsedMarkerBaselineCount: Int? = null,
+    val wireSubmitAttempted: Boolean = false,
+    /** Tap-time tmux generation. Both fields are required for identity promotion. */
+    val tmuxSessionId: String? = null,
+    val tmuxSessionCreated: Long? = null,
 )
 
 /** Issue #900: persisted send route selected before an item entered the durable queue. */
@@ -561,6 +613,8 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         route: OutboundRoute,
         agentKind: String?,
         sendKey: String,
+        tmuxSessionId: String?,
+        tmuxSessionCreated: Long?,
     ): OutboundItem = synchronized(lock) {
         // Issue #961: coalesce a re-Send of the SAME logical prompt while a
         // matching un-delivered row still exists, instead of minting a second
@@ -583,6 +637,8 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             route = route,
             agentKind = agentKind,
             sendKey = sendKey,
+            tmuxSessionId = tmuxSessionId,
+            tmuxSessionCreated = tmuxSessionCreated,
         )
         items[item.id] = item
         item
@@ -623,6 +679,31 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         items.values
             .filter { it.sessionKey == sessionKey }
             .sortedBy { it.createdAtMs }
+    }
+
+    override fun promoteSessionIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        livePaneIds: Set<String>,
+        tmuxSessionId: String,
+        tmuxSessionCreated: Long,
+    ): List<OutboundItem> = synchronized(lock) {
+        if (fromSessionKey.isBlank() || toSessionKey.isBlank() ||
+            fromSessionKey == toSessionKey || livePaneIds.isEmpty()
+        ) return emptyList()
+        val promoted = items.values
+            .filter {
+                it.sessionKey == fromSessionKey &&
+                    it.state != OutboundState.Delivered &&
+                    it.paneId.isNotBlank() &&
+                    it.paneId in livePaneIds &&
+                    it.tmuxSessionId == tmuxSessionId &&
+                    it.tmuxSessionCreated == tmuxSessionCreated
+            }
+            .sortedBy { it.createdAtMs }
+            .map { it.copy(sessionKey = toSessionKey) }
+        promoted.forEach { items[it.id] = it }
+        promoted
     }
 
     override fun item(id: String): OutboundItem? = synchronized(lock) { items[id] }
@@ -760,6 +841,19 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         items[itemId]?.let { it.sessionKey == sessionKey && it.wireAttempted } == true
     }
 
+    override fun markWireSubmitAttempted(sessionKey: String, itemId: String): OutboundItem? = synchronized(lock) {
+        val target = items[itemId]
+            ?.takeIf { it.sessionKey == sessionKey && it.state != OutboundState.Delivered }
+            ?: return null
+        val updated = target.copy(wireSubmitAttempted = true)
+        items[itemId] = updated
+        updated
+    }
+
+    override fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean = synchronized(lock) {
+        items[itemId]?.let { it.sessionKey == sessionKey && it.wireSubmitAttempted } == true
+    }
+
     override fun wireNeedleBaseline(sessionKey: String, itemId: String): Int? = synchronized(lock) {
         items[itemId]
             ?.takeIf { it.sessionKey == sessionKey && it.wireAttempted }
@@ -788,6 +882,8 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         route: OutboundRoute,
         agentKind: String?,
         sendKey: String,
+        tmuxSessionId: String?,
+        tmuxSessionCreated: Long?,
     ): OutboundItem = OutboundItem(
         id = UUID.randomUUID().toString(),
         sessionKey = sessionKey,
@@ -799,10 +895,19 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         route = route,
         agentKind = agentKind,
         sendKey = sendKey,
+        tmuxSessionId = tmuxSessionId,
+        tmuxSessionCreated = tmuxSessionCreated,
     )
 
     override fun enqueueExisting(item: OutboundItem): OutboundItem = item
     override fun itemsFor(sessionKey: String): List<OutboundItem> = emptyList()
+    override fun promoteSessionIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        livePaneIds: Set<String>,
+        tmuxSessionId: String,
+        tmuxSessionCreated: Long,
+    ): List<OutboundItem> = emptyList()
     override fun item(id: String): OutboundItem? = null
     override fun claimNext(sessionKey: String): OutboundItem? = null
     override fun claim(id: String): OutboundItem? = null
@@ -823,6 +928,10 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         collapsedMarkerBaselineCount: Int?,
     ): OutboundItem? = null
     override fun hasWireAttempt(sessionKey: String, itemId: String): Boolean = false
+
+    override fun markWireSubmitAttempted(sessionKey: String, itemId: String): OutboundItem? = null
+
+    override fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean = false
     override fun wireNeedleBaseline(sessionKey: String, itemId: String): Int? = null
     override fun wireCollapsedMarkerBaseline(sessionKey: String, itemId: String): Int? = null
 }
@@ -845,14 +954,22 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
  * tabs/newlines round-trip losslessly.
  */
 @Singleton
-public class SharedPrefsOutboundQueueStore @Inject constructor(
-    @ApplicationContext context: Context,
+public class SharedPrefsOutboundQueueStore internal constructor(
+    private val deferredPrefs: DeferredPrefs,
 ) : OutboundQueueStore {
+
+    @Inject
+    public constructor(@ApplicationContext context: Context) : this(
+        DeferredPrefs(context, PREFS_NAME),
+    )
+
+    /** Direct prefs seam for crash-window durability tests. */
+    @VisibleForTesting
+    internal constructor(prefs: SharedPreferences) : this(DeferredPrefs(opener = { prefs }))
 
     // Issue #1125: open the prefs file off the Main thread (it is opened at
     // first-composer-open Hilt injection on Main otherwise — touched on every
     // session open via the always-present composer, #809).
-    private val deferredPrefs = DeferredPrefs(context, PREFS_NAME)
     private val prefs: SharedPreferences get() = deferredPrefs.get()
 
     @VisibleForTesting
@@ -872,8 +989,12 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         return decodeOutboundItems(sessionKey, raw).toMutableList()
     }
 
-    private fun storeSession(sessionKey: String, list: List<OutboundItem>) {
-        if (sessionKey.isEmpty()) return
+    private fun storeSession(
+        sessionKey: String,
+        list: List<OutboundItem>,
+        synchronous: Boolean = false,
+    ): Boolean {
+        if (sessionKey.isEmpty()) return false
         val editor = prefs.edit()
         if (list.isEmpty()) {
             editor.remove(blobKey(sessionKey))
@@ -882,7 +1003,12 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             editor.putString(blobKey(sessionKey), encodeOutboundItems(list))
             editor.putStringSet(SESSION_INDEX_KEY, sessionKeys() + sessionKey)
         }
-        editor.apply()
+        return if (synchronous) {
+            editor.commit()
+        } else {
+            editor.apply()
+            true
+        }
     }
 
     /** Find the session that owns [id], or `null`. */
@@ -899,6 +1025,8 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
         route: OutboundRoute,
         agentKind: String?,
         sendKey: String,
+        tmuxSessionId: String?,
+        tmuxSessionCreated: Long?,
     ): OutboundItem = synchronized(lock) {
         val list = loadSession(sessionKey)
         // Issue #961: coalesce a re-Send of the SAME logical prompt while a
@@ -922,6 +1050,8 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
             route = route,
             agentKind = agentKind,
             sendKey = sendKey,
+            tmuxSessionId = tmuxSessionId,
+            tmuxSessionCreated = tmuxSessionCreated,
         )
         list.add(item)
         storeSession(sessionKey, list.sortedBy { it.createdAtMs })
@@ -959,6 +1089,51 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
 
     override fun itemsFor(sessionKey: String): List<OutboundItem> = synchronized(lock) {
         loadSession(sessionKey).sortedBy { it.createdAtMs }
+    }
+
+    override fun promoteSessionIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        livePaneIds: Set<String>,
+        tmuxSessionId: String,
+        tmuxSessionCreated: Long,
+    ): List<OutboundItem> = synchronized(lock) {
+        if (fromSessionKey.isBlank() || toSessionKey.isBlank() ||
+            fromSessionKey == toSessionKey || livePaneIds.isEmpty()
+        ) return emptyList()
+
+        val source = loadSession(fromSessionKey)
+        val promotable = source.filter {
+            it.state != OutboundState.Delivered &&
+                it.paneId.isNotBlank() &&
+                it.paneId in livePaneIds &&
+                it.tmuxSessionId == tmuxSessionId &&
+                it.tmuxSessionCreated == tmuxSessionCreated
+        }
+        if (promotable.isEmpty()) return emptyList()
+
+        val promoted = promotable.map { it.copy(sessionKey = toSessionKey) }
+        val promotedIds = promoted.mapTo(mutableSetOf()) { it.id }
+        val sourceRemaining = source.filterNot { it.id in promotedIds }
+        val target = loadSession(toSessionKey).filterNot { it.id in promotedIds }
+        val mergedTarget = (target + promoted).sortedBy { it.createdAtMs }
+
+        // One editor transaction updates both blobs and the ownership index, so
+        // a process restart can never observe a row under neither identity.
+        val index = sessionKeys().toMutableSet()
+        val editor = prefs.edit()
+        if (sourceRemaining.isEmpty()) {
+            editor.remove(blobKey(fromSessionKey))
+            index.remove(fromSessionKey)
+        } else {
+            editor.putString(blobKey(fromSessionKey), encodeOutboundItems(sourceRemaining))
+            index.add(fromSessionKey)
+        }
+        editor.putString(blobKey(toSessionKey), encodeOutboundItems(mergedTarget))
+        index.add(toSessionKey)
+        editor.putStringSet(SESSION_INDEX_KEY, index)
+        editor.apply()
+        promoted
     }
 
     override fun item(id: String): OutboundItem? = synchronized(lock) {
@@ -1124,6 +1299,26 @@ public class SharedPrefsOutboundQueueStore @Inject constructor(
     override fun hasWireAttempt(sessionKey: String, itemId: String): Boolean = synchronized(lock) {
         loadSession(sessionKey).any {
             it.id == itemId && it.sessionKey == sessionKey && it.wireAttempted
+        }
+    }
+
+    override fun markWireSubmitAttempted(sessionKey: String, itemId: String): OutboundItem? = synchronized(lock) {
+        val list = loadSession(sessionKey)
+        val target = list.firstOrNull {
+            it.id == itemId && it.sessionKey == sessionKey && it.state != OutboundState.Delivered
+        } ?: return null
+        val updated = target.copy(wireSubmitAttempted = true)
+        val idx = list.indexOfFirst { it.id == updated.id }
+        if (idx >= 0) list[idx] = updated else list.add(updated)
+        // This one write is the pre-Enter write-ahead barrier. apply() is not an
+        // acknowledgement: process death may drop it after Enter reached tmux.
+        // commit() is called by the suspend send path on seedIoDispatcher, never Main.
+        updated.takeIf { storeSession(sessionKey, list.sortedBy { it.createdAtMs }, synchronous = true) }
+    }
+
+    override fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean = synchronized(lock) {
+        loadSession(sessionKey).any {
+            it.id == itemId && it.sessionKey == sessionKey && it.wireSubmitAttempted
         }
     }
 
@@ -1307,14 +1502,15 @@ internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"
 /**
  * Issue #900: encode a session's outbound items as newline-separated rows.
  * Each row is tab-delimited:
- * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind \t sendKey \t wireAttempted \t wireAttemptedAtMs \t wireNeedleBaselineCount \t wireCollapsedMarkerBaselineCount`
+ * `id \t cleanText \t withEnter \t state \t createdAtMs \t lastAttemptAtMs \t attemptCount \t lastError \t attachmentsBlob \t paneId \t route \t agentKind \t sendKey \t wireAttempted \t wireAttemptedAtMs \t wireNeedleBaselineCount \t wireCollapsedMarkerBaselineCount \t tmuxSessionId \t tmuxSessionCreated \t wireSubmitAttempted`
  * with the same `\`-escaping [ComposerDraftStore] uses so text/paths containing
  * tabs/newlines round-trip losslessly. The attachments field reuses
  * [encodeAttachments], itself escaped as a single field. Trailing fields
  * (`sendKey` #961, `wireAttempted`/`wireAttemptedAtMs` #1541,
- * `wireNeedleBaselineCount` #1577, collapsed-marker baseline #1739) are appended last so legacy rows without them
+ * `wireNeedleBaselineCount` #1577, collapsed-marker baseline #1739,
+ * durable tmux identity and `wireSubmitAttempted` #1944) are appended last so legacy rows without them
  * decode to their defaults (empty `sendKey`, `wireAttempted=false`,
- * `wireNeedleBaselineCount=null`) rather than a malformed row.
+ * `wireNeedleBaselineCount=null`, `wireSubmitAttempted=false`) rather than a malformed row.
  */
 internal fun encodeOutboundItems(items: List<OutboundItem>): String =
     items.joinToString(separator = "\n") { item ->
@@ -1336,6 +1532,9 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
             item.wireAttemptedAtMs?.toString().orEmpty(),
             item.wireNeedleBaselineCount?.toString().orEmpty(),
             item.wireCollapsedMarkerBaselineCount?.toString().orEmpty(),
+            item.tmuxSessionId.orEmpty(),
+            item.tmuxSessionCreated?.toString().orEmpty(),
+            if (item.wireSubmitAttempted) "1" else "0",
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -1370,6 +1569,9 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
             wireNeedleBaselineCount = f.getOrNull(15)?.takeIf { it.isNotEmpty() }?.toIntOrNull(),
             wireCollapsedMarkerBaselineCount =
                 f.getOrNull(16)?.takeIf { it.isNotEmpty() }?.toIntOrNull(),
+            tmuxSessionId = f.getOrNull(17)?.takeIf { it.isNotEmpty() },
+            tmuxSessionCreated = f.getOrNull(18)?.takeIf { it.isNotEmpty() }?.toLongOrNull(),
+            wireSubmitAttempted = f.getOrNull(19) == "1",
         )
     }
 }

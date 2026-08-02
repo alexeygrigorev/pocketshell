@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
 import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.ConversationLoadState
 import com.pocketshell.app.session.SessionTab
@@ -502,6 +503,19 @@ internal fun tmuxComposerSendRoute(
     else -> TmuxComposerSendRoute.RawBytes
 }
 
+internal fun tmuxComposerSendRouteForConnection(
+    sessionLive: Boolean,
+    disconnectedAgentKind: AgentKind?,
+    viewingConversation: Boolean,
+    liveAgent: AgentKind?,
+    presumedAgentKind: AgentKind?,
+    withEnter: Boolean,
+): TmuxComposerSendRoute = if (!sessionLive && disconnectedAgentKind != null) {
+    TmuxComposerSendRoute.AgentPayload
+} else {
+    tmuxComposerSendRoute(viewingConversation, liveAgent, presumedAgentKind, withEnter)
+}
+
 /**
  * Issue #1584: extract the leading `/word` command ROOT from [text], or `null`
  * when [text] is not a well-formed slash-command token. The grammar is
@@ -644,6 +658,16 @@ internal suspend fun tmuxComposerSendResult(
             rowId = rowId,
         )
     }
+    DiagnosticEvents.record(
+        "action",
+        "composer_tmux_send_route",
+        "route" to target.route.name,
+        "rowId" to (request.outboundQueueItemId ?: "none"),
+        "panePresent" to paneId.isNotBlank(),
+        "agentKind" to (target.agentKind ?: "none"),
+        "sessionKey" to target.sessionKey,
+        "paneId" to paneId,
+    )
     return when (target.route) {
         OutboundRoute.AgentConversation ->
             tmuxAgentConversationSendResult(
@@ -713,23 +737,27 @@ internal fun tmuxComposerAgentKindFromToken(token: String?): AgentKind? = when (
 internal fun tmuxComposerSendTargetSnapshot(
     sessionKey: String,
     paneId: String?,
+    tmuxSessionId: String? = null,
+    tmuxSessionCreated: Long? = null,
     route: TmuxComposerSendRoute,
     agentKind: AgentKind?,
 ): PromptComposerViewModel.SendTargetSnapshot =
     PromptComposerViewModel.SendTargetSnapshot(
         sessionKey = sessionKey,
         paneId = paneId.orEmpty(),
+        tmuxSessionId = tmuxSessionId,
+        tmuxSessionCreated = tmuxSessionCreated,
         route = tmuxComposerOutboundRoute(route),
         agentKind = tmuxComposerAgentToken(agentKind),
     )
 
 internal fun handleTmuxSessionSelection(
     currentSessionName: String,
-    selectedSessionName: String,
+    selectedTarget: TmuxSessionNavigationTarget,
     onDismiss: () -> Unit,
-    onReplace: (String) -> Unit,
+    onReplace: (TmuxSessionNavigationTarget) -> Unit,
 ) {
-    if (selectedSessionName == currentSessionName) return
+    if (selectedTarget.sessionName == currentSessionName) return
     onDismiss()
-    onReplace(selectedSessionName)
+    onReplace(selectedTarget)
 }

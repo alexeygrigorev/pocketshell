@@ -265,6 +265,33 @@ class ComposerQueueDiagnosticsHostMirrorTest {
         assertEquals(1L, drain.getJSONObject("metadata").getLong("suppressedCount"))
     }
 
+    /** A stale promoted snapshot must not masquerade as retry suppression. */
+    @Test
+    fun `an inflight snapshot head records its blocking state`() = runTest {
+        val recorder = newRecorder()
+        val items = listOf(
+            item(id = "old-head", state = OutboundState.InFlight),
+            item(id = "queued-tail", state = OutboundState.Queued),
+        )
+        val plan = items.planComposerAutoFlush(sessionPath)
+        assertEquals(null, plan.nextId)
+
+        ComposerQueueDiagnostics.recordDrainCycle(
+            sessionKey = sessionPath,
+            items = items,
+            plan = plan,
+            suppressedCount = 0,
+            dispatched = false,
+        )
+
+        val metadata = recorder.connectionLogJsonl().mirroredLines()
+            .single { it.getString("name") == "drain_attempt" }
+            .getJSONObject("metadata")
+        assertEquals("blocked_by_inflight_snapshot", metadata.getString("outcome"))
+        assertEquals("InFlight", metadata.getString("snapshotHeadState"))
+        assertEquals("InFlight:1,Queued:1", metadata.getString("snapshotStateCounts"))
+    }
+
     /** row_state transitions reach the host log with reason + post-transition budget. */
     @Test
     fun `a row_state transition reaches the host log`() = runTest {

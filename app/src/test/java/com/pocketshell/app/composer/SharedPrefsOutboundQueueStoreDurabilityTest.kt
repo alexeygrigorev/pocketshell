@@ -1,6 +1,7 @@
 package com.pocketshell.app.composer
 
 import android.content.Context
+import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -295,5 +296,107 @@ class SharedPrefsOutboundQueueStoreDurabilityTest {
         val afterRestart = newStore()
         assertTrue(afterRestart.itemsFor("sessA").isEmpty())
         assertNull(afterRestart.item("anything"))
+    }
+
+    @Test
+    fun paneProvenIdentityPromotionIsAtomicAndPreservesDeliveryLedgerAcrossRestart() {
+        val fallback = "1944/project-a"
+        val durable = "tmux:1944:\$12:1700000000"
+        val store = newStore()
+        val first = store.enqueue(
+            fallback,
+            "first",
+            attachments = listOf(DurableAttachmentRef("/remote/a", "a.txt", "text/plain")),
+            withEnter = false,
+            createdAtMs = 10,
+            paneId = "%192",
+            route = OutboundRoute.AgentPayload,
+            agentKind = "claude",
+            sendKey = "logical-first",
+            tmuxSessionId = "\$12",
+            tmuxSessionCreated = 1700000000,
+        )
+        store.claimNext(fallback)
+        store.markWireAttempted(fallback, first.id, 12, 3, 1)
+        store.markFailed(first.id, "deferred", 13)
+        store.requeueForRetry(first.id)
+        val second = store.enqueue(fallback, "second", createdAtMs = 20, paneId = "%192", tmuxSessionId = "\$12", tmuxSessionCreated = 1700000000)
+        val foreign = store.enqueue(fallback, "foreign", createdAtMs = 30, paneId = "%777")
+        val expectedFirst = requireNotNull(store.item(first.id))
+
+        assertEquals(
+            listOf(first.id, second.id),
+            store.promoteSessionIdentity(fallback, durable, setOf("%192"), "\$12", 1700000000).map { it.id },
+        )
+
+        val restarted = newStore()
+        val rebound = restarted.itemsFor(durable)
+        assertEquals(listOf(first.id, second.id), rebound.map { it.id })
+        assertEquals(listOf("first", "second"), rebound.map { it.cleanText })
+        assertTrue(rebound.first().wireAttempted)
+        assertEquals(3, rebound.first().wireNeedleBaselineCount)
+        assertEquals(expectedFirst.copy(sessionKey = durable), rebound.first())
+        assertEquals("\$12", rebound.first().tmuxSessionId)
+        assertEquals(1700000000L, rebound.first().tmuxSessionCreated)
+        assertEquals(listOf(foreign.id), restarted.itemsFor(fallback).map { it.id })
+        assertTrue(restarted.promoteSessionIdentity(fallback, durable, setOf("%192"), "\$12", 1700000000).isEmpty())
+        assertEquals(first.id, restarted.claimNext(durable)?.id)
+        assertEquals(second.id, restarted.claimNext(durable)?.id)
+    }
+
+    @Test
+    fun submitLatchIsSynchronouslyCommittedBeforeCrashAndVisibleAfterRestart() {
+        val backing = context.getSharedPreferences("issue1944-submit-latch", Context.MODE_PRIVATE)
+        backing.edit().clear().commit()
+        val row = SharedPrefsOutboundQueueStore(backing).enqueue("sessA", "must not submit twice")
+        // Wait for the ordinary enqueue apply before opening the deliberate crash window.
+        backing.edit().commit()
+        val crashWindowPrefs = ApplyLosingSharedPreferences(backing)
+        val store = SharedPrefsOutboundQueueStore(crashWindowPrefs)
+
+        val latched = store.markWireSubmitAttempted("sessA", row.id)
+
+        assertEquals("submit latch must use synchronous commit", 1, crashWindowPrefs.commitCount)
+        assertEquals("submit latch must not rely on async apply", 0, crashWindowPrefs.applyCount)
+        assertEquals(true, latched?.wireSubmitAttempted)
+        val afterCrash = SharedPrefsOutboundQueueStore(backing)
+        assertTrue(afterCrash.hasWireSubmitAttempt("sessA", row.id))
+        assertTrue(
+            "the exact restart-visible row carries the fail-closed submit latch",
+            afterCrash.item(row.id)?.wireSubmitAttempted == true,
+        )
+    }
+}
+
+/** Simulates process death dropping every asynchronous apply while preserving commit writes. */
+private class ApplyLosingSharedPreferences(
+    private val delegate: SharedPreferences,
+) : SharedPreferences by delegate {
+    var applyCount: Int = 0
+        private set
+    var commitCount: Int = 0
+        private set
+
+    override fun edit(): SharedPreferences.Editor = Editor(delegate.edit())
+
+    private inner class Editor(
+        private val delegateEditor: SharedPreferences.Editor,
+    ) : SharedPreferences.Editor {
+        override fun putString(key: String?, value: String?) = apply { delegateEditor.putString(key, value) }
+        override fun putStringSet(key: String?, values: MutableSet<String>?) =
+            apply { delegateEditor.putStringSet(key, values) }
+        override fun putInt(key: String?, value: Int) = apply { delegateEditor.putInt(key, value) }
+        override fun putLong(key: String?, value: Long) = apply { delegateEditor.putLong(key, value) }
+        override fun putFloat(key: String?, value: Float) = apply { delegateEditor.putFloat(key, value) }
+        override fun putBoolean(key: String?, value: Boolean) = apply { delegateEditor.putBoolean(key, value) }
+        override fun remove(key: String?) = apply { delegateEditor.remove(key) }
+        override fun clear() = apply { delegateEditor.clear() }
+        override fun commit(): Boolean {
+            commitCount += 1
+            return delegateEditor.commit()
+        }
+        override fun apply() {
+            applyCount += 1
+        }
     }
 }

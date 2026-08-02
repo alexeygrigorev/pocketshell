@@ -57,7 +57,10 @@ PROMPT_PREFIX="> "
 SUBMIT_PREFIX="FAKE-AGENT SUBMITTED: "
 READY_MARKER="FAKE-AGENT-READY"
 RENDER_MODE="${POCKETSHELL_FAKE_AGENT_RENDER_MODE:-default}"
+SUBMIT_LEDGER="${POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER:-}"
+TRANSCRIPT_PATH="${POCKETSHELL_FAKE_AGENT_TRANSCRIPT:-}"
 ISSUE1153_RENDER_MODE="issue1153-incremental"
+ISSUE1944_RENDER_MODE="issue1944-framed-input"
 ISSUE1153_FRAME_MARKER="ISSUE1153-FRAME"
 ISSUE1153_FRAME_ROWS=20
 issue1153_full_render_count=0
@@ -90,6 +93,7 @@ last_submitted=""
 last_submitted_display=""
 # Issue #1687: session-relative paste counter, mirroring Claude Code's `#N`.
 paste_counter=0
+submit_counter=0
 
 # Redraw the whole viewport cleanly: home + clear screen, print the readiness
 # marker, the most-recent submitted line (if any), then the input box. Clearing
@@ -104,6 +108,20 @@ render_default() {
     printf '%s%s\r\n' "$SUBMIT_PREFIX" "$last_submitted"
   fi
   printf '%s%s' "$PROMPT_PREFIX" "$buffer"
+}
+
+# The real Claude/Codex input surface is framed rather than a readline `>`
+# prompt. This mode keeps pasted text observable to the paste-ingestion gate,
+# while deliberately remaining Unknown to the generic submit-turnover oracle.
+# The #1944 outage journey must therefore wait for the authoritative transcript
+# event appended on Enter, including when its tail starts after reconnect.
+render_issue1944_framed() {
+  printf '\033[H\033[2J'
+  printf '%s\r\n' "$READY_MARKER"
+  if [ -n "$last_submitted" ]; then
+    printf '%s%s\r\n' "$SUBMIT_PREFIX" "$last_submitted"
+  fi
+  printf '┃ %s' "$buffer"
 }
 
 # Initial #1769 frame: the SAME dense marker shape the journey previously
@@ -153,6 +171,8 @@ render_issue1153_incremental() {
 render() {
   if [ "$RENDER_MODE" = "$ISSUE1153_RENDER_MODE" ]; then
     render_issue1153_incremental
+  elif [ "$RENDER_MODE" = "$ISSUE1944_RENDER_MODE" ]; then
+    render_issue1944_framed
   else
     render_default
   fi
@@ -160,6 +180,8 @@ render() {
 
 if [ "$RENDER_MODE" = "$ISSUE1153_RENDER_MODE" ]; then
   render_issue1153_initial
+elif [ "$RENDER_MODE" = "$ISSUE1944_RENDER_MODE" ]; then
+  render_issue1944_framed
 else
   render_default
 fi
@@ -267,6 +289,18 @@ process_byte() {
       # paste still lands its real multi-line body.
       last_submitted="$submit_buffer"
       last_submitted_display="$buffer"
+      if [ -n "$SUBMIT_LEDGER" ] || [ -n "$TRANSCRIPT_PATH" ]; then
+        submit_counter=$((submit_counter + 1))
+      fi
+      if [ -n "$SUBMIT_LEDGER" ]; then
+        encoded_submit=$(printf '%s' "$submit_buffer" | base64 | tr -d '\r\n')
+        printf '%s|%s\n' "$submit_counter" "$encoded_submit" >> "$SUBMIT_LEDGER"
+      fi
+      if [ -n "$TRANSCRIPT_PATH" ]; then
+        transcript_text=$(printf '%s' "$submit_buffer" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        printf '{"uuid":"fake-agent-user-%s","timestamp":"%s","message":{"role":"user","content":"%s"}}\n' \
+          "$submit_counter" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$transcript_text" >> "$TRANSCRIPT_PATH"
+      fi
       buffer=""
       submit_buffer=""
       dirty=1

@@ -5,7 +5,9 @@ import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.tmux.OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS
+import com.pocketshell.app.tmux.DurableOutboundRowIdentity
 import com.pocketshell.app.tmux.OutboundQueueAutoFlushController
+import com.pocketshell.app.tmux.durableAgentQueueSendMustDefer
 import com.pocketshell.app.tmux.outboundBudgetTestComposer
 import com.pocketshell.app.tmux.runOutboundQueueAutoFlush
 import com.pocketshell.core.voice.WhisperClient
@@ -177,6 +179,41 @@ class PromptComposerWireOracleClogTest {
             dispatched,
         )
         job.cancelAndJoin()
+    }
+
+    @Test
+    fun wireDropsAfterDrainReadinessBeforeDurableAgentDispatch() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(queue)
+        val session = "tmux:1:\$1:100"
+        vm.onComposerTargetChanged(session)
+        val row = queue.enqueue(session, "dictated during outage", createdAtMs = 1L)
+        vm.refreshOutboundQueueItemsFor(session)
+
+        // Scheduling observed a writable wire and claimed the row.
+        var transportWritable = true
+        val claimedId = vm.retryNextOutboundItem()
+        advanceUntilIdle()
+        assertEquals(row.id, claimedId)
+        val request = requireNotNull(vm.inFlightSendRequest)
+
+        // The exact race: the wire dies after readiness but immediately before
+        // the agent delivery call. The durable lane must fail fast without IO,
+        // then the real dispatcher failure branch re-arms the same row.
+        transportWritable = false
+        var networkCalls = 0
+        val mustDefer = durableAgentQueueSendMustDefer(
+            DurableOutboundRowIdentity(session, row.id),
+            transportWritable,
+        )
+        if (!mustDefer) networkCalls += 1
+        assertTrue(mustDefer)
+        vm.resolveFailureLikeDispatcher(request)
+        advanceUntilIdle()
+
+        assertEquals("a dead wire must not be touched", 0, networkCalls)
+        assertEquals(OutboundState.Queued, requireNotNull(queue.item(row.id)).state)
+        assertTrue(vm.uiState.value.sendInFlight.not())
     }
 
     // -------- Layer 2: the failure taxonomy --------

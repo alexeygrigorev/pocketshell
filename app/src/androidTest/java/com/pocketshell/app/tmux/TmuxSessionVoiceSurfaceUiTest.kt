@@ -347,6 +347,7 @@ class TmuxSessionVoiceSurfaceUiTest {
      */
     @Test
     fun heldTerminalHidesQuickCommandBand_keepsComposerLauncher() {
+        var composerTaps = 0
         compose.setContent {
             PocketShellTheme {
                 TmuxTerminalBottomControls(
@@ -357,7 +358,7 @@ class TmuxSessionVoiceSurfaceUiTest {
                     // Issue #1672: the terminal is held behind the "Attaching…"
                     // loader (Reconnecting / Attaching — the reported state).
                     terminalHeld = true,
-                    onDictateTap = {},
+                    onDictateTap = { composerTaps += 1 },
                     onEnterTap = {},
                     onShowKeyboardTap = {},
                     onAddSnippetTap = {},
@@ -378,8 +379,14 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertDoesNotExist()
 
         // …but the composer launcher stays present (#810) and fully within the
-        // viewport so a message can still be queued while reconnecting.
+        // viewport AND operable so a message can still be queued while
+        // reconnecting. Presence alone missed the #1944 regression: the control
+        // was rendered with disabled semantics whenever sessionLive=false.
         compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+            .assertHasClickAction()
+            .performClick()
+        assertEquals(1, composerTaps)
     }
 
     /**

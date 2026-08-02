@@ -12,6 +12,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.layout.Layout
+import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,7 @@ import kotlin.coroutines.CoroutineContext
  * @property engineCommands tappable engine-command regions (hit-test + underline).
  */
 internal data class ShellPaneAffordanceRegions(
+    val viewport: ViewportRowsSnapshot = ViewportRowsSnapshot.EMPTY,
     val urls: List<UrlRegion> = emptyList(),
     val filePaths: List<FilePathRegion> = emptyList(),
     val matches: List<TerminalMatchRegion> = emptyList(),
@@ -101,6 +103,7 @@ internal suspend fun collectShellPaneAffordances(
             // ~4× per frame on the UI thread.
             val result = withContext(scanContext) {
                 ShellPaneAffordanceRegions(
+                    viewport = snapshot,
                     urls = if (scanUrls) {
                         runCatching { urlRegionsForRows(snapshot.rows, snapshot.columns) }.getOrDefault(emptyList())
                     } else {
@@ -173,6 +176,14 @@ public fun ShellPaneAffordanceOverlay(
     onFilePathsChanged: (List<FilePathRegion>) -> Unit = {},
     onMatchesChanged: (List<TerminalMatchRegion>) -> Unit = {},
     onEngineCommandsChanged: (List<EngineCommandRegion>) -> Unit = {},
+    onAffordancesPublished: (
+        TerminalView?,
+        TerminalSession?,
+        ViewportRowsSnapshot,
+        List<UrlRegion>,
+        List<FilePathRegion>,
+        List<EngineCommandRegion>,
+    ) -> Unit = { _, _, _, _, _, _ -> },
     scanDispatcher: CoroutineDispatcher = Dispatchers.Default,
     modifier: Modifier = Modifier,
 ) {
@@ -184,6 +195,7 @@ public fun ShellPaneAffordanceOverlay(
     val latestOnPaths by rememberUpdatedState(onFilePathsChanged)
     val latestOnMatches by rememberUpdatedState(onMatchesChanged)
     val latestOnCommands by rememberUpdatedState(onEngineCommandsChanged)
+    val latestOnAffordancesPublished by rememberUpdatedState(onAffordancesPublished)
 
     LaunchedEffect(
         view,
@@ -204,6 +216,14 @@ public fun ShellPaneAffordanceOverlay(
             latestOnPaths(emptyList())
             latestOnMatches(emptyList())
             latestOnCommands(emptyList())
+            latestOnAffordancesPublished(
+                null,
+                null,
+                ViewportRowsSnapshot.EMPTY,
+                emptyList(),
+                emptyList(),
+                emptyList(),
+            )
             return@LaunchedEffect
         }
         // Issue #1260 (mirrored from [AgentPaneAffordanceOverlay]): pin the collect
@@ -212,9 +232,13 @@ public fun ShellPaneAffordanceOverlay(
         // otherwise the coalescer's `delay` window stalls for a whole `%output`
         // burst on a non-invalidating surface and the affordance never repopulates.
         val mainDispatcher = Dispatchers.Main.immediate
+        var sourceSession: TerminalSession? = null
         collectShellPaneAffordances(
             renderRequests = renderRequests,
-            extractSnapshot = { extractVisibleViewportRows(view) },
+            extractSnapshot = {
+                sourceSession = view.currentSession
+                extractVisibleViewportRows(view)
+            },
             matcher = matcher,
             knownCommands = knownCommands,
             scanUrls = scanUrls,
@@ -238,6 +262,17 @@ public fun ShellPaneAffordanceOverlay(
                 commands = result.engineCommands
                 latestOnCommands(result.engineCommands)
             }
+            // Commit marker after every region list has been staged. The parent
+            // can now expose this exact painted generation to gesture routing
+            // without waiting for another recomposition (#558 reopened).
+            latestOnAffordancesPublished(
+                view,
+                sourceSession,
+                result.viewport,
+                result.urls,
+                result.filePaths,
+                result.engineCommands,
+            )
         }
     }
 

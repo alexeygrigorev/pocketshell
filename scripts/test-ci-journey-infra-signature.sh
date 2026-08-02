@@ -208,6 +208,8 @@ write_issue1919_attempt() {
   local root="$1" class="$2" key="$3" attempt="$4"
   local dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt"
   local xml_dir="$dir/android-test-outputs/app/build/outputs/androidTest-results/connected/debug"
+  local snapshot_sha snapshot_size capture_token
+  capture_token="$(printf '%s' "$root|$class|$attempt" | sha256sum | awk '{ print $1 }')"
   mkdir -p "$xml_dir"
   if [[ "$class" == "$SATURATED_CLASS" ]]; then
     cat > "$xml_dir/TEST-emulator-5554 - 15-_app-.xml" <<EOF
@@ -251,6 +253,91 @@ ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)
     pid=1188
     foregroundActivities=true (rep=true)
      mCrashing=false null mNotResponding=true [com.android.server.am.AppNotRespondingDialog@8fc5bd] bad=false
+EOF
+  printf '\nPOCKETSHELL_ATTEMPT_CAPTURE_TOKEN=%s\n' "$capture_token" \
+    >> "$dir/activity-processes.txt"
+  snapshot_sha="$(sha256sum "$dir/activity-processes.txt" | awk '{ print $1 }')"
+  snapshot_size="$(wc -c < "$dir/activity-processes.txt")"
+  cat > "$dir/manifest.txt" <<EOF
+format_version=1
+module=app
+class=$class
+attempt=$attempt
+capture_token=$capture_token
+started_at_utc=2026-07-31T15:00:0${attempt}Z
+status=running
+activity_processes_sha256=$snapshot_sha
+activity_processes_size_bytes=$snapshot_size
+activity_processes_captured_at_utc=2026-07-31T15:00:30Z
+snapshot_status=complete
+status=complete
+finished_at_utc=2026-07-31T15:01:0${attempt}Z
+EOF
+}
+
+# Issue #788 / exact-main run 30747057492: write the two focus-handoff
+# failures that each repeated twice in one boot while the same Pixel Launcher
+# ANR dialog remained above the app.  These are the exact causal oracle texts;
+# no generic IME timeout, Copy timeout, or product assertion is substituted.
+write_issue788_focus_handoff_attempt() {
+  local root="$1" class="$2" key="$3" attempt="$4"
+  local dir="$root/ci-journey/class-attempts/app/$key/attempt-$attempt"
+  local xml_dir="$dir/android-test-outputs/app/build/outputs/androidTest-results/connected/debug"
+  local snapshot_sha snapshot_size capture_token
+  capture_token="$(printf '%s' "$root|$class|$attempt" | sha256sum | awk '{ print $1 }')"
+  mkdir -p "$xml_dir"
+  if [[ "$class" == "$OCCLUSION_CLASS" ]]; then
+    cat > "$xml_dir/TEST-emulator-5554 - 15-_app-.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="$class" tests="1" failures="1">
+  <testcase name="$OCCLUSION_METHOD" classname="${class}[emulator-5554 - 15]">
+    <failure>java.lang.AssertionError: the sent-snippet modal must release input focus before the keyboard-up shell-composer phase: app_window_focused=false active_window_pkg=android active_window_class=android.widget.FrameLayout
+at org.junit.Assert.fail(Assert.java:89)
+at com.pocketshell.app.tmux.TmuxShellComposerOcclusionE2eTest.awaitTestOpenedSnippetPickerDismissed(TmuxShellComposerOcclusionE2eTest.kt:495)
+</failure>
+  </testcase>
+</testsuite>
+EOF
+  else
+    cat > "$xml_dir/TEST-emulator-5554 - 15-_app-.xml" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="$class" tests="1" failures="1">
+  <testcase name="$FILEVIEWER_METHOD" classname="${class}[emulator-5554 - 15]">
+    <failure>java.lang.AssertionError: file-viewer activity must regain focus after the synthetic owner is dismissed; active_window_pkg=android active_window_class=android.widget.FrameLayout
+at org.junit.Assert.fail(Assert.java:89)
+at com.pocketshell.app.fileviewer.FileViewerDockerTest.dismissSyntheticFocusStealingWindow(FileViewerDockerTest.kt:980)
+</failure>
+  </testcase>
+</testsuite>
+EOF
+  fi
+  cat > "$dir/activity-processes.txt" <<'EOF'
+ACTIVITY MANAGER RUNNING PROCESSES (dumpsys activity processes)
+  *APP* UID 10179 ProcessRecord{19927a0 1229:com.google.android.apps.nexuslauncher/u0a179}
+    user #0 uid=10179 gids={50179, 20179, 9997}
+    packageList={com.google.android.apps.nexuslauncher}
+    pid=1229
+    foregroundActivities=true (rep=true)
+     mCrashing=false null mNotResponding=true [com.android.server.am.AppNotRespondingDialog@b1901c8] bad=false
+EOF
+  printf '\nPOCKETSHELL_ATTEMPT_CAPTURE_TOKEN=%s\n' "$capture_token" \
+    >> "$dir/activity-processes.txt"
+  snapshot_sha="$(sha256sum "$dir/activity-processes.txt" | awk '{ print $1 }')"
+  snapshot_size="$(wc -c < "$dir/activity-processes.txt")"
+  cat > "$dir/manifest.txt" <<EOF
+format_version=1
+module=app
+class=$class
+attempt=$attempt
+capture_token=$capture_token
+started_at_utc=2026-08-02T13:1${attempt}:00Z
+status=running
+activity_processes_sha256=$snapshot_sha
+activity_processes_size_bytes=$snapshot_size
+activity_processes_captured_at_utc=2026-08-02T13:1${attempt}:30Z
+snapshot_status=complete
+status=complete
+finished_at_utc=2026-08-02T13:1${attempt}:59Z
 EOF
 }
 
@@ -706,8 +793,202 @@ run_agg "$verdicts"
 [[ "$AGG_VERDICT" == "RE-RUN" && "$AGG_RC" -eq 0 ]] \
   || fail "(#1919-red) exact launcher-ANR run must aggregate RE-RUN/exit0, got $AGG_VERDICT/exit$AGG_RC"
 pass "(#1919) exact four-attempt launcher ANR -> INFRA -> RE-RUN"
-
 ISSUE1919_FIXTURE="$root"
+
+echo
+echo "== #788 exact run 30747057492 cross-journey launcher-ANR focus handoff =="
+
+# Regression-first RED: exact main cfeafc27 classified these four failures as
+# product_failure even though every attempt-local snapshot proved the SAME sole
+# Pixel Launcher AppNotRespondingDialog owner.  Both repaired journeys therefore
+# failed twice in one boot and hardened into a RED when the cold-boot retry did
+# not fit.  The narrow handoff classifier must route that complete evidence to
+# the existing INFRA -> fresh-cold-boot path, without changing either journey's
+# real IME/Copy deadline or dismissing any window.
+root="$SANDBOX/issue788-focus-handoff"; mkdir -p "$root"
+ISSUE788_OCCLUSION_KEY="$(journey_fixture_artifact_key "$OCCLUSION_CLASS")"
+ISSUE788_FILEVIEWER_KEY="$(journey_fixture_artifact_key "$FILEVIEWER_CLASS")"
+write_summary "$root" 2910 \
+  "$OCCLUSION_CLASS#$OCCLUSION_METHOD" \
+  "$FILEVIEWER_CLASS#$FILEVIEWER_METHOD"
+for attempt in 1 2; do
+  write_issue788_focus_handoff_attempt "$root" "$OCCLUSION_CLASS" \
+    "$ISSUE788_OCCLUSION_KEY" "$attempt"
+  write_issue788_focus_handoff_attempt "$root" "$FILEVIEWER_CLASS" \
+    "$ISSUE788_FILEVIEWER_KEY" "$attempt"
+done
+run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
+printf '%s\n' "$SIG_OUT" | sed 's/^/    /'
+[[ "$SIG_CLASS" == "foreign_framework_anr_focus" ]] \
+  || fail "(#788-focus) exact four-attempt handoff fixture must classify foreign_framework_anr_focus, got '$SIG_CLASS'"
+grep -q '^journey_failing_testcases=4$' <<<"$SIG_OUT" \
+  || fail "(#788-focus) all four handoff failures must be covered"
+mkdir -p "$root/ci-journey-attempt-1"
+cp -a "$root/ci-journey" "$root/ci-journey-attempt-1/ci-journey"
+shard_verdict_for "$root"
+[[ "$SHARD_TOKEN" == "INFRA" ]] \
+  || fail "(#788-focus) exact launcher-ANR handoff shard must be INFRA, got $SHARD_TOKEN"
+verdicts="$SANDBOX/verdicts-788-focus"; mkdir -p "$verdicts"
+write_shard_token "$verdicts" 0 CLEAN
+write_shard_token "$verdicts" 1 "$SHARD_TOKEN"
+write_shard_token "$verdicts" 2 CLEAN
+run_agg "$verdicts"
+[[ "$AGG_VERDICT" == "RE-RUN" && "$AGG_RC" -eq 0 ]] \
+  || fail "(#788-focus) exact handoff run must aggregate RE-RUN/exit0, got $AGG_VERDICT/exit$AGG_RC"
+pass "(#788-focus) composer + FileViewer x2 in one boot -> INFRA -> RE-RUN"
+
+# Anti-mask controls specific to the new handoff wording.  Active-window text
+# alone is never enough: app ownership, a second owner, a PocketShell ANR owner,
+# or an ordinary product assertion must all stay RED.
+ISSUE788_FOCUS_FIXTURE="$root"
+issue788_focus_xml() {
+  printf '%s/ci-journey/class-attempts/app/%s/attempt-%s/android-test-outputs/app/build/outputs/androidTest-results/connected/debug/TEST-emulator-5554 - 15-_app-.xml\n' \
+    "$1" "$2" "$3"
+}
+issue788_focus_snapshot() {
+  printf '%s/ci-journey/class-attempts/app/%s/attempt-%s/activity-processes.txt\n' \
+    "$1" "$2" "$3"
+}
+rebind_issue788_focus_snapshot() {
+  local case_root="$1" key="$2" attempt="$3"
+  local snapshot manifest sha size token
+  snapshot="$(issue788_focus_snapshot "$case_root" "$key" "$attempt")"
+  manifest="$case_root/ci-journey/class-attempts/app/$key/attempt-$attempt/manifest.txt"
+  token="$(sed -n 's/^capture_token=//p' "$manifest" | tail -n 1)"
+  sed -i '/^POCKETSHELL_ATTEMPT_CAPTURE_TOKEN=/d' "$snapshot"
+  printf '\nPOCKETSHELL_ATTEMPT_CAPTURE_TOKEN=%s\n' "$token" >> "$snapshot"
+  sha="$(sha256sum "$snapshot" | awk '{ print $1 }')"
+  size="$(wc -c < "$snapshot")"
+  sed -i \
+    -e "s/^activity_processes_sha256=.*/activity_processes_sha256=$sha/" \
+    -e "s/^activity_processes_size_bytes=.*/activity_processes_size_bytes=$size/" \
+    "$manifest"
+}
+assert_issue788_focus_red() {
+  local label="$1" case_root="$2"
+  run_signature "$case_root/ci-journey/summary.md" "$case_root/ci-journey"
+  [[ "$SIG_CLASS" == "product_failure" || "$SIG_CLASS" == "unclassified" ]] \
+    || { printf '%s\n' "$SIG_OUT"; fail "(#788-focus-$label) unsafe evidence classified '$SIG_CLASS'"; }
+}
+
+case_root="$SANDBOX/issue788-focus-app-window"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+sed -i 's/active_window_pkg=android/active_window_pkg=com.pocketshell.app/g' \
+  "$(issue788_focus_xml "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+assert_issue788_focus_red app-window "$case_root"
+
+case_root="$SANDBOX/issue788-focus-mixed-window"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+sed -i 's/active_window_class=android.widget.FrameLayout/active_window_class=android.widget.FrameLayout active_window_pkg=com.pocketshell.app/' \
+  "$(issue788_focus_xml "$case_root" "$ISSUE788_FILEVIEWER_KEY" 1)"
+assert_issue788_focus_red mixed-window "$case_root"
+
+case_root="$SANDBOX/issue788-focus-app-anr"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+sed -i 's/com.google.android.apps.nexuslauncher/com.pocketshell.app.i788/g' \
+  "$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+rebind_issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1
+assert_issue788_focus_red app-anr "$case_root"
+
+case_root="$SANDBOX/issue788-focus-missing-snapshot"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+unlink "$(issue788_focus_snapshot "$case_root" "$ISSUE788_FILEVIEWER_KEY" 1)"
+assert_issue788_focus_red missing-snapshot "$case_root"
+
+case_root="$SANDBOX/issue788-focus-multiple-anr"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+snapshot="$(issue788_focus_snapshot "$case_root" "$ISSUE788_FILEVIEWER_KEY" 1)"
+cat >> "$snapshot" <<'EOF'
+  *APP* UID 10200 ProcessRecord{bbbbbbb 2200:com.example.second/u0a200}
+    mNotResponding=true [com.android.server.am.AppNotRespondingDialog@bbbbbbb]
+EOF
+rebind_issue788_focus_snapshot "$case_root" "$ISSUE788_FILEVIEWER_KEY" 1
+assert_issue788_focus_red multiple-anr "$case_root"
+
+# Exact reviewer repro: first establish a validly bound PocketShell-owned
+# attempt (3/4 environmental matches), then overwrite that regular file with
+# attempt 2's launcher dump.  Path/class/attempt metadata remains plausible,
+# but the copied bytes carry attempt 2's token/hash and must not turn 3/4 into
+# 4/4 or license INFRA.
+case_root="$SANDBOX/issue788-focus-regular-sibling-copy"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+sed -i 's/com.google.android.apps.nexuslauncher/com.pocketshell.app.i788/g' \
+  "$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+rebind_issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1
+run_signature "$case_root/ci-journey/summary.md" "$case_root/ci-journey"
+[[ "$SIG_CLASS" == "product_failure" ]] \
+  || fail "(#788-focus-regular-sibling-copy) app-owned baseline was not product_failure"
+grep -q '^journey_signature_matches=3$' <<<"$SIG_OUT" \
+  || fail "(#788-focus-regular-sibling-copy) app-owned baseline was not 3/4"
+cp "$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 2)" \
+  "$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+assert_issue788_focus_red regular-sibling-copy "$case_root"
+grep -q '^journey_signature_matches=3$' <<<"$SIG_OUT" \
+  || fail "(#788-focus-regular-sibling-copy) copied sibling snapshot laundered 3/4 evidence"
+
+case_root="$SANDBOX/issue788-focus-regular-other-class"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+cp "$(issue788_focus_snapshot "$case_root" "$ISSUE788_FILEVIEWER_KEY" 1)" \
+  "$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+assert_issue788_focus_red regular-other-class "$case_root"
+
+donor_root="$SANDBOX/issue788-focus-stale-root-donor"
+write_issue788_focus_handoff_attempt "$donor_root" "$OCCLUSION_CLASS" \
+  "$ISSUE788_OCCLUSION_KEY" 1
+case_root="$SANDBOX/issue788-focus-regular-stale-root"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+cp "$(issue788_focus_snapshot "$donor_root" "$ISSUE788_OCCLUSION_KEY" 1)" \
+  "$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+assert_issue788_focus_red regular-stale-root "$case_root"
+
+for mutation in missing-hash mismatched-hash mismatched-token stale-capture-time; do
+  case_root="$SANDBOX/issue788-focus-$mutation"; mkdir -p "$case_root"
+  cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+  manifest="$case_root/ci-journey/class-attempts/app/$ISSUE788_OCCLUSION_KEY/attempt-1/manifest.txt"
+  case "$mutation" in
+    missing-hash) sed -i '/^activity_processes_sha256=/d' "$manifest" ;;
+    mismatched-hash)
+      sed -i 's/^activity_processes_sha256=./activity_processes_sha256=0/' "$manifest"
+      ;;
+    mismatched-token)
+      sed -i 's/^capture_token=./capture_token=0/' "$manifest"
+      ;;
+    stale-capture-time)
+      sed -i 's/^activity_processes_captured_at_utc=.*/activity_processes_captured_at_utc=2026-08-02T12:00:00Z/' "$manifest"
+      ;;
+  esac
+  assert_issue788_focus_red "$mutation" "$case_root"
+done
+
+case_root="$SANDBOX/issue788-focus-attempt-root"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+snapshot="$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+unlink "$snapshot"
+ln -s "$(issue788_focus_snapshot "$case_root" "$ISSUE788_OCCLUSION_KEY" 2)" "$snapshot"
+assert_issue788_focus_red wrong-attempt-root "$case_root"
+
+for mutation in wrong-attempt inverted-time; do
+  case_root="$SANDBOX/issue788-focus-$mutation"; mkdir -p "$case_root"
+  cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+  manifest="$case_root/ci-journey/class-attempts/app/$ISSUE788_FILEVIEWER_KEY/attempt-1/manifest.txt"
+  case "$mutation" in
+    wrong-attempt) sed -i 's/^attempt=1$/attempt=2/' "$manifest" ;;
+    inverted-time)
+      sed -i \
+        -e 's/^started_at_utc=.*/started_at_utc=2026-08-02T13:59:59Z/' \
+        -e 's/^finished_at_utc=.*/finished_at_utc=2026-08-02T13:00:00Z/' \
+        "$manifest"
+      ;;
+  esac
+  assert_issue788_focus_red "$mutation" "$case_root"
+done
+
+case_root="$SANDBOX/issue788-focus-product"; mkdir -p "$case_root"
+cp -a "$ISSUE788_FOCUS_FIXTURE/ci-journey" "$case_root/ci-journey"
+sed -i 's/the sent-snippet modal must release input focus before the keyboard-up shell-composer phase:/composer launcher must be fully on-screen (keyboard up);/' \
+  "$(issue788_focus_xml "$case_root" "$ISSUE788_OCCLUSION_KEY" 1)"
+assert_issue788_focus_red ordinary-product "$case_root"
+pass "(#788-focus-a) app/mixed owners, app/multiple ANRs, copied/symlinked/cross-root or missing/mismatched/stale bindings, and ordinary product assertions stay RED"
 issue1919_snapshot() {
   printf '%s/ci-journey/class-attempts/app/%s/attempt-%s/activity-processes.txt\n' \
     "$1" "$2" "$3"

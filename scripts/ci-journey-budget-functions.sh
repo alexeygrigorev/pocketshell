@@ -607,7 +607,7 @@ begin_class_attempt_artifacts() {
   local suffix="${3:-}"
   local key="$module:$fqcn"
   local attempt=$(( ${JOURNEY_CLASS_ATTEMPT_COUNTS[$key]:-0} + 1 ))
-  local artifact_key
+  local artifact_key capture_token
 
   JOURNEY_CLASS_ATTEMPT_COUNTS["$key"]="$attempt"
   artifact_key="$(journey_class_artifact_key "$fqcn")" || return 1
@@ -619,6 +619,13 @@ begin_class_attempt_artifacts() {
   LAST_RUN_CLASS_RAW_JUNIT_STATUS=""
   LAST_RUN_CLASS_RAW_JUNIT_COUNT=0
   LAST_RUN_CLASS_SNAPSHOT_STATUS=""
+  capture_token="$(
+    printf '%s\0%s\0%s\0%s\0%s\n' \
+      "$module" "$fqcn" "$attempt" "$(date +%s%N)" "$RANDOM" \
+      | sha256sum | awk '{ print $1 }'
+  )" || return 1
+  [[ "$capture_token" =~ ^[0-9a-f]{64}$ ]] || return 1
+  LAST_RUN_CLASS_CAPTURE_TOKEN="$capture_token"
   rm -rf -- "$LAST_RUN_CLASS_ATTEMPT_DIR" || return 1
   mkdir -p "$LAST_RUN_CLASS_ATTEMPT_DIR" || return 1
   : > "$LAST_RUN_CLASS_ATTEMPT_DIR/attempt.log" || return 1
@@ -628,6 +635,7 @@ begin_class_attempt_artifacts() {
     printf 'module=%s\n' "$module"
     printf 'class=%s\n' "$fqcn"
     printf 'attempt=%s\n' "$attempt"
+    printf 'capture_token=%s\n' "$capture_token"
     printf 'started_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf 'application_id_suffix=%s\n' "$suffix"
     printf 'status=running\n'
@@ -818,6 +826,9 @@ snapshot_connected_test_outputs() {
   local primary_classification
   local outer_timeout_phase
   local attempt_failure_phase
+  local activity_processes_sha256=""
+  local activity_processes_size_bytes=""
+  local activity_processes_captured_at_utc=""
   local -a build_roots=()
 
   mapfile -t build_roots < <(journey_module_build_roots "$module" "$suffix") || return 1
@@ -899,10 +910,32 @@ snapshot_connected_test_outputs() {
         "device process list" "$attempt_dir/device-processes.txt" \
         journey_adb -s "$serial" shell ps -A \
         || snapshot_failed=1
-      capture_required_nonempty \
-        "activity processes" "$attempt_dir/activity-processes.txt" \
-        journey_adb -s "$serial" shell dumpsys activity processes \
-        || snapshot_failed=1
+      if capture_required_nonempty \
+          "activity processes" "$attempt_dir/activity-processes.txt" \
+          journey_adb -s "$serial" shell dumpsys activity processes; then
+        # Bind the exact process dump bytes to this attempt while capture is
+        # still in progress.  The focus-ANR classifier verifies all three
+        # fields before this evidence can downgrade a product failure to INFRA;
+        # a later regular-file copy from a sibling attempt therefore fails
+        # closed just like a symlink or missing snapshot.
+        printf '\nPOCKETSHELL_ATTEMPT_CAPTURE_TOKEN=%s\n' \
+          "$LAST_RUN_CLASS_CAPTURE_TOKEN" \
+          >> "$attempt_dir/activity-processes.txt" || snapshot_failed=1
+        activity_processes_captured_at_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        activity_processes_sha256="$(
+          sha256sum "$attempt_dir/activity-processes.txt" | awk '{ print $1 }'
+        )" || snapshot_failed=1
+        activity_processes_size_bytes="$(
+          wc -c < "$attempt_dir/activity-processes.txt"
+        )" || snapshot_failed=1
+        activity_processes_size_bytes="${activity_processes_size_bytes//[[:space:]]/}"
+        [[ "$activity_processes_sha256" =~ ^[0-9a-f]{64}$ ]] \
+          || snapshot_failed=1
+        [[ "$activity_processes_size_bytes" =~ ^[1-9][0-9]*$ ]] \
+          || snapshot_failed=1
+      else
+        snapshot_failed=1
+      fi
       capture_required_nonempty \
         "activity top" "$attempt_dir/activity-top.txt" \
         journey_adb -s "$serial" shell dumpsys activity top \
@@ -936,6 +969,12 @@ snapshot_connected_test_outputs() {
     printf 'outer_timeout_phase=%s\n' "$outer_timeout_phase"
     printf 'attempt_failure_phase=%s\n' "$attempt_failure_phase"
     printf 'snapshotted_output_roots=%s\n' "$copied"
+    if [[ -n "$activity_processes_sha256" ]]; then
+      printf 'activity_processes_sha256=%s\n' "$activity_processes_sha256"
+      printf 'activity_processes_size_bytes=%s\n' "$activity_processes_size_bytes"
+      printf 'activity_processes_captured_at_utc=%s\n' \
+        "$activity_processes_captured_at_utc"
+    fi
     printf 'snapshot_status=%s\n' "$([[ "$snapshot_failed" -eq 0 ]] && printf complete || printf failed)"
   } >> "$attempt_dir/manifest.txt" || snapshot_failed=1
 

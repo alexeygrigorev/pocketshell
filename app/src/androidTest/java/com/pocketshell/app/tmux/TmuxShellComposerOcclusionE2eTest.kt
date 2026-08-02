@@ -1,11 +1,13 @@
 package com.pocketshell.app.tmux
 
+import android.app.Dialog
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import android.widget.TextView
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertContentDescriptionEquals
@@ -32,6 +34,10 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
+import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
+import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
+import com.pocketshell.app.proof.signals.waitForActivityWindowFocusLost
+import com.pocketshell.app.proof.signals.waitForActivityWindowFocused
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.snippets.snippetSendChipTag
 import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
@@ -97,12 +103,15 @@ class TmuxShellComposerOcclusionE2eTest {
     val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
+    private var focusStealer: Dialog? = null
     private val summaryLines = mutableListOf<String>()
+    private var imeRequestCount: Int = 0
     private var commandSnippetId: Long = 0
     private var commandWithEnterSnippetId: Long = 0
 
     @After
     fun cleanup() {
+        dismissSyntheticFocusStealingWindow(requireFocusReturn = false)
         launchedActivity?.close()
         launchedActivity = null
         runBlocking {
@@ -349,29 +358,39 @@ class TmuxShellComposerOcclusionE2eTest {
         summaryLines += "snippet_send_with_enter_remote_side_effect_bytes=1"
         captureFullDevice("03-snippet-dispatched")
         captureTerminalViewport("03-snippet-dispatched")
+        awaitTestOpenedSnippetPickerDismissed()
 
         // ---------------------------------------------------------------
         // SYMPTOM 2 — keyboard UP: accessory band is above the keyboard.
         // ---------------------------------------------------------------
+        // Issue #1942 fail-first reproduction: CI twice reached this exact
+        // point with a Pixel Launcher ANR dialog holding window focus. The old
+        // oracle burned the entire IME budget and reported only a generic
+        // ComposeTimeoutException. Reproduce the same window geometry with a
+        // non-cancelable focus owner and require a causal diagnosis; after it
+        // is removed, the original real-IME journey still has to pass.
+        raiseSyntheticFocusStealingWindow()
+        val focusStolen = waitForActivityWindowFocusLost(
+            scenario = requireNotNull(launchedActivity),
+            timeoutMs = WINDOW_FOCUS_TIMEOUT_MS,
+        )
+        assertTrue("synthetic #1942 focus owner must take window focus", focusStolen)
+        val focusFailure = runCatching { waitForRealImeAfterShowKeyboard() }.exceptionOrNull()
+        assertTrue(
+            "#1942 must name the foreign focus owner instead of timing out generically; " +
+                "failure=${focusFailure?.message}",
+            focusFailure?.message.orEmpty().contains(FOREIGN_WINDOW_FOCUS_SIGNATURE),
+        )
+        assertTrue(
+            "the focus oracle must observe only; it must not dismiss the obstructing window",
+            focusStealer?.isShowing == true,
+        )
+        captureFullDevice("04-synthetic-focus-owner")
+        dismissSyntheticFocusStealingWindow(requireFocusReturn = true)
+
         // Raise the real soft IME exactly as the user does — tap the
         // `show keyboard` chip, which calls showTerminalSoftKeyboard().
-        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()
-
-        // Wait for the real IME to become visible (inset > 0).
-        var imeTopPx = -1
-        var lastKeyboardRequestAt = 0L
-        compose.waitUntil(timeoutMillis = 15_000) {
-            imeTopPx = imeInsetTopOnScreenPx()
-            val now = SystemClock.elapsedRealtime()
-            if (imeTopPx <= 0 && now - lastKeyboardRequestAt >= KEYBOARD_REQUEST_RETRY_MS) {
-                compose.onNodeWithTag(
-                    SHOW_KEYBOARD_CHIP_TAG,
-                    useUnmergedTree = true,
-                ).performClick()
-                lastKeyboardRequestAt = now
-            }
-            imeTopPx in 1..Int.MAX_VALUE
-        }
+        var imeTopPx = waitForRealImeAfterShowKeyboard()
         compose.waitForIdle()
         SystemClock.sleep(500)
         imeTopPx = imeInsetTopOnScreenPx()
@@ -405,6 +424,112 @@ class TmuxShellComposerOcclusionE2eTest {
     } }
 
     // ---------------------------------------------------------------- IME insets
+
+    private fun waitForRealImeAfterShowKeyboard(): Int {
+        val request = ++imeRequestCount
+        val scenario = requireNotNull(launchedActivity)
+        val focus = awaitActivityWindowFocus(
+            scenario = scenario,
+            timeoutMs = WINDOW_FOCUS_TIMEOUT_MS,
+        )
+        summaryLines += "ime_request$request.app_window_focused_before_tap=${focus.focused}"
+        summaryLines += "ime_request$request.window_focus_before_tap=${focus.diagnosis}"
+        if (!focus.focused) {
+            throw AssertionError(
+                "$FOREIGN_WINDOW_FOCUS_SIGNATURE The shell-composer IME geometry " +
+                    "cannot be measured in that state (request $request): " +
+                    "${focus.diagnosis}.",
+            )
+        }
+
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()
+        var imeTopPx = -1
+        var lastKeyboardRequestAt = 0L
+        try {
+            compose.waitUntil(timeoutMillis = IME_VISIBILITY_TIMEOUT_MS) {
+                imeTopPx = imeInsetTopOnScreenPx()
+                val now = SystemClock.elapsedRealtime()
+                if (imeTopPx <= 0 && now - lastKeyboardRequestAt >= KEYBOARD_REQUEST_RETRY_MS) {
+                    compose.onNodeWithTag(
+                        SHOW_KEYBOARD_CHIP_TAG,
+                        useUnmergedTree = true,
+                    ).performClick()
+                    lastKeyboardRequestAt = now
+                }
+                imeTopPx in 1..Int.MAX_VALUE
+            }
+        } catch (cause: Throwable) {
+            val lateFocus = awaitActivityWindowFocus(scenario = scenario, timeoutMs = 0L)
+            summaryLines += "ime_request$request.window_focus_after_timeout=${lateFocus.diagnosis}"
+            if (!lateFocus.focused) {
+                throw AssertionError(
+                    "$FOREIGN_WINDOW_FOCUS_SIGNATURE Focus was lost after the " +
+                        "shell-composer pre-condition check (request $request): " +
+                        "${lateFocus.diagnosis}.",
+                    cause,
+                )
+            }
+            throw cause
+        }
+        summaryLines += "ime_request$request.ime_visible=true"
+        return imeTopPx
+    }
+
+    private fun awaitTestOpenedSnippetPickerDismissed() {
+        // Sending a snippet already calls the picker's production onDismiss.
+        // Its ModalBottomSheet window releases focus asynchronously, however;
+        // do not drive a hidden terminal control while that transition still
+        // owns input focus (the exact sequencing error exposed by #1942).
+        compose.waitUntil(timeoutMillis = WINDOW_FOCUS_TIMEOUT_MS) {
+            compose.onAllNodesWithText("Search snippets…", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        val focus = awaitActivityWindowFocus(
+            scenario = requireNotNull(launchedActivity),
+            timeoutMs = WINDOW_FOCUS_TIMEOUT_MS,
+        )
+        summaryLines += "snippet_picker_dismissed=true"
+        summaryLines += "snippet_picker_dismiss_focus=${focus.diagnosis}"
+        assertTrue(
+            "the sent-snippet modal must release input focus before the " +
+                "keyboard-up shell-composer phase: ${focus.diagnosis}",
+            focus.focused,
+        )
+    }
+
+    private fun raiseSyntheticFocusStealingWindow() {
+        requireNotNull(launchedActivity).onActivity { activity ->
+            val dialog = Dialog(activity)
+            dialog.setContentView(TextView(activity).apply {
+                text = "issue-1942 synthetic focus owner"
+                isFocusable = true
+                isFocusableInTouchMode = true
+            })
+            dialog.setCancelable(false)
+            dialog.setOnDismissListener { focusStealer = null }
+            dialog.show()
+            focusStealer = dialog
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
+    private fun dismissSyntheticFocusStealingWindow(requireFocusReturn: Boolean) {
+        val dialog = focusStealer ?: return
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            if (dialog.isShowing) dialog.dismiss()
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        if (requireFocusReturn) {
+            assertTrue(
+                "PocketShell must regain focus after the synthetic #1942 owner is removed",
+                waitForActivityWindowFocused(
+                    scenario = requireNotNull(launchedActivity),
+                    timeoutMs = WINDOW_FOCUS_TIMEOUT_MS,
+                ),
+            )
+        }
+    }
 
     /**
      * Top Y (screen pixels) of the soft IME inset. Returns -1 when the
@@ -883,6 +1008,7 @@ class TmuxShellComposerOcclusionE2eTest {
                         appendLine("  03-snippet-dispatched.png")
                         appendLine("  03-snippet-dispatched-viewport.png")
                         appendLine("  03-snippet-dispatched-visible-terminal.txt")
+                        appendLine("  04-synthetic-focus-owner.png")
                     }
                 }
             },
@@ -916,6 +1042,8 @@ class TmuxShellComposerOcclusionE2eTest {
         const val ROOT_SLOP_PX: Float = 1f
         const val EXACT_ONCE_STABILITY_MS: Long = 750
         const val KEYBOARD_REQUEST_RETRY_MS: Long = 1_000
+        const val WINDOW_FOCUS_TIMEOUT_MS: Long = 10_000
+        const val IME_VISIBILITY_TIMEOUT_MS: Long = 15_000
         val FORBIDDEN_LITERAL_CHIPS: List<String> =
             listOf("git status", "tmux ls", "k logs", "clear")
     }

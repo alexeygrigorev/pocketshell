@@ -24,7 +24,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -41,12 +40,10 @@ import com.pocketshell.uikit.theme.PocketShellType
 internal const val SESSION_CHECKLIST_CHIP_TAG: String = "session:checklist-chip"
 internal const val SESSION_CHECKLIST_CARD_TAG_PREFIX: String = "session:checklist:card:"
 internal const val SESSION_CHECKLIST_ITEM_TAG_PREFIX: String = "session:checklist:item:"
-internal const val SESSION_CHECKLIST_CLOSE_TAG: String = "session:checklist:close"
 
 // Issue #859 Slice B: the generic feed chip + sheet (all card types via the
-// renderer registry). The checklist-only chip/sheet below remain for the
-// current single-checklist wiring and are themselves now expressed through the
-// registry's [ChecklistCardRenderer] (no checklist-specific layout duplicated).
+// renderer registry). The checklist-only summary chip remains for callers that
+// need item totals; the only sheet/content path is the generic registry feed.
 internal const val SESSION_CARD_FEED_CHIP_TAG: String = "session:card-feed-chip"
 internal const val SESSION_CARD_FEED_SHEET_TAG: String = "session:card-feed:sheet"
 internal const val SESSION_CARD_FEED_CLOSE_TAG: String = "session:card-feed:close"
@@ -211,71 +208,6 @@ internal fun SessionCardFeedContent(
             }
         }
     }
-}
-
-@Composable
-internal fun ChecklistCardsContent(
-    cards: List<SessionCardsRemoteSource.ChecklistCard>,
-    onToggle: (cardId: String, itemId: String, checked: Boolean) -> Unit,
-    onClose: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    // Adapt the checklist-only callback into the generic interactions contract
-    // so the SAME [ChecklistCardRenderer] draws the rows (no duplicated layout).
-    val interactions = remember(onToggle) { checklistOnlyInteractions(onToggle) }
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            // Issue #1821 — LOAD-BEARING, do not delete by analogy with #1812.
-            // This composable has NO production caller at all: it is composed
-            // only STANDALONE, from `SessionChecklistUiInteractionTest` and the
-            // gate-wired `SessionChecklistPushJourneyDockerTest`. Outside a
-            // `ModalBottomSheet` nothing has consumed these insets, so they are
-            // the only thing keeping the last item clear of the keyboard and the
-            // nav bar. `StandaloneContentImePaddingLivenessTest` goes RED if
-            // EITHER is removed, and it takes BOTH keyboard states to see that:
-            // dropping `imePadding()` collapses the keyboard-UP lift
-            // 648px -> 0px; dropping `navigationBarsPadding()` drops the last
-            // item 126px under the nav bar in the keyboard-DOWN state
-            // (invisible with the keyboard up, where the ime inset subsumes the
-            // nav bar).
-            .navigationBarsPadding()
-            .imePadding()
-            .padding(horizontal = PocketShellSpacing.lg)
-            .padding(bottom = PocketShellSpacing.lg),
-    ) {
-        SessionCardFeedHeader(
-            title = "Checklist",
-            closeTag = SESSION_CHECKLIST_CLOSE_TAG,
-            onClose = onClose,
-        )
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(max = 420.dp),
-            verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
-        ) {
-            items(cards, key = { it.id }) { card ->
-                ChecklistCardRenderer.Render(
-                    card = card,
-                    interactions = interactions,
-                    modifier = Modifier,
-                )
-            }
-            item {
-                Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
-            }
-        }
-    }
-}
-
-private fun checklistOnlyInteractions(
-    onToggle: (cardId: String, itemId: String, checked: Boolean) -> Unit,
-): SessionCardInteractions = object : SessionCardInteractions {
-    override fun onToggleChecklistItem(cardId: String, itemId: String, checked: Boolean) =
-        onToggle(cardId, itemId, checked)
-
-    override fun onSetNoteRead(cardId: String, read: Boolean) = Unit
 }
 
 @Composable

@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -277,7 +276,6 @@ private fun CommentSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(testTag),
@@ -380,7 +378,6 @@ private fun PendingTraySheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_REVIEW_TRAY_SHEET_TAG),
@@ -479,7 +476,6 @@ internal fun ReviewSubmittedSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_REVIEW_SAVED_SHEET_TAG),
@@ -581,7 +577,6 @@ internal fun AnnotationSavedSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .navigationBarsPadding()
                 .padding(horizontal = PocketShellSpacing.lg)
                 .padding(bottom = PocketShellSpacing.lg)
                 .testTag(FILE_VIEWER_ANNOTATE_SAVED_SHEET_TAG),

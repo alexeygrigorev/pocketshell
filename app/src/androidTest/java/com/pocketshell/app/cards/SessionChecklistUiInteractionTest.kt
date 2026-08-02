@@ -13,12 +13,12 @@ class SessionChecklistUiInteractionTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun checklistCardsContentItemRowInvokesToggleWithNextCheckedState() {
+    fun sessionCardFeedContentItemRowInvokesToggleWithNextCheckedState() {
         val toggles = mutableListOf<ToggleEvent>()
 
         composeRule.setContent {
             PocketShellTheme {
-                ChecklistCardsContent(
+                SessionCardFeedContent(
                     cards = listOf(
                         checklistCard(
                             id = "card-1",
@@ -28,9 +28,7 @@ class SessionChecklistUiInteractionTest {
                             checkedIds = emptySet(),
                         ),
                     ),
-                    onToggle = { cardId, itemId, checked ->
-                        toggles += ToggleEvent(cardId, itemId, checked)
-                    },
+                    interactions = recordingInteractions(toggles),
                     onClose = {},
                 )
             }
@@ -44,12 +42,12 @@ class SessionChecklistUiInteractionTest {
     }
 
     @Test
-    fun checklistCardsContentCloseInvokesOnClose() {
+    fun sessionCardFeedContentCloseInvokesOnClose() {
         var closeCount = 0
 
         composeRule.setContent {
             PocketShellTheme {
-                ChecklistCardsContent(
+                SessionCardFeedContent(
                     cards = listOf(
                         checklistCard(
                             id = "card-1",
@@ -59,14 +57,14 @@ class SessionChecklistUiInteractionTest {
                             checkedIds = emptySet(),
                         ),
                     ),
-                    onToggle = { _, _, _ -> },
+                    interactions = recordingInteractions(mutableListOf()),
                     onClose = { closeCount += 1 },
                 )
             }
         }
 
         composeRule
-            .onNodeWithTag(SESSION_CHECKLIST_CLOSE_TAG)
+            .onNodeWithTag(SESSION_CARD_FEED_CLOSE_TAG)
             .performClick()
 
         assertEquals(1, closeCount)
@@ -77,6 +75,19 @@ class SessionChecklistUiInteractionTest {
         val itemId: String,
         val checked: Boolean,
     )
+
+    private fun recordingInteractions(toggles: MutableList<ToggleEvent>): SessionCardInteractions =
+        object : SessionCardInteractions {
+            override fun onToggleChecklistItem(
+                cardId: String,
+                itemId: String,
+                checked: Boolean,
+            ) {
+                toggles += ToggleEvent(cardId, itemId, checked)
+            }
+
+            override fun onSetNoteRead(cardId: String, read: Boolean) = Unit
+        }
 
     private fun checklistCard(
         id: String,

@@ -9,7 +9,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.app.cards.ChecklistCardsContent
 import com.pocketshell.app.cards.SESSION_CHECKLIST_ITEM_TAG_PREFIX
 import com.pocketshell.app.cards.SessionCardFeedContent
 import com.pocketshell.app.cards.SessionCardInteractions
@@ -31,19 +30,19 @@ import org.junit.runner.RunWith
 /**
  * Issue #1821 — the LIVE half of the nested-`imePadding()` sweep.
  *
- * ## Why these five sites are not deleted with the others
+ * ## Why these four sites are not deleted with the others
  *
  * Ten sites carried the copy-pasted `.navigationBarsPadding().imePadding()`
  * idiom. Five of them are written inline inside a `ModalBottomSheet` content
  * lambda, so the sheet is their ONLY possible composition and the modifier is
  * structurally unreachable — those are deleted (D22 hard cut).
  *
- * The other five are **extracted content composables** that are also composed
- * **standalone**, outside any `ModalBottomSheet`:
+ * The other five were extracted content composables. Issue #1872 deleted the
+ * fifth, `ChecklistCardsContent`, because it had zero production callers and
+ * repointed its gate-wired journey at the real generic feed. The remaining four
+ * are also composed **standalone**, outside any `ModalBottomSheet`:
  *
  *  - `SessionCardFeedContent`  — `SessionCardFeedRegistryTest`
- *  - `ChecklistCardsContent`   — `SessionChecklistUiInteractionTest`,
- *                                `SessionChecklistPushJourneyDockerTest`
  *  - `FolderContextActionContent` — `FolderContextActionSheetScreenshotTest`
  *  - `SessionTypePickerContent` — `SessionTypePickerNameFieldUiTest` and three
  *                                 sibling picker tests
@@ -141,20 +140,6 @@ class StandaloneContentImePaddingLivenessTest {
             SessionCardFeedContent(
                 cards = listOf(checklistCard()),
                 interactions = NoopInteractions,
-                onClose = {},
-            )
-        }
-    }
-
-    @Test
-    fun checklistCardsContentLiftsItsLastItemAboveTheKeyboard() {
-        measureStandalone(
-            site = "SessionChecklistUi.ChecklistCardsContent",
-            probeTag = SESSION_CHECKLIST_ITEM_TAG_PREFIX + "cl:build-0",
-        ) {
-            ChecklistCardsContent(
-                cards = listOf(checklistCard()),
-                onToggle = { _, _, _ -> },
                 onClose = {},
             )
         }

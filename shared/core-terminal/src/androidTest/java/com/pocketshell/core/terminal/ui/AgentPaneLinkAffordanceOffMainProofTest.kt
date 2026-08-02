@@ -100,6 +100,113 @@ class AgentPaneLinkAffordanceOffMainProofTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     /**
+     * Issue #558 (reopened): the exact long DataTalksClub URL from maintainer
+     * dogfood is painted across two rows in an agent Terminal, but the tap
+     * callback can still hold an older/empty affordance snapshot. Exercise the
+     * real TerminalView gesture recognizer with ONE physical tap per fragment;
+     * tap retries would hide the snapshot-generation bug this test guards.
+     */
+    @Test
+    fun wrappedDogfoodUrlRoutesWholeTargetFromEitherFragmentWithOneGesture() { runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val tappedUrls = mutableListOf<String>()
+        val url =
+            "https://github.com/DataTalksClub/playbooks/blob/main/campaigns/" +
+                "ml-zoomcamp-2026/copy-bank/events/pre-course-live-qa.md"
+
+        // Preload the viewport before mounting the agent Terminal. This is the
+        // dogfood shape: switching into Terminal reveals already-rendered agent
+        // output; there need not be a later output tick to heal tap routing.
+        try {
+            state.appendRemoteOutput("Pre-course Q&A\r\n$url\r\n".toByteArray(Charsets.US_ASCII))
+
+            compose.setContent {
+                TerminalSurface(
+                    state = state,
+                    modifier = Modifier,
+                    urlsEnabled = true,
+                    onUrlTap = { tappedUrls.add(it) },
+                    affordanceScannersEnabled = false,
+                    agentPaneLinkAffordancesEnabled = true,
+                )
+            }
+            compose.waitForIdle()
+            val view = waitForTerminalView()
+            val client = view.mClient as PocketShellTerminalViewClient
+
+            val regions = AtomicReference<List<UrlRegion>>(emptyList())
+            withTimeout(8_000) {
+                while (regions.get().count { it.url == url } < 2) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        regions.set(findVisibleUrls(view))
+                    }
+                }
+            }
+            val wrapped = regions.get().filter { it.url == url }.sortedBy { it.row }
+            assertTrue("dogfood URL must wrap across visual rows: $wrapped", wrapped.size >= 2)
+
+            val published = AtomicReference<List<UrlRegion>>(emptyList())
+            var firstGestureDispatched = false
+            withTimeout(8_000) {
+                while (!firstGestureDispatched) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        published.set(client.publishedUrlsForTesting?.invoke().orEmpty())
+                        if (published.get().filter { it.url == url }.size >= 2) {
+                            // Deliberately dispatch in the SAME main-loop turn that
+                            // first observes the overlay publication. The old
+                            // captured-list callback needed another recomposition,
+                            // so this one physical tap was lost despite paint.
+                            dispatchPhysicalTap(view, wrapped.first())
+                            firstGestureDispatched = true
+                        }
+                    }
+                }
+            }
+            assertEquals(
+                "the gesture callback must expose the exact generation carrying the painted fragments",
+                wrapped,
+                published.get().filter { it.url == url }.sortedBy { it.row },
+            )
+
+            // GestureDetector may confirm a single-tap asynchronously. Wait for
+            // delivery, but never send another tap — retries are exactly what hid
+            // this regression in the older proofs.
+            withTimeout(1_500) {
+                while (tappedUrls.size < 1) delay(10)
+            }
+            assertEquals("first wrapped fragment must route on its first gesture", listOf(url), tappedUrls)
+            delay(400)
+            instrumentation.runOnMainSync { dispatchPhysicalTap(view, wrapped.last()) }
+            withTimeout(1_500) {
+                while (tappedUrls.size < 2) delay(10)
+            }
+
+            assertEquals(
+                "one user gesture on each painted fragment must route the exact full URL once",
+                listOf(url, url),
+                tappedUrls,
+            )
+
+            captureViewport(view, "issue558-dogfood-wrapped-url")
+            writeIssue558RoutedUrl(instrumentation, view, url, tappedUrls)
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    } }
+
+    /**
      * Issue #871 / G2 class coverage — CODEX agent pane: a project-relative PNG
      * path (`tmp/…png`) and a schemed URL the way Codex prints them. RED on base
      * (the agent pane wired no scanner), GREEN with the off-main overlay.
@@ -517,6 +624,22 @@ class AgentPaneLinkAffordanceOffMainProofTest {
         return r.fontLineSpacingAndAscent + (region.row - view.topRow + 0.5f) * r.fontLineSpacing
     }
 
+    /** Must be called on the instrumentation main thread. */
+    private fun dispatchPhysicalTap(view: TerminalView, region: UrlRegion) {
+        val x = centreX(region, view)
+        val y = centreY(region, view)
+        val downAt = SystemClock.uptimeMillis()
+        val down = MotionEvent.obtain(downAt, downAt, MotionEvent.ACTION_DOWN, x, y, 0)
+        val up = MotionEvent.obtain(downAt, downAt + 40, MotionEvent.ACTION_UP, x, y, 0)
+        try {
+            view.dispatchTouchEvent(down)
+            view.dispatchTouchEvent(up)
+        } finally {
+            down.recycle()
+            up.recycle()
+        }
+    }
+
     private fun visibleTerminalText(view: TerminalView): String {
         var text = ""
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
@@ -551,6 +674,43 @@ class AgentPaneLinkAffordanceOffMainProofTest {
         artifactFile(ctx, "$name-visible-terminal.txt").writeText(visibleTerminalText(view))
     }
 
+    private fun writeIssue558RoutedUrl(
+        instrumentation: android.app.Instrumentation,
+        view: TerminalView,
+        expectedUrl: String,
+        tappedUrls: List<String>,
+    ) {
+        val root = view.rootView
+        var bitmap: Bitmap? = null
+        instrumentation.runOnMainSync {
+            if (root.width > 0 && root.height > 0) {
+                bitmap = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888).also {
+                    root.draw(Canvas(it))
+                }
+            }
+        }
+        bitmap?.let { captured ->
+            val screenshot = artifactFile(instrumentation.targetContext, "issue558-pixel7-wrapped-url-root.png")
+            FileOutputStream(screenshot).use { out ->
+                check(captured.compress(Bitmap.CompressFormat.PNG, 100, out))
+            }
+            println("ISSUE558_PIXEL7_VIEWPORT ${screenshot.absolutePath}")
+            captured.recycle()
+        }
+        val routed = artifactFile(instrumentation.targetContext, "issue558-routed-url.txt")
+        routed.writeText(
+            buildString {
+                appendLine("scenario=#558 exact wrapped DataTalksClub URL, real TerminalView gestures")
+                appendLine("pixel_width=${root.width}")
+                appendLine("terminal_width=${view.width}")
+                appendLine("columns=${view.mEmulator?.mColumns}")
+                appendLine("expected=$expectedUrl")
+                tappedUrls.forEachIndexed { index, value -> appendLine("routed_${index + 1}=$value") }
+            },
+        )
+        println("ISSUE558_ROUTED_URL ${routed.absolutePath}")
+    }
+
     private fun writeTimings(
         instrumentation: android.app.Instrumentation,
         lines: List<String>,
@@ -562,7 +722,12 @@ class AgentPaneLinkAffordanceOffMainProofTest {
     }
 
     private fun artifactFile(context: android.content.Context, name: String): File {
-        val dir = File(testArtifactsRoot(context), "terminal-lab").apply { mkdirs() }
+        val argDir = InstrumentationRegistry.getArguments().getString("additionalTestOutputDir")
+        val dir = if (!argDir.isNullOrBlank()) {
+            File(argDir, "terminal-lab").apply { mkdirs() }
+        } else {
+            File(testArtifactsRoot(context), "terminal-lab").apply { mkdirs() }
+        }
         return File(dir, name)
     }
 

@@ -35,6 +35,8 @@ import com.pocketshell.core.terminal.selection.safeLayoutDimension
 import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatchRegion
 import com.pocketshell.core.terminal.selection.UrlRegion
+import com.pocketshell.core.terminal.selection.ViewportRowsSnapshot
+import com.pocketshell.core.terminal.selection.extractVisibleViewportRows
 import com.pocketshell.core.terminal.selection.hitTestEngineCommand
 import com.pocketshell.core.terminal.selection.hitTestFilePath
 import com.pocketshell.core.terminal.selection.hitTestUrl
@@ -136,6 +138,72 @@ internal const val CLIPBOARD_LABEL_TERMINAL: String = "PocketShell terminal"
  * truncating to a sane prefix keeps the toast on-screen for a single line.
  */
 internal const val TOAST_PREVIEW_CHARS: Int = 60
+
+/**
+ * The exact affordance generation currently painted by a terminal overlay.
+ *
+ * This is deliberately a plain main-thread holder, not Compose state: overlay
+ * publication and TerminalView gesture dispatch both happen on Main, and the
+ * tap path must become live synchronously with publication rather than waiting
+ * for another recomposition. The Compose-state mirrors remain the inputs for
+ * overlays whose drawing lives outside their scanner.
+ */
+internal class PublishedTapAffordances {
+    private var publishedView: TerminalView? = null
+    private var publishedSession: TerminalSession? = null
+    private var publishedViewport: ViewportRowsSnapshot = ViewportRowsSnapshot.EMPTY
+    private var publishedUrls: List<UrlRegion> = emptyList()
+    private var publishedFilePaths: List<FilePathRegion> = emptyList()
+    private var publishedEngineCommands: List<EngineCommandRegion> = emptyList()
+
+    fun publish(
+        view: TerminalView,
+        session: TerminalSession,
+        viewport: ViewportRowsSnapshot,
+        urls: List<UrlRegion>,
+        filePaths: List<FilePathRegion>,
+        engineCommands: List<EngineCommandRegion>,
+    ) {
+        publishedView = view
+        publishedSession = session
+        publishedViewport = viewport
+        publishedUrls = urls
+        publishedFilePaths = filePaths
+        publishedEngineCommands = engineCommands
+    }
+
+    fun clear() {
+        publishedView = null
+        publishedSession = null
+        publishedViewport = ViewportRowsSnapshot.EMPTY
+        publishedUrls = emptyList()
+        publishedFilePaths = emptyList()
+        publishedEngineCommands = emptyList()
+    }
+
+    fun currentFor(
+        view: TerminalView,
+        currentViewport: ViewportRowsSnapshot? = null,
+    ): PublishedTapAffordanceRegions? {
+        if (publishedView !== view) return null
+        // TerminalView is deliberately reused across session attachment. View
+        // identity and even viewport bytes can therefore remain unchanged while
+        // the routing target changes. Bind every generation to the session that
+        // was present when its viewport was extracted (#558 reviewer G2).
+        if (publishedSession == null || view.currentSession !== publishedSession) return null
+        // A tap is infrequent; one cheap row-copy here is acceptable and keeps
+        // stale paint/hit regions from routing after scroll, resize, output, or
+        // session replacement. Regex/reassembly remains off Main and off-frame.
+        if ((currentViewport ?: extractVisibleViewportRows(view)) != publishedViewport) return null
+        return PublishedTapAffordanceRegions(publishedUrls, publishedFilePaths, publishedEngineCommands)
+    }
+}
+
+internal data class PublishedTapAffordanceRegions(
+    val urls: List<UrlRegion>,
+    val filePaths: List<FilePathRegion>,
+    val engineCommands: List<EngineCommandRegion>,
+)
 
 /**
  * Fire `Intent.ACTION_VIEW` for [url] from [context]. We add
@@ -273,6 +341,7 @@ fun TerminalSurface(
     viewClient.onTerminalSurfaceError = onLocalTerminalError
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
     var viewportTick by remember { mutableStateOf(0L) }
+    val publishedTapAffordances = remember { PublishedTapAffordances() }
 
     val context = LocalContext.current
 
@@ -355,6 +424,13 @@ fun TerminalSurface(
     }
 
     DisposableEffect(state, terminalView) {
+        // A new View or session surface must earn a fresh overlay publication;
+        // never let the previous pane's coordinates route during attachment.
+        publishedTapAffordances.clear()
+        onDispose { publishedTapAffordances.clear() }
+    }
+
+    DisposableEffect(state, terminalView) {
         val view = terminalView
         state.setSmartTextStagingBridge(
             if (view == null) {
@@ -404,6 +480,7 @@ fun TerminalSurface(
         withContext(Dispatchers.Main.immediate) {
             snapshotFlow { state.session }.collect { session ->
                 if (view.currentSession !== session) {
+                    publishedTapAffordances.clear()
                     runCatching {
                         view.attachSession(session)
                         if (session != null) {
@@ -540,10 +617,15 @@ fun TerminalSurface(
     // this composable (and not in TerminalSurfaceState) because URLs are a
     // view-coordinate concept, not a transcript-bytes concept — the same
     // session can render different URL sets at different sizes.
-    var visibleUrls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
-    var visibleFilePaths by remember { mutableStateOf<List<FilePathRegion>>(emptyList()) }
-    var visibleEngineCommands by remember { mutableStateOf<List<EngineCommandRegion>>(emptyList()) }
     var visibleMatchRegions by remember { mutableStateOf<List<TerminalMatchRegion>>(emptyList()) }
+    // Issue #558 (reopened): the overlay owns the paintable affordance regions,
+    // while a parent recomposition used to copy those regions into the gesture
+    // callback. That extra apply turn created a real split generation: a wrapped
+    // URL could already be underlined across both rows while onTapMaybeUrl still
+    // captured the previous empty/truncated list. Keep one stable, main-thread
+    // publication object instead. Each overlay writes it in the SAME publish
+    // turn that changes its painted regions; the gesture callback reads it at
+    // tap time, so no recomposition is required to make a painted target live.
     // Issue #770: engine-command detection is active only when the host both
     // supplies a tap sink and a non-empty command set for the detected engine.
     // Issue #796: an agent pane runs NO per-frame viewport scanner, so the
@@ -570,7 +652,7 @@ fun TerminalSurface(
             agentPaneLinkAffordancesEnabled &&
             (onFilePathTap != null || effectiveUrlTap != null)
     // The file-path tap is live when EITHER the shell-pane single-snapshot overlay
-    // OR the agent-pane off-main overlay is feeding `visibleFilePaths`.
+    // OR the agent-pane off-main overlay publishes tap affordances.
     val filePathTapActive =
         onFilePathTap != null && (filePathScannerEnabled || agentLinkOverlayEnabled)
     // Issue #1233: the ONE consolidated shell / non-agent affordance overlay
@@ -585,13 +667,12 @@ fun TerminalSurface(
             (effectiveUrlTap != null || matchScannerEnabled || filePathScannerEnabled || engineCommandsEnabled)
 
     // Issue #1233: the URL / smart-selection / file-path / engine-command hit-test
-    // snapshots (`visibleUrls` / `visibleMatchRegions` / `visibleFilePaths` /
-    // `visibleEngineCommands`) are all fed by [ShellPaneAffordanceOverlay] (shell
-    // pane) or [AgentPaneAffordanceOverlay] (agent pane) below, each from a SINGLE
-    // per-frame viewport extraction — no standalone per-frame URL scan here.
+    // painted + hit-test snapshots are fed by [ShellPaneAffordanceOverlay]
+    // (shell pane) or [AgentPaneAffordanceOverlay] (agent pane) below, each from
+    // a SINGLE per-frame viewport extraction — no standalone URL scan here.
 
-    // Install the tap-hook on the view client every time `visibleUrls`,
-    // `terminalView`, or `effectiveUrlTap` changes. The hook receives a tap
+    // Install one stable tap-hook for the current view/callback configuration.
+    // The hook receives a tap
     // in view-local pixels and returns true if the tap landed on a URL —
     // PocketShellTerminalViewClient.onSingleTapUp then lets the host handle
     // that gesture and suppresses the plain terminal tap fall-through.
@@ -599,9 +680,6 @@ fun TerminalSurface(
     DisposableEffect(
         viewClient,
         terminalView,
-        visibleUrls,
-        visibleFilePaths,
-        visibleEngineCommands,
         effectiveUrlTap,
         onFilePathTap,
         filePathTapActive,
@@ -609,20 +687,26 @@ fun TerminalSurface(
     ) {
         val view = terminalView
         val tap = effectiveUrlTap
-        // The file-path tap is live when EITHER the shell-pane on-main overlay
-        // (#500) OR the agent-pane off-main overlay (#871) is feeding
-        // `visibleFilePaths`. When neither is, the tap stays inert (its snapshot
-        // is empty and the affordance lives in Conversation, #809/#818).
+        // The file-path tap is live when EITHER the shell-pane overlay (#500) OR
+        // the agent-pane off-main overlay (#871) publishes tap affordances. When
+        // neither is active, the tap stays inert (the affordance lives in
+        // Conversation, #809/#818).
         val pathTapMaybe = if (filePathTapActive) onFilePathTap else null
         if (view == null || (tap == null && pathTapMaybe == null && engineCommandTap == null)) {
             viewClient.onTapMaybeUrl = null
+            viewClient.publishedUrlsForTesting = null
         } else {
-            val urlsSnapshot = visibleUrls
-            val pathsSnapshot = visibleFilePaths
-            val commandsSnapshot = visibleEngineCommands
             val pathTap = pathTapMaybe
             val cmdTap = engineCommandTap
-            viewClient.onTapMaybeUrl = { x, y ->
+            viewClient.onTapMaybeUrl = tapHandler@{ x, y ->
+                // Read the overlay's current published generation at gesture
+                // time. Capturing the Compose-state lists here required a later
+                // parent recomposition and was the #558 painted-but-dead link.
+                val snapshot = publishedTapAffordances.currentFor(view)
+                    ?: return@tapHandler false
+                val urlsSnapshot = snapshot.urls
+                val pathsSnapshot = snapshot.filePaths
+                val commandsSnapshot = snapshot.engineCommands
                 // URLs first: a URL's `/path` tail is already excluded from
                 // file-path detection, but keeping URL precedence here is
                 // belt-and-braces and matches the established browser route.
@@ -652,8 +736,17 @@ fun TerminalSurface(
                     }
                 }
             }
+            // A read-only test oracle for the generation the gesture callback
+            // will consult. Unlike re-running findVisibleUrls(view), this proves
+            // the callback and the painted overlay share the publication.
+            viewClient.publishedUrlsForTesting = {
+                publishedTapAffordances.currentFor(view)?.urls.orEmpty()
+            }
         }
-        onDispose { viewClient.onTapMaybeUrl = null }
+        onDispose {
+            viewClient.onTapMaybeUrl = null
+            viewClient.publishedUrlsForTesting = null
+        }
     }
 
     // Layer the vendored TerminalView under the optional SelectionOverlay
@@ -722,16 +815,27 @@ fun TerminalSurface(
                     knownCommands = if (engineCommandsEnabled) engineCommands else emptySet(),
                     scanUrls = effectiveUrlTap != null,
                     scanFilePaths = filePathScannerEnabled,
-                    onUrlsChanged = { visibleUrls = it },
-                    onFilePathsChanged = { visibleFilePaths = it },
                     onMatchesChanged = { visibleMatchRegions = it },
-                    onEngineCommandsChanged = { visibleEngineCommands = it },
+                    onAffordancesPublished = { sourceView, sourceSession, viewport, urls, paths, commands ->
+                        if (sourceView != null && sourceSession != null) {
+                            publishedTapAffordances.publish(
+                                sourceView,
+                                sourceSession,
+                                viewport,
+                                urls,
+                                paths,
+                                commands,
+                            )
+                        } else {
+                            publishedTapAffordances.clear()
+                        }
+                    },
                 )
             }
             // Issue #871: an agent pane (Codex/Claude) gets tappable file paths +
             // URLs via the OFF-main, debounced overlay — never the per-frame
-            // on-main scan. It feeds BOTH `visibleFilePaths` and `visibleUrls` for
-            // the tap hit-test and paints the affordance hairlines. The match +
+            // on-main scan. It publishes BOTH path and URL regions for the tap
+            // hit-test and paints the affordance hairlines. The match +
             // engine-command scanners stay off for an agent pane (Conversation,
             // #818, is the richer surface).
             if (agentLinkOverlayEnabled) {
@@ -739,8 +843,22 @@ fun TerminalSurface(
                     view = terminalView,
                     renderRequests = coalescedRenderRequests,
                     viewportChangeKey = viewportTick,
-                    onFilePathsChanged = { visibleFilePaths = it },
-                    onUrlsChanged = { visibleUrls = it },
+                    onFilePathsChanged = {},
+                    onUrlsChanged = {},
+                    onAffordancesPublished = { sourceView, sourceSession, viewport, urls, paths, commands ->
+                        if (sourceView != null && sourceSession != null) {
+                            publishedTapAffordances.publish(
+                                sourceView,
+                                sourceSession,
+                                viewport,
+                                urls,
+                                paths,
+                                commands,
+                            )
+                        } else {
+                            publishedTapAffordances.clear()
+                        }
+                    },
                 )
             }
         },
@@ -879,6 +997,9 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
      * matching overlay code rather than being hard-coded in this client.
      */
     var onTapMaybeUrl: ((tapX: Float, tapY: Float) -> Boolean)? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal var publishedUrlsForTesting: (() -> List<UrlRegion>)? = null
 
     fun bind(view: TerminalView) {
         terminalView = view

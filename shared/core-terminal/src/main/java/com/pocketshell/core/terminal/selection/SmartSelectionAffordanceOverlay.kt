@@ -16,6 +16,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.MeasureResult
 import androidx.compose.ui.layout.MeasureScope
 import androidx.compose.ui.unit.Constraints
+import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +67,14 @@ public fun AgentPaneAffordanceOverlay(
     viewportChangeKey: Any? = Unit,
     onFilePathsChanged: (List<FilePathRegion>) -> Unit,
     onUrlsChanged: (List<UrlRegion>) -> Unit,
+    onAffordancesPublished: (
+        TerminalView?,
+        TerminalSession?,
+        ViewportRowsSnapshot,
+        List<UrlRegion>,
+        List<FilePathRegion>,
+        List<EngineCommandRegion>,
+    ) -> Unit = { _, _, _, _, _, _ -> },
     scanDispatcher: CoroutineDispatcher = Dispatchers.Default,
     modifier: Modifier = Modifier,
 ) {
@@ -73,6 +82,7 @@ public fun AgentPaneAffordanceOverlay(
     var urls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
     val latestOnPathsChanged by rememberUpdatedState(onFilePathsChanged)
     val latestOnUrlsChanged by rememberUpdatedState(onUrlsChanged)
+    val latestOnAffordancesPublished by rememberUpdatedState(onAffordancesPublished)
 
     LaunchedEffect(view, renderRequests, viewportChangeKey, scanDispatcher) {
         if (view == null) {
@@ -80,6 +90,14 @@ public fun AgentPaneAffordanceOverlay(
             urls = emptyList()
             latestOnPathsChanged(emptyList())
             latestOnUrlsChanged(emptyList())
+            latestOnAffordancesPublished(
+                null,
+                null,
+                ViewportRowsSnapshot.EMPTY,
+                emptyList(),
+                emptyList(),
+                emptyList(),
+            )
             return@LaunchedEffect
         }
         // The Main dispatcher. The cheap viewport extraction and the Compose-state
@@ -109,7 +127,9 @@ public fun AgentPaneAffordanceOverlay(
             renderRequests.onStart { emit(Unit) }.conflate().collect {
                 // CHEAP, on Main: copy the live, non-thread-safe viewport into a
                 // plain-data snapshot.
-                val snapshot = withContext(mainDispatcher) { extractVisibleViewportRows(view) }
+                val (sourceSession, snapshot) = withContext(mainDispatcher) {
+                    view.currentSession to extractVisibleViewportRows(view)
+                }
                 // EXPENSIVE, OFF Main: regex + wrapped-line reassembly. This is the
                 // per-frame cost that caused the #803/#866 ANR; here it never touches
                 // the UI thread.
@@ -131,6 +151,17 @@ public fun AgentPaneAffordanceOverlay(
                         urls = freshUrls
                         latestOnUrlsChanged(freshUrls)
                     }
+                    // Commit marker: callbacks above stage every region list;
+                    // publishing the source viewport LAST makes paint + hit-test
+                    // one atomic main-thread generation (#558 reopened).
+                    latestOnAffordancesPublished(
+                        view,
+                        sourceSession,
+                        snapshot,
+                        freshUrls,
+                        freshPaths,
+                        emptyList(),
+                    )
                 }
             }
         }

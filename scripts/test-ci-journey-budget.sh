@@ -978,6 +978,25 @@ for diagnostic in device-processes.txt activity-processes.txt activity-top.txt; 
   [[ -f "$attempt_root/attempt-1/$diagnostic" ]] \
     || fail "(artifacts) timeout attempt is missing $diagnostic"
 done
+attempt_1_process_snapshot="$attempt_root/attempt-1/activity-processes.txt"
+attempt_1_manifest="$attempt_root/attempt-1/manifest.txt"
+attempt_1_capture_token="$(sed -n 's/^capture_token=//p' "$attempt_1_manifest" | tail -n 1)"
+[[ "$attempt_1_capture_token" =~ ^[0-9a-f]{64}$ ]] \
+  || fail "(artifacts) timeout manifest is missing its per-attempt capture token"
+grep -Fqx "POCKETSHELL_ATTEMPT_CAPTURE_TOKEN=$attempt_1_capture_token" \
+  "$attempt_1_process_snapshot" \
+  || fail "(artifacts) process snapshot is not bound to its attempt token"
+grep -Fqx \
+  "activity_processes_sha256=$(sha256sum "$attempt_1_process_snapshot" | awk '{ print $1 }')" \
+  "$attempt_1_manifest" \
+  || fail "(artifacts) process snapshot digest was not sealed into its manifest"
+grep -Fqx \
+  "activity_processes_size_bytes=$(wc -c < "$attempt_1_process_snapshot")" \
+  "$attempt_1_manifest" \
+  || fail "(artifacts) process snapshot size was not sealed into its manifest"
+grep -Eq '^activity_processes_captured_at_utc=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+  "$attempt_1_manifest" \
+  || fail "(artifacts) process snapshot capture time was not sealed into its manifest"
 grep -q '^primary_exit_code=124$' "$attempt_root/attempt-1/manifest.txt" \
   || fail "(artifacts) timeout manifest did not preserve the primary rc=124"
 grep -q '^application_id_suffix=i1458$' "$attempt_root/attempt-1/manifest.txt" \

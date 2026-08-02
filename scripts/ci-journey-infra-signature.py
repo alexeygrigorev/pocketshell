@@ -66,11 +66,13 @@ Exit status is always 0: the caller decides the verdict from the classification.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
 import sys
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 
 # The ONE captured environment signature (issue #1800 / run 30305256109).
 REAL_IME_UNAVAILABLE_SIGNATURE = (
@@ -86,11 +88,73 @@ ACTIVE_WINDOW_PACKAGE = re.compile(
 APP_WINDOW_FOCUS_STATE = re.compile(
     r"app_window_focused=(true|false)\s+active_window_pkg=([^\s,;.]+)",
 )
+# Issue #788 / exact-main run 30747057492: these are bounded focus-handoff
+# preconditions, not the load-bearing IME/Copy assertions themselves.  They may
+# join #1919's foreign-framework-ANR classification only when the failure also
+# says the current window belongs to `android` AND the attempt-local process
+# snapshot independently proves the sole ANR dialog belongs to a foreign app.
+# Keep the strings exact and intentionally small: an arbitrary focus, Copy, or
+# composer failure must never enter the environmental branch.
+FOCUS_HANDOFF_PRECONDITION_SIGNATURES = (
+    "the sent-snippet modal must release input focus before the "
+    "keyboard-up shell-composer phase:",
+    "file-viewer activity must regain focus after the synthetic owner is "
+    "dismissed;",
+)
 ANDROID_PACKAGE = re.compile(
     r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+",
 )
 POCKETSHELL_APP_PACKAGE_PREFIX = "com.pocketshell.app"
 ATTEMPT_DIRECTORY = re.compile(r"attempt-[1-9][0-9]*")
+CAPTURE_TOKEN = re.compile(r"[0-9a-f]{64}")
+# Run 30747057492 predates capture-time manifest digests.  Preserve only its
+# four byte-exact process dumps, pinned to their full selector, attempt, and UTC
+# interval.  New captures must carry the manifest binding written by
+# ci-journey-budget-functions.sh; this immutable legacy set exists solely so
+# the exact reviewed incident remains classifiable without making arbitrary
+# unhashed artifacts eligible.
+LEGACY_ISSUE788_ACTIVITY_PROCESS_BINDINGS = {
+    (
+        "com.pocketshell.app.tmux.TmuxShellComposerOcclusionE2eTest"
+        "#shellComposerControlsAreVisibleAndReachableInBothKeyboardStates",
+        "1",
+        "2026-08-02T13:11:06Z",
+        "2026-08-02T13:11:53Z",
+    ): (
+        "a993fbf8a7cd1c74b0c5674a38e325484f0d9a1e82c58d1fb2993bd6c24975af",
+        268193,
+    ),
+    (
+        "com.pocketshell.app.tmux.TmuxShellComposerOcclusionE2eTest"
+        "#shellComposerControlsAreVisibleAndReachableInBothKeyboardStates",
+        "2",
+        "2026-08-02T13:11:53Z",
+        "2026-08-02T13:12:41Z",
+    ): (
+        "f5f263d38f61a5beb1a5f4ca1b9a17fc132a0900f630ec845006783f2567f3ee",
+        268681,
+    ),
+    (
+        "com.pocketshell.app.fileviewer.FileViewerDockerTest"
+        "#moduleOneArticleListsRenderIntactAndContinuedLinkOpensExactUrl",
+        "1",
+        "2026-08-02T13:19:45Z",
+        "2026-08-02T13:20:17Z",
+    ): (
+        "9277216eab2f2da8b7a9c4450c956424f952d1a728db198d177e0476e23b95f8",
+        268009,
+    ),
+    (
+        "com.pocketshell.app.fileviewer.FileViewerDockerTest"
+        "#moduleOneArticleListsRenderIntactAndContinuedLinkOpensExactUrl",
+        "2",
+        "2026-08-02T13:20:17Z",
+        "2026-08-02T13:20:49Z",
+    ): (
+        "56bdc66954f6bfeafa39799a26997a165a9e5d62679b3f608e0b679833937bda",
+        268262,
+    ),
+}
 PROCESS_HEADER = re.compile(
     r"^\s*\*APP\*.*?\bProcessRecord\{[^{}\n]*?\s+[0-9]+:([^/\s}]+)/[^\s}]+\}",
 )
@@ -244,15 +308,28 @@ def _is_real_ime_environment_failure(text: str) -> bool:
 
 def _is_framework_focus_precondition(text: str) -> bool:
     if (
-        REAL_IME_UNAVAILABLE_SIGNATURE not in text
-        and APP_WINDOW_FOCUS_SIGNATURE not in text
+        REAL_IME_UNAVAILABLE_SIGNATURE in text
+        or APP_WINDOW_FOCUS_SIGNATURE in text
+    ):
+        states = APP_WINDOW_FOCUS_STATE.findall(text)
+        return bool(states) and all(
+            focused == "false" and package == "android"
+            for focused, package in states
+        )
+
+    # The #1942/#1855 repaired journeys establish focus at a handoff boundary
+    # before exercising their real IME/Copy oracles.  Run 30747057492 caught a
+    # launcher ANR already standing above both classes in one boot.  The
+    # composer reports the full app-window state while FileViewer reports the
+    # active owner after dismissing only its own synthetic dialog.  Accept both
+    # exact causal messages here; _foreign_anr_owner() remains the independent,
+    # attempt-local ownership gate before either can affect the shard verdict.
+    if not any(
+        signature in text for signature in FOCUS_HANDOFF_PRECONDITION_SIGNATURES
     ):
         return False
-    states = APP_WINDOW_FOCUS_STATE.findall(text)
-    return bool(states) and all(
-        focused == "false" and package == "android"
-        for focused, package in states
-    )
+    owners = ACTIVE_WINDOW_PACKAGE.findall(text)
+    return bool(owners) and all(owner == "android" for owner in owners)
 
 
 def _foreign_anr_owner(snapshot_path: str) -> str | None:
@@ -317,6 +394,113 @@ def _foreign_anr_owner(snapshot_path: str) -> str | None:
     if len(ANY_ANR_DIALOG.findall(text)) != 1:
         return None
     return package
+
+
+def _attempt_provenance_matches(
+    attempt_dir: str, classname: str, snapshot_path: str
+) -> bool:
+    """Require the snapshot's own completed class-attempt manifest.
+
+    The suite deletes/recreates each attempt directory before execution, then
+    writes the process snapshot and finalises this manifest in that directory.
+    Binding the framework-ANR exception to its class, attempt number, and
+    monotonic UTC interval prevents evidence from a sibling attempt/root from
+    being copied or linked in to license a failure it did not accompany.
+    """
+    manifest_path = os.path.join(attempt_dir, "manifest.txt")
+    if not _is_readable_regular_file(manifest_path):
+        return False
+    values: dict[str, list[str]] = {}
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.rstrip("\n")
+                if "=" not in line:
+                    return False
+                key, value = line.split("=", 1)
+                if not key:
+                    return False
+                values.setdefault(key, []).append(value)
+    except (OSError, UnicodeError):
+        return False
+
+    def last(key: str) -> str | None:
+        entries = values.get(key, [])
+        return entries[-1] if entries else None
+
+    attempt_match = ATTEMPT_DIRECTORY.fullmatch(os.path.basename(attempt_dir))
+    if attempt_match is None:
+        return False
+    selector = last("class") or ""
+    attempt = os.path.basename(attempt_dir).removeprefix("attempt-")
+    started_text = last("started_at_utc") or ""
+    finished_text = last("finished_at_utc") or ""
+    if (
+        last("format_version") != "1"
+        or last("module") != "app"
+        or selector.split("#", 1)[0] != classname
+        or last("attempt") != attempt
+        or last("snapshot_status") != "complete"
+        or last("status") != "complete"
+    ):
+        return False
+
+    try:
+        started = datetime.strptime(
+            started_text, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+        finished = datetime.strptime(
+            finished_text, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    if started > finished or not _is_readable_regular_file(snapshot_path):
+        return False
+
+    try:
+        snapshot_size = os.stat(snapshot_path, follow_symlinks=False).st_size
+        with open(snapshot_path, "rb") as handle:
+            snapshot_bytes = handle.read()
+        snapshot_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
+    except OSError:
+        return False
+
+    bound_sha256 = last("activity_processes_sha256")
+    bound_size = last("activity_processes_size_bytes")
+    captured_text = last("activity_processes_captured_at_utc")
+    capture_token = last("capture_token")
+    binding_fields = (bound_sha256, bound_size, captured_text, capture_token)
+    if all(field is None for field in binding_fields):
+        return LEGACY_ISSUE788_ACTIVITY_PROCESS_BINDINGS.get(
+            (selector, attempt, started_text, finished_text)
+        ) == (snapshot_sha256, snapshot_size)
+    if any(field is None for field in binding_fields):
+        return False
+    assert capture_token is not None
+    if CAPTURE_TOKEN.fullmatch(capture_token) is None:
+        return False
+    expected_marker = (
+        f"\nPOCKETSHELL_ATTEMPT_CAPTURE_TOKEN={capture_token}\n".encode("ascii")
+    )
+    if not snapshot_bytes.endswith(expected_marker):
+        return False
+    if snapshot_bytes.count(b"POCKETSHELL_ATTEMPT_CAPTURE_TOKEN=") != 1:
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", bound_sha256):
+        return False
+    if not re.fullmatch(r"[1-9][0-9]*", bound_size):
+        return False
+    try:
+        captured = datetime.strptime(
+            captured_text, "%Y-%m-%dT%H:%M:%SZ"
+        ).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (
+        started <= captured <= finished
+        and bound_sha256 == snapshot_sha256
+        and int(bound_size) == snapshot_size
+    )
 
 
 def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
@@ -386,9 +570,15 @@ def classify(summary_path: str, roots: list[str]) -> dict[str, object]:
                         kinds.append("real_ime")
                     elif _is_framework_focus_precondition(text):
                         if snapshot_owner is None:
-                            snapshot_owner = _foreign_anr_owner(
-                                os.path.join(attempt_dir, "activity-processes.txt"),
+                            snapshot_path = os.path.join(
+                                attempt_dir, "activity-processes.txt"
                             )
+                            if _attempt_provenance_matches(
+                                attempt_dir, base, snapshot_path
+                            ):
+                                snapshot_owner = _foreign_anr_owner(
+                                    snapshot_path,
+                                )
                         kinds.append("framework_anr" if snapshot_owner else "offender")
                     else:
                         kinds.append("offender")

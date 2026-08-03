@@ -1910,13 +1910,14 @@ private fun TmuxSessionSheetsRegion(
             request = request,
             targetSessionId = composerQueueSessionKey,
             fallbackPaneId = surfacePane?.paneId.orEmpty(),
-            sendAgentPayload = { paneId, text, agentKind, sendToken, durableRow ->
+            sendAgentPayload = { paneId, text, agentKind, sendToken, durableRow, deliveryProof ->
                 viewModel.sendAgentPayloadToPaneResult(
                     paneId,
                     text,
                     agentKind,
                     sendToken,
                     durableRow,
+                    deliveryProof,
                 ).isSuccess
             },
             sendToAgent = { paneId, text, sendToken, durableRow ->

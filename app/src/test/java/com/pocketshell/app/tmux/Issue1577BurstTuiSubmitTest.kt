@@ -491,6 +491,34 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
         assertTrue("generic turnover must retain its 800ms ceiling: elapsed=$elapsed", elapsed < 1_000L)
     }
 
+    /**
+     * Issue #1944 / #1207: a catalog-approved TUI-only control has no transcript
+     * turn by contract. Its acknowledged tmux Enter therefore completes the
+     * durable control row without weakening the turnover oracle for prompts.
+     */
+    @Test
+    fun tuiOnlyControlUsesAcknowledgedEnterInsteadOfImpossibleTranscriptTurn() = runTest(scheduler) {
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            neverConsumesEnter = true,
+        )
+        val vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0",
+            "/model",
+            AgentKind.ClaudeCode,
+            sendToken = "tui-control-row",
+            durableRow = durableRow("tui-control-row", "/model"),
+            deliveryProof = AgentSubmitDeliveryProof.TmuxEnterAccepted,
+        )
+
+        assertTrue(result.isSuccess)
+        assertTrue(client.sentCommands.any { it.endsWith(" Enter") })
+    }
+
     /** An animated spinner/footer is not row-correlated submit evidence. */
     @Test
     fun unrelatedFrameChangeWhilePayloadRemainsInInputIsNotDeliverySuccess() = runTest(scheduler) {

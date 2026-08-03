@@ -67,6 +67,16 @@ internal class AgentTranscriptAuthority(
         }
     }
 
+    fun baselineFor(
+        deliveryProof: AgentSubmitDeliveryProof,
+        paneId: String,
+        payload: String,
+    ): Baseline? = if (deliveryProof == AgentSubmitDeliveryProof.AgentTurnover) {
+        baseline(paneId, payload)
+    } else {
+        null
+    }
+
     fun timeoutMs(baseline: Baseline?): Long {
         if (baseline != null) return AGENT_TRANSCRIPT_TURNOVER_TIMEOUT_MS
         DiagnosticEvents.record(

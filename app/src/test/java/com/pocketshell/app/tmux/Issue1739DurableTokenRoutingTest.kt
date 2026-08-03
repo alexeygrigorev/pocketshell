@@ -30,6 +30,7 @@ class Issue1739DurableTokenRoutingTest {
                 ),
                 expectedLane = "agent-payload",
                 expectedPayload = "agent payload",
+                expectedDeliveryProof = AgentSubmitDeliveryProof.AgentTurnover,
             ),
             RouteCase(
                 name = "conversation echo",
@@ -50,6 +51,7 @@ class Issue1739DurableTokenRoutingTest {
                 ),
                 expectedLane = "agent-payload",
                 expectedPayload = "/model",
+                expectedDeliveryProof = AgentSubmitDeliveryProof.TmuxEnterAccepted,
             ),
             RouteCase(
                 name = "raw bytes",
@@ -80,6 +82,9 @@ class Issue1739DurableTokenRoutingTest {
                 DurableOutboundRowIdentity(SESSION_ID, DURABLE_ROW_ID),
                 calls.single().durableRow,
             )
+            case.expectedDeliveryProof?.let {
+                assertEquals("${case.name} must use its route-specific delivery proof", it, calls.single().deliveryProof)
+            }
         }
     }
 
@@ -307,8 +312,9 @@ class Issue1739DurableTokenRoutingTest {
             agent: AgentKind,
             sendToken: String,
             durableRow: DurableOutboundRowIdentity?,
-        ) -> Boolean = { paneId, text, _, sendToken, durableRow ->
-            calls += WireCall("agent-payload", paneId, text, sendToken, durableRow)
+            deliveryProof: AgentSubmitDeliveryProof,
+        ) -> Boolean = { paneId, text, _, sendToken, durableRow, deliveryProof ->
+            calls += WireCall("agent-payload", paneId, text, sendToken, durableRow, deliveryProof)
             true
         },
     ): Boolean =
@@ -340,8 +346,15 @@ class Issue1739DurableTokenRoutingTest {
         calls: MutableList<WireCall>,
         onPaste: () -> Unit,
         onEnter: () -> Unit,
-    ): suspend (String, String, AgentKind, String, DurableOutboundRowIdentity?) -> Boolean =
-        { paneId, text, _, sendToken, durableRow ->
+    ): suspend (
+        String,
+        String,
+        AgentKind,
+        String,
+        DurableOutboundRowIdentity?,
+        AgentSubmitDeliveryProof,
+    ) -> Boolean =
+        { paneId, text, _, sendToken, durableRow, _ ->
             calls += WireCall("agent-payload", paneId, text, sendToken, durableRow)
             when (
                 verifyBeforeAgentResend(
@@ -379,6 +392,7 @@ class Issue1739DurableTokenRoutingTest {
         val request: PromptComposerViewModel.SendRequest,
         val expectedLane: String,
         val expectedPayload: String,
+        val expectedDeliveryProof: AgentSubmitDeliveryProof? = null,
     )
 
     private data class WireCall(
@@ -387,6 +401,7 @@ class Issue1739DurableTokenRoutingTest {
         val payload: String,
         val sendToken: String,
         val durableRow: DurableOutboundRowIdentity?,
+        val deliveryProof: AgentSubmitDeliveryProof? = null,
     )
 
     private companion object {

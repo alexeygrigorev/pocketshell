@@ -77,5 +77,10 @@ internal class OutboundSendConsumerRegistry {
     fun canDispatch(): Boolean = !registrationRequired || activeGeneration.get() != null
 
     fun accepts(generation: Long, requestGeneration: Long?): Boolean =
-        requestGeneration == generation && activeGeneration.get() == generation
+        activeGeneration.get() == generation &&
+            // Before the first screen registers, dispatch is intentionally
+            // allowed and carries no generation. Only the active consumer may
+            // adopt that bootstrap request; concrete generations stay exact so
+            // a replacement cannot steal work emitted for a retired screen.
+            (requestGeneration == null || requestGeneration == generation)
 }

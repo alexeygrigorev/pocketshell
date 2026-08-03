@@ -11,20 +11,41 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextClearance
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
+import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
+import com.pocketshell.app.composer.COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
+import com.pocketshell.app.composer.OutboundItem
+import com.pocketshell.app.composer.composerOutboundQueueItemRowTestTag
 import com.pocketshell.app.composer.OutboundState
+import com.pocketshell.app.composer.OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE
+import com.pocketshell.app.composer.OUTBOUND_MAX_AUTO_ATTEMPTS
+import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.DiagnosticPrivacy
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.AGENT_SUBMIT_ACK_TIMEOUT_MS
@@ -33,19 +54,28 @@ import com.pocketshell.app.tmux.OutboundDeliverySeams
 import com.pocketshell.app.tmux.PasteChunkSeams
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.durableTmuxSessionKey
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
+import com.pocketshell.app.voice.SESSION_COMPOSER_UNSENT_BADGE_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
 import java.io.File
-import java.io.FileOutputStream
+import java.util.Base64
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -144,7 +174,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     /** Issue #1819: the last sidecar SSH read error, so a blank frame can name its cause. */
     private var lastSidecarFailure: String? = null
-    private val timings = mutableListOf<String>()
+    private val artifacts = OutboundAcceptanceArtifacts(DEVICE_DIR_NAME) { testName.methodName }
+    private val queueViewport = OutboundQueueViewportCapture(compose, artifacts, ::visibleTerminalText)
 
     private suspend fun seedBeforeLaunch() {
         clearLastSessionPrefs()
@@ -311,6 +342,405 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             verifies.any { it.fields["outcome"] == "AlreadyLanded" },
         )
         writeTimings()
+    } }
+
+    @Test
+    fun fallbackQueueRowsSurviveSessionSwitchAndDrainOnlyIntoSameGeneration() { runBlocking<Unit> {
+        enableIssue1944FramedFakeAgent()
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("initial attach") { it.contains(FAKE_AGENT_READY) }
+        waitForConnected("initial attach")
+
+        val tmuxVm = currentViewModel()
+        // Cold Live/frame delivery may precede immutable tree identity binding.
+        compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
+            tmuxVm.currentTargetSessionKeyForTest()?.startsWith("tmux:") == true
+        }
+        val originalDurableA = requireNotNull(tmuxVm.currentTargetSessionKeyForTest())
+        assertTrue("A must open with its durable tree identity", originalDurableA.startsWith("tmux:"))
+        val hostId = originalDurableA.removePrefix("tmux:").substringBefore(':').toLong()
+        val renamedA = "$SESSION_NAME-renamed"
+        renameCurrentSessionThroughUi(renamedA)
+        waitForConnected("rename navigation")
+        val kindResult = execRemoteSetupUntilReady(
+            key = SshKey.Pem(fixtureKey),
+            command = "tmux set-option -t ${shellQuote(renamedA)} @ps_agent_kind claude",
+            description = "issue1944 bind renamed fake-agent kind",
+        )
+        assertEquals("fake-agent kind tag must update", 0, kindResult.exitCode)
+        val durableA = requireNotNull(currentViewModel().currentTargetSessionKeyForTest())
+        assertEquals(
+            "rename navigation must carry the same immutable tmux generation",
+            originalDurableA,
+            durableA,
+        )
+        val bIdentity = execRemoteSetupUntilReady(
+            key = SshKey.Pem(fixtureKey),
+            command = "tmux display-message -p -t ${shellQuote("=$SESSION_B:")} " +
+                shellQuote("#{session_id}|#{session_created}"),
+            description = "issue1944 session-B immutable identity",
+        )
+        val bFields = bIdentity.stdout.trim().split('|')
+        assertEquals("session-B identity must contain id+created", 2, bFields.size)
+        val durableB = requireNotNull(
+            durableTmuxSessionKey(hostId, bFields[0], bFields[1].toLongOrNull()),
+        )
+        switchSessionFromMoreMenu(SESSION_B, durableB)
+        switchSessionFromMoreMenu(renamedA, durableA)
+        waitForVisibleTerminal("renamed A after recorded-kind refresh") { it.contains(FAKE_AGENT_READY) }
+        val vm = currentViewModel()
+        waitForDetectionBound(vm)
+        openConversationTab(vm)
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            vm.currentRecordedAgentRouteEvidence.value?.durableSessionKey == durableA
+        }
+        val routeEvidenceBeforeOutage = requireNotNull(vm.currentRecordedAgentRouteEvidence.value)
+        assertEquals(durableA, routeEvidenceBeforeOutage.durableSessionKey)
+        val clientBeforeOutage = vm.currentClientIdentityForTest()
+        val generationBeforeOutage = vm.currentConnectGenerationForTest()
+        val fallbackA = "$hostId/$renamedA"
+        val store = SharedPrefsOutboundQueueStore(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+        )
+        store.clearSession(fallbackA)
+        store.clearSession(durableA)
+
+        val nonce = SystemClock.elapsedRealtime().toString().takeLast(6)
+        val firstPayload = "issue1944-first-$nonce"
+        val secondPayload = "issue1944-second-$nonce"
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
+            .performClick()
+        waitForComposerReady(expectQueue = false)
+        vm.forceUnrecoverableHostForTest = true
+        assertTrue("the clean outage must cut the live client", vm.triggerCleanPassiveDropForTest())
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            currentConnectionStatus() !is TmuxSessionViewModel.ConnectionStatus.Connected &&
+                !currentViewModel().isSendTransportWritable()
+        }
+        assertEquals(
+            "same-generation/pane recorded agent evidence must survive the outage",
+            routeEvidenceBeforeOutage,
+            vm.currentRecordedAgentRouteEvidence.value,
+        )
+        val fallbackEnqueueStartedAt = SystemClock.elapsedRealtime()
+        openComposerAndSend(firstPayload)
+        waitForIssue1739Boundary(
+            timeoutMs = UI_TIMEOUT_MS,
+            label = "first real composer send settled as queued while unavailable",
+            timeoutDetails = {
+                "rows=${store.itemsFor(fallbackA).map { Triple(it.id, it.cleanText, it.state) }} " +
+                    "sendInFlight=${currentPromptComposerViewModel().uiState.value.sendInFlight} " +
+                    "queueEvents=${diagnostics!!.events.filter { event ->
+                        event.name == "row_state" || event.name == "composer_send" ||
+                            event.name == "composer_send_deferred_to_queue" ||
+                            event.name == "drain_attempt"
+                    }.map { it.name to it.fields }} " +
+                    "events=${boundedEventTail(diagnostics!!.events)}"
+            },
+        ) {
+            val rows = store.itemsFor(fallbackA)
+            rows.size == 1 && rows.single().cleanText == firstPayload &&
+                rows.single().state == OutboundState.Queued &&
+                !currentPromptComposerViewModel().uiState.value.sendInFlight
+        }
+        openComposerAndSend(secondPayload)
+        waitForIssue1739Boundary(
+            timeoutMs = UI_TIMEOUT_MS,
+            label = "two real composer sends committed",
+            timeoutDetails = {
+                    "durable=${store.itemsFor(durableA).map { Triple(it.id, it.cleanText, it.state) }} " +
+                    "fallback=${store.itemsFor(fallbackA).map { Triple(it.id, it.cleanText, it.state) }} " +
+                    "draft=${draftText()} queueEvents=${diagnostics!!.events.filter { event ->
+                        event.name == "row_state" || event.name == "composer_send" ||
+                            event.name == "composer_send_deferred_to_queue"
+                    }.map { it.name to it.fields }} " +
+                    "events=${boundedEventTail(diagnostics!!.events)}"
+            },
+        ) {
+            val durableRows = store.itemsFor(durableA)
+            val fallbackRows = store.itemsFor(fallbackA)
+            durableRows.size + fallbackRows.size >= 2 &&
+                (durableRows + fallbackRows).all { it.state == OutboundState.Queued } &&
+                !currentPromptComposerViewModel().uiState.value.sendInFlight
+        }
+        val queued = store.itemsFor(fallbackA)
+        assertEquals(listOf(firstPayload, secondPayload), queued.map { it.cleanText })
+        assertTrue("outage rows stay Queued rather than being parked Failed", queued.all { it.state == OutboundState.Queued })
+        assertTrue("durable identity must stay empty before live generation settles", store.itemsFor(durableA).isEmpty())
+        assertTrue("fallback rows preserve exact tmux generation evidence", queued.all {
+            it.tmuxSessionId == routeEvidenceBeforeOutage.durableSessionKey
+                .removePrefix("tmux:$hostId:").substringBeforeLast(':') &&
+                it.tmuxSessionCreated != null &&
+                it.paneId == routeEvidenceBeforeOutage.paneId
+        })
+        recordTiming("fallback_two_rows_committed_ms", SystemClock.elapsedRealtime() - fallbackEnqueueStartedAt)
+        compose.onNode(
+            hasContentDescription("2 unsent") and
+                androidx.compose.ui.test.hasTestTag(SESSION_COMPOSER_UNSENT_BADGE_TAG),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        waitForComposerReady(expectQueue = true)
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG, useUnmergedTree = true)
+            .performClick()
+        queueViewport.capture("issue1944-queued-before-switch", queued)
+        assertTrue(
+            "outage must remain controller-non-Connected through both sends",
+            currentConnectionStatus() !is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse(
+            "outage wire oracle must remain false through both sends",
+            currentViewModel().isSendTransportWritable(),
+        )
+        val queuedIds = queued.map { it.id }
+        val serverWhileDown = runBlocking { sidecarCapturePane(renamedA) }
+        assertFalse(serverWhileDown.contains(firstPayload))
+        assertFalse(serverWhileDown.contains(secondPayload))
+
+        pressSystemBack()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        SystemClock.sleep(250)
+        assertEquals(queuedIds, store.itemsFor(fallbackA).map { it.id })
+        assertTrue(
+            "CREATED interval must remain controller-non-Connected",
+            currentConnectionStatus() !is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse(
+            "CREATED interval must remain wire-unavailable",
+            currentViewModel().isSendTransportWritable(),
+        )
+        val createdCapture = runBlocking { sidecarCapturePane(renamedA) }
+        assertFalse("foreground-only: no first delivery while CREATED", createdCapture.contains(firstPayload))
+        assertFalse("foreground-only: no second delivery while CREATED", createdCapture.contains(secondPayload))
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        waitForComposerReady(expectQueue = true)
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG, useUnmergedTree = true).performClick()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        SystemClock.sleep(250)
+        assertEquals(queuedIds, store.itemsFor(fallbackA).map { it.id })
+        assertTrue("open-sheet CREATED must not submit", readFakeAgentSubmitLedger().isEmpty())
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        pressSystemBack()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
+
+        clickTmuxBack()
+        vm.forceUnrecoverableHostForTest = false
+        val bOpenStartedAt = SystemClock.elapsedRealtime()
+        openSessionFromFolder(SESSION_B)
+        waitForVisibleTerminal("open B") { it.contains(SESSION_B_MARKER) }
+        assertTrue("session B must never own A rows", store.itemsFor("$hostId/$SESSION_B").isEmpty())
+        assertTrue(
+            "session B durable key must never own A rows",
+            store.itemsFor(requireNotNull(currentViewModel().currentTargetSessionKeyForTest())).isEmpty(),
+        )
+        compose.onNodeWithTag(SESSION_COMPOSER_UNSENT_BADGE_TAG, useUnmergedTree = true)
+            .assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { hasNode(COMPOSER_DRAFT_TAG) }
+        assertTrue(
+            "B composer must not render A's first row",
+            compose.onAllNodesWithText(firstPayload, substring = true, useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
+        assertTrue(
+            "B composer must not render A's second row",
+            compose.onAllNodesWithText(secondPayload, substring = true, useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
+        captureViewportArtifacts("issue1944-b-isolated")
+        recordTiming("b_isolated_ui_ms", SystemClock.elapsedRealtime() - bOpenStartedAt)
+        pressSystemBack()
+
+        val bVm = currentViewModel()
+        val clientAtB = bVm.currentClientIdentityForTest()
+        val generationAtB = bVm.currentConnectGenerationForTest()
+        assertTrue("B must be reached through a fresh client", clientAtB != null && clientAtB != clientBeforeOutage)
+        assertTrue("the reconnect generation must advance", generationAtB > generationBeforeOutage)
+        bVm.forceUnrecoverableHostForTest = true
+        assertTrue("B transport cut must hold A offline for UI proof", bVm.triggerCleanPassiveDropForTest())
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !currentViewModel().isSendTransportWritable() }
+        val aReturnStartedAt = SystemClock.elapsedRealtime()
+        clickTmuxBack()
+        openSessionFromFolder(renamedA, waitForConnection = false)
+        val offlineAIntent = requireNotNull(currentViewModel().latestRestoreIntentSnapshot())
+        assertEquals("cached row must target renamed A while offline", renamedA, offlineAIntent.sessionName)
+        assertEquals(durableA.removePrefix("tmux:$hostId:").substringBeforeLast(':'), offlineAIntent.tmuxSessionId)
+        assertEquals(durableA.substringAfterLast(':').toLong(), offlineAIntent.sessionCreated)
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            store.itemsFor(fallbackA).map { it.id } == queuedIds
+        }
+        assertTrue("durable owner must stay empty before A wire truth settles", store.itemsFor(durableA).isEmpty())
+        compose.onNode(
+            hasContentDescription("2 unsent") and
+                androidx.compose.ui.test.hasTestTag(SESSION_COMPOSER_UNSENT_BADGE_TAG),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        waitForComposerReady(expectQueue = true)
+        compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG, useUnmergedTree = true).performClick()
+        queueViewport.capture("issue1944-a-returned-queued", store.itemsFor(fallbackA))
+        val returnedOfflineRows = store.itemsFor(fallbackA)
+        assertEquals(
+            "offline retry may advance only attempt time; payload, identity, route, and wire fields must survive",
+            queued,
+            returnedOfflineRows.mapIndexed { index, row ->
+                row.copy(lastAttemptAtMs = queued[index].lastAttemptAtMs)
+            },
+        )
+        assertEquals(listOf(0, 0), returnedOfflineRows.map { it.attemptCount })
+        recordTiming("a_rows_visible_before_heal_ms", SystemClock.elapsedRealtime() - aReturnStartedAt)
+        pressSystemBack()
+
+        val healStartedAt = SystemClock.elapsedRealtime()
+        val activeAVm = currentViewModel()
+        assertTrue("the Activity must still route connectivity to its active host VM", activeAVm === bVm)
+        activeAVm.forceUnrecoverableHostForTest = false
+        SystemClock.sleep(250)
+        assertEquals("clearing the fixture alone must not deliver", queuedIds, store.itemsFor(fallbackA).map { it.id })
+        assertTrue("clearing the fixture alone must not reach the server", readFakeAgentSubmitLedger().isEmpty())
+        activeAVm.onNetworkChanged(
+            TerminalNetworkChange(
+                previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                current = TerminalNetworkSnapshot.Validated("issue-1944-restored"),
+                previousValidated = null,
+                reason = "issue-1944-foreground-network-restored",
+                sequence = 1_944L,
+                kind = TerminalNetworkChangeKind.NetworkRestored,
+            ),
+        )
+        waitForConnected("heal returned A")
+        waitForVisibleTerminal("return to A") { it.contains(FAKE_AGENT_READY) }
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            store.itemsFor(fallbackA).isEmpty() &&
+                (store.itemsFor(durableA).map { it.id } == queuedIds || store.itemsFor(durableA).isEmpty())
+        }
+        assertTrue("promoted rows must leave no orphan fallback owner", store.itemsFor(fallbackA).isEmpty())
+        val promotion = diagnostics!!.eventsNamed("identity_promotion").single { event ->
+            event.fields["oldFingerprint"] == DiagnosticPrivacy.stableFingerprint(fallbackA) &&
+                event.fields["newFingerprint"] == DiagnosticPrivacy.stableFingerprint(durableA)
+        }
+        assertEquals(2, promotion.fields["rowCount"])
+        assertEquals(queuedIds, promotion.fields["rowIds"])
+        assertEquals(true, promotion.fields["preservedExceptOwner"])
+        assertEquals(promotion.fields["expectedRowFingerprints"], promotion.fields["rowFingerprints"])
+        waitForIssue1739Boundary(
+            timeoutMs = CONNECTED_TIMEOUT_MS,
+            label = "promoted durable rows drained after heal",
+            timeoutDetails = {
+                "durable=${store.itemsFor(durableA)} fallback=${store.itemsFor(fallbackA)} " +
+                    "sendInFlight=${currentPromptComposerViewModel().uiState.value.sendInFlight} " +
+                    "wire=${currentViewModel().isSendTransportWritable()} " +
+                    "status=${currentConnectionStatus()} " +
+                    "ledger=${runBlocking { readFakeAgentSubmitLedger() }} " +
+                    "queueEvents=${diagnostics!!.events.filter { event ->
+                        event.name == "row_state" || event.name == "drain_attempt" ||
+                            event.name == "dispatch_rejected" ||
+                            event.name == "composer_tmux_send_route" ||
+                            event.name == "agent_submit_turnover" ||
+                            event.name == "identity_promotion"
+                    }.map { it.name to it.fields }}"
+            },
+        ) {
+            store.itemsFor(durableA).isEmpty()
+        }
+        assertTrue("both stable rows must be delivered+pruned", store.itemsFor(durableA).isEmpty())
+        val clientAfterHeal = currentViewModel().currentClientIdentityForTest()
+        val generationAfterHeal = currentViewModel().currentConnectGenerationForTest()
+        assertTrue("A heal must use a fresh client", clientAfterHeal != null && clientAfterHeal != clientAtB)
+        assertTrue("A heal must advance generation", generationAfterHeal > generationAtB)
+        recordTiming("fallback_promoted_and_drained_ms", SystemClock.elapsedRealtime() - healStartedAt)
+        val routedRows = diagnostics!!.eventsNamed("composer_tmux_send_route")
+            .filter { it.fields["rowId"] in queuedIds }
+        assertEquals(
+            "both stable durable row ids must reach the tmux dispatcher",
+            queuedIds.toSet(),
+            routedRows.map { it.fields["rowId"] }.toSet(),
+        )
+        assertTrue(
+            "both recovered composer rows must use an agent route, never RawBytes; events=$routedRows",
+            routedRows.isNotEmpty() && routedRows.all { it.fields["route"] != "RawBytes" },
+        )
+        val turnovers = diagnostics!!.eventsNamed("agent_submit_turnover")
+            .filter { it.fields["result"] == "transcript_ack_observed" }
+        assertEquals(
+            "each durable row must earn exact-runtime post-Enter turnover before prune",
+            2,
+            turnovers.size,
+        )
+        assertTrue(
+            "turnover evidence must remain bound to one client generation",
+            turnovers.all {
+                it.fields["clientHash"] == it.fields["currentClientHash"] &&
+                    it.fields["generation"] == it.fields["currentGeneration"]
+            },
+        )
+        assertTrue(
+            "recorded-agent rows must not fall back to a screen-only ready oracle",
+            diagnostics!!.eventsNamed("agent_submit_turnover")
+                .none { it.fields["result"] == "ready_surface_observed" },
+        )
+        val transcriptAcks = diagnostics!!.eventsNamed("agent_submit_transcript_ack")
+        assertEquals("each row must bind to a new confirmed transcript event", 2, transcriptAcks.size)
+        assertEquals(1, transcriptAcks.map { it.fields["sourceHash"] }.toSet().size)
+        assertTrue(
+            "transcript events must stay on the exact pane/Claude source binding; events=$transcriptAcks",
+            transcriptAcks.all {
+                it.fields["pane"] == "%0" && it.fields["agent"] == AgentKind.ClaudeCode.name
+            },
+        )
+        val secondSubmitted = waitForStableSidecarCapture(renamedA)
+        val submitLedger = readFakeAgentSubmitLedger()
+        writeText(
+            "issue1944-submit-ledger.txt",
+            submitLedger.joinToString(separator = "\n", postfix = "\n") { (sequence, payload) ->
+                "$sequence|$payload"
+            },
+        )
+        assertEquals("server ledger must contain two submit Enters", listOf(1, 2), submitLedger.map { it.first })
+        assertEquals(
+            "server ledger is the authoritative exactly-once FIFO oracle",
+            listOf(firstPayload, secondPayload),
+            submitLedger.map { it.second },
+        )
+        writeText(
+            "issue1944-final-diagnostics.txt",
+            buildString {
+                appendLine("queuedIds=$queuedIds")
+                appendLine("remainingRows=${store.itemsFor(durableA)}")
+                appendLine("capture=$secondSubmitted")
+                diagnostics!!.events.filter { event ->
+                    event.name == "row_state" ||
+                        event.name == "agent_submit_ack" ||
+                        event.name == "agent_submit_turnover" ||
+                        event.name == "agent_submit_transcript_ack" ||
+                        event.name == "composer_tmux_send_route" ||
+                        event.name == "outbound_verify_before_resend" ||
+                        event.name == "dispatch_rejected" ||
+                        event.name == "drain_attempt"
+                }.forEach { appendLine("${it.name} ${it.fields}") }
+            },
+        )
+        val secondSubmittedStripped = secondSubmitted.filterNot { it.isWhitespace() }
+        val secondStripped = secondPayload.filterNot { it.isWhitespace() }
+        assertEquals(
+            "final visible frame must retain the latest submitted row and clean input; capture=$secondSubmitted",
+            1,
+            countOccurrences(
+                secondSubmittedStripped,
+                FAKE_AGENT_SUBMITTED_STRIPPED + secondStripped,
+            ),
+        )
+        val deliveredIds = diagnostics!!.eventsNamed("row_state")
+            .filter { it.fields["toState"] == "Sent" && it.fields["itemId"] in queuedIds }
+            .map { it.fields["itemId"] }
+        assertEquals("automatic drain must deliver FIFO exactly once", queuedIds, deliveredIds)
+        captureViewportArtifacts("issue1944-returned-and-drained")
+        writeText("issue1944-queue.txt", "queuedIds=$queuedIds\ndeliveredIds=$deliveredIds\n")
+        writeTimings()
+        Unit
     } }
 
     /**
@@ -946,9 +1376,15 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         // Open the composer via the launcher unless the sheet is already open
         // (a deferred send leaves it open with the queue row visible).
         if (!hasNode(COMPOSER_DRAFT_TAG)) {
+            // A successful handoff dismisses the modal asynchronously. Let the
+            // launcher become the settled foreground hit target before opening
+            // the next real composer; its semantics node is structurally present
+            // during the closing animation but a tap in that overlap is ignored.
+            pumpComposeMainFor(750)
             compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
                 hasNode(SESSION_COMPOSER_LAUNCHER_TAG)
             }
+            compose.waitForIdle()
             compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
                 .performClick()
             compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { hasNode(COMPOSER_DRAFT_TAG) }
@@ -1140,7 +1576,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
      * exactly READY + the (single) SUBMITTED line + the input box, so payload
      * occurrence counts on it are deterministic.
      */
-    private suspend fun sidecarCapturePane(): String {
+    private suspend fun sidecarCapturePane(sessionName: String = SESSION_NAME): String {
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
             port = DEFAULT_PORT,
@@ -1150,7 +1586,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use {
-                it.exec("tmux capture-pane -p -t ${shellQuote(SESSION_NAME)}")
+                it.exec("tmux capture-pane -p -t ${shellQuote(sessionName)}")
             }
         }
         // Issue #1819: remember WHY a read came back empty. A failed sidecar
@@ -1195,9 +1631,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
      * still fails the count assertion, but a broken sidecar can no longer
      * masquerade as one.
      */
-    private fun waitForStableSidecarCapture(): String {
+    private fun waitForStableSidecarCapture(sessionName: String = SESSION_NAME): String {
         lastSidecarFailure = null
-        var previous = runBlocking { sidecarCapturePane() }
+        var previous = runBlocking { sidecarCapturePane(sessionName) }
         repeat(20) {
             // Issue #1819 audit: pumped, and correctly so. This wait's subject is
             // "production has STOPPED changing the pane" — the inverse of waiting
@@ -1207,7 +1643,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             // [pollSidecarCaptureWhileDrivingIssue1739Main] (#1798), which already
             // pumps across the identical sidecar reads.
             pumpComposeMainFor(SIDECAR_SETTLE_STEP_MS)
-            val next = runBlocking { sidecarCapturePane() }
+            val next = runBlocking { sidecarCapturePane(sessionName) }
             if (next == previous && next.isNotBlank()) return next
             previous = next
         }
@@ -1341,6 +1777,104 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             SystemClock.sleep(100)
         }
         return requireNotNull(vm) { "TmuxSessionViewModel not available" }
+    }
+
+    private fun currentPromptComposerViewModel(): PromptComposerViewModel {
+        var vm: PromptComposerViewModel? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            vm = ViewModelProvider(activity)[PromptComposerViewModel::class.java]
+        }
+        return requireNotNull(vm) { "PromptComposerViewModel not available" }
+    }
+
+    private fun clickTmuxBack() {
+        val tag = listOf(TMUX_COMPACT_CHROME_BACK_BUTTON_TAG, TMUX_FULL_CHROME_BACK_BUTTON_TAG)
+            .firstOrNull { hasNode(it) }
+            ?: TMUX_FULL_CHROME_BACK_BUTTON_TAG
+        compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(TMUX_SESSION_SCREEN_TAG) }
+    }
+
+    private fun renameCurrentSessionThroughUi(newName: String) {
+        val moreTag = listOf(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG, TMUX_FULL_CHROME_MORE_BUTTON_TAG)
+            .firstOrNull { hasNode(it) }
+            ?: TMUX_FULL_CHROME_MORE_BUTTON_TAG
+        compose.onNodeWithTag(moreTag, useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Rename session", useUnmergedTree = true).performClick()
+        compose.onNode(hasSetTextAction(), useUnmergedTree = true)
+            .performTextClearance()
+        compose.onNode(hasSetTextAction(), useUnmergedTree = true)
+            .performTextInput(newName)
+        compose.onNodeWithTag(TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithText(newName, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
+        }
+    }
+
+    private fun openSessionFromFolder(sessionName: String, waitForConnection: Boolean = true) {
+        compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithText(sessionName, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        compose.onNodeWithText(sessionName, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { hasNode(TMUX_SESSION_SCREEN_TAG) }
+        if (waitForConnection) waitForConnected("open $sessionName")
+    }
+
+    /** Return through the real in-session picker, which reads live tmux names. */
+    private fun switchSessionFromMoreMenu(
+        sessionName: String,
+        expectedDurableKey: String,
+        waitForConnection: Boolean = true,
+    ) {
+        openSessionSwitcher(sessionName)
+        selectSessionFromOpenSwitcher(expectedDurableKey)
+        if (waitForConnection) waitForConnected("switch to $sessionName")
+    }
+
+    private fun openSessionSwitcher(sessionName: String) {
+        val moreTag = listOf(
+            TMUX_FULL_CHROME_MORE_BUTTON_TAG,
+            TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
+        ).firstOrNull { hasNode(it) } ?: TMUX_FULL_CHROME_MORE_BUTTON_TAG
+        compose.onNodeWithTag(moreTag, useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Switch session", useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
+            compose.onAllNodesWithText(sessionName, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    private fun selectSessionFromOpenSwitcher(expectedDurableKey: String) {
+        // Session-switcher pages are current-first. Swipe to the adjacent live
+        // tmux page; tapping the offscreen Text semantics is not a real pager
+        // selection and does not settle the page/navigation effect.
+        compose.onNodeWithTag(TMUX_SESSION_PAGER_TAG, useUnmergedTree = true)
+            .performTouchInput { swipeLeft() }
+        compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
+            currentViewModel().currentTargetSessionKeyForTest() == expectedDurableKey
+        }
+    }
+
+    private fun pressSystemBack() {
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        compose.waitForIdle()
+    }
+
+    private fun waitForComposerReady(expectQueue: Boolean) {
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            hasNode(COMPOSER_DRAFT_TAG) &&
+                (!expectQueue || hasNode(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG))
+        }
     }
 
     private fun waitForConnected(label: String) {
@@ -1787,6 +2321,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val script = buildString {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
+            appendLine("tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true")
+            appendLine("rm -f ${shellQuote(FAKE_AGENT_LEDGER_PATH)}")
             appendLine("mkdir -p /home/testuser/.claude/projects/-home-testuser")
             appendLine(
                 "cp /home/testuser/.claude/projects/-workspace-pocketshell/" +
@@ -1797,13 +2333,22 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_NAME)} -x 80 -y 40 " +
                     "-c /home/testuser " +
-                    shellQuote("exec /usr/local/bin/pocketshell-fake-agent"),
+                    shellQuote(
+                        "POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER=$FAKE_AGENT_LEDGER_PATH " +
+                            "POCKETSHELL_FAKE_AGENT_TRANSCRIPT=/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL " +
+                            "exec /usr/local/bin/pocketshell-fake-agent",
+                    ),
             )
             // The #975/#1057 masked-live fixture shape (mirrors the proven
             // ConversationTuiCommandJourneyDockerTest seeding): the session
             // records `shell` while the fresh cwd transcript above is the
             // evidence that binds REAL live Claude detection.
             appendLine("tmux set-option -t ${shellQuote(SESSION_NAME)} @ps_agent_kind shell")
+            appendLine(
+                "tmux new-session -d -s ${shellQuote(SESSION_B)} -x 80 -y 40 " +
+                    shellQuote("printf '$SESSION_B_MARKER\\n'; exec sh"),
+            )
+            appendLine("tmux set-option -t ${shellQuote(SESSION_B)} @ps_agent_kind shell")
             appendLine("sleep 1")
             appendLine("tmux list-sessions")
         }
@@ -1816,6 +2361,28 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             "expected fake-agent seeding to succeed; exit=${result.exitCode} stderr='${result.stderr}'",
             result.exitCode == 0,
         )
+    }
+
+    /**
+     * Give only the #1944 outage proof the framed Claude/Codex-shaped input.
+     * Other journeys in this class intentionally retain the legacy `>` fixture
+     * because their assertions characterize that readline surface.
+     */
+    private suspend fun enableIssue1944FramedFakeAgent() {
+        val command =
+            "tmux respawn-pane -k -t ${shellQuote("=$SESSION_NAME:0.0")} " +
+                shellQuote(
+                    "POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER=$FAKE_AGENT_LEDGER_PATH " +
+                        "POCKETSHELL_FAKE_AGENT_TRANSCRIPT=/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL " +
+                        "POCKETSHELL_FAKE_AGENT_RENDER_MODE=issue1944-framed-input " +
+                        "exec /usr/local/bin/pocketshell-fake-agent",
+                )
+        val result = execRemoteSetupUntilReady(
+            key = SshKey.Pem(fixtureKey),
+            command = command,
+            description = "issue1944 framed fake-agent input surface",
+        )
+        assertEquals("framed fake-agent respawn must succeed: ${result.stderr}", 0, result.exitCode)
     }
 
     private suspend fun cleanupRemoteTmuxSession(key: String) {
@@ -1831,7 +2398,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 session.use {
                     it.exec(
                         "tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true; " +
+                            "tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true; " +
                             "rm -f /home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL " +
+                            "${shellQuote(FAKE_AGENT_LEDGER_PATH)} " +
                             "2>/dev/null || true",
                     )
                 }
@@ -1843,6 +2412,21 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     private fun captureArtifacts(name: String) {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        writeText("$name-visible-terminal.txt", visibleTerminalText())
+    }
+
+    /** Same-run reviewer evidence for #1944's composer and recovered terminal checkpoints. */
+    private fun captureViewportArtifacts(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "UiAutomation returned no screenshot for $name"
+        }
+        check(bitmap.width == 1080 && bitmap.height == 2400) {
+            "$name must be the reviewer-required 1080x2400 viewport; got ${bitmap.width}x${bitmap.height}"
+        }
+        artifacts.writeViewport(name, bitmap)
+        bitmap.recycle()
         writeText("$name-visible-terminal.txt", visibleTerminalText())
     }
 
@@ -1886,15 +2470,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             "$name must be the reviewer-required 1080x2400 viewport; " +
                 "got ${bitmap.width}x${bitmap.height}"
         }
-        val file = artifactFile("$name.png")
-        FileOutputStream(file).use { stream ->
-            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                "failed to encode ${file.absolutePath}"
-            }
-        }
+        val file = artifacts.writeViewport(name, bitmap, event = "ISSUE1739_LIVE_VIEWPORT")
         bitmap.recycle()
         writeText("$name-visible-terminal.txt", visibleText)
-        println("ISSUE1739_LIVE_VIEWPORT ${file.absolutePath}")
         return file
     }
 
@@ -1916,22 +2494,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
     }
 
-    private fun writeText(name: String, text: String): File {
-        val file = artifactFile(name)
-        file.writeText(text)
-        println("ISSUE1526_TEXT ${file.absolutePath}")
-        return file
-    }
-
-    private fun artifactFile(name: String): File {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
-        val dir = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME")
-        check(dir.exists() || dir.mkdirs()) {
-            "could not create artifact directory ${dir.absolutePath}"
-        }
-        return File(dir, name)
-    }
+    private fun writeText(name: String, text: String): File = artifacts.writeText(name, text)
 
     /**
      * Issue #1621 (round-three review follow-up): suffix the timings artifact with
@@ -1941,26 +2504,38 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
      * the branch-taken evidence was only recoverable by running a method in
      * isolation. Per-method files make it readable from any run.
      */
-    private fun writeTimings(): File {
-        val file = artifactFile("timings-${testName.methodName}.txt")
-        file.writeText(timings.joinToString(separator = "\n", postfix = "\n"))
-        println("ISSUE1526_TIMINGS ${file.absolutePath}")
-        return file
-    }
+    private fun writeTimings(): File = artifacts.writeTimings()
 
-    private fun recordTiming(name: String, value: Long) {
-        val line = "$name=$value"
-        timings += line
-        println("ISSUE1526_TIMING $line")
-    }
+    private fun recordTiming(name: String, value: Long) = artifacts.recordTiming(name, value)
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
+
+    private suspend fun readFakeAgentSubmitLedger(): List<Pair<Int, String>> {
+        val result = execRemoteSetupUntilReady(
+            key = SshKey.Pem(fixtureKey),
+            command = "cat ${shellQuote(FAKE_AGENT_LEDGER_PATH)} 2>/dev/null || true",
+            description = "issue1944 append-only fake-agent submit ledger",
+        )
+        assertEquals("fake-agent ledger read must succeed", 0, result.exitCode)
+        return result.stdout.lineSequence()
+            .filter(String::isNotBlank)
+            .map { line ->
+                val fields = line.split('|', limit = 2)
+                check(fields.size == 2) { "invalid fake-agent ledger row: $line" }
+                requireNotNull(fields[0].toIntOrNull()) to
+                    String(Base64.getDecoder().decode(fields[1]), Charsets.UTF_8)
+            }
+            .toList()
+    }
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue1526-exactly-once"
         const val SESSION_NAME: String = "issue1526-exactly-once"
+        const val SESSION_B: String = "issue1944-switch-b"
+        const val SESSION_B_MARKER: String = "ISSUE1944-B-READY"
+        const val FAKE_AGENT_LEDGER_PATH: String = "/tmp/pocketshell-fake-agent-submits.log"
         const val SEEDED_JSONL: String = "issue1526-live-claude.jsonl"
         const val FAKE_AGENT_READY: String = "FAKE-AGENT-READY"
         const val FAKE_AGENT_SUBMITTED_STRIPPED: String = "FAKE-AGENTSUBMITTED:"

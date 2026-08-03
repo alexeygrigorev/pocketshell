@@ -30,6 +30,8 @@ internal fun computeSendKey(
         sendTarget.paneId,
         sendTarget.route.name,
         sendTarget.agentKind.orEmpty(),
+        sendTarget.tmuxSessionId.orEmpty(),
+        sendTarget.tmuxSessionCreated?.toString().orEmpty(),
         if (withEnter) "1" else "0",
         cleanDraft,
         attachmentSignature,

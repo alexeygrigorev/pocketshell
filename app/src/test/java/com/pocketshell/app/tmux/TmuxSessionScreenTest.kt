@@ -167,8 +167,8 @@ class TmuxSessionScreenTest {
             state = HostTmuxSessionPickerState.Ready(
                 request = pickerRequest(),
                 rows = listOf(
-                    HostTmuxSessionRow(name = "work"),
-                    HostTmuxSessionRow(name = "logs", attached = true),
+                    HostTmuxSessionRow(name = "work", tmuxSessionId = "\$1", createdAt = 100L),
+                    HostTmuxSessionRow(name = "logs", tmuxSessionId = "\$2", createdAt = 200L, attached = true),
                 ),
             ),
             currentSessionName = "work",
@@ -177,7 +177,12 @@ class TmuxSessionScreenTest {
         assertEquals(
             listOf(
                 SessionSwitcherPage(name = "work", statusLabel = "current", selectable = false),
-                SessionSwitcherPage(name = "logs", statusLabel = "attached", selectable = true),
+                SessionSwitcherPage(
+                    name = "logs",
+                    statusLabel = "attached",
+                    selectable = true,
+                    target = TmuxSessionNavigationTarget("logs", "\$2", 200L),
+                ),
             ),
             pages,
         )
@@ -188,7 +193,7 @@ class TmuxSessionScreenTest {
         val pages = sessionSwitcherPages(
             state = HostTmuxSessionPickerState.Ready(
                 request = pickerRequest(),
-                rows = listOf(HostTmuxSessionRow(name = "logs")),
+                rows = listOf(HostTmuxSessionRow(name = "logs", tmuxSessionId = "\$2", createdAt = 200L)),
             ),
             currentSessionName = "work",
         )
@@ -196,10 +201,30 @@ class TmuxSessionScreenTest {
         assertEquals(
             listOf(
                 SessionSwitcherPage(name = "work", statusLabel = "current", selectable = false),
-                SessionSwitcherPage(name = "logs", statusLabel = "available", selectable = true),
+                SessionSwitcherPage(
+                    name = "logs",
+                    statusLabel = "available",
+                    selectable = true,
+                    target = TmuxSessionNavigationTarget("logs", "\$2", 200L),
+                ),
             ),
             pages,
         )
+    }
+
+    @Test
+    fun sessionSwitcherPagesFailClosedWhenGenerationIdentityIsUnavailable() {
+        val pages = sessionSwitcherPages(
+            state = HostTmuxSessionPickerState.Ready(
+                request = pickerRequest(),
+                rows = listOf(HostTmuxSessionRow(name = "legacy-name-only", createdAt = 200L)),
+            ),
+            currentSessionName = "work",
+        )
+
+        assertEquals("identity unavailable", pages[1].statusLabel)
+        assertFalse(pages[1].selectable)
+        assertNull(pages[1].target)
     }
 
     @Test
@@ -208,8 +233,8 @@ class TmuxSessionScreenTest {
             state = HostTmuxSessionPickerState.Ready(
                 request = pickerRequest(),
                 rows = listOf(
-                    HostTmuxSessionRow(name = "logs", attached = true),
-                    HostTmuxSessionRow(name = "work"),
+                    HostTmuxSessionRow(name = "logs", tmuxSessionId = "\$2", createdAt = 200L, attached = true),
+                    HostTmuxSessionRow(name = "work", tmuxSessionId = "\$1", createdAt = 100L),
                 ),
             ),
             currentSessionName = "work",
@@ -218,7 +243,12 @@ class TmuxSessionScreenTest {
         assertEquals(
             listOf(
                 SessionSwitcherPage(name = "work", statusLabel = "current", selectable = false),
-                SessionSwitcherPage(name = "logs", statusLabel = "attached", selectable = true),
+                SessionSwitcherPage(
+                    name = "logs",
+                    statusLabel = "attached",
+                    selectable = true,
+                    target = TmuxSessionNavigationTarget("logs", "\$2", 200L),
+                ),
             ),
             pages,
         )
@@ -252,7 +282,7 @@ class TmuxSessionScreenTest {
 
         handleTmuxSessionSelection(
             currentSessionName = "work",
-            selectedSessionName = "work",
+            selectedTarget = TmuxSessionNavigationTarget("work"),
             onDismiss = { events += "dismiss" },
             onReplace = { events += "replace:$it" },
         )
@@ -266,9 +296,9 @@ class TmuxSessionScreenTest {
 
         handleTmuxSessionSelection(
             currentSessionName = "work",
-            selectedSessionName = "logs",
+            selectedTarget = TmuxSessionNavigationTarget("logs"),
             onDismiss = { events += "dismiss" },
-            onReplace = { events += "replace:$it" },
+            onReplace = { events += "replace:${it.sessionName}" },
         )
 
         assertEquals(listOf("dismiss", "replace:logs"), events)

@@ -4,6 +4,8 @@ import com.pocketshell.core.storage.entity.HostEntity
 
 data class HostTmuxSessionRow(
     val name: String,
+    /** Stable tmux identity (`#{session_id}`), required for safe navigation. */
+    val tmuxSessionId: String? = null,
     val createdAt: Long? = null,
     val lastActivity: Long? = null,
     val attached: Boolean = false,

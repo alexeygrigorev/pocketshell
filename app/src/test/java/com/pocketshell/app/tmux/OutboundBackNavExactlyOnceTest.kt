@@ -3,6 +3,8 @@ package com.pocketshell.app.tmux
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.OutboundRoute
+import com.pocketshell.app.composer.OutboundItem
+import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
@@ -61,8 +63,11 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         sentCommands.count { it == "send-keys -t %0 Enter" }
 
     /** A VM whose delivery ledger is durable-backed (real app context). */
-    private fun newDurableConnectedVm(client: FakeTmuxClient): TmuxSessionViewModel {
-        val vm = newVm(applicationContext = context)
+    private fun newDurableConnectedVm(
+        client: FakeTmuxClient,
+        store: OutboundQueueStore? = null,
+    ): TmuxSessionViewModel {
+        val vm = newVm(applicationContext = context, outboundQueueStore = store ?: SharedPrefsOutboundQueueStore(context))
         vm.attachClientForTest(client)
         vm.startAgentConversationForTest("%0", claudeDetection())
         vm.setAgentSubmitEnterDelayForTest(0)
@@ -72,6 +77,14 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
 
     private fun clientShowing(vararg lines: String): FakeTmuxClient = FakeTmuxClient().apply {
         defaultCaptureResponse = CommandResponse(number = 0L, output = lines.toList(), isError = false)
+        onCommandSent = { command ->
+            when {
+                command.startsWith("send-keys -l -t %0") ->
+                    defaultCaptureResponse = CommandResponse(0L, lines.toList(), false)
+                command == "send-keys -t %0 Enter" ->
+                    defaultCaptureResponse = CommandResponse(0L, listOf(">"), false)
+            }
+        }
     }
 
     /**
@@ -114,6 +127,7 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         assertEquals("attempt 1 pastes exactly once", 1, client1.pasteCount(payload))
         // The wire attempt is now DURABLE on the row (survives the VM-clear).
         assertTrue(store.hasWireAttempt("sessA", row.id))
+        assertTrue("the pre-Enter latch is restart-visible", store.hasWireSubmitAttempt("sessA", row.id))
 
         // The user taps BACK mid-delivery → VM #1 is cleared (its volatile ledger
         // dies). #780 model: a synthetic VM-clear, not process death.
@@ -123,7 +137,9 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
         // flag. The reconnect auto-flush re-dispatches the SAME row; the pane still
         // shows the landed payload.
         val client2 = clientShowing("> $payload")
-        val vm2 = newDurableConnectedVm(client2)
+        val restartedStore = SharedPrefsOutboundQueueStore(context)
+        assertTrue(restartedStore.hasWireSubmitAttempt("sessA", row.id))
+        val vm2 = newDurableConnectedVm(client2, restartedStore)
         val second = async {
             vm2.sendAgentPayloadToPaneResult(
                 "%0",
@@ -134,7 +150,10 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
             )
         }
         advanceUntilIdle()
-        assertTrue("the verified resend must succeed", second.await().isSuccess)
+        assertTrue(
+            "an unconfirmed prior Enter must stay queued without a blind second submit",
+            second.await().isFailure,
+        )
 
         // THE assertion (#1541 AC): the rebuilt VM must NOT re-paste. On base
         // (volatile ledger only) VM #2 has no memory and blindly re-pastes ⇒ 1
@@ -145,7 +164,7 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
             0,
             client2.pasteCount(payload),
         )
-        assertTrue("the rebuilt VM must still submit the pending row (Enter-only)", client2.enterCount() >= 1)
+        assertEquals("the rebuilt VM must not submit another ambiguous Enter", 0, client2.enterCount())
     }
 
     /**
@@ -257,5 +276,78 @@ class OutboundBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() {
             2,
             client.pasteCount(payload),
         )
+    }
+
+    @Test
+    fun freshPasteCommitFailureSendsNoEnterAndAddsNoVolatileSuccessMarker() = runTest(scheduler) {
+        val payload = "commit barrier before fresh Enter"
+        val delegate = SharedPrefsOutboundQueueStore(context)
+        val row = delegate.enqueue("sess-submit-fresh", payload, paneId = "%0", route = OutboundRoute.AgentConversation)
+        val store = SubmitLatchFaultStore(delegate, SubmitLatchFault.ReturnFalse)
+        val client = clientShowing("> $payload")
+        val vm = newDurableConnectedVm(client, store)
+        val durableRow = DurableOutboundRowIdentity(row.sessionKey, row.id)
+
+        val failed = async {
+            vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode, row.id, durableRow)
+        }
+        advanceUntilIdle()
+        assertTrue(failed.await().isFailure)
+        assertEquals(1, client.pasteCount(payload))
+        assertEquals("commit=false must stop before Enter", 0, client.enterCount())
+        assertFalse(delegate.hasWireSubmitAttempt(row.sessionKey, row.id))
+        assertTrue("row remains durable and unresolved", delegate.item(row.id) != null)
+
+        store.fault = SubmitLatchFault.None
+        val retry = async {
+            vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode, row.id, durableRow)
+        }
+        advanceUntilIdle()
+        assertTrue("no volatile success marker may block the acknowledged retry", retry.await().isSuccess)
+        assertEquals("retry verifies the paste and sends one Enter only", 1, client.enterCount())
+        assertEquals("retry never re-pastes", 1, client.pasteCount(payload))
+    }
+
+    @Test
+    fun alreadyLandedCommitExceptionSendsNoEnterAndAddsNoVolatileSuccessMarker() = runTest(scheduler) {
+        val payload = "commit barrier before recovery Enter"
+        val delegate = SharedPrefsOutboundQueueStore(context)
+        val row = delegate.enqueue("sess-submit-recovery", payload, paneId = "%0", route = OutboundRoute.AgentConversation)
+        delegate.markWireAttempted(row.sessionKey, row.id, baselineCount = 0)
+        val store = SubmitLatchFaultStore(delegate, SubmitLatchFault.Throw)
+        val client = clientShowing("> $payload")
+        val vm = newDurableConnectedVm(client, store)
+        val durableRow = DurableOutboundRowIdentity(row.sessionKey, row.id)
+
+        val failed = async {
+            vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode, row.id, durableRow)
+        }
+        advanceUntilIdle()
+        assertTrue(failed.await().isFailure)
+        assertEquals(0, client.pasteCount(payload))
+        assertEquals("persistence exception must stop recovery before Enter", 0, client.enterCount())
+        assertFalse(delegate.hasWireSubmitAttempt(row.sessionKey, row.id))
+
+        store.fault = SubmitLatchFault.None
+        val retry = async {
+            vm.sendAgentPayloadToPaneResult("%0", payload, AgentKind.ClaudeCode, row.id, durableRow)
+        }
+        advanceUntilIdle()
+        assertTrue("failed persistence must not poison the volatile ledger", retry.await().isSuccess)
+        assertEquals(1, client.enterCount())
+        assertEquals(0, client.pasteCount(payload))
+    }
+}
+
+private enum class SubmitLatchFault { None, ReturnFalse, Throw }
+
+private class SubmitLatchFaultStore(
+    private val delegate: OutboundQueueStore,
+    var fault: SubmitLatchFault,
+) : OutboundQueueStore by delegate {
+    override fun markWireSubmitAttempted(sessionKey: String, itemId: String): OutboundItem? = when (fault) {
+        SubmitLatchFault.None -> delegate.markWireSubmitAttempted(sessionKey, itemId)
+        SubmitLatchFault.ReturnFalse -> null
+        SubmitLatchFault.Throw -> error("synthetic submit-latch persistence failure")
     }
 }

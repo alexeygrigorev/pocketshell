@@ -49,6 +49,7 @@ internal fun parsePaneRow(line: String): TmuxSessionViewModel.ParsedPane? {
         // agent latch. Older tmux / legacy-format tests omit it -> false (no
         // latch), preserving the #894 no-flap invariant for a plain shell.
         alternateOn = parseTmuxBoolean(parts.getOrNull(paneIndexIndex + 6)),
+        sessionCreated = parts.getOrNull(paneIndexIndex + 7)?.trim()?.toLongOrNull(),
         sessionName = sessionName,
     )
 }

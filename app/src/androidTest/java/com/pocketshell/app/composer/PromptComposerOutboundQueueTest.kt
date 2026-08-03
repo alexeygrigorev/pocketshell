@@ -7,7 +7,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -33,6 +37,40 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class PromptComposerOutboundQueueTest {
+
+    @Test
+    fun stableQueueRowSelectorDisambiguatesPayloadAlsoPresentInDraft() {
+        val payload = "same payload in draft and queue"
+        val item = OutboundItem(
+            id = "stable-row-id",
+            sessionKey = "1/a",
+            cleanText = payload,
+            state = OutboundState.Failed,
+            createdAtMs = 1L,
+        )
+        val rowTag = composerOutboundQueueItemRowTestTag(item.id)
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(draft = payload),
+                    onClose = {}, onDraftChange = {}, onMicTap = {}, onSend = {},
+                    outboundQueueItems = listOf(item),
+                    outboundQueueExpanded = true,
+                )
+            }
+        }
+
+        assertEquals(
+            "global payload lookup must demonstrate the ambiguous selector regression",
+            2,
+            compose.onAllNodesWithText(payload, substring = true, useUnmergedTree = true)
+                .fetchSemanticsNodes().size,
+        )
+        compose.onNode(
+            hasText(payload, substring = true) and hasAnyAncestor(hasTestTag(rowTag)),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+    }
 
     @Test
     fun statusLedSingleRowsOwnCopyProgressAndResendPresentation() {

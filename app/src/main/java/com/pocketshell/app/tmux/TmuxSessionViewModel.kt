@@ -628,9 +628,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * a pane belonging to a different tmux session. The Screen collects this
      * and calls `onReplaceTmuxSession` to trigger the warm switch.
      */
-    private val _sessionSwitchRequest: MutableSharedFlow<String> =
+    private val _sessionSwitchRequest: MutableSharedFlow<TmuxSessionNavigationTarget> =
         MutableSharedFlow(extraBufferCapacity = 4)
-    public val sessionSwitchRequest: SharedFlow<String> =
+    internal val sessionSwitchRequest: SharedFlow<TmuxSessionNavigationTarget> =
         _sessionSwitchRequest.asSharedFlow()
 
     /**
@@ -720,7 +720,9 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
         viewModelScope.launch {
-            _sessionSwitchRequest.emit(paneSessionName)
+            _sessionSwitchRequest.emit(
+                knownPaneSessionNavigationTarget(active.hostId, paneSessionName, settled.paneId, runtimeCache),
+            )
         }
     }
 
@@ -1255,6 +1257,7 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun triggerCleanPassiveDropForTest(): Boolean {
         val client = clientRef ?: return false
         if (passiveTransportDropEffects.classify(client) == PassiveDropArm.Ignore) return false
+        runCatching { client.close() }
         connectionManager.reportRemoteDrop("test_clean_outage_seam")
         projectStatusFromController()
         handlePassiveClientDisconnect(
@@ -2059,7 +2062,9 @@ public class TmuxSessionViewModel @Inject constructor(
         MutableStateFlow(null)
     public val currentSessionRecordedKind: StateFlow<SessionAgentKind?> =
         _currentSessionRecordedKind.asStateFlow()
-
+    private val recordedAgentRouteTracker = RecordedAgentRouteTracker()
+    internal val currentRecordedAgentRouteEvidence: StateFlow<RecordedAgentRouteEvidence?> =
+        recordedAgentRouteTracker.evidence
     /**
      * Issue #898: the host-discovered Claude / Codex agent profiles, projected
      * for the in-session "+ New session" [com.pocketshell.app.projects.SessionTypePickerSheet]'s
@@ -2570,6 +2575,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // without preflighting a second time. Never set by external callers.
         skipExistencePreflight: Boolean = false,
     ) {
+        val testTransportAvailable =
+            syntheticUnrecoverableHostAllowsTransportReuse(forceUnrecoverableHostForTest)
         // Issue #666: a foreground cold-restore must NOT resurrect a session
         // killed elsewhere while the app was backgrounded. Before we attach —
         // and crucially BEFORE we can activate a stale warm/cached runtime
@@ -2581,7 +2588,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // resume-from-persisted-last-session path); [OpenExisting] preflights too,
         // but only for a genuine COLD open (handled below, after the warm-path
         // determination).
-        if (trigger == TmuxConnectTrigger.ColdRestore && !skipExistencePreflight) {
+        if (trigger == TmuxConnectTrigger.ColdRestore && !skipExistencePreflight && testTransportAvailable) {
             preflightSessionExistence(
                 hostId = hostId,
                 hostName = hostName,
@@ -2643,7 +2650,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
         val previousActiveTarget = activeTarget
         val previousSession = sessionRef
-        val willFastSwitch = previousActiveTarget != null &&
+        val willFastSwitch = testTransportAvailable && previousActiveTarget != null &&
             previousSession != null &&
             previousSession.isConnected &&
             isSameHost(previousActiveTarget, target) &&
@@ -2659,8 +2666,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // skips the probe (no added latency to the maintainer's instant switch), and
         // any AMBIGUOUS probe (no lease / exec error) FAILS OPEN to the normal
         // attach — so a transient reconnect blip never triggers the prompt.
-        if (trigger == TmuxConnectTrigger.OpenExisting &&
-            !skipExistencePreflight &&
+        if (trigger == TmuxConnectTrigger.OpenExisting && !skipExistencePreflight && testTransportAvailable &&
             !willFastSwitch &&
             !runtimeCache.contains(target.toRuntimeKey())
         ) {
@@ -2769,7 +2775,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }
 
-        val cachedActivation = if (shouldForceFreshLease(effectiveTrigger)) {
+        val cachedActivation = if (shouldForceFreshLease(effectiveTrigger) || !testTransportAvailable) {
             null
         } else {
             takeCachedRuntimeForActivation(
@@ -2823,7 +2829,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // blanking [Connecting] overlay (see the slow-path branch below).
                 // Issue #620: also warm when host detail's lease handshake is
                 // still in flight — this open coalesces onto it, no second dial.
-                val warmOpen = !shouldForceFreshLease(effectiveTrigger) &&
+                val warmOpen = testTransportAvailable && !shouldForceFreshLease(effectiveTrigger) &&
                     sshLeaseManager.hasLiveOrConnectingLease(target.toSshLeaseTarget().leaseKey)
                 setConnectionState(
                     if (warmOpen) {
@@ -2884,7 +2890,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // coroutine re-confirms authoritatively and downgrades to [Connecting]
         // if the lease turned out to be gone. A reconnect / network-reattach
         // deliberately forces a fresh transport, so it is never a warm open.
-        val warmOpenHint = !willFastSwitch &&
+        val warmOpenHint = testTransportAvailable && !willFastSwitch &&
             !shouldForceFreshLease(effectiveTrigger) &&
             liveLeaseKeys.contains(target.toSshLeaseTarget().leaseKey)
         setConnectionState(
@@ -3037,7 +3043,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     // detail's warm-lease handshake) ALSO counts as a warm open —
                     // the acquire below coalesces onto it, so no second SSH dial
                     // happens and the attach is instant.
-                    val warmOpen = !shouldForceFreshLease(effectiveTrigger) &&
+                    val warmOpen = testTransportAvailable && !shouldForceFreshLease(effectiveTrigger) &&
                         sshLeaseManager.hasLiveOrConnectingLease(target.toSshLeaseTarget().leaseKey)
                     if (warmOpen) {
                         recordWarmSwitchMilestone(
@@ -4618,10 +4624,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 generation = intent.generation,
             )
         }
-
-    internal fun setForegroundReattachForTest(handler: (() -> Unit)?) {
-        foregroundReattachForTest = handler
-    }
+    public fun onSessionScreenLeft() { latestConnectIntent = null }
+    internal fun setForegroundReattachForTest(handler: (() -> Unit)?) { foregroundReattachForTest = handler }
 
     internal fun setProcessForegroundForClearedForTest(isForeground: Boolean?) {
         processForegroundForClearedOverrideForTest = isForeground
@@ -4801,6 +4805,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     windowId = pane.windowId,
                     windowIndex = pane.windowIndex,
                     sessionId = pane.sessionId,
+                    sessionCreated = pane.sessionCreated,
                     title = pane.title,
                     cwd = pane.cwd,
                     currentCommand = pane.currentCommand,
@@ -5028,7 +5033,8 @@ public class TmuxSessionViewModel @Inject constructor(
      * waiting for sshj's reader to discover that the old TCP path died.
      */
     public fun onNetworkChanged(change: TerminalNetworkChange) {
-        val target = activeTarget ?: connectingTarget
+        val target = activeTarget ?: connectingTarget ?: latestConnectIntent?.takeIf { acceptedRestoreTargetIsCurrent(it.generation, connectGeneration, revealController.sessionId(it.target), revealController.currentTargetId()) }?.target
+        if (change.kind == com.pocketshell.app.connectivity.TerminalNetworkChangeKind.NetworkRestored && target != null && clientRef == null && sessionRef == null) return connectAcceptedNetworkRestore(target)
         // EPIC #792 Slice E: feed the AUTHORITATIVE controller the #548 validated-handoff
         // signal it suppresses on (computed identically to the inline reducer).
         //
@@ -6327,14 +6333,13 @@ public class TmuxSessionViewModel @Inject constructor(
         lastConnectFailureCause = null
         lastSuppressedDropDiagnostic = null
         try {
-            // Issue #1098 item 3 test seam: a GENUINELY-unrecoverable host fails every
-            // fresh-dial of the auto-reconnect ladder (a reconnect trigger), so the
-            // bounded ladder exhausts and the honest "Disconnected from …" band
-            // surfaces — modelling sshd dead / port blackholed / a network cut that
-            // stays cut. The cold OPEN (a non-reconnect trigger) is left alone so the
-            // test's initial attach still succeeds. Production never arms it; the throw
-            // routes through the same `catch` a real connection-refused does.
-            if (forceUnrecoverableHostForTest && trigger.isReconnectTrigger) {
+            // Issue #1098 item 3 test seam: once armed AFTER the fixture's initial
+            // attach, a GENUINELY-unrecoverable host fails every fresh dial. This
+            // includes a cold Open reached through main-screen navigation: a dead
+            // host does not become reachable merely because that navigation emits a
+            // different trigger kind. Production never arms it; the throw routes
+            // through the same `catch` a real connection-refused does.
+            if (syntheticUnrecoverableHostRejectsDial(forceUnrecoverableHostForTest, trigger)) {
                 throw IOException(
                     "synthetic unrecoverable host: connection refused (issue #1098 item 3 test seam)",
                 )
@@ -9721,6 +9726,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     windowId = p.windowId,
                     windowIndex = p.windowIndex,
                     sessionId = p.sessionId,
+                    sessionCreated = p.sessionCreated,
                     title = p.title,
                     cwd = p.cwd,
                     currentCommand = p.currentCommand,
@@ -14095,6 +14101,9 @@ public class TmuxSessionViewModel @Inject constructor(
         sendToken: String = newOutboundDeliveryToken(),
         durableRow: DurableOutboundRowIdentity? = null,
     ): Result<Unit> {
+        if (durableAgentQueueSendMustDefer(durableRow, isSendTransportWritable())) {
+            return Result.failure(IllegalStateException("Session is disconnected; kept queued."))
+        }
         val client = awaitLiveTmuxClientForSend()
             ?: return Result.failure(IllegalStateException("Session is disconnected."))
         return sendAgentPayloadToPaneResult(
@@ -14110,7 +14119,6 @@ public class TmuxSessionViewModel @Inject constructor(
     // Issue #1526 S1 / #1541 / #1587: verify-before-resend ledger, durable-backed by
     // the injected @Singleton store (see [outboundDeliveryLedgerFor]). Null ⇒ base S1.
     private val outboundDeliveryLedger = outboundDeliveryLedgerFor(outboundQueueStore)
-
     private fun consumeSendResultLostSeamForTest() {
         if (!OutboundDeliverySeams.consumeSendResultLostBeforeSubmitEnter()) return
         // The seam models the audit's cut point (c): the paste ran server-side,
@@ -14123,12 +14131,19 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun snapshotAgentSendRuntime(client: TmuxClient): AgentSendRuntimeIdentity =
-        AgentSendRuntimeIdentity(
-            client = client,
-            generation = connectGeneration,
-            target = activeTarget,
-        )
+        AgentSendRuntimeIdentity(client = client, generation = connectGeneration, target = activeTarget)
 
+    private val agentTranscriptAuthority = AgentTranscriptAuthority(
+        conversationForPane = { _agentConversations.value[it] },
+        tailJobActive = { paneAgentJobs[it]?.isActive == true },
+        tailGenerationPresent = { paneAgentTailGenerations[it] != null },
+    )
+    @androidx.annotation.VisibleForTesting
+    internal fun setAgentTranscriptAuthorityForTest(paneId: String, active: Boolean) =
+        agentTranscriptAuthority.setActiveForTest(paneId, active)
+    @androidx.annotation.VisibleForTesting
+    internal fun setAgentTranscriptAuthorityStartingForTest(paneId: String, starting: Boolean) =
+        agentTranscriptAuthority.setStartingForTest(paneId, starting)
     private fun isCurrentAgentSendRuntime(
         identity: AgentSendRuntimeIdentity,
         paneId: String,
@@ -14216,8 +14231,30 @@ public class TmuxSessionViewModel @Inject constructor(
                 check(!client.disconnected.value) {
                     "Tmux client disconnected after verify-before-resend."
                 }
+                val preEnterFrame = durableRow?.let {
+                    captureAgentPaneBounded(runtimeIdentity, paneId, AGENT_SUBMIT_TURNOVER_TIMEOUT_MS, 0)
+                        .response ?: error("Agent submit frame unavailable before Enter; kept queued.")
+                }
+                val transcriptBaseline = durableRow?.let { agentTranscriptAuthority.baseline(paneId, payload) }
+                durableRow?.let { row ->
+                    check(withContext(seedIoDispatcher) {
+                        outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row)
+                    }) { "Agent submit write-ahead persistence failed; Enter not sent." }
+                }
                 sendNamedKeyToPane(client, paneId, "Enter")
                     .throwIfTmuxError("submit previously pasted agent input")
+                if (preEnterFrame != null) {
+                    agentTranscriptAuthority.awaitTurnover(
+                        identity = runtimeIdentity,
+                        paneId = paneId,
+                        payload = payload,
+                        preEnterFrame = preEnterFrame,
+                        baseline = transcriptBaseline,
+                        capture = { timeoutMs, lines -> captureAgentPaneBounded(runtimeIdentity, paneId, timeoutMs, lines) },
+                        currentClientHash = { clientRef?.let { System.identityHashCode(it) } },
+                        currentGeneration = { connectGeneration },
+                    )
+                }
                 outboundDeliveryLedger.clear(paneId, sendToken)
                 requestReconcile(client, paneId, ReconcileReason.Send)
                 Result.success(Unit)
@@ -14290,7 +14327,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     ?: settingsRepository?.settings?.value?.agentSubmitEnterDelayMs
                     ?: com.pocketshell.app.settings.AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS
                 ).toLong()
-            awaitAgentPasteIngested(
+            val preEnterFrame = awaitAgentPasteIngested(
                 identity = runtimeIdentity,
                 paneId = paneId,
                 payload = payload,
@@ -14317,8 +14354,26 @@ public class TmuxSessionViewModel @Inject constructor(
                 "Tmux client disconnected after paste acknowledgement."
             }
             consumeSendResultLostSeamForTest()
+            val transcriptBaseline = durableRow?.let { agentTranscriptAuthority.baseline(paneId, payload) }
+            durableRow?.let { row ->
+                check(withContext(seedIoDispatcher) {
+                    outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row)
+                }) { "Agent submit write-ahead persistence failed; Enter not sent." }
+            }
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
+            if (durableRow != null) {
+                agentTranscriptAuthority.awaitTurnover(
+                    identity = runtimeIdentity,
+                    paneId = paneId,
+                    payload = payload,
+                    preEnterFrame = preEnterFrame,
+                    baseline = transcriptBaseline,
+                    capture = { timeoutMs, lines -> captureAgentPaneBounded(runtimeIdentity, paneId, timeoutMs, lines) },
+                    currentClientHash = { clientRef?.let { System.identityHashCode(it) } },
+                    currentGeneration = { connectGeneration },
+                )
+            }
             outboundDeliveryLedger.clear(paneId, sendToken)
             // Issue #941/#1353 R4: after the submit Enter a full-screen agent TUI can overpaint
             // the active pane partial-black; a guarded heal EVENT re-checks and re-seeds.
@@ -16277,12 +16332,17 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun refreshCurrentSessionRecordedKind() {
         val target = activeTarget?.sessionName?.trim()?.takeIf { it.isNotEmpty() } ?: run {
             _currentSessionRecordedKind.value = null
+            recordedAgentRouteTracker.clear()
             _currentSessionRecordedProfile.value = null
             return
         }
+        val targetSnapshot = activeTarget ?: return
+        val paneSnapshot = activeVisiblePane()
+        val routeRefresh = recordedAgentRouteTracker.begin(
+            durableSessionKey = recordedRouteKey(targetSnapshot, paneSnapshot),
+            paneId = paneSnapshot?.paneId,
+        )
         val session = sessionRef ?: return
-        // Issue #1820 [TmuxTarget]: EXACT pane target — a bare `-t <name>` prefix-matches, so with
-        // `<name>-2` alive this would read the NEIGHBOUR's recorded kind/profile.
         val optionTarget = "'${escapeSingleQuoted(TmuxTarget.pane(target))}'"
         bridgeScope.launch {
             val raw = withContext(Dispatchers.IO) {
@@ -16291,32 +16351,27 @@ public class TmuxSessionViewModel @Inject constructor(
                 }.getOrNull()
             }
             val recordedKind = sessionAgentKindFromOption(raw)
+            val stillCurrentPane = activeVisiblePane()
+            val stillCurrentKey = recordedRouteKey(activeTarget, stillCurrentPane)
+            val stillSameTarget = activeTarget?.let { sameSessionIdentity(it, targetSnapshot) } == true
+            if (!stillSameTarget || !recordedAgentRouteTracker.isLatest(routeRefresh)) return@launch
             _currentSessionRecordedKind.value = recordedKind
-            // Issue #894 (Slice C): feed the durable shell verdict into the
-            // per-pane confirmed-shell signal. The active session's panes share
-            // one `sessionId` (`$N`); mark/un-mark it so the seed skips a
-            // confirmed shell and the screen collapses its presumed-agent
-            // surface. A recorded SHELL also drops any auto-seeded placeholder
-            // that raced ahead of this read (the first-open flash). A null
-            // (foreign/unknown) verdict is NOT a confirmed shell — leave it
-            // presumed-agent so the #878 cure is intact.
-            activeSessionId()?.let { sessionId ->
-                applyRecordedShellVerdict(
-                    sessionId = sessionId,
-                    isShell = recordedKind == SessionAgentKind.Shell,
-                )
+            if (recordedAgentRouteTracker.isCurrent(routeRefresh, stillCurrentKey, stillCurrentPane?.paneId)) {
+                recordedAgentRouteTracker.accept(routeRefresh, recordedKind)
             }
-            // Issue #858: read the recorded profile over the SAME warm session
-            // (D21 — no new connection) so the "What is this session?" sheet can
-            // show the provider/profile. A blank/absent option (default /
-            // non-profiled / legacy session) leaves the profile null.
+            activeSessionId()?.let { sessionId ->
+                applyRecordedShellVerdict(sessionId, recordedKind == SessionAgentKind.Shell)
+            }
             val rawProfile = withContext(Dispatchers.IO) {
                 runCatching {
                     session.exec("tmux show-options -v -t $optionTarget @ps_agent_profile 2>/dev/null || true").stdout
                 }.getOrNull()
             }
-            _currentSessionRecordedProfile.value =
-                rawProfile?.trim()?.takeIf { it.isNotEmpty() }
+            if (activeTarget?.let { sameSessionIdentity(it, targetSnapshot) } == true &&
+                recordedAgentRouteTracker.isLatest(routeRefresh)
+            ) {
+                _currentSessionRecordedProfile.value = rawProfile?.trim()?.takeIf { it.isNotEmpty() }
+            }
         }
     }
 
@@ -17326,16 +17381,12 @@ public class TmuxSessionViewModel @Inject constructor(
         return _panes.value.any { it.paneId == pane.paneId }
     }
 
-    /**
-     * Issue #894 (Slice C): the active session's tmux `sessionId` (`$N`), read
-     * off the current pane rows (all active panes share it). Null when no pane
-     * is attached yet. Used to key the durable confirmed-shell verdict so it
-     * matches the conversation-open cache's `sessionId` key.
-     */
+    internal fun navigationTargetForKnownSession(sessionName: String): TmuxSessionNavigationTarget =
+        knownSessionNavigationTarget(sessionName, activeTarget, connectingTarget, runtimeCache)
+
+    /** Active panes' shared tmux session id, or null before attachment. */
     private fun activeSessionId(): String? =
         _panes.value.firstOrNull()?.sessionId?.trim()?.takeIf { it.isNotEmpty() }
-
-    // ---- End Issue #626 helpers ----
 
     /**
      * Internal value type used by the reconcile path. Visible to tests so
@@ -17369,13 +17420,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // launched directly inside a `@ps_agent_kind=shell` session. Defaults
         // false for older tmux / tests that omit the field.
         val alternateOn: Boolean = false,
+        val sessionCreated: Long? = null,
         val sessionName: String = "",
     )
 
-    // Issue #722: visibility widened from `private` to `internal` (no behavior
-    // change) so it can appear as a property of the now-`internal`
-    // [RuntimeRefreshGuard] carried opaquely across the characterization-test
-    // seam boundary. Tests never name or construct it.
+    /** Runtime target identity shared with connection-effect helpers and tests. */
     internal data class ConnectionTarget(
         val hostId: Long,
         val hostName: String,

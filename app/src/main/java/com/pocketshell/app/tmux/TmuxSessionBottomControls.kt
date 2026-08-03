@@ -176,7 +176,12 @@ internal fun TmuxTerminalBottomControls(
                         ConversationComposerLauncherRow(
                             onDictateTap = onDictateTap,
                             onDictateHoldSwipeUp = onDictateHoldSwipeUp,
-                            inputEnabled = sessionLive,
+                            // The composer is the durable offline-send entry point,
+                            // so reconnecting must disable only pane-bound controls,
+                            // never the launcher itself. Otherwise the first queued
+                            // send dismisses the sheet and there is no way to compose
+                            // another message until the transport heals (#1944).
+                            inputEnabled = true,
                             unsentCount = unsentCount,
                             unsentHasFailure = unsentHasFailure,
                             modifier = modifier,

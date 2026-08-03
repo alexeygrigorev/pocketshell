@@ -39,8 +39,8 @@ class HostTmuxSessionsGatewayTest {
         client.responses += CommandResponse(
             number = 1L,
             output = listOf(
-                "beta::101::301::1::/home/alexey/git/pocketshell",
-                "alpha::100::300::0::/home/alexey/git/other",
+                "\$2::beta::101::301::1::/home/alexey/git/pocketshell",
+                "\$1::alpha::100::300::0::/home/alexey/git/other",
             ),
             isError = false,
         )
@@ -60,6 +60,7 @@ class HostTmuxSessionsGatewayTest {
         assertTrue(result is HostTmuxSessionListResult.Sessions)
         val rows = (result as HostTmuxSessionListResult.Sessions).rows
         assertEquals(listOf("beta", "alpha"), rows.map { it.name })
+        assertEquals(listOf("\$2", "\$1"), rows.map { it.tmuxSessionId })
         assertEquals(
             listOf("/home/alexey/git/pocketshell", "/home/alexey/git/other"),
             rows.map { it.path },
@@ -68,7 +69,7 @@ class HostTmuxSessionsGatewayTest {
         assertEquals(
             listOf(
                 "list-sessions -F " +
-                    "'#{session_name}::#{session_created}::#{session_activity}::" +
+                    "'#{session_id}::#{session_name}::#{session_created}::#{session_activity}::" +
                     "#{session_attached}::#{session_path}'",
             ),
             client.sentCommands,
@@ -80,10 +81,8 @@ class HostTmuxSessionsGatewayTest {
         val session = FakeSshSession(
             responses = ArrayDeque(
                 listOf(
-                    ExecResult(stdout = "", stderr = "not found", exitCode = 127),
-                    ExecResult(stdout = "alpha::100::300::0\n", stderr = "", exitCode = 0),
-                    ExecResult(stdout = "", stderr = "not found", exitCode = 127),
-                    ExecResult(stdout = "beta::101::301::1\n", stderr = "", exitCode = 0),
+                    ExecResult(stdout = "\$1::alpha::100::300::0\n", stderr = "", exitCode = 0),
+                    ExecResult(stdout = "\$2::beta::101::301::1\n", stderr = "", exitCode = 0),
                 ),
             ),
         )
@@ -112,10 +111,8 @@ class HostTmuxSessionsGatewayTest {
             assertFalse(session.closed)
             assertEquals(
                 listOf(
-                    "pocketshell sessions list --by activity",
-                    "tmux list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
-                    "pocketshell sessions list --by activity",
-                    "tmux list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
+                    "tmux list-sessions -F '#{session_id}::#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
+                    "tmux list-sessions -F '#{session_id}::#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
                 ).map { ReposRemoteSource.pathAwareCommand(it) },
                 session.execCommands,
             )
@@ -141,8 +138,7 @@ class HostTmuxSessionsGatewayTest {
         val session = FakeSshSession(
             responses = ArrayDeque(
                 listOf(
-                    ExecResult(stdout = "", stderr = "not found", exitCode = 127),
-                    ExecResult(stdout = "lease::100::300::0\n", stderr = "", exitCode = 0),
+                    ExecResult(stdout = "\$3::lease::100::300::0\n", stderr = "", exitCode = 0),
                 ),
             ),
         )
@@ -173,7 +169,7 @@ class HostTmuxSessionsGatewayTest {
             assertEquals(
                 listOf(
                     "list-sessions -F " +
-                        "'#{session_name}::#{session_created}::#{session_activity}::" +
+                        "'#{session_id}::#{session_name}::#{session_created}::#{session_activity}::" +
                         "#{session_attached}::#{session_path}'",
                 ),
                 client.sentCommands,

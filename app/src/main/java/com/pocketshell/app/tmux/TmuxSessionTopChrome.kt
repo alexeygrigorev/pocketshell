@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.sp
 import com.pocketshell.app.portfwd.ForwardingGlyph
 import com.pocketshell.app.portfwd.SessionForwardingIndicatorState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
+import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
@@ -179,7 +180,7 @@ internal fun ConsolidatedTopChrome(
     projectSwitcher: HostTmuxSessionPickerViewModel.ProjectSwitcherState =
         HostTmuxSessionPickerViewModel.ProjectSwitcherState(),
     onProjectSwitcherOpen: () -> Unit = {},
-    onSwitchToSibling: (String) -> Unit = {},
+    onSwitchToSibling: (HostTmuxSessionRow) -> Unit = {},
     // Issues #177 / #249: the live connection state, surfaced through the
     // breadcrumb's status dot (amber pulse while reconnecting, red while
     // disconnected) plus a compact "Reconnecting" / "Disconnected" pill.
@@ -361,7 +362,7 @@ private fun ProjectSwitcherCrumb(
     projectLabel: String,
     switcher: HostTmuxSessionPickerViewModel.ProjectSwitcherState,
     onOpen: () -> Unit,
-    onSwitchToSibling: (String) -> Unit,
+    onSwitchToSibling: (HostTmuxSessionRow) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -420,11 +421,12 @@ private fun ProjectSwitcherCrumb(
             val rows = switcher.siblings
             rows.forEach { row ->
                 val isCurrent = row.name == switcher.currentSessionName
+                val hasGenerationIdentity = row.navigationTargetOrNull() != null
                 DropdownMenuItem(
-                    enabled = !isCurrent,
+                    enabled = !isCurrent && hasGenerationIdentity,
                     onClick = {
                         expanded = false
-                        if (!isCurrent) onSwitchToSibling(row.name)
+                        if (!isCurrent) row.navigationTargetOrNull()?.let { onSwitchToSibling(row) }
                     },
                     modifier = Modifier.testTag(TMUX_PROJECT_SWITCHER_ROW_TAG_PREFIX + row.name),
                     text = {

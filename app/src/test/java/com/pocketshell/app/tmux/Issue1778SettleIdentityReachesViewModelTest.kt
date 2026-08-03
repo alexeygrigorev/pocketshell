@@ -80,7 +80,7 @@ class Issue1778SettleIdentityReachesViewModelTest : TmuxSessionViewModelTestBase
                     "switch after unifiedPanes republished under the measured index",
                 firstSwitch.isCompleted,
             )
-            assertEquals("deploy", firstSwitch.await())
+            assertEquals("deploy", firstSwitch.await().sessionName)
         }
 
     @Test
@@ -116,9 +116,9 @@ class Issue1778SettleIdentityReachesViewModelTest : TmuxSessionViewModelTestBase
             assertFalse(
                 "the confirmed release page must never route to the sibling " +
                     "cached session that drifted into its old index",
-                switched == "deploy",
+                switched.sessionName == "deploy",
             )
-            assertEquals("release", switched)
+            assertEquals("release", switched.sessionName)
         }
 
     @Test

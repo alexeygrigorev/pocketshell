@@ -68,6 +68,7 @@ class HostTmuxSessionListParser @Inject constructor() {
         if (name.isEmpty()) return null
         return HostTmuxSessionRow(
             name = name,
+            tmuxSessionId = fields.tmuxSessionId?.trim()?.takeIf { it.isNotEmpty() },
             createdAt = fields.createdAt?.trim()?.toLongOrNull(),
             lastActivity = fields.lastActivity?.trim()?.toLongOrNull(),
             attached = (fields.attached?.trim()?.toLongOrNull() ?: fields.fallbackAttachedCount) > 0L,
@@ -87,6 +88,11 @@ class HostTmuxSessionListParser @Inject constructor() {
 
     private fun parseStructuredTmuxListSessionsFields(line: String): TmuxListSessionsFields? {
         for (separator in STRUCTURED_SEPARATORS) {
+            // Issue #1944: picker rows carry the immutable tmux generation as
+            // id + created. Parse these identity-bearing shapes first because
+            // the live form has six fields, like the dashboard state form.
+            parseStructuredIdentitySixFields(line, separator)?.let { return it }
+            parseStructuredIdentityFiveFields(line, separator)?.let { return it }
             // Issue #1237: the cross-host dashboard query appends
             // `#{@ps_agent_state}` and `#{@ps_agent_state_updated_at}` as a 5th
             // and 6th column (both controlled: an idle/waiting/working token and
@@ -110,6 +116,39 @@ class HostTmuxSessionListParser @Inject constructor() {
             )
         }
         return null
+    }
+
+    private fun parseStructuredIdentitySixFields(line: String, separator: String): TmuxListSessionsFields? {
+        val fields = line.splitFromRight(separator, expectedTailFields = 5) ?: return null
+        if (!fields[0].trim().startsWith('$') ||
+            fields[2].trim().toLongOrNull() == null ||
+            fields[3].trim().toLongOrNull() == null ||
+            fields[4].trim().toLongOrNull() == null
+        ) return null
+        return TmuxListSessionsFields(
+            tmuxSessionId = fields[0],
+            name = fields[1],
+            createdAt = fields[2],
+            lastActivity = fields[3],
+            attached = fields[4],
+            path = fields[5],
+        )
+    }
+
+    private fun parseStructuredIdentityFiveFields(line: String, separator: String): TmuxListSessionsFields? {
+        val fields = line.splitFromRight(separator, expectedTailFields = 4) ?: return null
+        if (!fields[0].trim().startsWith('$') ||
+            fields[2].trim().toLongOrNull() == null ||
+            fields[3].trim().toLongOrNull() == null ||
+            fields[4].trim().toLongOrNull() == null
+        ) return null
+        return TmuxListSessionsFields(
+            tmuxSessionId = fields[0],
+            name = fields[1],
+            createdAt = fields[2],
+            lastActivity = fields[3],
+            attached = fields[4],
+        )
     }
 
     private fun parseStructuredSixFields(line: String, separator: String): TmuxListSessionsFields? {
@@ -210,6 +249,7 @@ class HostTmuxSessionListParser @Inject constructor() {
         }.getOrNull()
 
     private data class TmuxListSessionsFields(
+        val tmuxSessionId: String? = null,
         val name: String,
         val createdAt: String?,
         val lastActivity: String?,

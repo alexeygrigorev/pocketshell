@@ -1,10 +1,12 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.connection.ConnectionController
+import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
@@ -36,6 +38,86 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
+    @Test
+    fun unrecoverableHostSeamBlocksColdOpenAndReconnectWhileArmed() {
+        assertTrue(syntheticUnrecoverableHostRejectsDial(true, TmuxConnectTrigger.OpenExisting))
+        assertTrue(syntheticUnrecoverableHostRejectsDial(true, TmuxConnectTrigger.AutoReconnect))
+    }
+
+    @Test
+    fun unrecoverableHostSeamAllowsColdOpenAndReconnectAfterClear() {
+        assertFalse(syntheticUnrecoverableHostRejectsDial(false, TmuxConnectTrigger.OpenExisting))
+        assertFalse(syntheticUnrecoverableHostRejectsDial(false, TmuxConnectTrigger.AutoReconnect))
+    }
+
+    @Test
+    fun unrecoverableHostSeamBlocksWarmLeaseAndFastSwitchReuseWhileArmed() {
+        assertFalse(syntheticUnrecoverableHostAllowsTransportReuse(true))
+    }
+
+    @Test
+    fun unrecoverableHostSeamRestoresWarmLeaseAndFastSwitchReuseAfterClear() {
+        assertTrue(syntheticUnrecoverableHostAllowsTransportReuse(false))
+    }
+
+    @Test
+    fun networkRestoreRedialsAcceptedColdOpenAfterItsTargetsWereCleared() = runTest(scheduler) {
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(sshLeaseManager = testLeaseManager(connector = connector, scope = this))
+        vm.setTmuxClientFactoryForTest { _, _, _ -> FakeTmuxClient().withSinglePane("work", "%1") }
+        vm.forceUnrecoverableHostForTest = true
+
+        vm.connect(7L, "alpha", "alpha.example", 22, "alex", "/keys/a", null, "work")
+        advanceUntilIdle()
+        assertEquals(0, connector.connectCount)
+        assertEquals("work", vm.latestRestoreIntentSnapshot()?.sessionName)
+        assertEquals(null, vm.activeSessionNameForTest())
+        assertEquals(null, vm.connectingSessionNameForTest())
+
+        vm.forceUnrecoverableHostForTest = false
+        vm.onNetworkChanged(
+            networkChange(reason = "network-restored").copy(
+                previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                kind = TerminalNetworkChangeKind.NetworkRestored,
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(1, connector.connectCount)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun acceptedRestoreTargetRejectsStaleGenerationAndSupersededScreen() {
+        val a = SessionId("tmux:7:a:1")
+        val b = SessionId("tmux:7:b:2")
+        assertFalse(acceptedRestoreTargetIsCurrent(4L, 5L, a, a))
+        assertFalse(acceptedRestoreTargetIsCurrent(5L, 5L, a, b))
+        assertTrue(acceptedRestoreTargetIsCurrent(5L, 5L, b, b))
+    }
+
+    @Test
+    fun leavingFailedSessionScreenClearsAcceptedRestoreAndNetworkCannotReviveIt() = runTest(scheduler) {
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(sshLeaseManager = testLeaseManager(connector = connector, scope = this))
+        vm.forceUnrecoverableHostForTest = true
+        vm.connect(7L, "alpha", "alpha.example", 22, "alex", "/keys/a", null, "work")
+        advanceUntilIdle()
+
+        vm.onSessionScreenLeft()
+        vm.forceUnrecoverableHostForTest = false
+        vm.onNetworkChanged(
+            networkChange(reason = "network-restored").copy(
+                previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                kind = TerminalNetworkChangeKind.NetworkRestored,
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(null, vm.latestRestoreIntentSnapshot())
+        assertEquals(0, connector.connectCount)
+    }
+
     @Test
     fun networkReconnectEvictsConnectedIdleLeaseBeforeReattaching() = runTest(scheduler) {
         val registry = ActiveTmuxClients()

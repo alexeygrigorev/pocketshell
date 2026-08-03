@@ -129,6 +129,20 @@ class HostTmuxSessionListParserTest {
     }
 
     @Test
+    fun parseTmuxListSessionsCarriesFullGenerationIdentityFromPickerShapes() {
+        val rows = parser.parseTmuxListSessions(
+            "\$7::renamed::1779520800::1779521400::1::/srv/project\n" +
+                "\$8::other::1779510000::1779510500::0\n",
+        )
+
+        assertEquals(listOf("renamed", "other"), rows.map { it.name })
+        assertEquals(listOf("\$7", "\$8"), rows.map { it.tmuxSessionId })
+        assertEquals(listOf(1779520800L, 1779510000L), rows.map { it.createdAt })
+        assertEquals("/srv/project", rows[0].path)
+        assertNull(rows[1].path)
+    }
+
+    @Test
     fun parseTmuxListSessionsReadsSessionPathFromFiveFieldShape() {
         // Issue #463: the warm live-client query appends `#{session_path}`.
         val rows = parser.parseTmuxListSessions(

@@ -2,11 +2,18 @@ package com.pocketshell.app.tmux
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.composer.InMemoryOutboundQueueStore
+import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.tmux.CommandResponse
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -54,6 +61,7 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
     private val context: Context = ApplicationProvider.getApplicationContext()
 
     private val footer = "gpt-5.6-sol medium · Context 42% · Goal blocked (/goal resume)"
+    private lateinit var durableStore: InMemoryOutboundQueueStore
 
     private fun codexDetection(): AgentDetection = AgentDetection(
         agent = AgentKind.Codex,
@@ -63,7 +71,8 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
     )
 
     private fun newBurstVm(client: BurstTuiFakeTmuxClient): TmuxSessionViewModel {
-        val vm = newVm(applicationContext = context)
+        durableStore = InMemoryOutboundQueueStore()
+        val vm = newVm(applicationContext = context, outboundQueueStore = durableStore)
         vm.attachClientForTest(client)
         vm.startAgentConversationForTest("%0", codexDetection())
         vm.setAgentSubmitEnterDelayForTest(0)
@@ -74,6 +83,33 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
         vm.localRenderTextOverrideForTest["%0"] = footer
         return vm
     }
+
+    private fun durableRow(id: String, payload: String): DurableOutboundRowIdentity {
+        durableStore.enqueueExisting(
+            OutboundItem(
+                id = id,
+                sessionKey = "session-a",
+                cleanText = payload,
+                paneId = "%0",
+                createdAtMs = 1L,
+            ),
+        )
+        return DurableOutboundRowIdentity("session-a", id)
+    }
+
+    private fun transcriptUserTurn(
+        id: String,
+        payload: String,
+        sendState: MessageSendState = MessageSendState.Confirmed,
+    ): ConversationEvent.Message =
+        ConversationEvent.Message(
+            id = id,
+            agent = AgentKind.Codex,
+            atMillis = 1L,
+            role = ConversationRole.User,
+            text = payload,
+            sendState = sendState,
+        )
 
     /**
      * Route A (Terminal tab, gated submit) — the maintainer's Codex Send+Enter. On a
@@ -189,6 +225,296 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
     }
 
     /**
+     * Issue #1944: a successful tmux Enter write is not yet proof that the TUI has
+     * consumed that Enter and reopened its input loop. The durable FIFO worker used
+     * to prune row A and paste row B immediately. On a redraw/debounce boundary the
+     * TUI can echo B (so the pre-Enter paste ack succeeds) while still consuming A;
+     * B's Enter is then swallowed even though tmux reports success, and both durable
+     * rows are pruned.
+     *
+     * This fake requires one clean post-submit observation before it accepts the next
+     * turn's Enter. RED on the #1944 implementation before the submit-turnover gate:
+     * both calls return success, but only the first command is submitted.
+     */
+    @Test
+    fun consecutiveQueuedPromptsWaitForPreviousSubmitTurnover() = runTest(scheduler) {
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            requirePostSubmitObservationBeforeNextEnter = true,
+        )
+        val vm = newBurstVm(client)
+
+        assertTrue(
+            vm.sendAgentPayloadToPaneResult(
+                "%0", "first queued prompt", AgentKind.Codex,
+                sendToken = "row-a",
+                durableRow = durableRow("row-a", "first queued prompt"),
+            ).isSuccess,
+        )
+        assertTrue(
+            vm.sendAgentPayloadToPaneResult(
+                "%0", "second queued prompt", AgentKind.Codex,
+                sendToken = "row-b",
+                durableRow = durableRow("row-b", "second queued prompt"),
+            ).isSuccess,
+        )
+
+        assertEquals(
+            "the FIFO worker must not prune B until the TUI has consumed A's submit and " +
+                "reopened the input turn",
+            listOf("first queued prompt", "second queued prompt"),
+            client.submittedCommands,
+        )
+    }
+
+    @Test
+    fun transientNoPromptRedrawCannotAuthorizeNextQueuedPaste() = runTest(scheduler) {
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            transientNoPromptBeforeEnterConsumption = true,
+        )
+        val vm = newBurstVm(client)
+
+        val firstResult = vm.sendAgentPayloadToPaneResult(
+                "%0", "first queued prompt", AgentKind.Codex,
+                sendToken = "transient-row-a",
+                durableRow = durableRow("transient-row-a", "first queued prompt"),
+            )
+        assertTrue(firstResult.exceptionOrNull()?.message, firstResult.isSuccess)
+        assertTrue(
+            vm.sendAgentPayloadToPaneResult(
+                "%0", "second queued prompt", AgentKind.Codex,
+                sendToken = "transient-row-b",
+                durableRow = durableRow("transient-row-b", "second queued prompt"),
+            ).isSuccess,
+        )
+
+        assertFalse(
+            "row B must not be pasted while row A's Enter is still unconsumed",
+            client.pastedBeforePreviousEnterConsumed,
+        )
+        assertEquals(listOf("first queued prompt", "second queued prompt"), client.submittedCommands)
+    }
+
+    @Test
+    fun newConfirmedTranscriptTurnAcknowledgesFramedPromptlessSubmit() = runTest(scheduler) {
+        val payload = "recorded prompt"
+        lateinit var vm: TmuxSessionViewModel
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+            onEnter = {
+                vm.appendAgentEventsForTest("%0", listOf(transcriptUserTurn("confirmed-new", payload)))
+            },
+        )
+        vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "transcript-row",
+            durableRow = durableRow("transcript-row", payload),
+        )
+
+        assertTrue(result.exceptionOrNull()?.message, result.isSuccess)
+    }
+
+    @Test
+    fun transcriptAuthorityMayBecomeActiveAfterSubmitBaseline() = runTest(scheduler) {
+        val payload = "reconnect tail startup prompt"
+        lateinit var vm: TmuxSessionViewModel
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+            onEnter = {
+                vm.setAgentTranscriptAuthorityForTest("%0", true)
+                vm.appendAgentEventsForTest("%0", listOf(transcriptUserTurn("confirmed-after-start", payload)))
+            },
+        )
+        vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityStartingForTest("%0", true)
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "tail-start-row",
+            durableRow = durableRow("tail-start-row", payload),
+        )
+
+        assertTrue(result.exceptionOrNull()?.message, result.isSuccess)
+    }
+
+    @Test
+    fun transcriptTurnAfterGenericCeilingStillAcknowledgesWithinTailBound() = runTest(scheduler) {
+        val payload = "tail poll phase prompt"
+        lateinit var vm: TmuxSessionViewModel
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+            onEnter = {
+                backgroundScope.launch {
+                    delay(1_200L)
+                    vm.appendAgentEventsForTest(
+                        "%0",
+                        listOf(transcriptUserTurn("confirmed-after-tail-poll", payload)),
+                    )
+                }
+            },
+        )
+        vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+        val startedAt = testScheduler.currentTime
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "tail-poll-row",
+            durableRow = durableRow("tail-poll-row", payload),
+        )
+
+        val elapsed = testScheduler.currentTime - startedAt
+        assertTrue(result.exceptionOrNull()?.message, result.isSuccess)
+        assertTrue("ack must arrive after the generic 800ms ceiling: elapsed=$elapsed", elapsed > 800L)
+        assertTrue("ack must remain inside the 2s transcript ceiling: elapsed=$elapsed", elapsed < 2_000L)
+    }
+
+    @Test
+    fun preExistingOrOptimisticTranscriptTurnsDoNotAcknowledgeSubmit() = runTest(scheduler) {
+        val payload = "identical prompt"
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+        )
+        val vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+        vm.appendAgentEventsForTest(
+            "%0",
+            listOf(
+                transcriptUserTurn("confirmed-existing", payload),
+                transcriptUserTurn("pending-non-prefix", payload, MessageSendState.Pending),
+            ),
+        )
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "existing-row",
+            durableRow = durableRow("existing-row", payload),
+        )
+
+        assertTrue("no new authoritative transcript turn must retain the row", result.isFailure)
+    }
+
+    @Test
+    fun confirmedTurnFromWrongPaneDoesNotAcknowledgeSubmit() = runTest(scheduler) {
+        val payload = "pane-bound prompt"
+        lateinit var vm: TmuxSessionViewModel
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+            onEnter = {
+                vm.appendAgentEventsForTest("%1", listOf(transcriptUserTurn("wrong-pane", payload)))
+            },
+        )
+        vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "wrong-pane-row",
+            durableRow = durableRow("wrong-pane-row", payload),
+        )
+
+        assertTrue("a foreign pane transcript must retain the row", result.isFailure)
+    }
+
+    @Test
+    fun confirmedTurnAfterDetectionSourceChangeDoesNotAcknowledgeSubmit() = runTest(scheduler) {
+        val payload = "source-bound prompt"
+        lateinit var vm: TmuxSessionViewModel
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+            onEnter = {
+                vm.startAgentConversationForTest(
+                    "%0",
+                    codexDetection().copy(sourcePath = "/home/u/.codex/sessions/other.jsonl"),
+                    listOf(transcriptUserTurn("wrong-source", payload)),
+                )
+            },
+        )
+        vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "wrong-source-row",
+            durableRow = durableRow("wrong-source-row", payload),
+        )
+
+        assertTrue("a replacement detection/source must retain the row", result.isFailure)
+    }
+
+    /**
+     * Issue #1944's false-success discriminator: tmux accepts Enter, but the
+     * agent never consumes it and its pane never advances. The send result must
+     * remain ambiguous/failure so the composer cannot mark the durable row Sent
+     * and prune it.
+     */
+    @Test
+    fun enterWriteWithoutAgentTurnoverIsNotDeliverySuccess() = runTest(scheduler) {
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            neverConsumesEnter = true,
+        )
+        val vm = newBurstVm(client)
+        val startedAt = testScheduler.currentTime
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0",
+            "durable prompt must remain queued",
+            AgentKind.Codex,
+            sendToken = "durable-row",
+            durableRow = durableRow("durable-row", "durable prompt must remain queued"),
+        )
+
+        assertTrue("tmux write completion without pane turnover is ambiguous", result.isFailure)
+        assertTrue("the fake must have accepted the Enter command", client.sentCommands.any { it.endsWith(" Enter") })
+        assertTrue("the agent did not semantically submit the row", client.submittedCommands.isEmpty())
+        val elapsed = testScheduler.currentTime - startedAt
+        assertTrue("generic turnover must retain its 800ms ceiling: elapsed=$elapsed", elapsed < 1_000L)
+    }
+
+    /** An animated spinner/footer is not row-correlated submit evidence. */
+    @Test
+    fun unrelatedFrameChangeWhilePayloadRemainsInInputIsNotDeliverySuccess() = runTest(scheduler) {
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            neverConsumesEnter = true,
+            animateUnrelatedFrame = true,
+        )
+        val vm = newBurstVm(client)
+
+        val result = vm.sendAgentPayloadToPaneResult(
+            "%0",
+            "payload still visible in agent input",
+            AgentKind.Codex,
+            sendToken = "animated-row",
+            durableRow = durableRow("animated-row", "payload still visible in agent input"),
+        )
+
+        assertTrue("unrelated animation must not authorize durable prune", result.isFailure)
+        assertTrue(client.submittedCommands.isEmpty())
+    }
+
+    /**
      * Class coverage — the footer-present FALSE-MATCH itself: when the pane NEVER
      * renders the typed input (a fully wedged busy Codex), the ack gate must NOT
      * confirm on the permanent footer occurrence. It fails within the bounded
@@ -243,12 +569,24 @@ internal class BurstTuiFakeTmuxClient(
     private val footer: String,
     private val busyReadDelayCaptures: Int,
     private val neverRenders: Boolean = false,
+    private val requirePostSubmitObservationBeforeNextEnter: Boolean = false,
+    private val neverConsumesEnter: Boolean = false,
+    private val animateUnrelatedFrame: Boolean = false,
+    private val transientNoPromptBeforeEnterConsumption: Boolean = false,
+    private val forceNoPromptFrames: Boolean = false,
+    private val onEnter: (() -> Unit)? = null,
 ) : FakeTmuxClient() {
 
     private var pendingText: String? = null
     private var textRendered: Boolean = false
     private var capturesSincePaste: Int = 0
     private var submitted: Boolean = false
+    private var previousSubmitStillTurningOver: Boolean = false
+    private var renderedFrame: Int = 0
+    private var pendingEnter: Boolean = false
+    private var transientNoPromptEmitted: Boolean = false
+    var pastedBeforePreviousEnterConsumed: Boolean = false
+        private set
     val submittedCommands: MutableList<String> = mutableListOf()
 
     private val literalRegex = Regex("^send-keys -l -t \\S+ -- '(.*)'$")
@@ -258,20 +596,34 @@ internal class BurstTuiFakeTmuxClient(
 
     private fun interpret(cmd: String) {
         literalRegex.find(cmd)?.let { m ->
-            pendingText = m.groupValues[1].replace("'\\''", "'")
+            val pasted = m.groupValues[1].replace("'\\''", "'")
+            if (pendingEnter) {
+                pastedBeforePreviousEnterConsumed = true
+                pendingText = pendingText.orEmpty() + pasted
+            } else {
+                pendingText = pasted
+            }
             textRendered = false
             submitted = false
             capturesSincePaste = 0
             return
         }
         if (enterRegex.matches(cmd)) {
+            onEnter?.invoke()
+            if (neverConsumesEnter) return
+            if (transientNoPromptBeforeEnterConsumption) {
+                pendingEnter = true
+                transientNoPromptEmitted = false
+                return
+            }
             val text = pendingText
-            if (text != null && textRendered && !submitted) {
+            if (text != null && textRendered && !submitted && !previousSubmitStillTurningOver) {
                 // The text was read+rendered in a PRIOR read ⇒ this CR is its own read
                 // ⇒ Codex submits. If the text is still unread (textRendered == false),
                 // the CR batches with it and the paste-burst heuristic swallows it.
                 submitted = true
                 submittedCommands.add(text)
+                previousSubmitStillTurningOver = requirePostSubmitObservationBeforeNextEnter
             }
         }
     }
@@ -287,10 +639,14 @@ internal class BurstTuiFakeTmuxClient(
     }
 
     private fun renderLines(): List<String> {
-        val lines = mutableListOf(footer)
+        if (forceNoPromptFrames && submitted) return listOf("agent framed input redraw")
+        val lines = mutableListOf(
+            if (animateUnrelatedFrame) "$footer · spinner ${renderedFrame++}" else footer,
+        )
         val text = pendingText
         if (submitted && text != null) {
             lines.add("■ submitted $text: thread/goal set")
+            lines.add("›")
         } else if (textRendered && text != null) {
             lines.add("› $text")
         }
@@ -314,7 +670,27 @@ internal class BurstTuiFakeTmuxClient(
     ): CommandResponse {
         capturePaneTextViaExecCalls += paneId
         capturePaneTextViaExecScrollbackLines += scrollbackLines
+        if (pendingEnter && !transientNoPromptEmitted) {
+            transientNoPromptEmitted = true
+            return CommandResponse(
+                number = 0L,
+                output = listOf("redrawing agent input surface"),
+                isError = false,
+            )
+        }
+        if (pendingEnter) {
+            pendingEnter = false
+            submitted = true
+            pendingText?.let(submittedCommands::add)
+        }
         advanceCodexReadOnCapture()
-        return CommandResponse(number = 0L, output = renderLines(), isError = false)
+        val response = CommandResponse(number = 0L, output = renderLines(), isError = false)
+        // A clean observation after Enter models the TUI finishing its submitted-turn
+        // redraw and reopening the input loop. A capture performed only after the next
+        // paste is too late: that next turn is already sharing the busy boundary.
+        if (submitted && previousSubmitStillTurningOver) {
+            previousSubmitStillTurningOver = false
+        }
+        return response
     }
 }

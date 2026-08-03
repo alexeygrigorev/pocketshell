@@ -184,12 +184,14 @@ class OutboundQueueStoreEncodingTest {
                 wireAttemptedAtMs = 1_700_000_009_000,
                 wireNeedleBaselineCount = 1,
                 wireCollapsedMarkerBaselineCount = 2,
+                wireSubmitAttempted = true,
             ),
         )
         val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
         assertEquals(items, decoded)
         assertEquals(1, decoded.single().wireNeedleBaselineCount)
         assertEquals(2, decoded.single().wireCollapsedMarkerBaselineCount)
+        assertTrue(decoded.single().wireSubmitAttempted)
     }
 
     @Test
@@ -201,6 +203,7 @@ class OutboundQueueStoreEncodingTest {
         val decoded = decodeOutboundItems("sessA", raw).single()
         assertTrue(decoded.wireAttempted)
         assertEquals(null, decoded.wireNeedleBaselineCount)
+        assertFalse(decoded.wireSubmitAttempted)
     }
 
     @Test

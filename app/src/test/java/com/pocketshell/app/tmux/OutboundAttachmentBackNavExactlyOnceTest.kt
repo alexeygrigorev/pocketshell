@@ -116,6 +116,11 @@ class OutboundAttachmentBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() 
             output = composed.split('\n'),
             isError = false,
         )
+        onCommandSent = { command ->
+            if (command == "send-keys -t %0 Enter") {
+                defaultCaptureResponse = CommandResponse(0L, listOf(">"), false)
+            }
+        }
     }
 
     private fun ref(path: String): DurableAttachmentRef =
@@ -193,7 +198,7 @@ class OutboundAttachmentBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() 
             )
         }
         advanceUntilIdle()
-        assertTrue("the verified resend must succeed", second.await().isSuccess)
+        assertTrue("an unconfirmed prior Enter must remain unresolved", second.await().isFailure)
 
         // THE assertion (#1554 AC): the rebuilt VM must NOT re-paste the attachment
         // payload. On base (cleanText-only needle) VM #2 has no matching durable
@@ -201,11 +206,11 @@ class OutboundAttachmentBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() 
         // attachment-aware needle ⇒ 0 (Enter-only, occurrence 1).
         assertEquals(
             "attachment back-navigation mid-delivery must NOT duplicate: the rebuilt " +
-                "VM recognizes the landed composed payload and submits Enter only",
+                "VM recognizes the landed composed payload and never pastes it again",
             0,
             client2.bracketedPasteCount(composed),
         )
-        assertTrue("the rebuilt VM must still submit the pending row (Enter-only)", client2.enterCount() >= 1)
+        assertEquals("the rebuilt VM must not send a second ambiguous Enter", 0, client2.enterCount())
     }
 
     /**
@@ -266,13 +271,13 @@ class OutboundAttachmentBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() 
             )
         }
         advanceUntilIdle()
-        assertTrue(second.await().isSuccess)
+        assertTrue(second.await().isFailure)
         assertEquals(
             "multi-attachment back-navigation must NOT duplicate the composed payload",
             0,
             client2.bracketedPasteCount(composed),
         )
-        assertTrue(client2.enterCount() >= 1)
+        assertEquals(0, client2.enterCount())
     }
 
     /**
@@ -395,15 +400,17 @@ class OutboundAttachmentBackNavExactlyOnceTest : TmuxSessionViewModelTestBase() 
             )
         }
         advanceUntilIdle()
-        assertTrue(second.await().isSuccess)
+        assertTrue(second.await().isFailure)
         assertEquals(
             "text-only back-navigation must remain exactly-once (no #1541 regression)",
             0,
             client2.literalPasteCount(payload),
         )
-        assertTrue(client2.enterCount() >= 1)
-        // And a delivered+pruned text row drops the durable flag (not falsely suppressed later).
-        store.markDelivered(row.id)
-        assertFalse(store.hasWireAttempt("sessT", row.id))
+        assertEquals(0, client2.enterCount())
+        assertTrue("the unresolved text row keeps its wire evidence", store.hasWireAttempt("sessT", row.id))
+        assertTrue(
+            "the unresolved text row keeps the Enter-ambiguity latch",
+            store.hasWireSubmitAttempt("sessT", row.id),
+        )
     }
 }

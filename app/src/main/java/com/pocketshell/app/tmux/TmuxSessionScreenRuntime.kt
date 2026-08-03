@@ -208,6 +208,49 @@ internal class TmuxSessionAgentSignals(
     val quickReplyInputEligible: Boolean,
 )
 
+internal fun tmuxPresumedAgentKind(
+    currentDetection: AgentDetection?,
+    paletteAgent: AgentKind?,
+    recordedEvidence: RecordedAgentRouteEvidence?,
+    durableSessionKey: String?,
+    paneId: String?,
+): AgentKind? = when {
+    currentDetection != null -> null
+    paletteAgent != null -> paletteAgent
+    durableSessionKey != null &&
+        paneId != null &&
+        recordedEvidence?.durableSessionKey == durableSessionKey &&
+        recordedEvidence.paneId == paneId -> recordedEvidence.agentKind
+    else -> null
+}
+
+internal fun tmuxDisconnectedAgentKind(
+    currentDetection: AgentDetection?,
+    recordedEvidence: RecordedAgentRouteEvidence?,
+    durableSessionKey: String?,
+    paneId: String?,
+): AgentKind? {
+    val exactRecorded = recordedEvidence?.takeIf {
+        durableSessionKey != null &&
+            paneId != null &&
+            recordedEvidence.durableSessionKey == durableSessionKey &&
+            recordedEvidence.paneId == paneId
+    } ?: return null
+    // Detection rows are pane-id keyed and carry no tmux generation. They may
+    // choose the engine only after authoritative evidence proves that this is
+    // still the exact durable session+pane, never on pane id alone.
+    return currentDetection?.agent ?: exactRecorded.agentKind
+}
+
+internal fun tmuxComposerPaneIdForSnapshot(
+    surfacePaneId: String?,
+    recordedEvidence: RecordedAgentRouteEvidence?,
+    durableSessionKey: String,
+): String? = surfacePaneId?.takeIf { it.isNotBlank() }
+    ?: recordedEvidence?.paneId?.takeIf {
+        it.isNotBlank() && recordedEvidence.durableSessionKey == durableSessionKey
+    }
+
 @Composable
 internal fun rememberTmuxSessionAgentSignals(
     viewModel: TmuxSessionViewModel,
@@ -215,6 +258,8 @@ internal fun rememberTmuxSessionAgentSignals(
     panes: TmuxSessionPaneSelection,
     agentConversationsState: State<Map<String, AgentConversationUiState>>,
     currentSessionRecordedKind: SessionAgentKind?,
+    hostId: Long,
+    recordedAgentRouteEvidence: RecordedAgentRouteEvidence?,
 ): TmuxSessionAgentSignals {
     val surfaceConversationPaneId = panes.surfaceConversationPaneId
     val surfacePane = panes.surfacePane
@@ -273,11 +318,29 @@ internal fun rememberTmuxSessionAgentSignals(
             stickyAgent = paletteAgent,
             confirmedShell = surfacePane.paneId in confirmedShellPaneIds,
         )
-    val presumedAgentKind: AgentKind? = if (currentDetection == null) {
-        paletteAgent
-    } else {
-        null
-    }
+    // Issue #1944: the conversation row and composition-local sticky map can
+    // both disappear during a reconnect boundary while the composer remains
+    // usable. The host-recorded kind is authoritative for this exact active
+    // tmux generation and keeps a disconnected dictation on AgentPayload
+    // instead of silently downgrading it to RawBytes.
+    // During a transport outage the cached surface row may temporarily lose
+    // its generation fields even though the navigation/reveal target still
+    // owns the exact durable identity. Prefer that target identity; never
+    // synthesize evidence from the human session name.
+    val recordedEvidenceSessionKey = conn.targetSessionId.value.takeIf {
+        parseDurableTmuxSessionIdentity(hostId, it) != null
+    } ?: durableTmuxSessionKey(
+        hostId = hostId,
+        tmuxSessionId = surfacePane?.sessionId,
+        sessionCreated = surfacePane?.sessionCreated,
+    )
+    val presumedAgentKind = tmuxPresumedAgentKind(
+        currentDetection = currentDetection,
+        paletteAgent = paletteAgent,
+        recordedEvidence = recordedAgentRouteEvidence,
+        durableSessionKey = recordedEvidenceSessionKey,
+        paneId = surfacePane?.paneId,
+    )
     return TmuxSessionAgentSignals(
         surfaceChrome = surfaceChrome,
         currentDetection = currentDetection,

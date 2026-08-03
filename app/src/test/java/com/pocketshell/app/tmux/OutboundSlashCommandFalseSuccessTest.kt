@@ -78,6 +78,11 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
 
     private fun clientShowing(vararg lines: String): FakeTmuxClient = FakeTmuxClient().apply {
         defaultCaptureResponse = CommandResponse(number = 0L, output = lines.toList(), isError = false)
+        onCommandSent = { command ->
+            if (command == "send-keys -t %0 Enter") {
+                defaultCaptureResponse = CommandResponse(0L, listOf(">"), false)
+            }
+        }
     }
 
     /**
@@ -243,13 +248,16 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
             )
         }
         advanceUntilIdle()
-        assertTrue("the verified resend must succeed", second.await().isSuccess)
+        assertTrue(
+            "an unconfirmed prior Enter must stay unresolved without a blind second submit",
+            second.await().isFailure,
+        )
         assertEquals(
             "a genuine resend of a payload that already LANDED must be deduped to " +
                 "exactly ONE paste (the baseline-aware probe still catches real duplicates)",
             1,
             client.literalPasteCount(payload),
         )
-        assertTrue("the resend must still submit (Enter-only)", client.enterCount() >= 2)
+        assertEquals("only the ambiguous first Enter reaches the wire", 1, client.enterCount())
     }
 }

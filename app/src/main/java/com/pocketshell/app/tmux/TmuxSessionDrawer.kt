@@ -57,7 +57,7 @@ internal fun TmuxSessionDrawer(
     currentSessionName: String,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit,
-    onAttach: (String) -> Unit,
+    onAttach: (TmuxSessionNavigationTarget) -> Unit,
     onCreate: () -> Unit,
 ) {
     AnimatedVisibility(
@@ -184,8 +184,8 @@ internal fun TmuxSessionDrawer(
                                 TmuxSessionDrawerRow(
                                     row = row,
                                     selected = row.name == currentSessionName,
-                                    enabled = row.name != currentSessionName,
-                                    onClick = { onAttach(row.name) },
+                                    enabled = row.name != currentSessionName && row.navigationTargetOrNull() != null,
+                                    onClick = { row.navigationTargetOrNull()?.let(onAttach) },
                                 )
                             }
                         }

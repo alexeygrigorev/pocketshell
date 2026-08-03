@@ -73,7 +73,12 @@ internal fun buildTmuxPaneListingCommand(sessionName: String?): String = buildSt
     // `list-panes` reports it truthfully on every reconcile. Appended LAST so
     // older tmux that omit it leave every prior field's index unchanged (the
     // parser tolerates its absence -> alternateOn false).
-    append("#{alternate_on}'")
+    append("#{alternate_on}")
+    append(LIST_PANES_FIELD_SEPARATOR)
+    // Issue #1944: pane ids can be reused after a tmux server restart. Carry
+    // the tmux generation beside every pane so queued sends cannot be rebound
+    // to a same-name successor merely because its `%N` happens to match.
+    append("#{session_created}'")
 }
 
 private fun escapePaneListingSingleQuoted(input: String): String =

@@ -179,7 +179,7 @@ internal fun SessionSwitcherOverlay(
     currentSessionName: String,
     onRefresh: () -> Unit,
     onDismiss: () -> Unit,
-    onSelectSession: (String) -> Unit,
+    onSelectSession: (TmuxSessionNavigationTarget) -> Unit,
     onCreate: () -> Unit,
 ) {
     val pages = remember(state, currentSessionName) {
@@ -200,7 +200,7 @@ internal fun SessionSwitcherOverlay(
         snapshotFlow { pagerState.settledPage }.collect { page ->
             val session = pages.getOrNull(page) ?: return@collect
             if (session.name != currentSessionName && session.selectable) {
-                onSelectSession(session.name)
+                session.target?.let(onSelectSession)
             }
         }
     }
@@ -285,7 +285,7 @@ internal fun SessionSwitcherOverlay(
                             .clickable(
                                 enabled = session.selectable,
                                 role = androidx.compose.ui.semantics.Role.Tab,
-                                onClick = { onSelectSession(session.name) },
+                                onClick = { session.target?.let(onSelectSession) },
                             )
                             .padding(16.dp)
                             .testTag("$TMUX_SESSION_PAGER_PAGE_TAG_PREFIX${page + 1}"),
@@ -328,4 +328,5 @@ internal data class SessionSwitcherPage(
     val name: String,
     val statusLabel: String,
     val selectable: Boolean,
+    val target: TmuxSessionNavigationTarget? = null,
 )

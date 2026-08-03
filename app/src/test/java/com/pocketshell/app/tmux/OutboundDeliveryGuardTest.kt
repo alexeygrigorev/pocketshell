@@ -35,6 +35,18 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
 class OutboundDeliveryGuardTest {
+    @Test
+    fun durableAgentQueueDefersImmediatelyUntilTransportIsWritable() {
+        val row = DurableOutboundRowIdentity("tmux:1:\$1:100", "row-1")
+
+        assertTrue(durableAgentQueueSendMustDefer(row, transportWritable = false))
+        assertFalse(durableAgentQueueSendMustDefer(row, transportWritable = true))
+        assertFalse(
+            "non-queued direct sends retain connect-on-action behavior",
+            durableAgentQueueSendMustDefer(null, transportWritable = false),
+        )
+    }
+
 
     @After
     fun tearDown() {
@@ -530,6 +542,34 @@ class OutboundDeliveryGuardTest {
             ledger.hasAmbiguousAttempt("%0", row.id, "unacked payload", durableRow),
         )
         assertTrue(store.hasWireAttempt("sessA", row.id))
+    }
+
+    @Test
+    fun persistedSubmitAttemptFailsClosedWithoutBlindEnterOrRepaste() = runTest {
+        val store = com.pocketshell.app.composer.InMemoryOutboundQueueStore()
+        val paneId = "%0"
+        val payload = "ambiguous agent submit"
+        val row = store.enqueue("sessA", payload, paneId = paneId)
+        store.claim(row.id)
+        store.markWireAttempted("sessA", row.id, baselineCount = 0)
+        store.markWireSubmitAttempted("sessA", row.id)
+        val durableRow = DurableOutboundRowIdentity("sessA", row.id)
+
+        val rebuilt = OutboundDeliveryLedger(durable = store.asWireAttemptDurableStore())
+        val outcome = verifyBeforeAgentResend(
+            rebuilt,
+            captureShowing("> $payload", "spinner changed"),
+            paneId,
+            row.id,
+            payload,
+            durableRow,
+        )
+
+        assertEquals(
+            "once Enter was attempted, payload visibility cannot distinguish typed from submitted",
+            DeliveryProbeOutcome.Unknown,
+            outcome,
+        )
     }
 
     /**

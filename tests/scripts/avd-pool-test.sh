@@ -218,6 +218,86 @@ failed_run_still_releases_and_propagates_rc() {
     || fail "failed run leaked a pool serial: claimable=$claimable expected=$expected"
 }
 
+# Issue #1944: the optional evidence capture must run before either lane lock is
+# released, on success and failure, and must preserve the wrapper result.
+same_run_evidence_is_captured_under_lock_for_success_and_failure() {
+  local sandbox="$1"
+  local pool_serials="emulator-5570"
+  make_sandbox "$sandbox" "$pool_serials"
+  local sroot="$sandbox/root"
+  mkdir -p "$sroot/tests/docker"
+  printf 'fake-key\n' > "$sroot/tests/docker/test_key"
+  local serial_lock
+  serial_lock="$(
+    source "$sroot/scripts/lib/avd-lock.sh"
+    pocketshell_avd_lock_file_for_serial "$sroot" "emulator-5570"
+  )"
+
+  cat > "$sandbox/bin/docker" <<'DOCKER'
+#!/usr/bin/env bash
+lock_state=free
+if ! flock -n "$EXPECTED_SERIAL_LOCK" true; then lock_state=held; fi
+printf '%s|lock=%s\n' "$*" "$lock_state" >> "$FAKE_DOCKER_CALLS"
+case "${1:-}" in
+  inspect)
+    if [[ "$*" == *Health.Status* ]]; then printf 'healthy\n'
+    elif [[ "$*" == *State.StartedAt* ]]; then printf 'fixture-id 2026-08-02T00:00:00Z\n'
+    else printf '[{"Id":"fixture-id","State":{"StartedAt":"2026-08-02T00:00:00Z"}}]\n'
+    fi
+    ;;
+  ps) printf 'fixture-id pocketshell-test-agents\n' ;;
+  logs) printf '2026-08-02T00:00:01Z fixture same-run log\n' ;;
+esac
+DOCKER
+  cat > "$sandbox/bin/ssh" <<'SSH'
+#!/usr/bin/env bash
+printf 'issue1944 ssh ready tmux 3.4\n'
+SSH
+  chmod +x "$sandbox/bin/docker" "$sandbox/bin/ssh"
+
+  local wanted_rc
+  for wanted_rc in 0 7; do
+    local evidence="$sandbox/evidence-$wanted_rc"
+    local calls="$sandbox/docker-$wanted_rc.calls"
+    set +e
+    PATH="$sandbox/bin:$PATH" \
+      ADB="$sandbox/bin/adb" \
+      ANDROID_SDK="$sandbox" \
+      POCKETSHELL_POOL_WAIT_SECONDS=5 \
+      POCKETSHELL_POOL_SERIALS="$pool_serials" \
+      POCKETSHELL_AGENTS_PORT=2222 \
+      POCKETSHELL_AGENTS_FIXTURE_IDENTITY="fixture-id 2026-08-02T00:00:00Z" \
+      POCKETSHELL_CONNECTED_EVIDENCE_DIR="$evidence" \
+      EXPECTED_SERIAL_LOCK="$serial_lock" \
+      FAKE_DOCKER_CALLS="$calls" \
+      STUB_GRADLEW_ARGS_FILE="$sandbox/args-$wanted_rc.txt" \
+      STUB_GRADLEW_MARKER="$sandbox/marker-$wanted_rc.txt" \
+      STUB_GRADLEW_RC="$wanted_rc" \
+      bash "$sroot/scripts/connected-test.sh" --pool --suffix "evidence$wanted_rc" \
+      > "$sandbox/evidence-$wanted_rc.out" 2> "$sandbox/evidence-$wanted_rc.err"
+    local actual_rc=$?
+    set -e
+
+    [[ "$actual_rc" == "$wanted_rc" ]] \
+      || fail "evidence run rc=$actual_rc, expected $wanted_rc"
+    [[ -s "$evidence/docker-ssh-readiness.log" ]] || fail "missing readiness evidence for rc=$wanted_rc"
+    [[ -s "$evidence/docker-inspect-start.json" ]] || fail "missing start inspect for rc=$wanted_rc"
+    [[ -s "$evidence/docker-inspect-end.json" ]] || fail "missing end inspect for rc=$wanted_rc"
+    [[ -s "$evidence/docker-agents.log" ]] || fail "missing Docker log for rc=$wanted_rc"
+    [[ -s "$evidence/SHA256SUMS" ]] || fail "missing evidence hashes for rc=$wanted_rc"
+    grep -q "wrapper_exit_rc=$wanted_rc" "$evidence/run-manifest-end.txt" \
+      || fail "manifest lost wrapper rc=$wanted_rc"
+    grep -q 'claim_fingerprint=fixture-id 2026-08-02T00:00:00Z' "$evidence/run-manifest-end.txt" \
+      || fail "manifest lost claim fingerprint"
+    grep -q 'final_fingerprint=fixture-id 2026-08-02T00:00:00Z' "$evidence/run-manifest-end.txt" \
+      || fail "manifest lost final fingerprint"
+    if grep -q 'lock=free' "$calls"; then
+      fail "evidence command escaped serial ownership before exit (rc=$wanted_rc)"
+    fi
+    flock -n "$serial_lock" true || fail "evidence run leaked serial lock for rc=$wanted_rc"
+  done
+}
+
 # Issue #1737: the default non-pool path must resolve the one online emulator
 # and acquire/release the SAME per-serial ownership lock used by --pool. The old
 # global base lock was a split domain: pool and legacy could both mutate one AVD.
@@ -266,6 +346,7 @@ run_case() {
 
 run_case reclaim_after_full_pool_run
 run_case failed_run_still_releases_and_propagates_rc
+run_case same_run_evidence_is_captured_under_lock_for_success_and_failure
 run_case non_pool_suffix_run_acquires_and_releases_serial_lock
 
 printf 'PASS: avd-pool claim/release\n'

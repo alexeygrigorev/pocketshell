@@ -110,6 +110,23 @@ class OutboundQueueStoreWireAttemptTest {
     }
 
     @Test
+    fun submitAttemptSurvivesRequeueUntilRowLeavesQueue() {
+        val store = InMemoryOutboundQueueStore()
+        val row = store.enqueue("sessA", "ambiguous submit", paneId = "%0")
+        store.claim(row.id)
+        store.markWireAttempted("sessA", row.id, baselineCount = 0)
+
+        val attempted = requireNotNull(store.markWireSubmitAttempted("sessA", row.id))
+        assertTrue(attempted.wireSubmitAttempted)
+        assertTrue(store.hasWireSubmitAttempt("sessA", row.id))
+
+        store.requeueForRetry(row.id)
+        assertTrue("requeue must preserve Enter ambiguity", store.hasWireSubmitAttempt("sessA", row.id))
+        store.remove(row.id)
+        assertFalse("row removal drops the latch with the row", store.hasWireSubmitAttempt("sessA", row.id))
+    }
+
+    @Test
     fun markWireAttemptedRequiresExactSessionAndRowId() {
         val store = InMemoryOutboundQueueStore()
         val row = store.enqueue("sessA", "ship the notes", paneId = "%0")

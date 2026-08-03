@@ -142,7 +142,13 @@ class Issue895SwitchWhileBlackDropTest {
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
 
-        val fired = vm.triggerCleanPassiveDropForTest()
+        client.markDisconnectedForTest(
+            com.pocketshell.core.tmux.TmuxDisconnectEvent(
+                reason = com.pocketshell.core.tmux.TmuxDisconnectReason.ReaderEof,
+                source = "eof",
+                intent = "unknown",
+            ),
+        )
 
         assertTrue("clean-drop fixture must latch the selected client disconnected", client.disconnected.value)
         assertTrue(
@@ -151,7 +157,6 @@ class Issue895SwitchWhileBlackDropTest {
         )
         advanceUntilIdle()
 
-        assertTrue("drop should have been dispatched", fired)
         assertTrue(
             "BASELINE: a Connected-state drop MUST surface an escapable band " +
                 "(Failed/Reconnecting); got ${vm.connectionStatus.value}",
@@ -190,10 +195,14 @@ class Issue895SwitchWhileBlackDropTest {
         )
 
         // Transport drops mid-switch (the black/wedged-channel EOF case).
-        val fired = vm.triggerCleanPassiveDropForTest()
+        client.markDisconnectedForTest(
+            com.pocketshell.core.tmux.TmuxDisconnectEvent(
+                reason = com.pocketshell.core.tmux.TmuxDisconnectReason.ReaderEof,
+                source = "eof",
+                intent = "unknown",
+            ),
+        )
         advanceUntilIdle()
-
-        assertTrue("drop should have been dispatched", fired)
 
         // Load-bearing assertion: the Switching-window drop SURFACES an escapable
         // band, matching the Connected baseline — the user is never left stuck on

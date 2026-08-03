@@ -296,7 +296,13 @@ class TmuxSessionCloseCascadeNoCrashTest {
         // A genuine drop kicks the within-grace silent reattach loop (the
         // viewModelScope grace launch). While it is in flight, a sibling
         // cascade collector throws against the dead transport.
-        vm.triggerCleanPassiveDropForTest()
+        client.markDisconnectedForTest(
+            com.pocketshell.core.tmux.TmuxDisconnectEvent(
+                reason = com.pocketshell.core.tmux.TmuxDisconnectReason.ReaderEof,
+                source = "eof",
+                intent = "unknown",
+            ),
+        )
         client.throwFromEventsCollectorOnNextEmit = theBoom
         client.emittedEvents.emit(ControlEvent.Output("%1", "x".toByteArray()))
         advanceUntilIdle()

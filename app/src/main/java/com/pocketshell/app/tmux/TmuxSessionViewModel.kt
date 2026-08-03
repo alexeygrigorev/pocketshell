@@ -85,7 +85,12 @@ import com.pocketshell.app.tmux.connection.KeepaliveDeathRedialAmortizer
 import com.pocketshell.app.tmux.connection.NetworkLossBandDebouncer
 import com.pocketshell.app.tmux.connection.ParkedRuntimeHealthEffects
 import com.pocketshell.app.tmux.connection.ParkedRuntimeDeathSignal
+import com.pocketshell.app.tmux.connection.PassiveDropArm
+import com.pocketshell.app.tmux.connection.PassiveTransportDrop
+import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
+import com.pocketshell.app.tmux.connection.isPassiveRecoveryEligible
 import com.pocketshell.app.tmux.connection.isSameIdentityNetworkRestore
+import com.pocketshell.app.tmux.connection.observePassiveTransportDrop
 import com.pocketshell.app.tmux.connection.recordNetworkRestoreReconnectStart
 import com.pocketshell.app.tmux.connection.recordNetworkRestoreRideThrough
 import com.pocketshell.app.tmux.connection.recordPassiveDisconnect
@@ -94,8 +99,6 @@ import com.pocketshell.app.tmux.connection.recordSilentReattachStart
 import com.pocketshell.app.tmux.connection.recordNetworkLossBandPainted
 import com.pocketshell.app.tmux.connection.recordNetworkLossBandSuppressed
 import com.pocketshell.app.tmux.connection.recordNetworkLossHold
-import com.pocketshell.app.tmux.connection.PassiveDropArm
-import com.pocketshell.app.tmux.connection.PassiveTransportDropEffects
 import com.pocketshell.app.tmux.connection.preferFreshTransportForPassiveReattach
 import com.pocketshell.app.tmux.connection.ReconnectRungFailureSource
 import com.pocketshell.app.tmux.connection.RestoreReaderActivityVerdict
@@ -138,6 +141,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshSessionCloseCause
+import com.pocketshell.core.ssh.SshSessionTestControl
 import com.pocketshell.core.terminal.bridge.TerminalSeedGateOverflowException
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -989,10 +993,10 @@ public class TmuxSessionViewModel @Inject constructor(
             // the driver submits TransportDropped to the controller (#630), while still
             // keeping the submit itself inside the driver-owned path.
             controlChannelDrops = connectionTmuxPort.disconnectedClients,
-            shouldSubmitControlChannelDrop = { client ->
-                passiveTransportDropEffects.classify(client) != PassiveDropArm.Ignore
+            shouldSubmitControlChannelDrop = { drop ->
+                passiveTransportDropEffects.classify(drop) != PassiveDropArm.Ignore
             },
-            controlChannelDroppedEffect = { client -> onControllerTransportDropped(client) },
+            controlChannelDroppedEffect = { drop -> onControllerTransportDropped(drop) },
             // Issue #972: on the current host's lease coming back `Up` after a
             // reconnect, mirror the recorded reconnect-cause trail to the host's
             // `~/.pocketshell/connection-log.jsonl` over the now-warm lease so the
@@ -1247,28 +1251,16 @@ public class TmuxSessionViewModel @Inject constructor(
     internal var preservePaneRuntimeOnBackgroundTeardownForTest: Boolean = false
 
     /**
-     * EPIC #792 #833 test seam: fire the CLEAN passive-disconnect path directly —
-     * the body the EOF oracle (`TmuxClient.disconnected` true-edge with a
-     * [TmuxDisconnectReason.ReaderEof]) drives. This is the clean-drop analogue of
-     * [triggerLivenessProbeDropForTest], letting a connected proof exercise the
-     * sustained-clean-outage reattach ladder without waiting on a real reader EOF or
-     * the toxiproxy proxy family. Returns false (no-op) if there is no current client.
+     * EPIC #792/#833/#1952 test seam: kill the real SSH transport so the ordinary reader
+     * emits the typed clean drop. Returns false when no real current transport exists.
      */
     internal fun triggerCleanPassiveDropForTest(): Boolean {
-        val client = clientRef ?: return false
-        if (passiveTransportDropEffects.classify(client) == PassiveDropArm.Ignore) return false
-        runCatching { client.close() }
-        connectionManager.reportRemoteDrop("test_clean_outage_seam")
-        projectStatusFromController()
-        handlePassiveClientDisconnect(
-            client = client,
-            disconnectEvent = TmuxDisconnectEvent(
-                reason = TmuxDisconnectReason.ReaderEof,
-                source = "test_clean_outage_seam",
-                intent = "synthetic_clean_drop",
-            ),
-        )
-        return true
+        clientRef ?: return false
+        val session = sessionRef ?: return false
+        // Issue #1952: raw transport fault injection, not TmuxClient.close(). The real reader
+        // produces ReaderEof/ReaderException and the ordinary typed driver
+        // path owns controller submission + recovery exactly as it does in production.
+        return SshSessionTestControl.forceTransportDeath(session)
     }
 
     /**
@@ -7877,14 +7869,16 @@ public class TmuxSessionViewModel @Inject constructor(
             client.disconnected.collect { dead ->
                 if (!dead) return@collect
                 val target = activeTarget ?: connectingTarget
-                val disconnectEvent = disconnectEventOrFallback(client)
+                // #1952: breadcrumb and classification share one immutable wire snapshot.
+                val drop = observePassiveTransportDrop(client)
+                val disconnectEvent = drop.disconnectEvent
                 // Recovery is fired from [ConnectionEffectDriver.controlChannelDroppedEffect]
                 // after the real current-client drop has moved the controller. This
                 // per-client observer stays only as a stale-client breadcrumb. The
                 // driver-owned handler records the canonical `passive_disconnect`
                 // diagnostic so silent reattach cannot cancel this collector before
                 // observability lands.
-                val decision = passiveTransportDropEffects.classify(client)
+                val decision = passiveTransportDropEffects.classify(drop)
                 if (decision == PassiveDropArm.Ignore) {
                     DiagnosticEvents.record(
                         "connection",
@@ -7909,8 +7903,8 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    private fun onControllerTransportDropped(client: TmuxClient) {
-        handlePassiveClientDisconnect(client, disconnectEventOrFallback(client))
+    private fun onControllerTransportDropped(drop: PassiveTransportDrop) {
+        handlePassiveClientDisconnect(drop)
     }
 
     private fun recordPassiveDisconnectDiagnostic(
@@ -7935,10 +7929,9 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
-    private fun handlePassiveClientDisconnect(
-        client: TmuxClient,
-        disconnectEvent: TmuxDisconnectEvent = disconnectEventOrFallback(client),
-    ) {
+    private fun handlePassiveClientDisconnect(drop: PassiveTransportDrop) {
+        val client = drop.client
+        val disconnectEvent = drop.disconnectEvent
         // Issue #895 (#766 down-payment): the passive-disconnect handler is
         // STATUS-AGNOSTIC. The old `inlineConnectionStatus as? Connected ?: return`
         // gate SWALLOWED a drop that landed while the VM was `Switching`
@@ -8008,7 +8001,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Classify the drop FIRST (status-agnostic — #895/#766). `Ignore` means the
         // dropped client is not the current one (a stale `-CC` close on a healthy
         // fast switch, the #635 spurious-band case) — for that we surface NOTHING.
-        val decision = passiveTransportDropEffects.classify(client)
+        val decision = passiveTransportDropEffects.classify(drop)
         if (decision == PassiveDropArm.Ignore) {
             projectStatusFromController()
             return
@@ -8173,7 +8166,13 @@ public class TmuxSessionViewModel @Inject constructor(
         return withTimeoutOrNull<Boolean>(passiveDisconnectGraceMs) {
             while (true) {
                 if (!appActive) return@withTimeoutOrNull false
-                if (inlineConnectionStatus !is ConnectionStatus.Connected) return@withTimeoutOrNull false
+                // Issue #1952: recovery eligibility belongs to the authoritative controller,
+                // not the projected display status. An accepted remote drop deliberately
+                // projects Reconnecting, so the old `inline Connected` gate cancelled the
+                // recovery effect it was meant to drive.
+                if (!isPassiveRecoveryEligible(connectionManager.state)) {
+                    return@withTimeoutOrNull false
+                }
                 val currentClient = clientRef
                 if (currentClient !== staleClient && currentClient?.disconnected?.value != true) {
                     return@withTimeoutOrNull true

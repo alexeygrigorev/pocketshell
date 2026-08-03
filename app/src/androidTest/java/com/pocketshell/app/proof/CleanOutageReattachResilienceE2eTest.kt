@@ -1,5 +1,7 @@
 package com.pocketshell.app.proof
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -15,6 +17,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.TMUX_PULL_TO_RECONNECT_TAG
@@ -22,11 +25,14 @@ import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.core.connection.ConnectionJournalSchema
+import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -87,6 +93,8 @@ class CleanOutageReattachResilienceE2eTest {
 
     private var seededKey: String? = null
     private var seededHostRowTag: String? = null
+    private var diagnostics: RecordingDiagnosticSink? = null
+    private var tmuxDiagnostics: RecordingTmuxDiagnosticSink? = null
 
     private fun seedFixtureRule(): TestRule = TestRule { base, _ ->
         object : Statement() {
@@ -106,6 +114,8 @@ class CleanOutageReattachResilienceE2eTest {
     @Before
     fun setUp() {
         clearLastSessionPrefs()
+        diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        tmuxDiagnostics = RecordingTmuxDiagnosticSink().also { TmuxClientDiagnostics.install(it) }
     }
 
     @After
@@ -116,6 +126,8 @@ class CleanOutageReattachResilienceE2eTest {
         runCatching {
             currentViewModel().forceCleanOutageForTest = false
         }
+        diagnostics?.close()
+        tmuxDiagnostics?.close()
         clearLastSessionPrefs()
         seededKey?.let { key ->
             runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }
@@ -172,7 +184,16 @@ class CleanOutageReattachResilienceE2eTest {
         // a single failed fresh-transport attempt it could only retry the warm
         // reattach, which can never succeed once the failed transport nulled the SSH
         // session — so the session never recovered for the rest of the grace window).
-        SystemClock.sleep(SILENT_OUTAGE_MS)
+        val highestAttempt = observeSustainedOutageAndAssertOneTypedCause(
+            vm = vm,
+            droppedClientIdentity = requireNotNull(clientBeforeDrop),
+        )
+        recordTiming("clean_outage_highest_attempt", highestAttempt.toLong())
+        assertTrue(
+            "A sustained clean outage must advance the controller beyond attempt 1; " +
+                "highestAttempt=$highestAttempt state=${vm.connectionControllerStateForTest()}",
+            highestAttempt >= 2,
+        )
 
         // ---- 2) AUTO-RECOVERY, NO SWITCH DANCE ----
         // Restore the link: the very next grace-loop re-dial of a fresh transport
@@ -219,8 +240,70 @@ class CleanOutageReattachResilienceE2eTest {
                 "dance). status=${currentConnectionStatus()}",
             roundTripped,
         )
+        captureJourneyArtifacts("clean-outage-recovered")
         writeTimings()
     } }
+
+    /**
+     * Issue #1952 cause-consistency oracle. The physical fault must be observed by the
+     * real tmux reader, then the SAME typed reason must enter the controller. The
+     * passive effect may start once, and only once, for that fault. The old seam is RED:
+     * it closes the client as `explicit_close`, separately journals
+     * `remote_failure/test_clean_outage_seam`, and starts zero effects.
+     */
+    private fun observeSustainedOutageAndAssertOneTypedCause(
+        vm: TmuxSessionViewModel,
+        droppedClientIdentity: Int,
+    ): Int {
+        val deadline = SystemClock.elapsedRealtime() + SILENT_OUTAGE_MS
+        var highestAttempt = 0
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val state = vm.connectionControllerStateForTest()
+            if (state is CoreConnectionState.Reconnecting) {
+                highestAttempt = maxOf(highestAttempt, state.attempt)
+            }
+            SystemClock.sleep(50)
+        }
+
+        val readerExits = requireNotNull(tmuxDiagnostics).eventsNamed("tmux_client_reader_exit")
+            .filter { it.fields["clientHash"] == droppedClientIdentity }
+        assertTrue(
+            "The CleanOutage fault must produce one real tmux reader EOF/down signal; exits=$readerExits",
+            readerExits.size == 1,
+        )
+        val readerReason = readerExits.single().fields["disconnectReason"] as? String
+        assertTrue(
+            "The fault must be remote reader EOF/failure, never an app ExplicitClose; reason=$readerReason",
+            readerReason == "reader_eof" || readerReason == "reader_exception",
+        )
+
+        val expectedCauseReason = when (readerReason) {
+            "reader_eof" -> "readereof"
+            "reader_exception" -> "readerexception"
+            else -> error("unreachable reader reason $readerReason")
+        }
+        val journalDrops = requireNotNull(diagnostics).events
+            .filter { event ->
+                event.category == ConnectionJournalSchema.CATEGORY &&
+                    event.name == ConnectionJournalSchema.SUBMIT &&
+                    event.fields["event"] == "transport_dropped" &&
+                    event.fields["causeReason"] == expectedCauseReason
+            }
+        assertTrue(
+            "The controller must receive the reader's same typed remote cause exactly once; " +
+                "expected=$expectedCauseReason journal=$journalDrops",
+            journalDrops.size == 1 && journalDrops.single().fields["cause"] == "remote_failure",
+        )
+
+        val recoveryStarts = requireNotNull(diagnostics).eventsNamed("silent_reattach_start")
+            .filter { it.fields["clientHash"] == droppedClientIdentity }
+        assertTrue(
+            "One accepted remote fault must start exactly one passive recovery effect; " +
+                "starts=$recoveryStarts",
+            recoveryStarts.size == 1,
+        )
+        return highestAttempt
+    }
 
     // -- user-visible recovery helpers (parity with the Slice D specs) -------------
 
@@ -450,6 +533,49 @@ class CleanOutageReattachResilienceE2eTest {
         file.writeText(timings.joinToString(separator = "\n", postfix = "\n"))
         println("ISSUE833_CLEAN_OUTAGE_TIMINGS ${file.absolutePath}")
         return file
+    }
+
+    /** Issue #1952 terminal-review evidence from the same successful journey run. */
+    private fun captureJourneyArtifacts(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150L)
+        var terminalBitmap: Bitmap? = null
+        var terminalText: String? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            val view = checkNotNull(activity.window.decorView.findTerminalView()) {
+                "could not find TerminalView for $name"
+            }
+            check(view.width > 0 && view.height > 0) {
+                "TerminalView is not laid out for $name: ${view.width}x${view.height}"
+            }
+            terminalText = view.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+            terminalBitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also {
+                view.draw(Canvas(it))
+            }
+        }
+        artifactFile("$name-visible-terminal.txt").writeText(checkNotNull(terminalText))
+        val bitmap = checkNotNull(terminalBitmap) { "could not render $name TerminalView" }
+        try {
+            artifactFile("$name-viewport.png").outputStream().use { output ->
+                assertTrue(
+                    "could not encode $name viewport",
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output),
+                )
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        instrumentation.uiAutomation.takeScreenshot()?.let { deviceBitmap ->
+            try {
+                artifactFile("$name-device-diagnostic.png").outputStream().use { output ->
+                    check(deviceBitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+                }
+            } finally {
+                deviceBitmap.recycle()
+            }
+        }
+        artifactFile("$name-timings.txt").writeText(timings.joinToString(separator = "\n", postfix = "\n"))
     }
 
     private fun artifactFile(name: String): File {

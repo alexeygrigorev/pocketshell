@@ -30,7 +30,9 @@ public object SshSessionTestControl {
      * [RealSshSession.forceTransportDeathForTest]; a no-op on any other
      * [SshSession] implementation.
      */
-    public fun forceTransportDeath(session: SshSession) {
-        (session as? RealSshSession)?.forceTransportDeathForTest()
+    public fun forceTransportDeath(session: SshSession): Boolean {
+        val real = session as? RealSshSession ?: return false
+        real.forceTransportDeathForTest()
+        return true
     }
 }

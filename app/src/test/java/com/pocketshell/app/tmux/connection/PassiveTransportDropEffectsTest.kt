@@ -1,10 +1,16 @@
 package com.pocketshell.app.tmux.connection
 
 import com.pocketshell.app.tmux.FakeTmuxClient
+import com.pocketshell.core.connection.ConnectionState
+import com.pocketshell.core.connection.DropCause
+import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -248,7 +254,7 @@ class PassiveTransportDropEffectsTest {
                 ),
             )
         }
-        assertEquals(PassiveDropArm.Ignore, effects().classify(detached))
+        assertEquals(PassiveDropArm.Ignore, effects().classify(observePassiveTransportDrop(detached)))
     }
 
     /**
@@ -267,7 +273,7 @@ class PassiveTransportDropEffectsTest {
                 ),
             )
         }
-        assertEquals(PassiveDropArm.Ignore, effects().classify(closed))
+        assertEquals(PassiveDropArm.Ignore, effects().classify(observePassiveTransportDrop(closed)))
     }
 
     /**
@@ -287,15 +293,60 @@ class PassiveTransportDropEffectsTest {
         }
         assertEquals(
             PassiveDropArm.SilentReattachWithinGrace,
-            effects(hasTarget = { false }).classify(eofed),
+            effects(hasTarget = { false }).classify(observePassiveTransportDrop(eofed)),
         )
+    }
+
+    /**
+     * Issue #1952 regression: one wire observation remains authoritative even if the
+     * mutable client later records a teardown event. The controller and effect both hold
+     * [drop], so a later ExplicitClose cannot contradict/reclassify the original EOF.
+     */
+    @Test
+    fun classify_usesTheSameTypedCauseSnapshotAfterClientEventChanges() {
+        val mutableClient = FakeTmuxClient().apply {
+            markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "eof",
+                    intent = "unknown",
+                ),
+            )
+        }
+        val drop = observePassiveTransportDrop(mutableClient)
+        mutableClient.markDisconnectedForTest(
+            TmuxDisconnectEvent(
+                reason = TmuxDisconnectReason.ExplicitClose,
+                source = "teardown",
+                intent = "local_close",
+            ),
+        )
+
+        assertEquals(TmuxDisconnectReason.ReaderEof, drop.disconnectEvent.reason)
+        assertEquals("eof", drop.disconnectEvent.source)
+        assertEquals("unknown", drop.disconnectEvent.intent)
+        assertEquals(DropCause.RemoteFailure("ReaderEof"), drop.cause)
+        assertEquals(
+            PassiveDropArm.SilentReattachWithinGrace,
+            effects(hasTarget = { false }).classify(drop),
+        )
+    }
+
+    @Test
+    fun acceptedPassiveEpisodeRemainsEligibleThroughControllerExhaustionButLiveIsNot() {
+        val host = HostKey("host")
+        val target = SessionId("session")
+        assertTrue(isPassiveRecoveryEligible(ConnectionState.Reattaching(host, target)))
+        assertTrue(isPassiveRecoveryEligible(ConnectionState.Reconnecting(host, target, attempt = 2)))
+        assertTrue(isPassiveRecoveryEligible(ConnectionState.Unreachable(host, target)))
+        assertFalse(isPassiveRecoveryEligible(ConnectionState.Live(host, target)))
     }
 
     @Test
     fun classify_currentClient_navigating_skips() {
         assertEquals(
             PassiveDropArm.SkipInAppNavigation,
-            effects(navigatingToDifferentSession = { true }).classify(client),
+            effects(navigatingToDifferentSession = { true }).classify(observePassiveTransportDrop(client)),
         )
     }
 
@@ -303,7 +354,7 @@ class PassiveTransportDropEffectsTest {
     fun classify_currentClient_screenStopped_pauses() {
         assertEquals(
             PassiveDropArm.PauseUntilForeground,
-            effects().classify(client),
+            effects().classify(observePassiveTransportDrop(client)),
         )
     }
 
@@ -311,7 +362,7 @@ class PassiveTransportDropEffectsTest {
     fun classify_currentClient_foreground_silentReattach() {
         assertEquals(
             PassiveDropArm.SilentReattachWithinGrace,
-            effects(screenStartedForCleared = { true }).classify(client),
+            effects(screenStartedForCleared = { true }).classify(observePassiveTransportDrop(client)),
         )
     }
 
@@ -329,11 +380,11 @@ class PassiveTransportDropEffectsTest {
         val fx = effects(isCurrentClient = { it === currentClient })
 
         // While oldClient is current, its drop recovers (no target/screenStopped -> here pause).
-        assertEquals(PassiveDropArm.PauseUntilForeground, fx.classify(oldClient))
+        assertEquals(PassiveDropArm.PauseUntilForeground, fx.classify(observePassiveTransportDrop(oldClient)))
         // A fast switch swaps in newClient: the OLD client's late close is now a stale drop.
         currentClient = newClient
-        assertEquals(PassiveDropArm.Ignore, fx.classify(oldClient))
+        assertEquals(PassiveDropArm.Ignore, fx.classify(observePassiveTransportDrop(oldClient)))
         // The new current client's drop still recovers.
-        assertEquals(PassiveDropArm.PauseUntilForeground, fx.classify(newClient))
+        assertEquals(PassiveDropArm.PauseUntilForeground, fx.classify(observePassiveTransportDrop(newClient)))
     }
 }

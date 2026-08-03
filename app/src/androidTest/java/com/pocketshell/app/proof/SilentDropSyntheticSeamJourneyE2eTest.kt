@@ -1,6 +1,8 @@
 package com.pocketshell.app.proof
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -203,6 +205,7 @@ class SilentDropSyntheticSeamJourneyE2eTest {
                     "(no switch dance). status=${currentConnectionStatus()}",
                 roundTripped,
             )
+            captureJourneyArtifacts("synthetic-drop-recovered")
             writeTimings()
         } }
 
@@ -307,6 +310,7 @@ class SilentDropSyntheticSeamJourneyE2eTest {
                     "(status=${currentConnectionStatus()}).",
                 recovered,
             )
+            captureJourneyArtifacts("slow-live-recovered")
             writeTimings()
         } }
 
@@ -561,6 +565,49 @@ class SilentDropSyntheticSeamJourneyE2eTest {
         file.writeText(timings.joinToString(separator = "\n", postfix = "\n"))
         println("ISSUE792_SLICED_TIMINGS ${file.absolutePath}")
         return file
+    }
+
+    /** Issue #1952 terminal-review evidence from the same successful journey run. */
+    private fun captureJourneyArtifacts(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150L)
+        var terminalBitmap: Bitmap? = null
+        var terminalText: String? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            val view = checkNotNull(activity.window.decorView.findTerminalView()) {
+                "could not find TerminalView for $name"
+            }
+            check(view.width > 0 && view.height > 0) {
+                "TerminalView is not laid out for $name: ${view.width}x${view.height}"
+            }
+            terminalText = view.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+            terminalBitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also {
+                view.draw(Canvas(it))
+            }
+        }
+        artifactFile("$name-visible-terminal.txt").writeText(checkNotNull(terminalText))
+        val bitmap = checkNotNull(terminalBitmap) { "could not render $name TerminalView" }
+        try {
+            artifactFile("$name-viewport.png").outputStream().use { output ->
+                assertTrue(
+                    "could not encode $name viewport",
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output),
+                )
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        instrumentation.uiAutomation.takeScreenshot()?.let { deviceBitmap ->
+            try {
+                artifactFile("$name-device-diagnostic.png").outputStream().use { output ->
+                    check(deviceBitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+                }
+            } finally {
+                deviceBitmap.recycle()
+            }
+        }
+        artifactFile("$name-timings.txt").writeText(timings.joinToString(separator = "\n", postfix = "\n"))
     }
 
     private fun artifactFile(name: String): File {

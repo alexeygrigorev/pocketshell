@@ -6,7 +6,6 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 ORACLE="$SCRIPT_DIR/ci-journey-dead-channel-oracle.py"
-VM="$REPO_ROOT/app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt"
 GATE="$REPO_ROOT/app/src/main/java/com/pocketshell/app/tmux/connection/LivenessProbeGate.kt"
 PROBE="$REPO_ROOT/shared/core-connection/src/main/java/com/pocketshell/core/connection/LivenessProbe.kt"
 
@@ -14,7 +13,7 @@ fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
 [[ -f "$ORACLE" ]] || fail "oracle missing: $ORACLE"
-for source in "$VM" "$GATE" "$PROBE"; do
+for source in "$GATE" "$PROBE"; do
   [[ -f "$source" ]] || fail "production source missing: $source"
 done
 
@@ -96,13 +95,16 @@ grep -Fqx $'com.pocketshell.app.proof.ReconnectStormLivelockE2eTest\t1\t0\t0\t0\
 pass "canonical-only, max-of-sources, per-attempt measurement and specificity"
 
 # Structural red control: after #1863, foreground Live+disconnected selects
-# DeadChannel, while the obsolete text is emitted only for Closed. Therefore an
-# old foreground `gate closed` grep is guaranteed to miss the repaired path.
+# DeadChannel, while the obsolete text is emitted only for Closed by the same
+# gate authority. Therefore an old foreground `gate closed` grep is guaranteed
+# to miss the repaired path.
 grep -q 'controlChannelDisconnected -> LivenessProbeGate.DeadChannel' "$GATE" \
   || fail "foreground disconnected channel no longer selects DeadChannel"
-closed_block="$(sed -n '/if (gate == LivenessProbeGate.Closed)/,/^[[:space:]]*}/p' "$VM")"
+closed_block="$(sed -n '/if (gate == LivenessProbeGate.Closed)/,/^[[:space:]]*}/p' "$GATE")"
 grep -q '"gate closed bg=' <<<"$closed_block" \
   || fail "could not prove old message is confined to the Closed branch"
+[[ "$(grep -c '"gate closed bg=' "$GATE")" -eq "$(grep -c '"gate closed bg=' <<<"$closed_block")" ]] \
+  || fail "old message escaped the Closed branch in the gate authority"
 grep -Fq "$signal" "$PROBE" \
   || fail "replacement signal no longer exists at the definitive-close decision"
 old_foreground_count="$(grep -c 'gate closed bg=false appActive=true hasClient=true disconnected=true ctrl=Live' \

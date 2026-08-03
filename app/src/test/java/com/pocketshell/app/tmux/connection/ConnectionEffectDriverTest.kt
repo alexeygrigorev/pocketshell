@@ -662,18 +662,20 @@ class ConnectionEffectDriverTest {
         val typedDrops = MutableSharedFlow<FakeTmuxClient>(extraBufferCapacity = 16)
         val accepted = mutableListOf<FakeTmuxClient>()
         val effects = mutableListOf<Pair<FakeTmuxClient, ConnectionState>>()
+        val effectCauses = mutableListOf<DropCause>()
         val driver = ConnectionEffectDriver(
             controller = controller,
             tmuxPort = tmuxPort,
             transportPort = transportPort,
             scope = scope,
             controlChannelDrops = typedDrops,
-            shouldSubmitControlChannelDrop = { client ->
-                accepted += client as FakeTmuxClient
+            shouldSubmitControlChannelDrop = { drop ->
+                accepted += drop.client as FakeTmuxClient
                 true
             },
-            controlChannelDroppedEffect = { client ->
-                effects += Pair(client as FakeTmuxClient, controller.state.value)
+            controlChannelDroppedEffect = { drop ->
+                effects += Pair(drop.client as FakeTmuxClient, controller.state.value)
+                effectCauses += drop.cause
             },
         ).also { it.start() }
 
@@ -681,7 +683,15 @@ class ConnectionEffectDriverTest {
         controller.submit(ConnectionEvent.SeedLanded(sessionA, paneId = "%0"))
         assertEquals(listOf("Idle", "Attaching", "Live"), stateNamesOf(driver))
 
-        val client = FakeTmuxClient()
+        val client = FakeTmuxClient().apply {
+            markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "eof",
+                    intent = "unknown",
+                ),
+            )
+        }
         typedDrops.emit(client)
 
         assertEquals(listOf(client), accepted)
@@ -691,6 +701,11 @@ class ConnectionEffectDriverTest {
             stateNamesOf(driver),
         )
         assertEquals(listOf(client to controller.state.value), effects)
+        assertEquals(
+            "the effect must receive the exact cause derived for the controller submit",
+            listOf(DropCause.RemoteFailure("ReaderEof")),
+            effectCauses,
+        )
         assertTrue(controller.state.value is ConnectionState.Reattaching)
         scope.cancel()
     }
@@ -711,8 +726,8 @@ class ConnectionEffectDriverTest {
             scope = scope,
             controlChannelDrops = typedDrops,
             onControllerTransition = { projections += 1 },
-            controlChannelDroppedEffect = { client ->
-                effects += Pair(client as FakeTmuxClient, controller.state.value)
+            controlChannelDroppedEffect = { drop ->
+                effects += Pair(drop.client as FakeTmuxClient, controller.state.value)
             },
         ).also { it.start() }
 
@@ -765,7 +780,7 @@ class ConnectionEffectDriverTest {
             scope = scope,
             controlChannelDrops = typedDrops,
             shouldSubmitControlChannelDrop = { false },
-            controlChannelDroppedEffect = { client -> effects += client as FakeTmuxClient },
+            controlChannelDroppedEffect = { drop -> effects += drop.client as FakeTmuxClient },
         ).also { it.start() }
 
         controller.submit(ConnectionEvent.Enter(host, sessionA))
@@ -849,7 +864,7 @@ class ConnectionEffectDriverTest {
             transportPort = transportPort,
             scope = scope,
             onControllerTransition = { projections += 1 },
-            controlChannelDroppedEffect = { client -> typedRecoveryEffects += client as FakeTmuxClient },
+            controlChannelDroppedEffect = { drop -> typedRecoveryEffects += drop.client as FakeTmuxClient },
         ).also { it.start() }
 
         controller.submit(ConnectionEvent.Enter(host, sessionA))

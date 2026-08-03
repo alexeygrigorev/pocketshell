@@ -187,8 +187,8 @@ class ConnectionEffectDriver(
     private val foregroundReconnectEffect: () -> Unit = {},
     private val onControllerTransition: () -> Unit = {},
     private val controlChannelDrops: Flow<TmuxClient>? = null,
-    private val shouldSubmitControlChannelDrop: (TmuxClient) -> Boolean = { true },
-    private val controlChannelDroppedEffect: (TmuxClient) -> Unit = {},
+    private val shouldSubmitControlChannelDrop: (PassiveTransportDrop) -> Boolean = { true },
+    private val controlChannelDroppedEffect: (PassiveTransportDrop) -> Unit = {},
     // EPIC #687 P2 (J1/#635): the SINGLE-GRACE-OWNER gate. When this returns true, the
     // driver SUPPRESSES the `TransportDropped` submission for a control-channel drop —
     // i.e. it does NOT walk the controller down the reconnect ladder. The VM supplies a
@@ -327,10 +327,13 @@ class ConnectionEffectDriver(
     private suspend fun collectControlChannelDrops(drops: Flow<TmuxClient>) {
         drops.collect { client ->
             record(Observation.Disconnected(true))
+            // Issue #1952: snapshot event + typed cause ONCE. The controller and effect
+            // consume this same value; neither re-reads mutable client authority later.
+            val drop = observePassiveTransportDrop(client)
             if (suppressTransportDrops()) {
                 onDropSuppressed(suppressedControlChannelDiagnostic(client))
                 record(Observation.DropSuppressed)
-            } else if (shouldSubmitControlChannelDrop(client)) {
+            } else if (shouldSubmitControlChannelDrop(drop)) {
                 val wasTargetless = isTargetless()
                 val changed = submitTransport(
                     // Issue #1666: carry the TYPED cause derived at the single close authority
@@ -338,12 +341,10 @@ class ConnectionEffectDriver(
                     // self-inflicted `-CC` close (the lease edge's `locallyInitiated` gate is
                     // the lease side), so typing it here + the reducer's refusal is what makes
                     // a self-inflicted control-channel close structurally inert.
-                    ConnectionEvent.TransportDropped(
-                        SelfInflictedClose.dropCauseForControlChannelClose(client.disconnectEvent.value),
-                    ),
+                    ConnectionEvent.TransportDropped(drop.cause),
                 )
                 if (changed || wasTargetless) {
-                    controlChannelDroppedEffect(client)
+                    controlChannelDroppedEffect(drop)
                 }
             }
         }

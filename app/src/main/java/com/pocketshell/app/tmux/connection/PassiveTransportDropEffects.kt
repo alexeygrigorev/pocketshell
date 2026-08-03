@@ -1,6 +1,38 @@
 package com.pocketshell.app.tmux.connection
 
+import com.pocketshell.core.connection.ConnectionState
+import com.pocketshell.core.connection.DropCause
 import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxDisconnectEvent
+import com.pocketshell.core.tmux.TmuxDisconnectReason
+
+/**
+ * Issue #1952 — one immutable observation of one control-channel drop.
+ *
+ * [disconnectEvent] is read from the client exactly once at the wire/driver edge and [cause]
+ * is derived from that same value by [SelfInflictedClose]. The controller submit and passive
+ * recovery classifier receive this object together, so neither can re-read a later,
+ * contradictory client event.
+ */
+data class PassiveTransportDrop(
+    val client: TmuxClient,
+    val disconnectEvent: TmuxDisconnectEvent,
+    val cause: DropCause,
+)
+
+/** Observe and type one client drop at its source boundary. */
+fun observePassiveTransportDrop(client: TmuxClient): PassiveTransportDrop {
+    val event = client.disconnectEvent.value ?: TmuxDisconnectEvent(
+        reason = TmuxDisconnectReason.Unknown,
+        source = "boolean_disconnected",
+        intent = "unknown",
+    )
+    return PassiveTransportDrop(
+        client = client,
+        disconnectEvent = event,
+        cause = SelfInflictedClose.dropCauseForControlChannelClose(event),
+    )
+}
 
 /**
  * EPIC #687 Slice 2 (#1047) — the PASSIVE-TRANSPORT-DROP classification, the THIRD of the
@@ -120,6 +152,18 @@ fun preferFreshTransportForPassiveReattach(
 ): Boolean = warmLeaseHeld && !transportVouchedAlive
 
 /**
+ * Issue #1952 — controller-owned eligibility for the passive recovery effect.
+ * A real drop first moves `Live -> Reattaching`; subsequent failed cycles live in
+ * `Reconnecting`, and controller exhaustion may reach `Unreachable` before this already-started,
+ * grace-bounded effect completes. Presentation status is deliberately absent, so projecting or
+ * exhausting the numbered ladder cannot cancel the IO that still owns the bounded passive episode.
+ */
+fun isPassiveRecoveryEligible(state: ConnectionState): Boolean =
+    state is ConnectionState.Reattaching ||
+        state is ConnectionState.Reconnecting ||
+        state is ConnectionState.Unreachable
+
+/**
  * The connection-core passive-transport-drop authority: the SINGLE owner of the passive
  * `-CC` drop classification. Every passive-drop call site (the driver's
  * `shouldSubmitControlChannelDrop` stale-client gate, the clean-drop test seam, the
@@ -142,17 +186,13 @@ class PassiveTransportDropEffects(
      * (the caller — `handlePassiveClientDisconnect` — owns the per-arm recovery IO with its
      * handler-local `target`/`reason`/`disconnectEvent`).
      */
-    fun classify(client: TmuxClient): PassiveDropArm =
+    fun classify(drop: PassiveTransportDrop): PassiveDropArm =
         selectPassiveDropArm(
-            // Issue #1632: the self-inflicted answer comes from the ONE authority
-            // ([SelfInflictedClose]) that also answers for the lease edge. The
-            // injectable `isSelfInflictedClose` lambda this used to take — the narrow
-            // #1568 `-CC`-only filter, inlined in `TmuxSessionViewModel` — is DELETED
-            // (D22 hard-cut): two independently-maintained filters is precisely how the
-            // lease edge silently never got one and the #1610 storm survived #1568.
-            isSelfInflictedClose =
-                SelfInflictedClose.isSelfInflictedControlChannelClose(client.disconnectEvent.value),
-            isCurrentClient = isCurrentClient(client),
+            // Issue #1952: do not re-read client.disconnectEvent here. The driver already
+            // derived this typed cause from the observed wire event and submits the SAME
+            // immutable value to the controller and this effect authority.
+            isSelfInflictedClose = drop.cause is DropCause.SelfInflicted,
+            isCurrentClient = isCurrentClient(drop.client),
             hasTarget = hasTarget(),
             screenStartedForCleared = screenStartedForCleared(),
             navigatingToDifferentSession = navigatingToDifferentSession(),

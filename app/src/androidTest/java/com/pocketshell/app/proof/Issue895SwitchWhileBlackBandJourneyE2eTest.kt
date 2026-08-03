@@ -1,5 +1,7 @@
 package com.pocketshell.app.proof
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.View
@@ -132,6 +134,7 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
+        captureJourneyArtifacts("switch-pre-drop-live")
 
         // Drive the VM into the Switching (Attaching) window — the window a
         // same-host fast switch holds before the Live flip. inlineConnectionStatus
@@ -175,6 +178,7 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
             "#895: the session screen must remain mounted (no freeze/restart)",
             hasTag(TMUX_SESSION_SCREEN_TAG),
         )
+        captureBandDiagnosticArtifacts("switch-drop-escapable-band")
         writeTimings()
     } }
 
@@ -258,6 +262,7 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
                 "probe interval; logcat tail:\n$oracleLog",
             oracleLog.contains(REPLACEMENT_ORACLE),
         )
+        captureJourneyArtifacts("closed-channel-replacement-oracle")
         writeTimings()
     } }
 
@@ -495,6 +500,75 @@ class Issue895SwitchWhileBlackBandJourneyE2eTest {
         file.writeText(timings.joinToString(separator = "\n", postfix = "\n"))
         println("ISSUE895_BAND_TIMINGS ${file.absolutePath}")
         return file
+    }
+
+    /** Issue #1952 terminal-review evidence from the same successful journey run. */
+    private fun captureJourneyArtifacts(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150L)
+        var terminalBitmap: Bitmap? = null
+        var terminalText: String? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            val view = checkNotNull(activity.window.decorView.findTerminalView()) {
+                "could not find TerminalView for $name"
+            }
+            check(view.width > 0 && view.height > 0) {
+                "TerminalView is not laid out for $name: ${view.width}x${view.height}"
+            }
+            terminalText = view.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+            terminalBitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also {
+                view.draw(Canvas(it))
+            }
+        }
+        artifactFile("$name-visible-terminal.txt").writeText(checkNotNull(terminalText))
+        val bitmap = checkNotNull(terminalBitmap) { "could not render $name TerminalView" }
+        try {
+            artifactFile("$name-viewport.png").outputStream().use { output ->
+                assertTrue(
+                    "could not encode $name viewport",
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output),
+                )
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        instrumentation.uiAutomation.takeScreenshot()?.let { deviceBitmap ->
+            try {
+                artifactFile("$name-device-diagnostic.png").outputStream().use { output ->
+                    check(deviceBitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+                }
+            } finally {
+                deviceBitmap.recycle()
+            }
+        }
+        artifactFile("$name-timings.txt").writeText(timings.joinToString(separator = "\n", postfix = "\n"))
+    }
+
+    /**
+     * The escapable-band reducer intentionally removes TerminalView while it shows the
+     * full-screen reconnect affordance. Its evidence is therefore explicitly a DEVICE
+     * diagnostic, never mislabeled as an authoritative terminal viewport. The same test
+     * already hard-captures the live pre-drop TerminalView above.
+     */
+    private fun captureBandDiagnosticArtifacts(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150L)
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "could not capture $name device diagnostic"
+        }
+        try {
+            artifactFile("$name-device-diagnostic.png").outputStream().use { output ->
+                assertTrue(
+                    "could not encode $name device diagnostic",
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, output),
+                )
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        artifactFile("$name-timings.txt").writeText(timings.joinToString(separator = "\n", postfix = "\n"))
     }
 
     private fun artifactFile(name: String): File {

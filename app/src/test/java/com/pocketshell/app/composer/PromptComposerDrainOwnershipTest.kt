@@ -85,6 +85,33 @@ class PromptComposerDrainOwnershipTest {
     }
 
     @Test
+    fun issue1944_firstConsumerAcceptsRequestBufferedBeforeRegistration() {
+        val registry = OutboundSendConsumerRegistry()
+
+        assertTrue(registry.canDispatch())
+        assertNull(registry.activeGenerationForDispatch())
+
+        val firstConsumer = registry.register()
+
+        assertTrue(registry.accepts(firstConsumer, requestGeneration = null))
+    }
+
+    @Test
+    fun issue1944_replacementConsumerRejectsRequestsOwnedByRetiredGeneration() {
+        val registry = OutboundSendConsumerRegistry()
+        val retiredConsumer = registry.register()
+        assertTrue(registry.accepts(retiredConsumer, retiredConsumer))
+        assertTrue(registry.unregister(retiredConsumer))
+        assertFalse(registry.canDispatch())
+
+        val replacementConsumer = registry.register()
+
+        assertFalse(registry.accepts(retiredConsumer, retiredConsumer))
+        assertFalse(registry.accepts(replacementConsumer, retiredConsumer))
+        assertTrue(registry.accepts(replacementConsumer, replacementConsumer))
+    }
+
+    @Test
     fun fallbackPhysicalOwnerSurvivesPromotionUntilDeferredThenDurableFifoRetries() = runTest {
         val fallback = "1/session-a"
         val durable = "tmux:1:\$0:1944"

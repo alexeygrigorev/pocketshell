@@ -110,6 +110,18 @@ internal const val AGENT_SUBMIT_TURNOVER_TIMEOUT_MS: Long = 800L
 internal const val AGENT_TRANSCRIPT_TURNOVER_TIMEOUT_MS: Long = 2_000L
 
 /**
+ * The proof required after tmux accepts the submit Enter. Normal prompts must
+ * advance an authoritative agent surface/transcript before their durable row is
+ * pruned. Catalog-approved TUI-only controls intentionally create no transcript
+ * turn; for those, the acknowledged tmux Enter is the terminal delivery proof
+ * and the write-ahead submit ledger still prevents a blind resend after a crash.
+ */
+internal enum class AgentSubmitDeliveryProof {
+    AgentTurnover,
+    TmuxEnterAccepted,
+}
+
+/**
  * Issue #869: how many whitespace-stripped tail characters of the pasted prompt
  * the ack needle matches against `capture-pane`.
  */

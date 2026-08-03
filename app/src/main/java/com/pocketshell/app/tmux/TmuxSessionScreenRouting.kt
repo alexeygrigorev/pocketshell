@@ -592,14 +592,16 @@ internal fun tmuxAgentConversationSend(
 internal suspend fun tmuxAgentConversationSendResult(
     text: String,
     agentToken: String?,
-    sendAgentPayload: suspend (String, AgentKind) -> Boolean,
+    sendAgentPayload: suspend (String, AgentKind, AgentSubmitDeliveryProof) -> Boolean,
     sendToAgent: suspend (String) -> Boolean,
     setTuiNotice: (String) -> Unit,
 ): Boolean {
     val agentKind = tmuxComposerAgentKindFromToken(agentToken)
     return when (tmuxAgentConversationSend(text, agentKind)) {
         TmuxAgentConversationSend.TuiCommandNoEcho -> {
-            val ok = agentKind?.let { sendAgentPayload(text, it) } ?: false
+            val ok = agentKind?.let {
+                sendAgentPayload(text, it, AgentSubmitDeliveryProof.TmuxEnterAccepted)
+            } ?: false
             if (ok) setTuiNotice(text.trim())
             ok
         }
@@ -629,6 +631,7 @@ internal suspend fun tmuxComposerSendResult(
         agent: AgentKind,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
+        deliveryProof: AgentSubmitDeliveryProof,
     ) -> Boolean,
     sendToAgent: suspend (
         paneId: String,
@@ -673,15 +676,22 @@ internal suspend fun tmuxComposerSendResult(
             tmuxAgentConversationSendResult(
                 request.text,
                 target.agentKind,
-                { text, agent ->
-                    sendAgentPayload(paneId, text, agent, sendToken, durableRow)
+                { text, agent, deliveryProof ->
+                    sendAgentPayload(paneId, text, agent, sendToken, durableRow, deliveryProof)
                 },
                 { text -> sendToAgent(paneId, text, sendToken, durableRow) },
                 setTuiNotice,
             )
         OutboundRoute.AgentPayload ->
             tmuxComposerAgentKindFromToken(target.agentKind)?.let { agent ->
-                sendAgentPayload(paneId, request.text, agent, sendToken, durableRow)
+                sendAgentPayload(
+                    paneId,
+                    request.text,
+                    agent,
+                    sendToken,
+                    durableRow,
+                    AgentSubmitDeliveryProof.AgentTurnover,
+                )
             } ?: false
         OutboundRoute.RawBytes -> {
             val payload = if (request.withEnter) request.text + "\r" else request.text

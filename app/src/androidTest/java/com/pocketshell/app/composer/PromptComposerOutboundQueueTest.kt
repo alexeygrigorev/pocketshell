@@ -60,11 +60,10 @@ class PromptComposerOutboundQueueTest {
             }
         }
 
-        assertEquals(
-            "global payload lookup must demonstrate the ambiguous selector regression",
-            2,
+        assertTrue(
+            "global payload lookup must remain ambiguous so the stable row selector is load-bearing",
             compose.onAllNodesWithText(payload, substring = true, useUnmergedTree = true)
-                .fetchSemanticsNodes().size,
+                .fetchSemanticsNodes().size > 1,
         )
         compose.onNode(
             hasText(payload, substring = true) and hasAnyAncestor(hasTestTag(rowTag)),

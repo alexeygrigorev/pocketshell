@@ -14099,7 +14099,7 @@ public class TmuxSessionViewModel @Inject constructor(
         payload: String,
         agent: AgentKind,
         sendToken: String = newOutboundDeliveryToken(),
-        durableRow: DurableOutboundRowIdentity? = null,
+        durableRow: DurableOutboundRowIdentity? = null, deliveryProof: AgentSubmitDeliveryProof = AgentSubmitDeliveryProof.AgentTurnover,
     ): Result<Unit> {
         if (durableAgentQueueSendMustDefer(durableRow, isSendTransportWritable())) {
             return Result.failure(IllegalStateException("Session is disconnected; kept queued."))
@@ -14112,7 +14112,7 @@ public class TmuxSessionViewModel @Inject constructor(
             payload,
             agent,
             sendToken,
-            durableRow,
+            durableRow, deliveryProof,
         )
     }
 
@@ -14191,7 +14191,7 @@ public class TmuxSessionViewModel @Inject constructor(
         payload: String,
         agent: AgentKind,
         sendToken: String,
-        durableRow: DurableOutboundRowIdentity?,
+        durableRow: DurableOutboundRowIdentity?, deliveryProof: AgentSubmitDeliveryProof,
     ): Result<Unit> {
         val payloadBytes = payload.toByteArray(Charsets.UTF_8)
         val runtimeIdentity = snapshotAgentSendRuntime(client)
@@ -14235,7 +14235,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     captureAgentPaneBounded(runtimeIdentity, paneId, AGENT_SUBMIT_TURNOVER_TIMEOUT_MS, 0)
                         .response ?: error("Agent submit frame unavailable before Enter; kept queued.")
                 }
-                val transcriptBaseline = durableRow?.let { agentTranscriptAuthority.baseline(paneId, payload) }
+                val transcriptBaseline = agentTranscriptAuthority.baselineFor(deliveryProof, paneId, payload)
                 durableRow?.let { row ->
                     check(withContext(seedIoDispatcher) {
                         outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row)
@@ -14243,7 +14243,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 sendNamedKeyToPane(client, paneId, "Enter")
                     .throwIfTmuxError("submit previously pasted agent input")
-                if (preEnterFrame != null) {
+                if (preEnterFrame != null && deliveryProof == AgentSubmitDeliveryProof.AgentTurnover) {
                     agentTranscriptAuthority.awaitTurnover(
                         identity = runtimeIdentity,
                         paneId = paneId,
@@ -14354,7 +14354,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "Tmux client disconnected after paste acknowledgement."
             }
             consumeSendResultLostSeamForTest()
-            val transcriptBaseline = durableRow?.let { agentTranscriptAuthority.baseline(paneId, payload) }
+            val transcriptBaseline = agentTranscriptAuthority.baselineFor(deliveryProof, paneId, payload)
             durableRow?.let { row ->
                 check(withContext(seedIoDispatcher) {
                     outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row)
@@ -14362,7 +14362,7 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
-            if (durableRow != null) {
+            if (durableRow != null && deliveryProof == AgentSubmitDeliveryProof.AgentTurnover) {
                 agentTranscriptAuthority.awaitTurnover(
                     identity = runtimeIdentity,
                     paneId = paneId,

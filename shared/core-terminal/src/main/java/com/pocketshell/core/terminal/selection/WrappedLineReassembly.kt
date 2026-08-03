@@ -27,11 +27,23 @@ package com.pocketshell.core.terminal.selection
  *   `getSelectedText` returns it).
  * @property wrapsToNext `true` when the emulator's line-wrap flag is set for
  *   this row — i.e. the next visual row continues the same logical line.
+ * @property startsWithOsc8Hyperlink whether column zero was emitted inside an
+ *   OSC 8 hyperlink. This immutable terminal provenance is intentionally
+ *   separate from visual SGR colour/style.
+ * @property endsWithOsc8Hyperlink whether the final grid column was emitted
+ *   inside an OSC 8 hyperlink.
+ * @property startsNewOsc8Hyperlink whether column zero is the first cell after
+ *   an OSC 8 opener. A true value distinguishes an adjacent independent OSC 8
+ *   link from a continuation whose hyperlink remained active across the row
+ *   boundary.
  */
 public data class VisualRow(
     val row: Int,
     val text: String,
     val wrapsToNext: Boolean,
+    val startsWithOsc8Hyperlink: Boolean = false,
+    val endsWithOsc8Hyperlink: Boolean = false,
+    val startsNewOsc8Hyperlink: Boolean = false,
 )
 
 /**
@@ -111,3 +123,87 @@ public fun reassemble(rows: List<VisualRow>): List<LogicalLine> {
     if (current.isNotEmpty()) out += LogicalLine(current)
     return out
 }
+
+/**
+ * Restores URL continuation metadata for agent TUIs that hard-wrap an OSC 8
+ * hyperlink but do not preserve Termux's [VisualRow.wrapsToNext] bit (#1955).
+ *
+ * This deliberately does **not** inspect a live terminal.  It runs over the
+ * immutable, single-extraction viewport snapshot used by the off-main overlay
+ * scanners (#796/#871/#1233). Text + width + a false wrap bit cannot distinguish
+ * the reported `campaig` / `ns/...` split from a complete extensionless URL
+ * followed by an independent path. Therefore this pass never guesses from text
+ * shape. It repairs only a boundary whose last/first cells both carry the
+ * emulator's OSC 8 provenance marker and whose next row does not start a newly
+ * opened hyperlink. SGR colour continuity is deliberately not enough:
+ * independent newline rows can use the same colour and attributes.
+ */
+internal fun markHardWrappedUrlContinuations(
+    rows: List<VisualRow>,
+    columns: Int,
+): List<VisualRow> {
+    if (rows.size < 2 || columns <= 0) return rows
+
+    val out = rows.toMutableList()
+    var changed = false
+    var index = 0
+    while (index < rows.lastIndex) {
+        if (out[index].wrapsToNext) {
+            index += 1
+            continue
+        }
+        val continuationEnd = osc8HardWrappedUrlContinuationEnd(rows, index, columns)
+        if (continuationEnd == null) {
+            index += 1
+            continue
+        }
+        for (joinIndex in index until continuationEnd) {
+            if (!out[joinIndex].wrapsToNext) {
+                out[joinIndex] = out[joinIndex].copy(wrapsToNext = true)
+                changed = true
+            }
+        }
+        index = continuationEnd
+    }
+    return if (changed) out else rows
+}
+
+private fun osc8HardWrappedUrlContinuationEnd(
+    rows: List<VisualRow>,
+    startIndex: Int,
+    columns: Int,
+): Int? {
+    val first = rows[startIndex].text.take(columns)
+    if (first.length != columns || first.lastOrNull()?.isWhitespace() != false) return null
+
+    val httpStart = first.lastIndexOf("http://", ignoreCase = true)
+    val httpsStart = first.lastIndexOf("https://", ignoreCase = true)
+    val schemeStart = maxOf(httpStart, httpsStart)
+    if (schemeStart < 0) return null
+    val firstFragment = first.substring(schemeStart)
+    if (firstFragment.any { it in OSC8_WRAP_URL_DELIMITERS }) return null
+
+    var index = startIndex
+    while (index < rows.lastIndex) {
+        val current = rows[index]
+        val next = rows[index + 1]
+        if (
+            !current.endsWithOsc8Hyperlink ||
+            !next.startsWithOsc8Hyperlink ||
+            next.startsNewOsc8Hyperlink
+        ) {
+            break
+        }
+        index += 1
+
+        val continuation = next.text.takeWhile { it !in OSC8_WRAP_URL_DELIMITERS }
+        val visualText = next.text.take(columns)
+        val fillsGrid = visualText.length == columns && continuation.length >= columns
+        if (!fillsGrid) break
+    }
+    return index.takeIf { it > startIndex }
+}
+
+private val OSC8_WRAP_URL_DELIMITERS: Set<Char> = setOf(
+    ' ', '\t', '\n', '\r', '`', '"', '\'', '<', '>',
+)

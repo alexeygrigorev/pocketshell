@@ -111,7 +111,8 @@ internal fun filePathRegionsForRows(
     if (columns <= 0 || visualRows.isEmpty()) return emptyList()
 
     val out = mutableListOf<FilePathRegion>()
-    for (logical in reassemble(markFilePathContinuationWraps(visualRows))) {
+    val rows = markFilePathContinuationWraps(markHardWrappedUrlContinuations(visualRows, columns))
+    for (logical in reassemble(rows)) {
         val line = logical.text
         for (detected in detectFilePathsInLine(line, urlSpans(line))) {
             for (span in logical.mapSpanToRows(detected.start, detected.endExclusive)) {

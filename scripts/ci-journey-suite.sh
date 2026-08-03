@@ -827,4 +827,35 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #1955 hard-wrapped URL target proof (core-terminal androidTest).
+# Agent TUIs can paint a URL to the final grid column and resume it at column
+# zero without preserving Termux's soft-wrap bit. The proof reproduces the
+# maintainer's exact 60-column `campaig` / `ns/...` split, hard-asserts both
+# source wrap flags are false, taps BOTH fragments through the production
+# TerminalViewClient route, and requires two ACTION_VIEW intents carrying the
+# exact complete GitHub URI. It also pins the continuation not being exposed as
+# a local file path. Uses NO Docker fixture (in-process real TerminalView).
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  HARD_WRAPPED_URL_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #1955 hard-wrapped URL proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #1955 HARD-WRAPPED URL PROOF: $CORE_TERMINAL_HARD_WRAPPED_URL_CLASS (attempt 1)"
+  echo "=========================================================="
+  hard_wrapped_url_start=$SECONDS
+  if run_core_terminal_hard_wrapped_url; then
+    echo "HARD_WRAPPED_URL_PASS: passed on attempt 1 (elapsed $((SECONDS - hard_wrapped_url_start))s)"
+  else
+    echo ">>> HARD-WRAPPED URL PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_hard_wrapped_url; then
+      echo "HARD_WRAPPED_URL_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "HARD_WRAPPED_URL_FAILED: #1955 proof failed twice"
+      HARD_WRAPPED_URL_STATUS="FAIL"
+    fi
+  fi
+fi
+
 finish_ci_journey_suite

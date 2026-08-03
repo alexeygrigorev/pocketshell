@@ -5,6 +5,9 @@ import android.os.SystemClock
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -212,7 +215,7 @@ class HostBootstrapScenarioSuiteTest {
 
         // Dismissible and non-blocking: tapping Dismiss removes the banner
         // and the host list stays usable (no loop, no re-prompt).
-        compose.onNodeWithText("Dismiss").performClick()
+        dismissActionWithin(HOST_LIST_APP_UPDATE_WARNING_TAG).performClick()
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithTag(HOST_LIST_APP_UPDATE_WARNING_TAG)
                 .fetchSemanticsNodes()
@@ -550,6 +553,10 @@ class HostBootstrapScenarioSuiteTest {
             compose.onNodeWithTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + row).assertExists()
         }
     }
+
+    private fun dismissActionWithin(ancestorTag: String) = compose.onNode(
+        hasText("Dismiss") and hasAnyAncestor(hasTestTag(ancestorTag)),
+    )
 
     private fun assumeScenariosEnabled() {
         val enabled = InstrumentationRegistry.getArguments()

@@ -271,6 +271,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#moduleOneArticleListsRenderIntactAndContinuedLinkOpensExactUrl"  # #1714 D33/G9/G10: exact issue-time excerpts plus synthetic mixed/deep/wide class coverage through production MarkdownView
   "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"  # #885 #117 D32 G9): the post-update Host ready success sheet must
   "com.pocketshell.app.bootstrap.HostNotificationsReadinessTest"  # #1236 D26 / D32 G9): per-host notification readiness + the
+  "com.pocketshell.app.bootstrap.AppUpdateDismissSelectorTest"  # #1958 D32 G9: two visible Dismiss actions; app-update ancestor selector removes only its banner
   "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"  # #933 #928 #931 #926 ============================================================…
   "com.pocketshell.app.cards.SessionChecklistPushJourneyDockerTest"  # #949 #859 ============================================================…
   "com.pocketshell.app.insets.NestedImePaddingInSheetGeometryTest"  # #1872/#1821: ten real ModalBottomSheet geometry cases pin the five inline navigationBarsPadding sites as inert

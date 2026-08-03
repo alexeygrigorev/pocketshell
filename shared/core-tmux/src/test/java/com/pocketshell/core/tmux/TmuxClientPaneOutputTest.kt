@@ -6,7 +6,9 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -14,11 +16,16 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.After
@@ -37,6 +44,9 @@ import java.util.concurrent.atomic.AtomicInteger
 
 private const val PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS = 15_000L
 
+private fun <T> CoroutineScope.armFirst(flow: Flow<T>): Deferred<T> =
+    async(start = CoroutineStart.UNDISPATCHED) { flow.first() }
+
 class TmuxClientPaneOutputTest {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -45,6 +55,21 @@ class TmuxClientPaneOutputTest {
     fun tearDown() {
         TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
         scope.cancel()
+    }
+
+    @Test
+    fun `armFirst subscribes before a replay-zero producer can emit`() = runTest {
+        val pinnedScope = CoroutineScope(
+            backgroundScope.coroutineContext + StandardTestDispatcher(testScheduler),
+        )
+        val flow = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 1)
+
+        val received = pinnedScope.armFirst(flow)
+        assertTrue("the fixture producer must accept the sentinel", flow.tryEmit("sentinel"))
+        runCurrent()
+
+        val actual = withTimeout(1_000) { received.await() }
+        assertEquals("sentinel", actual)
     }
 
     @Test
@@ -401,6 +426,7 @@ class TmuxClientPaneOutputTest {
 
             val target = 300
             val cap = 256
+            val readerBarrier = scope.armFirst(client.outputFor("%8"))
 
             shell.feed(
                 buildString {
@@ -412,9 +438,11 @@ class TmuxClientPaneOutputTest {
                     append("%output %8 sentinel\n")
                 },
             )
-            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) {
-                client.outputFor("%8").first()
+            val sentinel = withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) {
+                readerBarrier.await()
             }
+            assertEquals("%8", sentinel.paneId)
+            assertEquals("sentinel", String(sentinel.data, StandardCharsets.US_ASCII))
 
             val events = withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) {
                 client.outputFor("%9").take(cap).toList()

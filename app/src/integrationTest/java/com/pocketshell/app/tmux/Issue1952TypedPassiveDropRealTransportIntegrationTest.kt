@@ -9,7 +9,9 @@ import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientDiagnosticSink
@@ -19,6 +21,7 @@ import java.io.File
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -31,6 +34,7 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -196,6 +200,188 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
             println("ISSUE1952_REAL_TRANSCRIPT\n$transcript")
         } finally {
             vm?.forceCleanOutageForTest = false
+            vm?.cancelOwnScopesForTest()
+            vm?.clearForTest()
+            runCatching { cleanupSession() }
+            diagnostics.close()
+            TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
+            leaseManager.close()
+            ioScope.cancel()
+        }
+    }
+
+    /**
+     * Issue #1954 D34 proof: kill the real authenticated sshd worker while the app is in its
+     * bounded background grace, then foreground through the production grace-heal entrypoint.
+     * The symptom-defining assertions are on the real reader death, the absence of a competing
+     * liveness owner, the lease-authority invalidation record, object identities, connect count,
+     * and the real same-session transcript.
+     */
+    @Test
+    fun realReaderDropWithinGraceHasOneOwnerAndOneFreshHandshake() = runBlocking {
+        LivenessProbeTestOverride.setAutoStartEnabledForTest(true)
+        LivenessProbeTestOverride.setForTest(
+            intervalMs = 250L,
+            perProbeTimeoutMs = 250L,
+            failureThreshold = 1,
+        )
+        startDockerOrFail()
+        val fixture = requireNotNull(container)
+        val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val connector = CountingLeaseConnector(DefaultSshLeaseConnector())
+        val leaseManager = SshLeaseManager(
+            connector = connector,
+            scope = ioScope,
+            idleTtlMillis = 60_000L,
+        )
+        val diagnostics = installRecordingDiagnosticSink()
+        val tmuxDiagnostics = RecordingTmuxDiagnostics().also { TmuxClientDiagnostics.install(it) }
+        var vm: TmuxSessionViewModel? = null
+        try {
+            seedSession()
+            vm = TmuxSessionViewModel(
+                tmuxClientFactory = TmuxClientFactory(ioScope),
+                activeTmuxClients = ActiveTmuxClients(),
+                sshLeaseManager = leaseManager,
+            )
+            vm.connect(
+                hostId = 1954L,
+                hostName = "issue1954-docker",
+                host = fixture.host,
+                port = fixture.getMappedPort(SSH_PORT),
+                user = SSH_USER,
+                keyPath = privateKeyFile.absolutePath,
+                passphrase = null,
+                sessionName = SESSION_NAME,
+            )
+            awaitCondition(INITIAL_CONNECT_TIMEOUT_MS, "initial within-grace VM Live attach") {
+                vm.connectionControllerStateForTest() is ConnectionState.Live &&
+                    vm.liveTmuxClientForSendOrNullForTest() != null &&
+                    vm.panes.value.isNotEmpty()
+            }
+            awaitCondition(INITIAL_CONNECT_TIMEOUT_MS, "initial within-grace connect job completion") {
+                !vm.connectJobActiveForTest()
+            }
+            assertEquals("precondition: one initial SSH handshake", 1, connector.connectCount)
+            val firstClient = requireNotNull(vm.liveTmuxClientForSendOrNullForTest())
+            val firstClientHash = System.identityHashCode(firstClient)
+            val firstSshIdentity = currentSshIdentity(vm)
+            val beforeMarker = "ISSUE1954-BEFORE-${System.nanoTime().toString(36)}"
+            sendAndAwaitMarker(firstClient, beforeMarker)
+
+            vm.setPassiveDisconnectRecoveryForTest(
+                graceMs = WITHIN_GRACE_RECOVERY_MS,
+                silentReattachTimeoutMs = WITHIN_GRACE_REATTACH_TIMEOUT_MS,
+            )
+            // ProcessLifecycle ON_STOP starts the App-level grace without dispatching the VM's
+            // grace-elapsed `onAppBackgrounded()` teardown. This is the production within-grace
+            // state: the warm runtime stays attached, while the process-level liveness/drop gates
+            // close. The initial connect must be fully complete first so its stale-attach fallback
+            // cannot own a peer death that belongs to this later lifecycle interval.
+            vm.setProcessForegroundForClearedForTest(false)
+            assertFalse(
+                "precondition: process background must close the liveness probe gate",
+                vm.shouldRunLivenessProbeForTest(),
+            )
+            val killedPeerPids = killAuthenticatedSshdProcessesFromServer()
+            val readerExit = awaitReaderExit(tmuxDiagnostics, firstClientHash)
+            assertTrue(
+                "D34: the background-grace fault must be a real remote reader death: $readerExit",
+                readerExit["disconnectReason"] == "reader_eof" ||
+                    readerExit["disconnectReason"] == "reader_exception",
+            )
+            // The real drop is deferred while backgrounded. No replacement handshake may start
+            // before the foreground grace owner claims the target/client.
+            delay(500L)
+            val preForegroundEvents = diagnostics.events
+            println(
+                "ISSUE1954_PRE_FOREGROUND_CONNECTORS\n" +
+                    connector.invocations.joinToString("\n") { it.render() },
+            )
+            println(
+                "ISSUE1954_PRE_FOREGROUND_DIAGNOSTICS\n" +
+                    preForegroundEvents.joinToString("\n") { event ->
+                        "${event.category}/${event.name} ${event.fields}"
+                    },
+            )
+            println(
+                "ISSUE1954_PRE_FOREGROUND_TMUX_EVENTS\n" +
+                    tmuxDiagnostics.events.joinToString("\n") { (event, fields) ->
+                        "$event $fields"
+                    },
+            )
+            assertEquals(
+                "backgrounded drop must not start recovery; " +
+                    "connectors=${connector.invocations.map { it.summary() }}; " +
+                    "diagnostics=$preForegroundEvents",
+                1,
+                connector.connectCount,
+            )
+
+            vm.setProcessForegroundForClearedForTest(true)
+            vm.onAppForegrounded(resumedWithinGrace = true)
+
+            awaitCondition(RECOVERY_TIMEOUT_MS, "within-grace fresh-client recovery completion") {
+                val currentClient = vm.liveTmuxClientForSendOrNullForTest()
+                val currentHash = currentClient?.let(System::identityHashCode)
+                vm.connectionControllerStateForTest() is ConnectionState.Live &&
+                    currentClient?.disconnected?.value == false &&
+                    currentHash != null &&
+                    currentHash != firstClientHash &&
+                    diagnostics.eventsNamed("reconnect_success").any { event ->
+                        event.fields["source"] == "silent_transport_reattach" &&
+                            event.fields["clientHash"] == currentHash
+                    }
+            }
+            val recoveredClient = requireNotNull(vm.liveTmuxClientForSendOrNullForTest())
+            val recoveredSshIdentity = currentSshIdentity(vm)
+            val leaseRecovery = diagnostics.eventsNamed("dead_lease_recovery")
+            assertEquals("the grace owner invalidates/acquires exactly once", 1, leaseRecovery.size)
+            assertEquals(true, leaseRecovery.single().fields["invalidatedLease"])
+            assertEquals(true, leaseRecovery.single().fields["freshTransport"])
+            assertEquals(
+                "one initial + exactly one recovery handshake",
+                2,
+                connector.connectCount,
+            )
+            assertTrue(
+                "the competing liveness owner must stay deferred for the owned dead client: " +
+                    diagnostics.eventsNamed("liveness_probe_silent_drop"),
+                diagnostics.eventsNamed("liveness_probe_silent_drop").isEmpty(),
+            )
+            assertNotEquals(firstClientHash, System.identityHashCode(recoveredClient))
+            assertNotEquals(firstSshIdentity.session, recoveredSshIdentity.session)
+            assertNotEquals(firstSshIdentity.client, recoveredSshIdentity.client)
+            assertNotEquals(firstSshIdentity.transport, recoveredSshIdentity.transport)
+
+            val afterMarker = "ISSUE1954-AFTER-${System.nanoTime().toString(36)}"
+            sendAndAwaitMarker(recoveredClient, afterMarker)
+            val transcript = captureTranscript(recoveredClient)
+            assertTrue(transcript.contains(beforeMarker))
+            assertTrue(transcript.contains(afterMarker))
+            assertFalse("recovered client must remain connected", recoveredClient.disconnected.value)
+
+            println(
+                "ISSUE1954_REAL_TRANSPORT owner=within_grace livenessStarts=0 " +
+                    "connectCount=${connector.connectCount} leaseRecovery=${leaseRecovery.single().fields} " +
+                    "firstClient=$firstClientHash recoveredClient=${System.identityHashCode(recoveredClient)} " +
+                    "firstSsh=$firstSshIdentity recoveredSsh=$recoveredSshIdentity " +
+                    "peerKilledPids=$killedPeerPids reader=$readerExit",
+            )
+            println("ISSUE1954_REAL_TRANSCRIPT\n$transcript")
+        } finally {
+            println(
+                "ISSUE1954_FINAL_CONNECTORS\n" +
+                    connector.invocations.joinToString("\n") { it.render() },
+            )
+            println(
+                "ISSUE1954_FINAL_DIAGNOSTICS\n" +
+                    diagnostics.events.joinToString("\n") { event ->
+                        "${event.category}/${event.name} ${event.fields}"
+                    },
+            )
+            LivenessProbeTestOverride.clear()
+            vm?.setProcessForegroundForClearedForTest(null)
             vm?.cancelOwnScopesForTest()
             vm?.clearForTest()
             runCatching { cleanupSession() }
@@ -422,6 +608,42 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         }
     }
 
+    private class CountingLeaseConnector(
+        private val delegate: SshLeaseConnector,
+    ) : SshLeaseConnector {
+        data class Invocation(
+            val order: Int,
+            val startedAtNanos: Long,
+            val target: String,
+            val thread: String,
+            val callerStack: String,
+        ) {
+            fun summary(): String =
+                "#$order at=$startedAtNanos target=$target thread=$thread"
+
+            fun render(): String = "${summary()}\n$callerStack"
+        }
+
+        private val sequence = AtomicInteger(0)
+        val invocations = CopyOnWriteArrayList<Invocation>()
+
+        val connectCount: Int
+            get() = sequence.get()
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            val order = sequence.incrementAndGet()
+            invocations += Invocation(
+                order = order,
+                startedAtNanos = System.nanoTime(),
+                target = target.leaseKey.toString(),
+                thread = Thread.currentThread().name,
+                callerStack = Throwable("physical SSH connector invocation #$order")
+                    .stackTraceToString(),
+            )
+            return delegate.connect(target)
+        }
+    }
+
     private companion object {
         const val SSH_PORT = 22
         const val SSH_USER = "testuser"
@@ -433,5 +655,7 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         const val ATTEMPT_PROGRESS_TIMEOUT_MS = 12_000L
         const val RECOVERY_TIMEOUT_MS = 30_000L
         const val MARKER_TIMEOUT_MS = 10_000L
+        const val WITHIN_GRACE_RECOVERY_MS = 10_000L
+        const val WITHIN_GRACE_REATTACH_TIMEOUT_MS = 5_000L
     }
 }

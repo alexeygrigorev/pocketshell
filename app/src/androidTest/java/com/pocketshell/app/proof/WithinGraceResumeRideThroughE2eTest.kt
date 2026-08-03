@@ -1,18 +1,25 @@
 package com.pocketshell.app.proof
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.SystemClock
+import android.view.View
+import android.view.ViewGroup
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -20,6 +27,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.FileOutputStream
 
 /**
  * Issue #635 / #636 / #754 (slice 1c-iv-c): brief-background-within-grace ride-through.
@@ -198,29 +206,20 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
      * confirmed-dead within-grace foreground NEVER paints "Attaching…" and NEVER runs the
      * inline probe.
      *
-     * WHAT A CLEAN CUT ACTUALLY DOES (verified from the connection lifecycle diagnostics
-     * in this run): `proxy.disable()` kills the SSH socket near-instantly, so the
-     * transport-drop oracle (`tmux_client_reader_exit` / `passive_disconnect`) fires
-     * BEFORE the within-grace foreground. By the time the foreground is processed the
-     * `-CC` lease is already gone, so `canReseedWithinGraceForeground()` correctly
-     * DECLINES the reseed-only fast-path (the within-grace foreground records
-     * `background_grace foreground_preserved`/`foreground_reattach outcome=dispatch`,
-     * `gateDecision=suppress`, `activeTmuxClientCount=0`) and the connection honestly
-     * falls into its drop/reconnect ladder. That honest reconnect of a genuinely-dead
-     * socket is correct (and is the slice-1c-iv-f ladder's concern), NOT a #754 violation.
+     * Issue #1954 tightens the confirmed-dead arm: the foreground grace heal owns the
+     * target/client, invalidates the proven-dead active lease through [SshLeaseManager],
+     * and performs exactly one fresh transport acquisition. Liveness is deferred while
+     * that owner is active, so no competing auto-reconnect ladder can reuse the corpse or
+     * emit `Attaching`.
      *
-     * The #754 invariant this test PINS — and the OLD inline path VIOLATED — is therefore:
+     * The combined #754/#1954 invariant this test pins is therefore:
      *  - the confirmed-dead within-grace foreground NEVER paints `TMUX_SWITCHING_LOADING_TAG`
      *    / "Attaching…" (the EXACT surface the maintainer reported);
      *  - the DELETED inline probe (`tmux_probe_result` cause-trail /
-     *    `foreground_runtime_probe_failed` diagnostic) NEVER runs even on a confirmed-dead
-     *    channel inside grace.
-     *
-     * It does NOT assert a reseed-only fast-path (a dead lease correctly declines it) nor
-     * the absence of a Disconnect band (a clean-cut socket is genuinely dead and honestly
-     * reconnects) — asserting either would either be racy or mask real behavior. FAILS on
-     * `main` (the overlay appears + a `tmux_probe_result` cause-trail is recorded) and
-     * PASSES after the fix.
+     *    `foreground_runtime_probe_failed` diagnostic) NEVER runs;
+     *  - one typed grace owner performs one dead-lease invalidation/fresh acquisition,
+     *    while liveness starts zero recovery effects;
+     *  - the prior marker remains revealed and the recovered channel accepts new input.
      */
     @Test
     fun withinGraceForegroundConfirmedDeadDoesNotShowAttachingOverlayOrReconnect() { runBlocking {
@@ -247,6 +246,9 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
         waitForVisibleTerminalText("before-confdead") { "BEFORE-$marker" in it }
         assertNoExtraConnectAttempts(attemptsBefore, expectedDelta = 1, label = "initial attach")
         waitForConnected("initial attach")
+        val firstClientHash = System.identityHashCode(
+            requireNotNull(currentViewModel().liveTmuxClientForSendOrNullForTest()),
+        )
         diagnostics!!.clear()
 
         // Short grace override so the resume lands well within grace.
@@ -271,9 +273,14 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
                 it.fields["withinGrace"] == true
             }
             // The exact window the old probe→connect ran (and any subsequent honest
-            // ladder): the confirmed-dead within-grace foreground must NEVER paint the
+            // recovery): the confirmed-dead within-grace foreground must NEVER paint the
             // "Attaching…" overlay. Watched continuously, not sampled once.
             assertNeverAttachingOverlayDuring("confdead_during_cut", OVERLAY_WATCH_MS)
+            val heldText = captureTerminalViewport("issue1954-confdead-post-resume-no-overlay")
+            assertTrue(
+                "the no-overlay viewport must still reveal the prior marker; text=$heldText",
+                "BEFORE-$marker" in heldText,
+            )
         } finally {
             proxy.enable()
             recordTiming("confdead_cut_total_ms", SystemClock.elapsedRealtime() - cycleStart)
@@ -285,6 +292,18 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
         // invariant holds across the whole confirmed-dead journey, not just the foreground
         // instant.
         assertNeverAttachingOverlayDuring("confdead_after_restore", POST_RESTORE_SETTLE_MS)
+        waitForDiagnostic("dead_lease_recovery", "confirmed-dead lease replacement")
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            currentViewModel().liveTmuxClientForSendOrNullForTest()?.let { client ->
+                System.identityHashCode(client) != firstClientHash && !client.disconnected.value
+            } == true
+        }
+        waitForConnected("confirmed-dead within-grace recovery")
+        assertNoExtraConnectAttempts(
+            attemptsBefore,
+            expectedDelta = 1,
+            label = "single grace-owned recovery without reconnect ladder",
+        )
 
         // #754 INVARIANT — the deleted inline foreground probe NEVER runs, even on a
         // confirmed-dead channel inside grace. (We do NOT assert a reseed-only fast-path:
@@ -312,6 +331,25 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
             },
         )
 
+        val deadLeaseRecovery = diagnostics!!.eventsNamed("dead_lease_recovery")
+        assertEquals(
+            "the grace owner must invalidate/acquire the dead lease exactly once",
+            1,
+            deadLeaseRecovery.size,
+        )
+        assertEquals(true, deadLeaseRecovery.single().fields["invalidatedLease"])
+        assertEquals(true, deadLeaseRecovery.single().fields["freshTransport"])
+        assertEquals(
+            "liveness must not start a competing recovery effect for the owned client",
+            0,
+            diagnostics!!.eventsNamed("liveness_probe_silent_drop").size,
+        )
+
+        val afterMarker = "AFTER-$marker"
+        sendCommandThroughTerminalInput("printf '$afterMarker\\n'", "after-confdead")
+        waitForVisibleTerminalText("after-confdead") { afterMarker in it }
+        captureTerminalViewport("issue1954-confdead-recovered")
+
         writeSummary(
             testName = "WithinGraceForegroundConfirmedDeadE2eTest",
             lines = listOf(
@@ -319,8 +357,11 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
                 "marker=$marker",
                 "scenario=clean cut (proxy disable), background within grace, foreground while cut",
                 "grace_override_ms=$WITHIN_GRACE_MS",
-                "expectation=no Attaching overlay + no inline probe on a confirmed-dead within-grace foreground",
+                "expectation=one grace-owned fresh recovery, no liveness owner, no Attaching overlay",
                 "connect_attempt_delta=${TMUX_CONNECT_ATTEMPTS.get() - attemptsBefore}",
+                "dead_lease_recoveries=${deadLeaseRecovery.size}",
+                "liveness_recovery_starts=" +
+                    diagnostics!!.eventsNamed("liveness_probe_silent_drop").size,
                 "probe_results=" + causeTrail.count { it.fields["stage"] == "tmux_probe_result" },
                 "foreground_reattach_outcomes=" + causeTrail
                     .filter { it.fields["stage"] == "foreground_reattach" }
@@ -372,14 +413,56 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
     }
 
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
-        var status: TmuxSessionViewModel.ConnectionStatus =
-            TmuxSessionViewModel.ConnectionStatus.Idle
+        return currentViewModel().connectionStatus.value
+    }
+
+    private fun currentViewModel(): TmuxSessionViewModel {
+        var vm: TmuxSessionViewModel? = null
         launchedActivity?.onActivity { activity ->
-            status = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-                .connectionStatus
-                .value
+            vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
         }
-        return status
+        return requireNotNull(vm) { "MainActivity/TmuxSessionViewModel unavailable" }
+    }
+
+    /** Direct TerminalView draw + same-view text: authoritative in-app viewport evidence. */
+    private fun captureTerminalViewport(name: String): String {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+
+        var bitmap: Bitmap? = null
+        var visibleText = ""
+        launchedActivity?.onActivity { activity ->
+            val view = requireNotNull(activity.window.decorView.findTerminalView()) {
+                "TerminalView missing while capturing $name"
+            }
+            check(view.width > 0 && view.height > 0) {
+                "TerminalView has invalid dimensions ${view.width}x${view.height} for $name"
+            }
+            bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888).also {
+                view.draw(Canvas(it))
+            }
+            visibleText = view.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+        }
+        val captured = requireNotNull(bitmap) { "MainActivity unavailable while capturing $name" }
+        val png = artifactFile("$name-viewport.png")
+        FileOutputStream(png).use { output ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                "failed to write $png"
+            }
+        }
+        artifactFile("$name-visible-terminal.txt").writeText(visibleText)
+        captured.recycle()
+        return visibleText
+    }
+
+    private fun View.findTerminalView(): TerminalView? {
+        if (this is TerminalView) return this
+        if (this !is ViewGroup) return null
+        for (index in 0 until childCount) {
+            getChildAt(index).findTerminalView()?.let { return it }
+        }
+        return null
     }
 
     private fun waitForDiagnostic(

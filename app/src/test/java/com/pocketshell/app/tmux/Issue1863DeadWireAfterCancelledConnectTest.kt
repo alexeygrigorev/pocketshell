@@ -537,6 +537,19 @@ class Issue1863DeadWireAfterCancelledConnectTest {
             LivenessProbeGate.Closed,
             selectLivenessProbeGate(false, appActive = true, hasClient = true, controlChannelDisconnected = false, controllerLive = false),
         )
+        // Issue #1954: a within-grace recovery already owns this exact target/client.
+        // Even a definitively closed channel stays deferred to that one typed owner.
+        assertEquals(
+            LivenessProbeGate.Closed,
+            selectLivenessProbeGate(
+                backgrounded = false,
+                appActive = true,
+                hasClient = true,
+                controlChannelDisconnected = true,
+                controllerLive = true,
+                withinGraceRecoveryOwnsClient = true,
+            ),
+        )
         // The #1863 split: foregrounded + controller Live + a CLOSED client.
         assertEquals(
             LivenessProbeGate.DeadChannel,

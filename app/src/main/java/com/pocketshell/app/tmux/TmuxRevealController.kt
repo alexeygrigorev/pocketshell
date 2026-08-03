@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionTarget
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
+import com.pocketshell.core.connection.ConnectionProjection
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.RevealStateMachine
@@ -71,8 +72,8 @@ internal class TmuxRevealController(
 
     fun currentTargetId(): SessionId? = state.value.targetIdOrNull()
 
-    fun setSilentHealInFlight(value: Boolean) {
-        revealStateMachine.setSilentHealInFlight(value)
+    fun setConnectionProjection(value: ConnectionProjection) {
+        revealStateMachine.setConnectionProjection(value)
     }
 
     fun driveTerminalError(target: ConnectionTarget, cause: Throwable?) {

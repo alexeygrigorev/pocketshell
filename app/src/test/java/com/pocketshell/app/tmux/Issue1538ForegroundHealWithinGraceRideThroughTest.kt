@@ -9,6 +9,7 @@ import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -25,6 +26,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
 import java.io.InputStream
 
 /**
@@ -292,6 +294,259 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
             )
         }
 
+    /**
+     * Issue #1954: a confirmed-dead foreground heal owns the whole bounded grace window.
+     * A failed first physical dial must stay inside that typed owner and retry there; handing
+     * off immediately to the normal auto-reconnect ladder removes the held TerminalView and
+     * reintroduces the visible reconnect/Attaching journey while still within grace.
+     */
+    @Test
+    fun withinGraceDeadHealRetainsAuthorityAcrossFailedDialUntilFreshRetrySucceeds() =
+        runTest(scheduler) {
+            TMUX_CONNECT_ATTEMPTS.set(1)
+            val registry = ActiveTmuxClients()
+            val deadSession = FakeSshSession()
+            val freshSession = FakeSshSession()
+            val connector = ScriptedLeaseConnector(
+                listOf(
+                    Result.success(deadSession),
+                    Result.failure(IOException("first recovery dial is still inside the outage")),
+                    Result.success(freshSession),
+                ),
+            )
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(
+                    connector = connector,
+                    scope = this,
+                    idleTtlMillis = 60_000L,
+                ),
+            )
+            vm.setPassiveDisconnectRecoveryForTest(
+                graceMs = 5_000L,
+                silentReattachTimeoutMs = 100L,
+            )
+            vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+            vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
+            vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+
+            val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+            vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+                assertSame(freshSession, session)
+                assertEquals("work", sessionName)
+                replacementClient
+            }
+
+            val droppedCcClient = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = droppedCcClient,
+                session = deadSession,
+            )
+            vm.setActiveLeaseRefWarmForTest()
+            runCurrent()
+            assertEquals("one setup lease", 1, connector.connectCount)
+            deadSession.markDisconnected()
+
+            vm.setProcessForegroundForClearedForTest(false)
+            droppedCcClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "device_background",
+                    intent = "unknown",
+                ),
+            )
+            runCurrent()
+
+            val diagnostics = installRecordingDiagnosticSink()
+            try {
+                vm.setProcessForegroundForClearedForTest(true)
+                vm.onAppForegrounded(resumedWithinGrace = true)
+                runCurrent()
+
+                assertEquals("setup + failed first recovery dial", 2, connector.connectCount)
+                assertTrue(
+                    "the bounded grace owner must keep the projected status calm after the " +
+                        "first dial fails",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+                assertTrue(
+                    "the first failed dial must not hand off to the visible auto-reconnect ladder",
+                    diagnostics.eventsNamed("reconnect_start").isEmpty(),
+                )
+
+                advanceTimeBy(1_000L)
+                runCurrent()
+                assertEquals("the same owner must perform the paced fresh retry", 3, connector.connectCount)
+                awaitCondition {
+                    registry.clients.value[7L]?.client === replacementClient &&
+                        vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected
+                }
+
+                assertEquals("one setup + two paced recovery dials", 3, connector.connectCount)
+                assertTrue("the exact dead manager-owned lease must be closed", deadSession.closed)
+                assertFalse("the fresh replacement transport must stay live", freshSession.closed)
+                assertEquals(
+                    "the hidden foreground owner must never enter connect()/the user-visible ladder",
+                    1,
+                    TMUX_CONNECT_ATTEMPTS.get(),
+                )
+                assertTrue(diagnostics.eventsNamed("reconnect_start").isEmpty())
+                val recovery = diagnostics.eventsNamed("dead_lease_recovery")
+                assertEquals("one successful typed recovery diagnostic", 1, recovery.size)
+                assertEquals(true, recovery.single().fields["invalidatedLease"])
+                assertEquals(true, recovery.single().fields["freshTransport"])
+            } finally {
+                diagnostics.close()
+            }
+        }
+
+    /**
+     * Issue #1954 / #1653 interop: once the exact corpse has been invalidated and a fresh,
+     * identity-different successor has handshaken, a slow tmux tail does not make that successor
+     * dead. The same bounded owner must retry the tmux attach over that manager-held successor;
+     * acquiring the key again either leaks a lease ref or misclassifies the valid pooled result as
+     * a failed "fresh" recovery and disconnects it by key.
+     */
+    @Test
+    fun withinGraceDeadHealReusesFreshSuccessorAfterSlowTailWithoutAnotherAcquire() =
+        runTest(scheduler) {
+            TMUX_CONNECT_ATTEMPTS.set(1)
+            val registry = ActiveTmuxClients()
+            val deadSession = FakeSshSession()
+            val freshSuccessor = FakeSshSession()
+            val connector = QueueLeaseConnector(deadSession, freshSuccessor)
+            val leaseManager = testLeaseManager(
+                connector = connector,
+                scope = this,
+                idleTtlMillis = 60_000L,
+            )
+            val vm = newVm(registry = registry, sshLeaseManager = leaseManager)
+            vm.setPassiveDisconnectRecoveryForTest(
+                graceMs = 5_000L,
+                silentReattachTimeoutMs = 1_000L,
+            )
+            vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+            vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
+            vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+
+            val slowTailClient = FakeTmuxClient().apply {
+                connectThrows = TmuxClientException("tmux tail remained slow after SSH handshake")
+            }
+            val recoveredClient = FakeTmuxClient().withStickySinglePane("work", "%1")
+            val factorySessions = mutableListOf<SshSession>()
+            val recoveryClients = ArrayDeque(listOf(slowTailClient, recoveredClient))
+            vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+                assertEquals("work", sessionName)
+                factorySessions += session
+                recoveryClients.removeFirstOrNull() ?: error("unexpected recovery client")
+            }
+
+            val droppedCcClient = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = droppedCcClient,
+                session = deadSession,
+            )
+            vm.setActiveLeaseRefWarmForTest()
+            runCurrent()
+            assertEquals("one setup acquire owns the exact corpse", 1, connector.connectCount)
+            deadSession.markDisconnected()
+
+            vm.setProcessForegroundForClearedForTest(false)
+            droppedCcClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "device_background",
+                    intent = "unknown",
+                ),
+            )
+            runCurrent()
+
+            val diagnostics = installRecordingDiagnosticSink()
+            try {
+                vm.setProcessForegroundForClearedForTest(true)
+                vm.onAppForegrounded(resumedWithinGrace = true)
+                runCurrent()
+
+                assertEquals("the exact corpse is invalidated before one fresh successor dial", 2, connector.connectCount)
+                assertTrue("the exact corpse must be closed once", deadSession.closed)
+                assertFalse(
+                    "a slow tmux tail must vouch and keep the freshly handshaken successor",
+                    freshSuccessor.closed,
+                )
+                assertEquals(listOf(freshSuccessor), factorySessions)
+
+                advanceTimeBy(500L)
+                runCurrent()
+                assertEquals(
+                    "the bounded owner must start one successor-reuse tmux retry after the slow tail",
+                    2,
+                    factorySessions.size,
+                )
+                assertEquals(
+                    "successor reuse must not acquire/dial again before the tmux retry settles",
+                    2,
+                    connector.connectCount,
+                )
+                assertFalse(
+                    "successor reuse must not key-disconnect the vouched-alive transport",
+                    freshSuccessor.closed,
+                )
+
+                val settleDeadlineMs = scheduler.currentTime + 3_000L
+                var settled = false
+                while (!settled && scheduler.currentTime < settleDeadlineMs) {
+                    advanceTimeBy(100L)
+                    runCurrent()
+                    settled = registry.clients.value[7L]?.client === recoveredClient &&
+                        vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected
+                }
+                assertTrue(
+                    "successor-reuse tmux retry did not settle before the bounded virtual-time " +
+                        "deadline; status=${vm.connectionStatus.value} clients=${registry.clients.value}",
+                    settled,
+                )
+
+                assertEquals(
+                    "the retry must reuse the manager-held successor without another acquire/dial",
+                    2,
+                    connector.connectCount,
+                )
+                assertEquals(
+                    "both tmux attach attempts must use the same identity-different successor",
+                    listOf(freshSuccessor, freshSuccessor),
+                    factorySessions,
+                )
+                assertFalse(
+                    "the kept successor must never be key-disconnected as an alleged pooled corpse",
+                    freshSuccessor.closed,
+                )
+                assertSame(recoveredClient, registry.clients.value[7L]?.client)
+                assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+                assertTrue(diagnostics.eventsNamed("reconnect_start").isEmpty())
+                assertEquals(
+                    "only the original corpse-to-successor transition is a dead-lease recovery",
+                    1,
+                    diagnostics.eventsNamed("dead_lease_recovery").size,
+                )
+            } finally {
+                diagnostics.close()
+            }
+        }
+
     // ---- helpers ----
 
     private fun FakeTmuxClient.withSinglePane(
@@ -313,6 +568,26 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
         )
     }
 
+    private fun FakeTmuxClient.withStickySinglePane(
+        sessionName: String,
+        paneId: String,
+    ): FakeTmuxClient = apply {
+        repeat(8) {
+            responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = listOf("$paneId\t@0\t\$0\t$sessionName\t$sessionName\t0"),
+                    isError = false,
+                ),
+            )
+            cursorQueryResponses.addLast(
+                CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
+            )
+        }
+        defaultCaptureResponse =
+            CommandResponse(number = 2L, output = listOf("$sessionName ready"), isError = false)
+    }
+
     private class QueueLeaseConnector(
         private vararg val sessions: FakeSshSession,
     ) : SshLeaseConnector {
@@ -327,22 +602,43 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
         }
     }
 
+    private class ScriptedLeaseConnector(
+        private val results: List<Result<SshSession>>,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+            private set
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            val next = results.getOrNull(connectCount)
+                ?: error("unexpected lease connect $connectCount for ${target.leaseKey}")
+            connectCount += 1
+            return next
+        }
+    }
+
     private class FakeSshSession(
-        private val isConnectedValue: Boolean = true,
+        isConnectedValue: Boolean = true,
         // The #1222 async-close staleness window — `isConnected` may still lie true while a
         // close has been initiated. The transport vouch must FAIL there.
         private val isCloseInitiatedValue: Boolean = false,
     ) : SshSession {
         @Volatile
+        private var connected: Boolean = isConnectedValue
+
+        @Volatile
         var closed: Boolean = false
 
         override val isConnected: Boolean
-            get() = isConnectedValue && !closed
+            get() = connected && !closed
 
         override val isCloseInitiated: Boolean
             get() = isCloseInitiatedValue
 
         override fun isTransportProvenAliveWithinKeepAliveWindow(): Boolean = isConnected
+
+        fun markDisconnected() {
+            connected = false
+        }
 
         override suspend fun exec(command: String): ExecResult =
             ExecResult(stdout = "", stderr = "", exitCode = 0)

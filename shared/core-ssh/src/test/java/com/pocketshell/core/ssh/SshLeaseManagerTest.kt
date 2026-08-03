@@ -598,6 +598,51 @@ class SshLeaseManagerTest {
     }
 
     @Test
+    fun `proven-dead invalidation closes the exact active lease and next acquire is fresh`() = runTest {
+        val dead = FakeSshSession()
+        val fresh = FakeSshSession()
+        val connector = QueueLeaseConnector(dead, fresh)
+        val manager = leaseManager(connector = connector, idleTtlMillis = 60_000)
+
+        val activeDeadLease = manager.acquire(TARGET).getOrThrow()
+
+        assertTrue(manager.isCurrentLiveLease(activeDeadLease))
+        assertTrue(manager.invalidateDead(activeDeadLease))
+        assertFalse(manager.isCurrentLiveLease(activeDeadLease))
+        assertTrue("the proven-dead transport must be closed", dead.closed)
+        val replacement = manager.acquire(TARGET).getOrThrow()
+        assertTrue("replacement must be a genuine new handshake", replacement.isNewConnection)
+        assertTrue(manager.isCurrentLiveLease(replacement))
+        assertSame(fresh, replacement.session)
+        assertEquals(2, connector.connectCount)
+
+        // Releasing the invalidated holder is stale and cannot disturb the replacement.
+        activeDeadLease.release()
+        assertFalse(fresh.closed)
+        replacement.release()
+    }
+
+    @Test
+    fun `late proven-dead invalidation cannot close a newer replacement`() = runTest {
+        val dead = FakeSshSession()
+        val fresh = FakeSshSession()
+        val connector = QueueLeaseConnector(dead, fresh)
+        val manager = leaseManager(connector = connector, idleTtlMillis = 60_000)
+
+        val staleClaim = manager.acquire(TARGET).getOrThrow()
+        assertTrue(manager.invalidateDead(staleClaim))
+        val replacement = manager.acquire(TARGET).getOrThrow()
+
+        assertFalse("a stale entry-id claim must not invalidate the replacement", manager.invalidateDead(staleClaim))
+        assertFalse(fresh.closed)
+        assertSame(fresh, replacement.session)
+        assertEquals(2, connector.connectCount)
+
+        staleClaim.release()
+        replacement.release()
+    }
+
+    @Test
     fun `evict idle leaves a transport a second active holder still owns`() = runTest {
         // Issue #758 (back -> open-another-session reconnect): the FolderList
         // picker poll and an active TmuxSessionViewModel ride the SAME lease key.

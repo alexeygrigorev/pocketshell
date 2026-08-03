@@ -512,6 +512,51 @@ public class SshLeaseManager(
     }
 
     /**
+     * Invalidate the exact actively-held lease whose transport has been proven dead.
+     *
+     * Unlike [evictIdle], this is allowed to remove a non-zero-ref entry: once the physical
+     * transport is known dead, every holder already owns the same corpse and retaining it can
+     * only make a force-fresh acquire reuse that corpse. The lease's entry id is load-bearing:
+     * a late recovery claim can never close a newer replacement registered under the same key.
+     * Stale [SshLease.release] calls are already ignored by the entry-id guard in [release].
+     *
+     * This is the single lease-authority boundary for proven-dead active transports. Callers do
+     * not close [SshSession] directly.
+     *
+     * @return true only when [lease] still names the current pooled entry and it was invalidated.
+     */
+    public suspend fun invalidateDead(lease: SshLease): Boolean {
+        val entry = mutex.withLock {
+            val current = entries[lease.key] ?: return@withLock null
+            if (current.id != lease.entryId) return@withLock null
+            entries.remove(lease.key)
+            emitStateLocked(
+                key = lease.key,
+                state = SshLeaseConnectionState.Closed,
+                closeReason = SshLeaseCloseReason.ForceRefresh,
+            )
+            current
+        } ?: return false
+        entry.close()
+        return true
+    }
+
+    /**
+     * Whether [lease] still names the exact current, reusable pool entry.
+     *
+     * This is the non-mutating sibling of [invalidateDead]. Recovery code that already replaced
+     * an exact dead lease uses it before retrying a later tmux stage over the live successor. The
+     * entry-id and session-identity checks prevent a stale lease from vouching for a replacement
+     * that happened to reuse the same key.
+     */
+    public suspend fun isCurrentLiveLease(lease: SshLease): Boolean = mutex.withLock {
+        val current = entries[lease.key] ?: return@withLock false
+        current.id == lease.entryId &&
+            current.session === lease.session &&
+            current.session.isLiveForLease()
+    }
+
+    /**
      * Apply the app process background policy for warm SSH transports.
      *
      * Active leases are left alone because the owning foreground flow must
@@ -865,7 +910,7 @@ public class SshLease internal constructor(
     public val key: SshLeaseKey,
     public val session: SshSession,
     public val isNewConnection: Boolean,
-    private val entryId: Long,
+    internal val entryId: Long,
     private val releaseAction: suspend (SshLeaseKey, Long) -> Unit,
 ) {
     private val releaseMutex = Mutex()

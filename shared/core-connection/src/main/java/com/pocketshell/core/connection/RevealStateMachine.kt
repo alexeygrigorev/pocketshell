@@ -73,16 +73,15 @@ class RevealStateMachine {
      * unexpected foreground drop) keeps the prior calm-loading behaviour
      * ([ConnectionState.Reattaching] -> [RevealState.Seeding]).
      */
-    private var silentHealInFlight = false
+    private var connectionProjection: ConnectionProjection = ConnectionProjection.Normal
 
     /**
-     * Issue #1098 (item 4): mark/unmark a within-grace SILENT heal as in flight. While
-     * in flight, a [ConnectionState.Reattaching]/[ConnectionState.Reconnecting]
-     * projection holds the current reveal (no "Attaching…" overlay) — see
-     * [silentHealInFlight].
+     * Issue #1098/#1954: select the typed projection for a within-grace SILENT recovery.
+     * While selected, `Attaching`/`Reattaching`/`Reconnecting` are recovery plumbing and
+     * the projection holds the current reveal (no "Attaching…" overlay).
      */
-    fun setSilentHealInFlight(value: Boolean) {
-        silentHealInFlight = value
+    fun setConnectionProjection(value: ConnectionProjection) {
+        connectionProjection = value
     }
 
     /**
@@ -148,8 +147,14 @@ class RevealStateMachine {
             -> _state.value // no reveal change
 
             is ConnectionState.Connecting,
-            is ConnectionState.Attaching,
             -> RevealState.Seeding(target, targetName)
+
+            is ConnectionState.Attaching ->
+                if (connectionProjection == ConnectionProjection.SilentWithinGraceRecovery) {
+                    _state.value
+                } else {
+                    RevealState.Seeding(target, targetName)
+                }
 
             is ConnectionState.Reattaching,
             is ConnectionState.Reconnecting,
@@ -158,7 +163,7 @@ class RevealStateMachine {
                 // transport re-open WITHOUT an "Attaching…" overlay — hold the current
                 // (live) frame. Every other reattach/reconnect keeps the calm-loading
                 // Seeding surface.
-                if (silentHealInFlight) {
+                if (connectionProjection == ConnectionProjection.SilentWithinGraceRecovery) {
                     _state.value
                 } else {
                     RevealState.Seeding(target, targetName)
@@ -275,6 +280,12 @@ class RevealStateMachine {
         val live = _state.value as? RevealState.Live ?: return
         _state.value = live.copy(agentName = agentName)
     }
+}
+
+/** Typed connection-to-reveal projection policy; presentation never infers recovery ownership. */
+enum class ConnectionProjection {
+    Normal,
+    SilentWithinGraceRecovery,
 }
 
 /**

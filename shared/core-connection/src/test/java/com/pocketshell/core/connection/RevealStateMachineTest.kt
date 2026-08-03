@@ -210,11 +210,12 @@ class RevealStateMachineTest {
 
         // The VM marks the within-grace SILENT heal in flight BEFORE the transport
         // teardown moves the controller off Live (the #635/item-4 ride-through).
-        m.setSilentHealInFlight(true)
+        m.setConnectionProjection(ConnectionProjection.SilentWithinGraceRecovery)
 
-        // The silent heal necessarily walks Live -> Reattaching -> (Reconnecting) while it
-        // re-opens the dropped `-CC`. With the heal in flight these MUST NOT drop the reveal
-        // to Seeding (which the screen renders as the full-surface "Attaching…" overlay).
+        // The silent heal can legitimately walk Live -> Reattaching -> Reconnecting ->
+        // Attaching while it replaces a proven-dead transport. With the heal in flight
+        // NONE of those typed recovery states may drop the reveal to Seeding (which the
+        // screen renders as the full-surface "Attaching…" overlay).
         m.onConnectionState(ConnectionState.Reattaching(host, a))
         assertEquals(
             "within-grace Reattaching must hold the live frame, not show the Attaching overlay",
@@ -227,10 +228,16 @@ class RevealStateMachineTest {
             liveBefore,
             m.state.value,
         )
+        m.onConnectionState(ConnectionState.Attaching(host, a))
+        assertEquals(
+            "within-grace Attaching must hold the live frame, not show the Attaching overlay",
+            liveBefore,
+            m.state.value,
+        )
 
         // Heal succeeds: the transport re-promotes Live and the reseed lands; reveal is Live.
         m.onConnectionState(ConnectionState.Live(host, a))
-        m.setSilentHealInFlight(false)
+        m.setConnectionProjection(ConnectionProjection.Normal)
         assertTrue(m.state.value is RevealState.Live)
     }
 
@@ -248,8 +255,8 @@ class RevealStateMachineTest {
         // unexpected reattach again shows the calm loading surface (the hold cannot get
         // stuck on).
         m.onConnectionState(ConnectionState.Live(host, a))
-        m.setSilentHealInFlight(true)
-        m.setSilentHealInFlight(false)
+        m.setConnectionProjection(ConnectionProjection.SilentWithinGraceRecovery)
+        m.setConnectionProjection(ConnectionProjection.Normal)
         m.onConnectionState(ConnectionState.Reattaching(host, a))
         assertEquals(RevealState.Seeding(a, "session-A"), m.state.value)
     }

@@ -261,16 +261,18 @@ class FolderListScrollE2eTest {
         compose.onNodeWithTag(lastRowTag, useUnmergedTree = true).assertIsDisplayed()
         captureFullDevice("04-folder-tree-bottom-viewport.png")
 
-        // Flat view (#485): an ungrouped list of every session — the session
-        // detail rows that the tree path renders are gone, replaced by flat
-        // rows keyed by session name. `session-01` is the oldest session so it
-        // sorts to the bottom of the recency-ordered flat list.
-        val lastFlatRowTag = folderListFlatRowTestTag(rows.first().sessionName)
+        // Flat view (#485/#489): every session is partitioned into Active
+        // (agents) and Idle (shells), with recency order preserved inside each
+        // section. The oldest shell is therefore the final session row.
+        val oldestShell = rows
+            .filter { it.agentKind == SessionAgentKind.Shell }
+            .minBy { it.lastActivity ?: Long.MIN_VALUE }
+        val lastFlatRowTag = folderListFlatRowTestTag(oldestShell.sessionName)
         compose.runOnIdle { hostDetailViewMode = HostDetailViewMode.Flat }
-        compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithTag(lastFlatRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes().isNotEmpty()
-        }
+        // Issue #1868: do not wait for the target row before scrolling.
+        // Active/Idle grouping (#489) makes the final row an off-screen lazy
+        // item, so its semantics node cannot exist yet. Scroll to the explicit
+        // bottom destination first, then assert the final session row.
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG, useUnmergedTree = true)
             .performScrollToNode(hasTestTag(FOLDER_LIST_BOTTOM_SPACER_TAG))
         compose.waitForIdle()

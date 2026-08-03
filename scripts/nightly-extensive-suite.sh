@@ -27,7 +27,7 @@
 #      nightly-only as that issue requires, and it reuses the `agents` fixture
 #      this workflow already starts (no new fixture).
 #
-#   2) NETWORK-FAULT proofs — ONLY the NetworkFaultProofBase subclasses, run
+#   2) NETWORK-FAULT proofs — ONLY the fixture-backed network-fault classes, run
 #      WITHOUT `pocketshellCi=true` (so `isRunningOnCi()` is false and the
 #      `assumeFalse(isRunningOnCi())` guard passes) and WITH
 #      `pocketshellNetworkFaultProofs=true` (so the `assumeTrue(...)` opt-in
@@ -61,8 +61,10 @@ SUMMARY="$ARTIFACT_DIR/summary.md"
 
 GRADLEW="$REPO_ROOT/gradlew"
 
-# The NetworkFaultProofBase subclasses (toxiproxy proofs). Keep this list in
-# sync with `grep -rl NetworkFaultProofBase app/src/androidTest/.../proof/`.
+# The Toxiproxy-backed proofs. This is primarily the NetworkFaultProofBase
+# subclasses, plus explicitly documented fixture users such as issue #1733.
+# Keep the subclasses in sync with
+# `grep -rl NetworkFaultProofBase app/src/androidTest/.../proof/`.
 FQCN_PREFIX="com.pocketshell.app.proof"
 NETWORK_FAULT_CLASSES=(
   "$FQCN_PREFIX.RideThroughInterruptionE2eTest"
@@ -72,6 +74,15 @@ NETWORK_FAULT_CLASSES=(
   "$FQCN_PREFIX.DisconnectBlackholeE2eTest"
   "$FQCN_PREFIX.NetworkLatencyModelE2eTest"
   "$FQCN_PREFIX.PacketLossNetworkFaultE2eTest"
+  # Issue #1866 / #1733: durable queued-attachment correctness under real app
+  # SSH-worker death. The class hard-asserts the explicit Toxiproxy opt-in, so
+  # selecting it in phase 1 (which has no opt-in) is a guaranteed fixture red.
+  # Deliberate decision: this IS release-GATING in phase 2 because checkpoint-N
+  # resume, SHA-identical atomic promotion, and once-only prompt+Enter are
+  # durable-queue safety invariants, not an expected-fail/TDD spec. It reuses
+  # network-fault-proxy:2228 + toxiproxy API:8474; no fixture or unrelated
+  # nightly scope is added.
+  "$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"
   # Issue #1064 (R4 / #843 round-2 T10/C4): slow COLD-DIAL robustness. A
   # NetworkFaultProofBase toxiproxy proof that applies jitter-latency +
   # bandwidth-limit (and, in the class-coverage variant, a half-open blackhole)
@@ -456,7 +467,7 @@ fi
   echo "| --- | --- | --- | --- | --- |"
   echo "| Journey / E2E (non-gating) | full connected suite minus network-fault + expected-fail + opt-in classes ($shard_label) | \`pocketshellCi=true\` | $JOURNEY_EXIT | **$journey_status** |"
   echo "| Notification permission (NON-GATING) | dedicated unsharded $NOTIFICATION_PERMISSION_TEST_CLASS; executed=$notification_permission_executed | external revoke/verify before instrumentation; external grant/verify after | $NOTIFICATION_PERMISSION_EXIT | **$notification_permission_status** |"
-  echo "| Network-fault proofs (GATING) | ${#NETWORK_FAULT_CLASSES[@]} NetworkFaultProofBase classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** |"
+  echo "| Network-fault proofs (GATING) | ${#NETWORK_FAULT_CLASSES[@]} Toxiproxy-backed classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** |"
   echo "| #822 expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} Slice C/D TDD spec class(es) | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** |"
   echo "| Bootstrap setup scenarios (GATING) | ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (trimmed) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** |"
   echo

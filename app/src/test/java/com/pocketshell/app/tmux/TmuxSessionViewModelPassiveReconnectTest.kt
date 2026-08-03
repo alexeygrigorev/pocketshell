@@ -738,7 +738,11 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
     fun passiveEofShowsReconnectOnlyAfterSilentGraceExpires() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val registry = ActiveTmuxClients()
-        val connector = FailingLeaseConnector(IOException("network still unavailable"))
+        val deadSession = FakeSshSession(isConnectedValue = false)
+        val connector = FailingLeaseConnector(
+            failure = IOException("network still unavailable"),
+            initialSession = deadSession,
+        )
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
@@ -775,9 +779,12 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             keyPath = "/keys/a",
             sessionName = "work",
             client = deadClient,
-            session = FakeSshSession(isConnectedValue = false),
+            session = deadSession,
         )
+        vm.setActiveLeaseRefWarmForTest()
         runCurrent()
+        val setupConnectCount = connector.connectCount
+        assertEquals("precondition: the VM owns the exact dead lease", 1, setupConnectCount)
 
         deadClient.disconnectedSignal.value = true
         advanceTimeBy(499L)
@@ -803,16 +810,18 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
         // the loop re-dials more than once before grace expires — proving the
         // resilience fix — while still BOUNDED by the grace window (no hot loop /
         // infinite re-dial: the count is small, paced by the retry delay).
+        val recoveryConnectCount = connector.connectCount - setupConnectCount
         assertTrue(
             "silent fresh-transport probing must RE-DIAL across a sustained outage " +
-                "(resilience #833), got connectCount=${connector.connectCount}",
-            connector.connectCount >= 2,
+                "(resilience #833), got recoveryConnectCount=$recoveryConnectCount",
+            recoveryConnectCount >= 2,
         )
         assertTrue(
             "silent fresh-transport probing must stay BOUNDED by the grace window " +
-                "(no hot loop), got connectCount=${connector.connectCount}",
-            connector.connectCount <= 4,
+                "(no hot loop), got recoveryConnectCount=$recoveryConnectCount",
+            recoveryConnectCount <= 4,
         )
+        assertTrue("the exact manager-owned corpse must be invalidated", deadSession.closed)
 
         advanceTimeBy(2L)
         runCurrent()
@@ -1031,7 +1040,8 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
         // but every capture is empty, so the reattached pane is BLACK on green.
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
-        val connector = QueueLeaseConnector(FakeSshSession())
+        val deadSession = FakeSshSession(isConnectedValue = false)
+        val connector = QueueLeaseConnector(deadSession, FakeSshSession())
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
@@ -1075,8 +1085,9 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             keyPath = "/keys/a",
             sessionName = "work",
             client = deadClient,
-            session = FakeSshSession(isConnectedValue = false),
+            session = deadSession,
         )
+        vm.setActiveLeaseRefWarmForTest()
         runCurrent()
 
         deadClient.disconnectedSignal.value = true
@@ -1088,7 +1099,7 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             replacementClient,
             registry.clients.value[7L]?.client,
         )
-        assertEquals("a fresh transport was reacquired", 1, connector.connectCount)
+        assertEquals("one setup acquire + one fresh transport reacquire", 2, connector.connectCount)
         val pane = vm.panes.value.single { it.paneId == "%1" }
         assertTrue(
             "the fresh-transport reattach's seed stayed empty -> black on a live transport",
@@ -1202,7 +1213,8 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
     fun passiveEofSilentlyReacquiresTransportWhenOldSessionIsBroken() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
-        val connector = QueueLeaseConnector(FakeSshSession())
+        val deadSession = FakeSshSession(isConnectedValue = false)
+        val connector = QueueLeaseConnector(deadSession, FakeSshSession())
         val vm = newVm(
             registry = registry,
             sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
@@ -1223,14 +1235,15 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             keyPath = "/keys/a",
             sessionName = "work",
             client = deadClient,
-            session = FakeSshSession(isConnectedValue = false),
+            session = deadSession,
         )
+        vm.setActiveLeaseRefWarmForTest()
         runCurrent()
 
         deadClient.disconnectedSignal.value = true
         advanceUntilIdle()
 
-        assertEquals(1, connector.connectCount)
+        assertEquals("one setup acquire + one fresh recovery acquire", 2, connector.connectCount)
         assertSame(replacementClient, registry.clients.value[7L]?.client)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
         assertEquals(
@@ -1239,15 +1252,58 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             TMUX_CONNECT_ATTEMPTS.get(),
         )
         assertTrue(replacementClient.connectCalled)
+
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals(
+            "a successful recovery must terminate the bounded retry owner",
+            2,
+            connector.connectCount,
+        )
+    }
+
+    @Test
+    fun provenDeadFreshRecoveryWithoutExactLeaseFailsClosedWithoutDial() = runTest(scheduler) {
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = ActiveTmuxClients(),
+            sshLeaseManager = testLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setPassiveDisconnectRecoveryForTest(graceMs = 100L, silentReattachTimeoutMs = 1L)
+        vm.setAutoReconnectDelaysForTest(emptyList())
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+            // Deliberately sessionRef-only: no exact manager-owned SshLease authority.
+            session = FakeSshSession(isConnectedValue = false),
+        )
+        runCurrent()
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertEquals(
+            "an unproven null lease must fail closed before any physical SSH dial",
+            0,
+            connector.connectCount,
+        )
     }
 
     @Test
     fun failedSilentTransportReattachEvictsLeaseSoManualReconnectUsesFreshSession() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
+        val deadSession = FakeSshSession(isConnectedValue = false)
         val failedReconnectSession = FakeSshSession()
         val manualReconnectSession = FakeSshSession()
-        val connector = QueueLeaseConnector(failedReconnectSession, manualReconnectSession)
+        val connector = QueueLeaseConnector(deadSession, failedReconnectSession, manualReconnectSession)
         val manager = testLeaseManager(
             connector = connector,
             scope = this,
@@ -1277,8 +1333,9 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             keyPath = "/keys/a",
             sessionName = "work",
             client = deadClient,
-            session = FakeSshSession(isConnectedValue = false),
+            session = deadSession,
         )
+        vm.setActiveLeaseRefWarmForTest()
         runCurrent()
 
         deadClient.disconnectedSignal.value = true
@@ -1296,14 +1353,14 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             "failed hidden reattach must evict the acquired SSH lease instead of idling it",
             failedReconnectSession.closed,
         )
-        assertEquals(1, connector.connectCount)
+        assertEquals("one setup acquire + one failed hidden recovery acquire", 2, connector.connectCount)
 
         assertTrue("manual reconnect should be available after failed hidden reattach", vm.reconnect())
         advanceUntilIdle()
 
         assertEquals(
             "manual reconnect must open a fresh SSH session, not reuse the failed hidden lease",
-            2,
+            3,
             connector.connectCount,
         )
         assertEquals(
@@ -1312,15 +1369,17 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
         )
         assertSame(manualReconnectClient, registry.clients.value[7L]?.client)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+
     }
 
     @Test
     fun manualReconnectCancelsInFlightSilentTransportReattachAndUsesFreshSession() = runTest(scheduler) {
         TMUX_CONNECT_ATTEMPTS.set(1)
         val registry = ActiveTmuxClients()
+        val deadSession = FakeSshSession(isConnectedValue = false)
         val hiddenReconnectSession = FakeSshSession()
         val manualReconnectSession = FakeSshSession()
-        val connector = QueueLeaseConnector(hiddenReconnectSession, manualReconnectSession)
+        val connector = QueueLeaseConnector(deadSession, hiddenReconnectSession, manualReconnectSession)
         val manager = testLeaseManager(
             connector = connector,
             scope = this,
@@ -1354,8 +1413,9 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             keyPath = "/keys/a",
             sessionName = "work",
             client = deadClient,
-            session = FakeSshSession(isConnectedValue = false),
+            session = deadSession,
         )
+        vm.setActiveLeaseRefWarmForTest()
         runCurrent()
 
         deadClient.disconnectedSignal.value = true
@@ -1365,7 +1425,7 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
             "hidden reattach should be stalled while waiting for panes",
             hiddenAttachClient.sentCommands.any { it.startsWith("list-panes") },
         )
-        assertEquals(1, connector.connectCount)
+        assertEquals("one setup acquire + one in-flight hidden acquire", 2, connector.connectCount)
 
         assertTrue("manual reconnect should be accepted while hidden reattach is in flight", vm.reconnect())
         advanceUntilIdle()
@@ -1380,7 +1440,7 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
         )
         assertEquals(
             "manual reconnect must open a fresh SSH session after interrupting hidden reattach",
-            2,
+            3,
             connector.connectCount,
         )
         assertEquals(
@@ -1389,6 +1449,15 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
         )
         assertSame(manualReconnectClient, registry.clients.value[7L]?.client)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+
+        val connectorCountAfterSupersedingReconnect = connector.connectCount
+        advanceTimeBy(60_001L)
+        runCurrent()
+        assertEquals(
+            "the cancelled grace owner must not continue acquiring after manual reconnect supersedes it",
+            connectorCountAfterSupersedingReconnect,
+            connector.connectCount,
+        )
     }
 
 
@@ -1679,12 +1748,16 @@ class TmuxSessionViewModelPassiveReconnectTest : TmuxSessionViewModelTestBase() 
 
     private class FailingLeaseConnector(
         private val failure: Throwable,
+        private val initialSession: FakeSshSession? = null,
     ) : SshLeaseConnector {
         var connectCount: Int = 0
             private set
 
         override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
             connectCount += 1
+            if (connectCount == 1 && initialSession != null) {
+                return Result.success(initialSession)
+            }
             return Result.failure(failure)
         }
     }

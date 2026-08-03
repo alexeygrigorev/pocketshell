@@ -299,10 +299,9 @@ class Issue754ReseedSilentHealHoldTest : TmuxSessionViewModelTestBase() {
     // (3) CONFIRMED-DEAD / dispatch class (D31/G2): the reviewer's reopened gap. On a CLEAN
     //     CUT the `-CC` socket is already dead by foreground time, so
     //     `canReseedWithinGraceForeground()` DECLINES the reseed and the within-grace foreground
-    //     takes the HEAL / dispatch path — NOT the reseed_only path. The single-shot heal
-    //     fast-fails a dead/unreachable host and hands off to the loud auto-reconnect ladder,
-    //     whose `Reconnecting` projection paints RevealState.Seeding ("Attaching…") — WITHIN
-    //     grace — because the reveal hold was released the instant the heal job completed.
+    //     takes the HEAL / dispatch path — NOT the reseed_only path. Issue #1954 makes that
+    //     heal the bounded retry owner: a dead/unreachable host stays inside the silent owner
+    //     for the grace window instead of handing off immediately to the visible ladder.
     //     LOAD-BEARING: the within-grace confirmed-dead foreground must RIDE THROUGH — NO
     //     RevealState.Seeding overlay while the honest reconnect runs underneath, for the whole
     //     bounded grace window. RED on base (Seeding), GREEN with the whole-window hold.
@@ -369,14 +368,18 @@ class Issue754ReseedSilentHealHoldTest : TmuxSessionViewModelTestBase() {
                     it.fields["stage"] == "foreground_reattach" && it.fields["outcome"] == "reseed_only"
                 },
             )
-            // Drive the heal to its FAILURE + the loud auto-reconnect ladder engaging — the exact
-            // window the reopened overlay painted. On base the hold is already released here.
-            awaitCondition {
-                diagnostics.eventsNamed("auto_reconnect_decision").any {
-                    it.fields["decision"] == "scheduled"
-                }
-            }
+            // Drive more than one paced owner attempt. The old one-shot implementation had
+            // already scheduled the normal ladder here; #1954 requires that ladder to remain
+            // absent for the whole bounded grace window.
+            advanceTimeBy(500L)
             runCurrent()
+            assertTrue(
+                "the confirmed-dead foreground owner must not hand off to auto reconnect " +
+                    "within grace; events=${diagnostics.eventsNamed("auto_reconnect_decision")}",
+                diagnostics.eventsNamed("auto_reconnect_decision").none {
+                    it.fields["decision"] == "scheduled"
+                },
+            )
 
             // LOAD-BEARING: the confirmed-dead within-grace foreground must RIDE THROUGH — the
             // honest reconnect runs underneath but the reveal HOLDS the live frame: NO
@@ -441,14 +444,15 @@ class Issue754ReseedSilentHealHoldTest : TmuxSessionViewModelTestBase() {
                         it.fields["outcome"] == "silent_heal_within_grace"
                 }
             }
-            awaitCondition {
-                diagnostics.eventsNamed("auto_reconnect_decision").any {
-                    it.fields["decision"] == "scheduled"
-                }
-            }
-            // WITHIN grace: the ongoing (failing) reconnect is HELD on the live frame (proves the
-            // hold is genuinely masking the ladder — non-vacuous negative).
+            // WITHIN grace: the failing recovery remains owned here, with no visible ladder.
+            advanceTimeBy(500L)
             runCurrent()
+            assertTrue(
+                "the bounded owner must not schedule auto reconnect before grace expiry",
+                diagnostics.eventsNamed("auto_reconnect_decision").none {
+                    it.fields["decision"] == "scheduled"
+                },
+            )
             assertFalse(
                 "precondition: WITHIN grace the confirmed-dead reconnect must be HELD silent (no " +
                     "Seeding) — else the beyond-grace surfacing below proves nothing; got " +
@@ -458,6 +462,11 @@ class Issue754ReseedSilentHealHoldTest : TmuxSessionViewModelTestBase() {
             // Advance PAST the grace window so the bounded whole-window hold is released.
             advanceTimeBy(graceMs + 500L)
             runCurrent()
+            awaitCondition {
+                diagnostics.eventsNamed("auto_reconnect_decision").any {
+                    it.fields["decision"] == "scheduled"
+                }
+            }
 
             assertTrue(
                 "after the grace window the whole-window hold must be released, so a still-unreachable " +

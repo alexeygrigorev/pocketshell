@@ -98,17 +98,19 @@ class TmuxSessionKeepaliveDeathAmortizationTest : TmuxSessionViewModelTestBase()
             if (recoveries == 0) initialSession else sessions[recoveries - 1]
     }
 
-    private fun TestScope.buildRig(): Rig {
+    private suspend fun TestScope.buildRig(): Rig {
         val registry = ActiveTmuxClients()
+        val initialSession = FakeSshSession()
         val sessions = List(4) { FakeSshSession() }
-        val connector = QueueLeaseConnector(*sessions.toTypedArray())
+        val connector = QueueLeaseConnector(initialSession, *sessions.toTypedArray())
+        val leaseManager = testLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
         val vm = newVm(
             registry = registry,
-            sshLeaseManager = testLeaseManager(
-                connector = connector,
-                scope = this,
-                idleTtlMillis = 60_000L,
-            ),
+            sshLeaseManager = leaseManager,
         )
         vm.setPassiveDisconnectRecoveryForTest(
             graceMs = 60_000L,
@@ -124,7 +126,6 @@ class TmuxSessionKeepaliveDeathAmortizationTest : TmuxSessionViewModelTestBase()
             assertEquals("work", sessionName)
             replacementQueue.removeFirstOrNull() ?: error("unexpected tmux client factory call")
         }
-        val initialSession = FakeSshSession()
         val initialClient = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,
@@ -137,7 +138,14 @@ class TmuxSessionKeepaliveDeathAmortizationTest : TmuxSessionViewModelTestBase()
             client = initialClient,
             session = initialSession,
         )
+        // Issue #1954: proven-dead recovery owns an EXACT manager-held lease; an injected
+        // session with no lease identity is not a production-reachable starting state. Seed
+        // that exact lease before the first EOF, then zero only the observation counter so
+        // every assertion below keeps measuring recovery dials (not fixture setup).
+        vm.setActiveLeaseRefWarmForTest()
         runCurrent()
+        assertEquals("fixture setup must acquire the exact initial lease once", 1, connector.connectCount)
+        connector.beginRecoveryObservation()
         return Rig(
             vm = vm,
             registry = registry,
@@ -245,6 +253,22 @@ class TmuxSessionKeepaliveDeathAmortizationTest : TmuxSessionViewModelTestBase()
                 episodes.map { it.fields["graceMs"] },
             )
             assertEquals(listOf(1, 2, 3), episodes.map { it.fields["episode"] })
+
+            // Issue #1954 regression: Connected may be observed while the prior grace job is
+            // finishing. An immediate EOF of that successor must hand its exact manager-held
+            // lease to the next owner; the stale owner must not force-evict it during cancellation.
+            val exactRecoveries = diagnostics.eventsNamed("dead_lease_recovery")
+            assertEquals("each accepted dead successor must have one exact recovery owner", 3, exactRecoveries.size)
+            assertEquals(
+                "episode 2 must invalidate the exact successor produced by episode 1",
+                exactRecoveries[0].fields["newSshSessionHash"],
+                exactRecoveries[1].fields["oldSshSessionHash"],
+            )
+            assertEquals(
+                "episode 3 must invalidate the exact successor produced by episode 2",
+                exactRecoveries[1].fields["newSshSessionHash"],
+                exactRecoveries[2].fields["oldSshSessionHash"],
+            )
         } finally {
             diagnostics.close()
         }
@@ -357,14 +381,20 @@ class TmuxSessionKeepaliveDeathAmortizationTest : TmuxSessionViewModelTestBase()
     private class QueueLeaseConnector(
         private vararg val sessions: FakeSshSession,
     ) : SshLeaseConnector {
+        private var nextSessionIndex: Int = 0
         var connectCount: Int = 0
             private set
 
         override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
-            val next = sessions.getOrNull(connectCount)
-                ?: error("unexpected lease connect $connectCount for ${target.leaseKey}")
+            val next = sessions.getOrNull(nextSessionIndex)
+                ?: error("unexpected lease connect $nextSessionIndex for ${target.leaseKey}")
+            nextSessionIndex += 1
             connectCount += 1
             return Result.success(next)
+        }
+
+        fun beginRecoveryObservation() {
+            connectCount = 0
         }
     }
 

@@ -70,14 +70,18 @@ import com.pocketshell.app.tmux.connection.ConnectionEffectDriver
 import com.pocketshell.app.tmux.connection.ConnectionStatusProjection
 import com.pocketshell.app.tmux.connection.controlChannelAliveForReveal
 import com.pocketshell.app.tmux.connection.CurrentClientTmuxPort
+import com.pocketshell.app.tmux.connection.DeadLeaseRecoveryAuthority
 import com.pocketshell.app.tmux.connection.keepAliveProvenAliveRecently
 import com.pocketshell.app.tmux.connection.LivenessProbeGate
 import com.pocketshell.app.tmux.connection.livenessProbeIo
 import com.pocketshell.app.tmux.connection.requireControlChannelAliveForReveal
+import com.pocketshell.app.tmux.connection.selectCurrentClientLivenessProbeGate
 import com.pocketshell.app.tmux.connection.selectLivenessProbeGate
 import com.pocketshell.app.tmux.connection.ForegroundReturnEffects
 import com.pocketshell.app.tmux.connection.debounceReconnectUi
 import com.pocketshell.app.tmux.connection.GraceEffects
+import com.pocketshell.app.tmux.connection.WithinGraceRecoveryClaim
+import com.pocketshell.app.tmux.connection.graceClientId
 import com.pocketshell.app.tmux.connection.NetworkChangeArm
 import com.pocketshell.app.tmux.connection.NetworkChangeEffects
 import com.pocketshell.app.tmux.connection.KEEPALIVE_DEATH_REDIAL_QUIET_RESET_MS
@@ -111,6 +115,7 @@ import com.pocketshell.app.tmux.connection.shouldReportValidatedHandoffToControl
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionEvent as CoreConnectionEvent
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
+import com.pocketshell.core.connection.ConnectionProjection
 import com.pocketshell.core.connection.HostKey
 import com.pocketshell.core.connection.LivenessProbe
 import com.pocketshell.core.connection.RevealState
@@ -1078,27 +1083,16 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /** The probe gate — the pure decision + why each term exists lives in [selectLivenessProbeGate]. */
-    private fun livenessProbeGate(): LivenessProbeGate {
-        val bg = isProcessBackgroundedForGraceOwner()
-        val hasClient = clientRef != null
-        val disconnected = clientRef?.disconnected?.value ?: true
-        val ctrl = connectionManager.state
-        val gate = selectLivenessProbeGate(
-            backgrounded = bg,
+    private fun livenessProbeGate(): LivenessProbeGate =
+        selectCurrentClientLivenessProbeGate(
+            backgrounded = isProcessBackgroundedForGraceOwner(),
             appActive = appActive,
-            hasClient = hasClient,
-            controlChannelDisconnected = disconnected,
-            controllerLive = ctrl is CoreConnectionState.Live,
+            client = clientRef,
+            controllerState = connectionManager.state,
+            graceEffects = graceEffects,
+            targetId = (activeTarget ?: connectingTarget)?.let(::controllerSessionId),
+            logTag = LIVENESS_PROBE_TAG,
         )
-        if (gate == LivenessProbeGate.Closed) {
-            Log.i(
-                LIVENESS_PROBE_TAG,
-                "gate closed bg=$bg appActive=$appActive hasClient=$hasClient " +
-                    "disconnected=$disconnected ctrl=${ctrl::class.simpleName}",
-            )
-        }
-        return gate
-    }
 
     private fun shouldRunLivenessProbe(): Boolean = livenessProbeGate() != LivenessProbeGate.Closed
 
@@ -1627,7 +1621,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun projectStatusFromController(inlineState: ConnectionState) {
         val projected = connectionStatusForController(connectionManager.state, inlineState)
         _connectionStatus.value =
-            if (withinGraceSilentHealInFlight && projected is ConnectionStatus.Reconnecting) {
+            if (graceEffects.isWithinGraceRecoveryActive() && projected is ConnectionStatus.Reconnecting) {
                 // Issue #1098 (item 4 / #635): the within-grace SILENT heal re-opens the
                 // dropped `-CC` (controller `Reattaching`/`Reconnecting`), but a brief
                 // background→foreground ride-through must read the CALM `Connected` — never
@@ -3333,23 +3327,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var backgroundDetachJob: Job? = null
     private var lastSuppressedDropDiagnostic: SuppressedDropDiagnostic? = null
 
-    // Issue #1098 (item 4 / #635): true while the SINGLE-GRACE-OWNER within-grace
-    // SILENT heal of a dropped `-CC` socket is in flight. The heal MUST re-open the
-    // transport (controller `Live -> Reattaching -> Live`), but the user must see the
-    // CALM `Connected` ride-through with NO reconnect surface at all — no top
-    // Reconnecting bar, no "Attaching…" overlay, no disconnect band. While set, the
-    // displayed-status projection ([projectStatusFromController]) holds `Connected`
-    // and the [RevealStateMachine] holds the live frame (see
-    // [RevealStateMachine.setSilentHealInFlight]). Issue #754 (re-fix): armed at the within-grace
-    // foreground DECISION POINT ([armWithinGraceSilentHealHold]), released once after the bounded
-    // grace window (NOT tied to a single recovery job), so the ride-through covers BOTH the
-    // reseed_only path AND the confirmed-dead heal path whose failed single-shot heal hands off to
-    // the loud auto-reconnect ladder — else that ladder's Reconnecting paints the overlay WITHIN
-    // grace. A real BEYOND-grace drop still surfaces once the bounded release fires.
-    private var withinGraceSilentHealInFlight: Boolean = false
-
-    // Issue #754 (re-fix): SINGLE-OWNER bounded release of the hold above. A fresh within-grace
-    // foreground cancels + restarts it; only the CURRENT job's completion clears the hold.
+    // #754/#1954: bounded release of the one typed claim shared by status, reveal, and liveness.
     private var withinGraceSilentHealReleaseJob: Job? = null
 
     // EPIC #687 slice 1c-iv-b-B1 (#738): the `preserveConnectingTarget` computed
@@ -3917,9 +3895,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * drop still surfaces its reconnect band the instant the release fires.
      */
     private fun armWithinGraceSilentHealHold() {
+        val target = activeTarget ?: pausedAutoReconnect?.target ?: pendingReattach?.target ?: return
+        val claim = WithinGraceRecoveryClaim(controllerSessionId(target), clientRef?.graceClientId())
         val previous = withinGraceSilentHealReleaseJob
-        withinGraceSilentHealInFlight = true
-        revealController.setSilentHealInFlight(true)
+        graceEffects.beginWithinGraceRecovery(claim)
+        revealController.setConnectionProjection(ConnectionProjection.SilentWithinGraceRecovery)
         val job = launchContainedTeardown {
             delay(passiveDisconnectGraceMs.coerceAtLeast(1L))
         }
@@ -3927,8 +3907,8 @@ public class TmuxSessionViewModel @Inject constructor(
         job.invokeOnCompletion {
             if (withinGraceSilentHealReleaseJob === job) {
                 withinGraceSilentHealReleaseJob = null
-                withinGraceSilentHealInFlight = false
-                revealController.setSilentHealInFlight(false)
+                graceEffects.endWithinGraceRecovery(claim)
+                revealController.setConnectionProjection(ConnectionProjection.Normal)
                 // Re-drive the reveal from the CURRENT controller state so a still-failing
                 // BEYOND-grace reconnect surfaces its band the instant the hold lifts (the ongoing
                 // Reconnecting was emitted while gated and the state flow dedupes it); a recovered
@@ -4283,30 +4263,37 @@ public class TmuxSessionViewModel @Inject constructor(
             // eviction), else fall through to the lease-evicting fresh dial (a real death fails
             // the vouch, so it still escalates). `clientRef` may be null; the fresh dial is null-safe.
             val staleClient = clientRef
-            val recovered =
+            val recoveryClaim = WithinGraceRecoveryClaim(controllerSessionId(target), staleClient?.graceClientId())
+            val deadLeaseAuthority = leaseRef?.let(DeadLeaseRecoveryAuthority::held)
+            val recovered = graceEffects.retryWithinGraceRecovery(
+                claim = recoveryClaim,
+                timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+                retryDelayMs = PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS,
+            ) { firstAttempt ->
+                val currentStaleClient = clientRef
                 (
-                    transportVouchedAlive() && staleClient != null &&
+                    firstAttempt && transportVouchedAlive() && currentStaleClient != null &&
                         silentlyReattachAfterPassiveDisconnect(
-                            staleClient = staleClient,
+                            staleClient = currentStaleClient,
                             target = target,
                             budgets = passiveReattachStageBudgets(
-                                dialHandshakeMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
+                                dialHandshakeMs = silentReattachTimeoutMs.coerceAtLeast(1L),
                             ),
                         )
-                ) ||
-                    silentlyReconnectTransportAfterPassiveDisconnect(
-                        staleClient = clientRef,
-                        target = target,
-                        timeoutMs = passiveDisconnectGraceMs.coerceAtLeast(1L),
-                    )
+                ) || silentlyReconnectTransportAfterPassiveDisconnect(
+                    staleClient = currentStaleClient,
+                    target = target,
+                    timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
+                    deadLeaseAuthority = deadLeaseAuthority,
+                )
+            }
             if (!recovered) {
-                // The within-grace silent heal could not re-open the channel in time.
-                // Fall back to the normal auto-reconnect ladder — still SILENT (no manual
-                // "Tap Reconnect" band): [scheduleAutoReconnect] walks the calm
-                // Reconnecting ladder. The single-grace-owner contract requires the
-                // band-free within-grace ride-through when the heal succeeds; an honest
-                // failure to re-reach the host still surfaces through the calm reconnect
-                // path, not a scary disconnect band.
+                // Only bounded exhaustion of THIS owner may hand off to the normal ladder.
+                // If another target/client superseded the claim, this stale coroutine is
+                // inert and must not schedule recovery for the abandoned target.
+                if (graceEffects.recoveryWasSuperseded(recoveryClaim)) {
+                    return@launchContainedTeardown
+                }
                 scheduleAutoReconnect(
                     target = target,
                     reason = "Reattaching to ${target.user}@${target.host}:${target.port}.",
@@ -8152,6 +8139,14 @@ public class TmuxSessionViewModel @Inject constructor(
         // by the 60s grace `withTimeoutOrNull` + per-attempt timeout + 250ms retry spacing (no
         // hot loop); never short-circuits a HEALTHY warm reattach (#635/#553).
         var transportReattachAttempts = 0
+        val deadLeaseAuthority = leaseRef?.let(DeadLeaseRecoveryAuthority::held)
+        suspend fun attemptFreshTransportReattach(): Boolean =
+            silentlyReconnectTransportAfterPassiveDisconnect(
+                staleClient = staleClient,
+                target = target,
+                timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
+                deadLeaseAuthority = deadLeaseAuthority,
+            )
         recordSilentReattachStart(
             target = target,
             staleClientHash = System.identityHashCode(staleClient),
@@ -8186,12 +8181,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 val freshTransportPreferred = preferFreshTransportNow()
                 if (freshTransportPreferred) {
                     transportReattachAttempts += 1
-                    if (silentlyReconnectTransportAfterPassiveDisconnect(
-                            staleClient = staleClient,
-                            target = target,
-                            timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
-                        )
-                    ) {
+                    if (attemptFreshTransportReattach()) {
                         return@withTimeoutOrNull true
                     }
                 }
@@ -8212,12 +8202,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // transport and keep re-dialling it for the same sustained-outage resilience.
                 if (!freshTransportPreferred) {
                     transportReattachAttempts += 1
-                    if (silentlyReconnectTransportAfterPassiveDisconnect(
-                            staleClient = staleClient,
-                            target = target,
-                            timeoutMs = silentReattachTimeoutMs.coerceAtLeast(1L),
-                        )
-                    ) {
+                    if (attemptFreshTransportReattach()) {
                         return@withTimeoutOrNull true
                     }
                 }
@@ -8456,7 +8441,11 @@ public class TmuxSessionViewModel @Inject constructor(
             if (lease == null || leaseRef === lease) leaseRef = null
             // The lease is the SHARED per-host transport: only a genuine death reaches this.
             withContext(NonCancellable) {
-                runCatching { sshLeaseManager.disconnect(leaseKey) }
+                if (lease != null) {
+                    runCatching { sshLeaseManager.invalidateDead(lease) }
+                } else {
+                    runCatching { sshLeaseManager.disconnect(leaseKey) }
+                }
             }
         } else {
             leaseRef = lease
@@ -8473,6 +8462,7 @@ public class TmuxSessionViewModel @Inject constructor(
         staleClient: TmuxClient?,
         target: ConnectionTarget,
         timeoutMs: Long,
+        deadLeaseAuthority: DeadLeaseRecoveryAuthority?,
     ): Boolean {
         // EPIC #792 #833 test seam: while a synthetic clean outage is armed, the
         // fresh-transport re-dial fails as if the link were down (clean FIN /
@@ -8497,20 +8487,30 @@ public class TmuxSessionViewModel @Inject constructor(
         val budgets = passiveReattachStageBudgets(dialHandshakeMs = timeoutMs)
         val leaseTarget = target.toSshLeaseTarget()
         return try {
+            val authority = requireNotNull(deadLeaseAuthority) {
+                "proven-dead recovery requires exact held-or-invalidated lease authority"
+            }
             // ---- Stage 1: DIAL + HANDSHAKE (fast-fail, amortized — unchanged bound) ----
             val lease = withTimeoutOrNull(budgets.dialHandshakeMs) {
                 // Issue #866: DETACH the current-client port BEFORE tearing the stale transport
-                // down. `disconnect(leaseKey)` EOFs the stale `-CC` reader, and
+                // down. Dead-lease invalidation EOFs the stale `-CC` reader, and
                 // [CurrentClientTmuxPort.disconnectedClients] flatMapLatest-follows the current
                 // client — so unless we re-point first, that EOF re-enters the driver's
                 // control-channel-drop path (still the current client) and CANCELS this very
                 // grace loop: the cancel storm that wedged the silent reattach. Detaching to null
                 // makes the stale teardown emit nothing; the success path re-points below.
                 connectionTmuxPort.setClient(null)
-                withContext(NonCancellable) {
-                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
-                }
-                sshLeaseManager.acquire(leaseTarget).getOrThrow()
+                authority.acquireSuccessor(
+                    manager = sshLeaseManager,
+                    target = leaseTarget,
+                    currentLease = { leaseRef },
+                    onDeadLeaseInvalidated = {
+                        sessionRef = null
+                        leaseRef = null
+                    },
+                    diagnosticHostId = target.hostId,
+                    diagnosticSessionName = target.sessionName,
+                )
             }
             if (lease == null) {
                 // #1539: never handshook -> not a live link -> abandoned (the preserved
@@ -8636,6 +8636,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             true
         } catch (t: Throwable) {
+            if (DeadLeaseRecoveryAuthority.shouldHandOffSuccessorCancellation(t, replacement, clientRef, acquiredLease, leaseRef, target, activeTarget)) throw t
             // Issue #1653 — THE OTHER kill site, the one #1539 missed: a stalled tail's INNER
             // sshj timeout beats the OUTER stage budget, so the same "slow tail on a proven-up
             // link" arrives here THROWN instead of as `!ready`. This evicted unconditionally, so

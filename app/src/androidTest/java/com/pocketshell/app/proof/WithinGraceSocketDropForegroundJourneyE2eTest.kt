@@ -202,6 +202,10 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         // foreground into the reconnect ladder, which paints a
         // Reconnecting/Disconnected surface — this watch goes RED there.
         watchNoVisibleReconnect("within-grace after socket drop", OVERLAY_WATCH_MS)
+        // Issue #1954: authoritative in-app proof at the actual no-overlay watch point,
+        // before waiting for recovery completion. This is a direct TerminalView draw plus
+        // same-view visible text; the generic harness failure screenshot is not evidence.
+        captureViewport("issue1954-02-post-resume-no-overlay")
 
         // DEVICE-TRUTH assertion (1): the pane VIEWPORT is RE-SEEDED — non-blank
         // AND shows the prior content. The user must not be left on a blank
@@ -219,10 +223,31 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
                 "pane content ('$READY_MARKER'); visible terminal was:\n$visibleAfter",
             visibleAfter.contains(READY_MARKER),
         )
+        val deadLeaseRecovery = diagnostics!!.eventsNamed("dead_lease_recovery")
+        assertEquals(
+            "the within-grace owner must invalidate/acquire the dead lease exactly once",
+            1,
+            deadLeaseRecovery.size,
+        )
+        assertEquals(true, deadLeaseRecovery.single().fields["invalidatedLease"])
+        assertEquals(true, deadLeaseRecovery.single().fields["freshTransport"])
+        assertEquals(
+            "liveness must stay deferred while the within-grace owner heals the dead client",
+            0,
+            diagnostics!!.eventsNamed("liveness_probe_silent_drop").size,
+        )
+
+        // The recovered channel must accept real input, not merely repaint an old marker.
+        val recoveredClient = requireNotNull(currentViewModel().liveTmuxClientForSendOrNullForTest())
+        val send = recoveredClient.sendKeysViaExec(
+            "send-keys -t ${shellQuote(SESSION_NAME)} ${shellQuote("printf '$AFTER_MARKER\\n'")} Enter",
+        )
+        assertTrue("post-recovery input failed: ${send.output}", !send.isError)
+        waitForVisibleTerminal("within-grace post-recovery input") { it.contains(AFTER_MARKER) }
         // And the band stays absent through the settle (a late reconnect band
         // would still be the #635 regression).
         watchNoVisibleReconnect("within-grace settle after re-seed", POST_RESTORE_SETTLE_MS)
-        captureViewport("issue635-02-within-grace-reseeded")
+        captureViewport("issue1954-03-within-grace-reseeded")
 
         // The session screen is still up (a cleared pane that also lost the
         // screen would be a teardown/reconnect, not a within-grace ride-through).
@@ -279,14 +304,15 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
     }
 
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
-        var status: TmuxSessionViewModel.ConnectionStatus =
-            TmuxSessionViewModel.ConnectionStatus.Idle
+        return currentViewModel().connectionStatus.value
+    }
+
+    private fun currentViewModel(): TmuxSessionViewModel {
+        var vm: TmuxSessionViewModel? = null
         launchedActivity?.onActivity { activity ->
-            status = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-                .connectionStatus
-                .value
+            vm = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
         }
-        return status
+        return requireNotNull(vm) { "MainActivity/TmuxSessionViewModel is not available" }
     }
 
     private fun waitForVisibleTerminal(
@@ -429,7 +455,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
             appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_NAME)} " +
-                    shellQuote("printf '$READY_MARKER\\n'; exec sleep 600"),
+                    shellQuote("printf '$READY_MARKER\\n'; exec sh -i"),
             )
             appendLine("sleep 1")
             appendLine("tmux list-sessions")
@@ -543,7 +569,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
             "summary.txt",
             buildString {
                 appendLine("test=WithinGraceSocketDropForegroundJourneyE2eTest")
-                appendLine("issue=635")
+                appendLine("issue=1954")
                 appendLine("fixture=tests/docker agents ($DEFAULT_HOST:$DEFAULT_PORT)")
                 appendLine("running_on_ci=${TerminalTestTimeouts.isRunningOnCi()}")
                 appendLine("session=$SESSION_NAME")
@@ -555,6 +581,13 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
                 appendLine(
                     "expectation=pane re-seeded (non-blank, prior content), " +
                         "no Reconnecting/Disconnected/Attaching surface",
+                )
+                appendLine(
+                    "liveness_recovery_starts=" +
+                        diagnostics!!.eventsNamed("liveness_probe_silent_drop").size,
+                )
+                appendLine(
+                    "dead_lease_recoveries=" + diagnostics!!.eventsNamed("dead_lease_recovery").size,
                 )
                 appendLine("timings:")
                 timings.forEach { appendLine("  $it") }
@@ -596,6 +629,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         const val DEVICE_DIR_NAME: String = "issue635-within-grace-socket-drop"
         const val SESSION_NAME: String = "issue635-socketdrop-proof"
         const val READY_MARKER: String = "ISSUE635-SOCKETDROP-READY"
+        const val AFTER_MARKER: String = "ISSUE1954-SOCKETDROP-AFTER"
 
         const val WITHIN_GRACE_MS: Long = 8_000L
         const val BACKGROUND_HOLD_MS: Long = 1_500L

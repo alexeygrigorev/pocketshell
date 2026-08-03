@@ -1,6 +1,10 @@
 package com.pocketshell.app.tmux.connection
 
+import android.util.Log
+import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.LivenessProbe
+import com.pocketshell.core.connection.SessionId
+import com.pocketshell.core.tmux.TmuxClient
 
 /**
  * Issue #1863 — the liveness-probe gate, extracted out of `TmuxSessionViewModel`
@@ -21,6 +25,8 @@ import com.pocketshell.core.connection.LivenessProbe
  *  - `hasClient` — nothing to ping.
  *  - `controllerLive` — an in-flight attach / reconnect owns the channel; probing
  *    there would race the single reconnect ladder (D28: never a second writer).
+ *  - `!withinGraceRecoveryOwnsClient` — issue #1954: the typed foreground grace
+ *    owner is already healing this exact target/client, so liveness must defer.
  *  - `!controlChannelDisconnected` — the term #1863 is about. It covered TWO
  *    different states that happen to share one predicate:
  *      (a) the TRANSIENT window between `TmuxClient.disconnected` flipping true and
@@ -50,8 +56,12 @@ import com.pocketshell.core.connection.LivenessProbe
  * version of it is closed by a different term: the connect path submits
  * `submitControllerOpen` / `submitControllerSwitch` BEFORE `closeCurrentConnection
  * AndJoin`, so the controller is off `Live` for the whole `detachCleanly` teardown;
- * leave clears `appActive`; background sets `bg`. And if the probe does declare
- * inside that hop, `shouldSuppressTransportDropsForSingleGraceOwner()` suppresses
+ * leave clears `appActive`; background sets `bg`; and the #1954 typed recovery claim
+ * closes the gate for the exact grace-owned target/client. [LivenessProbe] re-checks
+ * this gate at its verdict boundary, including the definitive-close fast arm, so a
+ * read that began before ownership changed is deferred. If a foreground passive drop
+ * still declares inside the ordinary driver hop,
+ * `shouldSuppressTransportDropsForSingleGraceOwner()` suppresses
  * the driver's duplicate, so the worst case is the heavier reconnect ladder instead
  * of the calm within-grace silent reattach — never two writers (D28). Narrowing the
  * arm to "self-inflicted closes only" was considered and rejected: the same
@@ -65,7 +75,7 @@ import com.pocketshell.core.connection.LivenessProbe
 enum class LivenessProbeGate {
     /**
      * Not probing. Backgrounded / not app-active / no client / the controller is
-     * not `Live` (an attach, reconnect or grace window owns the channel).
+     * not `Live`, or the typed within-grace owner owns this target/client.
      */
     Closed,
 
@@ -98,10 +108,46 @@ fun selectLivenessProbeGate(
     hasClient: Boolean,
     controlChannelDisconnected: Boolean,
     controllerLive: Boolean,
+    withinGraceRecoveryOwnsClient: Boolean = false,
 ): LivenessProbeGate = when {
-    backgrounded || !appActive || !hasClient || !controllerLive -> LivenessProbeGate.Closed
+    backgrounded || !appActive || !hasClient || !controllerLive || withinGraceRecoveryOwnsClient ->
+        LivenessProbeGate.Closed
     controlChannelDisconnected -> LivenessProbeGate.DeadChannel
     else -> LivenessProbeGate.Probe
+}
+
+/** Bind the pure selector to the current typed grace owner and emit its closed-gate diagnostic. */
+fun selectCurrentClientLivenessProbeGate(
+    backgrounded: Boolean,
+    appActive: Boolean,
+    client: TmuxClient?,
+    controllerState: ConnectionState,
+    graceEffects: GraceEffects,
+    targetId: SessionId?,
+    logTag: String,
+): LivenessProbeGate {
+    val disconnected = client?.disconnected?.value ?: true
+    val graceOwnsClient = targetId != null && client != null && graceEffects.ownsRecovery(
+        targetId,
+        GraceClientId(System.identityHashCode(client)),
+    )
+    val gate = selectLivenessProbeGate(
+        backgrounded = backgrounded,
+        appActive = appActive,
+        hasClient = client != null,
+        controlChannelDisconnected = disconnected,
+        controllerLive = controllerState is ConnectionState.Live,
+        withinGraceRecoveryOwnsClient = graceOwnsClient,
+    )
+    if (gate == LivenessProbeGate.Closed) {
+        Log.i(
+            logTag,
+            "gate closed bg=$backgrounded appActive=$appActive hasClient=${client != null} " +
+                "disconnected=$disconnected ctrl=${controllerState::class.simpleName} " +
+                "withinGraceRecoveryOwnsClient=$graceOwnsClient",
+        )
+    }
+    return gate
 }
 
 /**

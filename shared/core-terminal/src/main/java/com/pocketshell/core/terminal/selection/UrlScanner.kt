@@ -102,7 +102,7 @@ public data class UrlRegion(
  * typically <30 rows on a phone.
  */
 public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
-    // Issue #558 bug 2 / #1233: read every visible row WITH its line-wrap flag —
+    // Issue #558 bug 2 / #1233/#1955: read every visible row WITH its line-wrap flag —
     // via the shared [extractVisibleViewportRows] primitive so a URL the emulator
     // soft-wrapped across rows is reassembled into one logical line before
     // matching, AND so the four shell-pane affordance scanners share ONE viewport
@@ -133,7 +133,9 @@ public fun urlRegionsForRows(
 ): List<UrlRegion> {
     if (columns <= 0 || visualRows.isEmpty()) return emptyList()
     val out = mutableListOf<UrlRegion>()
-    for (logical in reassemble(visualRows)) {
+    // #1955 conservatively restores the missing wrap metadata some agent TUIs
+    // lose; this remains a pure pass over the one immutable viewport snapshot.
+    for (logical in reassemble(markHardWrappedUrlContinuations(visualRows, columns))) {
         val line = logical.text
 
         // Columns already claimed by a URL on this logical line, so the loopback

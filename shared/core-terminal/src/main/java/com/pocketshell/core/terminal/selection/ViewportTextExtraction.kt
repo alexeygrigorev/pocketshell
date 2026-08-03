@@ -1,5 +1,6 @@
 package com.pocketshell.core.terminal.selection
 
+import com.termux.terminal.TextStyle
 import com.termux.view.TerminalView
 
 /**
@@ -70,7 +71,32 @@ public fun extractVisibleViewportRows(view: TerminalView): ViewportRowsSnapshot 
         } catch (_: Throwable) {
             false
         }
-        visualRows += VisualRow(row = row, text = line, wrapsToNext = wraps)
+        // OSC 8 provenance is stored in a rendering-neutral cell-style bit.
+        // Copy only the two boundary cells needed for hard-wrap repair: this
+        // remains the same one-pass main-thread snapshot and adds at most two
+        // constant-time terminal reads per visible row.
+        val firstCellStyle = try {
+            screen.getStyleAt(row, 0)
+        } catch (_: Throwable) {
+            0L
+        }
+        val startsWithOsc8Hyperlink =
+            firstCellStyle and TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK != 0L
+        val startsNewOsc8Hyperlink =
+            firstCellStyle and TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START != 0L
+        val endsWithOsc8Hyperlink = try {
+            screen.getStyleAt(row, columns - 1) and TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK != 0L
+        } catch (_: Throwable) {
+            false
+        }
+        visualRows += VisualRow(
+            row = row,
+            text = line,
+            wrapsToNext = wraps,
+            startsWithOsc8Hyperlink = startsWithOsc8Hyperlink,
+            endsWithOsc8Hyperlink = endsWithOsc8Hyperlink,
+            startsNewOsc8Hyperlink = startsNewOsc8Hyperlink,
+        )
     }
     return ViewportRowsSnapshot(rows = visualRows, columns = columns)
 }

@@ -35,6 +35,16 @@ public final class TextStyle {
     private final static int CHARACTER_ATTRIBUTE_TRUECOLOR_FOREGROUND = 1 << 9;
     /** If true (24-bit) color is used for the cell for foreground. */
     private final static int CHARACTER_ATTRIBUTE_TRUECOLOR_BACKGROUND= 1 << 10;
+    /**
+     * PocketShell-only provenance marker for a cell emitted while an OSC 8
+     * hyperlink was active. Bits 11..15 are unused by Termux's effect and
+     * colour encoding; keeping this outside {@link #decodeEffect(long)} makes
+     * it rendering neutral while allowing viewport scanners to distinguish a
+     * declared hyperlink continuation from same-colour newline text (#1955).
+     */
+    public final static long CHARACTER_ATTRIBUTE_OSC8_HYPERLINK = 1L << 11;
+    /** Marks only the first cell emitted after an OSC 8 hyperlink opener. */
+    public final static long CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START = 1L << 12;
 
     public final static int COLOR_INDEX_FOREGROUND = 256;
     public final static int COLOR_INDEX_BACKGROUND = 257;

@@ -22,6 +22,26 @@ public class TextStyleTest extends TestCase {
 		}
 	}
 
+	public void testOsc8ProvenanceBitDoesNotCollideWithStyleEncoding() {
+		long encoded = TextStyle.encode(0xFF123456, 0xFF654321, 0x7FF);
+		assertEquals(0L, encoded & TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK);
+		assertEquals(0L, encoded & TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START);
+		assertEquals(
+			"OSC 8 provenance must sit below the background field",
+			0L,
+			TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK & 0xFFFFFFFFFFFF0000L
+		);
+		assertEquals(
+			"renderer-visible effects occupy bits 0 through 10 only",
+			0,
+			TextStyle.decodeEffect(TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK)
+		);
+		assertEquals(
+			0,
+			TextStyle.decodeEffect(TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START)
+		);
+	}
+
 	public void testEncoding24Bit() {
 		int[] values = {255, 240, 127, 1, 0};
 		for (int red : values) {

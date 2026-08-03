@@ -3,12 +3,251 @@ package com.pocketshell.core.terminal.selection
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
 
 /**
  * Unit tests for soft-wrap reassembly + span mapping used to detect a URL/path
  * wrapped across terminal rows as one logical target (issue #558 bug 2).
  */
+@RunWith(RobolectricTestRunner::class)
 class WrappedLineReassemblyTest {
+
+    /**
+     * Issue #1955 exact real-device row shape: the agent TUI painted a URL to
+     * the final grid column, continued it at column zero, but neither row kept
+     * Termux's soft-wrap bit.  The screenshot split `campaigns` as
+     * `campaig` / `ns/...` in a 60-column viewport.
+     */
+    @Test
+    fun `issue 1955 hard wrapped exact github URL is one target and not a path`() {
+        val url =
+            "https://github.com/DataTalksClub/playbooks/blob/main/" +
+                "campaigns/ml-zoomcamp-2026/copy-bank/events/pre-course-live-qa.md"
+        val splitAt = url.indexOf("campaigns") + "campaig".length
+        val columns = splitAt
+        val rows = listOf(
+            VisualRow(
+                row = 0,
+                text = url.take(splitAt),
+                wrapsToNext = false,
+                endsWithOsc8Hyperlink = true,
+            ),
+            VisualRow(
+                row = 1,
+                text = url.drop(splitAt),
+                wrapsToNext = false,
+                startsWithOsc8Hyperlink = true,
+            ),
+        )
+
+        assertEquals("the screenshot's first fragment must fill the grid", columns, rows[0].text.length)
+        assertEquals("campaig", rows[0].text.takeLast("campaig".length))
+        assertTrue(rows[1].text.startsWith("ns/ml-zoomcamp"))
+
+        val urlRegions = urlRegionsForRows(rows, columns)
+        assertEquals("both visible fragments must be tappable", listOf(0, 1), urlRegions.map { it.row })
+        assertTrue(
+            "both fragments must carry the complete exact URI: $urlRegions",
+            urlRegions.all { it.url == url },
+        )
+
+        val decorated = terminalMatchRegionsForRows(rows, columns, DefaultTerminalMatcher())
+        val decoratedUrls = decorated.filter { it.match is TerminalMatch.Url }
+        assertEquals("both fragments must have URL decoration", listOf(0, 1), decoratedUrls.map { it.row })
+        assertTrue(
+            "every decoration must carry the same complete URI: $decoratedUrls",
+            decoratedUrls.all { it.match.value == url },
+        )
+        assertTrue(
+            "the continuation must not become a local-file target: $decorated",
+            decorated.none { it.match is TerminalMatch.Path },
+        )
+        assertTrue(
+            "the continuation must not be exposed by the file viewer overlay",
+            filePathRegionsForRows(rows, columns).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `issue 1955 second reported course launch URL follows the same hard wrap contract`() {
+        val url =
+            "https://github.com/DataTalksClub/playbooks/blob/main/" +
+                "campaigns/ml-zoomcamp-2026/copy-bank/events/course-launch.md"
+        val splitAt = url.indexOf("campaigns") + "campaig".length
+        val rows = listOf(
+            VisualRow(
+                row = 2,
+                text = url.take(splitAt),
+                wrapsToNext = false,
+                endsWithOsc8Hyperlink = true,
+            ),
+            VisualRow(
+                row = 3,
+                text = url.drop(splitAt),
+                wrapsToNext = false,
+                startsWithOsc8Hyperlink = true,
+            ),
+        )
+
+        val urls = urlRegionsForRows(rows, columns = splitAt)
+        assertEquals(listOf(2, 3), urls.map { it.row })
+        assertTrue(urls.all { it.url == url })
+        assertTrue(filePathRegionsForRows(rows, columns = splitAt).isEmpty())
+    }
+
+    @Test
+    fun `hard wrap inference does not join a full-width URL to newline prose`() {
+        val first = "https://example.com/" + "a".repeat(40)
+        val rows = listOf(
+            VisualRow(row = 4, text = first, wrapsToNext = false),
+            VisualRow(row = 5, text = "follow-up prose is a genuine new paragraph.", wrapsToNext = false),
+        )
+
+        val urls = urlRegionsForRows(rows, columns = first.length)
+
+        assertEquals(listOf(UrlRegion(first, row = 4, startCol = 0, endColExclusive = first.length)), urls)
+    }
+
+    @Test
+    fun `hard wrap inference does not join adjacent independent links`() {
+        val first = "https://example.com/" + "a".repeat(40)
+        val second = "https://github.com/DataTalksClub/playbooks"
+        val rows = listOf(
+            VisualRow(row = 6, text = first, wrapsToNext = false),
+            VisualRow(row = 7, text = second, wrapsToNext = false),
+        )
+
+        val urls = urlRegionsForRows(rows, columns = first.length)
+
+        assertEquals(listOf(first, second), urls.map { it.url })
+        assertEquals(listOf(6, 7), urls.map { it.row })
+    }
+
+    @Test
+    fun `adjacent independent OSC8 links do not become one target`() {
+        val first = "https://example.com/" + "a".repeat(40)
+        val second = "https://github.com/DataTalksClub/playbooks"
+        val rows = listOf(
+            VisualRow(
+                row = 8,
+                text = first,
+                wrapsToNext = false,
+                endsWithOsc8Hyperlink = true,
+            ),
+            VisualRow(
+                row = 9,
+                text = second,
+                wrapsToNext = false,
+                startsWithOsc8Hyperlink = true,
+                startsNewOsc8Hyperlink = true,
+            ),
+        )
+
+        assertEquals(listOf(first, second), urlRegionsForRows(rows, first.length).map { it.url })
+        assertEquals(listOf(8, 9), urlRegionsForRows(rows, first.length).map { it.row })
+    }
+
+    @Test
+    fun `issue 1955 does not join a full width URL to newline docs path prose`() {
+        assertHardWrapRowsStayIndependent(
+            second = "docs/readme.md is the next paragraph",
+            expectedPaths = listOf("docs/readme.md"),
+        )
+    }
+
+    @Test
+    fun `issue 1955 does not join a full width URL to newline namespace prose`() {
+        assertHardWrapRowsStayIndependent(
+            second = "ns/ml-zoomcamp is prose but looks path-like",
+            expectedPaths = emptyList(),
+        )
+    }
+
+    @Test
+    fun `issue 1955 does not join punctuation led newline path prose`() {
+        assertHardWrapRowsStayIndependent(
+            second = "(docs/readme.md) begins with punctuation",
+            expectedPaths = listOf("docs/readme.md"),
+        )
+    }
+
+    @Test
+    fun `issue 1955 does not join an unrelated full width path row`() {
+        val first = fullWidthStandaloneUrl()
+        val second = "unrelated/full-width/row.md".padEnd(first.length, 'x')
+        assertHardWrapRowsStayIndependent(
+            second = second,
+            expectedPaths = emptyList(),
+        )
+    }
+
+    @Test
+    fun `issue 1955 complete github blob URL does not absorb a deep newline path`() {
+        val first = "https://github.com/org/repo/blob/main/docs/readme.md"
+        assertHardWrapRowsStayIndependent(
+            first = first,
+            second = "ns/a/b/next-file.md is a separate row",
+            expectedPaths = listOf("ns/a/b/next-file.md"),
+        )
+    }
+
+    @Test
+    fun `issue 1955 short newline path is not inferred as a continuation`() {
+        val first = "https://github.com/org/repo/blob/main/guide"
+        assertHardWrapRowsStayIndependent(
+            first = first,
+            second = "ns/file.md is a separate row",
+            expectedPaths = listOf("ns/file.md"),
+        )
+    }
+
+    @Test
+    fun `issue 1955 extensionless blob URL does not absorb a deep newline path`() {
+        assertHardWrapRowsStayIndependent(
+            first = "https://github.com/org/repo/blob/main/guide",
+            second = "ns/a/b/next-file.md is a separate row",
+            expectedPaths = listOf("ns/a/b/next-file.md"),
+        )
+    }
+
+    @Test
+    fun `issue 1955 extensionless blob URL does not absorb a path-only row`() {
+        assertHardWrapRowsStayIndependent(
+            first = "https://github.com/org/repo/blob/main/campaign",
+            second = "ns/a/b/c.txt",
+            expectedPaths = listOf("ns/a/b/c.txt"),
+        )
+    }
+
+    @Test
+    fun `issue 1955 query-bearing URL does not absorb a deep newline path`() {
+        assertHardWrapRowsStayIndependent(
+            first = "https://github.com/org/repo/blob/main/guide?x",
+            second = "ns/a/b/next-file.md is separate",
+            expectedPaths = listOf("ns/a/b/next-file.md"),
+        )
+    }
+
+    @Test
+    fun `issue 1955 extensionless blob URL does not absorb a mixed-case path`() {
+        assertHardWrapRowsStayIndependent(
+            first = "https://github.com/org/repo/blob/main/guide",
+            second = "ns/a/b/README.md",
+            expectedPaths = listOf("ns/a/b/README.md"),
+        )
+    }
+
+    @Test
+    fun `matching visual style without OSC8 provenance does not join newline rows`() {
+        // SGR colour/effect equality is intentionally absent from VisualRow's
+        // continuation contract: two independent rows can have identical SGR.
+        assertHardWrapRowsStayIndependent(
+            first = "https://github.com/org/repo/blob/main/guide",
+            second = "ns/a/b/README.md",
+            expectedPaths = listOf("ns/a/b/README.md"),
+        )
+    }
 
     @Test
     fun `non-wrapping rows become one logical line each`() {
@@ -21,6 +260,33 @@ class WrappedLineReassemblyTest {
         assertEquals("first", logical[0].text)
         assertEquals("second", logical[1].text)
     }
+
+    private fun assertHardWrapRowsStayIndependent(
+        first: String = fullWidthStandaloneUrl(),
+        second: String,
+        expectedPaths: List<String>,
+    ) {
+        val rows = listOf(
+            VisualRow(row = 80, text = first, wrapsToNext = false),
+            VisualRow(row = 81, text = second, wrapsToNext = false),
+        )
+
+        val repaired = markHardWrappedUrlContinuations(rows, columns = first.length)
+        assertEquals("genuine newline metadata must remain unchanged", listOf(false, false), repaired.map { it.wrapsToNext })
+        assertEquals("genuine newline rows must remain separate", listOf(first, second), reassemble(repaired).map { it.text })
+        assertEquals(
+            "the first row must retain only its own complete URL",
+            listOf(UrlRegion(first, row = 80, startCol = 0, endColExclusive = first.length)),
+            urlRegionsForRows(rows, columns = first.length),
+        )
+        assertEquals(
+            "the second row must retain its independent file target or no target",
+            expectedPaths,
+            filePathRegionsForRows(rows, columns = first.length).map { it.path },
+        )
+    }
+
+    private fun fullWidthStandaloneUrl(): String = "https://example.com/" + "a".repeat(40)
 
     @Test
     fun `wrapped rows join into one logical line`() {

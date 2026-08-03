@@ -48,11 +48,12 @@ internal fun terminalMatchRegionsForRows(
 
     val out = mutableListOf<TerminalMatchRegion>()
     // The terminal's wrap flag is authoritative when present, but some
-    // agent-emitted file paths have shown up as adjacent visual rows without a
-    // wrap marker. Keep generic smart-selection affordances aligned with the
-    // file-path tap overlay for the conservative generated-image/attachment
-    // shapes that scanner already knows how to join.
-    for (logical in reassemble(markFilePathContinuationWraps(visualRows))) {
+    // agent-emitted URLs and file paths have shown up as adjacent visual rows
+    // without a wrap marker. Keep generic smart-selection affordances aligned
+    // with both tap overlays for the conservative continuation shapes those
+    // scanners already know how to join.
+    val rows = markFilePathContinuationWraps(markHardWrappedUrlContinuations(visualRows, columns))
+    for (logical in reassemble(rows)) {
         for (span in matchSpansForLine(logical.text, matcher)) {
             for (rowSpan in logical.mapSpanToRows(span.start, span.endExclusive)) {
                 val startCol = rowSpan.startCol.coerceAtLeast(0)

@@ -9,6 +9,72 @@ import java.util.Random;
 /** "ESC ]" is the Operating System Command. */
 public class OperatingSystemControlTest extends TerminalTestCase {
 
+	public void testOsc8HyperlinkProvenanceStartsEndsAndResets() throws Exception {
+		withTerminalSized(20, 4);
+
+		// ST-terminated opener, BEL-terminated closer. Params may be non-empty.
+		enterString("\033]8;id=issue1955;https://example.com/path\033\\link\033]8;;\007plain");
+		for (int column = 0; column < 4; column++) {
+			assertTrue(
+				"OSC 8 link cell " + column + " must retain provenance",
+				(mTerminal.getScreen().getStyleAt(0, column) &
+					TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK) != 0L
+			);
+		}
+		assertTrue(
+			"the first emitted link cell must carry the opener marker",
+			(mTerminal.getScreen().getStyleAt(0, 0) &
+				TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START) != 0L
+		);
+		for (int column = 1; column < 4; column++) {
+			assertEquals(
+				"only the first emitted link cell carries the opener marker",
+				0L,
+				mTerminal.getScreen().getStyleAt(0, column) &
+					TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START
+			);
+		}
+		for (int column = 4; column < 9; column++) {
+			assertEquals(
+				"closer must remove provenance from following text",
+				0L,
+				mTerminal.getScreen().getStyleAt(0, column) &
+					TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+			);
+		}
+
+		enterString("\033]8;;https://example.com/reset\007x");
+		mTerminal.reset();
+		enterString("y");
+		int yColumn = mTerminal.getCursorCol() - 1;
+		assertEquals(
+			"terminal reset must close any active OSC 8 hyperlink",
+			0L,
+			mTerminal.getScreen().getStyleAt(0, yColumn) &
+				TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+		);
+	}
+
+	public void testMatchingSgrAcrossExplicitRowsIsNotHyperlinkProvenance() throws Exception {
+		withTerminalSized(60, 4);
+		String first = "https://github.com/org/repo/blob/main/guide";
+		String second = "ns/a/b/README.md";
+		enterString("\033[38;5;99m" + first + "\033[2;1H" + second);
+
+		assertEquals(
+			"matching SGR at the previous row edge is not OSC 8 provenance",
+			0L,
+			mTerminal.getScreen().getStyleAt(0, 59) &
+				TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+		);
+		assertEquals(
+			"matching SGR at the next row start is not OSC 8 provenance",
+			0L,
+			mTerminal.getScreen().getStyleAt(1, 0) &
+				TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+		);
+	}
+
 	public void testSetTitle() throws Exception {
 		List<ChangedTitle> expectedTitleChanges = new ArrayList<>();
 

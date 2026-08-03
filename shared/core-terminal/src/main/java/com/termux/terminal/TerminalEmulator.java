@@ -268,6 +268,11 @@ public final class TerminalEmulator {
     /** Current {@link TextStyle} effect. */
     int mEffect;
 
+    /** True between an OSC 8 hyperlink opener and its empty-URI closer. */
+    private boolean mOsc8HyperlinkActive;
+    /** True until the first printable cell after an OSC 8 opener is emitted. */
+    private boolean mOsc8HyperlinkStartPending;
+
     /**
      * The number of scrolled lines since last calling {@link #clearScrollCounter()}. Used for moving selection up along
      * with the scrolling text.
@@ -2090,6 +2095,16 @@ public final class TerminalEmulator {
                     if (endOfInput) break;
                 }
                 break;
+            case 8:
+                // OSC 8 ; params ; URI ST. The URI itself is deliberately not
+                // retained: PocketShell only needs durable per-cell provenance
+                // that adjacent painted fragments belonged to an explicitly
+                // declared hyperlink. An empty URI closes the hyperlink.
+                int uriSeparator = textParameter.indexOf(';');
+                mOsc8HyperlinkActive = uriSeparator >= 0 &&
+                    uriSeparator + 1 < textParameter.length();
+                mOsc8HyperlinkStartPending = mOsc8HyperlinkActive;
+                break;
             case 10: // Set foreground color.
             case 11: // Set background color.
             case 12: // Set cursor color.
@@ -2182,7 +2197,10 @@ public final class TerminalEmulator {
     }
 
     private long getStyle() {
-        return TextStyle.encode(mForeColor, mBackColor, mEffect);
+        long style = TextStyle.encode(mForeColor, mBackColor, mEffect);
+        if (mOsc8HyperlinkActive) style |= TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK;
+        if (mOsc8HyperlinkStartPending) style |= TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START;
+        return style;
     }
 
     /** "CSI P_m h" for set or "CSI P_m l" for reset ANSI mode. */
@@ -2507,6 +2525,7 @@ public final class TerminalEmulator {
         // TODO: Check if there are thread synchronization issues with mCursorCol and mCursorRow, possibly causing others bugs too.
         if (column < 0) column = 0;
         mScreen.setChar(column, mCursorRow, codePoint, getStyle());
+        if (displayWidth > 0) mOsc8HyperlinkStartPending = false;
 
         markCarriageReturnOverwriteOutput(displayWidth);
 
@@ -2609,6 +2628,8 @@ public final class TerminalEmulator {
         mBottomMargin = mRows;
         mRightMargin = mColumns;
         mAboutToAutoWrap = false;
+        mOsc8HyperlinkActive = false;
+        mOsc8HyperlinkStartPending = false;
         mForeColor = mSavedStateMain.mSavedForeColor = mSavedStateAlt.mSavedForeColor = TextStyle.COLOR_INDEX_FOREGROUND;
         mBackColor = mSavedStateMain.mSavedBackColor = mSavedStateAlt.mSavedBackColor = TextStyle.COLOR_INDEX_BACKGROUND;
         setDefaultTabStops();

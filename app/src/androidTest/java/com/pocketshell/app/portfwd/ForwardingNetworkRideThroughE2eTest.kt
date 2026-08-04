@@ -27,11 +27,11 @@ import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 
 /**
@@ -70,15 +70,31 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ForwardingNetworkRideThroughE2eTest {
 
-    @get:Rule
     val compose = createEmptyComposeRule()
-
-    @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private var seededHostId: Long? = null
     private var diagnostics: RecordingDiagnosticSink? = null
+
+    private val forwardingIsolation = PortForwardingTestIsolationRule(
+        beforeStop = {
+            observer().ignoreRealNetworkCallbacksForTest = false
+            controller().forceTransportProvenAliveForTest = null
+        },
+        afterStop = {
+            diagnostics?.close()
+            diagnostics = null
+            seededHostId = null
+            launchedActivity?.close()
+            launchedActivity = null
+        },
+    )
+
+    @get:Rule
+    val rules: RuleChain = RuleChain
+        .outerRule(forwardingIsolation)
+        .around(PreGrantPermissionsRule())
+        .around(compose)
 
     private fun appContext(): Context =
         InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
@@ -89,21 +105,6 @@ class ForwardingNetworkRideThroughE2eTest {
     private fun controller(): ForwardingController = entryPoint().forwardingController()
 
     private fun observer(): TerminalNetworkObserver = entryPoint().terminalNetworkObserver()
-
-    @After
-    fun teardown() {
-        // Issue #1356: re-enable real network callbacks for any sibling test
-        // sharing this singleton observer in the same instrumentation process
-        // (mirrors BareNetworkLossRestoreReconnectE2eTest#tearDown, #1098 item 5).
-        runCatching { observer().ignoreRealNetworkCallbacksForTest = false }
-        runCatching { controller().forceTransportProvenAliveForTest = null }
-        runCatching { controller().stopAllForwarding() }
-        diagnostics?.close()
-        diagnostics = null
-        seededHostId = null
-        launchedActivity?.close()
-        launchedActivity = null
-    }
 
     @Test
     fun cellularHandoffLossRestoreRidesThroughWhenTunnelSurvived_redialsWhenDead() {

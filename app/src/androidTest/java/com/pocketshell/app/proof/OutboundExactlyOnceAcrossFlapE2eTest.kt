@@ -114,8 +114,8 @@ import org.junit.runner.RunWith
  * ## Journey (emulator + the deterministic Docker `agents:2222` fixture)
  *
  * Composer lane: seed a tmux session running the `pocketshell-fake-agent`
- * input box with a fresh Claude transcript for its cwd (the #975 masked-live
- * fixture shape) so REAL live detection binds; attach through the app, open
+ * input box recorded as Claude with a fresh Claude transcript for its cwd so
+ * REAL live source detection binds; attach through the app, open
  * the Conversation tab, then send a prompt from the REAL composer (launcher →
  * draft field → Send) with the flap seam armed
  * ([OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter], the #780
@@ -226,11 +226,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         viewModel.setAgentSubmitEnterDelayForTest(0)
         val clientBeforeFlap = viewModel.currentClientIdentityForTest()
 
-        // REAL live detection must bind (the #975 transcript-evidence path the
-        // seeded fresh Claude JSONL drives): a bound detection + the
+        // REAL live source detection must bind from the recorded Claude
+        // identity plus its seeded fresh JSONL: a bound detection + the
         // Conversation tab is what routes the composer send down the
         // agent-payload delivery chain — the maintainer's duplicated-prompt
-        // lane. A presumed-only/recorded-only pane routes RawBytes instead.
+        // lane. An unbound pane routes RawBytes instead.
         waitForDetectionBound(viewModel)
         openConversationTab(viewModel)
 
@@ -1325,7 +1325,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             SystemClock.sleep(150)
         }
         assertTrue(
-            "precondition: live detection must bind (fresh seeded Claude JSONL) so " +
+            "precondition: live source detection must bind (recorded Claude identity + " +
+                "fresh seeded Claude JSONL) so " +
                 "the composer routes down the agent delivery chain; " +
                 "conversations=${vm.agentConversations.value.mapValues { it.value.detection?.agent }}",
             vm.agentConversations.value.values.any { it.detection != null },
@@ -2305,8 +2306,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     /**
      * Seed a tmux session running the deterministic `pocketshell-fake-agent`
      * input box (echoes typed chars; on Enter prints `FAKE-AGENT SUBMITTED:
-     * <line>` and clears the box), with a FRESH Claude transcript for the
-     * pane's cwd (the #975 transcript-evidence shape) so REAL live detection
+     * <line>` and clears the box), recorded as Claude and paired with a FRESH
+     * Claude transcript for the pane's cwd so REAL live source detection
      * binds — a bound detection + the Conversation tab is what routes the
      * composer send down the agent-payload delivery chain
      * (`sendToAgentPaneResult` → `sendAgentPayloadToPaneResult`), the lane the
@@ -2334,11 +2335,25 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                             "exec /usr/local/bin/pocketshell-fake-agent",
                     ),
             )
-            // The #975/#1057 masked-live fixture shape (mirrors the proven
-            // ConversationTuiCommandJourneyDockerTest seeding): the session
-            // records `shell` while the fresh cwd transcript above is the
-            // evidence that binds REAL live Claude detection.
-            appendLine("tmux set-option -t ${shellQuote(SESSION_NAME)} @ps_agent_kind shell")
+            // Issue #1963: this exactly-once fixture is an intentionally fake
+            // Bash input surface, so the healthy host classifier correctly
+            // reports `none`. Recording it as `shell` made binding depend on
+            // the #975 masked-live fallback, which deliberately accepts JSONL
+            // evidence only after an UNREADABLE (`unknown`) classification —
+            // never after a readable `none`. Full-shard state exposed that
+            // mismatch as `agentConversations={}` after the first method.
+            // Record the identity this fixture is explicitly modelling, then
+            // keep the real source selector + transcript reader load-bearing.
+            // Nothing is injected into the ViewModel and the production
+            // `detection != null` precondition below remains unchanged.
+            appendLine("tmux set-option -t ${shellQuote(SESSION_NAME)} @ps_agent_kind claude")
+            appendLine(
+                "tmux show-options -v -t ${shellQuote(SESSION_NAME)} " +
+                    "@ps_agent_kind | grep -qx claude",
+            )
+            appendLine(
+                "test -s /home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL",
+            )
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_B)} -x 80 -y 40 " +
                     shellQuote("printf '$SESSION_B_MARKER\\n'; exec sh"),

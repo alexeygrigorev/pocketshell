@@ -1,5 +1,6 @@
 package com.pocketshell.app.composer
 
+import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -15,6 +16,8 @@ import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
+import java.util.concurrent.atomic.AtomicInteger
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -109,7 +112,17 @@ class PromptComposerRecordingTimerAndTailTest {
             voiceSettings = AndroidSpeechSettings(),
             speechRecognitionProvider = speech,
         )
-        vm.clock = { nowMs }
+        // The production ticker reads clock() and immediately updates _uiState
+        // in the same coroutine, with no suspension between those operations.
+        // Therefore this records the actual Compose-observed writer context,
+        // while the rendered timer assertions below prove that ticker ran.
+        val offMainTickerClockReads = AtomicInteger(0)
+        vm.clock = {
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                offMainTickerClockReads.incrementAndGet()
+            }
+            nowMs
+        }
 
         compose.setContent {
             PocketShellTheme {
@@ -150,6 +163,11 @@ class PromptComposerRecordingTimerAndTailTest {
                 compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertTextEquals("00:21")
             }.isSuccess
         }
+        assertEquals(
+            "the production ticker must read and publish elapsed state on Android main",
+            0,
+            offMainTickerClockReads.get(),
+        )
 
         // #870 — feed a long live partial through the real recognizer listener.
         // The production applyLiveSpeechTranscript stores the raw growing partial;

@@ -1,5 +1,6 @@
 package com.pocketshell.core.terminal.ui
 
+import android.os.Looper
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -99,6 +100,30 @@ class TerminalSurfaceState(
 
     private var _session: TerminalSession? by mutableStateOf(null)
     private val renderModelMutationEpoch = AtomicLong(0L)
+
+    /**
+     * Issue #1968: the mounted View is the real InputConnection owner, so a
+     * main-thread session replacement must reach it in the same turn that
+     * publishes [_session]. Compose observation remains the off-main/lifecycle
+     * backstop; this callback closes only the main-thread handoff dead zone.
+     */
+    private var mountedSessionBinder: ((TerminalSession?) -> Unit)? = null
+
+    internal fun installMountedSessionBinder(
+        binder: (TerminalSession?) -> Unit,
+    ): () -> Unit {
+        mountedSessionBinder = binder
+        binder(_session)
+        return {
+            if (mountedSessionBinder === binder) mountedSessionBinder = null
+        }
+    }
+
+    private fun bindMountedSessionInCurrentMainTurn(session: TerminalSession?) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            mountedSessionBinder?.invoke(session)
+        }
+    }
 
     /**
      * Backing flow for [output]. Replay = 0 — bytes are only delivered to
@@ -392,6 +417,7 @@ class TerminalSurfaceState(
         if (_session === session) return
         _session = session
         renderModelMutationEpoch.incrementAndGet()
+        bindMountedSessionInCurrentMainTurn(session)
     }
 
     /**
@@ -403,6 +429,7 @@ class TerminalSurfaceState(
     fun detach() {
         if (_session != null) renderModelMutationEpoch.incrementAndGet()
         _session = null
+        bindMountedSessionInCurrentMainTurn(null)
     }
 
     /**
@@ -1367,7 +1394,10 @@ class TerminalSurfaceState(
      * canvas redraws as bytes arrive.
      *
      * Replays / multiple attachments: calling [attachExternalProducer] a
-     * second time stops the previous bridge first, then starts a new one.
+     * second time publishes the replacement session to a mounted View before
+     * stopping the previous bridge. This ordering is load-bearing: an IME
+     * commit must never observe the old View/session identity after that old
+     * session's outbound queue has closed (#1968).
      *
      * @param scope the [CoroutineScope] in which the stdout-collection
      *   coroutine runs. Pass the calling composable's scope (from
@@ -1397,10 +1427,8 @@ class TerminalSurfaceState(
         awaitSeed: Boolean = false,
         onTerminalFeedFailure: ((Throwable) -> Unit)? = null,
     ): Job {
-        // Tear down any existing bridge so we never have two producers
-        // racing on the same emulator.
-        detachExternalProducer()
-
+        val previousBridge = bridge
+        val previousProducerJob = producerJob
         val newBridge = SshTerminalBridge(client = sessionClient)
         // Issue #468: for tmux panes the live `%output` producer is attached
         // here but the pane is painted from a `capture-pane` snapshot a moment
@@ -1429,6 +1457,15 @@ class TerminalSurfaceState(
         // `updateSize` resizes the bridge's pre-installed emulator to match
         // the on-screen size.
         attach(newBridge.session)
+
+        // Issue #1968: replacement is a handoff, not detach-then-attach. Once
+        // attach() has synchronously rebound a mounted View on Main, no new
+        // InputConnection commit can enter the previous session. Only then is
+        // it safe to close that session's outbound queue. The bridges own
+        // distinct emulator models, so the brief overlap cannot race writes on
+        // one emulator; the previous producer is cancelled immediately here.
+        previousProducerJob?.cancel()
+        previousBridge?.stop()
 
         val job = scope.launch(externalProducerDispatcher) {
             try {
@@ -1527,19 +1564,20 @@ class TerminalSurfaceState(
     public fun detachExternalProducer() {
         producerJob?.cancel()
         producerJob = null
-        bridge?.stop()
+        val detachedBridge = bridge
         bridge = null
         sanitizeQueryResponses = false
         detach()
+        detachedBridge?.stop()
     }
 
     private fun detachCompletedExternalProducer(completedBridge: SshTerminalBridge) {
         if (bridge !== completedBridge) return
         producerJob = null
-        completedBridge.stop()
         bridge = null
         sanitizeQueryResponses = false
         detach()
+        completedBridge.stop()
     }
 
     private companion object {

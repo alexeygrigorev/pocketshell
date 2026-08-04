@@ -1315,6 +1315,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /** Issue #1072 test seam: is a connect attempt's single-flight guard active? */
     internal fun connectJobActiveForTest(): Boolean = connectJob?.isActive == true
+    internal fun withinGraceRecoveryActiveForTest(): Boolean = graceEffects.isWithinGraceRecoveryActive()
 
     @androidx.annotation.VisibleForTesting
     internal fun paneProducerClientIdentityForTest(paneId: String): Int? =

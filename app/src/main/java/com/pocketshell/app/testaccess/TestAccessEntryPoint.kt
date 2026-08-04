@@ -50,6 +50,9 @@ internal interface TestAccessEntryPoint {
     fun appDatabase(): AppDatabase
     fun sshKeyDao(): SshKeyDao
 
+    /** Issue #1972: the connector owned by the authoritative singleton lease manager. */
+    fun authoritativeSshLeaseConnector(): AuthoritativeSshLeaseConnector
+
     /**
      * Issue #446: the singleton [ForwardingController] so the indicator
      * connected test ([com.pocketshell.app.portfwd.ForwardingIndicatorE2eTest])

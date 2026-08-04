@@ -185,7 +185,6 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.tmux.TmuxAttachPrefillDockerTest"
   "com.pocketshell.app.tmux.TmuxAttachTimeoutDockerTest"
   "com.pocketshell.app.tmux.TmuxDetectedPortForwardDockerTest"
-  "com.pocketshell.app.tmux.TmuxSessionOpencodeInputDockerTest"
   "com.pocketshell.app.usage.UsageScreenE2eTest"
 )
 

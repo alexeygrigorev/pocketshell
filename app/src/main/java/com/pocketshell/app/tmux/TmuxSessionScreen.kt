@@ -39,6 +39,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.SemanticsPropertyReceiver
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -369,6 +372,15 @@ public fun TmuxSessionScreen(
         modifier = modifier
             .fillMaxSize()
             .background(color = PocketShellColors.Background)
+            // Issue #1977: expose the authoritative lifecycle inputs on the
+            // existing screen semantics node so connected geometry proves the
+            // held -> Live boundary independently of the control under test.
+            .semantics {
+                tmuxSessionLive = conn.sessionLive
+                tmuxTerminalHeld = conn.terminalHeld
+                tmuxSurfacePanePresent = panesSel.surfacePane != null
+                tmuxSelectedTabIndex = tabState.selectedIndex
+            }
             .testTag(TMUX_SESSION_SCREEN_TAG),
     ) {
         Column(
@@ -2076,3 +2088,17 @@ private fun TmuxSessionSheetsRegion(
 private const val MotionDurationMs: Int = 200
 private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
 internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
+internal val TMUX_SESSION_LIVE_SEMANTICS_KEY =
+    SemanticsPropertyKey<Boolean>("TmuxSessionLive")
+internal var SemanticsPropertyReceiver.tmuxSessionLive by TMUX_SESSION_LIVE_SEMANTICS_KEY
+internal val TMUX_TERMINAL_HELD_SEMANTICS_KEY =
+    SemanticsPropertyKey<Boolean>("TmuxTerminalHeld")
+internal var SemanticsPropertyReceiver.tmuxTerminalHeld by TMUX_TERMINAL_HELD_SEMANTICS_KEY
+internal val TMUX_SURFACE_PANE_PRESENT_SEMANTICS_KEY =
+    SemanticsPropertyKey<Boolean>("TmuxSurfacePanePresent")
+internal var SemanticsPropertyReceiver.tmuxSurfacePanePresent by
+    TMUX_SURFACE_PANE_PRESENT_SEMANTICS_KEY
+internal val TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY =
+    SemanticsPropertyKey<Int>("TmuxSelectedTabIndex")
+internal var SemanticsPropertyReceiver.tmuxSelectedTabIndex by
+    TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY

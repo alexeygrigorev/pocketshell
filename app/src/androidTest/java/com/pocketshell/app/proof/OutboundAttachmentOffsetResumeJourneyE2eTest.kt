@@ -465,6 +465,15 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
                     Issue1733JourneyContract.xmlSafeFailureText(liveCapture),
                 liveCapture.contains(LIVE_INPUT_MARKER),
             )
+            val visibleCatchupStarted = SystemClock.elapsedRealtime()
+            waitForVisibleTerminalViewport(
+                label = "post-resume live input",
+                timeoutMs = INPUT_TIMEOUT_MS,
+            ) { it.contains(LIVE_INPUT_MARKER) }
+            recordTiming(
+                "live_input_visible_catchup_ms",
+                SystemClock.elapsedRealtime() - visibleCatchupStarted,
+            )
             captureViewport(
                 name = "03-resumed-delivered-live",
                 requiredVisibleText = LIVE_INPUT_MARKER,
@@ -1016,6 +1025,49 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
         return text
     }
 
+    /**
+     * The remote pane accepting input is only the first half of the final proof:
+     * control-mode output is delivered asynchronously to the app's terminal model.
+     * Wait for that exact marker to reach the visible rows before taking the
+     * same-frame screenshot. This remains a viewport oracle (never scrollback or
+     * a server-only substitute) and retains a hard wall-clock failure bound.
+     */
+    private fun waitForVisibleTerminalViewport(
+        label: String,
+        timeoutMs: Long,
+        predicate: (String) -> Boolean,
+    ): String {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var last = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            compose.activityRule.scenario.onActivity { activity ->
+                last = activity.window.decorView.findTerminalView()
+                    ?.currentSession?.emulator?.screen?.visibleScreenText.orEmpty()
+            }
+            if (predicate(last)) return last
+            SystemClock.sleep(VISIBLE_VIEWPORT_POLL_MS)
+        }
+
+        val visible = writeText("03-visible-catchup-failure-visible-terminal.txt", last)
+        val diagnostic = writeText(
+            "03-visible-catchup-failure-diagnostics.txt",
+            diagnosticSummary().ifEmpty { "<no diagnostics>\n" },
+        )
+        preserveArtifacts(
+            phase = "03-visible-catchup-failure",
+            visible.name,
+            diagnostic.name,
+        )
+        assertTrue(
+            "$label did not reach the authoritative visible terminal viewport within " +
+                "${timeoutMs}ms; status=${currentConnectionStatus()} text=\n" +
+                Issue1733JourneyContract.xmlSafeFailureText(last),
+            predicate(last),
+        )
+        return last
+    }
+
     private fun View.findTerminalView(): TerminalView? {
         if (this is TerminalView) return this
         if (this !is ViewGroup) return null
@@ -1273,6 +1325,7 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
         const val CUT_AFTER_BYTES = 512L * 1024
         const val REQUIRED_STABLE_REMOTE_READS = 8
         const val DELIVERY_MAIN_CLOCK_STEP_MS = 20L
+        const val VISIBLE_VIEWPORT_POLL_MS = 100L
         const val AUTO_RETRY_WINDOW_MS = 5_000L
         const val HOOK_TIMEOUT_MS = 90_000L
         const val SSHD_SNAPSHOT = "ps -o pid,ppid,stat,cmd -u testuser | grep '[s]shd' || true"

@@ -297,7 +297,7 @@ process_byte() {
         printf '%s|%s\n' "$submit_counter" "$encoded_submit" >> "$SUBMIT_LEDGER"
       fi
       if [ -n "$TRANSCRIPT_PATH" ]; then
-        transcript_text=$(printf '%s' "$submit_buffer" | sed 's/\\/\\\\/g; s/"/\\"/g')
+        transcript_text=$(json_escape "$submit_buffer")
         printf '{"uuid":"fake-agent-user-%s","timestamp":"%s","message":{"role":"user","content":"%s"}}\n' \
           "$submit_counter" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$transcript_text" >> "$TRANSCRIPT_PATH"
       fi
@@ -337,6 +337,27 @@ flush() {
     render
     dirty=0
   fi
+}
+
+# Encode one transcript string without external jq/python dependencies (the
+# agents fixture is intentionally Alpine-minimal). Literal newlines in a JSON
+# string made multiline submits unparsable, so transcript authority could never
+# acknowledge the exact row after Enter.
+json_escape() {
+  local input="$1" output="" ch=""
+  while [ -n "$input" ]; do
+    ch="${input%"${input#?}"}"
+    input="${input#?}"
+    case "$ch" in
+      \\) output="$output\\\\" ;;
+      '"') output="$output\\\"" ;;
+      "$LF") output="$output\\n" ;;
+      "$CR") output="$output\\r" ;;
+      $'\t') output="$output\\t" ;;
+      *) output="$output$ch" ;;
+    esac
+  done
+  printf '%s' "$output"
 }
 
 while true; do

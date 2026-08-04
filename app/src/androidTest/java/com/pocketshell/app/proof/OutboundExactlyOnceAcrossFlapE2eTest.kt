@@ -42,13 +42,12 @@ import com.pocketshell.app.composer.composerOutboundQueueItemRowTestTag
 import com.pocketshell.app.composer.OutboundState
 import com.pocketshell.app.composer.OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE
 import com.pocketshell.app.composer.OUTBOUND_MAX_AUTO_ATTEMPTS
+import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.PromptComposerViewModel
-import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticPrivacy
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.tmux.AGENT_SUBMIT_ACK_TIMEOUT_MS
 import com.pocketshell.app.tmux.AgentSubmitCaptureSeams
 import com.pocketshell.app.tmux.OutboundDeliverySeams
 import com.pocketshell.app.tmux.PasteChunkSeams
@@ -76,10 +75,8 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
 import java.io.File
 import java.util.Base64
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
@@ -399,9 +396,10 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val clientBeforeOutage = vm.currentClientIdentityForTest()
         val generationBeforeOutage = vm.currentConnectGenerationForTest()
         val fallbackA = "$hostId/$renamedA"
-        val store = SharedPrefsOutboundQueueStore(
-            InstrumentationRegistry.getInstrumentation().targetContext,
-        )
+        // Observe and mutate the SAME Hilt-owned queue store that the composer
+        // drain and delivery ledger use; the journey must not create a second
+        // lock owner over production's SharedPreferences blob (#1587).
+        val store = currentPromptComposerViewModel().outboundQueueStore
         store.clearSession(fallbackA)
         store.clearSession(durableA)
 
@@ -770,9 +768,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             issue1739CaptureCleanupGate = cleanupGate
             val cleanupParked = AtomicBoolean(false)
             val cleanupRanOnMain = AtomicReference<Boolean>()
-            val store = SharedPrefsOutboundQueueStore(
-                InstrumentationRegistry.getInstrumentation().targetContext,
-            )
+            val store = currentPromptComposerViewModel().outboundQueueStore
             val sessionKey = requireNotNull(viewModel.currentTargetSessionKeyForTest()) {
                 "the connected VM must expose its exact durable queue session key"
             }
@@ -861,9 +857,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
             val cleanupGate = CompletableDeferred<Unit>()
             issue1739CaptureCleanupGate = cleanupGate
-            val store = SharedPrefsOutboundQueueStore(
-                InstrumentationRegistry.getInstrumentation().targetContext,
-            )
+            val store = currentPromptComposerViewModel().outboundQueueStore
             val sessionKey = requireNotNull(viewModel.currentTargetSessionKeyForTest()) {
                 "the connected VM must expose its exact durable queue session key"
             }
@@ -891,7 +885,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             // Authoritative intermediate evidence, while the first ack capture
             // is still parked: one durable InFlight row, wire attempted, real
             // collapsed paste visible, and NO submission/Enter.
-            val inFlightRows = store.itemsFor(sessionKey)
+            val routedSessionKey = captureProbe.routedSessionKey.get()
+            val routedRowId = captureProbe.routedRowId.get()
+            val inFlightRows = store.itemsFor(routedSessionKey)
             assertEquals(
                 "the real composer must own exactly one durable row during the wedged ack; " +
                     "rows=$inFlightRows",
@@ -899,6 +895,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 inFlightRows.size,
             )
             val row = inFlightRows.single()
+            assertEquals("the probe must follow the exact routed durable row", routedRowId, row.id)
             assertEquals(
                 "the row must still be InFlight while the real capture cleanup is parked",
                 OutboundState.InFlight,
@@ -1007,14 +1004,21 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 ),
             )
             assertInputBoxEmpty("after issue1739 same-token retry", submitted)
+            waitForIssue1739Boundary(
+                SUBMIT_AFTER_FLAP_TIMEOUT_MS,
+                "authoritative transcript ack and durable row prune",
+                timeoutDetails = { "row=${store.item(row.id)} events=${boundedEventTail(diagnostics!!.events)}" },
+            ) {
+                store.item(row.id) == null
+            }
             assertTrue(
                 "the SAME durable row/token must be Sent and pruned; id=${row.id} " +
-                    "remaining=${store.itemsFor(sessionKey)}",
-                store.item(row.id) == null && store.itemsFor(sessionKey).isEmpty(),
+                    "remaining=${store.itemsFor(routedSessionKey)}",
+                store.item(row.id) == null && store.itemsFor(routedSessionKey).isEmpty(),
             )
             writeText(
                 "issue1739-row-prune.txt",
-                "session=$sessionKey\nrowId=${row.id}\nitem=null\nsessionItems=0\n",
+                "session=$routedSessionKey\nrowId=${row.id}\nitem=null\nsessionItems=0\n",
             )
             val verifies = diagnostics!!.eventsNamed("outbound_verify_before_resend")
             assertTrue(
@@ -1961,128 +1965,20 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
     }
 
-    private class Issue1739CaptureProbe {
-        val observed = AtomicBoolean(false)
-        val firstRealCapture = AtomicReference("")
-        val readyOnly = CopyOnWriteArrayList<String>()
-        val rejected = CopyOnWriteArrayList<String>()
-        val matched = AtomicReference("")
-        lateinit var timeoutDetails: () -> String
-    }
-
-    /**
-     * Correlate the chip-bearing callback to its exact capture invocation.
-     * `agent_prompt_send` is asserted only as the ordered dispatch event; its
-     * production diagnostic has no runtime fields. Runtime authority comes from
-     * the identity-complete callback plus its same-capture-id `started` event.
-     */
-    private fun armIssue1739CaptureProbe(
+    private suspend fun armIssue1739CaptureProbe(
         viewModel: TmuxSessionViewModel,
-        store: SharedPrefsOutboundQueueStore,
+        store: OutboundQueueStore,
         sessionKey: String,
         expectedClient: Int,
         onCancelled: suspend () -> Unit,
-    ): Issue1739CaptureProbe {
-        val probe = Issue1739CaptureProbe()
-        val expectedGeneration = viewModel.currentConnectGenerationForTest()
-        val collapsedChipBaseline = countCollapsedPasteChips(runBlocking { sidecarCapturePane() })
-        val diagnosticOffset = diagnostics!!.events.size
-        AgentSubmitCaptureSeams.afterRealCapture = captureHook@{ observation ->
-            val capture = observation.response.output.joinToString("\n")
-            val row = store.itemsFor(sessionKey).singleOrNull()
-            val events = diagnostics!!.events.drop(diagnosticOffset)
-            val claimIndex = events.indexOfFirst {
-                it.name == "row_state" &&
-                    it.fields["itemId"] == row?.id &&
-                    it.fields["toState"] == "InFlight" &&
-                    it.fields["reason"] == "claimed"
-            }
-            val sendIndex = events.indexOfFirst {
-                it.name == "agent_prompt_send" && it.fields["pane"] == row?.paneId
-            }
-            val startIndex = events.indexOfFirst {
-                it.name == "agent_submit_capture" &&
-                    it.fields["result"] == "started" &&
-                    it.fields["captureId"] == observation.captureId &&
-                    it.fields["timeoutMs"] == observation.timeoutMs &&
-                    it.fields["pane"] == observation.paneId &&
-                    it.fields["clientHash"] == observation.clientHash &&
-                    it.fields["generation"] == observation.generation &&
-                    it.fields["session"] == observation.session
-            }
-            val chipCount = countCollapsedPasteChips(capture)
-            val identityMatches =
-                observation.scrollbackLines == 0 &&
-                    observation.timeoutMs == AGENT_SUBMIT_ACK_TIMEOUT_MS &&
-                    observation.paneId == row?.paneId &&
-                    observation.clientHash == expectedClient &&
-                    observation.generation == expectedGeneration &&
-                    observation.session == SESSION_NAME &&
-                    viewModel.currentClientIdentityForTest() == expectedClient &&
-                    viewModel.currentConnectGenerationForTest() == expectedGeneration &&
-                    viewModel.currentTargetSessionKeyForTest() == sessionKey
-            val ordered =
-                row != null &&
-                    row.state == OutboundState.InFlight &&
-                    row.wireAttempted &&
-                    claimIndex >= 0 &&
-                    sendIndex > claimIndex &&
-                    startIndex > sendIndex
-            val summary =
-                "captureId=${observation.captureId} pane=${observation.paneId} " +
-                    "timeout=${observation.timeoutMs} " +
-                    "client=${observation.clientHash} generation=${observation.generation} " +
-                    "session=${observation.session} row=${row?.id}/${row?.state}/" +
-                    "${row?.wireAttempted} order=$claimIndex<$sendIndex<$startIndex " +
-                    "chips=$collapsedChipBaseline->$chipCount"
-
-            if (
-                observation.scrollbackLines == 0 &&
-                capture.contains(FAKE_AGENT_READY) &&
-                chipCount == collapsedChipBaseline
-            ) {
-                probe.readyOnly.addBounded("$summary\n${capture.take(DIAGNOSTIC_CAPTURE_LIMIT)}")
-                return@captureHook
-            }
-            if (
-                !identityMatches ||
-                !ordered ||
-                observation.response.isError ||
-                !capture.contains(FAKE_AGENT_READY) ||
-                chipCount != collapsedChipBaseline + 1
-            ) {
-                probe.rejected.addBounded("$summary\n${capture.take(DIAGNOSTIC_CAPTURE_LIMIT)}")
-                return@captureHook
-            }
-            if (!probe.observed.compareAndSet(false, true)) return@captureHook
-            probe.firstRealCapture.set(capture)
-            probe.matched.set(summary.take(DIAGNOSTIC_CAPTURE_LIMIT))
-            try {
-                CompletableDeferred<Unit>().await()
-            } catch (cancelled: CancellationException) {
-                onCancelled()
-                throw cancelled
-            }
-        }
-        probe.timeoutDetails = {
-            val rows = store.itemsFor(sessionKey)
-            val rowTail = rows.takeLast(DIAGNOSTIC_ROW_TAIL_COUNT).joinToString {
-                "id=${it.id.take(DIAGNOSTIC_ID_LIMIT)} state=${it.state} " +
-                    "attempt=${it.attemptCount} pane=${it.paneId?.take(DIAGNOSTIC_ID_LIMIT)} " +
-                    "wireAttempted=${it.wireAttempted}"
-            }
-            "currentClient=${viewModel.currentClientIdentityForTest()} " +
-                "currentGeneration=${viewModel.currentConnectGenerationForTest()} " +
-                "currentSession=${viewModel.currentTargetSessionKeyForTest()?.take(DIAGNOSTIC_ID_LIMIT)} " +
-                "expected=$expectedClient/$expectedGeneration/" +
-                sessionKey.take(DIAGNOSTIC_ID_LIMIT) + " " +
-                "rowsTotal=${rows.size} rowsTail=[$rowTail] " +
-                "events=${boundedEventTail(diagnostics!!.events, diagnosticOffset)} " +
-                "readyOnly=${boundedCaptureEntries(probe.readyOnly)} " +
-                "rejected=${boundedCaptureEntries(probe.rejected)}"
-        }
-        return probe
-    }
+    ): Issue1739CaptureProbe = Issue1739CaptureProbeHarness(
+        diagnostics = requireNotNull(diagnostics),
+        capturePane = { sidecarCapturePane() },
+        countCollapsedPasteChips = ::countCollapsedPasteChips,
+        boundedEventTail = ::boundedEventTail,
+        sessionName = SESSION_NAME,
+        fakeAgentReady = FAKE_AGENT_READY,
+    ).arm(viewModel, store, sessionKey, expectedClient, onCancelled)
 
     private fun boundedEventTail(
         events: List<RecordedDiagnosticEvent>,
@@ -2115,12 +2011,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     private fun boundedCaptureEntries(entries: List<String>): String =
         entries.takeLast(DIAGNOSTIC_CAPTURE_LIMIT_COUNT)
             .joinToString(prefix = "[", postfix = "]") { it.take(DIAGNOSTIC_CAPTURE_LIMIT) }
-
-    private fun CopyOnWriteArrayList<String>.addBounded(value: String) {
-        if (size < DIAGNOSTIC_CAPTURE_LIMIT_COUNT) {
-            add(value.take(DIAGNOSTIC_CAPTURE_LIMIT))
-        }
-    }
 
     private fun waitForIssue1739CapturePrecondition(
         label: String,
@@ -2587,8 +2477,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         const val DIAGNOSTIC_FIELD_COUNT: Int = 10
         const val DIAGNOSTIC_FIELD_KEY_LIMIT: Int = 64
         const val DIAGNOSTIC_FIELD_VALUE_LIMIT: Int = 160
-        const val DIAGNOSTIC_ROW_TAIL_COUNT: Int = 4
-        const val DIAGNOSTIC_ID_LIMIT: Int = 96
         val DEFERRAL_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 30_000L
 

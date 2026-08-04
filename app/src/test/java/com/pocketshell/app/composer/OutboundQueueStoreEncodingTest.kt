@@ -185,6 +185,12 @@ class OutboundQueueStoreEncodingTest {
                 wireNeedleBaselineCount = 1,
                 wireCollapsedMarkerBaselineCount = 2,
                 wireSubmitAttempted = true,
+                wireSubmitTranscriptBaseline = OutboundSubmitTranscriptBaseline(
+                    sourcePath = "/home/u/.codex/sessions/rollout.jsonl",
+                    agentSessionId = "rollout-1",
+                    agentKind = "Codex",
+                    confirmedMatchingIds = linkedSetOf("existing-1", "existing-2"),
+                ),
             ),
         )
         val decoded = decodeOutboundItems("sessA", encodeOutboundItems(items))
@@ -192,6 +198,7 @@ class OutboundQueueStoreEncodingTest {
         assertEquals(1, decoded.single().wireNeedleBaselineCount)
         assertEquals(2, decoded.single().wireCollapsedMarkerBaselineCount)
         assertTrue(decoded.single().wireSubmitAttempted)
+        assertEquals(items.single().wireSubmitTranscriptBaseline, decoded.single().wireSubmitTranscriptBaseline)
     }
 
     @Test

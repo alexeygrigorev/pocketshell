@@ -18,19 +18,24 @@ import com.pocketshell.core.tmux.TmuxClientDiagnosticSink
 import com.pocketshell.core.tmux.TmuxClientDiagnostics
 import com.pocketshell.core.tmux.TmuxClientFactory
 import java.io.File
+import java.io.IOException
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExecutorCoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -64,10 +69,14 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
 
     private val projectRoot: Path by lazy { findProjectRoot() }
     private var container: GenericContainer<*>? = null
+    private var mainDispatcher: ExecutorCoroutineDispatcher? = null
 
     @Before
     fun setUpMain() {
-        Dispatchers.setMain(Dispatchers.Unconfined)
+        mainDispatcher = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "issue1952-main").apply { isDaemon = true }
+        }.asCoroutineDispatcher()
+        Dispatchers.setMain(requireNotNull(mainDispatcher))
     }
 
     @After
@@ -76,6 +85,8 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         runCatching { container?.stop() }
         container = null
         Dispatchers.resetMain()
+        mainDispatcher?.close()
+        mainDispatcher = null
     }
 
     @Test
@@ -83,8 +94,9 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         startDockerOrFail()
         val fixture = requireNotNull(container)
         val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val connector = SustainedOutageLeaseConnector(DefaultSshLeaseConnector())
         val leaseManager = SshLeaseManager(
-            connector = DefaultSshLeaseConnector(),
+            connector = connector,
             scope = ioScope,
             idleTtlMillis = 60_000L,
         )
@@ -124,7 +136,11 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                 graceMs = PASSIVE_GRACE_MS,
                 silentReattachTimeoutMs = REATTACH_TIMEOUT_MS,
             )
-            vm.forceCleanOutageForTest = true
+            // Issue #1965: hold the authoritative lease-manager connector down, not a
+            // VM-local reconnect primitive. Confirmed-dead recovery now acquires through
+            // DeadLeaseRecoveryAuthority, so the sustained outage must govern that exact
+            // manager-new transport path as well as every later retry.
+            connector.outageActive = true
             val killedPeerPids = killAuthenticatedSshdProcessesFromServer()
             assertTrue("the Docker peer fault must kill at least one sshd process", killedPeerPids.isNotEmpty())
 
@@ -145,15 +161,33 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
             assertEquals("remote_failure", journalDrop["cause"])
             assertEquals(typedReason, journalDrop["causeReason"])
 
-            val maxAttempt = awaitAttemptBeyondOne(vm)
+            val maxAttempt = awaitAttemptBeyondOne(diagnostics, connector)
             assertTrue(
                 "sustained failure must progress beyond attempt 1; maxAttempt=$maxAttempt " +
                     "state=${vm.connectionControllerStateForTest()}",
                 maxAttempt >= 2,
             )
+            assertTrue(
+                "sustained outage must reject the authoritative fresh-lease acquisition",
+                connector.blockedConnectCount > 0,
+            )
             assertExactlyOneRecoveryStart(diagnostics, firstClientHash)
 
-            vm.forceCleanOutageForTest = false
+            // The attempt-2 journal edge is emitted before the auto-ladder's blocked dial
+            // has fully terminalized. Starting manual Reconnect at that edge races the stale
+            // ladder: it can submit reconnect_gave_up after the fresh dial submits
+            // transport_live, leaving the controller Unreachable. Wait for the ladder's
+            // authoritative reconnect_gave_up projection, then cross the serialized Main
+            // dispatcher as a queue barrier before entering Reconnect there. This synchronizes
+            // on behavior and ownership quiescence, not elapsed time.
+            awaitSustainedOutageTerminalization(vm, diagnostics)
+
+            connector.outageActive = false
+            assertTrue(
+                "the explicit Reconnect entrypoint must re-enter the retained same-session target " +
+                    "after the sustained outage",
+                withContext(Dispatchers.Main.immediate) { vm.reconnect() },
+            )
             awaitCondition(RECOVERY_TIMEOUT_MS, "fresh-client recovery to Live") {
                 vm.connectionControllerStateForTest() is ConnectionState.Live &&
                     vm.liveTmuxClientForSendOrNullForTest()?.let { client ->
@@ -182,6 +216,11 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                 firstSshIdentity.transport,
                 recoveredSshIdentity.transport,
             )
+            assertEquals(
+                "initial attach plus one recovered manager-new SSH handshake",
+                2,
+                connector.successfulConnectCount,
+            )
 
             val afterMarker = "ISSUE1952-AFTER-${System.nanoTime().toString(36)}"
             sendAndAwaitMarker(recoveredClient, afterMarker)
@@ -195,11 +234,27 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                     "maxAttempt=$maxAttempt firstClient=$firstClientHash " +
                     "recoveredClient=${System.identityHashCode(recoveredClient)} " +
                     "firstSsh=$firstSshIdentity recoveredSsh=$recoveredSshIdentity " +
+                    "connectorAttempts=${connector.connectCount} " +
+                    "connectorBlocked=${connector.blockedConnectCount} " +
                     "peerKilledPids=$killedPeerPids",
             )
             println("ISSUE1952_REAL_TRANSCRIPT\n$transcript")
         } finally {
-            vm?.forceCleanOutageForTest = false
+            println(
+                "ISSUE1952_FINAL_DIAGNOSTICS\n" +
+                    diagnostics.events
+                        .filter { event ->
+                            event.category == ConnectionJournalSchema.CATEGORY ||
+                                event.name == "silent_reattach_start" ||
+                                event.name == "silent_reattach_failed" ||
+                                event.name == "auto_reconnect_decision" ||
+                                event.name == "dead_lease_recovery"
+                        }
+                        .joinToString("\n") { event ->
+                            "${event.category}/${event.name} ${event.fields}"
+                        },
+            )
+            connector.outageActive = false
             vm?.cancelOwnScopesForTest()
             vm?.clearForTest()
             runCatching { cleanupSession() }
@@ -558,14 +613,51 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         return matches.single()
     }
 
-    private suspend fun awaitAttemptBeyondOne(vm: TmuxSessionViewModel): Int {
+    private suspend fun awaitAttemptBeyondOne(
+        diagnostics: RecordingDiagnosticEventSink,
+        connector: SustainedOutageLeaseConnector,
+    ): Int {
         var maxAttempt = 0
-        awaitCondition(ATTEMPT_PROGRESS_TIMEOUT_MS, "controller attempt > 1") {
-            val state = vm.connectionControllerStateForTest()
-            if (state is ConnectionState.Reconnecting) maxAttempt = maxOf(maxAttempt, state.attempt)
+        awaitCondition(ATTEMPT_PROGRESS_TIMEOUT_MS, "controller journal attempt > 1") {
+            maxAttempt = diagnostics.events
+                .asSequence()
+                .filter { event ->
+                    event.category == ConnectionJournalSchema.CATEGORY &&
+                        event.name == ConnectionJournalSchema.SUBMIT &&
+                        event.fields["event"] == "reconnect_failed"
+                }
+                .mapNotNull { event -> (event.fields["postAttempt"] as? Number)?.toInt() }
+                .maxOrNull() ?: maxAttempt
             maxAttempt >= 2
         }
+        assertTrue(
+            "controller journal must reach attempt > 1; maxAttempt=$maxAttempt " +
+                "connectorAttempts=${connector.connectCount} blocked=${connector.blockedConnectCount}",
+            maxAttempt >= 2,
+        )
         return maxAttempt
+    }
+
+    private suspend fun awaitSustainedOutageTerminalization(
+        vm: TmuxSessionViewModel,
+        diagnostics: RecordingDiagnosticEventSink,
+    ) {
+        awaitCondition(ATTEMPT_PROGRESS_TIMEOUT_MS, "sustained outage reconnect gave up") {
+            diagnostics.events.any { event ->
+                event.category == ConnectionJournalSchema.CATEGORY &&
+                    event.name == ConnectionJournalSchema.SUBMIT &&
+                    event.fields["event"] == "reconnect_gave_up"
+            }
+        }
+        // reconnect_gave_up is submitted synchronously on the dedicated test Main thread.
+        // Crossing that same dispatcher guarantees the stale recovery owner has finished its
+        // terminal projection before the test is allowed to restore and manually reconnect.
+        withContext(Dispatchers.Main.immediate) { }
+        assertTrue(
+            "the blocked auto-ladder must finish in Unreachable before manual Reconnect; " +
+                "state=${vm.connectionControllerStateForTest()}",
+            vm.connectionControllerStateForTest() is ConnectionState.Unreachable,
+        )
     }
 
     private fun assertExactlyOneRecoveryStart(
@@ -641,6 +733,42 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                     .stackTraceToString(),
             )
             return delegate.connect(target)
+        }
+    }
+
+    /**
+     * Issue #1965 sustained-outage authority seam. Unlike the older VM-local primitive
+     * seam, this wraps the connector owned by [SshLeaseManager], so every manager-new
+     * acquisition is deterministically unavailable until the test restores the link.
+     */
+    private class SustainedOutageLeaseConnector(
+        private val delegate: SshLeaseConnector,
+    ) : SshLeaseConnector {
+        private val attempts = AtomicInteger(0)
+        private val blockedAttempts = AtomicInteger(0)
+        private val successfulAttempts = AtomicInteger(0)
+
+        @Volatile
+        var outageActive: Boolean = false
+
+        val connectCount: Int
+            get() = attempts.get()
+
+        val blockedConnectCount: Int
+            get() = blockedAttempts.get()
+
+        val successfulConnectCount: Int
+            get() = successfulAttempts.get()
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            val attempt = attempts.incrementAndGet()
+            if (outageActive) {
+                blockedAttempts.incrementAndGet()
+                return Result.failure(IOException("synthetic sustained outage at connector attempt $attempt"))
+            }
+            return delegate.connect(target).also { result ->
+                if (result.isSuccess) successfulAttempts.incrementAndGet()
+            }
         }
     }
 

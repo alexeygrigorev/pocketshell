@@ -14209,21 +14209,20 @@ public class TmuxSessionViewModel @Inject constructor(
                 scrollbackLines = scrollbackLines,
             ).takeIf { it.status == AgentPaneCaptureStatus.Captured }?.response
         }
+        if (outboundDeliveryLedger.resolveLateAuthoritativeTranscriptAck(agentTranscriptAuthority, paneId, payload, sendToken, durableRow)) return Result.success(Unit).also { requestReconcile(client, paneId, ReconcileReason.Send) }
         // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt for THIS send —
         // keyed by the #1529 [sendToken], NOT the payload, so two distinct identical sends
         // never false-dedup — the paste may have run server-side (audit A1/A2). Probe (#869
         // needle, #1577 baseline): landed ⇒ Enter ONLY; unknown ⇒ fail; else full send.
-        when (
-            verifyBeforeAgentResend(
-                outboundDeliveryLedger,
-                client,
-                paneId,
-                sendToken,
-                payload,
-                durableRow = durableRow,
-                capturePane = boundedCapture,
-            )
-        ) {
+        when (verifyBeforeAgentResend(
+            outboundDeliveryLedger,
+            client,
+            paneId,
+            sendToken,
+            payload,
+            durableRow = durableRow,
+            capturePane = boundedCapture,
+        )) {
             DeliveryProbeOutcome.AlreadyLanded -> return try {
                 check(isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
                     "Agent send runtime changed after verify-before-resend."
@@ -14238,7 +14237,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 val transcriptBaseline = agentTranscriptAuthority.baselineFor(deliveryProof, paneId, payload)
                 durableRow?.let { row ->
                     check(withContext(seedIoDispatcher) {
-                        outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row)
+                        outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row, transcriptBaseline?.durable())
                     }) { "Agent submit write-ahead persistence failed; Enter not sent." }
                 }
                 sendNamedKeyToPane(client, paneId, "Enter")
@@ -14357,7 +14356,7 @@ public class TmuxSessionViewModel @Inject constructor(
             val transcriptBaseline = agentTranscriptAuthority.baselineFor(deliveryProof, paneId, payload)
             durableRow?.let { row ->
                 check(withContext(seedIoDispatcher) {
-                    outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row)
+                    outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row, transcriptBaseline?.durable())
                 }) { "Agent submit write-ahead persistence failed; Enter not sent." }
             }
             sendNamedKeyToPane(client, paneId, "Enter")

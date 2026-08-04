@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import android.util.Log
 import com.pocketshell.app.composer.OutboundQueueStore
+import com.pocketshell.app.composer.OutboundSubmitTranscriptBaseline
 import com.pocketshell.app.composer.OutboundWireAttemptDurableStore
 import com.pocketshell.app.composer.asWireAttemptDurableStore
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -427,9 +428,14 @@ internal class OutboundDeliveryLedger(
         paneId: String,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity? = null,
+        transcriptBaseline: OutboundSubmitTranscriptBaseline? = null,
     ): Boolean = synchronized(lock) {
         val durableAcknowledged = durableRow?.let { row ->
-            durable?.recordWireSubmitAttempt(row.sessionKey, row.rowId) == true
+            durable?.recordWireSubmitAttempt(
+                row.sessionKey,
+                row.rowId,
+                transcriptBaseline,
+            ) == true
         } ?: true
         if (!durableAcknowledged) return false
         submitAttempts += key(paneId, sendToken)
@@ -443,6 +449,12 @@ internal class OutboundDeliveryLedger(
     ): Boolean = synchronized(lock) {
         key(paneId, sendToken) in submitAttempts ||
             durableRow?.let { durable?.hasWireSubmitAttempt(it.sessionKey, it.rowId) } == true
+    }
+
+    fun submitTranscriptBaseline(
+        durableRow: DurableOutboundRowIdentity,
+    ): OutboundSubmitTranscriptBaseline? = synchronized(lock) {
+        durable?.wireSubmitTranscriptBaseline(durableRow.sessionKey, durableRow.rowId)
     }
 
     fun hasAmbiguousAttempt(

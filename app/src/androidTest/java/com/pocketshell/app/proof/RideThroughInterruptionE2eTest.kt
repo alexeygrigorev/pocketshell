@@ -140,23 +140,55 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
 
         // Live session established (VM Connected).
         waitForConnectedStatus("initial attach")
+        sendCommandThroughTerminalInput("printf 'BEFORE-$marker\\n'", "before-longcut")
+        waitForVisibleTerminalText("before-longcut") { "BEFORE-$marker" in it }
+        startConnectionDiagnosticCapture()
 
         // Sustained clean drop -> reader EOF -> the deliberate reconnect ladder. The
         // app surfaces the fast Reconnecting indicator (NOT the settled Failed band)
         // while the link is down, then AUTO-recovers when it is restored.
         val proxy = toxiproxy()
+        val initialProxyState = proxy.state()
+        org.junit.Assert.assertTrue(
+            "expected exact enabled 2228 -> agents:22 proxy before cut, got $initialProxyState",
+            initialProxyState.enabled &&
+                initialProxyState.listen in setOf("0.0.0.0:2228", "[::]:2228") &&
+                initialProxyState.upstream == "agents:22",
+        )
         proxy.disable()
+        val disabledProxyState = proxy.state()
+        org.junit.Assert.assertTrue(
+            "expected Toxiproxy's independent oracle to confirm the cut engaged, got $disabledProxyState",
+            !disabledProxyState.enabled,
+        )
+        var readerEofReason = "missing"
         try {
+            val readerEof = waitForReaderEofDiagnostic(sessionName, "longcut")
+            readerEofReason = readerEof.metadata["disconnectReason"].toString()
             waitForReconnectingRecoveryBand("longcut")
         } finally {
             proxy.enable()
         }
+        val restoredProxyState = proxy.state()
+        org.junit.Assert.assertTrue(
+            "expected Toxiproxy's independent oracle to confirm restore, got $restoredProxyState",
+            restoredProxyState.enabled,
+        )
+        waitForSshFixtureReady(
+            key = com.pocketshell.core.ssh.SshKey.Pem(key),
+            port = NETWORK_FAULT_SSH_PORT,
+        )
 
         // AUTO-recovery (no manual Reconnect tap — the superseded #342/#552 contract):
         // the VM returns to Connected, and the reconnect is CLEAN — the same tmux
         // session survives with at most one client (no orphaned/duplicate clients),
         // verified server-side over a direct SSH connection.
         waitForConnectedStatus("longcut recovery")
+        val reboundMarker = "REBOUND-$marker"
+        emitShellMarkerOverFixtureControlPlane(key, sessionName, reboundMarker, "longcut rebound")
+        waitForVisibleTerminalText("longcut-rebound") { reboundMarker in it }
+        sendCommandThroughTerminalInput("printf 'AFTER-$marker\\n'", "after-longcut")
+        waitForVisibleTerminalText("after-longcut") { "AFTER-$marker" in it }
         waitForClientCountAtMost(key, sessionName, max = 1, label = "post-longcut reconnect")
 
         writeSummary(
@@ -166,6 +198,13 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
                 "marker=$marker",
                 "cut=toxiproxy disable (clean socket drop), then enable within episode budget",
                 "contract=CURRENT ride-through: fast Reconnecting indicator, auto-recover on restore",
+                "proxy_before=$initialProxyState",
+                "proxy_during_cut=$disabledProxyState",
+                "proxy_after_restore=$restoredProxyState",
+                "typed_disconnect_reason=$readerEofReason",
+                "initial_visible_marker=BEFORE-$marker",
+                "rebound_visible_marker=$reboundMarker",
+                "final_visible_marker=AFTER-$marker",
                 "connect_attempt_delta=${TMUX_CONNECT_ATTEMPTS.get() - attemptsBefore}",
             ),
         )

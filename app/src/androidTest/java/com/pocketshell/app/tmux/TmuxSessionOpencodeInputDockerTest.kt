@@ -48,6 +48,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -619,10 +620,10 @@ class TmuxSessionOpencodeInputDockerTest {
             }
             captureArtifact("issue297-00-agent-ready")
 
-            showKeyboardAndWaitForExitKeys()
+            openIssue1979KeyboardFromRecordedAgentConversation()
             val ctrlCAt = SystemClock.elapsedRealtime()
-            compose.onNodeWithText("Ctrl-C", useUnmergedTree = true).performClick()
-            compose.onNodeWithText("Ctrl-C", useUnmergedTree = true).performClick()
+            compose.onNodeWithText("^C").performClick()
+            compose.onNodeWithText("^C").performClick()
             waitForVisibleTerminalText("issue297-ctrl-c-exit", VISIBLE_TIMEOUT_MS) {
                 "issue297-ctrl-c-2" in it && "issue297-agent-exited-ctrl-c" in it
             }
@@ -640,10 +641,10 @@ class TmuxSessionOpencodeInputDockerTest {
             }
             captureArtifact("issue297-02-agent-restarted")
 
-            showKeyboardAndWaitForExitKeys()
+            assertIssue1979HotkeysVisible("after-agent-restart")
             val ctrlDAt = SystemClock.elapsedRealtime()
-            compose.onNodeWithText("Ctrl-D", useUnmergedTree = true).performClick()
-            compose.onNodeWithText("Ctrl-D", useUnmergedTree = true).performClick()
+            compose.onNodeWithText("^D").performClick()
+            compose.onNodeWithText("^D").performClick()
             waitForVisibleTerminalText("issue297-ctrl-d-exit", VISIBLE_TIMEOUT_MS) {
                 "issue297-ctrl-d-2" in it && "issue297-agent-exited-ctrl-d" in it
             }
@@ -1298,23 +1299,131 @@ class TmuxSessionOpencodeInputDockerTest {
         val surfacePanePresent: Boolean,
     )
 
-    private fun showKeyboardAndWaitForExitKeys() {
-        if (compose.onAllNodesWithText("Ctrl-C", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isEmpty()
-        ) {
-            compose.onNodeWithText("show keyboard", useUnmergedTree = true).performClick()
+    /**
+     * Issue #1979 regression oracle for the recorded-agent default-view journey.
+     *
+     * The keyboard chip is intentionally Terminal-only. The old journey waited
+     * for terminal bytes behind the Conversation surface, then searched for the
+     * chip by its label and failed before it could exercise any input behavior.
+     * Own the visible tab first, and prove one tagged tap (with no retry path)
+     * raises the real IME before opening the retained dedicated hotkeys sheet
+     * and delivering its interrupt/EOF keys.
+     */
+    private fun openIssue1979KeyboardFromRecordedAgentConversation() {
+        waitForTabsPill()
+        val initialTerminalTabSelected = issue1977TerminalTabSelected()
+        captureFullFrame("issue1979-opencode-tabs-mounted-initial-state-full")
+        compose.onNodeWithText("Conversation", useUnmergedTree = true)
+            .performClick()
+        compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+            issue1977TerminalTabSelected() == false
         }
+        assertTrue(
+            "#1979: the journey must own Conversation before classifying the missing Terminal-only keyboard chip",
+            issue1977TerminalTabSelected() == false,
+        )
+        val conversationKeyboardCount = compose
+            .onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+        assertEquals(
+            "#1979: show-keyboard is deliberately absent from Conversation",
+            0,
+            conversationKeyboardCount,
+        )
+        captureFullFrame("issue1979-opencode-conversation-readiness-full")
+
+        selectIssue1977TerminalTab()
+        waitForIssue1977TerminalLiveState()
+        assertIssue1977TerminalControlGeometry("issue1979-live-terminal-before-tap")
+        captureFullFrame("issue1979-opencode-before-keyboard-tap-full")
+
+        val scenario = checkNotNull(launchedActivity) {
+            "#1979: the real OpenCode activity must remain open for the keyboard proof"
+        }
+        val focus = awaitActivityWindowFocus(scenario, timeoutMs = 10_000)
+        assertTrue(
+            "#1979: the app window must own focus before the one keyboard-chip tap; ${focus.diagnosis}",
+            focus.focused,
+        )
+        val imeVisibleBeforeTap = waitForInputMethodVisible(
+            scenario = scenario,
+            expected = false,
+            timeoutMs = 5_000,
+        )
+        assertTrue(
+            "#1979: the OpenCode keyboard journey requires the IME to be down before the tap",
+            !imeVisibleBeforeTap,
+        )
+
+        val tapAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+            .performClick()
+        val imeVisibleAfterTap = waitForInputMethodVisible(
+            scenario = scenario,
+            expected = true,
+        )
+        recordTiming(
+            "issue1979_show_keyboard_tap_to_ime_visible_ms",
+            SystemClock.elapsedRealtime() - tapAt,
+        )
+        assertTrue(
+            "#1979: exactly one show-keyboard tap must raise the real IME",
+            imeVisibleAfterTap,
+        )
+        captureFullFrame("issue1979-opencode-after-keyboard-tap-full")
+
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        assertIssue1979HotkeysVisible("after-one-hotkeys-launcher-tap")
+        captureFullFrame("issue1979-opencode-hotkeys-sheet-full")
+        writeText(
+            "issue1979-opencode-keyboard-state.txt",
+            buildString {
+                appendLine("initial_terminal_tab_selected=$initialTerminalTabSelected")
+                appendLine("classified_visible_tab=conversation")
+                appendLine("conversation_show_keyboard_count=$conversationKeyboardCount")
+                appendLine("terminal_tab_selected=${issue1977TerminalTabSelected()}")
+                appendLine("show_keyboard_tap_count=1")
+                appendLine("app_window_focused_before_tap=${focus.focused}")
+                appendLine("ime_visible_before_tap=$imeVisibleBeforeTap")
+                appendLine("ime_visible_after_one_tap=$imeVisibleAfterTap")
+                appendLine("hotkeys_launcher_tap_count=1")
+                appendLine("hotkeys_panel_visible=true")
+                appendLine("ctrl_c_label=^C")
+                appendLine("ctrl_d_label=^D")
+            },
+        )
+    }
+
+    private fun assertIssue1979HotkeysVisible(stage: String) {
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("Ctrl-C", useUnmergedTree = true)
+            compose.onAllNodesWithTag(TERMINAL_HOTKEYS_PANEL_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty() &&
-                compose.onAllNodesWithText("Ctrl-D", useUnmergedTree = true)
+                compose.onAllNodesWithText("^C", useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                compose.onAllNodesWithText("^D", useUnmergedTree = true)
                     .fetchSemanticsNodes()
                     .isNotEmpty()
         }
-        compose.onNodeWithText("Ctrl-C", useUnmergedTree = true).assertIsDisplayed()
-        compose.onNodeWithText("Ctrl-D", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
+        // HotkeySlot deliberately merges its Text into the clickable parent.
+        // The unmerged Text child is visible but does not own OnClick.
+        compose.onNodeWithText("^C")
+            .assertIsDisplayed()
+            .assertHasClickAction()
+        compose.onNodeWithText("^D")
+            .assertIsDisplayed()
+            .assertHasClickAction()
+        writeText(
+            "issue1979-opencode-hotkeys-$stage.txt",
+            "stage=$stage\nhotkeys_panel_visible=true\nctrl_c_label=^C\nctrl_d_label=^D\n",
+        )
     }
 
     // ============================================================ Artifacts

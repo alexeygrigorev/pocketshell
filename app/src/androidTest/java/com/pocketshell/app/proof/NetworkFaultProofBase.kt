@@ -18,7 +18,9 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.App
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.diagnostics.DiagnosticsEvent
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FolderListViewModel
@@ -83,6 +85,7 @@ abstract class NetworkFaultProofBase {
     protected var launchedActivity: ActivityScenario<MainActivity>? = null
     protected val timings: MutableList<String> = mutableListOf()
     private var networkFaultProofEnabled: Boolean = false
+    private var diagnosticsRecordingWasEnabled: Boolean? = null
 
     @After
     fun closeNetworkFaultActivity() {
@@ -96,6 +99,10 @@ abstract class NetworkFaultProofBase {
         if (networkFaultProofEnabled) {
             runCatching { toxiproxy().reset() }
         }
+        diagnosticsRecordingWasEnabled?.let { wasEnabled ->
+            runCatching { networkFaultApp().settingsRepository.setDiagnosticsRecordingEnabled(wasEnabled) }
+        }
+        diagnosticsRecordingWasEnabled = null
     }
 
     protected fun assumeNetworkFaultProofsEnabled() {
@@ -372,8 +379,8 @@ abstract class NetworkFaultProofBase {
          */
         val showsRecoveryInProgress: Boolean
             get() = !settledFailedBand &&
-                (reconnectingPill || attachingHold || reconnectBandRetryNow ||
-                    connectingProgressRow || statusName == "Reconnecting")
+                statusName == "Reconnecting" &&
+                (reconnectingPill || attachingHold || reconnectBandRetryNow || connectingProgressRow)
 
         fun asLine(): String =
             "t=${elapsedMs}ms status=$statusName pill=$reconnectingPill " +
@@ -404,6 +411,70 @@ abstract class NetworkFaultProofBase {
         connectingProgressRow = hasTag(TMUX_CONNECTING_PROGRESS_TAG),
         settledFailedBand = hasTag(TMUX_SESSION_ERROR_TAG),
     )
+
+    /**
+     * Start a fresh, lossless connection diagnostic episode for a real-wire cut.
+     * The previous user setting is restored by [closeNetworkFaultActivity].
+     */
+    protected suspend fun startConnectionDiagnosticCapture() {
+        val app = networkFaultApp()
+        if (diagnosticsRecordingWasEnabled == null) {
+            diagnosticsRecordingWasEnabled = app.settingsRepository.settings.value.diagnosticsRecordingEnabled
+        }
+        app.settingsRepository.setDiagnosticsRecordingEnabled(true)
+        app.diagnosticRecorder.clear()
+    }
+
+    /**
+     * Wait for the typed control-reader EOF family after the diagnostic log was
+     * cleared for this one-session episode. sshj reports a clean proxy cut either
+     * as a literal reader EOF or as a TransportException/read_failure whose
+     * classified message is `eof`; both are typed remote-reader exits. A visible
+     * hold or status projection is not accepted as proof that the cut engaged.
+     */
+    protected suspend fun waitForReaderEofDiagnostic(
+        sessionName: String,
+        label: String,
+        timeoutMs: Long = RECONNECTING_BAND_BUDGET_MS,
+    ): DiagnosticsEvent {
+        val app = networkFaultApp()
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        var connectionEvents: List<DiagnosticsEvent> = emptyList()
+        while (SystemClock.elapsedRealtime() < deadline) {
+            connectionEvents = app.diagnosticRecorder.connectionLogArchive()
+                .filter { it.category == "connection" }
+            val eof = connectionEvents.lastOrNull { event ->
+                val reason = event.metadata["disconnectReason"]
+                val source = event.metadata["source"]
+                val message = event.metadata["message"]
+                event.name == "tmux_client_reader_exit" &&
+                    (
+                        reason == "reader_eof" ||
+                            (reason == "reader_exception" && source == "read_failure" && message == "eof")
+                        )
+            }
+            if (eof != null) {
+                recordTiming("${label}_reader_eof_ms", SystemClock.elapsedRealtime() - startedAt)
+                artifactFile("reader-eof-$label.txt").writeText(eof.asEvidenceLine() + "\n")
+                return eof
+            }
+            SystemClock.sleep(100L)
+        }
+        artifactFile("failure-reader-eof-$label.txt").writeText(
+            connectionEvents.joinToString(separator = "\n", postfix = "\n") { it.asEvidenceLine() },
+        )
+        throw AssertionError(
+            "expected typed tmux_client_reader_exit EOF family for " +
+                "$sessionName within ${timeoutMs}ms (see failure-reader-eof-$label.txt)",
+        )
+    }
+
+    private fun DiagnosticsEvent.asEvidenceLine(): String =
+        "sequence=$sequence category=$category name=$name metadata=${metadata.toSortedMap()}"
+
+    private fun networkFaultApp(): App =
+        InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as App
 
     /**
      * The top-chrome "Reconnecting" pill reads its label from the fused surface
@@ -637,6 +708,41 @@ abstract class NetworkFaultProofBase {
     ) {
         val response = client.sendCommand("send-keys ${tmuxSingleQuoted("printf '$marker\\n'")} Enter")
         assertTrue("expected send-keys to succeed for $label, got ${response.output}", !response.isError)
+    }
+
+    /**
+     * Emit through the unproxied fixture control plane, then observe the marker through
+     * PocketShell's live proxied `-CC` stream. This is a post-reconnect readiness oracle:
+     * `Connected` can be projected just before TerminalView receives the replacement
+     * session's first output, so typing at that boundary can target the stale view.
+     */
+    protected suspend fun emitShellMarkerOverFixtureControlPlane(
+        key: String,
+        sessionName: String,
+        marker: String,
+        label: String,
+    ) {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec(
+                    "tmux send-keys -t ${shellQuote(sessionName)} " +
+                        "${shellQuote("printf '$marker\\n'")} Enter",
+                )
+            }
+        }
+        val exec = result.getOrNull()
+        assertTrue(
+            "expected fixture-control marker for $label to succeed; " +
+                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
     }
 
     protected suspend fun waitForCapturedPaneText(

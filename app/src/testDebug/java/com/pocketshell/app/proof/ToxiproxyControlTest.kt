@@ -70,6 +70,25 @@ class ToxiproxyControlTest {
     }
 
     @Test
+    fun stateReadsTheIndependentToxiproxyOracle() {
+        val transport = RecordingTransport(
+            responses = mapOf(
+                RecordedRequest("GET", "/proxies/agents_ssh", null) to
+                    """{"name":"agents_ssh","listen":"0.0.0.0:2228","upstream":"agents:22","enabled":false}""",
+            ),
+        )
+
+        assertEquals(
+            ToxiproxyControl.ProxyState(
+                enabled = false,
+                listen = "0.0.0.0:2228",
+                upstream = "agents:22",
+            ),
+            ToxiproxyControl(baseUrl = "http://unused", transport = transport).state(),
+        )
+    }
+
+    @Test
     fun disabledScopeOrdersRealCutBeforeCaptureAndRestoresAfterward() {
         val events = mutableListOf<String>()
         val transport = RecordingTransport { request ->
@@ -133,6 +152,7 @@ class ToxiproxyControlTest {
     )
 
     private class RecordingTransport(
+        private val responses: Map<RecordedRequest, String> = emptyMap(),
         private val onRequest: (RecordedRequest) -> Unit = {},
     ) : ToxiproxyTransport {
         val requests = mutableListOf<RecordedRequest>()
@@ -141,7 +161,7 @@ class ToxiproxyControlTest {
             val request = RecordedRequest(method, path, body)
             requests += request
             onRequest(request)
-            return "{}"
+            return responses[request] ?: "{}"
         }
     }
 }

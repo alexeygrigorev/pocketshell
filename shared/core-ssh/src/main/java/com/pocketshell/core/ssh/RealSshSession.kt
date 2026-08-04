@@ -1038,10 +1038,8 @@ internal class RealSshSession(
             //  - Genuine programming errors (NPE, IAE, ...) still
             //    propagate to the supervisor scope so they aren't
             //    silently swallowed.
-            // Channel open + the `tail -F` exec write are transport-mutating
-            // packets — serialise them through the dispatcher (issue #847). The
-            // long-lived line READ below runs OUTSIDE the dispatcher so the
-            // follow loop never wedges the `-CC` write or other ops.
+            // Dispatch channel open + exec writes; keep the long-lived read
+            // outside so tail cannot wedge other transport operations (#847).
             val sessionChannelRef = AtomicReference<Session?>()
             var cmd: Command? = null
             val cancelHandle = coroutineJob?.invokeOnCompletion(onCancelling = true) {
@@ -1054,8 +1052,7 @@ internal class RealSshSession(
                 }
             }
             try {
-                // -F follows by name, surviving rotation. Quote the path so
-                // weird filenames don't break the shell parsing.
+                // -F survives rotation; quote unusual paths for the shell.
                 val quoted = shellSingleQuote(path)
                 val lineArg = if (fromLineExclusive >= 0) {
                     "-n +${fromLineExclusive + 1}"
@@ -1064,7 +1061,13 @@ internal class RealSshSession(
                 }
                 cmd = try {
                     dispatcher.run {
-                        val channel = client.startSession()
+                        val channel = try {
+                            client.startSession()
+                        } catch (t: Throwable) {
+                            if (!isSshjDisconnect(t)) throw t
+                            logTailRecoverableFailure(path, t)
+                            return@run null
+                        }
                         sessionChannelRef.set(channel)
                         channel.exec("tail -F $lineArg $quoted")
                     }
@@ -1072,14 +1075,13 @@ internal class RealSshSession(
                     logTailRecoverableFailure(path, e)
                     return@launch
                 } catch (e: IOException) {
-                    // Channel-open / exec race against transport drop —
-                    // same recoverable-disconnect story as the
-                    // startSession() catch above.
+                    // Channel-open / exec raced a recoverable transport drop.
                     logTailRecoverableFailure(path, e)
                     return@launch
                 } catch (t: Throwable) {
                     throw SshException("Failed to start tail session for `$path`: ${t.message}", t)
                 }
+                if (cmd == null) return@launch
                 BufferedReader(InputStreamReader(cmd!!.inputStream, Charsets.UTF_8)).use { reader ->
                     while (isActive) {
                         val line = try {

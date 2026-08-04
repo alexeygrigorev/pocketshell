@@ -4,14 +4,29 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.common.LoggerFactory
+import net.schmizz.sshj.common.Message
+import net.schmizz.sshj.common.SSHException
+import net.schmizz.sshj.common.SSHPacket
 import net.schmizz.sshj.connection.ConnectionException
+import net.schmizz.sshj.connection.channel.Channel
+import net.schmizz.sshj.connection.channel.direct.PTYMode
+import net.schmizz.sshj.connection.channel.direct.Session
+import net.schmizz.sshj.connection.channel.direct.Signal
 import net.schmizz.sshj.transport.TransportException
 import net.schmizz.sshj.common.DisconnectReason
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.IOException
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.SocketException
+import java.nio.charset.Charset
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.TimeUnit
 
 /**
  * Issue #239 — `RealSshSession.tail()` must NOT propagate transport
@@ -53,11 +68,18 @@ import java.net.SocketException
  *     cleanly.
  *  4. `startSession()` throws `IOException` (catch-all parent of the
  *     sshj/socket families) → tail job completes cleanly.
- *  5. Negative case: `startSession()` throws a genuine programming
+ *  5. Issue #1963 recurrence: sshj's `checkConnected()` races a transport
+ *     cut and throws `IllegalStateException("Not connected")` from
+ *     `startSession()` → tail job completes cleanly like the typed transport
+ *     failures above.
+ *  6. Negative case: `startSession()` throws any other genuine programming
  *     error (`IllegalStateException`) → wrapped in `SshException` and
  *     surfaced via the job's completion exception (so genuine bugs
  *     still get reported).
- *  6. Issue #621: an unconnected session is a RECOVERABLE transport drop,
+ *  7. Negative source-boundary case: `startSession()` succeeds, then
+ *     `Session.exec()` throws the same `IllegalStateException("Not connected")`
+ *     text → wrapped and surfaced, never mistaken for sshj's start sentinel.
+ *  8. Issue #621: an unconnected session is a RECOVERABLE transport drop,
  *     not a programmer error. `tail()` on a disconnected session must NOT
  *     throw synchronously into the caller (that crashed the main thread via
  *     `startAgentConversationForPane` → `tailEventsFromLine` in app v0.3.29).
@@ -106,6 +128,17 @@ class RealSshSessionTailRecoverableFailureTest {
     }
 
     @Test
+    fun `tail swallows sshj Not connected race from startSession`() {
+        // Issue #1963: exact Nightly shard-2 crash after an intentional
+        // reconnect. The transport died after tail()'s optimistic connected
+        // check but before sshj's startSession(); SSHClient.checkConnected()
+        // reports that ordinary disconnect race as an IllegalStateException.
+        runTailJobCompletesCleanly(
+            IllegalStateException("Not connected"),
+        )
+    }
+
+    @Test
     fun `tail propagates genuine programming errors from startSession`() {
         // Negative case: a non-IOException Throwable is still wrapped in
         // SshException and surfaces to the coroutine root. We do NOT
@@ -146,6 +179,15 @@ class RealSshSessionTailRecoverableFailureTest {
             Thread.setDefaultUncaughtExceptionHandler(previousHandler)
             session.close()
         }
+    }
+
+    @Test
+    fun `tail propagates exact Not connected programming error from exec`() {
+        // The #1963 exception is recoverable only at SSHClient.startSession().
+        // Identical text from downstream channel logic remains a fatal bug.
+        runTailJobSurfacesWrappedSshException(
+            ConnectedSessionClient(ThrowingExecSession()),
+        )
     }
 
     @Test
@@ -224,6 +266,33 @@ class RealSshSessionTailRecoverableFailureTest {
         }
     }
 
+    private fun runTailJobSurfacesWrappedSshException(client: SSHClient) {
+        val session = RealSshSession(client)
+        val capturedExceptions = mutableListOf<Throwable>()
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, throwable ->
+            capturedExceptions += throwable
+        }
+        try {
+            val job = session.tail("/agent.jsonl") { /* unreachable */ }
+            runBlocking {
+                withTimeout(5_000) { job.join() }
+            }
+            assertTrue(
+                "expected exact-message exec failure to surface as SshException; " +
+                    "captured=$capturedExceptions",
+                capturedExceptions.any { e ->
+                    e is SshException &&
+                        e.cause is IllegalStateException &&
+                        e.cause?.message == "Not connected"
+                },
+            )
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previousHandler)
+            session.close()
+        }
+    }
+
     /**
      * `SSHClient` that reports as connected + authenticated (so the
      * `ensureConnected()` precondition passes) and throws the
@@ -250,6 +319,59 @@ class RealSshSessionTailRecoverableFailureTest {
             // invokes `super.disconnect()` which would NPE walking
             // uninitialised connection state.
         }
+    }
+
+    private class ConnectedSessionClient(
+        private val sessionChannel: Session,
+    ) : SSHClient() {
+        override fun isConnected(): Boolean = true
+        override fun isAuthenticated(): Boolean = true
+        override fun startSession(): Session = sessionChannel
+        override fun disconnect() = Unit
+    }
+
+    private class ThrowingExecSession : FakeChannel(), Session {
+        override fun exec(command: String): Session.Command =
+            throw IllegalStateException("Not connected")
+
+        override fun allocateDefaultPTY() = Unit
+        override fun allocatePTY(
+            term: String,
+            cols: Int,
+            rows: Int,
+            width: Int,
+            height: Int,
+            modes: MutableMap<PTYMode, Int>,
+        ) = Unit
+
+        override fun reqX11Forwarding(host: String, proto: String, cookie: Int) = Unit
+        override fun setEnvVar(name: String, value: String) = Unit
+        override fun startShell(): Session.Shell = throw UnsupportedOperationException("not used")
+        override fun startSubsystem(name: String): Session.Subsystem =
+            throw UnsupportedOperationException("not used")
+    }
+
+    private abstract class FakeChannel : Channel {
+        override fun close() = Unit
+        override fun getAutoExpand(): Boolean = false
+        override fun getID(): Int = 1
+        override fun getInputStream(): InputStream = ByteArrayInputStream(ByteArray(0))
+        override fun getLocalMaxPacketSize(): Int = 32 * 1024
+        override fun getLocalWinSize(): Long = 0L
+        override fun getOutputStream(): OutputStream = ByteArrayOutputStream()
+        override fun getRecipient(): Int = 1
+        override fun getRemoteCharset(): Charset = StandardCharsets.UTF_8
+        override fun getRemoteMaxPacketSize(): Int = 32 * 1024
+        override fun getRemoteWinSize(): Long = 0L
+        override fun getType(): String = "session"
+        override fun isOpen(): Boolean = true
+        override fun setAutoExpand(autoExpand: Boolean) = Unit
+        override fun join() = Unit
+        override fun join(timeout: Long, unit: TimeUnit) = Unit
+        override fun isEOF(): Boolean = false
+        override fun getLoggerFactory(): LoggerFactory = LoggerFactory.DEFAULT
+        override fun handle(message: Message, packet: SSHPacket) = Unit
+        override fun notifyError(error: SSHException) = Unit
     }
 
     /**

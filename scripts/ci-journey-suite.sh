@@ -136,7 +136,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"  # #998 a remote tmux SERVER death (host reboot / OOM
   "$FQCN_PREFIX.AttachmentDropReconnectRecoversE2eTest"  # #1072 attaching a file dropped the live connection AND the
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
-  "com.pocketshell.app.portfwd.PortForwardPanelLifecycleE2eTest"  # #1967 must quiesce its app-owned forward before grace journeys
+  "com.pocketshell.app.portfwd.PortForwardPanelLifecycleE2eTest"  # #1967/#1984 failure-preserving hard cleanup + zero-forward post-test invariant before grace journeys
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"  # #754 #959 this class is the per-PR-CI deterministic regression catcher…
   "$FQCN_PREFIX.BoundedGraceSessionHoldJourneyE2eTest"  # #1123 #977 #1021 #215 bounded-grace D21 update — supersedes the / indefinite-hold…
   "com.pocketshell.app.share.ShareTargetE2eTest"  # #727 #657 epic Wave 1 / S1): the share-auth journey pair
@@ -235,7 +235,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.conversation.ConversationCodeBlockCopyJourneyTest"  # #1888 D33/G9/G10: every fenced Conversation block has a fixed, accessible 48dp Copy action; two raw payloads + long horizontal-scroll line + whole-message Copy preservation
   "com.pocketshell.app.portfwd.PortForwardDuplicateKeyCrashTest"  # #931 D33/G10 reproduce-first): the port-forward panel LazyColumn…
   "com.pocketshell.app.portfwd.PortForwardDuplicateKeyRenderTest"
-  "com.pocketshell.app.portfwd.ForwardingNetworkRideThroughE2eTest"  # #1058 #843 #981 #997 audit R1, trigger T11 / coverage gap C1, D33/G10
+  "com.pocketshell.app.portfwd.ForwardingNetworkRideThroughE2eTest"  # #1058/#1984 real ride-through plus persisted-intent/runtime hard cleanup
   "com.pocketshell.app.portfwd.ForwardingNotificationE2eTest#sessionPinnedForForward_hasExactlyOneForwardNotification_andStopTearsDownTunnels"  # #1202 #1198 D31/D32 durable-fix gate, on-device regression): the port-fo…
   "com.pocketshell.app.portfwd.ForwardingNotificationE2eTest#liveUpdateContract_isApi36Promotable_pre36Ordinary_andStopClears"  # #1487 actual ForwardingService notification contract: API36 promoted request + short text + promotable shape, pre36 ordinary ongoing FGS, and Stop/zero-forward clears
   "$FQCN_PREFIX.SilentDropSyntheticSeamJourneyE2eTest"  # #792 #822 #823 #964 epic Slice D, /V7a + — D31 durable-fix gate

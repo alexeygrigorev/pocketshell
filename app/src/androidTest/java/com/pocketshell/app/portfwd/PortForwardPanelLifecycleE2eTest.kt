@@ -1,9 +1,6 @@
 package com.pocketshell.app.portfwd
 
-import android.app.ActivityManager
-import android.app.NotificationManager
 import android.content.Context
-import android.os.SystemClock
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.room.Room
@@ -11,7 +8,6 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
-import com.pocketshell.app.portfwd.service.ForwardingService
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.core.portfwd.TunnelInfo
@@ -25,16 +21,15 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 
 /**
@@ -75,42 +70,32 @@ class PortForwardPanelLifecycleE2eTest {
     // Issue #470 blocker #1: grant runtime permissions before the activity
     // launches so the system GrantPermissionsActivity never steals focus
     // from MainActivity at launch.
-    @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
-
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private var db: AppDatabase? = null
-    private var ownedForwardingController: ForwardingController? = null
-    private var ownedForwardingHostId: Long? = null
-    private var appContext: Context? = null
+
+    private val forwardingIsolation = PortForwardingTestIsolationRule(
+        afterStop = {
+            launchedActivity?.close()
+            launchedActivity = null
+            db?.close()
+            db = null
+        },
+    )
+
+    @get:Rule
+    val rules: RuleChain = RuleChain
+        .outerRule(forwardingIsolation)
+        .around(PreGrantPermissionsRule())
 
     private fun appForwardingController(context: Context): ForwardingController =
         EntryPointAccessors
             .fromApplication(context.applicationContext, TestAccessEntryPoint::class.java)
             .forwardingController()
 
-    @After
-    fun tearDown() {
-        // Issue #1967: leavePanel() intentionally does NOT stop a user-owned
-        // forward. This proof enabled the app singleton directly, so the test
-        // owns its teardown as well. Await a stable zero controller + service
-        // state before the next in-process journey can start its grace timer.
-        val forwardingCleanupFailure = runCatching {
-            runBlocking { stopOwnedForwardingAndAwaitQuiescent() }
-        }.exceptionOrNull()
-        launchedActivity?.close()
-        launchedActivity = null
-        db?.close()
-        db = null
-        appContext = null
-        forwardingCleanupFailure?.let { throw it }
-    }
-
     @Test
     fun lifecycleStopKeepsTunnels_lifecycleStartDoesNotReconnectThem() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
-        appContext = targetContext.applicationContext
 
         // 1. Stand up an in-memory Room DB on the main thread so the
         //    panel's autoForward + persist paths have a real DAO.
@@ -136,8 +121,6 @@ class PortForwardPanelLifecycleE2eTest {
                 enabled = false,
             ),
         )
-        ownedForwardingHostId = hostId
-
         // 3. Launch MainActivity to get a real process lifecycle.
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
         launchedActivity!!.moveToState(Lifecycle.State.RESUMED)
@@ -148,7 +131,6 @@ class PortForwardPanelLifecycleE2eTest {
         // 4. Build the ViewModel on the main thread (Lifecycle.addObserver
         //    requirement) and attach ProcessLifecycleOwner.
         val forwardingController = appForwardingController(targetContext)
-        ownedForwardingController = forwardingController
         assertTrue(
             "app-owned forwarding controller must start empty; a prior test leaked " +
                 forwardingController.activeHostIdsSnapshot(),
@@ -187,7 +169,7 @@ class PortForwardPanelLifecycleE2eTest {
                 state.connectionState == PortForwardConnectionState.Connected &&
                     state.tunnels.any { it.status == TunnelInfo.Status.FORWARDING } &&
                     forwardingController.activeHostIdsSnapshot() == listOf(hostId) &&
-                    forwardingServiceRunning(targetContext)
+                    forwardingServiceRunningForTest(targetContext)
             }
         }
         val firstSession = requireNotNull(sessionFactory.lastSession()) {
@@ -239,71 +221,8 @@ class PortForwardPanelLifecycleE2eTest {
         )
     } }
 
-    private suspend fun stopOwnedForwardingAndAwaitQuiescent() {
-        val controller = ownedForwardingController ?: return
-        val ownedHostId = ownedForwardingHostId
-        val activeBefore = controller.activeHostIdsSnapshot()
-
-        // stopAllForwarding is ownership-correct here because this test asserts
-        // the app controller was empty before adoption and registers one host.
-        // If a foreign registration appears, remove only ours and fail rather
-        // than silently stopping forwarding another test created.
-        val ownsEveryActiveHost = activeBefore.all { it == ownedHostId }
-        if (ownsEveryActiveHost) {
-            controller.stopAllForwarding()
-        } else {
-            ownedHostId?.let(controller::stopForwarding)
-        }
-
-        withTimeout(STATE_TIMEOUT_MS) {
-            var zeroSinceMs: Long? = null
-            waitFor("zero active forwarding and stopped service") {
-                val context = appContext
-                val isQuiescent = controller.flowOfActiveHostCount().value == 0 &&
-                    controller.activeHostIdsSnapshot().isEmpty() &&
-                    (context == null ||
-                        (!forwardingServiceRunning(context) && !forwardingNotificationPresent(context)))
-                if (isQuiescent) {
-                    val now = SystemClock.elapsedRealtime()
-                    val since = zeroSinceMs ?: now.also { zeroSinceMs = it }
-                    now - since >= QUIESCENT_STABLE_MS
-                } else {
-                    zeroSinceMs = null
-                    false
-                }
-            }
-        }
-
-        assertTrue(
-            "test teardown may stop only its own forwarding; activeBefore=$activeBefore owned=$ownedHostId",
-            ownsEveryActiveHost,
-        )
-        assertEquals(0, controller.flowOfActiveHostCount().value)
-        assertTrue(controller.activeHostIdsSnapshot().isEmpty())
-        ownedForwardingController = null
-        ownedForwardingHostId = null
-    }
-
-    @Suppress("DEPRECATION")
-    private fun forwardingServiceRunning(context: Context): Boolean =
-        context.getSystemService(ActivityManager::class.java)
-            .getRunningServices(Int.MAX_VALUE)
-            .any { it.service.className == ForwardingService::class.java.name }
-
-    private fun forwardingNotificationPresent(context: Context): Boolean =
-        context.getSystemService(NotificationManager::class.java)
-            .activeNotifications
-            .any {
-                it.notification.extras
-                    .getCharSequence("android.title")
-                    ?.toString()
-                    ?.contains("Port forwarding running") == true
-            }
-
     private suspend fun waitFor(label: String, predicate: () -> Boolean) {
-        while (!predicate()) {
-            delay(POLL_INTERVAL_MS)
-        }
+        while (!predicate()) kotlinx.coroutines.delay(POLL_INTERVAL_MS)
     }
 
     private companion object {
@@ -316,7 +235,6 @@ class PortForwardPanelLifecycleE2eTest {
          */
         const val STATE_TIMEOUT_MS: Long = 15_000L
         const val POLL_INTERVAL_MS: Long = 50L
-        const val QUIESCENT_STABLE_MS: Long = 1_000L
     }
 }
 

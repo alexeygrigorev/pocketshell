@@ -140,8 +140,8 @@ case "${1:-}" in
     # `{"results":[{"pane_id","agent_kind","scope","evidence_pid"?}]}`.
     #
     # This Docker container has no real cgroup-v2 scope tree, so the fixture
-    # can't run the live classifier. Instead it answers DETERMINISTICALLY,
-    # keyed off the pane_pid the test supplies, so a connected test can assert a
+    # can't run the live classifier. Instead it answers DETERMINISTICALLY for
+    # SYNTHETIC (non-existent) pane pids, so a connected test can assert a
     # foreign session's guessed kind without seeding a cgroup tree:
     #   pid 1000-1999 -> claude (scope tmuxctl-claude-main.scope)
     #   pid 2000-2999 -> codex  (scope tmuxctl-codex.scope)
@@ -150,7 +150,18 @@ case "${1:-}" in
     #   missing / non-integer / any other pid -> unknown (scope null)
     # These ranges line up with the seeded fixture sessions claude-main / codex
     # / opencode-lab (see pocketshell-sessions-list.txt) so the guess matches
-    # the session the test joins.
+    # the synthetic session the test joins.
+    #
+    # Issue #1973: a REAL live tmux pane pid must never enter this synthetic
+    # table. The nightly suite advances the container PID allocator through
+    # these ranges; the old fixture then called an ordinary `sh` pane Claude /
+    # Codex / OpenCode solely from its numeric pid. That contaminated later
+    # state-readback and folder-list tests even though raw @ps_agent_kind was
+    # absent, the previous agent sessions were gone, and /proc showed the pane
+    # was a live shell in the container's root cgroup. A real pid is therefore
+    # owned by the live fixture, not by the synthetic canned table: resolve it
+    # to `none`. PocketShell-launched fixture agents remain covered by their
+    # authoritative recorded @ps_agent_kind and never take this foreign path.
     shift
     if [ "${1:-}" != "kind" ]; then
       printf 'pocketshell agents fixture supports: kind\n' >&2
@@ -215,6 +226,7 @@ case "${1:-}" in
       function classify(pid,   n) {
         if (pid !~ /^[0-9]+$/) return "unknown\tnull"
         n = pid + 0
+        if (system("test -d /proc/" n) == 0) return "none\tpocketshell-fixture-live.scope"
         if (n >= 1000 && n < 2000) return "claude\ttmuxctl-claude-main.scope"
         if (n >= 2000 && n < 3000) return "codex\ttmuxctl-codex.scope"
         if (n >= 3000 && n < 4000) return "opencode\ttmuxctl-opencode-lab.scope"

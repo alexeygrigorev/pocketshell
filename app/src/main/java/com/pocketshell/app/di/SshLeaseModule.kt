@@ -1,7 +1,7 @@
 package com.pocketshell.app.di
 
 import com.pocketshell.app.sessions.SharedSshLeaseManager
-import com.pocketshell.core.ssh.DefaultSshLeaseConnector
+import com.pocketshell.app.testaccess.AuthoritativeSshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import dagger.Module
@@ -15,7 +15,13 @@ import javax.inject.Singleton
 object SshLeaseModule {
     @Provides
     @Singleton
-    fun provideSshLeaseConnector(): SshLeaseConnector = DefaultSshLeaseConnector()
+    internal fun provideAuthoritativeSshLeaseConnector(): AuthoritativeSshLeaseConnector =
+        AuthoritativeSshLeaseConnector()
+
+    @Provides
+    @Singleton
+    internal fun provideSshLeaseConnector(connector: AuthoritativeSshLeaseConnector): SshLeaseConnector =
+        connector
 
     @Provides
     @Singleton

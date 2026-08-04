@@ -31,9 +31,6 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
-import com.pocketshell.app.connectivity.TerminalNetworkChange
-import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
-import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.app.composer.COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
@@ -61,11 +58,15 @@ import com.pocketshell.app.tmux.TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
+import com.pocketshell.app.tmux.TMUX_UNIFIED_TERMINAL_PAGER_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.app.tmux.durableTmuxSessionKey
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.testaccess.AuthoritativeSshLeaseConnector
+import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_UNSENT_BADGE_TAG
+import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -73,6 +74,7 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
+import dagger.hilt.android.EntryPointAccessors
 import java.io.File
 import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
@@ -186,6 +188,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     @Before
     fun setUp() {
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        authoritativeLeaseConnector().resetOutageForTest()
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
         OutboundDeliverySeams.failInputSendResultLostOnce = false
         PasteChunkSeams.reset()
@@ -194,6 +197,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     @After
     fun tearDown() {
+        runCatching { authoritativeLeaseConnector().resetOutageForTest() }
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
         OutboundDeliverySeams.failInputSendResultLostOnce = false
         PasteChunkSeams.reset()
@@ -386,6 +390,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         switchSessionFromMoreMenu(renamedA, durableA)
         waitForVisibleTerminal("renamed A after recorded-kind refresh") { it.contains(FAKE_AGENT_READY) }
         val vm = currentViewModel()
+        vm.setPassiveDisconnectRecoveryForTest(
+            graceMs = OUTAGE_GRACE_MS,
+            silentReattachTimeoutMs = OUTAGE_DIAL_MS,
+        )
+        vm.setAutoReconnectDelaysForTest(OUTAGE_RETRY_DELAYS_MS)
         waitForDetectionBound(vm)
         openConversationTab(vm)
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
@@ -396,9 +405,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val clientBeforeOutage = vm.currentClientIdentityForTest()
         val generationBeforeOutage = vm.currentConnectGenerationForTest()
         val fallbackA = "$hostId/$renamedA"
-        // Observe and mutate the SAME Hilt-owned queue store that the composer
-        // drain and delivery ledger use; the journey must not create a second
-        // lock owner over production's SharedPreferences blob (#1587).
         val store = currentPromptComposerViewModel().outboundQueueStore
         store.clearSession(fallbackA)
         store.clearSession(durableA)
@@ -409,17 +415,15 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
             .performClick()
         waitForComposerReady(expectQueue = false)
-        vm.forceUnrecoverableHostForTest = true
+        val leaseConnector = authoritativeLeaseConnector()
+        val outageA = leaseConnector.beginSustainedOutageForLastLeaseForTest()
+        assertEquals(DEFAULT_HOST, outageA.leaseKey.host)
+        assertEquals(DEFAULT_PORT, outageA.leaseKey.port)
+        assertEquals(DEFAULT_USER, outageA.leaseKey.user)
+        val outageAStartedAt = SystemClock.elapsedRealtime()
         assertTrue("the clean outage must cut the live client", vm.triggerCleanPassiveDropForTest())
-        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
-            currentConnectionStatus() !is TmuxSessionViewModel.ConnectionStatus.Connected &&
-                !currentViewModel().isSendTransportWritable()
-        }
-        assertEquals(
-            "same-generation/pane recorded agent evidence must survive the outage",
-            routeEvidenceBeforeOutage,
-            vm.currentRecordedAgentRouteEvidence.value,
-        )
+        awaitAuthoritativeLeaseOutage(vm, outageA)
+        assertEquals(routeEvidenceBeforeOutage, vm.currentRecordedAgentRouteEvidence.value)
         val fallbackEnqueueStartedAt = SystemClock.elapsedRealtime()
         openComposerAndSend(firstPayload)
         waitForIssue1739Boundary(
@@ -500,17 +504,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         SystemClock.sleep(250)
         assertEquals(queuedIds, store.itemsFor(fallbackA).map { it.id })
-        assertTrue(
-            "CREATED interval must remain controller-non-Connected",
-            currentConnectionStatus() !is TmuxSessionViewModel.ConnectionStatus.Connected,
-        )
-        assertFalse(
-            "CREATED interval must remain wire-unavailable",
-            currentViewModel().isSendTransportWritable(),
-        )
+        assertTrue(currentConnectionStatus() !is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertFalse(currentViewModel().isSendTransportWritable())
         val createdCapture = runBlocking { sidecarCapturePane(renamedA) }
-        assertFalse("foreground-only: no first delivery while CREATED", createdCapture.contains(firstPayload))
-        assertFalse("foreground-only: no second delivery while CREATED", createdCapture.contains(secondPayload))
+        assertFalse(createdCapture.contains(firstPayload))
+        assertFalse(createdCapture.contains(secondPayload))
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
 
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
@@ -521,13 +519,31 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertEquals(queuedIds, store.itemsFor(fallbackA).map { it.id })
         assertTrue("open-sheet CREATED must not submit", readFakeAgentSubmitLedger().isEmpty())
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        val finalForegroundResumeAt = SystemClock.elapsedRealtime()
         pressSystemBack()
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
 
-        clickTmuxBack()
-        vm.forceUnrecoverableHostForTest = false
+        assertAuthoritativeLeaseOutageHeld(vm, outageA, outageAStartedAt, "A")
+        awaitSustainedOutageTerminalization(
+            vm,
+            outageA,
+            finalForegroundResumeAt + OUTAGE_GRACE_MS + OUTAGE_MARGIN_MS,
+        )
+        vm.closeCurrentConnectionAndJoinForTest()
+        val bBlockedBaseline = outageA.blockedAttemptCount
         val bOpenStartedAt = SystemClock.elapsedRealtime()
-        openSessionFromFolder(SESSION_B)
+        clickTmuxBack()
+        openSessionFromFolder(SESSION_B, waitForConnection = false)
+        awaitBlockedNavigationSettled(vm, outageA, bBlockedBaseline, "B")
+        assertEquals(SESSION_B, currentViewModel().latestRestoreIntentSnapshot()?.sessionName)
+        leaseConnector.endSustainedOutageForTest(outageA)
+        var bReconnectAccepted = false
+        compose.activityRule.scenario.onActivity { bReconnectAccepted = vm.reconnect() }
+        assertTrue(bReconnectAccepted)
+        val freshBClient = waitForFreshClient(clientBeforeOutage)
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            vm.currentTargetSessionKeyForTest() == durableB
+        }
         waitForVisibleTerminal("open B") { it.contains(SESSION_B_MARKER) }
         assertTrue("session B must never own A rows", store.itemsFor("$hostId/$SESSION_B").isEmpty())
         assertTrue(
@@ -556,17 +572,31 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val clientAtB = bVm.currentClientIdentityForTest()
         val generationAtB = bVm.currentConnectGenerationForTest()
         assertTrue("B must be reached through a fresh client", clientAtB != null && clientAtB != clientBeforeOutage)
+        assertEquals("fresh-client wait must settle on B's active client", freshBClient, clientAtB)
         assertTrue("the reconnect generation must advance", generationAtB > generationBeforeOutage)
-        bVm.forceUnrecoverableHostForTest = true
+        openSessionSwitcher(renamedA)
+        val outageB = leaseConnector.beginSustainedOutageForLastLeaseForTest()
+        assertEquals(outageA.leaseKey, outageB.leaseKey)
+        val outageBStartedAt = SystemClock.elapsedRealtime()
         assertTrue("B transport cut must hold A offline for UI proof", bVm.triggerCleanPassiveDropForTest())
-        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !currentViewModel().isSendTransportWritable() }
+        awaitAuthoritativeLeaseOutage(bVm, outageB)
+        awaitSustainedOutageTerminalization(
+            bVm,
+            outageB,
+            outageBStartedAt + OUTAGE_GRACE_MS + OUTAGE_MARGIN_MS,
+        )
         val aReturnStartedAt = SystemClock.elapsedRealtime()
-        clickTmuxBack()
-        openSessionFromFolder(renamedA, waitForConnection = false)
+        val aBlockedBaseline = outageB.blockedAttemptCount
+        compose.onNodeWithTag(TMUX_SESSION_PAGER_TAG, useUnmergedTree = true)
+            .performTouchInput { swipeLeft() }
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            currentViewModel().latestRestoreIntentSnapshot()?.sessionName == renamedA
+        }
         val offlineAIntent = requireNotNull(currentViewModel().latestRestoreIntentSnapshot())
         assertEquals("cached row must target renamed A while offline", renamedA, offlineAIntent.sessionName)
         assertEquals(durableA.removePrefix("tmux:$hostId:").substringBeforeLast(':'), offlineAIntent.tmuxSessionId)
         assertEquals(durableA.substringAfterLast(':').toLong(), offlineAIntent.sessionCreated)
+        awaitBlockedNavigationSettled(bVm, outageB, aBlockedBaseline, "returned A")
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
             store.itemsFor(fallbackA).map { it.id } == queuedIds
         }
@@ -595,20 +625,14 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val healStartedAt = SystemClock.elapsedRealtime()
         val activeAVm = currentViewModel()
         assertTrue("the Activity must still route connectivity to its active host VM", activeAVm === bVm)
-        activeAVm.forceUnrecoverableHostForTest = false
+        assertAuthoritativeLeaseOutageHeld(activeAVm, outageB, outageBStartedAt, "B")
+        leaseConnector.endSustainedOutageForTest(outageB)
         SystemClock.sleep(250)
-        assertEquals("clearing the fixture alone must not deliver", queuedIds, store.itemsFor(fallbackA).map { it.id })
-        assertTrue("clearing the fixture alone must not reach the server", readFakeAgentSubmitLedger().isEmpty())
-        activeAVm.onNetworkChanged(
-            TerminalNetworkChange(
-                previous = TerminalNetworkSnapshot.NoValidatedNetwork,
-                current = TerminalNetworkSnapshot.Validated("issue-1944-restored"),
-                previousValidated = null,
-                reason = "issue-1944-foreground-network-restored",
-                sequence = 1_944L,
-                kind = TerminalNetworkChangeKind.NetworkRestored,
-            ),
-        )
+        assertEquals("restoring connector authority alone must not deliver", queuedIds, store.itemsFor(fallbackA).map { it.id })
+        assertTrue("restoring connector authority alone must not reach the server", readFakeAgentSubmitLedger().isEmpty())
+        var aReconnectAccepted = false
+        compose.activityRule.scenario.onActivity { aReconnectAccepted = activeAVm.reconnect() }
+        assertTrue(aReconnectAccepted)
         waitForConnected("heal returned A")
         waitForVisibleTerminal("return to A") { it.contains(FAKE_AGENT_READY) }
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
@@ -674,6 +698,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 it.fields["clientHash"] == it.fields["currentClientHash"] &&
                     it.fields["generation"] == it.fields["currentGeneration"]
             },
+        )
+        assertEquals(
+            "both rows must drain only into the one healed A generation",
+            setOf(generationAfterHeal),
+            turnovers.map { it.fields["generation"] }.toSet(),
         )
         assertTrue(
             "recorded-agent rows must not fall back to a screen-only ready oracle",
@@ -2119,6 +2148,82 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         return status
     }
 
+    private fun awaitAuthoritativeLeaseOutage(
+        viewModel: TmuxSessionViewModel,
+        outage: AuthoritativeSshLeaseConnector.LeaseOutageForTest,
+    ) {
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            outage.blockedAttemptCount > 0 &&
+                currentConnectionStatus() !is TmuxSessionViewModel.ConnectionStatus.Connected &&
+                !viewModel.isSendTransportWritable()
+        }
+        assertTrue(outage.blockedAttemptCount > 0)
+    }
+
+    private fun assertAuthoritativeLeaseOutageHeld(
+        viewModel: TmuxSessionViewModel,
+        outage: AuthoritativeSshLeaseConnector.LeaseOutageForTest,
+        startedAtMs: Long,
+        label: String,
+    ) {
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+            SystemClock.elapsedRealtime() - startedAtMs >= OUTAGE_OFFLINE_MS
+        }
+        val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
+        assertTrue(outage.blockedAttemptCount > 0)
+        assertFalse("$label wire remains offline", viewModel.isSendTransportWritable())
+        recordTiming("${label.lowercase()}_authoritative_offline_ms", elapsedMs)
+        recordTiming("${label.lowercase()}_authoritative_blocked_dials", outage.blockedAttemptCount.toLong())
+    }
+
+    private fun authoritativeLeaseConnector(): AuthoritativeSshLeaseConnector {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+        return EntryPointAccessors.fromApplication(context, TestAccessEntryPoint::class.java)
+            .authoritativeSshLeaseConnector()
+    }
+
+    private fun awaitBlockedNavigationSettled(
+        viewModel: TmuxSessionViewModel,
+        outage: AuthoritativeSshLeaseConnector.LeaseOutageForTest,
+        blockedBaseline: Int,
+        label: String,
+    ) {
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            outage.blockedAttemptCount > blockedBaseline && !viewModel.connectJobActiveForTest()
+        }
+        assertTrue(
+            "$label navigation must exhaust its blocked authoritative connect before restore",
+            outage.blockedAttemptCount > blockedBaseline && !viewModel.connectJobActiveForTest(),
+        )
+    }
+
+    private fun awaitSustainedOutageTerminalization(
+        viewModel: TmuxSessionViewModel,
+        outage: AuthoritativeSshLeaseConnector.LeaseOutageForTest,
+        notBeforeMs: Long,
+    ) {
+        var lastBlockedCount = -1
+        var stableSinceMs = 0L
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            val now = SystemClock.elapsedRealtime()
+            val blockedCount = outage.blockedAttemptCount
+            if (blockedCount != lastBlockedCount) {
+                lastBlockedCount = blockedCount
+                stableSinceMs = now
+            }
+            now >= notBeforeMs && now - stableSinceMs >= OUTAGE_QUIET_MS &&
+                !viewModel.withinGraceRecoveryActiveForTest() &&
+                viewModel.connectionControllerStateForTest() is ConnectionState.Unreachable &&
+                !viewModel.connectJobActiveForTest()
+        }
+        compose.activityRule.scenario.onActivity { }
+        assertTrue(
+            !viewModel.withinGraceRecoveryActiveForTest() &&
+            viewModel.connectionControllerStateForTest() is ConnectionState.Unreachable &&
+                !viewModel.connectJobActiveForTest(),
+        )
+    }
+
     private fun waitForVisibleTerminal(
         label: String,
         timeoutMillis: Long = TerminalTestTimeouts.terminalVisibilityTimeoutMs(),
@@ -2458,6 +2563,12 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         const val ACK_BOUNDED_RESULT_TIMEOUT_MS: Long = 5_000L
         const val MAIN_HEARTBEAT_TIMEOUT_MS: Long = 2_000L
         const val ISSUE1739_MAIN_CLOCK_STEP_MS: Long = 20L
+        const val OUTAGE_OFFLINE_MS: Long = 250L
+        const val OUTAGE_GRACE_MS: Long = 4_000L
+        const val OUTAGE_DIAL_MS: Long = 750L
+        const val OUTAGE_MARGIN_MS: Long = 2_000L
+        const val OUTAGE_QUIET_MS: Long = 500L
+        val OUTAGE_RETRY_DELAYS_MS: List<Long> = listOf(0L, 250L, 500L)
 
         /**
          * Issue #1819 pumped-step sizes replacing bare `SystemClock.sleep`s.

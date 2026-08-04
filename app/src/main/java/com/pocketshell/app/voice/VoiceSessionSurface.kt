@@ -489,7 +489,18 @@ private fun PrimaryChipCluster(
                 label = SHOW_KEYBOARD_CHIP_LABEL,
                 onClick = onShowKeyboardTap,
                 icon = KeyboardChipIcon,
-                modifier = Modifier.testTag(SHOW_KEYBOARD_CHIP_TAG),
+                // Issue #1977: this is the only path into the real IME/key bar
+                // while the terminal keyboard is down. Material's
+                // minimumInteractiveComponentSize expands pointer dispatch but
+                // leaves this tagged semantics node at the compact painted
+                // height (35.81dp at 1.5x font), so the nightly could neither
+                // prove a 48dp target nor reliably inject a tap. Give the
+                // keyboard action a real laid-out touch floor; the surrounding
+                // one-line cluster already reserves the same 48dp for hotkeys
+                // and the pinned composer launcher.
+                modifier = Modifier
+                    .testTag(SHOW_KEYBOARD_CHIP_TAG)
+                    .heightIn(min = PocketShellDensity.tapTargetMin),
             )
         }
         // Issue #789: the compact terminal-hotkeys launcher. Replaces the

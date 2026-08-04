@@ -1,7 +1,6 @@
 package com.pocketshell.app.tmux
 
 import android.graphics.Bitmap
-import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -11,13 +10,17 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
@@ -276,6 +279,40 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
     }
 
     @Test
+    fun showKeyboardIsInitiallyContainedAndHitTestableOnNarrowLargeFont() {
+        renderBottomControls(widthDp = NARROW_WIDTH_DP, fontScale = LARGE_FONT_SCALE)
+        captureFullDevice(File(artifactDir(), "issue1977-narrow-largefont-keyboard-chip.png"))
+
+        val band = compose.onNodeWithTag(BAND_TAG).getUnclippedBoundsInRoot()
+        val launcher = compose.onNodeWithTag(
+            SESSION_COMPOSER_LAUNCHER_TAG,
+        ).getUnclippedBoundsInRoot()
+        val keyboard = compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG)
+            .assertHasClickAction()
+            .assertHeightIsAtLeast(48.dp)
+        val keyboardBounds = keyboard.getUnclippedBoundsInRoot()
+        println(
+            "ISSUE1977_NARROW_GEOMETRY band=$band keyboard=$keyboardBounds " +
+                "launcher=$launcher",
+        )
+
+        assertTrue(
+            "#1977: the show-keyboard chip must be initially fully contained " +
+                "and clear of the pinned composer launcher without a hidden " +
+                "scroll gesture; keyboard=$keyboardBounds launcher=$launcher band=$band",
+            keyboardBounds.left >= band.left &&
+                keyboardBounds.top >= band.top &&
+                keyboardBounds.right <= launcher.left &&
+                keyboardBounds.bottom <= band.bottom,
+        )
+        keyboard.performClick()
+        compose.runOnIdle {
+            assertEquals(listOf(SHOW_KEYBOARD_CHIP_TAG), clickedPrimaryControls)
+        }
+        assertLauncherWithinBand("#1977 initial keyboard-chip case")
+    }
+
+    @Test
     fun rawSshPrimaryControlsScrollIntoFullReachOnNarrowLargeFont() {
         renderRawSshBottomControls(
             widthDp = NARROW_WIDTH_DP,
@@ -327,10 +364,10 @@ class TmuxComposerLauncherNarrowFontClipProofTest {
     }
 
     private fun captureFullDevice(file: File) {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        instrumentation.waitForIdleSync()
-        SystemClock.sleep(200)
-        val bitmap: Bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        compose.waitForIdle()
+        val bitmap: Bitmap = compose.onRoot(useUnmergedTree = true)
+            .captureToImage()
+            .asAndroidBitmap()
         try {
             FileOutputStream(file).use { output ->
                 check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {

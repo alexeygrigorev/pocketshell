@@ -8,12 +8,18 @@ import android.graphics.Rect
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
@@ -24,13 +30,17 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
-import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
+import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -387,6 +397,7 @@ class TmuxSessionOpencodeInputDockerTest {
             val detectionAt = SystemClock.elapsedRealtime()
             waitForTabsPill()
             recordTiming("issue303_agent_terminal_to_tabs_visible_ms", SystemClock.elapsedRealtime() - detectionAt)
+            selectIssue1977TerminalTab()
             assertTabsInsideToolbar("issue303_agent_terminal")
             compose.onNodeWithText("Terminal", useUnmergedTree = true).assertIsDisplayed()
             compose.onNodeWithText("Conversation", useUnmergedTree = true).assertIsDisplayed()
@@ -396,8 +407,7 @@ class TmuxSessionOpencodeInputDockerTest {
             // / key bar for raw keys).
             compose.onNodeWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true)
                 .assertIsDisplayed()
-            compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
-                .assertIsDisplayed()
+            assertIssue1977TerminalControlGeometry("issue303-live-after-tabs")
             captureArtifact("issue303-01-agent-terminal")
             captureFullFrame("issue303-01-agent-terminal-full")
 
@@ -471,6 +481,101 @@ class TmuxSessionOpencodeInputDockerTest {
             launchedActivity = null
             runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME) } }
             runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_303_PLAIN_SESSION_NAME) } }
+        }
+        Unit
+    } }
+
+    @Test
+    fun issue1977OpenCodeKeyboardChipIsContainedAndHitTestable() { runBlocking {
+        val sshPort = resolveSshPort()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        val key = instrumentation.context.assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        val sshKey = SshKey.Pem(key)
+        waitForSshFixtureReady(sshKey, port = sshPort)
+        killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
+        seedIssue303AgentSession(sshKey, sshPort)
+
+        try {
+            val hostRowTag = persistHost(appContext, key, sshPort)
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            attachToSeededSession(
+                hostRowTag = hostRowTag,
+                sessionName = ISSUE_303_AGENT_SESSION_NAME,
+            )
+            recordIssue1977LifecycleState("held-after-session-tap")
+            waitForIssue1977TerminalLiveState()
+            waitForTerminalSessionAttached()
+            waitForVisibleTerminalText("issue1977-opencode-ready", VISIBLE_TIMEOUT_MS) {
+                "issue303-agent-terminal-ready" in it
+            }
+            waitForTabsPill()
+            selectIssue1977TerminalTab()
+            assertTabsInsideToolbar("issue1977_opencode_terminal")
+            compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
+                .assertIsDisplayed()
+
+            assertIssue1977TerminalControlGeometry("live-after-tabs")
+            captureArtifact("issue1977-opencode-toolbar")
+            captureFullFrame("issue1977-opencode-toolbar-full")
+
+            val scenario = checkNotNull(launchedActivity) {
+                "#1977: the real OpenCode activity must remain open for the click-effect proof"
+            }
+            val focus = awaitActivityWindowFocus(scenario, timeoutMs = 10_000)
+            assertTrue(
+                "#1977: the app window must own input focus before the one real keyboard-chip tap; " +
+                    focus.diagnosis,
+                focus.focused,
+            )
+            val imeVisibleBeforeTap = waitForInputMethodVisible(
+                scenario = scenario,
+                expected = false,
+                timeoutMs = 5_000,
+            )
+            assertTrue(
+                "#1977: real OpenCode click-effect proof requires the IME to be down first",
+                !imeVisibleBeforeTap,
+            )
+            val tapAt = SystemClock.elapsedRealtime()
+            compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                .performClick()
+            val imeVisibleAfterTap = waitForInputMethodVisible(
+                scenario = scenario,
+                expected = true,
+            )
+            recordTiming(
+                "issue1977_show_keyboard_tap_to_ime_visible_ms",
+                SystemClock.elapsedRealtime() - tapAt,
+            )
+            writeText(
+                "issue1977-opencode-toolbar-click-effect.txt",
+                buildString {
+                    appendLine("effect_source=WindowInsetsCompat.Type.ime")
+                    appendLine("app_window_focused_before_tap=${focus.focused}")
+                    appendLine("ime_visible_before_tap=$imeVisibleBeforeTap")
+                    appendLine("ime_visible_after_one_tap=$imeVisibleAfterTap")
+                },
+            )
+            assertTrue(
+                "#1977: one real show-keyboard tap must raise the IME on OpenCode",
+                imeVisibleAfterTap,
+            )
+            compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
+                .assertIsDisplayed()
+            captureFullFrame("issue1977-opencode-toolbar-after-keyboard-tap-full")
+            writeTimings()
+        } finally {
+            launchedActivity?.close()
+            launchedActivity = null
+            runCatching {
+                withTimeout(20_000) {
+                    killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
+                }
+            }
         }
         Unit
     } }
@@ -994,6 +1099,204 @@ class TmuxSessionOpencodeInputDockerTest {
         recordTiming("${label}_tabs_top_px", tabs.top.toLong())
         recordTiming("${label}_tabs_bottom_px", tabs.bottom.toLong())
     }
+
+    /**
+     * Issue #1977 regression oracle for the exact real OpenCode toolbar state.
+     *
+     * A bare `assertIsDisplayed()` classified neither the nightly failure nor
+     * the #813-style off-edge case. Persist every owning/owned bound first,
+     * then require the keyboard chip and the structurally-always-present
+     * composer launcher to be fully contained and hit-testable.
+     */
+    private fun assertIssue1977TerminalControlGeometry(label: String) {
+        issue1977TerminalControlGeometry(label = label, requireKeyboard = true)
+    }
+
+    private fun recordIssue1977LifecycleState(label: String) {
+        val lifecycle = issue1977LifecycleState()
+        writeText(
+            "issue1977-opencode-toolbar-lifecycle-$label.txt",
+            buildString {
+                appendLine("stage=$label")
+                appendLine("surface_state_source=$TMUX_SESSION_SCREEN_TAG semantics")
+                appendLine("session_live=${lifecycle.sessionLive}")
+                appendLine("terminal_held=${lifecycle.terminalHeld}")
+                appendLine("surface_pane_present=${lifecycle.surfacePanePresent}")
+                appendLine("terminal_tab_selected=${issue1977TerminalTabSelected()}")
+                appendLine("held_overlay_count=${issue1977HeldOverlayCount()}")
+                appendLine("terminal_view_attached=${issue1977TerminalViewAttached()}")
+            },
+        )
+    }
+
+    private fun issue1977TerminalControlGeometry(
+        label: String,
+        requireKeyboard: Boolean,
+    ) {
+        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
+        val screen = compose
+            .onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        val toolbar = compose
+            .onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG, useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        val tabs = compose
+            .onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        val launcherNode = compose
+            .onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
+        val launcher = launcherNode.fetchSemanticsNode().boundsInRoot
+        val launcherUnclipped = launcherNode.getUnclippedBoundsInRoot()
+        val keyboardNodes = compose
+            .onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        val keyboard = keyboardNodes.singleOrNull()
+        val keyboardBounds = keyboard?.boundsInRoot
+        val keyboardHasClickAction =
+            keyboard?.config?.getOrNull(SemanticsActions.OnClick) != null
+        val keyboardClassification = when {
+            keyboardBounds == null -> "absent"
+            keyboardBounds.left < root.left ||
+                keyboardBounds.top < root.top ||
+                keyboardBounds.right > root.right ||
+                keyboardBounds.bottom > root.bottom -> "clipped"
+            keyboardBounds.overlaps(launcher) -> "overlapped_by_composer"
+            !keyboardHasClickAction -> "non_hit_testable"
+            else -> "contained_hit_testable"
+        }
+        val keyboardUnclipped = if (keyboard != null) {
+            compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                .getUnclippedBoundsInRoot()
+        } else {
+            null
+        }
+        writeText(
+            "issue1977-opencode-toolbar-geometry-$label.txt",
+            buildString {
+                appendLine("stage=$label")
+                val lifecycle = issue1977LifecycleState()
+                appendLine("surface_state_source=$TMUX_SESSION_SCREEN_TAG semantics")
+                appendLine("session_live=${lifecycle.sessionLive}")
+                appendLine("terminal_held=${lifecycle.terminalHeld}")
+                appendLine("surface_pane_present=${lifecycle.surfacePanePresent}")
+                appendLine("terminal_tab_selected=${issue1977TerminalTabSelected()}")
+                appendLine("held_overlay_count=${issue1977HeldOverlayCount()}")
+                appendLine("terminal_view_attached=${issue1977TerminalViewAttached()}")
+                appendLine("classification_node_count=${keyboardNodes.size}")
+                appendLine("classification=$keyboardClassification")
+                appendLine("root=$root")
+                appendLine("session_screen_unclipped=$screen")
+                appendLine("toolbar_unclipped=$toolbar")
+                appendLine("tabs_unclipped=$tabs")
+                appendLine("composer_launcher_bounds=$launcher")
+                appendLine("composer_launcher_unclipped=$launcherUnclipped")
+                appendLine("show_keyboard_bounds=$keyboardBounds")
+                appendLine("show_keyboard_unclipped=$keyboardUnclipped")
+                appendLine("show_keyboard_has_click_action=$keyboardHasClickAction")
+                appendLine("show_keyboard_config=${keyboard?.config}")
+            },
+        )
+        if (!requireKeyboard) return
+        assertEquals(
+            "#1977: show-keyboard chip must exist exactly once in the Live OpenCode Terminal band",
+            1,
+            keyboardNodes.size,
+        )
+        compose.assertNodeFullyWithinRoot(
+            SHOW_KEYBOARD_CHIP_TAG,
+            useUnmergedTree = true,
+        )
+        compose.assertNodeFullyWithinRoot(
+            SESSION_COMPOSER_LAUNCHER_TAG,
+            useUnmergedTree = true,
+        )
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+            .assertHasClickAction()
+            .assertHeightIsAtLeast(48.dp)
+            .assertIsDisplayed()
+    }
+
+    /**
+     * Waits on the reveal surface's own held marker, never on the keyboard chip.
+     * The screen semantics expose raw `sessionLive`, `terminalHeld`, and pane
+     * projection state from the connection/runtime slab. The caller records
+     * the immediate post-tap state (held on a cold attach, possibly already
+     * Live on a warm local fixture); waiting on the raw Live values plus the
+     * attached TerminalView establishes the precondition independently before
+     * the #1977 node is queried.
+     */
+    private fun waitForIssue1977TerminalLiveState() {
+        val startedAt = SystemClock.elapsedRealtime()
+        compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+            val lifecycle = issue1977LifecycleState()
+            lifecycle.sessionLive &&
+                !lifecycle.terminalHeld &&
+                issue1977HeldOverlayCount() == 0 &&
+                issue1977TerminalViewAttached()
+        }
+        recordTiming(
+            "issue1977_post_session_tap_state_to_live_ms",
+            SystemClock.elapsedRealtime() - startedAt,
+        )
+        val lifecycle = issue1977LifecycleState()
+        assertTrue(
+            "#1977: the reveal surface must independently settle Live before chip assertions",
+            lifecycle.sessionLive && !lifecycle.terminalHeld,
+        )
+        recordIssue1977LifecycleState("live-before-toolbar-assertion")
+    }
+
+    private fun issue1977LifecycleState(): Issue1977LifecycleState {
+        val config = compose
+            .onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+        return Issue1977LifecycleState(
+            sessionLive = config.getOrNull(TMUX_SESSION_LIVE_SEMANTICS_KEY) == true,
+            terminalHeld = config.getOrNull(TMUX_TERMINAL_HELD_SEMANTICS_KEY) == true,
+            surfacePanePresent =
+                config.getOrNull(TMUX_SURFACE_PANE_PRESENT_SEMANTICS_KEY) == true,
+        )
+    }
+
+    private fun selectIssue1977TerminalTab() {
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+            issue1977TerminalTabSelected() == true
+        }
+        assertTrue(
+            "#1977: the real journey must own the Terminal tab before asserting its controls",
+            issue1977TerminalTabSelected() == true,
+        )
+    }
+
+    private fun issue1977TerminalTabSelected(): Boolean? =
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+            .getOrNull(TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY)
+            ?.let { it == 0 }
+
+    private fun issue1977HeldOverlayCount(): Int =
+        compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+
+    private fun issue1977TerminalViewAttached(): Boolean {
+        var attached = false
+        launchedActivity?.onActivity { activity ->
+            val terminalView = activity.window.decorView.findTerminalView()
+            attached = terminalView?.currentSession != null && terminalView.mEmulator != null
+        }
+        return attached
+    }
+
+    private data class Issue1977LifecycleState(
+        val sessionLive: Boolean,
+        val terminalHeld: Boolean,
+        val surfacePanePresent: Boolean,
+    )
 
     private fun showKeyboardAndWaitForExitKeys() {
         if (compose.onAllNodesWithText("Ctrl-C", useUnmergedTree = true)

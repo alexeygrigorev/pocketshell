@@ -36,21 +36,32 @@
 # ---------------------------------------------------------------------------
 # compute_fault_verdict <network_fault_status> <bootstrap_status>
 #
-# The two arguments are the PASS/FAIL results of the network-fault (phase 2) and
+# The two arguments are the PASS/FAIL/INFRA results of the network-fault (phase 2) and
 # bootstrap (phase 3) phases. The journey phase (phase 1) and the #822
 # expected-fail lane are DELIBERATELY not arguments — they must never influence
 # the fault-injection safety verdict.
 #
-# Prints "PASS" / "FAIL"; returns 0 (pass) / 1 (fail).
+# FAIL dominates INFRA so a real assertion can never be downgraded by a later
+# device loss. Otherwise INFRA is preserved as a distinct blocking verdict.
+# Prints "PASS" / "FAIL" / "INFRA"; returns 0 / 1 / 2.
 # ---------------------------------------------------------------------------
 compute_fault_verdict() {
   local network_fault_status="$1"
   local bootstrap_status="$2"
 
+  if [[ "$network_fault_status" == "FAIL" || "$bootstrap_status" == "FAIL" ]]; then
+    echo "FAIL"
+    return 1
+  fi
+  if [[ "$network_fault_status" == "INFRA" || "$bootstrap_status" == "INFRA" ]]; then
+    echo "INFRA"
+    return 2
+  fi
   if [[ "$network_fault_status" == "PASS" && "$bootstrap_status" == "PASS" ]]; then
     echo "PASS"
     return 0
   fi
+  # Unknown status is never a release-green signal.
   echo "FAIL"
   return 1
 }
@@ -122,6 +133,11 @@ _fault_verdict_self_test() {
   assert_verdict "nf red"                             FAIL 1 FAIL PASS
   assert_verdict "bootstrap red"                      FAIL 1 PASS FAIL
   assert_verdict "both gating red"                    FAIL 1 FAIL FAIL
+  # Exact #1991 direction: infra is distinct unless a substantive product
+  # failure also exists, in which case product-red dominates.
+  assert_verdict "network-fault device offline"       INFRA 2 INFRA PASS
+  assert_verdict "bootstrap device offline"           INFRA 2 PASS INFRA
+  assert_verdict "product red dominates infra"        FAIL 1 FAIL INFRA
 
   # THE load-bearing #1201 direction, at the FILE level: the journey suite and
   # the #822 expected-fail lane are red, but the fault phases passed -> the
@@ -136,6 +152,19 @@ _fault_verdict_self_test() {
     echo "ok   [file] fault_verdict=PASS despite expected-fail lane red"
   else
     echo "FAIL [file] fault_verdict should be PASS despite expected-fail lane red"
+    failures=$((failures + 1))
+  fi
+  rm -f "$tmp"
+
+  echo
+  echo "--- file-level dry run: fault phase device-offline -> verdict INFRA ---"
+  tmp="$(mktemp)"
+  write_fault_verdict_file "$tmp" INFRA 1 PASS 0 FAIL 1
+  cat "$tmp"
+  if grep -q '^fault_verdict=INFRA$' "$tmp"; then
+    echo "ok   [file] fault_verdict=INFRA for device-offline fault phase"
+  else
+    echo "FAIL [file] fault_verdict should distinguish device-offline infrastructure"
     failures=$((failures + 1))
   fi
   rm -f "$tmp"

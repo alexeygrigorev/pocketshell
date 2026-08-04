@@ -202,7 +202,13 @@ class FileViewerDockerTest {
                 throw injectedFailure
             }
         }.exceptionOrNull()
-        assertTrue("the injected body failure must escape unchanged", escaped === injectedFailure)
+        if (escaped !== injectedFailure) {
+            // Issue #1991: cleanup failure intentionally dominates the injected
+            // body failure in SyntheticFocusOwnerHarness. Preserve that causal
+            // focus diagnosis instead of replacing it with a generic identity
+            // assertion; the injected failure remains attached as suppressed.
+            throw escaped ?: AssertionError("synthetic owner body returned without its injected failure")
+        }
 
         requirePocketShellFocusAtJourneyBoundary(
             scenario = composeRule.activityRule.scenario,

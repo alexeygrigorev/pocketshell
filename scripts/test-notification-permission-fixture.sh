@@ -696,10 +696,23 @@ fi
 grep -q '^[[:space:]]*NOTIFICATION_PERMISSION_EXIT=\${PIPESTATUS\[0\]}$' \
   "$nightly_phase1b" \
   || fail "nightly phase 1b does not propagate the wrapper's real exit code"
+# Issue #1991: the summary status now comes from the preserved-report
+# classifier, so a strong UTP device-offline signature is surfaced as INFRA
+# while every other non-zero phase stays FAIL. Pin both the real exit/report
+# inputs and the classification-to-status mapping instead of the superseded
+# direct `-ne 0` assignment.
 # shellcheck disable=SC2016
-grep -q '^[[:space:]]*\[\[ "\$NOTIFICATION_PERMISSION_EXIT" -ne 0 \]\] && notification_permission_status="FAIL"$' \
+grep -q 'classify_nightly_phase.*"\$NOTIFICATION_PERMISSION_EXIT"' \
   "$nightly_phase1b" \
-  || fail "nightly phase 1b summary row no longer turns FAIL on a non-zero exit"
+  || fail "nightly phase 1b classification no longer consumes the real exit code"
+# shellcheck disable=SC2016
+grep -q '"\$PHASE_REPORTS_DIR/phase1b-notification-permission"' \
+  "$nightly_phase1b" \
+  || fail "nightly phase 1b classification no longer consumes its preserved report"
+# shellcheck disable=SC2016
+grep -q 'nightly_phase_status "\$notification_permission_classification"' \
+  "$nightly_phase1b" \
+  || fail "nightly phase 1b summary no longer maps its fail-safe classification"
 
 # Human extensive-shard verdict, scoped to the overall_status conditional.
 overall_status_block="$FIXTURE_ROOT/nightly-overall-status.txt"

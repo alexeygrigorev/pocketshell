@@ -38,6 +38,7 @@ import com.pocketshell.app.tmux.TMUX_CONVERSATION_DETECTING_TAG
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
+import com.pocketshell.app.usage.UsageSchedulerTestIsolationRule
 import com.pocketshell.app.usage.usageBannerTagFor
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentDetection
@@ -56,6 +57,7 @@ import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
@@ -73,14 +75,16 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class EmulatorDockerSshSmokeTest {
 
-    @get:Rule
     val compose = createEmptyComposeRule()
 
     // Issue #470 blocker #1: grant runtime permissions before the activity
     // launches so the system GrantPermissionsActivity never steals focus
     // from the Compose hierarchy ("No compose hierarchies found").
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val rules: RuleChain = RuleChain
+        .outerRule(UsageSchedulerTestIsolationRule())
+        .around(PreGrantPermissionsRule())
+        .around(compose)
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
 

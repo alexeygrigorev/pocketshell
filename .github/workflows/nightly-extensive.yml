@@ -492,5 +492,9 @@ jobs:
             echo "PASS: the fault-injection safety journeys (network-fault + bootstrap) passed on this HEAD."
             exit 0
           fi
+          if [[ "$verdict" == "INFRA" ]]; then
+            echo "BLOCK-INFRA: a gating phase lost the emulator/device; preserved UTP evidence did not contain a substantive product assertion. Re-run on a healthy AVD before release."
+            exit 1
+          fi
           echo "BLOCK: fault_verdict=$verdict — a fault-injection safety phase failed on this HEAD."
           exit 1

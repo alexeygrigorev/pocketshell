@@ -429,6 +429,15 @@ jobs:
           chmod +x scripts/lib/nightly-phase-reports.sh
           scripts/lib/nightly-phase-reports.sh --self-test
 
+      # Issue #1991: fast report-fixture proof that an empty UTP failure with
+      # the exact APK-installer + ddmlib device-offline signature is INFRA, a
+      # substantive assertion remains product-red, and product-red dominates a
+      # later offline teardown. No emulator, Gradle, retry, or network.
+      - name: Nightly phase device-offline classification guard (issue #1991)
+        run: |
+          chmod +x scripts/test-nightly-phase-classification.sh
+          scripts/test-nightly-phase-classification.sh
+
       # Issue #1581: gate the Build workflow's corrupted-NDK-download retry
       # wrapper (scripts/ci-assemble-with-ndk-retry.sh) so its clear-and-retry
       # logic cannot silently regress. Fast, JVM-free shell test (fake build cmd,

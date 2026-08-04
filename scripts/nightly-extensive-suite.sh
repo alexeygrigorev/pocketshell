@@ -246,6 +246,13 @@ source "$REPO_ROOT/scripts/lib/nightly-phase-reports.sh"
 PHASE_REPORTS_DIR="$ARTIFACT_DIR/phase-reports"
 APP_BUILD_DIR="$REPO_ROOT/app/build"
 
+# Issue #1991: distinguish a substantive assertion from UTP assigning an empty
+# test failure because its APK-installer teardown lost an offline device. The
+# classifier reads only preserved phase evidence and never retries/restarts.
+# shellcheck source=scripts/lib/nightly-phase-classification.sh
+source "$REPO_ROOT/scripts/lib/nightly-phase-classification.sh"
+PHASE_CLASSIFICATIONS_DIR="$ARTIFACT_DIR/phase-classifications"
+
 # ---------------------------------------------------------------------------
 # Sharding (issue #835 follow-up): the full connected journey/E2E suite is
 # ~680 tests. Run serially on ONE swiftshader AVD it cannot finish inside the
@@ -301,6 +308,14 @@ echo "phase 1 (journey/E2E) exit code: $JOURNEY_EXIT"
 # Snapshot phase 1's report BEFORE the phase-2 gradle invocation overwrites it
 # (issue #1293). Observability only — never affects JOURNEY_EXIT.
 preserve_phase_reports "phase1-journey" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+write_nightly_phase_classification \
+  "$PHASE_CLASSIFICATIONS_DIR/phase1-journey.txt" \
+  "phase1-journey" "$JOURNEY_EXIT" "$PHASE_REPORTS_DIR/phase1-journey"
+capture_nightly_device_boundary \
+  "$PHASE_CLASSIFICATIONS_DIR/phase1-journey-device.txt" "phase1-journey"
+JOURNEY_CLASSIFICATION="$(
+  classify_nightly_phase "$JOURNEY_EXIT" "$PHASE_REPORTS_DIR/phase1-journey"
+)"
 
 # Default the dedicated/aux phases to SKIPPED; only shard 0 owns them.
 NOTIFICATION_PERMISSION_EXIT=0
@@ -312,6 +327,10 @@ notification_permission_executed=0
 nf_status="SKIP"
 bootstrap_status="SKIP"
 expectedfail_status="SKIP"
+notification_permission_classification="SKIP"
+nf_classification="SKIP"
+bootstrap_classification="SKIP"
+expectedfail_classification="SKIP"
 
 if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   echo "=========================================================="
@@ -343,9 +362,21 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     "phase1b-notification-permission" \
     "$APP_BUILD_DIR" \
     "$PHASE_REPORTS_DIR"
-
-  notification_permission_status="PASS"
-  [[ "$NOTIFICATION_PERMISSION_EXIT" -ne 0 ]] && notification_permission_status="FAIL"
+  write_nightly_phase_classification \
+    "$PHASE_CLASSIFICATIONS_DIR/phase1b-notification-permission.txt" \
+    "phase1b-notification-permission" "$NOTIFICATION_PERMISSION_EXIT" \
+    "$PHASE_REPORTS_DIR/phase1b-notification-permission"
+  capture_nightly_device_boundary \
+    "$PHASE_CLASSIFICATIONS_DIR/phase1b-notification-permission-device.txt" \
+    "phase1b-notification-permission"
+  notification_permission_classification="$(
+    classify_nightly_phase \
+      "$NOTIFICATION_PERMISSION_EXIT" \
+      "$PHASE_REPORTS_DIR/phase1b-notification-permission"
+  )"
+  notification_permission_status="$(
+    nightly_phase_status "$notification_permission_classification"
+  )"
 
   echo "=========================================================="
   echo "Nightly Extensive Tests — phase 2: network-fault proofs (un-gated, GATING)"
@@ -377,6 +408,17 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   # DisconnectBlackhole / NatIdle failing assertions unrecoverable. Observability
   # only — never affects NETWORK_FAULT_EXIT.
   preserve_phase_reports "phase2-network-fault" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+  write_nightly_phase_classification \
+    "$PHASE_CLASSIFICATIONS_DIR/phase2-network-fault.txt" \
+    "phase2-network-fault" "$NETWORK_FAULT_EXIT" \
+    "$PHASE_REPORTS_DIR/phase2-network-fault"
+  capture_nightly_device_boundary \
+    "$PHASE_CLASSIFICATIONS_DIR/phase2-network-fault-device.txt" \
+    "phase2-network-fault"
+  nf_classification="$(
+    classify_nightly_phase \
+      "$NETWORK_FAULT_EXIT" "$PHASE_REPORTS_DIR/phase2-network-fault"
+  )"
 
   echo "=========================================================="
   echo "Nightly Extensive Tests — phase 2b: #822 expected-fail lane (NON-GATING)"
@@ -400,6 +442,17 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   # Snapshot phase 2b's report BEFORE the phase-3 gradle invocation overwrites it
   # (issue #1293). Observability only — never affects EXPECTED_FAIL_EXIT.
   preserve_phase_reports "phase2b-expected-fail" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+  write_nightly_phase_classification \
+    "$PHASE_CLASSIFICATIONS_DIR/phase2b-expected-fail.txt" \
+    "phase2b-expected-fail" "$EXPECTED_FAIL_EXIT" \
+    "$PHASE_REPORTS_DIR/phase2b-expected-fail"
+  capture_nightly_device_boundary \
+    "$PHASE_CLASSIFICATIONS_DIR/phase2b-expected-fail-device.txt" \
+    "phase2b-expected-fail"
+  expectedfail_classification="$(
+    classify_nightly_phase \
+      "$EXPECTED_FAIL_EXIT" "$PHASE_REPORTS_DIR/phase2b-expected-fail"
+  )"
 
   echo "=========================================================="
   echo "Nightly Extensive Tests — phase 3: bootstrap setup scenarios (opt-in, GATING)"
@@ -423,13 +476,18 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   # per-phase set complete + uniform (and future-proofs adding a phase 4).
   # Observability only — never affects BOOTSTRAP_EXIT.
   preserve_phase_reports "phase3-bootstrap" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+  write_nightly_phase_classification \
+    "$PHASE_CLASSIFICATIONS_DIR/phase3-bootstrap.txt" \
+    "phase3-bootstrap" "$BOOTSTRAP_EXIT" "$PHASE_REPORTS_DIR/phase3-bootstrap"
+  capture_nightly_device_boundary \
+    "$PHASE_CLASSIFICATIONS_DIR/phase3-bootstrap-device.txt" "phase3-bootstrap"
+  bootstrap_classification="$(
+    classify_nightly_phase "$BOOTSTRAP_EXIT" "$PHASE_REPORTS_DIR/phase3-bootstrap"
+  )"
 
-  nf_status="PASS"
-  [[ "$NETWORK_FAULT_EXIT" -ne 0 ]] && nf_status="FAIL"
-  bootstrap_status="PASS"
-  [[ "$BOOTSTRAP_EXIT" -ne 0 ]] && bootstrap_status="FAIL"
-  expectedfail_status="PASS"
-  [[ "$EXPECTED_FAIL_EXIT" -ne 0 ]] && expectedfail_status="FAIL"
+  nf_status="$(nightly_phase_status "$nf_classification")"
+  bootstrap_status="$(nightly_phase_status "$bootstrap_classification")"
+  expectedfail_status="$(nightly_phase_status "$expectedfail_classification")"
 
   # Issue #1201: emit the authoritative, machine-readable fault-injection safety
   # verdict from the network-fault + bootstrap phases ONLY. The journey suite
@@ -454,8 +512,7 @@ else
   echo "=========================================================="
 fi
 
-journey_status="PASS"
-[[ "$JOURNEY_EXIT" -ne 0 ]] && journey_status="FAIL"
+journey_status="$(nightly_phase_status "$JOURNEY_CLASSIFICATION")"
 
 # `overall_status` is the human/summary verdict for the whole extensive shard. It
 # includes the journey suite and both GATING fault phases, but NOT the #822
@@ -483,11 +540,11 @@ fi
   echo
   echo "| Phase | Selection | Args | Exit | Result |"
   echo "| --- | --- | --- | --- | --- |"
-  echo "| Journey / E2E (non-gating) | full connected suite minus network-fault + expected-fail + opt-in classes ($shard_label) | \`pocketshellCi=true\` | $JOURNEY_EXIT | **$journey_status** |"
-  echo "| Notification permission (NON-GATING) | dedicated unsharded $NOTIFICATION_PERMISSION_TEST_CLASS; executed=$notification_permission_executed | external revoke/verify before instrumentation; external grant/verify after | $NOTIFICATION_PERMISSION_EXIT | **$notification_permission_status** |"
-  echo "| Network-fault proofs (GATING) | ${#NETWORK_FAULT_CLASSES[@]} Toxiproxy-backed classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** |"
-  echo "| #822 expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} Slice C/D TDD spec class(es) | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** |"
-  echo "| Bootstrap setup scenarios (GATING) | ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (trimmed) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** |"
+  echo "| Journey / E2E (non-gating) | full connected suite minus network-fault + expected-fail + opt-in classes ($shard_label) | \`pocketshellCi=true\` | $JOURNEY_EXIT | **$journey_status** ($JOURNEY_CLASSIFICATION) |"
+  echo "| Notification permission (NON-GATING) | dedicated unsharded $NOTIFICATION_PERMISSION_TEST_CLASS; executed=$notification_permission_executed | external revoke/verify before instrumentation; external grant/verify after | $NOTIFICATION_PERMISSION_EXIT | **$notification_permission_status** ($notification_permission_classification) |"
+  echo "| Network-fault proofs (GATING) | ${#NETWORK_FAULT_CLASSES[@]} Toxiproxy-backed classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** ($nf_classification) |"
+  echo "| #822 expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} Slice C/D TDD spec class(es) | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** ($expectedfail_classification) |"
+  echo "| Bootstrap setup scenarios (GATING) | ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (trimmed) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** ($bootstrap_classification) |"
   echo
   echo "**Extensive-shard overall (non-gating summary): $overall_status**"
   echo
@@ -496,6 +553,8 @@ fi
   echo "longer overwrites an earlier phase's JUnit XML / HTML report / device"
   echo "output before the artifact upload. Read the GATING phase-2 assertions at"
   echo "\`artifacts/nightly-extensive/phase-reports/phase2-network-fault/\`."
+  echo "Phase classifications and read-only adb boundary evidence are under"
+  echo "\`artifacts/nightly-extensive/phase-classifications/\`."
   echo
   echo "## Fault-injection safety verdict (issue #1201 — the RELEASE-GATING signal)"
   echo

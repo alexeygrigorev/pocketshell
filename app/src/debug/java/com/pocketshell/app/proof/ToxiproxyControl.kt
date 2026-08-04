@@ -1,5 +1,6 @@
 package com.pocketshell.app.proof
 
+import org.json.JSONObject
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
@@ -9,6 +10,12 @@ class ToxiproxyControl(
     baseUrl: String,
     private val transport: ToxiproxyTransport = HttpToxiproxyTransport(baseUrl),
 ) {
+
+    data class ProxyState(
+        val enabled: Boolean,
+        val listen: String,
+        val upstream: String,
+    )
 
     fun reset() {
         runCatching { transport.request("DELETE", "/proxies/$PROXY_NAME", null) }
@@ -176,6 +183,20 @@ class ToxiproxyControl(
     /** Restore the link after [disable]; new connections are accepted again. */
     fun enable() {
         transport.request("POST", "/proxies/$PROXY_NAME", """{"enabled":true}""")
+    }
+
+    /**
+     * Read back Toxiproxy's authoritative proxy state. Fault journeys use this
+     * after every toggle so an HTTP 2xx alone cannot masquerade as an engaged cut
+     * or a completed restore.
+     */
+    fun state(): ProxyState {
+        val json = JSONObject(transport.request("GET", "/proxies/$PROXY_NAME", null))
+        return ProxyState(
+            enabled = json.getBoolean("enabled"),
+            listen = json.getString("listen"),
+            upstream = json.getString("upstream"),
+        )
     }
 
     /**

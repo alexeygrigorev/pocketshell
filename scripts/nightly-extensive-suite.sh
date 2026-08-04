@@ -215,6 +215,15 @@ NETWORK_FAULT_CLASS_ARG="$(join_by , "${NETWORK_FAULT_CLASSES[@]}")"
 EXPECTED_FAIL_CLASS_ARG="$(join_by , "${EXPECTED_FAIL_CLASSES[@]}")"
 JOURNEY_NOTCLASS_ARG="$(join_by , "${JOURNEY_EXCLUDED_CLASSES[@]}")"
 
+# Issue #1751: a class-level phase can green vacuously if the sustained method is
+# renamed/removed while the class's intentionally skipped brief method remains.
+# Pin the exact successful release-gating method and its positive-band artifact
+# before computing the fault verdict.
+REQUIRED_SUSTAINED_FAULT_CLASS="$FQCN_PREFIX.RideThroughInterruptionE2eTest"
+REQUIRED_SUSTAINED_FAULT_METHOD="sustainedLinkCutReconnectsCleanlyWithoutHang"
+# shellcheck source=scripts/lib/nightly-exact-method-guard.sh
+source "$REPO_ROOT/scripts/lib/nightly-exact-method-guard.sh"
+
 # The machine-readable fault-verdict helper (issue #1201): pure PASS/FAIL from the
 # network-fault + bootstrap phases ONLY (never the journey suite or the
 # expected-fail lane). Written to a file the CI fault-verdict job reads.
@@ -353,6 +362,15 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     --stacktrace
   NETWORK_FAULT_EXIT=$?
   echo "phase 2 (network-fault proofs) exit code: $NETWORK_FAULT_EXIT"
+
+  if ! require_exact_junit_method \
+    "$APP_BUILD_DIR/outputs/androidTest-results/connected" \
+    "$APP_BUILD_DIR/outputs/connected_android_test_additional_output" \
+    "$REQUIRED_SUSTAINED_FAULT_CLASS" \
+    "$REQUIRED_SUSTAINED_FAULT_METHOD"; then
+    NETWORK_FAULT_EXIT=1
+    echo "phase 2 (network-fault proofs) forced RED by exact-method guard"
+  fi
 
   # Snapshot phase 2's report BEFORE the phase-2b gradle invocation overwrites
   # it (issue #1293). THIS is the release-GATING report whose overwrite made the

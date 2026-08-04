@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.composer.OutboundSubmitTranscriptBaseline
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
@@ -26,7 +27,14 @@ internal class AgentTranscriptAuthority(
     internal data class Baseline(
         val detection: AgentDetection,
         val confirmedMatchingIds: Set<String>,
-    )
+    ) {
+        fun durable(): OutboundSubmitTranscriptBaseline = OutboundSubmitTranscriptBaseline(
+            sourcePath = detection.sourcePath,
+            agentSessionId = detection.sessionId,
+            agentKind = detection.agent.name,
+            confirmedMatchingIds = confirmedMatchingIds,
+        )
+    }
 
     private val activeOverrides = mutableSetOf<String>()
     private val startingOverrides = mutableSetOf<String>()
@@ -112,6 +120,36 @@ internal class AgentTranscriptAuthority(
             "sourceHash" to baseline.detection.sourcePath.hashCode().toUInt().toString(16),
             "agentSessionId" to baseline.detection.sessionId,
             "agent" to baseline.detection.agent.name,
+        )
+        return true
+    }
+
+    fun acknowledgedFromDurableBaseline(
+        paneId: String,
+        payload: String,
+        baseline: OutboundSubmitTranscriptBaseline,
+    ): Boolean {
+        val conversation = conversationForPane(paneId) ?: return false
+        val detection = conversation.detection ?: return false
+        if (
+            detection.sourcePath != baseline.sourcePath ||
+            detection.sessionId != baseline.agentSessionId ||
+            detection.agent.name != baseline.agentKind ||
+            !isActive(paneId, detection)
+        ) {
+            return false
+        }
+        val confirmed = conversation.events.filterIsInstance<ConversationEvent.Message>().firstOrNull {
+            it.isConfirmedTranscriptUser(payload) && it.id !in baseline.confirmedMatchingIds
+        } ?: return false
+        DiagnosticEvents.record(
+            "action",
+            "agent_submit_transcript_late_ack",
+            "pane" to paneId,
+            "eventId" to confirmed.id,
+            "sourceHash" to detection.sourcePath.hashCode().toUInt().toString(16),
+            "agentSessionId" to detection.sessionId,
+            "agent" to detection.agent.name,
         )
         return true
     }

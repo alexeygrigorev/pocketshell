@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.app.composer.OutboundQueueStore
+import com.pocketshell.app.composer.OutboundSubmitTranscriptBaseline
 import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
@@ -345,8 +346,12 @@ private class SubmitLatchFaultStore(
     private val delegate: OutboundQueueStore,
     var fault: SubmitLatchFault,
 ) : OutboundQueueStore by delegate {
-    override fun markWireSubmitAttempted(sessionKey: String, itemId: String): OutboundItem? = when (fault) {
-        SubmitLatchFault.None -> delegate.markWireSubmitAttempted(sessionKey, itemId)
+    override fun markWireSubmitAttempted(
+        sessionKey: String,
+        itemId: String,
+        transcriptBaseline: OutboundSubmitTranscriptBaseline?,
+    ): OutboundItem? = when (fault) {
+        SubmitLatchFault.None -> delegate.markWireSubmitAttempted(sessionKey, itemId, transcriptBaseline)
         SubmitLatchFault.ReturnFalse -> null
         SubmitLatchFault.Throw -> error("synthetic submit-latch persistence failure")
     }

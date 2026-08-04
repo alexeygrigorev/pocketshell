@@ -116,14 +116,42 @@ class OutboundQueueStoreWireAttemptTest {
         store.claim(row.id)
         store.markWireAttempted("sessA", row.id, baselineCount = 0)
 
-        val attempted = requireNotNull(store.markWireSubmitAttempted("sessA", row.id))
+        val baseline = OutboundSubmitTranscriptBaseline(
+            sourcePath = "/home/u/.codex/sessions/rollout.jsonl",
+            agentSessionId = "rollout",
+            agentKind = "Codex",
+            confirmedMatchingIds = setOf("old-turn"),
+        )
+        val attempted = requireNotNull(store.markWireSubmitAttempted("sessA", row.id, baseline))
         assertTrue(attempted.wireSubmitAttempted)
         assertTrue(store.hasWireSubmitAttempt("sessA", row.id))
+        assertEquals(baseline, store.wireSubmitTranscriptBaseline("sessA", row.id))
 
         store.requeueForRetry(row.id)
         assertTrue("requeue must preserve Enter ambiguity", store.hasWireSubmitAttempt("sessA", row.id))
         store.remove(row.id)
         assertFalse("row removal drops the latch with the row", store.hasWireSubmitAttempt("sessA", row.id))
+    }
+
+    @Test
+    fun submitTranscriptBaselineSurvivesProcessRestart() {
+        val first = SharedPrefsOutboundQueueStore(context)
+        val row = first.enqueue("sess-submit-baseline", "late ack", paneId = "%0")
+        first.markWireAttempted("sess-submit-baseline", row.id, baselineCount = 0)
+        val baseline = OutboundSubmitTranscriptBaseline(
+            sourcePath = "/home/u/.claude/projects/p/session.jsonl",
+            agentSessionId = "session-1",
+            agentKind = "ClaudeCode",
+            confirmedMatchingIds = linkedSetOf("same-payload-before-enter"),
+        )
+        requireNotNull(first.markWireSubmitAttempted("sess-submit-baseline", row.id, baseline))
+
+        val afterRestart = SharedPrefsOutboundQueueStore(context)
+        assertTrue(afterRestart.hasWireSubmitAttempt("sess-submit-baseline", row.id))
+        assertEquals(
+            baseline,
+            afterRestart.wireSubmitTranscriptBaseline("sess-submit-baseline", row.id),
+        )
     }
 
     @Test

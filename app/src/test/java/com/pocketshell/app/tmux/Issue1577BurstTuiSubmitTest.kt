@@ -15,6 +15,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -381,6 +383,59 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
         assertTrue("ack must remain inside the 2s transcript ceiling: elapsed=$elapsed", elapsed < 2_000L)
     }
 
+    /**
+     * Issue #1526 recurrence after #1944: Enter can reach the agent while its
+     * authoritative transcript tail lands just after the bounded turnover wait.
+     * The durable submit write-ahead correctly prevents another blind Enter, but
+     * it must not wedge the row forever: a later retry can safely complete from a
+     * new confirmed turn on the exact source that was baselined before Enter.
+     */
+    @Test
+    fun lateAuthoritativeTranscriptAckCompletesSubmitAttemptWithoutSecondEnter() = runTest(scheduler) {
+        val payload = "late transcript acknowledgement"
+        lateinit var vm: TmuxSessionViewModel
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+            onEnter = {
+                backgroundScope.launch {
+                    delay(2_100L)
+                    vm.appendAgentEventsForTest(
+                        "%0",
+                        listOf(transcriptUserTurn("confirmed-after-timeout", payload)),
+                    )
+                }
+            },
+        )
+        vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+        val row = durableRow("late-ack-row", payload)
+
+        val first = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "late-ack-row",
+            durableRow = row,
+        )
+        assertTrue("the first bounded turnover wait must retain the row", first.isFailure)
+        assertEquals(1, client.sentCommands.count { it.endsWith(" Enter") })
+
+        advanceTimeBy(100L)
+        runCurrent()
+        val retry = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "late-ack-row",
+            durableRow = row,
+        )
+
+        assertTrue(retry.exceptionOrNull()?.message, retry.isSuccess)
+        assertEquals(
+            "late transcript authority proves the original Enter; retry must not duplicate it",
+            1,
+            client.sentCommands.count { it.endsWith(" Enter") },
+        )
+    }
+
     @Test
     fun preExistingOrOptimisticTranscriptTurnsDoNotAcknowledgeSubmit() = runTest(scheduler) {
         val payload = "identical prompt"
@@ -406,6 +461,14 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
         )
 
         assertTrue("no new authoritative transcript turn must retain the row", result.isFailure)
+
+        val retry = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "existing-row",
+            durableRow = DurableOutboundRowIdentity("session-a", "existing-row"),
+        )
+        assertTrue("the persisted baseline must not accept an old identical turn", retry.isFailure)
+        assertEquals(1, client.sentCommands.count { it.endsWith(" Enter") })
     }
 
     @Test
@@ -458,6 +521,14 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
         )
 
         assertTrue("a replacement detection/source must retain the row", result.isFailure)
+
+        val retry = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = "wrong-source-row",
+            durableRow = DurableOutboundRowIdentity("session-a", "wrong-source-row"),
+        )
+        assertTrue("a late turn from a replacement source must not resolve the old submit", retry.isFailure)
+        assertEquals(1, client.sentCommands.count { it.endsWith(" Enter") })
     }
 
     /**

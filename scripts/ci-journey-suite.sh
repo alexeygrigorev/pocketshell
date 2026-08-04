@@ -136,6 +136,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"  # #998 a remote tmux SERVER death (host reboot / OOM
   "$FQCN_PREFIX.AttachmentDropReconnectRecoversE2eTest"  # #1072 attaching a file dropped the live connection AND the
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
+  "com.pocketshell.app.portfwd.PortForwardPanelLifecycleE2eTest"  # #1967 must quiesce its app-owned forward before grace journeys
   "$FQCN_PREFIX.BackgroundGraceReconnectE2eTest"  # #754 #959 this class is the per-PR-CI deterministic regression catcher…
   "$FQCN_PREFIX.BoundedGraceSessionHoldJourneyE2eTest"  # #1123 #977 #1021 #215 bounded-grace D21 update — supersedes the / indefinite-hold…
   "com.pocketshell.app.share.ShareTargetE2eTest"  # #727 #657 epic Wave 1 / S1): the share-auth journey pair

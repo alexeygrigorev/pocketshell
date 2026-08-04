@@ -16,6 +16,7 @@ import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
@@ -45,17 +46,14 @@ import java.nio.charset.StandardCharsets
  *  >  close it and then I open it on so the app I I stop using right and
  *  >  then I open it in my other computer and then I cannot type anything"
  *
- * The hypothesis (confirmed locally before this test landed): closing the
- * PocketShell app while attached to a tmux session via `tmux -CC` leaves
- * an orphan control client registered server-side until tmux notices the
- * SSH socket drop independently. A laptop attaching to the same session
- * in that window lands alongside the orphan and finds the session in an
- * input-broken state.
+ * The original bug left an orphan control client registered server-side after
+ * PocketShell stopped owning it. Since #1123/#1159, an Activity close while
+ * the instrumented process remains alive deliberately parks that runtime only
+ * for bounded background grace. The actual regression signal is therefore a
+ * client that survives the grace deadline, not a still-owned client inside it.
  *
  * The fix is in [com.pocketshell.core.tmux.TmuxClient.detachCleanly] and
- * its wire-up inside [com.pocketshell.app.tmux.TmuxSessionViewModel]'s
- * three close paths (suspending teardown, same-host fast-switch
- * teardown, and synchronous `onCleared` teardown).
+ * its wire-up inside the elapsed-grace teardown path.
  *
  * This test runs against the deterministic `agents:2222` Docker fixture
  * (already required by the rest of the connected suite — no new fixture
@@ -65,12 +63,9 @@ import java.nio.charset.StandardCharsets
  *  1. Attach to `claude-main` via the normal app journey
  *     (host picker -> session picker -> Attach).
  *  2. Verify the server has exactly one client attached (the app).
- *  3. Force the activity to DESTROYED to drive
- *     [com.pocketshell.app.tmux.TmuxSessionViewModel.onCleared] — the
- *     pathological case the maintainer reported, where PocketShell is
- *     closed (back press / process finish) while the tmux session
- *     stays alive remotely.
- *  4. Poll `tmux list-clients -t claude-main` until the orphan count
+ *  3. Force the activity to DESTROYED while the instrumented process stays
+ *     alive, then let a short injected background grace elapse.
+ *  4. Poll `tmux list-clients -t claude-main` until the post-grace count
  *     drops to 0 (acceptance: it must reach 0 inside
  *     [ORPHAN_CLIENT_CLEANUP_TIMEOUT_MS]).
  *  5. Open a fresh non-CC interactive `tmux attach -t claude-main`
@@ -84,8 +79,8 @@ import java.nio.charset.StandardCharsets
  *    proof the app attached cleanly before the test exercised the
  *    teardown.
  *  - `issue215-02-after-destroy-clients.txt` — output of
- *    `tmux list-clients -t claude-main` immediately after the activity
- *    destruction, captured for the orphan-count assertion.
+ *    `tmux list-clients -t claude-main` after activity destruction + grace,
+ *    captured for the orphan-count assertion.
  *  - `issue215-03-second-client-pane.txt` — text the second
  *    (non-CC) client typed-and-read, proving input round-trips.
  *  - `timings.txt` — attach time, destroy-to-orphan-cleared latency,
@@ -110,6 +105,7 @@ class TmuxOrphanClientCleanupE2eTest {
     fun closeLaunchedActivity() {
         launchedActivity?.close()
         launchedActivity = null
+        BackgroundGraceTestOverride.setForTest(null)
         runBlocking {
             runCatching { cleanupRemoteTmuxSession(readFixtureKey()) }
         }
@@ -154,11 +150,17 @@ class TmuxOrphanClientCleanupE2eTest {
             attachedClientCount >= 1,
         )
 
-        // ---- (3) Force the activity to DESTROYED. ActivityScenario's
+        // ---- (3) Force the activity to DESTROYED. ActivityScenario keeps the
+        // instrumented app process alive, so this is a background transition,
+        // not an OS process kill. Since #1123/#1159 the ViewModel parks its
+        // runtime during bounded grace and the App-level grace owner performs
+        // the clean detach after the deadline. Inject a short deadline rather
+        // than asserting the superseded synchronous-onCleared contract.
+        BackgroundGraceTestOverride.setForTest(POST_CLOSE_GRACE_MS)
+        // ActivityScenario's
         // `close()` walks the lifecycle through stopped + destroyed,
-        // which invokes [TmuxSessionViewModel.onCleared] and the
-        // synchronous `closeCurrentConnection()` path that now sends
-        // `detach-client` via a brief runBlocking(Dispatchers.IO) hop.
+        // which invokes [TmuxSessionViewModel.onCleared], parks the runtime,
+        // and leaves the process-scoped grace owner responsible for teardown.
         // This is the exact code path the maintainer's "close the
         // app" sequence exercises on a real phone (back-out of the
         // session screen -> back-out of the app).
@@ -167,12 +169,9 @@ class TmuxOrphanClientCleanupE2eTest {
         launchedActivity = null
 
         // ---- (4) Poll `tmux list-clients -t claude-main` until the
-        // orphan count drops to 0. Without the fix the count stays at
-        // >=1 for as long as the tmux server takes to independently
-        // observe the SSH socket close (variable; up to 10+ seconds
-        // depending on the kernel TCP timeout). With the fix the
-        // detach-client round-trip removes the entry in well under
-        // 100ms on a healthy Docker fixture.
+        // client count drops to 0 after grace. A client before the deadline is
+        // owned, not orphaned; a client surviving the deadline is the actual
+        // orphan class this proof guards.
         var orphanCount = -1
         var orphanRawSnapshot = ""
         val deadline = SystemClock.elapsedRealtime() + ORPHAN_CLIENT_CLEANUP_TIMEOUT_MS
@@ -190,7 +189,8 @@ class TmuxOrphanClientCleanupE2eTest {
         )
         writeText("issue215-02-after-destroy-clients.txt", orphanRawSnapshot)
         assertEquals(
-            "expected zero tmux clients on $SEEDED_SESSION after app close; raw=`$orphanRawSnapshot`",
+            "expected zero tmux clients on $SEEDED_SESSION after app close grace elapsed; " +
+                "raw=`$orphanRawSnapshot`",
             0,
             orphanCount,
         )
@@ -592,14 +592,12 @@ class TmuxOrphanClientCleanupE2eTest {
         const val SEEDED_SESSION: String = "claude-main"
 
         /**
-         * After we destroy the activity, we wait up to this long for
-         * `tmux list-clients -t claude-main` to drop to zero. The fix
-         * removes the client in <100ms on a healthy fixture (the
-         * `detach-client` round-trip is sub-millisecond on localhost
-         * + the runBlocking hop is bounded by [SYNC_DETACH_TIMEOUT_MS]
-         * = 600ms). 6s is generous CI headroom for swiftshader
-         * emulator + Docker compose overhead.
+         * After we destroy the activity, the short injected bounded grace
+         * expires and the App-level owner detaches the parked runtime. The
+         * budget includes ProcessLifecycleOwner's ON_STOP debounce, grace,
+         * detach-client, and swiftshader/Docker contention.
          */
-        const val ORPHAN_CLIENT_CLEANUP_TIMEOUT_MS: Long = 6_000L
+        const val ORPHAN_CLIENT_CLEANUP_TIMEOUT_MS: Long = 15_000L
+        const val POST_CLOSE_GRACE_MS: Long = 1_500L
     }
 }

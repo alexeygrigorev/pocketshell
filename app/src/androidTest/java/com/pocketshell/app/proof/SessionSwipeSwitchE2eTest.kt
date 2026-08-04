@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -30,10 +29,14 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_SESSION_LABEL_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_DETECTING_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_BREADCRUMB_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_OVERLAY_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
+import com.pocketshell.app.tmux.TmuxSessionLatencyTelemetry
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -65,7 +68,7 @@ import java.io.FileOutputStream
  * swipe-DOWN on the top chrome opens a [HorizontalPager] of same-host
  * sessions ([TMUX_SESSION_PAGER_OVERLAY_TAG]); choosing a session
  * lazy-attaches it. This test exercises the path end-to-end on the
- * deterministic Docker `agents` fixture and pins four contracts:
+ * deterministic Docker `agents` fixture and pins five contracts:
  *
  *  1. **The switch happens.** A horizontal swipe switches the app AWAY from
  *     SESSION_A onto the adjacent same-host session: SESSION_A's unique
@@ -78,15 +81,21 @@ import java.io.FileOutputStream
  *     not fire a fresh SSH handshake; [SSH_HANDSHAKE_ATTEMPTS] must not
  *     advance across the switch. A fresh socket would be the 2-5s
  *     `kex_exchange_identification` regression the fast-switch path deleted.
- *  3. **Previous tmux client detached** (#235 / #215). After swiping away
- *     from SESSION_A, `tmux list-clients -t SESSION_A` reports zero clients
- *     — the previous `-CC` control client was `detachCleanly()`'d, so no
- *     orphan lingers to hit the size-lock issue.
+ *  3. **Exactly one previous tmux client remains owned by the warm cache.**
+ *     Since #626, a same-host switch deliberately parks SESSION_A's live
+ *     runtime so switch-back is a pointer swap. `tmux list-clients` must
+ *     therefore report exactly one client on SESSION_A: zero would mean the
+ *     warm-switch contract was lost; more than one would be a real duplicate
+ *     / orphan regression (#235 / #215).
  *  4. **The swipe debounces.** The pager's settle path can emit spurious
  *     `settledPage` values (the spike's flagged risk); if the overlay acted
  *     on them the logical tmux connect counter would advance more than once
  *     for the single swipe. We assert exactly one logical tmux connect fires
  *     for that swipe, so a spurious double-fire is caught.
+ *  5. **Switch-back activates the cached runtime.** A second pager swipe from
+ *     B back to A must atomically restore A's marker, record one cache
+ *     activation, open no fresh tmux control client or SSH transport, and
+ *     leave exactly one owned client on each runtime.
  *
  * Gesture note: BOTH gestures are driven as real touch input — the
  * swipe-DOWN that opens the session pager AND the horizontal swipe-LEFT that
@@ -149,7 +158,7 @@ class SessionSwipeSwitchE2eTest {
     }
 
     @Test
-    fun swipeDownPagerSwitchesSessionReusingSshAndDetaching() { runBlocking {
+    fun swipeDownPagerSwitchesSessionAndActivatesCachedRuntimeOnReturn() { runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -169,6 +178,7 @@ class SessionSwipeSwitchE2eTest {
         compose.onNodeWithText(SESSION_A).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
+        selectTerminalTabForVisibleCapture()
 
         // Confirm SESSION_A's content is actually on screen before we
         // switch — otherwise a "switch" assertion later could pass against
@@ -180,7 +190,7 @@ class SessionSwipeSwitchE2eTest {
                 terminalCols = terminalGridSize().columns,
             )
         }
-        captureViewport("issue237-01-attached-session-a")
+        captureViewport("issue237-01-attached-session-a", A_MARKER)
 
         // ---- (2) The app is attached to SESSION_A; confirm exactly one
         // client is registered for it server-side. This is the baseline
@@ -201,6 +211,13 @@ class SessionSwipeSwitchE2eTest {
         val tmuxConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
         Log.i(LOG_TAG, "snapshot-before handshake=$handshakeBefore tmuxConnect=$tmuxConnectBefore")
 
+        // Make the test-owned B session the first non-current page. The shared
+        // Docker fixture may contain unrelated sessions, and the picker sorts
+        // them by second-resolution activity before name. Updating B immediately
+        // before opening the pager makes A -> B deterministic without deleting
+        // any foreign session.
+        bumpSessionActivity(key, SESSION_B)
+
         // ---- (3) Swipe the session pager FORWARD one page, switching away
         // from SESSION_A — the exact horizontal session-swipe the maintainer
         // asked for. The deterministic `agents` fixture is SHARED and the
@@ -211,10 +228,10 @@ class SessionSwipeSwitchE2eTest {
         // specific name (that would require killing foreign sessions and
         // racing sibling worktrees). We verify the GESTURE CONTRACT: a
         // forward swipe switches the app to the adjacent session — its content
-        // replaces SESSION_A's, the previous tmux client detaches, and the SSH
-        // transport is reused — proving two distinct sessions' content render
-        // via the swipe gesture (SESSION_A's marker before, the adjacent
-        // session's shell after).
+        // replaces SESSION_A's, the previous runtime is parked as the single
+        // owned cache entry, and the SSH transport is reused — proving two
+        // distinct sessions' content render via the swipe gesture (SESSION_A's
+        // marker before, the adjacent session's shell after).
         val switchAt = SystemClock.elapsedRealtime()
         val forwardSession = swipeSessionPagerForwardOnce(
             previousSession = SESSION_A,
@@ -222,10 +239,11 @@ class SessionSwipeSwitchE2eTest {
         )
         captureFullFrame("issue237-03-swiped-forward-to-$forwardSession-fullframe")
         assertTrue(
-            "a forward session-pager swipe must switch AWAY from $SESSION_A to a " +
-                "different same-host session; landed on '$forwardSession'",
-            forwardSession != SESSION_A,
+            "the first forward pager page must be the freshly-active test-owned " +
+                "$SESSION_B session; landed on '$forwardSession'",
+            forwardSession == SESSION_B,
         )
+        selectTerminalTabForVisibleCapture()
         // The adjacent session's content replaces SESSION_A's: SESSION_A's
         // unique marker must no longer be on screen.
         waitForVisibleTerminal("forward swipe left SESSION_A (A-marker gone)") { transcript ->
@@ -274,36 +292,135 @@ class SessionSwipeSwitchE2eTest {
             tmuxConnectsForward,
         )
 
-        // (c) Previous tmux client detached (#235 / #215). After swiping away
-        // from SESSION_A its previous `-CC` control client must have been
-        // `detachCleanly()`'d, so `tmux list-clients -t SESSION_A` drops to
-        // zero. We poll because the `detach-client` round-trip races the new
-        // attach; the count must settle to zero within the budget.
-        val orphanClients = pollListClientsUntilZero(key, SESSION_A)
-        writeText("issue237-clients-on-a-after-forward-swipe.txt", "clients=$orphanClients\n")
+        // (c) The previous runtime is deliberately cached, but never duplicated.
+        // #626 changed the fast-switch contract from detach-on-leave to a bounded
+        // process-owned warm cache. The nightly used to assert the superseded zero
+        // count and therefore failed on the one healthy cached client. Exactly one
+        // is the class-covering signal: it proves the warm owner exists and catches
+        // the actual duplicate/orphan accumulation class (>1).
+        val cachedClients = listClientsCount(key, SESSION_A)
+        writeText("issue237-clients-on-a-after-forward-swipe.txt", "clients=$cachedClients\n")
         assertEquals(
-            "after swiping away from $SESSION_A its previous tmux -CC client " +
-                "must be detached (no orphan lingering for the size-lock issue, " +
-                "#235/#215); tmux list-clients -t $SESSION_A reported $orphanClients " +
-                "clients",
-            0,
-            orphanClients,
+            "after swiping away from $SESSION_A the bounded warm-runtime cache must own " +
+                "exactly one tmux -CC client (zero loses instant switch-back; more than one " +
+                "is a duplicate/orphan, #235/#215); tmux list-clients reported $cachedClients",
+            1,
+            cachedClients,
         )
 
-        // ---- (5) The adjacent session renders its OWN content (not a blank
-        // screen, and not SESSION_A's). Capture its visible terminal so the
-        // reviewer can confirm two distinct sessions' content render across
-        // the swipe (SESSION_A's `A-READY` in issue237-01-*, the adjacent
-        // session's shell prompt here).
-        compose.waitUntil(timeoutMillis = pickerWaitMs) {
-            visibleTerminalText().isNotBlank()
+        // ---- (5) B renders its OWN seeded content (not a blank screen, and
+        // not SESSION_A's stale frame).
+        waitForVisibleTerminal("session B marker after A-to-B swipe") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                B_MARKER,
+                terminalCols = terminalGridSize().columns,
+            )
         }
-        assertTrue(
-            "the session swiped onto ('$forwardSession') must render its own " +
-                "terminal content, not a blank screen",
-            visibleTerminalText().isNotBlank(),
+        captureViewport("issue237-04-adjacent-session-content", B_MARKER)
+
+        // ---- (6) Swipe from B back to A. Refresh A's tmux activity just before
+        // opening the pager so it is deterministically the first non-current
+        // page even when the shared fixture contains foreign sessions. A is
+        // already live in the runtime cache; this remote send-keys only affects
+        // picker ordering and does not create an app SSH/tmux runtime.
+        bumpSessionActivity(key, SESSION_A)
+        val returnHandshakeBefore = SSH_HANDSHAKE_ATTEMPTS.get()
+        val returnTmuxLogicalBefore = TMUX_CONNECT_ATTEMPTS.get()
+        val returnTelemetryBefore = TmuxSessionLatencyTelemetry.snapshot()
+        val returnAt = SystemClock.elapsedRealtime()
+        val returnedSession = swipeSessionPagerForwardOnce(
+            previousSession = forwardSession,
+            captureOpenAs = "issue237-05-return-pager-open-fullframe",
         )
-        captureViewport("issue237-04-adjacent-session-content")
+        assertEquals(
+            "second pager swipe must return from $forwardSession to cached $SESSION_A",
+            SESSION_A,
+            returnedSession,
+        )
+        selectTerminalTabForVisibleCapture()
+        waitForVisibleTerminal("cached A marker after B-to-A switch-back") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                A_MARKER,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        val returnSwitchMs = SystemClock.elapsedRealtime() - returnAt
+        val returnHandshakeAfter = SSH_HANDSHAKE_ATTEMPTS.get()
+        val returnTmuxLogicalAfter = TMUX_CONNECT_ATTEMPTS.get()
+        val returnTelemetry = TmuxSessionLatencyTelemetry.snapshot().drop(returnTelemetryBefore.size)
+        val returnCacheActivations = returnTelemetry.filter { it.name == "runtime_cache_activate" }
+        val returnControlAttaches = returnTelemetry.filter { it.name == "tmux_control_attach_count" }
+
+        assertEquals(
+            "cached B-to-A pointer swap must not perform another SSH handshake",
+            returnHandshakeBefore,
+            returnHandshakeAfter,
+        )
+        assertEquals(
+            "cached B-to-A pointer swap must activate exactly one cached runtime; " +
+                "events=$returnTelemetry",
+            1,
+            returnCacheActivations.size,
+        )
+        assertTrue(
+            "cached B-to-A pointer swap must not attach a fresh tmux -CC client; " +
+                "events=$returnTelemetry",
+            returnControlAttaches.isEmpty(),
+        )
+        assertEquals(
+            "B-to-A gesture must be accepted exactly once as a logical connect; " +
+                "the separate tmux_control_attach_count oracle proves that this " +
+                "logical activation did not open a new -CC connection",
+            1,
+            returnTmuxLogicalAfter - returnTmuxLogicalBefore,
+        )
+
+        val clientsOnAAfterReturn = listClientsCount(key, SESSION_A)
+        val clientsOnBAfterReturn = listClientsCount(key, forwardSession)
+        writeText(
+            "issue237-clients-after-return-swipe.txt",
+            "clients_on_A=$clientsOnAAfterReturn\n" +
+                "clients_on_B=$clientsOnBAfterReturn\n",
+        )
+        assertEquals(
+            "active $SESSION_A must still have exactly one owned -CC client after " +
+                "cached activation (no duplicate attach)",
+            1,
+            clientsOnAAfterReturn,
+        )
+        assertEquals(
+            "switched-away $forwardSession must have exactly one cache-owned -CC " +
+                "client after return (no orphan/duplicate accumulation)",
+            1,
+            clientsOnBAfterReturn,
+        )
+        // The cached frame is published synchronously, followed by a legitimate
+        // asynchronous remote refresh. Wait for that refresh to settle before
+        // taking the authoritative bitmap so a mid-row draw cannot produce a
+        // misleading partial-marker screenshot even though the screen grid is
+        // already correct.
+        SystemClock.sleep(1_000L)
+        waitForVisibleTerminal("stable visible A marker before return capture") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                A_MARKER,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        captureViewport("issue237-06-returned-to-session-a", A_MARKER)
+        recordTiming("return_swipe_switch_ms", returnSwitchMs)
+        recordTiming(
+            "ssh_handshakes_during_return",
+            (returnHandshakeAfter - returnHandshakeBefore).toLong(),
+        )
+        recordTiming(
+            "logical_tmux_connects_during_return",
+            (returnTmuxLogicalAfter - returnTmuxLogicalBefore).toLong(),
+        )
+        recordTiming("runtime_cache_activations_during_return", returnCacheActivations.size.toLong())
+        recordTiming("tmux_control_attaches_during_return", returnControlAttaches.size.toLong())
 
         writeTimings()
         writeText(
@@ -313,8 +430,16 @@ class SessionSwipeSwitchE2eTest {
                 appendLine("forward_swipe_session=$forwardSession")
                 appendLine("ssh_handshakes_during_forward=${handshakeAfter - handshakeBefore}")
                 appendLine("tmux_connects_during_forward=$tmuxConnectsForward")
-                appendLine("clients_on_A_after_forward=$orphanClients")
+                appendLine("owned_cached_clients_on_A_after_forward=$cachedClients")
                 appendLine("forward_swipe_switch_ms=$forwardSwitchMs")
+                appendLine("return_swipe_session=$returnedSession")
+                appendLine("ssh_handshakes_during_return=${returnHandshakeAfter - returnHandshakeBefore}")
+                appendLine("logical_tmux_connects_during_return=${returnTmuxLogicalAfter - returnTmuxLogicalBefore}")
+                appendLine("runtime_cache_activations_during_return=${returnCacheActivations.size}")
+                appendLine("tmux_control_attaches_during_return=${returnControlAttaches.size}")
+                appendLine("clients_on_A_after_return=$clientsOnAAfterReturn")
+                appendLine("clients_on_B_after_return=$clientsOnBAfterReturn")
+                appendLine("return_swipe_switch_ms=$returnSwitchMs")
             },
         )
 
@@ -465,11 +590,11 @@ class SessionSwipeSwitchE2eTest {
             appendLine("tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true")
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_A)} " +
-                    shellQuote("printf '$A_MARKER\\n'; exec sh"),
+                    shellQuote("printf '$PIXEL_MARKER_ANSI$A_MARKER$PIXEL_MARKER_RESET\\n'; exec sh"),
             )
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_B)} " +
-                    shellQuote("printf '$B_MARKER\\n'; exec sh"),
+                    shellQuote("printf '$PIXEL_MARKER_ANSI$B_MARKER$PIXEL_MARKER_RESET\\n'; exec sh"),
             )
             appendLine("tmux list-sessions")
         }
@@ -536,18 +661,36 @@ class SessionSwipeSwitchE2eTest {
     }
 
     /**
-     * Poll `tmux list-clients -t <session>` until it reports zero clients
-     * or the budget elapses. Returns the final observed count.
+     * Move a test-owned session to the front of the picker's activity ordering
+     * without changing the app's active runtime. `Space` + `BSpace` leaves the
+     * shell command line unchanged while tmux updates `session_activity`.
      */
-    private suspend fun pollListClientsUntilZero(key: String, sessionName: String): Int {
-        val deadline = SystemClock.elapsedRealtime() +
-            if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L
-        var count = listClientsCount(key, sessionName)
-        while (count != 0 && SystemClock.elapsedRealtime() < deadline) {
-            SystemClock.sleep(500)
-            count = listClientsCount(key, sessionName)
+    private suspend fun bumpSessionActivity(key: String, sessionName: String) {
+        // tmux exposes session activity at one-second resolution. Crossing a
+        // second boundary makes the ordering deterministic against sessions
+        // touched earlier in this journey.
+        SystemClock.sleep(1_100L)
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec(
+                    "tmux send-keys -t ${shellQuote(sessionName)} Space BSpace; " +
+                        "tmux display-message -p -t ${shellQuote(sessionName)} '#{session_activity}'",
+                )
+            }
         }
-        return count
+        val exec = result.getOrNull()
+        assertTrue(
+            "failed to refresh picker activity for $sessionName: " +
+                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
     }
 
     private fun waitForText(text: String, timeoutMs: Long) {
@@ -568,6 +711,35 @@ class SessionSwipeSwitchE2eTest {
             attached
         }
     }
+
+    /** Ensure screenshots observe the real Terminal surface, not the #818
+     * Conversation default used while a presumed-agent transcript loads. */
+    private fun selectTerminalTabForVisibleCapture() {
+        val deadline = SystemClock.elapsedRealtime() + 20_000L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            val conversationVisible =
+                hasTag(TMUX_CONVERSATION_DETECTING_TAG) || hasTag(TMUX_CONVERSATION_PANE_TAG)
+            if (!conversationVisible) return
+            if (hasTag(TMUX_TERMINAL_TAB_TAG)) {
+                compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+                    .performClick()
+            }
+            SystemClock.sleep(250L)
+        }
+        assertTrue(
+            "Terminal surface was not selected before the authoritative viewport capture; " +
+                "conversationDetecting=${hasTag(TMUX_CONVERSATION_DETECTING_TAG)} " +
+                "conversationPane=${hasTag(TMUX_CONVERSATION_PANE_TAG)} " +
+                "terminalTab=${hasTag(TMUX_TERMINAL_TAB_TAG)}",
+            false,
+        )
+    }
+
+    private fun hasTag(tag: String): Boolean =
+        compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
 
     /**
      * Read the session name currently shown in the top chrome's session
@@ -655,7 +827,7 @@ class SessionSwipeSwitchE2eTest {
                 ?.currentSession
                 ?.emulator
                 ?.screen
-                ?.transcriptText
+                ?.visibleScreenText
                 .orEmpty()
         }
         return text
@@ -675,20 +847,42 @@ class SessionSwipeSwitchE2eTest {
         return grid ?: GridSize(columns = 80, rows = 24)
     }
 
-    private fun captureViewport(name: String) {
+    private fun captureViewport(name: String, expectedMarker: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(150)
 
-        var bitmap: Bitmap? = null
+        var viewportLeft = 0
+        var viewportTop = 0
+        var viewportWidth = 0
+        var viewportHeight = 0
+        var fontWidthPx = 0f
         launchedActivity?.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            val location = IntArray(2)
+            view.getLocationOnScreen(location)
+            viewportLeft = location[0]
+            viewportTop = location[1]
+            viewportWidth = view.width
+            viewportHeight = view.height
+            fontWidthPx = view.mRenderer.fontWidth
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val screen = instrumentation.uiAutomation.takeScreenshot()
+        val left = viewportLeft.coerceIn(0, screen.width)
+        val top = viewportTop.coerceIn(0, screen.height)
+        val width = viewportWidth.coerceAtMost(screen.width - left)
+        val height = viewportHeight.coerceAtMost(screen.height - top)
+        check(width > 0 && height > 0) {
+            "invalid terminal viewport crop left=$left top=$top width=$width height=$height " +
+                "screen=${screen.width}x${screen.height}"
+        }
+        // Crop the pixels the emulator actually displayed. Drawing TerminalView
+        // into a fresh off-screen bitmap is not authoritative because its dirty
+        // renderer cache describes the already-painted device surface and can
+        // intentionally skip unchanged cells, producing a partial evidence image.
+        val bitmap = Bitmap.createBitmap(screen, left, top, width, height)
+        screen.recycle()
+        writeBitmap("$name-viewport", bitmap)
         var text = ""
         launchedActivity?.onActivity { activity ->
             text = activity.window.decorView
@@ -696,11 +890,64 @@ class SessionSwipeSwitchE2eTest {
                 ?.currentSession
                 ?.emulator
                 ?.screen
-                ?.transcriptText
+                ?.visibleScreenText
                 .orEmpty()
         }
         writeText("$name-visible-terminal.txt", text)
-        bitmap?.recycle()
+        assertCompleteMarkerPainted(
+            bitmap = bitmap,
+            marker = expectedMarker,
+            fontWidthPx = fontWidthPx,
+            artifactName = name,
+        )
+        bitmap.recycle()
+    }
+
+    /**
+     * Device-pixel oracle for the complete marker. The seeded marker owns a
+     * unique true-colour magenta cell background; the span of those pixels on
+     * the UIAutomation screenshot therefore measures what the TerminalView
+     * actually painted, independently of the emulator model text. A stale
+     * #469 dirty clip that paints only `A2`/`B2` spans roughly two cells and
+     * hard-fails against the full ten-cell marker width.
+     */
+    private fun assertCompleteMarkerPainted(
+        bitmap: Bitmap,
+        marker: String,
+        fontWidthPx: Float,
+        artifactName: String,
+    ) {
+        var minX = bitmap.width
+        var maxX = -1
+        var matchingPixels = 0
+        for (y in 0 until bitmap.height) {
+            for (x in 0 until bitmap.width) {
+                val color = bitmap.getPixel(x, y)
+                val red = android.graphics.Color.red(color)
+                val green = android.graphics.Color.green(color)
+                val blue = android.graphics.Color.blue(color)
+                if (red >= 245 && green <= 10 && blue >= 245) {
+                    minX = minOf(minX, x)
+                    maxX = maxOf(maxX, x)
+                    matchingPixels++
+                }
+            }
+        }
+        val paintedSpanPx = if (maxX >= minX) maxX - minX + 1 else 0
+        val requiredSpanPx = (fontWidthPx * (marker.length - 1)).toInt()
+        writeText(
+            "$artifactName-device-pixel-oracle.txt",
+            "marker=$marker\nfont_width_px=$fontWidthPx\n" +
+                "painted_magenta_span_px=$paintedSpanPx\n" +
+                "required_span_px=$requiredSpanPx\nmatching_pixels=$matchingPixels\n",
+        )
+        assertTrue(
+            "device-visible viewport did not paint the complete '$marker' cell band for " +
+                "$artifactName: magenta span=$paintedSpanPx px, required>=$requiredSpanPx px, " +
+                "fontWidth=$fontWidthPx, matchingPixels=$matchingPixels. The emulator model " +
+                "may already contain the marker, but a partial actual surface is a failure.",
+            fontWidthPx > 0f && paintedSpanPx >= requiredSpanPx,
+        )
     }
 
     /**
@@ -796,6 +1043,8 @@ class SessionSwipeSwitchE2eTest {
         const val SESSION_B: String = "issue237-session-b"
         const val A_MARKER: String = "A237-READY"
         const val B_MARKER: String = "B237-READY"
+        const val PIXEL_MARKER_ANSI: String = "\\033[48;2;255;0;255m"
+        const val PIXEL_MARKER_RESET: String = "\\033[0m"
 
         // Highest pager page tag index probed when locating the on-screen
         // card; comfortably above any realistic same-host session count on

@@ -28,6 +28,74 @@ import java.io.InputStream
 @OptIn(ExperimentalCoroutinesApi::class)
 class TmuxSessionViewModelPrewarmSeedTest : TmuxSessionViewModelTestBase() {
     @Test
+    fun nameOnlyPrewarmDoesNotDuplicateParkedSessionWithDurableIdentity() = runTest(scheduler) {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val parkedClient = FakeTmuxClient()
+        runtimeCache.put(
+            CachedTmuxRuntime(
+                key = TmuxRuntimeKey(
+                    hostId = 1L,
+                    hostname = "alpha.example",
+                    port = 22,
+                    username = "alex",
+                    keyPath = "/keys/a",
+                    sessionName = "session-a",
+                    durableSessionKey = durableTmuxSessionKey(1L, "@1", 101L),
+                ),
+                hostName = "alpha",
+                startDirectory = null,
+                lease = null,
+                session = null,
+                client = parkedClient,
+                panes = emptyList(),
+                paneRows = emptyMap(),
+                paneProducerJobs = emptyMap(),
+                paneInputQueues = emptyMap(),
+                paneInputJobs = emptyMap(),
+                paneAgentJobs = emptyMap(),
+                paneAgentInputs = emptyMap(),
+                agentConversations = emptyMap(),
+                remoteColumns = 0,
+                remoteRows = 0,
+            ),
+        )
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = testLeaseManager(
+                connector = QueueLeaseConnector(FakeSshSession()),
+                scope = this,
+                idleTtlMillis = 0L,
+            ),
+        )
+        val duplicateClient = FakeTmuxClient().withSinglePane("session-a", "%1")
+        vm.setTmuxClientFactoryForTest { _, _, _ -> duplicateClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "session-b",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+            tmuxSessionId = "@2",
+            sessionCreated = 202L,
+        )
+
+        // The picker supplies names only. Deriving A from active B must neither
+        // inherit B's durable identity nor attach a second client for parked A.
+        vm.prewarmLikelySwitchTargets(listOf("session-a"))
+        advanceUntilIdle()
+
+        assertFalse(
+            "name-only prewarm must reuse the parked A runtime instead of opening duplicate -CC",
+            duplicateClient.connectCalled,
+        )
+        assertEquals(listOf(parkedClient), runtimeCache.cachedRuntimesForHost(1L).map { it.client })
+    }
+
+    @Test
     fun sessionSwitcherPrewarmCachesOnlyBoundedLikelyTargets() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
         val connector = QueueLeaseConnector(FakeSshSession(), FakeSshSession(), FakeSshSession())

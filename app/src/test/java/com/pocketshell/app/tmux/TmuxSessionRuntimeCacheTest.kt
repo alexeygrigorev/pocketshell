@@ -93,6 +93,21 @@ class TmuxSessionRuntimeCacheTest {
     }
 
     @Test
+    fun durableSelectionActivatesNameOnlyPrewarmForSameHostAndSession() {
+        val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
+        val nameOnlyPrewarm = cachedRuntime("work")
+        val selectedKey = nameOnlyPrewarm.key.copy(durableSessionKey = "tmux:1:\$7:700")
+
+        cache.put(nameOnlyPrewarm)
+
+        assertEquals(
+            CacheActivation(runtime = nameOnlyPrewarm, evicted = emptyList()),
+            cache.activate(selectedKey),
+        )
+        assertEquals(emptyList<TmuxRuntimeKey>(), cache.snapshotKeys())
+    }
+
+    @Test
     fun removeExactStaleBindingCannotRemoveSameSessionReplacement() {
         val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
         val old = cachedRuntime("work")

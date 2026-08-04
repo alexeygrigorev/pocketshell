@@ -1,7 +1,6 @@
 package com.pocketshell.app.fileviewer
 
 import android.app.Activity
-import android.app.Dialog
 import android.app.Instrumentation
 import android.content.Intent
 import android.content.RecordingClipboardManager
@@ -10,8 +9,8 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.pdf.PdfDocument
 import android.util.Base64
-import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.compose.material3.Text
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,10 +45,9 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
+import com.pocketshell.app.proof.signals.SyntheticFocusOwnerHarness
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
-import com.pocketshell.app.proof.signals.describeActiveWindow
-import com.pocketshell.app.proof.signals.waitForActivityWindowFocusLost
-import com.pocketshell.app.proof.signals.waitForActivityWindowFocused
+import com.pocketshell.app.proof.signals.requirePocketShellFocusAtJourneyBoundary
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -96,7 +94,13 @@ class FileViewerDockerTest {
      * already warm must NOT advance it (no per-open ~3-4s handshake).
      */
     private lateinit var leasing: CountingLeaseManager
-    private var focusStealer: Dialog? = null
+    private val focusOwner by lazy {
+        SyntheticFocusOwnerHarness(
+            scenario = composeRule.activityRule.scenario,
+            label = "issue-1942 synthetic focus owner",
+            timeoutMs = 5_000,
+        )
+    }
 
     @Before
     fun setUp(): Unit { runBlocking {
@@ -116,7 +120,7 @@ class FileViewerDockerTest {
 
     @After
     fun tearDown(): Unit { runBlocking {
-        dismissSyntheticFocusStealingWindow(requireFocus = false)
+        focusOwner.dismissBestEffort()
         if (seededPaths.isNotEmpty()) {
             withTimeout(15_000) {
                 connect()?.use { session ->
@@ -179,6 +183,34 @@ class FileViewerDockerTest {
         composeRule.onNodeWithTag(FILE_VIEWER_IMAGE_TAG).assertExists()
         WalkthroughScreenshotArtifacts.capture("issue497-file-viewer-image")
     } }
+
+    /** Issue #1985: an assertion exit cannot leak synthetic focus into the next journey. */
+    @Test
+    fun failedSyntheticOwnerBodyRestoresFocusBeforeNextImeJourney() {
+        composeRule.setContent { Text("issue #1985 focus restoration surface") }
+        composeRule.onNodeWithText("issue #1985 focus restoration surface").assertIsDisplayed()
+        val injectedFailure = AssertionError("issue1985 injected owner-body failure")
+        val harness = SyntheticFocusOwnerHarness(
+            scenario = composeRule.activityRule.scenario,
+            label = "issue-1985 synthetic focus owner",
+            timeoutMs = 5_000,
+        )
+        val escaped = runCatching {
+            harness.withOwner { owner ->
+                assertTrue("synthetic owner must remain visible during its body", owner.isShowing)
+                WalkthroughScreenshotArtifacts.capture("issue1985-synthetic-focus-owner")
+                throw injectedFailure
+            }
+        }.exceptionOrNull()
+        assertTrue("the injected body failure must escape unchanged", escaped === injectedFailure)
+
+        requirePocketShellFocusAtJourneyBoundary(
+            scenario = composeRule.activityRule.scenario,
+            context = "issue #1985 next IME journey boundary",
+            timeoutMs = 1_000,
+        )
+        WalkthroughScreenshotArtifacts.capture("issue1985-focus-restored-next-ime-boundary")
+    }
 
     @Test
     fun viewsRemoteTextFromFixture(): Unit { runBlocking {
@@ -761,42 +793,34 @@ class FileViewerDockerTest {
         // visible. The failure must name that pre-condition instead of timing
         // out as though Markdown selection were broken.
         composeRule.onNodeWithTag(unorderedBody).performTouchInput { longClick() }
-        raiseSyntheticFocusStealingWindow()
-        val focusLost = waitForActivityWindowFocusLost(
-            scenario = composeRule.activityRule.scenario,
-            timeoutMs = 5_000,
-        )
-        assertTrue(
-            "synthetic focus owner must take focus or the #1942 regression is vacuous",
-            focusLost,
-        )
-        WalkthroughScreenshotArtifacts.capture("issue1942-fileviewer-foreign-focus-owner")
-        val foreignFocusStartedAt = android.os.SystemClock.elapsedRealtime()
-        val foreignFocusFailure = runCatching {
-            assertFileViewerWindowFocused()
-        }.exceptionOrNull()
-        val foreignFocusFailureMs =
-            android.os.SystemClock.elapsedRealtime() - foreignFocusStartedAt
-        val foreignFocusMessage = foreignFocusFailure?.message.orEmpty()
-        assertTrue(
-            "foreign focus must be reported as the cause instead of a generic Copy timeout; " +
-                "got: $foreignFocusMessage",
-            foreignFocusMessage.contains(FOREIGN_WINDOW_FOCUS_SIGNATURE),
-        )
-        assertTrue(
-            "causal focus failure must name the active window; got: $foreignFocusMessage",
-            foreignFocusMessage.contains("active_window_pkg="),
-        )
-        assertTrue(
-            "focus pre-condition must fail before the old 5s Copy timeout; observed " +
-                "${foreignFocusFailureMs}ms",
-            foreignFocusFailureMs < 5_000,
-        )
-        assertTrue(
-            "the focus owner must remain visible; the journey must diagnose, not recover",
-            focusStealer?.isShowing == true,
-        )
-        dismissSyntheticFocusStealingWindow(requireFocus = true)
+        focusOwner.withOwner { owner ->
+            WalkthroughScreenshotArtifacts.capture("issue1942-fileviewer-foreign-focus-owner")
+            val foreignFocusStartedAt = android.os.SystemClock.elapsedRealtime()
+            val foreignFocusFailure = runCatching {
+                assertFileViewerWindowFocused()
+            }.exceptionOrNull()
+            val foreignFocusFailureMs =
+                android.os.SystemClock.elapsedRealtime() - foreignFocusStartedAt
+            val foreignFocusMessage = foreignFocusFailure?.message.orEmpty()
+            assertTrue(
+                "foreign focus must be reported as the cause instead of a generic Copy timeout; " +
+                    "got: $foreignFocusMessage",
+                foreignFocusMessage.contains(FOREIGN_WINDOW_FOCUS_SIGNATURE),
+            )
+            assertTrue(
+                "causal focus failure must name the active window; got: $foreignFocusMessage",
+                foreignFocusMessage.contains("active_window_pkg="),
+            )
+            assertTrue(
+                "focus pre-condition must fail before the old 5s Copy timeout; observed " +
+                    "${foreignFocusFailureMs}ms",
+                foreignFocusFailureMs < 5_000,
+            )
+            assertTrue(
+                "the app-owned focus thief must stay visible until harness cleanup",
+                owner.isShowing,
+            )
+        }
 
         // The real production SelectionContainer must still select and copy
         // Markdown text. Use the platform Copy key action after long-pressing
@@ -946,43 +970,6 @@ class FileViewerDockerTest {
 
     private fun assertMarkerText(path: String, expected: String) {
         assertEquals(expected, annotatedText(listMarkerTag(path)).text)
-    }
-
-    private fun raiseSyntheticFocusStealingWindow() {
-        composeRule.activityRule.scenario.onActivity { activity ->
-            val dialog = Dialog(activity)
-            val label = TextView(activity).apply {
-                text = "issue-1942 synthetic focus owner"
-                isFocusableInTouchMode = true
-                isFocusable = true
-            }
-            dialog.setContentView(label)
-            dialog.setCancelable(false)
-            dialog.setOnDismissListener { focusStealer = null }
-            dialog.show()
-            focusStealer = dialog
-        }
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-    }
-
-    private fun dismissSyntheticFocusStealingWindow(requireFocus: Boolean) {
-        val dialog = focusStealer
-        InstrumentationRegistry.getInstrumentation().runOnMainSync {
-            if (dialog?.isShowing == true) dialog.dismiss()
-        }
-        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        if (requireFocus) {
-            val regained = waitForActivityWindowFocused(
-                scenario = composeRule.activityRule.scenario,
-                timeoutMs = 5_000,
-            )
-            if (!regained) {
-                fail(
-                    "file-viewer activity must regain focus after the synthetic owner is " +
-                        "dismissed; ${describeActiveWindow()}",
-                )
-            }
-        }
     }
 
     private fun assertFileViewerWindowFocused(timeoutMs: Long = 1_000) {

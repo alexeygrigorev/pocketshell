@@ -457,6 +457,30 @@ fun TerminalSurface(
         }
     }
 
+    // Issue #1968: InputConnection routes through the mounted TerminalView,
+    // not through TerminalSurfaceState directly. Bind main-thread session
+    // publication to that View synchronously, before a replaced bridge closes
+    // its old outbound queue. Without this handoff, commitText() could return
+    // true against the stopped old session and lose one whole IME chunk before
+    // snapshotFlow's next collection turn.
+    DisposableEffect(state, terminalView, onLocalTerminalError) {
+        val view = terminalView
+        if (view == null) {
+            onDispose { }
+        } else {
+            val uninstall = state.installMountedSessionBinder { session ->
+                if (view.currentSession !== session) {
+                    publishedTapAffordances.clear()
+                    runCatching {
+                        view.attachSession(session)
+                        if (session != null) view.forceFullRepaint()
+                    }.onFailure { onLocalTerminalError?.invoke(it) }
+                }
+            }
+            onDispose { uninstall() }
+        }
+    }
+
     // Issue #959 recurrence: TerminalSurfaceState owns the authoritative
     // TerminalSession identity, while the mounted TerminalView owns the real
     // IME/key-event entry point. Binding the two from AndroidView.update left a
@@ -473,8 +497,10 @@ fun TerminalSurface(
     // The A→null→B connected proof separately exercises the detach identity;
     // snapshotFlow may conflate faster intermediate writes, so this is not a
     // claim that arbitrary off-main mutations are synchronously mirrored.
-    // This is the single attachment owner; AndroidView.update below only reports
-    // the View instance and never performs a second delayed attachment.
+    // Issue #1968 adds a synchronous main-thread binder above as the readiness
+    // owner. This collector remains the backstop for off-main state publication
+    // and lifecycle re-entry; its identity check makes already-bound emissions
+    // no-ops. AndroidView.update below only reports the View instance.
     LaunchedEffect(state, terminalView) {
         val view = terminalView ?: return@LaunchedEffect
         withContext(Dispatchers.Main.immediate) {

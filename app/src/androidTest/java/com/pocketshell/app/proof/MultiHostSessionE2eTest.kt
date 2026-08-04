@@ -8,15 +8,15 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
-import androidx.activity.ComponentActivity
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.printToString
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -39,6 +39,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
@@ -61,27 +62,37 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class MultiHostSessionE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    // Issue #1993: the former createEmptyComposeRule + ActivityScenario harness
+    // let InstrumentationActivityInvoker$EmptyActivity retake foreground between
+    // the host tap and the folder assertion in the long hosted shard, destroying
+    // MainActivity. The launch-owned rule keeps the production surface alive;
+    // SeedBeforeLaunchRule establishes both remote sessions and Room rows before
+    // MainActivity's first composition.
+    val compose = createAndroidComposeRule<MainActivity>()
 
-    // Issue #470 blocker #1: grant runtime permissions before the activity
-    // launches so the system GrantPermissionsActivity never steals focus
-    // from the Compose hierarchy ("No compose hierarchies found").
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: RuleChain = RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
     private var sessionA: String = ""
     private var sessionB: String = ""
+    private var fixtureKey: String? = null
+    private var seededHosts: SeededHosts? = null
+    private var expectedHostA: String? = null
+    private var expectedHostB: String? = null
+    private var baselineHostA: Int? = null
+    private var baselineHostB: Int? = null
+    private var navigationAttempt: Int = 0
 
     @After
     fun tearDown() {
-        launchedActivity?.close()
-        launchedActivity = null
+        clearLastSessionPrefs()
         runBlocking {
             runCatching {
-                val key = readFixtureKey()
+                val key = fixtureKey ?: readFixtureKey()
                 cleanupSession(key, AGENTS_PORT, sessionA)
                 cleanupSession(key, TMUX_PORT, sessionB)
             }
@@ -90,26 +101,14 @@ class MultiHostSessionE2eTest {
 
     @Test
     fun switchingBetweenHostsPreservesRemoteSessionTranscript() { runBlocking {
-        val key = readFixtureKey()
-        val pem = SshKey.Pem(key)
-        waitForSshFixtureReady(pem, port = AGENTS_PORT)
-        waitForSshFixtureReady(pem, port = TMUX_PORT)
-
-        val suffix = System.currentTimeMillis().toString().takeLast(6)
-        sessionA = "issue147-a-$suffix"
-        sessionB = "issue147-b-$suffix"
-        val expectedHostA = seedSession(key, AGENTS_PORT, sessionA, "HOST-A-READY")
-        val expectedHostB = seedSession(key, TMUX_PORT, sessionB, "HOST-B-READY")
-        val baselineA = sshdProcessCount(key, AGENTS_PORT)
-        val baselineB = sshdProcessCount(key, TMUX_PORT)
-        Log.i(LOG_TAG, "sshd baseline: hostA=$baselineA hostB=$baselineB")
-
-        val hosts = seedDockerHosts(key)
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        val key = requireNotNull(fixtureKey) { "seed-before-launch fixture key missing" }
+        val hosts = requireNotNull(seededHosts) { "seed-before-launch hosts missing" }
+        val hostAHostname = requireNotNull(expectedHostA) { "seed-before-launch host A marker missing" }
+        val hostBHostname = requireNotNull(expectedHostB) { "seed-before-launch host B marker missing" }
 
         attachFromHostList(hosts.hostARowTag, hosts.hostAName, sessionA)
         waitForPtyReady("host A initial attach")
-        val hostAMarker = "host-a:$expectedHostA"
+        val hostAMarker = "host-a:$hostAHostname"
         sendCommandThroughTerminalInput(
             command = "printf 'host-a:%s\\n' \"\$(hostname)\"",
             label = "host A hostname marker",
@@ -128,7 +127,7 @@ class MultiHostSessionE2eTest {
 
         attachFromHostList(hosts.hostBRowTag, hosts.hostBName, sessionB)
         waitForPtyReady("host B attach")
-        val hostBMarker = "host-b:$expectedHostB"
+        val hostBMarker = "host-b:$hostBHostname"
         sendCommandThroughTerminalInput(
             command = "printf 'host-b:%s\\n' \"\$(hostname)\"",
             label = "host B hostname marker",
@@ -158,12 +157,31 @@ class MultiHostSessionE2eTest {
         }
         captureViewport("03-host-a-marker-preserved")
 
-        bestEffortAssertNoRunawaySshdChildren(key, AGENTS_PORT, baselineA, "host A")
-        bestEffortAssertNoRunawaySshdChildren(key, TMUX_PORT, baselineB, "host B")
+        bestEffortAssertNoRunawaySshdChildren(key, AGENTS_PORT, baselineHostA, "host A")
+        bestEffortAssertNoRunawaySshdChildren(key, TMUX_PORT, baselineHostB, "host B")
 
         writeTimings()
         Unit
     } }
+
+    private suspend fun seedBeforeLaunch() {
+        clearLastSessionPrefs()
+        val key = readFixtureKey()
+        fixtureKey = key
+        val pem = SshKey.Pem(key)
+        waitForSshFixtureReady(pem, port = AGENTS_PORT)
+        waitForSshFixtureReady(pem, port = TMUX_PORT)
+
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        sessionA = "issue147-a-$suffix"
+        sessionB = "issue147-b-$suffix"
+        expectedHostA = seedSession(key, AGENTS_PORT, sessionA, "HOST-A-READY")
+        expectedHostB = seedSession(key, TMUX_PORT, sessionB, "HOST-B-READY")
+        baselineHostA = sshdProcessCount(key, AGENTS_PORT)
+        baselineHostB = sshdProcessCount(key, TMUX_PORT)
+        Log.i(LOG_TAG, "sshd baseline: hostA=$baselineHostA hostB=$baselineHostB")
+        seededHosts = seedDockerHosts(key)
+    }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()
@@ -197,6 +215,10 @@ class MultiHostSessionE2eTest {
                     pocketshellInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
                     pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    // This journey owns host/session switching, not bootstrap.
+                    // Keep the setup cache internally complete so HostList does
+                    // not route the tmux-only host-B fixture into a setup sheet.
+                    pocketshellVersionCompatible = true,
                 )
 
             val hostAName = "Issue147 Host A"
@@ -275,6 +297,13 @@ class MultiHostSessionE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        navigationAttempt += 1
+        captureNavigationState("host-tap-$navigationAttempt-$sessionName")
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
         compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForText(hostName, timeoutMs = 10_000)
         waitForText(sessionName, timeoutMs = folderListWaitMs())
@@ -284,8 +313,13 @@ class MultiHostSessionE2eTest {
     }
 
     private fun returnToHostList() {
-        launchedActivity?.onActivity { activity ->
-            (activity as ComponentActivity).onBackPressedDispatcher.onBackPressed()
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.onBackPressedDispatcher.onBackPressed()
+        }
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
         }
         compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true).performClick()
@@ -351,7 +385,7 @@ class MultiHostSessionE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
@@ -397,7 +431,7 @@ class MultiHostSessionE2eTest {
 
     private fun terminalInputConnection(): InputConnection {
         var connection: InputConnection? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = requireNotNull(activity.window.decorView.findTerminalView()) {
                 "TerminalView was not found"
             }
@@ -410,7 +444,7 @@ class MultiHostSessionE2eTest {
 
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -424,7 +458,7 @@ class MultiHostSessionE2eTest {
 
     private fun terminalGridSize(): GridSize {
         var grid: GridSize? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -477,7 +511,7 @@ class MultiHostSessionE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = activity.window.decorView.findTerminalView() ?: return@onActivity
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
@@ -496,6 +530,14 @@ class MultiHostSessionE2eTest {
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
         writeBitmap(name, bitmap)
         bitmap.recycle()
+    }
+
+    private fun captureNavigationState(name: String) {
+        captureFullScreen(name)
+        writeText(
+            "$name-semantics.txt",
+            compose.onRoot(useUnmergedTree = true).printToString(maxDepth = 12),
+        )
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {

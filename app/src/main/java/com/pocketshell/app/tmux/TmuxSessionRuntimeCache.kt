@@ -100,6 +100,7 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         val evicted = mutableListOf<CachedTmuxRuntime>()
         evicted += evictExpiredLocked(now)
         val runtime = runtimes.remove(key)?.runtime
+            ?: removeNameOnlyPrewarmLocked(key)
         // Issue #681: when a session becomes active, drop any key-drifted TWIN
         // of that same session still parked under a different key. Otherwise
         // the active session ends up with a duplicate cache entry that surfaces
@@ -112,8 +113,36 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
         )
     }
 
+    /**
+     * A picker prewarm is intentionally keyed only by host + session name,
+     * because the picker callback does not provide durable tmux identity. When
+     * the selected row subsequently supplies that identity, promote the single
+     * name-only prewarm instead of opening a second control client. Never fall
+     * back to another non-null durable identity: a killed/recreated same-name
+     * session must remain a cache miss.
+     */
+    private fun removeNameOnlyPrewarmLocked(key: TmuxRuntimeKey): CachedTmuxRuntime? {
+        if (key.durableSessionKey == null) return null
+        val entry = runtimes.entries.firstOrNull { candidate ->
+            candidate.key.hostId == key.hostId &&
+                candidate.key.sessionName == key.sessionName &&
+                candidate.key.durableSessionKey == null
+        } ?: return null
+        runtimes.remove(entry.key)
+        return entry.value.runtime
+    }
+
     internal fun contains(key: TmuxRuntimeKey): Boolean = synchronized(this) {
         runtimes.containsKey(key)
+    }
+
+    /**
+     * Session-picker prewarm receives only a host-scoped tmux session name, not
+     * the durable tmux identity. Match that deliberately narrower namespace so
+     * a parked runtime with a durable key is not prewarmed a second time.
+     */
+    internal fun containsSession(hostId: Long, sessionName: String): Boolean = synchronized(this) {
+        runtimes.keys.any { it.hostId == hostId && it.sessionName == sessionName }
     }
 
     internal fun containsExact(binding: RuntimeHealthBinding): Boolean = synchronized(this) {

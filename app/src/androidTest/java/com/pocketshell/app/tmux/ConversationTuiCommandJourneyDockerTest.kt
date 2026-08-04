@@ -90,10 +90,10 @@ import java.io.FileOutputStream
  * ### Real-path red→green (D33/G10)
  *
  * [modelCommandFromConversationShowsNoticeNoEchoBubbleThenTapOpensTerminal]:
- *  1. Attach to a masked-live-claude session (the #975/#1057 fixture shape: a
- *     recorded-shell whose cwd holds a fresh Claude transcript; the #975
- *     transcript-evidence fallback binds live detection and the transcript tails
- *     into `events`). The composer route is AgentConversation only when
+ *  1. Attach to a session explicitly recorded as Claude whose cwd holds a fresh
+ *     Claude transcript. The authoritative identity selects the real Claude
+ *     source and the transcript tails into `events`. The composer route is
+ *     AgentConversation only when
  *     `currentDetection != null` on the Conversation tab, so a REAL bound
  *     detection is required — a presumed-only pane routes AgentPayload and never
  *     reaches the notice path.
@@ -173,8 +173,8 @@ class ConversationTuiCommandJourneyDockerTest {
 
         val vm = currentViewModel()
 
-        // STEP 1 — REAL detection binds (the #975 transcript-evidence fallback)
-        // AND the transcript tails into `events`. A bound detection is what makes
+        // STEP 1 — REAL detection binds from the authoritative recorded Claude
+        // identity AND the transcript tails into `events`. A bound detection is what makes
         // the composer route AgentConversation (the notice path); a presumed-only
         // pane routes AgentPayload and never reaches it.
         val boundPaneId = requireNotNull(waitForDetectionBoundConversationPane(vm)) {
@@ -555,7 +555,12 @@ class ConversationTuiCommandJourneyDockerTest {
                     "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} " +
                         "-c /home/testuser \"printf 'issue1890-ready\\r\\n'; exec sh\"",
                 )
-                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind claude")
+                appendLine(
+                    "tmux show-options -v -t ${shellQuote(sessionName)} " +
+                        "@ps_agent_kind | grep -qx claude",
+                )
+                appendLine("test -s ${shellQuote(transcript)}")
                 appendLine("sleep 1")
             },
         )
@@ -563,12 +568,10 @@ class ConversationTuiCommandJourneyDockerTest {
     }
 
     /**
-     * The #975/#1057 masked-live-claude fixture shape: a session recorded
-     * `@ps_agent_kind=shell` whose cwd holds a FRESH Claude transcript (copied
-     * from the fixture seed). The daemon classify returns `unknown`, so the ONLY
-     * way detection binds is the #975 transcript-evidence fallback — which is what
-     * we need: a bound live detection whose transcript tails into events so the
-     * composer routes AgentConversation.
+     * A session explicitly recorded as Claude whose cwd holds a FRESH Claude
+     * transcript copied from the fixture seed. The recorded identity and JSONL
+     * are both asserted remotely so this test cannot silently become a readable
+     * shell fixture that never binds the Conversation composer route.
      */
     private suspend fun seedMaskedLiveClaudeSession(key: String): String {
         val suffix = unique()
@@ -598,7 +601,15 @@ class ConversationTuiCommandJourneyDockerTest {
                         "-c /home/testuser " +
                         "\"printf 'issue1207-ready\\r\\n'; exec sh\"",
                 )
-                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind claude")
+                appendLine(
+                    "tmux show-options -v -t ${shellQuote(sessionName)} " +
+                        "@ps_agent_kind | grep -qx claude",
+                )
+                appendLine(
+                    "test -s /home/testuser/.claude/projects/-home-testuser/" +
+                        "issue1207-live-claude.jsonl",
+                )
                 appendLine("sleep 1")
             },
         )

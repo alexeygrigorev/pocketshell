@@ -26,12 +26,15 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TERMINAL_HOTKEYS_LAUNCHER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TmuxHotkeyCtrlModifierLabel
 import com.pocketshell.app.tmux.TmuxHotkeyEnterLabel
 import com.pocketshell.uikit.components.HotkeyModifierActiveKey
+import com.pocketshell.uikit.components.HotkeyPanelExpandedKey
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -126,7 +129,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         }
         val attachAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForSessionInPicker(rule = compose, sessionName = SESSION_NAME, timeoutMs = 20_000)
+        waitForSeededSessionInPicker(hostRowTag)
         compose.onNodeWithText(SESSION_NAME).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -144,16 +147,15 @@ class TmuxKeyBarCtrlComboE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true).performClick()
-        // The panel shows EVERY key at once in a tidy grid — Esc / Tab / ⇧Tab /
-        // Enter, the de-duped Ctrl combos incl. the restored ^B (tmux prefix) AND
-        // the #1091-filled nano/TUI control keys (^G ^J ^K ^O ^T ^U ^W ^X ^\), the
-        // re-homed doubled interrupt/EOF chords, the sticky `Ctrl` modifier, and
-        // the clean arrow glyphs. No `…` overflow, no duplicate `/`.
+        // Issue #1332: the panel opens with only the common keys. Expand it
+        // before auditing or using the full catalog (⇧Tab, all Ctrl combos,
+        // doubled controls, sticky Ctrl, and letters).
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("^C", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        expandHotkeysPanel()
         // Issue #787: doubled interrupt/EOF controls; issue #893: ⇧Tab; issue
         // #1091: the previously-missing nano/TUI control keys are now present too.
         listOf(
@@ -194,6 +196,11 @@ class TmuxKeyBarCtrlComboE2eTest {
         // (the terminal-only viewport capture does not include the Compose sheet).
         captureFullDevice("issue784-02b-hotkeys-panel-fulldevice")
 
+        // Return to #1332 compact mode before exercising the common ^C key.
+        // Expanded mode intentionally contains an equivalent second ^C in the
+        // CTRL COMBOS catalog; compact mode makes the interaction unambiguous.
+        collapseHotkeysPanel()
+
         // ===== Start a long-running process in the pane =====
         // A ticking loop is the canonical "is it still running?" process:
         // it keeps emitting until interrupted, but at a measured rate so the
@@ -213,7 +220,11 @@ class TmuxKeyBarCtrlComboE2eTest {
 
         // ===== Tap the panel ^C to interrupt =====
         val interruptAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText("^C", useUnmergedTree = true).performClick()
+        compose.onNode(
+            hasText("^C")
+                .and(hasClickAction())
+                .and(hasAnyAncestor(hasTestTag(TERMINAL_HOTKEYS_PANEL_TAG))),
+        ).performClick()
         // After the interrupt, the flood stops and a fresh shell prompt
         // returns. We detect "stopped" by sampling the transcript twice
         // with a settle gap and confirming the flood-line count no longer
@@ -248,6 +259,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         // `Ctrl-D ×2`) was hard-cut; those controls moved into the hotkeys panel's
         // INTERRUPT / EOF section. Prove the doubled control still interrupts a
         // live process: start a fresh flood, tap `^C×2`, confirm it stops.
+        expandHotkeysPanel()
         SystemClock.sleep(750)
         sendCommandThroughTerminalInput(
             "i=0; while true; do i=\$((i+1)); echo $FLOOD_MARKER-\$i; sleep 0.3; done",
@@ -385,7 +397,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         }
         val attachAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForSessionInPicker(rule = compose, sessionName = SESSION_NAME, timeoutMs = 20_000)
+        waitForSeededSessionInPicker(hostRowTag)
         compose.onNodeWithText(SESSION_NAME).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -400,13 +412,10 @@ class TmuxKeyBarCtrlComboE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true).performClick()
-        // The #1091-filled nano control keys (incl. `^O` Write Out, `^X` Exit)
-        // must be present as direct buttons.
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("^X", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        // Issue #1332 moved the full Ctrl catalog into the extended section.
+        // Reveal it through the production panel control before requiring the
+        // #1091 nano keys (`^O` Write Out and `^X` Exit among them).
+        expandHotkeysPanel()
         listOf("^G", "^J", "^K", "^O", "^T", "^U", "^W", "^X", "^\\").forEach { label ->
             assertTrue(
                 "expected the hotkeys panel to expose the nano control key '$label'",
@@ -540,6 +549,72 @@ class TmuxKeyBarCtrlComboE2eTest {
         ).performClick()
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         SystemClock.sleep(150)
+    }
+
+    /**
+     * Issue #1332 made the hotkeys panel progressively disclosed. Extended
+     * keys are deliberately absent until the user taps "Show more keys", so
+     * every E2E leg that audits or uses those keys must perform that real user
+     * action instead of waiting for a node that cannot exist in compact mode.
+     */
+    private fun expandHotkeysPanel() {
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(
+                TERMINAL_HOTKEYS_PANEL_EXPAND_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(
+            TERMINAL_HOTKEYS_PANEL_EXPAND_TAG,
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodes(
+                SemanticsMatcher.expectValue(HotkeyPanelExpandedKey, true),
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
+    /** Restore compact mode and prove its common ^C interaction is unique. */
+    private fun collapseHotkeysPanel() {
+        compose.onNodeWithTag(
+            TERMINAL_HOTKEYS_PANEL_EXPAND_TAG,
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            val collapsed = compose.onAllNodes(
+                SemanticsMatcher.expectValue(HotkeyPanelExpandedKey, false),
+            ).fetchSemanticsNodes().isNotEmpty()
+            if (!collapsed) return@waitUntil false
+            compose.onAllNodes(
+                hasText("^C")
+                    .and(hasClickAction())
+                    .and(hasAnyAncestor(hasTestTag(TERMINAL_HOTKEYS_PANEL_TAG))),
+            ).fetchSemanticsNodes().size == 1
+        }
+    }
+
+    /**
+     * Keep this hotkey journey behind the shared, bounded #470 readiness gate.
+     * A stalled first enumeration gets the standard host-detail re-poke and
+     * hosted timeout, while a genuinely absent seeded session still hard-fails
+     * with the helper's enumeration diagnostics before any hotkey assertion.
+     */
+    private fun waitForSeededSessionInPicker(hostRowTag: String) {
+        waitForSessionInPicker(
+            rule = compose,
+            sessionName = SESSION_NAME,
+            onStateNote = { note -> Log.i(LOG_TAG, "session picker: $note") },
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                    onStateNote = { note -> Log.i(LOG_TAG, "session picker: $note") },
+                )
+            },
+        )
     }
 
     private fun buildSummary(

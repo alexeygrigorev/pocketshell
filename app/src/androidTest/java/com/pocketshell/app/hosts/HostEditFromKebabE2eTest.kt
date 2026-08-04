@@ -17,7 +17,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.proof.PreGrantPermissionsRule
-import com.pocketshell.app.usage.UsageScheduler
+import com.pocketshell.app.usage.UsageSchedulerTestIsolationRule
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import java.io.File
@@ -25,9 +25,9 @@ import java.io.FileOutputStream
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 
 /**
@@ -47,52 +47,24 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class HostEditFromKebabE2eTest {
 
-    @get:Rule
     val compose = createEmptyComposeRule()
 
     // Issue #470 blocker #1: grant runtime permissions before the activity
     // launches so the system GrantPermissionsActivity never steals focus
     // from the Compose hierarchy ("No compose hierarchies found").
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val rules: RuleChain = RuleChain
+        .outerRule(UsageSchedulerTestIsolationRule())
+        .around(PreGrantPermissionsRule())
+        .around(compose)
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
-    private var usageScheduler: UsageScheduler? = null
     private var hostId: Long? = null
-    private var keyId: Long? = null
 
     @After
     fun tearDown() {
-        val scheduler = usageScheduler
         launchedActivity?.close()
         launchedActivity = null
-        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-        val db = openDb(appContext)
-        try {
-            runBlocking {
-                hostId?.let { db.hostDao().deleteById(it) }
-                keyId?.let { db.sshKeyDao().deleteById(it) }
-            }
-        } finally {
-            db.close()
-        }
-        // Issue #1992: this test deliberately gives the process-singleton
-        // UsageScheduler an eligible Docker host. Its real fixture response
-        // includes Claude at 85%, so merely deleting the Room row leaves a
-        // warning snapshot cached for later classes in the same shard. Drain
-        // against the now-empty host table before handing the instrumentation
-        // process to the next test; this is the owning fixture's cleanup, not
-        // a smoke-test bypass of the real warning UI.
-        runBlocking {
-            scheduler?.refreshNow()
-        }
-        scheduler?.snapshots?.value?.let { snapshots ->
-            assertTrue(
-                "HostEditFromKebabE2eTest must not leak process-wide usage snapshots",
-                snapshots.isEmpty(),
-            )
-        }
-        usageScheduler = null
     }
 
     @Test
@@ -103,9 +75,6 @@ class HostEditFromKebabE2eTest {
         val id = requireNotNull(hostId)
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-        launchedActivity!!.onActivity { activity ->
-            usageScheduler = activity.usageScheduler
-        }
         launchedActivity!!.moveToState(Lifecycle.State.RESUMED)
 
         // Land on the host list — the seeded row is present.
@@ -188,7 +157,6 @@ class HostEditFromKebabE2eTest {
                     name = "edit-kebab-key-${System.nanoTime()}",
                     content = key,
                 )
-                keyId = storedKey.id
                 hostId = db.hostDao().insert(
                     HostEntity(
                         name = hostName,

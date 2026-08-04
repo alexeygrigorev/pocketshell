@@ -910,6 +910,24 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
+    fun cacheRestoreForcesFullSurfaceRepaintBoundaryForReusedTerminal() = runTest(scheduler) {
+        val vm = newVm()
+        vm.connectPresumedAgentPaneWithDroppedRowForTest(FakeSshSession())
+        runCurrent()
+        val terminalState = vm.panes.value.single().terminalState
+        val repaintsBefore = terminalState.surfaceRepaintRequestCountForTest()
+
+        vm.parkAndRestoreActiveRuntimeForTest()
+
+        assertEquals(
+            "a cached activation must force exactly one surface repaint boundary so the " +
+                "reused or remounted TerminalView invalidates its #469 dirty cache",
+            repaintsBefore + 1,
+            terminalState.surfaceRepaintRequestCountForTest(),
+        )
+    }
+
+    @Test
     fun cacheRestoreReseedsDroppedRowWithoutScreenRefresh() = runTest(scheduler) {
         // G10 reproduce-first: a presumed-agent pane whose Conversation row was
         // dropped (the R3-B 2-null collapse), then PARKED and RESTORED on a warm

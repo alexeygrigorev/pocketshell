@@ -93,6 +93,14 @@ internal fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
         durableSessionKey = durableSessionKey(),
     )
 
+/** Picker rows provide names only, so a derived target must not inherit another session's identity. */
+internal fun ConnectionTarget.toNameOnlyPrewarmTarget(sessionName: String): ConnectionTarget = copy(
+    sessionName = sessionName,
+    startDirectory = null,
+    tmuxSessionId = null,
+    sessionCreated = null,
+)
+
 internal fun targetLogFields(target: ConnectionTarget): String = buildString {
     append("hostId=")
     append(target.hostId)

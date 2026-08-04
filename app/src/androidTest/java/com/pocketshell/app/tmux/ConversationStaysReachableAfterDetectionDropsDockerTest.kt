@@ -74,11 +74,10 @@ import java.io.FileOutputStream
  * ### Real-path red→green (D33/G10)
  *
  * [conversationStaysReachableAfterLiveDetectionDropsWithLoadedTranscript]:
- *  1. Attach to a recorded `@ps_agent_kind=shell` session whose cwd holds a fresh
- *     Claude transcript (the #975 masked-live-agent fixture shape) — the daemon
- *     classify is `unknown`, so the ONLY way detection binds is the #975
- *     transcript-evidence fallback. Detection binds → the transcript tails into
- *     `events` → the Terminal/Conversation toggle is up. (REAL VM, REAL transcript.)
+ *  1. Attach to a session explicitly recorded as Claude whose cwd holds a fresh
+ *     Claude transcript. The authoritative recorded identity selects the real
+ *     Claude source, the transcript tails into `events`, and the
+ *     Terminal/Conversation toggle appears. (REAL VM, REAL transcript.)
  *  2. Tap the Conversation segment → the real [TMUX_CONVERSATION_PANE_TAG]
  *     transcript pane renders (AC2 — tap-to-switch on the real screen, the gap
  *     #975's "toggle exists" assertion left open).
@@ -164,15 +163,14 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
 
         val vm = currentViewModel()
 
-        // STEP 1 — REAL detection binds (the #975 transcript-evidence fallback,
-        // the only way to bind for a recorded-shell pane the daemon classifies
-        // `unknown`) AND the transcript tails into `events`. This is the genuine
+        // STEP 1 — REAL detection binds from the authoritative recorded Claude
+        // identity AND the transcript tails into `events`. This is the genuine
         // conversation that EXISTS on the pane — not hand-constructed state.
         val paneId = waitForLoadedConversationPane(vm)
         assertNotNull(
             "#1057 precondition: a live conversation with loaded transcript events " +
-                "must bind on the real path (detection via the #975 transcript " +
-                "fallback, then the transcript tails into events). " +
+                "must bind on the real path (recorded Claude identity, then the " +
+                "transcript tails into events). " +
                 "agentConversations=${describeConversations(vm)}",
             paneId,
         )
@@ -420,11 +418,10 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
     }
 
     /**
-     * The #975 masked-live-claude fixture shape: a session recorded
-     * `@ps_agent_kind=shell` whose cwd holds a FRESH Claude transcript (copied
-     * from the fixture seed), with the daemon classify returning `unknown`. The
-     * #975 transcript-evidence fallback binds detection and the transcript tails
-     * into events — the genuine conversation #1057 needs to keep reachable.
+     * A session explicitly recorded as Claude whose cwd holds a FRESH Claude
+     * transcript copied from the fixture seed. The recorded identity and JSONL
+     * are both asserted remotely so this test cannot silently become a readable
+     * shell fixture that never binds a Conversation row.
      */
     private suspend fun seedMaskedLiveClaudeSession(key: String): String {
         val suffix = unique()
@@ -454,7 +451,15 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
                         "-c /home/testuser " +
                         "\"printf 'issue1057-ready\\r\\n'; exec sh\"",
                 )
-                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
+                appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind claude")
+                appendLine(
+                    "tmux show-options -v -t ${shellQuote(sessionName)} " +
+                        "@ps_agent_kind | grep -qx claude",
+                )
+                appendLine(
+                    "test -s /home/testuser/.claude/projects/-home-testuser/" +
+                        "issue1057-live-claude.jsonl",
+                )
                 appendLine("sleep 1")
             },
         )

@@ -301,7 +301,9 @@ private fun TmuxSessionDrawerRow(
             },
             trailing = {
                 Box(
-                    modifier = Modifier.defaultMinSize(minWidth = PocketShellDensity.tapTargetMin),
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = PocketShellDensity.tapTargetMin)
+                        .testTag(tmuxSessionDrawerActionTag(row.name)),
                     contentAlignment = Alignment.CenterEnd,
                 ) {
                     Badge(
@@ -327,3 +329,6 @@ internal const val TMUX_SESSION_SWITCHER_TAG = "tmux:session-switcher"
 internal const val TMUX_SESSION_DRAWER_CLOSE_TAG = "tmux:session-drawer:close"
 internal const val TMUX_SESSION_DRAWER_CREATE_TAG = "tmux:session-drawer:create"
 internal const val TMUX_SESSION_DRAWER_REFRESH_TAG = "tmux:session-drawer:refresh"
+
+internal fun tmuxSessionDrawerActionTag(sessionName: String): String =
+    "tmux:session-drawer:action:$sessionName"

@@ -2051,13 +2051,15 @@ public class PromptComposerViewModel @Inject constructor(
      * anchored at [recordingStartedAtMs], independent of any audio-capture/PCM
      * source. Used by the Android SpeechRecognizer recording path, whose
      * listener-driven flow never runs the Whisper amplitude sampler that
-     * otherwise advances the timer. Runs on [samplerDispatcher] so tests drive
-     * it under virtual time; cancelled by [stopRecordingTimerTicker] when
-     * recording ends.
+     * otherwise advances the timer. Runs on `viewModelScope`'s pinnable
+     * `Dispatchers.Main.immediate` context because each tick publishes state
+     * observed by Compose; dispatching that mutation through the background
+     * sampler context can invalidate the Android view hierarchy off main.
+     * Cancelled by [stopRecordingTimerTicker] when recording ends.
      */
     private fun startRecordingTimerTicker() {
         recordingTimerJob?.cancel()
-        recordingTimerJob = viewModelScope.launch(samplerDispatcher) {
+        recordingTimerJob = viewModelScope.launch {
             while (kotlinx.coroutines.currentCoroutineContext().isActive) {
                 if (_uiState.value.recording != RecordingState.Recording) break
                 val elapsedMs = (clock() - recordingStartedAtMs).coerceAtLeast(0L)

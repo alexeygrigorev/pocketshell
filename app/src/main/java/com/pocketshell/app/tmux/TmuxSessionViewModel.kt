@@ -4649,8 +4649,8 @@ public class TmuxSessionViewModel @Inject constructor(
             .map { it.trim() }
             .filter { it.isNotEmpty() && it != baseTarget.sessionName }
             .distinct()
-            .map { sessionName -> baseTarget.copy(sessionName = sessionName, startDirectory = null) }
-            .filterNot { runtimeCache.contains(it.toRuntimeKey()) }
+            .map(baseTarget::toNameOnlyPrewarmTarget)
+            .filterNot { runtimeCache.containsSession(it.hostId, it.sessionName) }
             .take(TMUX_SESSION_PREWARM_MAX_TARGETS)
             .toList()
         if (targets.isEmpty()) return
@@ -4660,7 +4660,7 @@ public class TmuxSessionViewModel @Inject constructor(
             for (target in targets) {
                 if (!isActive) return@launch
                 if (activeTarget?.let { isSameHost(it, target) } != true) return@launch
-                if (runtimeCache.contains(target.toRuntimeKey())) continue
+                if (runtimeCache.containsSession(target.hostId, target.sessionName)) continue
                 prewarmRuntime(target, foregroundSession)
             }
         }
@@ -5891,8 +5891,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // different session never inherits a stale shell verdict.
         confirmedShellSessionIds.clear()
         _confirmedShellPaneIds.value = emptySet()
-        // Issue #1158: drop the sticky alt-buffer agent latch with the other
-        // per-runtime caches so a different session never inherits a stale verdict.
+        // Issue #1158: clear the sticky alt-buffer latch before another session restores.
         altBufferAgentSessionIds.clear()
         _altBufferAgentPaneIds.value = emptySet()
         clearAgentConversations()
@@ -6065,6 +6064,7 @@ public class TmuxSessionViewModel @Inject constructor(
         bindClientObservers(runtime.client)
         rebindRestoredRuntimePaneJobsIfNeeded(runtime.client, runtime.panes)
         _panes.value = runtime.panes
+        runtime.panes.forEach { it.terminalState.requestSurfaceRepaint() }
         rebuildUnifiedPanes()
         restartAgentConversationsForRestoredRuntime(runtime)
         clientRegistration = activeTmuxClients.register(

@@ -17,6 +17,7 @@ import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
@@ -43,9 +44,9 @@ import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 
 /**
- * Issue #235 — auto-detach the tmux `-CC` control client on lifecycle
- * background so the desktop terminal opening the same session is not
- * pinned to the phone's small viewport.
+ * Issue #235 — auto-detach the tmux `-CC` control client after the bounded
+ * lifecycle-background grace so a desktop terminal opening the same session
+ * is not pinned to the phone's small viewport.
  *
  * Symptom (maintainer dogfood, v0.2.8): PocketShell attaches to a
  * tmux session at ~85x30, desktop terminal attaches at 200x50, tmux
@@ -71,10 +72,10 @@ import java.nio.charset.StandardCharsets
  *     real device (Activity → STOPPED → ProcessLifecycleOwner
  *     `ON_STOP`), but without an extra `uiautomator` dependency and
  *     without depending on launcher-availability on swiftshader.
- *     The `App` observer (#235) fans the event into every registered
- *     `TmuxSessionViewModel`'s `onAppBackgrounded` hook, which runs
- *     `detachCleanly()` against the live `-CC` client.
- *  5. Poll `tmux list-clients -t claude-main` until the count
+ *     The App-level grace owner intentionally retains the client inside the
+ *     short injected grace, then fans the elapsed event into every registered
+ *     `TmuxSessionViewModel`'s `onAppBackgrounded` clean-detach hook.
+ *  5. Poll `tmux list-clients -t claude-main` after grace until the count
  *     reaches 0 — proves the `-CC` client is gone and the size lock
  *     is released.
  *  6. Open a sidecar plain-ssh `tmux attach -t claude-main` over a
@@ -129,6 +130,7 @@ class TmuxDetachOnBackgroundE2eTest {
     fun closeLaunchedActivity() {
         launchedActivity?.close()
         launchedActivity = null
+        BackgroundGraceTestOverride.setForTest(null)
         runBlocking {
             runCatching { cleanupRemoteTmuxSession(readFixtureKey()) }
         }
@@ -187,8 +189,12 @@ class TmuxDetachOnBackgroundE2eTest {
             attachedClientCount >= 1,
         )
 
-        // ---- (2) Background the app via `moveToState(CREATED)`. This
-        // walks the Activity through `onPause` + `onStop`, which the
+        // ---- (2) Background the app via `moveToState(CREATED)`. Use a short
+        // test-only grace so this proof exercises the production D21 contract
+        // without waiting the full 90 seconds: the client remains owned inside
+        // grace, then cleanly detaches when grace expires.
+        BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
+        // This walks the Activity through `onPause` + `onStop`, which the
         // [ProcessLifecycleOwner] observer in [com.pocketshell.app.App]
         // translates into the `ON_STOP` event the #235 fanout reads
         // off. Same lifecycle journey `UiDevice.pressHome()` produces
@@ -199,10 +205,45 @@ class TmuxDetachOnBackgroundE2eTest {
         val backgroundStart = SystemClock.elapsedRealtime()
         launchedActivity?.moveToState(Lifecycle.State.CREATED)
 
-        // ---- (3) Poll list-clients until the detach lands. tmux
-        // removes the entry within a single round-trip once
-        // `detach-client` is received; 6s is generous CI headroom and
-        // also covers ProcessLifecycleOwner's 700ms ON_STOP debounce.
+        // A quick app switch deliberately retains the live runtime. The old
+        // nightly assertion polled for immediate zero and contradicted the
+        // bounded-grace decision (#1123/#1159). Pin the within-grace half first
+        // so this cannot become a test that merely delays before asserting zero.
+        waitForGraceStart(POST_GRACE_MS)
+        val conservativeGraceDeadline = backgroundStart + POST_GRACE_MS
+        val withinGraceRawSnapshot = listClientsRaw(key, SEEDED_SESSION)
+        val withinGraceObservedAt = SystemClock.elapsedRealtime()
+        val clientsInsideGrace = withinGraceRawSnapshot
+            .lines()
+            .count { it.isNotBlank() }
+        writeText(
+            "issue235-02-within-grace-clients.txt",
+            buildString {
+                appendLine("background_start_elapsed_realtime_ms=$backgroundStart")
+                appendLine("conservative_grace_deadline_elapsed_realtime_ms=$conservativeGraceDeadline")
+                appendLine("client_observation_completed_elapsed_realtime_ms=$withinGraceObservedAt")
+                appendLine("observation_completed_before_conservative_deadline=${withinGraceObservedAt < conservativeGraceDeadline}")
+                appendLine("clients=$clientsInsideGrace")
+                append(withinGraceRawSnapshot)
+            },
+        )
+        assertTrue(
+            "within-grace client observation crossed even the conservative deadline: " +
+                "backgroundStart=$backgroundStart graceMs=$POST_GRACE_MS " +
+                "observedAt=$withinGraceObservedAt. The real grace starts after " +
+                "backgroundStart, so completing before backgroundStart+grace is a " +
+                "hard monotonic proof that teardown could not yet be due.",
+            withinGraceObservedAt < conservativeGraceDeadline,
+        )
+        assertTrue(
+            "the active -CC client must remain owned inside bounded grace; got " +
+                "$clientsInsideGrace clients; raw=`$withinGraceRawSnapshot`",
+            clientsInsideGrace >= 1,
+        )
+
+        // ---- (3) Poll list-clients until the post-grace detach lands. tmux
+        // removes the entry within a single round-trip once `detach-client` is
+        // received. The budget covers the injected grace, teardown, and CI load.
         var orphanCount = -1
         var orphanRawSnapshot = ""
         val deadline = SystemClock.elapsedRealtime() + DETACH_TIMEOUT_MS
@@ -220,7 +261,8 @@ class TmuxDetachOnBackgroundE2eTest {
         )
         writeText("issue235-02-after-background-clients.txt", orphanRawSnapshot)
         assertEquals(
-            "expected zero tmux clients on $SEEDED_SESSION after background; raw=`$orphanRawSnapshot`",
+            "expected zero tmux clients on $SEEDED_SESSION after bounded background grace elapsed; " +
+                "raw=`$orphanRawSnapshot`",
             0,
             orphanCount,
         )
@@ -660,6 +702,20 @@ class TmuxDetachOnBackgroundE2eTest {
         runCatching { ProcessBuilder("logcat", "-c").start().waitFor() }
     }
 
+    private fun waitForGraceStart(expectedMillis: Long) {
+        val deadline = SystemClock.elapsedRealtime() + 10_000L
+        var logcat = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            logcat = dumpLogcat()
+            if (logcat.contains("grace-window-start millis=$expectedMillis")) return
+            SystemClock.sleep(100)
+        }
+        throw AssertionError(
+            "expected bounded grace to start with millis=$expectedMillis before checking " +
+                "the within-grace client owner; logcat tail:\n${logcat.takeLast(4_000)}",
+        )
+    }
+
     private fun dumpLogcat(): String =
         ProcessBuilder(
             "logcat",
@@ -668,6 +724,7 @@ class TmuxDetachOnBackgroundE2eTest {
             "threadtime",
             "PsTmuxLifecycle:I",
             "PsTmuxReconnect:I",
+            "PsAppBgGrace:I",
             "*:S",
         )
             .redirectErrorStream(true)
@@ -702,14 +759,18 @@ class TmuxDetachOnBackgroundE2eTest {
         const val DESKTOP_PTY_ROWS: Int = 50
 
         /**
-         * After we drive the lifecycle background, the detach must
-         * land in well under this ceiling. The single-client detach
-         * round-trip on a healthy fixture is sub-100ms;
-         * ProcessLifecycleOwner adds a 700ms ON_STOP debounce; 6s is
-         * generous CI headroom for swiftshader emulator + Docker
-         * compose overhead, matching the #215 sibling test's budget.
+         * After we drive lifecycle background, the injected grace and clean
+         * detach must land inside this ceiling. The budget includes the
+         * ProcessLifecycleOwner debounce and swiftshader/Docker load.
          */
-        const val DETACH_TIMEOUT_MS: Long = 6_000L
+        const val DETACH_TIMEOUT_MS: Long = 60_000L
+        /**
+         * The within-grace oracle includes logcat confirmation plus a fresh real
+         * SSH connect/list-clients round trip. Give that observation enough room
+         * under contended hosted runners, then hard-check its completion against
+         * the conservative monotonic deadline derived before ON_STOP.
+         */
+        const val POST_GRACE_MS: Long = 30_000L
 
         /**
          * Issue #235 r2: the local `TerminalView` binds to its session

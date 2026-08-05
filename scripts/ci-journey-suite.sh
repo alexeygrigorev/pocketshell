@@ -867,4 +867,43 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #2003 abandoned-PixelCopy RenderThread abort proof (core-terminal
+# androidTest). The #1443 diagnostic pixel-truth probe recycled its PixelCopy
+# destination bitmap in a `finally` that ALSO ran when the caller abandoned the
+# wait (the 250 ms `latch.await` timing out on a loaded device, or the probing
+# IO thread being interrupted). `PixelCopy.request` is asynchronous, so HWUI
+# resolved that same bitmap later on the RenderThread
+# (`Readback::copySurfaceInto` -> `CopyRequestAdapter::getDestinationBitmap` ->
+# `android::bitmap::toBitmap`), and `toBitmap` is LOG_ALWAYS_FATAL on a recycled
+# bitmap: "Error, cannot access an invalid/free'd bitmap here!" -> SIGABRT ->
+# the WHOLE APP PROCESS died. It killed a Conversation journey mid-run on `main`
+# base 20ec66b1 (device tombstone_16, pid 9555 tid 9598 RenderThread). This
+# proof drives the REAL production TerminalSurface + REAL PixelCopy against a
+# real window and abandons in-flight copies both ways (timeout + interrupt);
+# with the base recycle it dies as "Process crashed", with the ownership fix the
+# process survives and the probe still works. A diagnostic must never be able to
+# abort the app, so it stays guarded per-push. Uses NO Docker fixture.
+if budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  PIXEL_PROBE_ABANDON_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #2003 abandoned-PixelCopy proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #2003 ABANDONED-PIXELCOPY PROOF: $CORE_TERMINAL_PIXEL_PROBE_ABANDON_CLASS (attempt 1)"
+  echo "=========================================================="
+  pixel_probe_abandon_start=$SECONDS
+  if run_core_terminal_pixel_probe_abandon; then
+    echo "PIXEL_PROBE_ABANDON_PASS: passed on attempt 1 (elapsed $((SECONDS - pixel_probe_abandon_start))s)"
+  else
+    echo ">>> ABANDONED-PIXELCOPY PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_pixel_probe_abandon; then
+      echo "PIXEL_PROBE_ABANDON_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "PIXEL_PROBE_ABANDON_FAILED: #2003 proof failed twice"
+      PIXEL_PROBE_ABANDON_STATUS="FAIL"
+    fi
+  fi
+fi
+
 finish_ci_journey_suite

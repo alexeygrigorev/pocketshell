@@ -43,6 +43,7 @@ import android.widget.Scroller;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.annotation.VisibleForTesting;
 
 import com.pocketshell.core.terminal.input.BracketedPaste;
 import com.termux.terminal.KeyHandler;
@@ -286,6 +287,21 @@ public final class TerminalView extends View {
      */
     @Nullable
     public Boolean sampleSurfaceNearUniformBlack() {
+        return sampleSurfaceNearUniformBlack(PIXEL_SAMPLE_TIMEOUT_MS);
+    }
+
+    /**
+     * Issue #2003 — the timeout-parameterised body of {@link #sampleSurfaceNearUniformBlack()}.
+     *
+     * <p>The parameter exists ONLY so
+     * {@code TerminalViewPixelProbeAbandonedCopyInstrumentedTest} can force the
+     * abandon-while-in-flight path deterministically (a 0 ms wait always leaves the
+     * {@link PixelCopy} request queued on the HWUI RenderThread). Production always
+     * calls the no-arg overload with {@value #PIXEL_SAMPLE_TIMEOUT_MS} ms.
+     */
+    @VisibleForTesting
+    @Nullable
+    Boolean sampleSurfaceNearUniformBlack(long timeoutMs) {
         try {
             final int width = getWidth();
             final int height = getHeight();
@@ -302,6 +318,29 @@ public final class TerminalView extends View {
             // view's on-screen size — never a per-pixel full-surface scan (#1296/#1164).
             final Bitmap dest =
                 Bitmap.createBitmap(PIXEL_SAMPLE_DIM, PIXEL_SAMPLE_DIM, Bitmap.Config.ARGB_8888);
+            // Issue #2003 — RenderThread OWNERSHIP of `dest`, not "always recycle".
+            //
+            // `PixelCopy.request` is ASYNCHRONOUS: it hands `dest` to HWUI, which
+            // resolves it on the RenderThread inside `Readback::copySurfaceInto` ->
+            // `CopyRequestAdapter::getDestinationBitmap` -> `android::bitmap::toBitmap`.
+            // `toBitmap` is `LOG_ALWAYS_FATAL` on a recycled bitmap ("Error, cannot
+            // access an invalid/free'd bitmap here!"), so recycling `dest` while the
+            // request is still queued ABORTS THE WHOLE APP PROCESS (SIGABRT on
+            // RenderThread) — a diagnostic probe killing the app, the exact inverse of
+            // "must NEVER destabilise the terminal". That is what the #2003 tombstone
+            // (`tombstone_16`, pid 9555 tid 9598 RenderThread) recorded, reached via
+            // the 250 ms `latch.await` timing out on a loaded device while the copy was
+            // still in flight.
+            //
+            // The callback firing is the ONLY signal that HWUI is done with `dest`
+            // (`Readback::copySurfaceInto` invokes it after the readback, on every
+            // result including errors). So recycle IF AND ONLY IF the latch was
+            // counted down. On the timeout / interrupt paths we simply drop the
+            // reference: the in-flight `CopyRequest` holds its own ref, so the GC frees
+            // the (1 KB, PIXEL_SAMPLE_DIM^2 ARGB_8888) sample only once HWUI is truly
+            // finished with it. `Bitmap.recycle()` is documented as not normally
+            // needed; a 1 KB deferred free is not worth a process abort.
+            boolean copyFinished = false;
             try {
                 final CountDownLatch latch = new CountDownLatch(1);
                 final int[] status = {PixelCopy.ERROR_UNKNOWN};
@@ -311,7 +350,8 @@ public final class TerminalView extends View {
                     status[0] = copyResult;
                     latch.countDown();
                 }, pixelProbeHandler());
-                if (!latch.await(PIXEL_SAMPLE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                copyFinished = latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+                if (!copyFinished) {
                     return null;
                 }
                 if (status[0] != PixelCopy.SUCCESS) {
@@ -319,9 +359,7 @@ public final class TerminalView extends View {
                 }
                 return Boolean.valueOf(isBitmapNearUniformBackground(dest));
             } finally {
-                // Always recycle — including the timeout / error / exception paths — so a
-                // probe failure never leaks the sample bitmap.
-                dest.recycle();
+                if (copyFinished) dest.recycle();
             }
         } catch (Throwable t) {
             // A diagnostic probe must NEVER destabilise the terminal: any failure

@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -140,6 +141,11 @@ public class UpdateCheckScheduler @Inject constructor(
     public val checkCount: Long
         get() = _checkCount.get()
 
+    /** Completed throttled requests, including requests suppressed by the throttle. */
+    private val _settledRequestCount = AtomicLong(0L)
+    internal val settledRequestCount: Long
+        get() = _settledRequestCount.get()
+
     private val processLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         if (event == Lifecycle.Event.ON_START) {
             // Foreground resume — the maintainer's most common entry point
@@ -149,6 +155,9 @@ public class UpdateCheckScheduler @Inject constructor(
     }
 
     private var lifecycleAttached: Boolean = false
+    private val _lifecycleObserverAttached = AtomicBoolean(false)
+    internal val lifecycleObserverAttached: Boolean
+        get() = _lifecycleObserverAttached.get()
 
     /**
      * Attach a [ProcessLifecycleOwner] (or any [LifecycleOwner]) so a
@@ -169,9 +178,19 @@ public class UpdateCheckScheduler @Inject constructor(
         scope.launch {
             val alreadyStarted = withContext(Dispatchers.Main) {
                 owner.lifecycle.addObserver(processLifecycleObserver)
+                _lifecycleObserverAttached.set(true)
                 owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
             }
             if (alreadyStarted) requestCheck(TRIGGER_FOREGROUND)
+        }
+    }
+
+    /** Detach the process-global observer so connected tests do not leak it to sibling tests. */
+    internal fun stopObservingProcessLifecycleForTest(owner: LifecycleOwner) {
+        owner.lifecycle.removeObserver(processLifecycleObserver)
+        _lifecycleObserverAttached.set(false)
+        synchronized(this) {
+            lifecycleAttached = false
         }
     }
 
@@ -205,7 +224,13 @@ public class UpdateCheckScheduler @Inject constructor(
     }
 
     private fun requestCheck(trigger: String) {
-        scope.launch { runCheck(trigger, force = false) }
+        scope.launch {
+            try {
+                runCheck(trigger, force = false)
+            } finally {
+                _settledRequestCount.incrementAndGet()
+            }
+        }
     }
 
     private suspend fun runCheck(trigger: String, force: Boolean) {

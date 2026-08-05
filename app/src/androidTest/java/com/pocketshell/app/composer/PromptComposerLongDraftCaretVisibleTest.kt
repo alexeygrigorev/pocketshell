@@ -42,6 +42,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.insets.SyntheticImeStage
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.core.voice.WhisperClient
@@ -98,6 +99,7 @@ class PromptComposerLongDraftCaretVisibleTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     private val observedImeBottomPx = mutableStateOf(0)
+    private val syntheticImeStage by lazy { SyntheticImeStage(compose) }
 
     private class TestMicCapture : PromptComposerViewModel.MicCapture {
         override fun start() {}
@@ -528,15 +530,15 @@ class PromptComposerLongDraftCaretVisibleTest {
     )
 
     private fun applySyntheticKeyboardDownAndReadSendBottom(): Float {
-        repeat(2) {
-            applySyntheticInsets(
-                imeBottomPx = 0,
-                navBarBottomPx = 0,
-                statusBarTopPx = (SYNTHETIC_STATUS_BAR_DP * displayDensity()).toInt(),
-                requireModalRoot = true,
-            )
-            compose.waitForIdle()
-        }
+        // performTextInput focuses the production editor and may finish showing Gboard only
+        // after Compose has gone idle. Dispatching ime=0 into that in-flight transition lets
+        // the physical IME overwrite the synthetic baseline (the nightly #1677 recurrence
+        // observed 883 px). The shared stage waits for both the physical IME window and every
+        // app-root real inset to disappear before it permits a synthetic measurement.
+        syntheticImeStage.hideRealImeAndAssertHidden(
+            "Issue #1677 keyboard-down baseline must start without a physical IME.",
+        )
+        syntheticImeStage.dispatch(imeBottomPx = 0, requireExtraWindowRoot = true)
         val observedIme = compose.onNodeWithTag(PRODUCTION_SHEET_TAG, useUnmergedTree = true)
             .fetchSemanticsNode()
             .config
@@ -569,15 +571,10 @@ class PromptComposerLongDraftCaretVisibleTest {
     }
 
     private fun applySyntheticImeAndAssertObservedInProductionSheet(): SyntheticImeGeometry {
-        repeat(2) {
-            applySyntheticInsets(
-                imeBottomPx = (SYNTHETIC_IME_HEIGHT_DP * displayDensity()).toInt(),
-                navBarBottomPx = 0,
-                statusBarTopPx = (SYNTHETIC_STATUS_BAR_DP * displayDensity()).toInt(),
-                requireModalRoot = true,
-            )
-            compose.waitForIdle()
-        }
+        syntheticImeStage.dispatch(
+            imeBottomPx = (SYNTHETIC_IME_HEIGHT_DP * displayDensity()).toInt(),
+            requireExtraWindowRoot = true,
+        )
 
         val sheetNode = compose.onNodeWithTag(PRODUCTION_SHEET_TAG, useUnmergedTree = true)
             .fetchSemanticsNode()

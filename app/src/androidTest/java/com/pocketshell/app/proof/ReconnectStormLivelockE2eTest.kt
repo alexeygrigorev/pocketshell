@@ -26,6 +26,8 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
@@ -159,6 +161,9 @@ class ReconnectStormLivelockE2eTest {
     private var seededHostRowTag: String? = null
     private var tmuxServerPid: String? = null
     private var serverStalled: Boolean = false
+    private var decoySshSession: SshSession? = null
+    private var decoyShell: SshShell? = null
+    private var decoyControlClientPid: String? = null
     private val diagnostics = RecordingDiagnosticSink()
     private val timings = mutableListOf<String>()
 
@@ -182,6 +187,7 @@ class ReconnectStormLivelockE2eTest {
         // Un-stall the tmux server FIRST so the fixture is never left frozen for a
         // sibling test, even when an assertion above threw.
         runCatching { runBlocking { resumeTmuxServer() } }
+        runCatching { runBlocking { cleanupDecoyControlClient() } }
         runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
         runCatching { diagnostics.close() }
         clearLastSessionPrefs()
@@ -209,6 +215,7 @@ class ReconnectStormLivelockE2eTest {
     fun slowTailOnAProvenLinkNeitherKillsHandshakenTransportsNorSpinsForever() {
         runBlocking<Unit> {
             val key = requireNotNull(seededKey)
+            seedOlderUnrelatedControlClient(key)
             attachSeededTmuxSession(requireNotNull(seededHostRowTag))
             waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
             waitForConnected("initial attach")
@@ -317,14 +324,16 @@ class ReconnectStormLivelockE2eTest {
             val failure = runCatching {
                 stallTmuxServerAndDropControlChannel(
                     key = key,
-                    controlClientLookup = "true",
+                    targetControlClientLookup = "true",
                 )
             }.exceptionOrNull()
 
             assertTrue(
                 "fixture must enter the exact missing-control-client rejection; got=$failure",
                 failure is AssertionError &&
-                    failure.message.orEmpty().contains("could not resolve the app's live `tmux -CC`"),
+                    failure.message.orEmpty().contains(
+                        "expected exactly one live `tmux -CC` client attached to $SESSION_NAME",
+                    ),
             )
 
             resumeTmuxServer()
@@ -354,6 +363,7 @@ class ReconnectStormLivelockE2eTest {
     fun slowTailThatClearsHealsTheSameSessionWithoutKillingTheHandshakenTransport() {
         runBlocking<Unit> {
             val key = requireNotNull(seededKey)
+            seedOlderUnrelatedControlClient(key)
             attachSeededTmuxSession(requireNotNull(seededHostRowTag))
             waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
             waitForConnected("initial attach")
@@ -475,6 +485,86 @@ class ReconnectStormLivelockE2eTest {
     // -- the fixture: stall the tail, keep the dial healthy ------------------------------
 
     /**
+     * Reproduce #1996's hosted topology deterministically: another live `tmux -CC` process
+     * exists before PocketShell attaches the target session. A process-global
+     * `pgrep ... | head -1` therefore names this older, unrelated client and leaves the
+     * app's control channel alive. The real fixture must resolve the client from the target
+     * session instead of depending on process age or shard history.
+     */
+    private suspend fun seedOlderUnrelatedControlClient(key: String) {
+        val session = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).getOrThrow()
+        val shell = session.startShell()
+        decoySshSession = session
+        decoyShell = shell
+
+        val script = buildString {
+            appendLine("set -eu")
+            appendLine("tmux kill-session -t ${shellQuote(DECOY_SESSION_NAME)} 2>/dev/null || true")
+            appendLine(
+                "tmux new-session -d -s ${shellQuote(DECOY_SESSION_NAME)} " +
+                    shellQuote("exec sh -i"),
+            )
+        }
+        val seedResult = execRemote(key, script)
+        assertTrue(
+            "expected to seed the unrelated tmux session; exit=${seedResult.exitCode} " +
+                "stdout='${seedResult.stdout}' stderr='${seedResult.stderr}'",
+            seedResult.exitCode == 0,
+        )
+
+        // Use the same PTY-backed SSH shell shape as PocketShell's real TmuxClient. A plain
+        // background exec has no TTY and tmux rejects it with `tcgetattr failed`.
+        shell.writeStdin(
+            ("exec tmux -CC attach-session -t ${shellQuote(DECOY_SESSION_NAME)}\n")
+                .toByteArray(),
+        )
+
+        val lookupScript = buildString {
+            appendLine("set -u")
+            appendLine("CC=")
+            appendLine("for ignored in \$(seq 1 50); do")
+            appendLine(
+                "  CC=\$(tmux list-clients -t ${shellQuote(DECOY_SESSION_NAME)} " +
+                    "-F '#{client_pid}' 2>/dev/null | head -1)",
+            )
+            appendLine("  [ -n \"\$CC\" ] && break")
+            appendLine("  sleep 0.1")
+            appendLine("done")
+            appendLine("echo \"decoy_client_pid=\$CC\"")
+        }
+        val result = execRemote(key, lookupScript)
+        val decoyClientPid =
+            Regex("decoy_client_pid=(\\d+)").find(result.stdout)?.groupValues?.get(1)
+        decoyControlClientPid = decoyClientPid
+        assertTrue(
+            "expected an older unrelated tmux -CC client before PocketShell attaches; " +
+                "exit=${result.exitCode} stdout='${result.stdout}' stderr='${result.stderr}'",
+            result.exitCode == 0 && decoyClientPid != null,
+        )
+        recordTiming("fixture_decoy_client_pid", decoyClientPid!!.toLong())
+    }
+
+    private suspend fun cleanupDecoyControlClient() {
+        runCatching { decoyShell?.close() }
+        runCatching { decoySshSession?.close() }
+        decoyShell = null
+        decoySshSession = null
+        decoyControlClientPid = null
+        val key = seededKey ?: return
+        execRemote(
+            key,
+            "tmux kill-session -t ${shellQuote(DECOY_SESSION_NAME)} 2>/dev/null || true",
+        )
+    }
+
+    /**
      * Enter the maintainer's state in ONE remote round-trip so there is no window in which
      * the loop could heal before the tail is stalled:
      *
@@ -482,26 +572,27 @@ class ReconnectStormLivelockE2eTest {
      *  2. `kill -STOP` it — every later `-CC attach` / `list-panes` / `capture-pane` now
      *     blocks on a server that never answers, while `sshd` (a different process) keeps
      *     completing fresh dials + handshakes exactly as the maintainer's link did;
-     *  3. `pkill -f 'tmux -CC'` — kill the app's live control client so its channel EOFs and
-     *     the REAL passive-drop classifier fires. Ordering matters: stall first, then drop,
-     *     or the loop can heal in the gap.
+     *  3. resolve the ONE client attached to [SESSION_NAME] through tmux's own client table,
+     *     then kill that client so its channel EOFs and the REAL passive-drop classifier
+     *     fires. Process-global `pgrep | head -1` is forbidden: #1996 proved it selects an
+     *     unrelated older/orphan client under hosted shard history. Ordering matters: stall
+     *     first, then drop, or the loop can heal in the gap.
      */
     private suspend fun stallTmuxServerAndDropControlChannel(
         key: String,
-        controlClientLookup: String = "pgrep -f 'tmux(\\.real)?[ ]-CC' | head -1",
+        targetControlClientLookup: String =
+            "tmux list-clients -t ${shellQuote(SESSION_NAME)} -F '#{client_pid}' 2>/dev/null",
     ) {
-        // Match both the normal binary and the fixture wrapper's delegated
-        // `/usr/bin/tmux.real -CC` process. Keep `[ ]` in the regex: a plain literal
-        // `tmux -CC` also matches the shell running THIS script (its command line contains
-        // the lookup text), so it kills itself and the exec returns empty output. The
-        // bracketed form matches neither its own source text nor the shell command line.
         val script = buildString {
             appendLine("set -u")
             // Resolve BEFORE stalling: `#{pid}` needs a responsive server, and it is the
             // SERVER's pid (never a client's).
             appendLine("PID=\$(tmux display-message -p -t ${shellQuote(SESSION_NAME)} '#{pid}')")
             appendLine("echo \"tmux_server_pid=\$PID\"")
-            appendLine("CC=\$($controlClientLookup)")
+            appendLine("CCS=\$($targetControlClientLookup)")
+            appendLine("CC_COUNT=\$(printf '%s\\n' \"\$CCS\" | sed '/^\$/d' | wc -l | tr -d ' ')")
+            appendLine("CC=\$(printf '%s\\n' \"\$CCS\" | head -1)")
+            appendLine("echo \"cc_client_count=\$CC_COUNT\"")
             appendLine("echo \"cc_client_pid=\$CC\"")
             // The app spawns `tmux -CC new-session -A -s <name>` by writing into an SSH
             // SHELL channel, so the control channel EOFs (and `disconnected` latches) when
@@ -516,6 +607,10 @@ class ReconnectStormLivelockE2eTest {
         }
         val result = execRemote(key, script)
         tmuxServerPid = Regex("tmux_server_pid=(\\d+)").find(result.stdout)?.groupValues?.get(1)
+        val controlClientCount =
+            Regex("cc_client_count=(\\d+)").find(result.stdout)?.groupValues?.get(1)?.toIntOrNull()
+        val controlClientPid =
+            Regex("cc_client_pid=(\\d+)").find(result.stdout)?.groupValues?.get(1)
         // Record the cleanup debt BEFORE validating anything that happened after SIGSTOP.
         // Exact-main #1940 reached this point with a valid server pid but an empty CC pid;
         // the assertion below threw while serverStalled was still false, making @After's
@@ -533,10 +628,16 @@ class ReconnectStormLivelockE2eTest {
                 tmuxServerPid != null,
             )
             assertTrue(
-                "could not resolve the app's live `tmux -CC` control-client pid from " +
-                    "'${result.stdout}' — without dropping it there is no passive disconnect " +
-                    "and the grace loop never runs",
-                Regex("cc_client_pid=(\\d+)").containsMatchIn(result.stdout),
+                "expected exactly one live `tmux -CC` client attached to $SESSION_NAME, got " +
+                    "count=$controlClientCount from '${result.stdout}' — without identifying " +
+                    "the target session's client unambiguously there is no trustworthy passive " +
+                    "disconnect and the grace loop may never run",
+                controlClientCount == 1 && controlClientPid != null,
+            )
+            assertTrue(
+                "target-session lookup selected the unrelated decoy client " +
+                    "pid=$controlClientPid instead of $SESSION_NAME; stdout='${result.stdout}'",
+                controlClientPid != decoyControlClientPid,
             )
         } catch (failure: Throwable) {
             // Restore immediately as well as retaining @After as a second line of defence.
@@ -544,6 +645,8 @@ class ReconnectStormLivelockE2eTest {
             runCatching { resumeTmuxServer() }
             throw failure
         }
+        recordTiming("fixture_target_control_client_pid", controlClientPid!!.toLong())
+        recordTiming("fixture_target_control_client_count", controlClientCount!!.toLong())
         recordTiming("fixture_tmux_server_pid", tmuxServerPid!!.toLong())
     }
 
@@ -825,6 +928,7 @@ class ReconnectStormLivelockE2eTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue1652-storm-livelock"
         const val SESSION_NAME: String = "issue1652-storm"
+        const val DECOY_SESSION_NAME: String = "issue1996-unrelated-control"
         const val READY_MARKER: String = "ISSUE1652-STORM-READY"
         const val MARKER: String = "issue1652storm"
         const val POLL_MS: Long = 250L

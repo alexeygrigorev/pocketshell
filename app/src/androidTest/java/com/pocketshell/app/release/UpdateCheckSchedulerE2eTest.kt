@@ -1,6 +1,8 @@
 package com.pocketshell.app.release
 
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.SharedPreferences
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.test.core.app.ApplicationProvider
@@ -10,8 +12,10 @@ import com.pocketshell.app.notifications.UpdateNotifier
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -37,8 +41,22 @@ import java.util.concurrent.atomic.AtomicInteger
 @RunWith(AndroidJUnit4::class)
 class UpdateCheckSchedulerE2eTest {
 
+    private companion object {
+        const val TEST_PREFS_NAME = "update_check_throttle_issue_698_e2e"
+    }
+
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
     private val context: Context = ApplicationProvider.getApplicationContext()
+    // The instrumentation process runs the real App, whose singleton scheduler observes the
+    // same ProcessLifecycleOwner. Give this test scheduler a separate ledger so the App's
+    // earlier ON_START observer cannot consume this scheduler's throttle window.
+    private val isolatedStoreContext: Context = object : ContextWrapper(context) {
+        override fun getApplicationContext(): Context = this
+
+        override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences =
+            context.getSharedPreferences(TEST_PREFS_NAME, mode)
+    }
+    private var activeScheduler: UpdateCheckScheduler? = null
 
     private val sampleInfo = ReleaseInfo(
         tagName = "v9.9.9",
@@ -63,25 +81,65 @@ class UpdateCheckSchedulerE2eTest {
 
     @Before
     fun resetThrottleStore() {
-        context.getSharedPreferences("update_check_throttle", Context.MODE_PRIVATE)
+        restoreProcessLifecycleStarted()
+        context.getSharedPreferences(TEST_PREFS_NAME, Context.MODE_PRIVATE)
             .edit().clear().commit()
     }
 
     @After
     fun cleanup() {
-        context.getSharedPreferences("update_check_throttle", Context.MODE_PRIVATE)
-            .edit().clear().commit()
+        val scheduler = activeScheduler
+        try {
+            scheduler?.let {
+                instrumentation.runOnMainSync {
+                    it.stopObservingProcessLifecycleForTest(ProcessLifecycleOwner.get())
+                }
+            }
+        } finally {
+            try {
+                // The tests below mutate the process-global owner. Restore it even when the
+                // body or an early hard assertion throws, before any sibling test can start.
+                restoreProcessLifecycleStarted()
+            } finally {
+                scheduler?.scope?.cancel()
+                activeScheduler = null
+                context.getSharedPreferences(TEST_PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit().clear().commit()
+            }
+        }
+    }
+
+    private fun restoreProcessLifecycleStarted() {
+        instrumentation.runOnMainSync {
+            val registry = ProcessLifecycleOwner.get().lifecycle as androidx.lifecycle.LifecycleRegistry
+            if (!registry.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+            }
+        }
+    }
+
+    private inline fun <T> withStoppedProcessLifecycle(body: () -> T): T {
+        return try {
+            instrumentation.runOnMainSync {
+                (ProcessLifecycleOwner.get().lifecycle as androidx.lifecycle.LifecycleRegistry)
+                    .handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+            }
+            body()
+        } finally {
+            restoreProcessLifecycleStarted()
+        }
     }
 
     private fun newScheduler(checker: ReleaseChecker, notifier: UpdateNotifier): UpdateCheckScheduler {
         val s = UpdateCheckScheduler(
             applicationContext = context,
             releaseChecker = checker,
-            store = UpdateCheckStore(context),
+            store = UpdateCheckStore(isolatedStoreContext),
             updateNotifier = notifier,
         )
         s.scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         s.currentVersionProvider = { "0.3.0" }
+        activeScheduler = s
         return s
     }
 
@@ -122,54 +180,72 @@ class UpdateCheckSchedulerE2eTest {
         val notifier = RecordingNotifier()
         val scheduler = newScheduler(checker, notifier)
 
-        // Attach to the REAL ProcessLifecycleOwner, exactly as App.onCreate
-        // does. Drive the lifecycle from CREATED → STARTED on the main thread
-        // so the observer receives ON_START (the foreground-resume trigger).
-        instrumentation.runOnMainSync {
-            scheduler.observeProcessLifecycle(ProcessLifecycleOwner.get())
-        }
+        withStoppedProcessLifecycle {
+            // Attach while stopped so the attach-time cold-start seed cannot satisfy the
+            // load-bearing resume assertion.
+            instrumentation.runOnMainSync {
+                scheduler.observeProcessLifecycle(ProcessLifecycleOwner.get())
+            }
+            assertTrue(
+                "the lifecycle observer should attach within the bounded pump",
+                pollUntil { scheduler.lifecycleObserverAttached },
+            )
 
-        // Background then foreground the process so an ON_START is delivered.
-        instrumentation.runOnMainSync {
-            val registry = ProcessLifecycleOwner.get().lifecycle
-            // currentState mutation is restricted to LifecycleRegistry; the
-            // process owner is a LifecycleRegistry under the hood. Toggle via
-            // the standard handleLifecycleEvent path used by tests.
-            (registry as androidx.lifecycle.LifecycleRegistry)
-                .handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-        }
-        instrumentation.runOnMainSync {
-            (ProcessLifecycleOwner.get().lifecycle as androidx.lifecycle.LifecycleRegistry)
-                .handleLifecycleEvent(Lifecycle.Event.ON_START)
-        }
+            // Foreground the process so the attached observer receives the real ON_START event.
+            instrumentation.runOnMainSync {
+                (ProcessLifecycleOwner.get().lifecycle as androidx.lifecycle.LifecycleRegistry)
+                    .handleLifecycleEvent(Lifecycle.Event.ON_START)
+            }
 
+            assertTrue(
+                "foreground resume (ON_START) should fire the update check",
+                pollUntil { scheduler.checkCount >= 1L },
+            )
+            assertTrue(
+                "the first lifecycle request should settle within the bounded pump",
+                pollUntil { scheduler.settledRequestCount >= 1L },
+            )
+
+            val firstCount = scheduler.checkCount
+            val firstSettledRequestCount = scheduler.settledRequestCount
+
+            // A second immediate resume within the throttle window must NOT fire another call.
+            instrumentation.runOnMainSync {
+                val registry =
+                    ProcessLifecycleOwner.get().lifecycle as androidx.lifecycle.LifecycleRegistry
+                registry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
+                registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
+            }
+            assertTrue(
+                "the second lifecycle request should settle within the bounded pump",
+                pollUntil { scheduler.settledRequestCount > firstSettledRequestCount },
+            )
+            assertEquals(
+                "a resume within the throttle window must not re-check",
+                firstCount,
+                scheduler.checkCount,
+            )
+        }
+    }
+
+    @Test
+    fun stoppedProcessLifecycle_isRestoredWhenTestBodyThrows() {
+        val sentinel = IllegalStateException("issue-698-sentinel")
+
+        val thrown = runCatching {
+            withStoppedProcessLifecycle {
+                assertEquals(
+                    Lifecycle.State.CREATED,
+                    ProcessLifecycleOwner.get().lifecycle.currentState,
+                )
+                throw sentinel
+            }
+        }.exceptionOrNull()
+
+        assertSame("the sentinel body failure must propagate", sentinel, thrown)
         assertTrue(
-            "foreground resume (ON_START) should fire the update check",
-            pollUntil { scheduler.checkCount >= 1L },
+            "a thrown test body must leave the shared process owner STARTED",
+            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
         )
-
-        val firstCount = scheduler.checkCount
-
-        // A second immediate resume within the throttle window must NOT fire
-        // another GitHub call.
-        instrumentation.runOnMainSync {
-            val registry = ProcessLifecycleOwner.get().lifecycle as androidx.lifecycle.LifecycleRegistry
-            registry.handleLifecycleEvent(Lifecycle.Event.ON_STOP)
-            registry.handleLifecycleEvent(Lifecycle.Event.ON_START)
-        }
-        // Give any (incorrect) extra check a chance to run, then assert it did not.
-        Thread.sleep(500)
-        assertEquals(
-            "a resume within the throttle window must not re-check",
-            firstCount,
-            scheduler.checkCount,
-        )
-
-        // Restore the process owner to STARTED so the shared AVD lifecycle is
-        // left in a sane state for sibling tests.
-        instrumentation.runOnMainSync {
-            (ProcessLifecycleOwner.get().lifecycle as androidx.lifecycle.LifecycleRegistry)
-                .handleLifecycleEvent(Lifecycle.Event.ON_START)
-        }
     }
 }

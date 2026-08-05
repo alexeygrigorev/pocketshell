@@ -344,7 +344,6 @@ J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
   "com.pocketshell.app.proof.WarmLeaseReuseBatchCDockerTest"
   "com.pocketshell.app.proof.WarmLeaseReuseDockerTest"
   "com.pocketshell.app.proof.WithinGraceResumeRideThroughE2eTest"
-  "com.pocketshell.app.release.UpdateCheckSchedulerE2eTest"
   "com.pocketshell.app.session.ConversationToolResultPairingE2eTest"
   "com.pocketshell.app.sessions.service.SessionConnectionServiceE2eTest"
   "com.pocketshell.app.settings.ConversationFontSizeSettingE2eTest"

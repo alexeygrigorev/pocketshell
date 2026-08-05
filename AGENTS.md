@@ -503,6 +503,19 @@ are looking at before proposing a fix:
     bounded pump, and hard-fails a NEW bare `Thread.sleep(N)`-before-assert with
     no bounded loop. Scope: the connection/terminal roots plus (widened in #1048)
     the app `composer`/`hosts`/`projects` test dirs where #1102/#1110 flaked.
+- **A Gradle console line pointing INSIDE a `runBlocking` / `runTest` body names
+  the enclosing builder line, NOT the failing assertion.** Do not start triage
+  from it. #1969's gate failure reported `AssertionError at
+  TmuxClientPaneOutputTest.kt:792`; line 792 is that test's `runBlocking {` line
+  and the real assertion was at `:833`. An implementer and a reviewer each
+  confirmed it independently with probe tests failing on known distinct lines —
+  all were attributed to their enclosing builder (791/792, 798/799, 805/806).
+  The true location lives only in the XML `<failure>` element's stack, so read
+  `build/test-results/**/TEST-*.xml`, not the console. This compounds with the
+  overwrite hazard below: on the next run the XML is replaced, and a *passing*
+  test task is skipped while a *failing* one always re-executes, so the one
+  artifact identifying the assertion is exactly the one a re-run destroys.
+  **Capture the XML before re-running a failed test task.**
 - **File CI failures as issues.** Every red CI run on `main` (or local release-gate
   failure) becomes a GitHub issue with the run URL, failure snippet, and fix
   proposal — don't retry silently. Recurring classes (AVD contention) get one

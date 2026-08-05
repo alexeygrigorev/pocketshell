@@ -37,6 +37,7 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
+import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.proof.waitForSshFixtureReady
@@ -49,6 +50,7 @@ import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_CLOSE_TAG
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -180,7 +182,13 @@ class TmuxSessionOpencodeInputDockerTest {
 
     @After
     fun closeLaunchedActivity() {
-        launchedActivity?.close()
+        launchedActivity?.let { scenario ->
+            requirePocketShellFocusAfterLauncherDialogCleanup(
+                scenario = scenario,
+                context = "after OpenCode input journey cleanup",
+            )
+            scenario.close()
+        }
         launchedActivity = null
     }
 
@@ -598,6 +606,10 @@ class TmuxSessionOpencodeInputDockerTest {
         val hostRowTag: String = persistHost(appContext, key, sshPort)
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            requirePocketShellFocusAfterLauncherDialogCleanup(
+                scenario = requireNotNull(launchedActivity),
+                context = "before issue #1979 OpenCode IME journey",
+            )
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                     .fetchSemanticsNodes()
@@ -650,6 +662,20 @@ class TmuxSessionOpencodeInputDockerTest {
             }
             recordTiming("issue297_ctrl_d_double_tap_to_exit_ms", SystemClock.elapsedRealtime() - ctrlDAt)
             captureArtifact("issue297-03-ctrl-d-exited")
+
+            // The dedicated hotkeys sheet is test-owned. Close exactly that
+            // surface before the class boundary; otherwise its app window
+            // remains the focus owner and contaminates the next IME journey.
+            compose.onNodeWithTag(
+                TERMINAL_HOTKEYS_PANEL_CLOSE_TAG,
+                useUnmergedTree = true,
+            ).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(
+                    TERMINAL_HOTKEYS_PANEL_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isEmpty()
+            }
 
             writeTimings()
             writeIssue297Summary()

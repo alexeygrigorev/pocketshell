@@ -48,6 +48,7 @@ import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
 import com.pocketshell.app.proof.signals.SyntheticFocusOwnerHarness
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
 import com.pocketshell.app.proof.signals.requirePocketShellFocusAtJourneyBoundary
+import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -104,6 +105,10 @@ class FileViewerDockerTest {
 
     @Before
     fun setUp(): Unit { runBlocking {
+        requirePocketShellFocusAfterLauncherDialogCleanup(
+            scenario = composeRule.activityRule.scenario,
+            context = "before FileViewer Docker journey",
+        )
         val keyText = InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
         sshKey = SshKey.Pem(keyText)
@@ -121,6 +126,10 @@ class FileViewerDockerTest {
     @After
     fun tearDown(): Unit { runBlocking {
         focusOwner.dismissBestEffort()
+        requirePocketShellFocusAfterLauncherDialogCleanup(
+            scenario = composeRule.activityRule.scenario,
+            context = "after FileViewer Docker journey cleanup",
+        )
         if (seededPaths.isNotEmpty()) {
             withTimeout(15_000) {
                 connect()?.use { session ->

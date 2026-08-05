@@ -274,6 +274,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#markdownRenderedPipeTableShowsCellsNotRawDelimiter"  # #921 D32 G9): rendered Markdown shows GFM pipe tables as
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#reopeningAChangedTextFileShowsTheFreshHostContent"  # #1713 D33/G10: reopening a text file whose host content changed over the same warm lease must show the FRESH body, not the stale one (bind() no longer early-returns on the identical settled request)
+  "com.pocketshell.app.fileviewer.EnvironmentFocusOwnerCleanupE2eTest#launcherFrameworkDialogAtPriorJourneyExitCannotPoisonNextImeJourney"  # #1985 recurrence: a genuine Android launcher framework dialog is owner-scoped cleanup, then the next IME journey starts focused
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#failedSyntheticOwnerBodyRestoresFocusBeforeNextImeJourney"  # #1985 D32/G9: assertion exits always dismiss the owned synthetic window and prove PocketShell focus before the next IME journey
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#moduleOneArticleListsRenderIntactAndContinuedLinkOpensExactUrl"  # #1714 D33/G9/G10: exact issue-time excerpts plus synthetic mixed/deep/wide class coverage through production MarkdownView
   "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"  # #885 #117 D32 G9): the post-update Host ready success sheet must

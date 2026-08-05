@@ -427,6 +427,33 @@ are looking at before proposing a fix:
   via issue status/APPROVED comments and output-file mtimes
   (`find <taskdir> -name '*.output' -mmin -5`), not the count you remember. Use a
   task list when running >~5 lanes.
+- **Run the merged-but-open sweep BEFORE dispatching anything.** The sibling of
+  the lesson above, and it costs one command. A merge closes an issue only when
+  the PR body carried `Closes #N`; a batch PR whose commits merely reference
+  `(#N)` in the subject leaves every one of those issues OPEN. On 2026-08-05 a
+  sweep across 100 open issues found **six** already fixed, reviewer-`APPROVED`
+  and merged (#1999, #2002, #1996, #1995, #1993, #1992), and an implementer had
+  already been dispatched onto one of them (#2002) before the sweep ran — pure
+  waste, and the kind of duplicate work that also risks a conflicting second fix.
+  The mechanical check:
+
+  ```bash
+  for n in $(gh issue list --state open --limit 200 --json number --jq '.[].number'); do
+    c=$(git log --oneline origin/main --grep="(#$n)" --fixed-strings | head -1)
+    [ -n "$c" ] && echo "#$n <- $c"
+  done
+  ```
+
+  A hit is a *candidate*, never a verdict — always confirm before closing:
+  (a) the commit is genuinely this issue's fix, not a sibling commit that merely
+  cites it as context (`fix X (#1647)` referencing #1610 is not #1610's fix);
+  (b) the issue's last comment is the `APPROVED`, with **no post-merge
+  recurrence** after the commit date — #1994 and #1876 both had one and must stay
+  open; and (c) the merged blobs match the approved candidate (`git show
+  origin/main:<path>` vs the worktree copy) when a worktree still exists.
+  An umbrella or feature issue whose merged commit was only one slice stays open
+  (#1677, #698). Close with the SHA and the evidence cited, and state that a
+  post-merge recurrence reopens it rather than being folded into a sibling.
 - **The contended dev box masks CI flakiness.** A connect/lease test that "flakes"
   locally is often DETERMINISTIC on CI's idle runner; run `:app:testDebugUnitTest`
   ≥3× (and the FULL suite, not just the changed class) before pushing a

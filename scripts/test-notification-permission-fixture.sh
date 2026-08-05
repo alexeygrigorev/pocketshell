@@ -36,7 +36,14 @@ cp "$REAL_CONNECTED" "$FIXTURE_ROOT/repo/scripts/connected-test.sh"
 cp "$SCRIPT_DIR/lib/avd-lock.sh" "$FIXTURE_ROOT/repo/scripts/lib/avd-lock.sh"
 cp "$SCRIPT_DIR/lib/agents-pool.sh" "$FIXTURE_ROOT/repo/scripts/lib/agents-pool.sh"
 cp "$SCRIPT_DIR/lib/scope-run.sh" "$FIXTURE_ROOT/repo/scripts/lib/scope-run.sh"
+# Issue #2007: the wrapper now also owns this checkout's gradle output tree.
+cp "$SCRIPT_DIR/lib/gradle-output-lock.sh" \
+  "$FIXTURE_ROOT/repo/scripts/lib/gradle-output-lock.sh"
 chmod +x "$FIXTURE_ROOT/repo/scripts/connected-test.sh"
+# Keep this fixture's output lock inside its own temporary tree rather than the
+# real per-user lock directory, so it can never queue behind (or hold up) a real
+# build on the box.
+export POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$FIXTURE_ROOT/gradle-output-locks"
 
 # Keep the fixture out of the host's user systemd while exercising the real
 # wrapper. scope-run will take its explicit test-only bare fallback.

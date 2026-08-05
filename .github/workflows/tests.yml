@@ -273,6 +273,36 @@ jobs:
           chmod +x scripts/test-agents-pool-isolation.sh
           scripts/test-agents-pool-isolation.sh
 
+      # Issue #2007: connected-test.sh and full-jvm-gate.sh are both canonical
+      # wrappers around ./gradlew and both rewrite the SAME app/build graph of
+      # the checkout they run from. Nothing stopped them overlapping, so during
+      # #893 validation a connected --rerun-tasks build and the full JVM gate
+      # ran at once and the gate died in 1m41s on a missing
+      # processDebugResources/R.jar -- before a single test. Like #1842 that is
+      # worse than a flake: the failure lands in whichever lane LOST the race and
+      # reads as a product/test defect, so the gate had to be discarded as
+      # evidence. This harness drives the REAL wrappers with stubbed
+      # gradlew/adb/systemctl and sandboxed lock anchors: two lanes in one
+      # worktree (on DISTINCT stub emulators, so the per-serial AVD lock
+      # deliberately does not serialise them) must reach a peak of exactly ONE
+      # live builder, distinct worktrees and #724 pool lanes must stay
+      # concurrent, the Bash and Python halves of the lock must resolve one file,
+      # and a blocked run must name the owner and exit 75 without building.
+      # It also pins the crash and ordering contracts that a lock can silently
+      # get wrong: a SIGKILLed wrapper (what run_bounded does on the --no-pool
+      # path) must leave NO orphaned holder wedging the tree for the default
+      # 7200s, the contention diagnostic must name the live flock holder as well
+      # as the wrapper to stop, and a lane queuing for the tree must not be
+      # sitting on the box's emulator serial -- checked at BOTH serial-claim
+      # sites (a caller-preset ANDROID_SERIAL and the default path where
+      # connected-test.sh allocates its own), because a guard covering only the
+      # preset one stays green while the acquire is moved after the allocator.
+      # Fast (< 90 s), JVM-free, no emulator, no Docker.
+      - name: "Gradle output-tree lock guard (issue #2007)"
+        run: |
+          chmod +x scripts/test-gradle-output-lock.sh
+          scripts/test-gradle-output-lock.sh
+
       # Issue #1937 recurrence: ubuntu-latest does not guarantee ripgrep. Run
       # the real guard under a minimal no-rg PATH and prove it still discovers
       # both a valid consumer and a dynamically added broken fourth consumer.

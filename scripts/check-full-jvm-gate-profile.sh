@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_ENTRYPOINT = ROOT_DIR / "scripts" / "full-jvm-gate.sh"
 EXPECTED_ENTRYPOINT_SHA256 = (
-    "12d8d268b708814eb54e037002c167b122c0be86125d5d8796d900c393336a23"
+    "7b3612eefb7c3ed1936540a6cb98905793e5d45d44c5238d386ce9d1a784c4af"
 )
 EXPECTED_CGROUP_RUNNER_SHA256 = (
     "6e4ce5f99cf4a6666aa9ac0c097776fb2bd4b87b2cc01744ddd06e4fee114b20"
@@ -97,12 +97,22 @@ def validate_entrypoint(entrypoint: Path) -> None:
 
 
 def clean_test_environment() -> dict[str, str]:
-    return {
+    environment = {
         "HOME": os.environ.get("HOME", "/tmp"),
         "LOGNAME": os.environ.get("LOGNAME", "pocketshell-test"),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "USER": os.environ.get("USER", "pocketshell-test"),
     }
+    # Issue #2007: keep every fixture entrypoint's Gradle output lock inside the
+    # self-test's own temporary directory. It is a pure relocation (the lock can
+    # never be disabled) and it stops ~10 fixture runs per invocation from
+    # leaving lock files in the real per-user lock directory. The gate does NOT
+    # forward this variable into the child environment, so the exact-environment
+    # assertion below is unaffected.
+    lock_directory = os.environ.get("POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR", "")
+    if lock_directory:
+        environment["POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR"] = lock_directory
+    return environment
 
 
 def run_entrypoint(
@@ -247,6 +257,9 @@ def self_test(
     checks += 1
 
     with tempfile.TemporaryDirectory(prefix="pocketshell-1761-") as temp_dir:
+        os.environ["POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR"] = str(
+            Path(temp_dir) / "gradle-output-locks"
+        )
         fixture_root = Path(temp_dir) / "repo"
         fixture_scripts = fixture_root / "scripts"
         fixture_scripts.mkdir(parents=True)

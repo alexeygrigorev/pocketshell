@@ -308,12 +308,16 @@ pocketshell_start_without_avd_lock_fd() {
 # Combined EXIT handler so the single-lock release, the pool-claim release, and
 # the agents-fixture-port release never clobber each other's trap. Every acquire
 # path registers THIS handler; each inner release is a no-op when its own state
-# is absent. The agents-port release (issue #724) is invoked defensively only
-# when that helper has been sourced into the shell.
+# is absent. The agents-port release (issue #724) and the Gradle output-tree
+# release (issue #2007) are invoked defensively only when their helper has been
+# sourced into the shell.
 pocketshell_release_all() {
   pocketshell_release_pool_serial
   if declare -F pocketshell_release_agents_port >/dev/null 2>&1; then
     pocketshell_release_agents_port
+  fi
+  if declare -F pocketshell_release_gradle_output_lock >/dev/null 2>&1; then
+    pocketshell_release_gradle_output_lock
   fi
   pocketshell_release_toxiproxy_lock
   pocketshell_release_avd_lock

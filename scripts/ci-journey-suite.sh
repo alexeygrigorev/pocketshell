@@ -133,7 +133,8 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"  # #758 the maintainer's priority- back→open-another-session reconne…
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.LifecycleReattachGoneSessionNoResurrectE2eTest"  # #666 #998 a session killed on the host must NOT be
-  "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"  # #998 a remote tmux SERVER death (host reboot / OOM
+  "com.pocketshell.app.portfwd.ForwardingResumeOnLaunchE2eTest"  # #2000 forwarding owner uses persisted-intent + runtime hard isolation
+  "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"  # #998 #2000 one-process forwarding cleanup -> ON_START -> server-death consumer
   "$FQCN_PREFIX.AttachmentDropReconnectRecoversE2eTest"  # #1072 attaching a file dropped the live connection AND the
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   "com.pocketshell.app.portfwd.PortForwardPanelLifecycleE2eTest"  # #1967/#1984 failure-preserving hard cleanup + zero-forward post-test invariant before grace journeys

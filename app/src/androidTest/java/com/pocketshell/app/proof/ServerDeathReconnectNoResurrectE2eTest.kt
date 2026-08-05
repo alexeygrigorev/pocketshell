@@ -10,21 +10,23 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
-import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.portfwd.PortForwardingTestIsolationRule
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
-import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertFalse
@@ -85,14 +87,18 @@ class ServerDeathReconnectNoResurrectE2eTest {
 
     val compose = createAndroidComposeRule<MainActivity>()
 
+    private val forwardingIsolation = PortForwardingTestIsolationRule()
+
     @get:Rule
     val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
-        .outerRule(PreGrantPermissionsRule())
+        .outerRule(forwardingIsolation)
+        .around(PreGrantPermissionsRule())
         .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
         .around(compose)
 
     private lateinit var fixtureKey: String
     private lateinit var hostRowTag: String
+    private var forwardingHostId: Long = -1L
     private val timings = mutableListOf<String>()
 
     @After
@@ -127,6 +133,39 @@ class ServerDeathReconnectNoResurrectE2eTest {
     @Test
     fun serverDeathOnReconnectDropsToListAndNeverResurrects() { runBlocking {
         val key = fixtureKey
+
+        // #2000 recurrence prelude, in THIS instrumentation process: launch
+        // with real persisted forwarding intent, let production ON_START adopt
+        // it, hard-isolate it, then give a second real ON_START an opportunity
+        // to re-adopt stale intent. Neutralizing the hard isolation leaves the
+        // always-on pin active and the unchanged server-death consumer below
+        // times out after 30s with `grace-window-held-by-port-forward`.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        delay(PROCESS_LIFECYCLE_DRAIN_MS)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        compose.waitUntil(timeoutMillis = FORWARDING_RESUME_TIMEOUT_MS) {
+            testAccess().forwardingController().isHostActive(forwardingHostId)
+        }
+        val controller = testAccess().forwardingController()
+        recordTiming(
+            "forwarding_active_before_cleanup",
+            if (controller.isHostActive(forwardingHostId)) 1L else 0L,
+        )
+
+        forwardingIsolation.hardStopAndAssertZero("#2000 same-process forwarding owner")
+
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        delay(PROCESS_LIFECYCLE_DRAIN_MS)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        delay(FORWARDING_READOPTION_OBSERVATION_MS)
+        recordTiming(
+            "forwarding_active_after_readoption_opportunity",
+            if (controller.isHostActive(forwardingHostId)) 1L else 0L,
+        )
+        recordTiming(
+            "persisted_enabled_after_cleanup",
+            testAccess().appDatabase().hostDao().getEnabled().first().size.toLong(),
+        )
 
         // ---- (1) Attach to the primary seeded session via the normal journey.
         waitForHostRowPresent(hostRowTag)
@@ -204,6 +243,18 @@ class ServerDeathReconnectNoResurrectE2eTest {
             sessionScreenStillUp,
         )
 
+        // Supplemental owner-side oracle. The consumer above stays load-bearing:
+        // with cleanup neutralized, it first fails via the unchanged 30s list
+        // timeout while the re-adopted forward pins grace.
+        assertTrue(
+            "#2000 cleanup must leave no persisted enabled forwarding intent",
+            testAccess().appDatabase().hostDao().getEnabled().first().isEmpty(),
+        )
+        assertFalse(
+            "#2000 cleanup must prevent a later ON_START from re-adopting forwarding",
+            controller.isHostActive(forwardingHostId),
+        )
+
         writeTimings()
         Unit
     } }
@@ -246,32 +297,34 @@ class ServerDeathReconnectNoResurrectE2eTest {
 
     private suspend fun seedDockerHost(key: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-        val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
-            .fallbackToDestructiveMigration(dropAllTables = true)
-            .build()
-        return try {
-            db.clearAllTables()
-            val storedKey = SshKeyStorage.persistKey(
-                context = appContext,
-                sshKeyDao = db.sshKeyDao(),
-                name = "issue998-key-${System.currentTimeMillis()}",
-                content = key,
-            )
-            val hostId = db.hostDao().insert(
-                HostEntity(
-                    name = "Issue998 ServerDeath",
-                    hostname = DEFAULT_HOST,
-                    port = DEFAULT_PORT,
-                    username = DEFAULT_USER,
-                    keyId = storedKey.id,
-                    tmuxInstalled = true,
-                    lastBootstrapAt = System.currentTimeMillis(),
-                ),
-            )
-            HOST_ROW_TAG_PREFIX + hostId
-        } finally {
-            db.close()
-        }
+        val db = testAccess().appDatabase()
+        db.clearAllTables()
+        val storedKey = SshKeyStorage.persistKey(
+            context = appContext,
+            sshKeyDao = db.sshKeyDao(),
+            name = "issue998-key-${System.currentTimeMillis()}",
+            content = key,
+        )
+        forwardingHostId = db.hostDao().insert(
+            HostEntity(
+                name = "Issue998 ServerDeath",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyId = storedKey.id,
+                tmuxInstalled = true,
+                lastBootstrapAt = System.currentTimeMillis(),
+                // #2000: this journey owns the exact persisted intent that can
+                // be re-adopted later and pin the reconnect grace forever.
+                enabled = true,
+            ),
+        )
+        return HOST_ROW_TAG_PREFIX + forwardingHostId
+    }
+
+    private fun testAccess(): TestAccessEntryPoint {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+        return EntryPointAccessors.fromApplication(context, TestAccessEntryPoint::class.java)
     }
 
     private suspend fun seedTmuxSessions(key: String) {
@@ -394,7 +447,6 @@ class ServerDeathReconnectNoResurrectE2eTest {
         "'" + value.replace("'", "'\"'\"'") + "'"
 
     private companion object {
-        const val DATABASE_NAME: String = "pocketshell.db"
         const val LOG_TAG: String = "Issue998ServerDeath"
         const val DEVICE_DIR_NAME: String = "issue998-server-death-reconnect"
 
@@ -409,5 +461,8 @@ class ServerDeathReconnectNoResurrectE2eTest {
         // without the user-facing 30s minimum.
         const val POST_GRACE_MS: Long = 1_200L
         const val RECONNECT_TIMEOUT_MS: Long = 30_000L
+        const val PROCESS_LIFECYCLE_DRAIN_MS: Long = 1_000L
+        const val FORWARDING_RESUME_TIMEOUT_MS: Long = 30_000L
+        const val FORWARDING_READOPTION_OBSERVATION_MS: Long = 2_000L
     }
 }

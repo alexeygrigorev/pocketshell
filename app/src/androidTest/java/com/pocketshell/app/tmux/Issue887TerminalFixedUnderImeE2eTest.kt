@@ -31,6 +31,7 @@ import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
+import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
@@ -93,7 +94,13 @@ class Issue887TerminalFixedUnderImeE2eTest {
 
     @After
     fun cleanup() {
-        launchedActivity?.close()
+        launchedActivity?.let { scenario ->
+            requirePocketShellFocusAfterLauncherDialogCleanup(
+                scenario = scenario,
+                context = "after issue #887 IME journey cleanup",
+            )
+            scenario.close()
+        }
         launchedActivity = null
         runBlocking {
             runCatching { cleanupSeededSessions(readFixtureKey()) }
@@ -112,6 +119,10 @@ class Issue887TerminalFixedUnderImeE2eTest {
         forceFlatHostDetailViewMode()
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        requirePocketShellFocusAfterLauncherDialogCleanup(
+            scenario = requireNotNull(launchedActivity),
+            context = "before issue #887 IME journey",
+        )
 
         // Host row -> folder list -> picker -> attach to the seeded shell session.
         compose.waitUntil(timeoutMillis = 10_000) {

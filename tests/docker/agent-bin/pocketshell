@@ -162,6 +162,14 @@ case "${1:-}" in
     # owned by the live fixture, not by the synthetic canned table: resolve it
     # to `none`. PocketShell-launched fixture agents remain covered by their
     # authoritative recorded @ps_agent_kind and never take this foreign path.
+    #
+    # Issue #975: one connected regression deliberately models the narrower
+    # real-host failure where a LIVE pane is unreadable to the classifier while
+    # its transcript is still trustworthy evidence. The seeder opts that exact
+    # pid into `unknown` by creating
+    # `/tmp/pocketshell-agents-kind-unknown-pids/<pid>`.  This is explicit
+    # per-pane state, never pid-range inference, so the #1973 live-shell rule
+    # remains authoritative for every unmarked live process.
     shift
     if [ "${1:-}" != "kind" ]; then
       printf 'pocketshell agents fixture supports: kind\n' >&2
@@ -226,6 +234,7 @@ case "${1:-}" in
       function classify(pid,   n) {
         if (pid !~ /^[0-9]+$/) return "unknown\tnull"
         n = pid + 0
+        if (system("test -f /tmp/pocketshell-agents-kind-unknown-pids/" n) == 0) return "unknown\tnull"
         if (system("test -d /proc/" n) == 0) return "none\tpocketshell-fixture-live.scope"
         if (n >= 1000 && n < 2000) return "claude\ttmuxctl-claude-main.scope"
         if (n >= 2000 && n < 3000) return "codex\ttmuxctl-codex.scope"

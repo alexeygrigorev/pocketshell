@@ -303,7 +303,6 @@ J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
   "com.pocketshell.app.hosts.HostEditFromKebabE2eTest"
   "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest"
   "com.pocketshell.app.portfwd.ForwardingIndicatorE2eTest"
-  "com.pocketshell.app.portfwd.ForwardingResumeOnLaunchE2eTest"
   "com.pocketshell.app.projects.AgentLaunchCommandDockerTest"
   "com.pocketshell.app.projects.FolderListGatewayDockerTest"
   "com.pocketshell.app.projects.FolderListGatewayStaleChannelHealDockerTest"

@@ -38,7 +38,7 @@ internal class PortForwardingTestIsolationRule(
                 val cleanupFailures = mutableListOf<Throwable>()
 
                 runCatching { beforeStop() }.exceptionOrNull()?.let(cleanupFailures::add)
-                runCatching { hardStopAndAssertZero(description) }
+                runCatching { hardStopAndAssertZero(description.displayName) }
                     .exceptionOrNull()
                     ?.let(cleanupFailures::add)
                 runCatching { afterStop() }.exceptionOrNull()?.let(cleanupFailures::add)
@@ -54,7 +54,8 @@ internal class PortForwardingTestIsolationRule(
             }
         }
 
-    private fun hardStopAndAssertZero(description: Description) {
+    /** Run the same hard isolation mid-journey before a later `ON_START`. */
+    internal fun hardStopAndAssertZero(testName: String) {
         val context = androidx.test.platform.app.InstrumentationRegistry
             .getInstrumentation()
             .targetContext
@@ -108,17 +109,17 @@ internal class PortForwardingTestIsolationRule(
 
         runCatching {
             check(controller.flowOfActiveHostCount().value == 0) {
-                "post-test forwarding count must be zero for ${description.displayName}"
+                "post-test forwarding count must be zero for $testName"
             }
             check(controller.activeHostIdsSnapshot().isEmpty()) {
-                "post-test active forwards must be empty for ${description.displayName}: " +
+                "post-test active forwards must be empty for $testName: " +
                     controller.activeHostIdsSnapshot()
             }
             check(
                 !forwardingServiceRunningForTest(context) &&
                     !forwardingNotificationPresentForTest(context),
             ) {
-                "post-test forwarding service/notification must be absent for ${description.displayName}"
+                "post-test forwarding service/notification must be absent for $testName"
             }
         }.exceptionOrNull()?.let(cleanupFailures::add)
         MultipleFailureException.assertEmpty(cleanupFailures)
@@ -126,10 +127,10 @@ internal class PortForwardingTestIsolationRule(
         DiagnosticEvents.record(
             "test",
             "port_forward_post_test_zero",
-            "test" to description.displayName,
+            "test" to testName,
             "activeHostCount" to 0,
         )
-        Log.i(TAG, "post-test-zero test=${description.displayName}")
+        Log.i(TAG, "post-test-zero test=$testName")
     }
 
     private companion object {

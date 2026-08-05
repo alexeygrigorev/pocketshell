@@ -133,7 +133,8 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.BackThenOpenSecondSessionReusesWarmLeaseE2eTest"  # #758 the maintainer's priority- back→open-another-session reconne…
   "$FQCN_PREFIX.ColdRestoreGoneSessionNoResurrectE2eTest"
   "$FQCN_PREFIX.LifecycleReattachGoneSessionNoResurrectE2eTest"  # #666 #998 a session killed on the host must NOT be
-  "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"  # #998 a remote tmux SERVER death (host reboot / OOM
+  "com.pocketshell.app.portfwd.ForwardingResumeOnLaunchE2eTest"  # #2000 forwarding owner uses persisted-intent + runtime hard isolation
+  "$FQCN_PREFIX.ServerDeathReconnectNoResurrectE2eTest"  # #998 #2000 one-process forwarding cleanup -> ON_START -> server-death consumer
   "$FQCN_PREFIX.AttachmentDropReconnectRecoversE2eTest"  # #1072 attaching a file dropped the live connection AND the
   "$FQCN_PREFIX.ReconnectRepaintE2eTest"
   "com.pocketshell.app.portfwd.PortForwardPanelLifecycleE2eTest"  # #1967/#1984 failure-preserving hard cleanup + zero-forward post-test invariant before grace journeys
@@ -274,6 +275,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#markdownRenderedPipeTableShowsCellsNotRawDelimiter"  # #921 D32 G9): rendered Markdown shows GFM pipe tables as
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#reopeningAChangedTextFileShowsTheFreshHostContent"  # #1713 D33/G10: reopening a text file whose host content changed over the same warm lease must show the FRESH body, not the stale one (bind() no longer early-returns on the identical settled request)
+  "com.pocketshell.app.fileviewer.EnvironmentFocusOwnerCleanupE2eTest#launcherFrameworkDialogAtPriorJourneyExitCannotPoisonNextImeJourney"  # #1985 recurrence: a genuine Android launcher framework dialog is owner-scoped cleanup, then the next IME journey starts focused
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#failedSyntheticOwnerBodyRestoresFocusBeforeNextImeJourney"  # #1985 D32/G9: assertion exits always dismiss the owned synthetic window and prove PocketShell focus before the next IME journey
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#moduleOneArticleListsRenderIntactAndContinuedLinkOpensExactUrl"  # #1714 D33/G9/G10: exact issue-time excerpts plus synthetic mixed/deep/wide class coverage through production MarkdownView
   "com.pocketshell.app.bootstrap.HostReadyPrimaryActionTest"  # #885 #117 D32 G9): the post-update Host ready success sheet must

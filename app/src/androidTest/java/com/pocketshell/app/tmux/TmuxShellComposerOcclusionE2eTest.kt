@@ -36,6 +36,7 @@ import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
+import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocusLost
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocused
 import com.pocketshell.app.proof.waitForSshFixtureReady
@@ -112,7 +113,13 @@ class TmuxShellComposerOcclusionE2eTest {
     @After
     fun cleanup() {
         dismissSyntheticFocusStealingWindow(requireFocusReturn = false)
-        launchedActivity?.close()
+        launchedActivity?.let { scenario ->
+            requirePocketShellFocusAfterLauncherDialogCleanup(
+                scenario = scenario,
+                context = "after shell-composer IME journey cleanup",
+            )
+            scenario.close()
+        }
         launchedActivity = null
         runBlocking {
             runCatching { cleanupSeededSessions(readFixtureKey()) }
@@ -127,6 +134,10 @@ class TmuxShellComposerOcclusionE2eTest {
         val hostRowTag = seedDockerHost(key, "Issue641 Shell Composer")
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        requirePocketShellFocusAfterLauncherDialogCleanup(
+            scenario = requireNotNull(launchedActivity),
+            context = "before shell-composer IME journey",
+        )
 
         // Host row -> picker -> attach to the seeded shell session.
         compose.waitUntil(timeoutMillis = 10_000) {

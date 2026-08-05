@@ -36,6 +36,7 @@ import com.pocketshell.app.proof.signals.captureImeServiceState
 import com.pocketshell.app.proof.signals.describeActiveWindow
 import com.pocketshell.app.proof.signals.describeActiveWindowCallCount
 import com.pocketshell.app.proof.signals.resetDescribeActiveWindowCallCount
+import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocusLost
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocused
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
@@ -194,6 +195,10 @@ class ShowKeyboardChipE2eTest {
 
     @Before
     fun resetSharedProbes() {
+        requirePocketShellFocusAfterLauncherDialogCleanup(
+            scenario = compose.activityRule.scenario,
+            context = "before show-keyboard IME journey",
+        )
         resetDescribeActiveWindowCallCount()
     }
 
@@ -209,6 +214,10 @@ class ShowKeyboardChipE2eTest {
             }
         }
         focusStealer = null
+        requirePocketShellFocusAfterLauncherDialogCleanup(
+            scenario = compose.activityRule.scenario,
+            context = "after show-keyboard IME journey cleanup",
+        )
         clearLastSessionPrefs()
         seededKey?.let { key ->
             runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }

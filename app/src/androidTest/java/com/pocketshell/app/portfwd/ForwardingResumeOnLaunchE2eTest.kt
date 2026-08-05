@@ -25,9 +25,9 @@ import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Rule
+import org.junit.rules.RuleChain
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -70,10 +70,8 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class ForwardingResumeOnLaunchE2eTest {
 
-    @get:Rule
     val compose = createEmptyComposeRule()
 
-    @get:Rule
     val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
@@ -87,15 +85,25 @@ class ForwardingResumeOnLaunchE2eTest {
 
     private fun controller(): ForwardingController = entryPoint().forwardingController()
 
-    @After
-    fun teardown() {
-        // Stop the resumed forward so the foreground service + notification
-        // clear and a sibling test starts clean.
-        runCatching { controller().stopAllForwarding() }
-        seededHostId = null
-        launchedActivity?.close()
-        launchedActivity = null
-    }
+    // Issue #2000: stopping only the runtime left this test's persisted
+    // `enabled=true` intent behind. A later process ON_START could therefore
+    // re-adopt the real tunnel and pin an unrelated reconnect journey forever.
+    // The shared hard-isolation owner disables that intent first, stops the
+    // singleton runtime, and refuses to return until controller/service/
+    // notification state is stably zero.
+    private val forwardingIsolation = PortForwardingTestIsolationRule(
+        afterStop = {
+            seededHostId = null
+            launchedActivity?.close()
+            launchedActivity = null
+        },
+    )
+
+    @get:Rule
+    val rules: RuleChain = RuleChain
+        .outerRule(forwardingIsolation)
+        .around(grantPermissions)
+        .around(compose)
 
     @Test
     fun persistedEnabledHost_resumesForwardingAndShowsIndicatorOnLaunch() {

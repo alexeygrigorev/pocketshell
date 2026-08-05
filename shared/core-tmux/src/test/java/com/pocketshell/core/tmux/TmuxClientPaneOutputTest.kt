@@ -44,6 +44,29 @@ import java.util.concurrent.atomic.AtomicInteger
 
 private const val PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS = 15_000L
 
+// Issue #1969: pane the reader-quiescence sentinel rides on. It must be a pane
+// the flood never touches, so observing its frame proves the reader's single
+// sequential parse loop is past every flood frame.
+private const val QUIESCENCE_PANE_ID = "%1969"
+
+// Issue #1969: deliberate scheduling stall injected BETWEEN the authoritative
+// drain and the re-drain that asserts the backlog stayed empty. It is an
+// adversary, never a synchroniser: the load-bearing wait is the sentinel
+// barrier, and this gap only widens the window a real GC pause / descheduled
+// test thread opened on the forced full JVM gate.
+private const val DRAIN_QUIESCENCE_ADVERSARIAL_GAP_MS = 50L
+
+// Issue #1969: the ONLY safe way to take a reader barrier off a pane flow.
+// `withTimeout { client.outputFor("%barrier").first() }` AFTER the barrier line
+// has been fed loses the frame whenever the reader parses that line in the
+// window between pipe registration and subscription: the pipe's drain loop
+// emits into a still-zero-subscriber replay-zero flow, which drops it, and the
+// barrier then hangs to its 15s timeout (observed on run 5/20 of the #1969
+// determinism sweep, in `many orphaned panes are bounded by the global
+// pre-registration caps`). Arm the barrier BEFORE feeding it: `armFirst`
+// subscribes UNDISPATCHED, i.e. synchronously on the calling thread, so no
+// frame can be emitted before the subscriber exists. Proven by
+// `armFirst subscribes before a replay-zero producer can emit`.
 private fun <T> CoroutineScope.armFirst(flow: Flow<T>): Deferred<T> =
     async(start = CoroutineStart.UNDISPATCHED) { flow.first() }
 
@@ -335,8 +358,9 @@ class TmuxClientPaneOutputTest {
                     append("%window-close @7\n")
                 },
             )
+            val barrier = scope.armFirst(client.outputFor("%barrier"))
             shell.feed("%output %barrier done\n")
-            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
+            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { barrier.await() }
 
             floodDrained.complete(Unit)
             val closed = withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { windowCloseSeen.await() }
@@ -356,8 +380,9 @@ class TmuxClientPaneOutputTest {
         try {
             client.connect()
 
+            val barrier = scope.armFirst(client.outputFor("%barrier"))
             shell.feed("%output %0 before-one\n%output %0 before-two\n%output %barrier ready\n")
-            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
+            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { barrier.await() }
 
             val paneEvents = scope.async {
                 client.outputFor("%0").take(3).toList()
@@ -387,13 +412,14 @@ class TmuxClientPaneOutputTest {
             val pane0 = scope.async { client.outputFor("%0").take(1).toList() }
             delay(100)
 
+            val barrier = scope.armFirst(client.outputFor("%barrier"))
             shell.feed(
                 "%output %0 live0\n" +
                     "%output %1 bg-one\n" +
                     "%output %1 bg-two\n" +
                     "%output %barrier ready\n",
             )
-            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
+            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { barrier.await() }
 
             val pane1 = scope.async { client.outputFor("%1").take(3).toList() }
             delay(100)
@@ -565,11 +591,12 @@ class TmuxClientPaneOutputTest {
             val frameBytes = 20 * 1024
             val payload = "x".repeat(frameBytes)
 
+            val sentinel = scope.armFirst(client.outputFor("%sentinel"))
             for (i in 0 until paneCount) {
                 shell.feed("%output %p$i $payload\n")
             }
             shell.feed("%output %sentinel done\n")
-            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%sentinel").first() }
+            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { sentinel.await() }
 
             val retainedPanes = client.preRegistrationBufferCountForTest()
             val retainedBytes = client.preRegistrationRetainedBytesForTest()
@@ -599,8 +626,9 @@ class TmuxClientPaneOutputTest {
         try {
             client.connect()
 
+            val barrier = scope.armFirst(client.outputFor("%barrier"))
             shell.feed("%output %0 buffered\n%output %barrier ready\n")
-            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { client.outputFor("%barrier").first() }
+            withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { barrier.await() }
 
             client.outputFor("%0")
 
@@ -802,14 +830,28 @@ class TmuxClientPaneOutputTest {
                 }
                 shell.resetStdin()
 
-                val blockedPaneCollector = scope.async {
+                // Issue #1969: subscribe UNDISPATCHED so the sole collector is
+                // attached to the replay-zero pane flow BEFORE the flood can
+                // emit. The old `scope.async { ... } + delay(100)` shape only
+                // made that likely, and if the subscription lost the race the
+                // pipe's drain loop would empty the channel into a
+                // zero-subscriber flow (emit never suspends without a
+                // subscriber), so no backlog would build at all.
+                val blockedPaneCollector = scope.async(start = CoroutineStart.UNDISPATCHED) {
                     client.outputFor("%0").collect {
                         firstOutputBlocked.complete(Unit)
                         releasePaneCollector.await()
                     }
                 }
-                val overflow = scope.async { client.outputBacklogOverflows.first() }
-                delay(100)
+                val overflow = scope.armFirst(client.outputBacklogOverflows)
+                // Issue #1969: reader-quiescence barrier. `%output` frames are
+                // handed to the pane pipe SYNCHRONOUSLY on the reader's single
+                // sequential parse loop, so observing a sentinel frame fed
+                // AFTER the flood proves every flood frame has already been
+                // sent into the `%0` channel. Registered here, before the
+                // flood, and armed UNDISPATCHED for the same replay-zero
+                // reason as the collector above.
+                val readerQuiescent = scope.armFirst(client.outputFor(QUIESCENCE_PANE_ID))
 
                 val feedJob = scope.async {
                     shell.feed(codexScaleControlModeFlood(commandNumber = 1L, outputCount = 5_000))
@@ -821,12 +863,42 @@ class TmuxClientPaneOutputTest {
                 assertTrue("sustained flood must overflow the channel", overflowEvent.droppedEvents > 0)
                 withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { feedJob.await() }
 
+                // Issue #1969: `feedJob.await()` only proves the WRITER finished
+                // — the shell's 64 KiB pipe (plus the reader's own line buffer)
+                // still holds an unparsed tail, which the reader keeps pushing
+                // into the pane channel concurrently. Asserting the drain
+                // contract here made the whole test a race against that tail
+                // (measured: 18 late frames landing after the "authoritative"
+                // drain). Feed the sentinel from THIS thread and hard-wait for
+                // it: the reader is then provably past the last flood frame.
+                shell.feed("%output $QUIESCENCE_PANE_ID reader-quiescent\n")
+                val quiescenceFrame =
+                    withTimeout(PANE_OUTPUT_ASYNC_AWAIT_TIMEOUT_MS) { readerQuiescent.await() }
+                assertEquals(
+                    "the quiescence sentinel must be the frame fed after the flood",
+                    "reader-quiescent",
+                    String(quiescenceFrame.data, StandardCharsets.US_ASCII),
+                )
+
                 val drained = client.drainPaneOutputBacklog("%0")
                 assertTrue(
                     "drainPaneOutputBacklog must empty the saturated backlog (drained=$drained)",
                     drained > 0,
                 )
-                assertEquals(0, client.drainPaneOutputBacklog("%0"))
+                // Issue #1969: an ADVERSARIAL gap, not a synchroniser. The
+                // drained backlog must STAY empty across a scheduling stall
+                // (a GC pause / descheduled test thread under the forced full
+                // JVM gate is exactly what turned this assertion red). With the
+                // quiescence barrier above nothing can refill the channel, so
+                // the gap is free; without it this reliably fails.
+                delay(DRAIN_QUIESCENCE_ADVERSARIAL_GAP_MS)
+                val drainedAgain = client.drainPaneOutputBacklog("%0")
+                assertEquals(
+                    "the backlog must stay empty after the authoritative drain " +
+                        "(drainedAgain=$drainedAgain)",
+                    0,
+                    drainedAgain,
+                )
                 assertEquals(0, client.drainPaneOutputBacklog("%does-not-exist"))
                 assertFalse(
                     "draining the backlog is a local recovery, never a transport disconnect",

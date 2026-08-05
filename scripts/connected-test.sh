@@ -116,6 +116,13 @@ source "$ROOT_DIR/scripts/lib/agents-pool.sh"
 # session's cgroup. A runaway then OOMs only its own scope; the parent session
 # survives. Degrades to a bare invocation when user systemd is unavailable (CI).
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+# Issue #2007: the AVD lock protects the EMULATOR; nothing protected the Gradle
+# OUTPUT TREE. A connected build and scripts/full-jvm-gate.sh overlapping in one
+# worktree both rewrite this checkout's app/build graph, and `--rerun-tasks`
+# deletes intermediates the sibling is consuming (the #893 gate died on a
+# missing processDebugResources/R.jar). Sourcing this makes
+# pocketshell_release_all also release the output-tree lock on exit.
+source "$ROOT_DIR/scripts/lib/gradle-output-lock.sh"
 
 # Retain the selected serial's flock in this wrapper for the complete package,
 # install, and instrumentation window. Mutating children explicitly close their
@@ -380,6 +387,40 @@ if [[ "$NETWORK_FAULT_RUN" == "1" ]]; then
   # singleton proxy, so they queue on this one shared lock.
   POCKETSHELL_TOXIPROXY_SERIALIZED=1
   printf 'Network-fault class detected (issue #776 P3): the toxiproxy proxy is a global singleton, so this run is SERIALIZED on a shared lock (no concurrent network-fault lanes).\n' >&2
+fi
+
+# Issue #2007: own this checkout's Gradle OUTPUT TREE before ANY other shared
+# resource, and long before any gradle task runs. The per-serial AVD lock is a
+# different resource and stays a separate concern: two lanes on DISTINCT
+# emulators legitimately hold distinct AVD locks, yet they still write the one
+# app/build graph of this worktree, so they must queue here. A `--pool` lane
+# relocates its build dir to build/lane-<suffix> (issue #724) and therefore
+# passes that lane token, keeping genuinely disjoint output trees concurrent.
+#
+# ORDER MATTERS (review round 2). This claim comes FIRST -- before the
+# toxiproxy singleton, the emulator serial, and the agents fixture port --
+# because a lane that loses the output-tree race would otherwise sit on the
+# box's scarcest resource (often the ONE online emulator) for the whole bounded
+# wait without building anything: a silent cross-lane starvation introduced by
+# the change that removes one. It also makes the acquisition order uniform
+# across every wrapper path (output tree -> toxiproxy -> serial -> agents
+# port), so two lanes can never deadlock each holding half of the other's set.
+# --cleanup-suffixes never invokes gradle, so it deliberately takes no output
+# lock and must not queue behind a build.
+GRADLE_OUTPUT_LANE=""
+if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
+  GRADLE_OUTPUT_LANE="lane-$SUFFIX"
+fi
+if [[ "$CLEANUP_ONLY" != "1" ]]; then
+  GRADLE_OUTPUT_LOCK_RC=0
+  pocketshell_acquire_gradle_output_lock "$ROOT_DIR" "$GRADLE_OUTPUT_LANE" \
+    "connected-test.sh $CONNECTED_TASK suffix=${SUFFIX:-<none>}" \
+    || GRADLE_OUTPUT_LOCK_RC=$?
+  if (( GRADLE_OUTPUT_LOCK_RC != 0 )); then
+    printf 'FAIL: refusing to start %s without exclusive ownership of this worktree gradle output tree (issue #2007).\n' \
+      "$CONNECTED_TASK" >&2
+    exit "$GRADLE_OUTPUT_LOCK_RC"
+  fi
 fi
 
 # Claim non-emulator shared infrastructure before the serial FD exists. This

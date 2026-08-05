@@ -336,6 +336,12 @@ GRADLEW
 make_sandbox() {
   local sandbox="$1" serials="${2:-emulator-5554}"
   mkdir -p "$sandbox/bin" "$sandbox/device-state" "$sandbox/locks"
+  # Issue #2007: the wrapper now also owns its checkout's gradle output tree.
+  # Anchor that lock inside this sandbox so a case can neither queue behind a
+  # real build on the box nor leave a lock file per sandbox in the real
+  # per-user lock directory.
+  mkdir -p "$sandbox/gradle-output-locks"
+  export POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$sandbox/gradle-output-locks"
   make_fake_adb "$sandbox"
   make_fake_docker "$sandbox"
   make_worktree "$ROOT_DIR" "$sandbox/pool-root"

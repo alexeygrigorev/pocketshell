@@ -64,6 +64,12 @@ make_sandbox() {
   # Issue #1657: point the machine-wide lock anchor at this sandbox so the test
   # cannot contend with (or corrupt) a real connected-test run on this box.
   export POCKETSHELL_AVD_LOCK_DIR="$sandbox/locks"
+  # Issue #2007: same reasoning for the Gradle output-tree lock the wrapper now
+  # takes. Its anchor is machine-wide per-user too, so without this every run of
+  # this harness would leave one lock file per fixture root in the real
+  # ~/.cache/pocketshell/gradle-output-locks and (more importantly) a fixture
+  # that ever resolved a real checkout could queue behind a real build.
+  export POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$sandbox/gradle-output-locks"
 
   # Fake adb: only the `devices` subcommand matters for pool claim. Report each
   # pool serial as a `device`-state emulator. Everything else is a harmless no-op.

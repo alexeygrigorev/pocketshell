@@ -7,12 +7,14 @@
 # LD_* values are rejected and never forwarded, but a caller already using
 # LD_PRELOAD has native-code authority before this dynamic interpreter starts;
 # that pre-entry authority is outside the trusted-repository boundary.
+import fcntl
 import os
 import pwd
 import re
 import stat
 import subprocess
 import sys
+import time
 from hashlib import sha256
 from pathlib import Path
 
@@ -33,7 +35,7 @@ EXPECTED_SCOPE_RUNNER_SHA256 = (
     "39406248dd3de35f3b6f5c47ba1ca4c6462b296b0a4995192160b8db5d61761d"
 )
 EXPECTED_PROFILE_GUARD_SHA256 = (
-    "8f50616bfe7bf3a47802dc51932624aa99e097d8700944ff38f7ec98528a0f9a"
+    "9670e3f6bfa5b1ce1016243a86e9a9a2b817461e897fb550b3a6132c961fe635"
 )
 GRADLE_ARGS = (
     "test",
@@ -75,8 +77,112 @@ REJECTED_PREFIXES = (
 )
 
 
+GRADLE_OUTPUT_LOCK_DEFAULT_WAIT_SECONDS = 7200
+GRADLE_OUTPUT_LOCK_TIMEOUT_RC = 75
+
+
 class SdkValidationError(ValueError):
     """An Android SDK candidate is unsafe or incomplete."""
+
+
+def gradle_output_lock_directory(home_directory: str) -> Path:
+    # POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR only RELOCATES the lock file; there is
+    # deliberately no switch that disables the lock, it cannot alter the fixed
+    # Gradle profile, and it is never forwarded into the child environment.
+    override = os.environ.get("POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR", "")
+    if override:
+        return Path(override.rstrip("/"))
+    return Path(home_directory) / ".cache" / "pocketshell" / "gradle-output-locks"
+
+
+def gradle_output_lock_file(output_root: Path, lane: str, home_directory: str) -> Path:
+    """Lock path for one (output root, lane) Gradle output tree (issue #2007).
+
+    Must stay byte-identical to pocketshell_gradle_output_lock_file() in
+    scripts/lib/gradle-output-lock.sh: connected-test.sh resolves the lock in
+    Bash and this gate resolves it in Python, and two wrappers that disagree
+    about the path exclude nothing. scripts/test-gradle-output-lock.sh pins the
+    two implementations against each other.
+    """
+    resolved = output_root.resolve(strict=True)
+    digest = sha256(f"{resolved}\n{lane}\n".encode()).hexdigest()[:32]
+    directory = gradle_output_lock_directory(home_directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"gradle-output-{digest}.lock"
+
+
+def gradle_output_lock_owner(lock_file: Path) -> str:
+    try:
+        with open(lock_file, "rb") as owner_file:
+            recorded = owner_file.read(512).split(b"\n", 1)[0].decode(errors="replace")
+    except OSError:
+        recorded = ""
+    return recorded or "unknown (no owner line recorded yet)"
+
+
+def acquire_gradle_output_lock(lock_file: Path, label: str) -> int | None:
+    """Own the Gradle output tree before any task can rewrite it (issue #2007).
+
+    Returns the locked descriptor, which is made inheritable so the flock
+    survives the execve below and is held for the whole Gradle run. The kernel
+    drops it when the process tree dies, so a crashed gate never wedges the
+    lock. Exits with GRADLE_OUTPUT_LOCK_TIMEOUT_RC — never starts a build — when
+    the bounded wait expires. Returns None when an ancestor process already owns
+    this exact tree: queuing behind our own ancestor would be a self-deadlock
+    presenting as a wedged lock.
+    """
+    if os.environ.get("POCKETSHELL_GRADLE_OUTPUT_LOCK_HELD_FILE", "") == str(lock_file):
+        sys.stderr.write(
+            f"Gradle output tree is already owned by an ancestor of this "
+            f"process ({lock_file}); reusing that ownership.\n"
+        )
+        sys.stderr.flush()
+        return None
+    raw_wait = os.environ.get("POCKETSHELL_GRADLE_OUTPUT_LOCK_WAIT_SECONDS", "")
+    wait_seconds = GRADLE_OUTPUT_LOCK_DEFAULT_WAIT_SECONDS
+    if raw_wait.isdigit():
+        wait_seconds = int(raw_wait)
+    descriptor = os.open(lock_file, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o644)
+    deadline = time.monotonic() + wait_seconds
+    announced = False
+    while True:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError:
+            if not announced:
+                sys.stderr.write(
+                    "Gradle output tree is LOCKED by another canonical wrapper "
+                    f"run; queuing up to {wait_seconds}s rather than corrupting "
+                    "its build.\n"
+                    f"  lock file: {lock_file}\n"
+                    f"  held by:   {gradle_output_lock_owner(lock_file)}\n"
+                )
+                sys.stderr.flush()
+                announced = True
+            if time.monotonic() >= deadline:
+                sys.stderr.write(
+                    f"FAIL: gave up waiting {wait_seconds}s for the gradle "
+                    "output lock.\n"
+                    f"  lock file: {lock_file}\n"
+                    f"  held by:   {gradle_output_lock_owner(lock_file)}\n"
+                    "  This run did NOT start; nothing was built.\n"
+                )
+                os.close(descriptor)
+                raise SystemExit(GRADLE_OUTPUT_LOCK_TIMEOUT_RC)
+            time.sleep(0.05)
+    # Same field shape as the Bash half so one blocked-lane diagnostic is
+    # parseable whichever wrapper owns the tree. This gate holds the descriptor
+    # in its OWN process across the execve, so holder and wrapper are one pid --
+    # unlike the Bash half, whose flock lives in a dedicated holder process.
+    owner_line = (
+        f"holder_pid={os.getpid()} wrapper_pid={os.getpid()} label={label} "
+        f"lock={lock_file} started={time.strftime('%Y-%m-%dT%H:%M:%S%z')}\n"
+    )
+    os.ftruncate(descriptor, 0)
+    os.pwrite(descriptor, owner_line.encode(), 0)
+    os.set_inheritable(descriptor, True)
+    return descriptor
 
 
 def validate_sdk_root(value: str, label: str) -> Path:
@@ -168,6 +274,15 @@ root_dir = Path(__file__).resolve().parent.parent
 unit = f"pocketshell-full-jvm-{os.getpid()}"
 arguments = sys.argv[1:]
 profile_guard_arguments = None
+# Issue #2007: acquire this checkout's Gradle output lock, report the resolved
+# path, hold it until stdin closes, and execute nothing else. It exists so the
+# gate's OWN output-lock behaviour (path derivation, bounded queuing, the owner
+# diagnostic) is testable without a 30-minute Gradle graph, an Android SDK, or a
+# JDK; scripts/test-gradle-output-lock.sh drives it. It runs no external
+# program, so it is not an execution path around the hardening below.
+output_lock_probe = arguments == ["--output-lock-probe"]
+if output_lock_probe:
+    arguments = []
 if arguments == ["--profile-guard-self-test"]:
     profile_guard_arguments = ("--self-test", "--verified-preflight")
     arguments = []
@@ -218,6 +333,17 @@ while arguments:
         f"FAIL: unexpected argument {argument!r}; the full JVM task graph is fixed\n"
     )
     raise SystemExit(2)
+
+if output_lock_probe:
+    probe_lock_file = gradle_output_lock_file(root_dir, "", identity.pw_dir)
+    acquire_gradle_output_lock(
+        probe_lock_file,
+        f"full-jvm-gate.sh --output-lock-probe ({root_dir})",
+    )
+    sys.stdout.write(f"gradle_output_lock={probe_lock_file}\n")
+    sys.stdout.flush()
+    sys.stdin.read()
+    raise SystemExit(0)
 
 clean_environment = {
     "HOME": identity.pw_dir,
@@ -420,6 +546,17 @@ for descriptor, metadata, artifact, label in validated_fds:
         sys.stderr.write(f"FAIL: canonical {label} changed before execution\n")
         raise SystemExit(2)
     os.close(descriptor)
+
+# Issue #2007: own this checkout's Gradle OUTPUT TREE before the forced
+# `--rerun-tasks` graph starts deleting and regenerating intermediates a
+# concurrent connected build may be consuming (the #893 gate died on a missing
+# processDebugResources/R.jar after 1m41s, before a single test ran). Acquired
+# last so the wait window is only the build, and left INHERITABLE so the flock
+# survives the execve and is held for the whole run.
+acquire_gradle_output_lock(
+    gradle_output_lock_file(root_dir, "", identity.pw_dir),
+    f"full-jvm-gate.sh --unit {unit} ({root_dir})",
+)
 
 # The repository is the trust boundary. The descriptor/inode recheck rejects
 # ordinary replacement and symlink redirection; it does not claim resistance to

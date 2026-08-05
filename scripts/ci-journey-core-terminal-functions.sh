@@ -78,6 +78,13 @@ run_core_terminal_hard_wrapped_url() {
   run_ct_class "$CORE_TERMINAL_HARD_WRAPPED_URL_CLASS"
 }
 
+CORE_TERMINAL_PIXEL_PROBE_ABANDON_CLASS="com.termux.view.TerminalViewPixelProbeAbandonedCopyInstrumentedTest"
+PIXEL_PROBE_ABANDON_STATUS="PASS"
+
+run_core_terminal_pixel_probe_abandon() {
+  run_ct_class "$CORE_TERMINAL_PIXEL_PROBE_ABANDON_CLASS"
+}
+
 # ---------------------------------------------------------------------------
 # Issue #1827: THE registry of core-terminal proofs.
 #
@@ -116,4 +123,5 @@ CORE_TERMINAL_PROOFS=(
   "SURFACE_REPAINT_STATUS|CORE_TERMINAL_SURFACE_REPAINT_CLASS|Core-terminal #1203 surface-only-black recovery proof"
   "SHELL_SNAPSHOT_STATUS|CORE_TERMINAL_SHELL_SNAPSHOT_CLASS|Core-terminal #1233 shell-pane single-snapshot affordance-scan proof"
   "HARD_WRAPPED_URL_STATUS|CORE_TERMINAL_HARD_WRAPPED_URL_CLASS|Core-terminal #1955 hard-wrapped URL target proof"
+  "PIXEL_PROBE_ABANDON_STATUS|CORE_TERMINAL_PIXEL_PROBE_ABANDON_CLASS|Core-terminal #2003 abandoned-PixelCopy RenderThread abort proof"
 )

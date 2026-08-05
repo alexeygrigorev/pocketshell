@@ -560,18 +560,38 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
     private suspend fun seedMaskedLiveClaudeSession(key: String): String {
         val suffix = unique()
         val sessionName = "issue975-masked-claude-$suffix"
+        val panePidFile = "/tmp/$sessionName-pane-pid"
+        val transcriptPath =
+            "/home/testuser/.claude/projects/-home-testuser/issue975-live-claude.jsonl"
+        val maskedProcessCommand =
+            "TRANSCRIPT_PATH=${shellQuote(transcriptPath)} exec sh -c " +
+                shellQuote(
+                    "exec 9< \"\$TRANSCRIPT_PATH\"; " +
+                        "printf 'issue975-masked-ready\\r\\n'; " +
+                        "POCKETSHELL_FAKE_AGENT_TRANSCRIPT=\"\$TRANSCRIPT_PATH\" " +
+                        "exec /usr/local/bin/pocketshell-fake-agent",
+                )
+        cleanupCommands +=
+            "pane_pid=\$(cat ${shellQuote(panePidFile)} 2>/dev/null || true); " +
+                "rm -f /tmp/pocketshell-agents-kind-unknown-pids/\$pane_pid " +
+                "${shellQuote(panePidFile)} 2>/dev/null || true"
         cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
         cleanupCommands +=
             "rm -f /home/testuser/.claude/projects/-home-testuser/" +
                 "issue975-live-claude.jsonl 2>/dev/null || true"
         // Seed a FRESH live Claude transcript in the cwd-encoded Claude project
         // dir for a writable cwd (`/home/testuser` → encoded `-home-testuser`), and
-        // attach the tmux session to that SAME cwd. (`/workspace` is not writable by
-        // testuser in the fixture; the encoded transcript dir is what the detector
-        // enumerates, and the cwd must be a real accessible dir for `pane.cwd` to
-        // match.) Record it `@ps_agent_kind=shell` (the durable verdict that hides
-        // the toggle). The daemon's classify returns `unknown` for this pane (no
-        // cgroup scope in the non-systemd container) — the masked-live-agent state.
+        // attach the tmux session to that SAME cwd. The pane runs the fixture's
+        // deterministic live agent TUI through a quiet wrapper whose command line
+        // contains no Claude/Codex/OpenCode kind token, while holding the real
+        // transcript open. This is a genuinely live masked-agent process plus
+        // live transcript evidence, not the old copied-file-only stand-in. Record
+        // it `@ps_agent_kind=shell` (the stale
+        // durable verdict that hides the toggle), then explicitly make this ONE
+        // live pane unreadable to the fixture classifier. The fixture hard-checks
+        // `/proc`, fd ownership, and the returned `unknown` verdict before launch,
+        // so a missing/non-live/misclassified setup fails rather than vacuously
+        // exercising the optimistic Conversation window.
         execRemote(
             key,
             buildString {
@@ -593,10 +613,26 @@ class ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest {
                 appendLine(
                     "tmux new-session -d -x 80 -y 24 -s ${shellQuote(sessionName)} " +
                         "-c /home/testuser " +
-                        "\"printf 'issue975-masked-ready\\r\\n'; exec sh\"",
+                        shellQuote(maskedProcessCommand),
                 )
                 appendLine("tmux set-option -t ${shellQuote(sessionName)} @ps_agent_kind shell")
-                appendLine("sleep 1")
+                appendLine(
+                    "pane_pid=\$(tmux list-panes -t ${shellQuote(sessionName)} " +
+                        "-F '#{pane_pid}' | head -n 1)",
+                )
+                appendLine("test -n \"\$pane_pid\" && test -d \"/proc/\$pane_pid\"")
+                appendLine(
+                    "readlink -f /proc/\$pane_pid/fd/9 | " +
+                        "grep -Fx ${shellQuote(transcriptPath)} >/dev/null",
+                )
+                appendLine("printf '%s\\n' \"\$pane_pid\" > ${shellQuote(panePidFile)}")
+                appendLine("mkdir -p /tmp/pocketshell-agents-kind-unknown-pids")
+                appendLine("touch \"/tmp/pocketshell-agents-kind-unknown-pids/\$pane_pid\"")
+                appendLine(
+                    "printf '{\"panes\":[{\"pane_id\":\"%%0\",\"pane_pid\":%s}]}' " +
+                        "\"\$pane_pid\" | pocketshell agents kind | " +
+                        "grep '\"agent_kind\":\"unknown\"' >/dev/null",
+                )
             },
         )
         return sessionName

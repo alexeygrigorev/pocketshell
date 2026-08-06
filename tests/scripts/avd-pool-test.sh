@@ -37,6 +37,15 @@ unset POCKETSHELL_AVD_LOCK_ACQUIRED \
       ANDROID_SERIAL \
       ADB_SERIAL
 
+# Issue #1989: connected-test.sh now refuses to start below a free-space floor.
+# This harness is about POOL CLAIM/RELEASE, and it runs on hosted runners whose
+# free space is not its business — a pool test that goes red because the runner
+# is 70% full is a test that gets disabled. Pin the floor to 0 MiB: a threshold,
+# not a skip, so the preflight still runs on every fixture here.
+# tests/scripts/disk-preflight-test.sh owns the disk behaviour.
+export POCKETSHELL_DISK_MIN_FREE_MB=0
+export POCKETSHELL_DISK_WARN_FREE_MB=0
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 fail() {

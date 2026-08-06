@@ -402,6 +402,106 @@ scripts/check-file-size-hygiene.sh
 scripts/check-file-size-hygiene.sh --update   # only after files shrink
 ```
 
+### Free-disk preflight and safe-list cleanup (issue #1989)
+
+**An ENOSPC failure is indistinguishable from a real gate failure until someone
+runs `df`.** During #1963 validation the dev box's root filesystem hit 100%
+(436G, 24M available) and two gates died before a single test ran: a connected
+lane could not write `~/.docker/buildx` and then could not create
+`~/.gradle/caches/8.13`, and `scripts/full-jvm-gate.sh` failed in
+`:app:kspDebugKotlin` at 1m12s. Neither is an assertion failure, but both look
+like one, so a full disk burns a review round and gets blamed on the change
+under test.
+
+Both canonical wrappers now refuse to start instead. The preflight runs before
+anything expensive or shared is claimed — before the #2007 Gradle output-tree
+lock, before the toxiproxy lock, before an emulator serial, before the agents
+fixture container — so a lane that cannot succeed never sits on the box's
+scarcest resource while it finds out.
+
+| Free space on the gate's filesystem | Behaviour |
+|---|---|
+| below 10 GiB | refuse to start, exit **76**, print usage + the cleanup command |
+| 10–20 GiB | run, with a `WARN: disk preflight` line naming the cleanup command |
+| above 20 GiB | run silently |
+
+**The 10 GiB floor is measured, not guessed: it has to clear one run's own
+working set.** A floor below that admits a run which then dies of the very
+ENOSPC it was checked for — a rubber stamp, worse than no preflight, because the
+failure now carries a "disk preflight OK" line above it. On the dev box
+(2026-08-06) a completed gate leaves **2.7 GiB** in `app/build` and **3.1 GiB**
+across all module `build/` directories, before Gradle daemon temp,
+`~/.gradle/caches` growth, and (for a connected lane) Docker image and BuildKit
+layers. 10 GiB is roughly 3x that.
+
+An earlier revision set the floor at 4 GiB on the premise that these wrappers
+run on hosted CI runners where free space is tight mid-job. **That premise is
+false**, and it is recorded here so it is not rediscovered as a reason to lower
+the floor again. `scripts/full-jvm-gate.sh`'s real path never runs on a hosted
+runner — `.github/workflows/tests.yml` invokes it only as
+`--profile-guard-self-test` / `--profile-guard-check`, both exempt from this
+preflight and both building nothing, and the real path additionally refuses to
+run with `CI` set. The one CI exposure is `connected-test.sh` in the emulator
+job, which measured **110134 MB** free after its own cleanup step (`main` run
+`31040932815`) and whose cleanup step already hard-fails the job below **9000
+MB** for the AVD userdata partition. A 10240 MiB floor sits barely above a bar
+CI already enforces for itself.
+
+The advisory 20 GiB line is the "clean up before root reaches 100%" alert; it
+never blocks a run.
+
+Exit code 76 is distinct from a build failure, from the #2007 output-lock
+timeout (75), and from the #1842 disturbed-fixture verdict (90), so "the box was
+full" is never read as "this change is red".
+
+`scripts/connected-test.sh` resolves the preflight through
+`scripts/lib/disk-preflight.sh`; `scripts/full-jvm-gate.sh` is an isolated
+Python program that sources no shell library, so it reimplements the identical
+thresholds and the identical statvfs arithmetic.
+`tests/scripts/disk-preflight-test.sh` pins the two halves against each other —
+change a threshold in one and that harness fails.
+
+`POCKETSHELL_DISK_MIN_FREE_MB` / `POCKETSHELL_DISK_WARN_FREE_MB` move the
+thresholds (a malformed value is a hard failure, never a silent fallback to the
+default). There is deliberately no variable that skips the check.
+`connected-test.sh --cleanup-suffixes` is exempt: it builds nothing, and gating
+a recovery path on the condition it recovers from is a self-lockout.
+
+To reclaim space, use the serialized safe-list sweep. It defaults to a dry run:
+
+```bash
+scripts/disk-cleanup.sh                        # report only; deletes nothing
+scripts/disk-cleanup.sh --apply                # reclaim stages 1-4
+scripts/disk-cleanup.sh --apply --worktrees    # also sweep clean agent worktrees
+```
+
+It will delete, and nothing else is reachable from it:
+
+1. the Docker build cache (`docker builder prune -f`);
+2. **dangling** Docker images (`docker image prune -f`, never `-a`) — and it
+   re-reads the `pocketshell-test:*` tag list afterwards and hard-fails if any
+   image disappeared;
+3. `/tmp/pocketshell-*` scratch older than `--tmp-age-days` (default 1), so a
+   live sibling lane's fresh scratch is never taken;
+4. `build/pre-release-confidence-gate/` and `build/phone-walkthrough/` (named
+   explicitly, not globbed under `build/`, because `build/test-results/` holds
+   the only artifact identifying a failing assertion — the #1969 lesson);
+5. with `--worktrees` only: `.claude/worktrees/agent-*` worktrees that are
+   unlocked, report an empty `git status --porcelain`, and have no commits
+   ahead of `origin/main`.
+
+It will never touch running or stopped containers, any tagged image, other
+projects' images, `~/.gradle/caches`, `~/.android/avd`, `.worktrees/issue-*`,
+the checkout it is running from, or any worktree holding uncommitted, untracked,
+or unpushed work. That last one is not a nicety: on 2026-07-19 a routine
+`agent-*` sweep destroyed the entire #1487 implementation because it was held
+only as **untracked** files, which `git diff` reports as clean. The sweep checks
+`git status --porcelain`, which sees `??` entries, and it never passes
+`--force`.
+
+A machine-wide per-user `flock` makes the sweep single-writer, so two agent
+lanes cannot race on one worktree list and one Docker daemon.
+
 ---
 
 ## Connecting the emulator to the Docker server

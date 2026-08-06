@@ -35,7 +35,7 @@ EXPECTED_SCOPE_RUNNER_SHA256 = (
     "39406248dd3de35f3b6f5c47ba1ca4c6462b296b0a4995192160b8db5d61761d"
 )
 EXPECTED_PROFILE_GUARD_SHA256 = (
-    "9670e3f6bfa5b1ce1016243a86e9a9a2b817461e897fb550b3a6132c961fe635"
+    "1200071bec8202c00a3ffa6f59e5bcfcd4746004d5b14606452c8efcdbd1b5dc"
 )
 GRADLE_ARGS = (
     "test",
@@ -81,8 +81,133 @@ GRADLE_OUTPUT_LOCK_DEFAULT_WAIT_SECONDS = 7200
 GRADLE_OUTPUT_LOCK_TIMEOUT_RC = 75
 
 
+# Issue #1989. Keep byte-identical to the POCKETSHELL_DISK_PREFLIGHT_* constants
+# in scripts/lib/disk-preflight.sh: connected-test.sh resolves this preflight in
+# Bash and this gate resolves it in Python, and two canonical wrappers that
+# disagree about "is there room" protect nothing. This gate deliberately does
+# not source shell libraries (the isolated-interpreter trust boundary at the top
+# of this file), so the arithmetic is reimplemented rather than shared, and
+# tests/scripts/disk-preflight-test.sh pins the two implementations against each
+# other. Both measure statvfs f_bavail * f_frsize — space available to a non-root
+# user — so they measure the identical quantity, not merely a similar one.
+#
+# The 10 GiB floor is MEASURED against one run's own working set: on the dev box
+# (2026-08-06) a completed gate leaves 2.7 GiB in app/build and 3.1 GiB across
+# all module build/ dirs, before Gradle daemon temp and ~/.gradle/caches growth.
+# A floor below that admits a run that then dies of the very ENOSPC it was
+# checked for — a rubber stamp, worse than no preflight, because the failure now
+# carries a "disk preflight OK" line above it.
+#
+# An earlier revision used 4 GiB on the premise that this gate runs on hosted CI
+# runners where space is tight. It does not: .github/workflows/tests.yml invokes
+# this file only as --profile-guard-self-test / --profile-guard-check (both
+# exempt, both building nothing), and the real path refuses to run with CI set at
+# all. The one CI exposure is connected-test.sh in the emulator job, which
+# measured 110134 MB free after its own cleanup and already hard-fails itself
+# below 9000 MB. See the header of scripts/lib/disk-preflight.sh.
+DISK_PREFLIGHT_FAIL_RC = 76
+DISK_PREFLIGHT_DEFAULT_MIN_FREE_MB = 10240
+DISK_PREFLIGHT_DEFAULT_WARN_FREE_MB = 20480
+
+
 class SdkValidationError(ValueError):
     """An Android SDK candidate is unsafe or incomplete."""
+
+
+class DiskPreflightError(ValueError):
+    """Free space is insufficient, unreadable, or the threshold is malformed."""
+
+
+def disk_threshold_mb(name: str, default_value: int) -> int:
+    """One threshold override, or the default. A typo is FATAL, never ignored.
+
+    POCKETSHELL_DISK_MIN_FREE_MB / _WARN_FREE_MB move the floor so the
+    regression harness is deterministic instead of depending on the box's real
+    free space. There is deliberately no variable that SKIPS the preflight, and
+    a malformed value fails closed: silently falling back to the default on a
+    typo is how a guard quietly becomes decoration.
+    """
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default_value
+    if re.fullmatch(r"[0-9]+", raw) is None:
+        raise DiskPreflightError(f"{name} must be a whole number of MiB (got: {raw})")
+    return int(raw)
+
+
+def disk_free_mb(path: Path) -> int:
+    """MiB available to a non-root user on the filesystem holding `path`."""
+    try:
+        usage = os.statvfs(path)
+    except OSError as error:
+        raise DiskPreflightError(
+            f"cannot determine free space for {path}: {error}"
+        ) from error
+    return usage.f_bavail * usage.f_frsize // 1048576
+
+
+def disk_preflight(path: Path, label: str) -> int:
+    """Refuse to start when the box cannot hold this run (issue #1989).
+
+    During #1963 validation the root filesystem filled completely and this gate
+    died in `:app:kspDebugKotlin` at 1m12s while a sibling connected lane died
+    in Docker BuildKit and then in `~/.gradle/caches`. Neither was an assertion
+    failure, but an ENOSPC failure is indistinguishable from a real gate failure
+    until someone runs `df` — so it burns a review round and gets blamed on the
+    change under test. Failing HERE, before the profile guard, the Java probe,
+    and the #2007 output-tree lock, makes the machine say what AGENTS.md
+    currently asks a human to remember.
+
+    Returns 0 to proceed, or DISK_PREFLIGHT_FAIL_RC to refuse.
+    """
+    try:
+        min_free_mb = disk_threshold_mb(
+            "POCKETSHELL_DISK_MIN_FREE_MB",
+            DISK_PREFLIGHT_DEFAULT_MIN_FREE_MB,
+        )
+        warn_free_mb = disk_threshold_mb(
+            "POCKETSHELL_DISK_WARN_FREE_MB",
+            DISK_PREFLIGHT_DEFAULT_WARN_FREE_MB,
+        )
+        free_mb = disk_free_mb(path)
+    except DiskPreflightError as error:
+        sys.stderr.write(f"FAIL: {label} disk preflight (issue #1989): {error}\n")
+        return DISK_PREFLIGHT_FAIL_RC
+
+    if free_mb < min_free_mb:
+        sys.stderr.write(
+            "\n=== DISK PREFLIGHT FAILED (issue #1989) ===\n"
+            f"{label} refuses to start: not enough free disk space.\n"
+            f"  path:      {path}\n"
+            f"  free:      {free_mb} MiB\n"
+            f"  required:  {min_free_mb} MiB\n"
+            "\n"
+            "This run did NOT start; nothing was built. A gate that starts on a "
+            "full disk fails with ENOSPC deep inside Gradle/Docker/KSP, which "
+            "reads exactly like a real test failure and gets blamed on the "
+            "change under test.\n"
+            "\n"
+            "Reclaim space with the serialized, safe-list cleanup path:\n"
+            "    scripts/disk-cleanup.sh            # dry run: shows what it "
+            "WOULD free\n"
+            "    scripts/disk-cleanup.sh --apply    # actually free it\n"
+            "It never touches active containers, .gradle/caches, .android/avd, "
+            "pocketshell-test:* images, .worktrees/issue-*, or any worktree "
+            "holding uncommitted or unpushed work.\n"
+            "\n"
+            "To run against a different floor (there is deliberately no way to "
+            "skip this check): POCKETSHELL_DISK_MIN_FREE_MB=<MiB>\n"
+        )
+        return DISK_PREFLIGHT_FAIL_RC
+
+    if free_mb < warn_free_mb:
+        sys.stderr.write(
+            f"WARN: disk preflight (issue #1989): {free_mb} MiB free on {path} "
+            f"is under the {warn_free_mb} MiB comfort line (hard floor "
+            f"{min_free_mb} MiB). Run scripts/disk-cleanup.sh before the box "
+            "reaches 100%.\n"
+        )
+    return 0
 
 
 def gradle_output_lock_directory(home_directory: str) -> Path:
@@ -283,6 +408,15 @@ profile_guard_arguments = None
 output_lock_probe = arguments == ["--output-lock-probe"]
 if output_lock_probe:
     arguments = []
+# Issue #1989: report this checkout's disk-preflight verdict and execute nothing
+# else. Same reasoning as --output-lock-probe above: the gate's OWN preflight
+# behaviour (threshold parsing, the measured free space, the refusal rc, the
+# operator-facing report) must be testable without a 30-minute Gradle graph, an
+# Android SDK, or a JDK. tests/scripts/disk-preflight-test.sh drives it. It runs
+# no external program, so it is not an execution path around the hardening below.
+disk_preflight_probe = arguments == ["--disk-preflight-probe"]
+if disk_preflight_probe:
+    arguments = []
 if arguments == ["--profile-guard-self-test"]:
     profile_guard_arguments = ("--self-test", "--verified-preflight")
     arguments = []
@@ -344,6 +478,21 @@ if output_lock_probe:
     sys.stdout.flush()
     sys.stdin.read()
     raise SystemExit(0)
+
+if disk_preflight_probe:
+    raise SystemExit(
+        disk_preflight(root_dir, "full-jvm-gate.sh --disk-preflight-probe")
+    )
+
+# Issue #1989: refuse a full-disk run before ANY expensive or shared step — the
+# profile-guard spawn, the Java probe, and the #2007 output-tree lock all come
+# after this. Scoped to the real gate path: the authenticated `--profile-guard-*`
+# workflow modes build nothing, so holding them to a build-sized free-space floor
+# would fail hosted runners for no reason.
+if profile_guard_arguments is None:
+    disk_preflight_result = disk_preflight(root_dir, f"full-jvm-gate.sh --unit {unit}")
+    if disk_preflight_result != 0:
+        raise SystemExit(disk_preflight_result)
 
 clean_environment = {
     "HOME": identity.pw_dir,

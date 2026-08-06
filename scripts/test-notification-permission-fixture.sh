@@ -33,13 +33,20 @@ FIXTURE_ROOT="$(mktemp -d)"
 trap 'rm -rf "$FIXTURE_ROOT"' EXIT
 mkdir -p "$FIXTURE_ROOT/repo/scripts/lib" "$FIXTURE_ROOT/stubbin" "$FIXTURE_ROOT/state"
 cp "$REAL_CONNECTED" "$FIXTURE_ROOT/repo/scripts/connected-test.sh"
-cp "$SCRIPT_DIR/lib/avd-lock.sh" "$FIXTURE_ROOT/repo/scripts/lib/avd-lock.sh"
-cp "$SCRIPT_DIR/lib/agents-pool.sh" "$FIXTURE_ROOT/repo/scripts/lib/agents-pool.sh"
-cp "$SCRIPT_DIR/lib/scope-run.sh" "$FIXTURE_ROOT/repo/scripts/lib/scope-run.sh"
-# Issue #2007: the wrapper now also owns this checkout's gradle output tree.
-cp "$SCRIPT_DIR/lib/gradle-output-lock.sh" \
-  "$FIXTURE_ROOT/repo/scripts/lib/gradle-output-lock.sh"
+# Glob the WHOLE scripts/lib rather than enumerating it. An enumerated list rots
+# silently the moment connected-test.sh sources a new library: the fixture then
+# dies at `source: No such file or directory` and this suite reports a failure
+# about the permission fixture that has nothing to do with permissions. It has
+# already had to be extended twice by hand (#2007's gradle-output-lock.sh, and
+# #1989's disk-preflight.sh); avd-pool-test.sh learned the same lesson in #1853.
+cp "$SCRIPT_DIR"/lib/*.sh "$FIXTURE_ROOT/repo/scripts/lib/"
 chmod +x "$FIXTURE_ROOT/repo/scripts/connected-test.sh"
+# Issue #1989: this fixture is about the POST_NOTIFICATIONS permission dance,
+# not about disk, and it runs on hosted runners whose free space is not its
+# business. Pin the floor to 0 MiB -- a threshold, not a skip, so the preflight
+# still runs on the real wrapper here.
+export POCKETSHELL_DISK_MIN_FREE_MB=0
+export POCKETSHELL_DISK_WARN_FREE_MB=0
 # Keep this fixture's output lock inside its own temporary tree rather than the
 # real per-user lock directory, so it can never queue behind (or hold up) a real
 # build on the box.

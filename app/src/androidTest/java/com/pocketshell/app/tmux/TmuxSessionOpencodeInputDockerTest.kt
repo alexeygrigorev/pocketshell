@@ -37,7 +37,9 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
-import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
+import com.pocketshell.app.proof.signals.InheritedJourneyFocus
+import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
+import com.pocketshell.app.proof.signals.requireNoJourneyOwnedFocusRegression
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.proof.waitForSshFixtureReady
@@ -176,6 +178,9 @@ class TmuxSessionOpencodeInputDockerTest {
     val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
+
+    /** Issue #2021: the focus reading this journey inherited at its entry boundary. */
+    private var journeyEntryFocus: InheritedJourneyFocus? = null
     private val timings = mutableListOf<String>()
     private val screenshots = mutableListOf<ViewportArtifact>()
     private val perStageStamps = mutableListOf<String>()
@@ -183,8 +188,9 @@ class TmuxSessionOpencodeInputDockerTest {
     @After
     fun closeLaunchedActivity() {
         launchedActivity?.let { scenario ->
-            requirePocketShellFocusAfterLauncherDialogCleanup(
+            requireNoJourneyOwnedFocusRegression(
                 scenario = scenario,
+                entry = journeyEntryFocus,
                 context = "after OpenCode input journey cleanup",
             )
             scenario.close()
@@ -606,7 +612,7 @@ class TmuxSessionOpencodeInputDockerTest {
         val hostRowTag: String = persistHost(appContext, key, sshPort)
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            requirePocketShellFocusAfterLauncherDialogCleanup(
+            journeyEntryFocus = recordJourneyEntryFocus(
                 scenario = requireNotNull(launchedActivity),
                 context = "before issue #1979 OpenCode IME journey",
             )

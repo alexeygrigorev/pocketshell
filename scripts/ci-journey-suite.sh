@@ -298,6 +298,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.usage.UsageThresholdNotificationE2eTest"  # #1618 both relative countdown + absolute reset time reach the real status-bar notification
   "com.pocketshell.app.usage.Usage1318StrictSchemaRenderE2eTest"  # #1318 on-device render acceptance for the quse-v0.0.9 strict-schem…
   "com.pocketshell.app.usage.UsageResetCreditsLayoutTest"  # #1789 reset-credit inventory remains contained and scrollable on narrow / large-font layouts
+  "$FQCN_PREFIX.InheritedFocusOwnerVerdictE2eTest"  # #2021 D31: an INHERITED app-owned focus window must not void a downstream journey's verdict (the state that voided 2 of 7 #1994 reopen arms), while an owner the journey itself leaks still hard-fails. No Docker fixture, ~15s.
 )
 
 # CI-matrix journey class selection and banner logging live in a sourced helper.

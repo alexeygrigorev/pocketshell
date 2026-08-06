@@ -54,6 +54,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -492,6 +493,14 @@ class SessionSwipeSwitchE2eTest {
      * complete 'A237-READY' cell band". GREEN with the fix: it throws the
      * foreign-owner attribution instead. Note it still THROWS — attribution is
      * never amnesty (pinned on the JVM by `MarkerBandCaptureVerdictTest`).
+     *
+     * Issue #2021: this arm produced NO verdict on the 2026-08-06 nightly — the
+     * harness refused to start because the hosted AVD had not granted the
+     * activity window focus (`active_window_pkg=com.pocketshell.app`, i.e. the
+     * app itself owned the display; no foreign window, no ANR). The harness now
+     * records that entry reading instead of demanding it and hard-asserts the
+     * state it actually injects; every assertion below is unchanged. See
+     * [SyntheticFocusOwnerHarness] and `InheritedFocusOwnerVerdictE2eTest`.
      */
     @Test
     fun foreignWindowOverTheViewportIsNamedInsteadOfBlamingTheTerminalPaint() { runBlocking {
@@ -580,6 +589,14 @@ class SessionSwipeSwitchE2eTest {
         attachToSessionAForCaptureProof()
         val scenario = requireNotNull(launchedActivity)
 
+        // Issue #2021: the guard below is a DELTA against this reading, not a
+        // demand that the hosted AVD granted the activity focus. The property
+        // this arm needs is "adding the cover changed nothing about who owns the
+        // window focus"; requiring an absolute `true` made the arm's verdict
+        // depend on an ambient grant it neither creates nor tests, and that is
+        // what voided it on the 2026-08-06 nightly before the pump ever ran.
+        val focusBeforeOverlay = activityWindowFocused(scenario)
+
         var overlay: View? = null
         InstrumentationRegistry.getInstrumentation().runOnMainSync {
             scenario.onActivity { activity ->
@@ -599,9 +616,18 @@ class SessionSwipeSwitchE2eTest {
             }
         }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
-        assertTrue(
-            "the synthetic occlusion must NOT steal window focus — otherwise this arm " +
-                "would exercise the foreign-owner attribution instead of the paint pump",
+        assertFalse(
+            "the synthetic occlusion must not be focusable — a focusable cover would " +
+                "make this arm exercise the foreign-owner attribution, not the paint pump",
+            requireNotNull(overlay).isFocusable ||
+                requireNotNull(overlay).isFocusableInTouchMode ||
+                requireNotNull(overlay).hasFocus(),
+        )
+        assertEquals(
+            "the synthetic occlusion must NOT change who owns the window focus — " +
+                "otherwise this arm would exercise the foreign-owner attribution " +
+                "instead of the paint pump",
+            focusBeforeOverlay,
             activityWindowFocused(scenario),
         )
 

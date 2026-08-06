@@ -31,7 +31,9 @@ import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
-import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
+import com.pocketshell.app.proof.signals.InheritedJourneyFocus
+import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
+import com.pocketshell.app.proof.signals.requireNoJourneyOwnedFocusRegression
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
@@ -87,6 +89,9 @@ class Issue887TerminalFixedUnderImeE2eTest {
     val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
+
+    /** Issue #2021: the focus reading this journey inherited at its entry boundary. */
+    private var journeyEntryFocus: InheritedJourneyFocus? = null
     private val summaryLines = mutableListOf<String>()
 
     private val pickerWaitMs: Long =
@@ -95,8 +100,9 @@ class Issue887TerminalFixedUnderImeE2eTest {
     @After
     fun cleanup() {
         launchedActivity?.let { scenario ->
-            requirePocketShellFocusAfterLauncherDialogCleanup(
+            requireNoJourneyOwnedFocusRegression(
                 scenario = scenario,
+                entry = journeyEntryFocus,
                 context = "after issue #887 IME journey cleanup",
             )
             scenario.close()
@@ -119,7 +125,7 @@ class Issue887TerminalFixedUnderImeE2eTest {
         forceFlatHostDetailViewMode()
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-        requirePocketShellFocusAfterLauncherDialogCleanup(
+        journeyEntryFocus = recordJourneyEntryFocus(
             scenario = requireNotNull(launchedActivity),
             context = "before issue #887 IME journey",
         )

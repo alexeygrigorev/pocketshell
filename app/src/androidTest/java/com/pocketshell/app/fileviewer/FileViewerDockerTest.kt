@@ -48,7 +48,9 @@ import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
 import com.pocketshell.app.proof.signals.SyntheticFocusOwnerHarness
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
 import com.pocketshell.app.proof.signals.requirePocketShellFocusAtJourneyBoundary
-import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
+import com.pocketshell.app.proof.signals.InheritedJourneyFocus
+import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
+import com.pocketshell.app.proof.signals.requireNoJourneyOwnedFocusRegression
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -95,6 +97,9 @@ class FileViewerDockerTest {
      * already warm must NOT advance it (no per-open ~3-4s handshake).
      */
     private lateinit var leasing: CountingLeaseManager
+
+    /** Issue #2021: the focus reading this journey inherited at its entry boundary. */
+    private var journeyEntryFocus: InheritedJourneyFocus? = null
     private val focusOwner by lazy {
         SyntheticFocusOwnerHarness(
             scenario = composeRule.activityRule.scenario,
@@ -105,7 +110,7 @@ class FileViewerDockerTest {
 
     @Before
     fun setUp(): Unit { runBlocking {
-        requirePocketShellFocusAfterLauncherDialogCleanup(
+        journeyEntryFocus = recordJourneyEntryFocus(
             scenario = composeRule.activityRule.scenario,
             context = "before FileViewer Docker journey",
         )
@@ -126,8 +131,9 @@ class FileViewerDockerTest {
     @After
     fun tearDown(): Unit { runBlocking {
         focusOwner.dismissBestEffort()
-        requirePocketShellFocusAfterLauncherDialogCleanup(
+        requireNoJourneyOwnedFocusRegression(
             scenario = composeRule.activityRule.scenario,
+            entry = journeyEntryFocus,
             context = "after FileViewer Docker journey cleanup",
         )
         if (seededPaths.isNotEmpty()) {

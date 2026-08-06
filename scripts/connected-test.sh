@@ -123,6 +123,10 @@ source "$ROOT_DIR/scripts/lib/scope-run.sh"
 # missing processDebugResources/R.jar). Sourcing this makes
 # pocketshell_release_all also release the output-tree lock on exit.
 source "$ROOT_DIR/scripts/lib/gradle-output-lock.sh"
+# Issue #1989: refuse to start on a full root filesystem. A connected run that
+# starts with no room dies inside Docker BuildKit or Gradle with ENOSPC, which
+# is indistinguishable from a real test failure until someone runs `df`.
+source "$ROOT_DIR/scripts/lib/disk-preflight.sh"
 
 # Retain the selected serial's flock in this wrapper for the complete package,
 # install, and instrumentation window. Mutating children explicitly close their
@@ -315,6 +319,28 @@ if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" ]]; then
     printf 'FAIL: notification-permission fixture requires dedicated class=%s\n' \
       "$NOTIFICATION_PERMISSION_TEST_CLASS" >&2
     exit 2
+  fi
+fi
+
+# Issue #1989: free-disk preflight, run BEFORE anything expensive or shared.
+#
+# It is deliberately the FIRST thing after argument validation — before the
+# #2007 Gradle output-tree lock, before the toxiproxy serialization lock, before
+# an emulator serial is claimed, and before the agents fixture container is
+# brought up. A lane that cannot possibly succeed must not first sit on the
+# box's scarcest resource (often the ONE online emulator) while it discovers
+# that; the #2007 header makes the same argument for the output lock.
+#
+# --cleanup-suffixes is exempt: it builds nothing, needs no space, and is part
+# of how an operator recovers a contended box. Gating recovery on the condition
+# it recovers from is the classic self-lockout.
+if [[ "$CLEANUP_ONLY" != "1" ]]; then
+  DISK_PREFLIGHT_RC=0
+  pocketshell_disk_preflight "$ROOT_DIR" \
+    "connected-test.sh $CONNECTED_TASK suffix=${SUFFIX:-<none>}" \
+    || DISK_PREFLIGHT_RC=$?
+  if (( DISK_PREFLIGHT_RC != 0 )); then
+    exit "$DISK_PREFLIGHT_RC"
   fi
 fi
 

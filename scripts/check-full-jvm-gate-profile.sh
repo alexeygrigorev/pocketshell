@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_ENTRYPOINT = ROOT_DIR / "scripts" / "full-jvm-gate.sh"
 EXPECTED_ENTRYPOINT_SHA256 = (
-    "7b3612eefb7c3ed1936540a6cb98905793e5d45d44c5238d386ce9d1a784c4af"
+    "216068796d70b6765fc21d42e831f24f31e1f4d02515e2a5f0e672aab9e5280a"
 )
 EXPECTED_CGROUP_RUNNER_SHA256 = (
     "6e4ce5f99cf4a6666aa9ac0c097776fb2bd4b87b2cc01744ddd06e4fee114b20"
@@ -112,6 +112,18 @@ def clean_test_environment() -> dict[str, str]:
     lock_directory = os.environ.get("POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR", "")
     if lock_directory:
         environment["POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR"] = lock_directory
+    # Issue #1989: pin the fixtures' disk-preflight floor to 0 MiB so the ~60
+    # fixture entrypoint runs below assert what they are about to assert (the
+    # profile, the SDK/Java/guard hardening) and never inherit a verdict about
+    # the CI runner's free space. It is a threshold, not a skip: the preflight
+    # still runs and still measures on every fixture, and the dedicated cases in
+    # self_test() drive it above and below the line. Without this the whole
+    # self-test would go red on any host under 10 GiB free — a guard that fails
+    # for a reason unrelated to what it guards is a guard that gets disabled.
+    # The gate does NOT forward this variable into the child environment, so the
+    # exact-environment assertion below is unaffected.
+    environment["POCKETSHELL_DISK_MIN_FREE_MB"] = "0"
+    environment["POCKETSHELL_DISK_WARN_FREE_MB"] = "0"
     return environment
 
 
@@ -663,6 +675,96 @@ def self_test(
             fixture_scripts,
             additions={"CI": "true"},
         )
+        checks += 1
+
+        # Issue #1989 — the free-disk preflight. These are the cases that make
+        # the preflight non-removable: with clean_test_environment() pinning the
+        # fixture floor to 0 MiB, every OTHER case above would stay green if the
+        # preflight were deleted outright, so its coverage has to be explicit.
+        # Both directions matter. A gate that refuses on a full disk but also
+        # refuses on a healthy one is useless, and a "guard" that can only ever
+        # say no is the shape process.md's G6 rejects.
+        def assert_disk_preflight(
+            label: str,
+            additions: dict[str, str],
+            expected_rc: int,
+            expected_stderr: str,
+            arguments: tuple[str, ...] = (),
+        ) -> None:
+            nonlocal checks
+            oracle = fixture_scripts / "oracle.txt"
+            oracle.unlink(missing_ok=True)
+            result = run_entrypoint(
+                copied_entrypoint,
+                fixture_scripts,
+                arguments=arguments,
+                additions=additions,
+            )
+            if (
+                result.returncode != expected_rc
+                or expected_stderr not in result.stderr
+                or (expected_rc != 0 and oracle.exists())
+            ):
+                fail(
+                    f"disk preflight case {label!r}: expected rc={expected_rc} "
+                    f"with {expected_stderr!r} on stderr, got rc="
+                    f"{result.returncode}: {result.stderr}"
+                )
+            checks += 1
+
+        # A run whose box cannot hold it must stop BEFORE the profile guard, the
+        # Java probe, and the #2007 output-tree lock — never halfway through a
+        # build, where ENOSPC is indistinguishable from a red test.
+        assert_disk_preflight(
+            "full gate below the free-space floor",
+            {"POCKETSHELL_DISK_MIN_FREE_MB": "999999999999"},
+            76,
+            "=== DISK PREFLIGHT FAILED (issue #1989) ===",
+            arguments=("--unit", "issue-1989-self-test"),
+        )
+        # A typo in the threshold must fail closed. Falling back to the default
+        # on an unparseable value would let a mistyped override silently relax
+        # the floor, and nothing would ever report it.
+        assert_disk_preflight(
+            "malformed free-space threshold",
+            {"POCKETSHELL_DISK_MIN_FREE_MB": "10 GiB"},
+            76,
+            "must be a whole number of MiB",
+            arguments=("--unit", "issue-1989-self-test"),
+        )
+        # The advisory line the issue's third bullet asks for: warn while there
+        # is still room to act, rather than only at 100%.
+        assert_disk_preflight(
+            "warn line below the comfort threshold",
+            {
+                "POCKETSHELL_DISK_MIN_FREE_MB": "0",
+                "POCKETSHELL_DISK_WARN_FREE_MB": "999999999999",
+            },
+            0,
+            "WARN: disk preflight (issue #1989)",
+            arguments=("--unit", "issue-1989-self-test"),
+        )
+        # The probe mode itself: cgroup-free in BOTH directions, so the harness
+        # can drive the real entrypoint's preflight without a JDK or an SDK.
+        assert_disk_preflight(
+            "probe mode below the floor",
+            {"POCKETSHELL_DISK_MIN_FREE_MB": "999999999999"},
+            76,
+            "=== DISK PREFLIGHT FAILED (issue #1989) ===",
+            arguments=("--disk-preflight-probe",),
+        )
+        probe_oracle = fixture_scripts / "oracle.txt"
+        probe_oracle.unlink(missing_ok=True)
+        healthy_probe_result = run_entrypoint(
+            copied_entrypoint,
+            fixture_scripts,
+            arguments=("--disk-preflight-probe",),
+        )
+        if healthy_probe_result.returncode != 0 or probe_oracle.exists():
+            fail(
+                "disk-preflight probe above the floor must exit 0 without "
+                f"reaching cgroup-run: rc={healthy_probe_result.returncode}"
+            )
         checks += 1
 
         hostile_ci_values = (

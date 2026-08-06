@@ -1,47 +1,30 @@
 package com.pocketshell.app.proof.signals
 
-import android.app.Activity
 import android.os.ParcelFileDescriptor
 import android.view.accessibility.AccessibilityNodeInfo
-import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 
 private val FRAMEWORK_ERROR_FOCUS_PATTERN = Regex(
     "mCurrentFocus=.*(?:Application Not Responding|Application Error): ([A-Za-z0-9._]+)",
 )
 
-/**
- * Restores a journey from the one environment-owned focus window proven by
- * issue #1985: a framework crash/ANR dialog for the device's HOME app.
+/*
+ * Issue #1985's narrow, evidence-based cleanup of the one environment-owned
+ * focus window proven safe to close: a framework crash/ANR dialog for the
+ * device's HOME app.
  *
  * This is deliberately narrower than "package android". Framework dialogs for
- * PocketShell and app-owned dialogs remain hard failures. Only a currently
- * focused framework error whose subject is the dynamically resolved HOME
- * package is closed, and the caller's activity must then regain focus.
+ * PocketShell and app-owned dialogs are never touched.
+ *
+ * Issue #2021 removed the `requirePocketShellFocusAfterLauncherDialogCleanup`
+ * wrapper that used to sit on top of these primitives (D22 hard cut — no shim).
+ * That wrapper hard-failed a journey at its `@Before`/`@After` boundary for ANY
+ * unfocused reading, including one the journey inherited from whatever ran
+ * before it on the shard, which is how two of the seven #1994 reopen-proof arms
+ * produced no verdict at all on the 2026-08-06 nightly. The boundary rule now
+ * lives in `recordJourneyEntryFocus` / `requireNoJourneyOwnedFocusRegression`
+ * (SyntheticFocusOwnerHarness.kt), which call the primitives below.
  */
-fun requirePocketShellFocusAfterLauncherDialogCleanup(
-    scenario: ActivityScenario<out Activity>,
-    context: String,
-    timeoutMs: Long = WINDOW_FOCUS_DEFAULT_TIMEOUT_MS,
-) {
-    if (waitForActivityWindowFocused(scenario, timeoutMs = 250)) return
-
-    val instrumentation = InstrumentationRegistry.getInstrumentation()
-    val focusedFrameworkPackage = focusedFrameworkErrorPackage()
-    val homePackage = resolveHomePackage()
-
-    if (focusedFrameworkPackage == homePackage) {
-        dismissFocusedLauncherFrameworkDialog()
-        if (waitForActivityWindowFocused(scenario, timeoutMs)) return
-    }
-
-    val outcome = awaitActivityWindowFocus(scenario, timeoutMs = 0)
-    throw AssertionError(
-        "$FOREIGN_WINDOW_FOCUS_SIGNATURE $context; ${outcome.diagnosis}; " +
-            "focused_framework_package=${focusedFrameworkPackage ?: "<none>"} " +
-            "home_package=$homePackage",
-    )
-}
 
 internal fun resolveHomePackage(): String {
     val component = executeShellCommand(

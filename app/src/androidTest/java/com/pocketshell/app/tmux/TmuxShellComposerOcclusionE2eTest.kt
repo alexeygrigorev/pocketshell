@@ -36,7 +36,9 @@ import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
-import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
+import com.pocketshell.app.proof.signals.InheritedJourneyFocus
+import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
+import com.pocketshell.app.proof.signals.requireNoJourneyOwnedFocusRegression
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocusLost
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocused
 import com.pocketshell.app.proof.waitForSshFixtureReady
@@ -104,6 +106,9 @@ class TmuxShellComposerOcclusionE2eTest {
     val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
+
+    /** Issue #2021: the focus reading this journey inherited at its entry boundary. */
+    private var journeyEntryFocus: InheritedJourneyFocus? = null
     private var focusStealer: Dialog? = null
     private val summaryLines = mutableListOf<String>()
     private var imeRequestCount: Int = 0
@@ -114,8 +119,9 @@ class TmuxShellComposerOcclusionE2eTest {
     fun cleanup() {
         dismissSyntheticFocusStealingWindow(requireFocusReturn = false)
         launchedActivity?.let { scenario ->
-            requirePocketShellFocusAfterLauncherDialogCleanup(
+            requireNoJourneyOwnedFocusRegression(
                 scenario = scenario,
+                entry = journeyEntryFocus,
                 context = "after shell-composer IME journey cleanup",
             )
             scenario.close()
@@ -134,7 +140,7 @@ class TmuxShellComposerOcclusionE2eTest {
         val hostRowTag = seedDockerHost(key, "Issue641 Shell Composer")
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-        requirePocketShellFocusAfterLauncherDialogCleanup(
+        journeyEntryFocus = recordJourneyEntryFocus(
             scenario = requireNotNull(launchedActivity),
             context = "before shell-composer IME journey",
         )

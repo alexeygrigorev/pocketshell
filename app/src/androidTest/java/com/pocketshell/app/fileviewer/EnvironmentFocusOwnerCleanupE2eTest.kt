@@ -7,7 +7,7 @@ import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.signals.executeFocusShellCommand
 import com.pocketshell.app.proof.signals.dismissFocusedLauncherFrameworkDialog
 import com.pocketshell.app.proof.signals.focusedFrameworkErrorPackage
-import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
+import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
 import com.pocketshell.app.proof.signals.resolveHomePackage
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import org.junit.After
@@ -28,7 +28,7 @@ class EnvironmentFocusOwnerCleanupE2eTest {
 
     @Before
     fun startFromPocketShellFocus() {
-        requirePocketShellFocusAfterLauncherDialogCleanup(
+        recordJourneyEntryFocus(
             scenario = compose.activityRule.scenario,
             context = "before issue #1985 launcher framework-dialog fixture",
         )

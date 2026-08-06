@@ -36,7 +36,9 @@ import com.pocketshell.app.proof.signals.captureImeServiceState
 import com.pocketshell.app.proof.signals.describeActiveWindow
 import com.pocketshell.app.proof.signals.describeActiveWindowCallCount
 import com.pocketshell.app.proof.signals.resetDescribeActiveWindowCallCount
-import com.pocketshell.app.proof.signals.requirePocketShellFocusAfterLauncherDialogCleanup
+import com.pocketshell.app.proof.signals.InheritedJourneyFocus
+import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
+import com.pocketshell.app.proof.signals.requireNoJourneyOwnedFocusRegression
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocusLost
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocused
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
@@ -184,6 +186,9 @@ class ShowKeyboardChipE2eTest {
     /** #1879: the synthetic focus stealer, torn down even when a cycle fails. */
     private var focusStealer: Dialog? = null
 
+    /** Issue #2021: the focus reading this journey inherited at its entry boundary. */
+    private var journeyEntryFocus: InheritedJourneyFocus? = null
+
     private suspend fun seedFixture() {
         clearLastSessionPrefs()
         val key = readFixtureKey()
@@ -195,7 +200,7 @@ class ShowKeyboardChipE2eTest {
 
     @Before
     fun resetSharedProbes() {
-        requirePocketShellFocusAfterLauncherDialogCleanup(
+        journeyEntryFocus = recordJourneyEntryFocus(
             scenario = compose.activityRule.scenario,
             context = "before show-keyboard IME journey",
         )
@@ -214,8 +219,9 @@ class ShowKeyboardChipE2eTest {
             }
         }
         focusStealer = null
-        requirePocketShellFocusAfterLauncherDialogCleanup(
+        requireNoJourneyOwnedFocusRegression(
             scenario = compose.activityRule.scenario,
+            entry = journeyEntryFocus,
             context = "after show-keyboard IME journey cleanup",
         )
         clearLastSessionPrefs()

@@ -421,6 +421,50 @@ are looking at before proposing a fix:
   - The `ci-journey-suite.sh` test array drifts — when applying a worktree patch
     that touches it, `git apply --exclude` that file and re-add the entries
     manually so you don't clobber sibling additions.
+- **The G6 wrong-cost trap has a small set of recurring disguises — check a proof
+  against them BEFORE requesting review.** On 2026-08-05/06, six rounds across
+  four independent issues were sent back for the *same* underlying defect: a
+  green test standing in for a property it did not constrain. The shape is
+  always "the assertion passes, and would still pass with the bug present."
+  Concrete forms seen, all caught only by a reviewer running its own mutation:
+  - **The guard presets the variable it exists to exercise.** #2007's queued-lane
+    check set `ANDROID_SERIAL`, which makes `connected-test.sh` skip
+    `pocketshell_claim_pool_serial` entirely — so it never traversed the default
+    path it was written to guard, and stayed 15/15 green while the acquire was
+    moved after the allocator.
+  - **The oracle launders the real symptom into an excused category.** #1994's
+    identity oracle would have filed a PocketShell `-CC` client leaked by an
+    earlier class as "foreign". The cure was a second classification axis (kind),
+    so an app-owned client is always fatal and only a plain client is excusable.
+  - **The proof injects a step production never performs.** #2006's journey sent
+    its own `startService(ACTION_START)`; production only starts on the
+    controller's empty→1 transition. Without that injected rescue the real state
+    was *no notification at all* — worse than the reported symptom.
+  - **The fix silently no-ops while reading correctly.** #2007's parent-death
+    guard read its ppid via `$(...)`, which forks: inside the fork `/proc/self`
+    is the subshell, so it compared a constant with itself.
+  The generalisable check: **name the mutation that must redden this assertion,
+  then actually apply it.** If you cannot state one, the assertion is decorative.
+  And confirm *selectivity* — the mutant should redden the new check and only the
+  new check; reddening more means over-broad, fewer means still not covering.
+- **`systemd-run --user` gives the gate a MINIMAL environment — export the SDK
+  vars explicitly or it dies in 15s.** Running an integration gate as a transient
+  unit is the right move (a plain background shell gets killed by the session
+  harness mid-run, which is how a gate produces a fake result), but the unit does
+  not inherit your shell env. Without them Gradle fails at project configuration
+  with `SDK location not found ... ANDROID_HOME`, which reads like a broken tree
+  rather than a missing variable. Pass at least:
+  `--setenv=ANDROID_HOME=$HOME/Android/Sdk --setenv=ANDROID_SDK_ROOT=$HOME/Android/Sdk --setenv=HOME=$HOME`
+  plus `-p WorkingDirectory=<worktree>` and a `-p MemoryMax=` cap so a bad run
+  cannot starve sibling lanes. Then wait on it with
+  `until ! systemctl --user is-active --quiet <unit>; do sleep 30; done` and read
+  the verdict from `systemctl --user show <unit> -p Result -p ExecMainStatus` —
+  **not** from the harness's own exit code, which reports 0 for a backgrounded
+  wrapper whose Gradle build failed.
+- **Never pipe a long-running gate through `grep`.** The harness captures only
+  what the pipeline emits, so a failing run leaves you a 2-line file with the
+  task name and no error — and you must re-run the whole thing to learn anything.
+  Redirect the full log to a file (`> gate.log 2>&1`) and grep the file after.
 - **Reconcile completed agents — don't trust the mental lane count.** Dispatched ≠
   running. Stale waiter-relay notifications bury REAL completions (4 finished
   deliverables sat unmerged for hours, 2026-06-14). Periodically verify true state

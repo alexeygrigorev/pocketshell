@@ -561,8 +561,9 @@ are looking at before proposing a fix:
     Handler/Thread, e.g. `SshTerminalBridge`): loop `advanceUntilIdle()` +
     `shadowOf(Looper.getMainLooper()).idleFor(16ms)` + small sleep to a
     `System.currentTimeMillis()` deadline that HARD-FAILS; assert the exit
-    condition, never the loop body. Reference: `TmuxSessionWarmOpenTest.pumpUntil`
-    (`:131-150`), codex pump (`TmuxSessionViewModelTest.kt:5602-5657`). The
+    condition, never the loop body. **Never hand-roll that loop** — call the ONE
+    audited helper below and inject the drain. Reference: the codex pump
+    (`TmuxSessionViewModelTest.kt:5602-5657`). The
     drifting hand-rolled Shape-B pumps now share ONE audited helper —
     `drainMainLooperUntil` in the test-only module `:shared:test-support`
     (`shared/test-support/src/main/java/com/pocketshell/testsupport/SettlePump.kt`,
@@ -571,8 +572,19 @@ are looking at before proposing a fix:
     clock" guarantee; the per-tick drain (`runCurrent()` / `idleFor` / both) is
     injected per call site because those drains are genuinely different (idle
     nothing to spare the #793 watchdog vs idle a frame for the #803 drain vs no
-    `TestScope` at all) and must not be forced into one. Clock-advancing pumps
-    (`advanceSchedulerUntil`, `pumpUntil`) stay separate by design.
+    `TestScope` at all) and must not be forced into one. **A clock-ADVANCING
+    drain is allowed — inject it as `onTick` (#2017).** "Never touch a clock" is
+    a property of the helper's BODY, not a ban on callers; #1048 read it as a
+    carve-out and left `TmuxSessionWarmOpenTest.pumpUntil` (and its copy in
+    `Issue1574DeadReconnectTest`) hand-rolled with a **5 s** real-time budget,
+    which a contended box exhausts while the awaited continuation is merely
+    unscheduled — so those classes red only under load. Both are migrated; the
+    single budget is `GENEROUS_SETTLE_DEADLINE_MS` (30 s) as the `deadlineMs`
+    default. **Prefer the default; never "fix" a contention timeout by nudging a
+    local constant up.** Only
+    `PromptComposerOutboundSendQueueViewModelTest.advanceSchedulerUntil` stays
+    separate (its predicate is `suspend` and its loop body re-checks it between
+    four distinct clock/dispatcher nudges, so the body is load-bearing).
   - **Banned:** a single `advanceUntilIdle()`+`idle()` then assert on real-thread
     output; a bare fixed `Thread.sleep(N)` as the only sync before a load-bearing
     assert. `scripts/check-test-validity.sh`'s advisory `TIMING1` smell surfaces

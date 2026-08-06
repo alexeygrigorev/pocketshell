@@ -112,6 +112,11 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.testcontainers)
+    // Issue #2017: the ONE audited shared de-flake settle-pump
+    // (`drainMainLooperUntil`) — it owns the bounded loop AND the one generous
+    // wall-clock budget, so a real-thread wait here cannot drift back to a
+    // hand-rolled deadline that only reds under contention.
+    testImplementation(project(":shared:test-support"))
     // sshj needs a logger at test time too; reuse the nop binding.
     testRuntimeOnly(libs.slf4j.nop)
 }

@@ -130,8 +130,9 @@
 #       together with a System.currentTimeMillis()/System.nanoTime() deadline loop),
 #       or (c) carries an inline `// JUSTIFIED:` opt-out. The two corrective shapes
 #       are Shape A (pinnable seam — SshLeaseAcquireBoundCharacterizationTest) and
-#       Shape B (wall-clock-bounded pump — TmuxSessionWarmOpenTest.pumpUntil / the
-#       codex pump). Current matches are baselined (advisory; the baseline only
+#       Shape B (wall-clock-bounded pump — the audited drainMainLooperUntil in
+#       :shared:test-support / the codex pump; #2017 migrated the hand-rolled
+#       copies onto it). Current matches are baselined (advisory; the baseline only
 #       shrinks as tests adopt a seam). The lone HARD-FAIL is the narrow,
 #       high-signal NEW case: a `runTest` test with a bare small `Thread.sleep(<N>)`
 #       immediately preceding its load-bearing assert and NO bounded-deadline loop
@@ -988,9 +989,15 @@ timing1_has_test_dispatcher() {
   grep -Eq 'StandardTestDispatcher[[:space:]]*\(|UnconfinedTestDispatcher[[:space:]]*\(' "$1"
 }
 
-# (b) the file shows the bounded-pump signature: an `idleFor(` pump AND a
-# `System.currentTimeMillis()` / `System.nanoTime()` deadline loop.
+# (b) the file shows the bounded-pump signature: either a call to the ONE
+# audited shared settle-pump (`drainMainLooperUntil`, which owns the bounded
+# loop and the generous hard deadline — issue #2017 migrated the hand-rolled
+# copies onto it, so requiring a raw `System.nanoTime()` deadline here would
+# push authors straight back to hand-rolling), or the legacy hand-rolled
+# signature: an `idleFor(` pump AND a `System.currentTimeMillis()` /
+# `System.nanoTime()` deadline loop.
 timing1_has_bounded_pump() {
+  grep -Eq 'drainMainLooperUntil[[:space:]]*\(' "$1" && return 0
   grep -Eq 'idleFor[[:space:]]*\(' "$1" \
     && grep -Eq 'System\.currentTimeMillis\(\)|System\.nanoTime\(\)' "$1"
 }
@@ -1724,8 +1731,9 @@ echo " TIMING1 Shape A: inject StandardTestDispatcher(testScheduler) for every"
 echo "        owned scope (SshLeaseAcquireBoundCharacterizationTest:191-219)."
 echo "        Shape B: drive an Android Handler/Thread worker with a bounded"
 echo "        advanceUntilIdle()+idleFor(16ms) pump to a currentTimeMillis/"
-echo "        nanoTime deadline that HARD-FAILS (TmuxSessionWarmOpenTest.pumpUntil"
-echo "        :131-150; codex pump TmuxSessionViewModelTest:5602-5657)."
+echo "        nanoTime deadline that HARD-FAILS — do NOT hand-roll it: call the"
+echo "        audited drainMainLooperUntil (:shared:test-support) and inject the"
+echo "        per-tick drain (codex pump TmuxSessionViewModelTest:5602-5657)."
 echo " V1     androidTest @Test/@Before/@After must use a VOID BLOCK body, not an"
 echo "        expression body. Change  fun x() = runBlocking { … }  to"
 echo "        fun x() { runBlocking { … } }  (the block body is always Unit; the"

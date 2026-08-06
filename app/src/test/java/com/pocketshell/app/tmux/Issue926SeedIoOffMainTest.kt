@@ -11,6 +11,8 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.testsupport.GENEROUS_SETTLE_DEADLINE_MS
+import com.pocketshell.testsupport.drainMainLooperUntil
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -184,22 +186,24 @@ class Issue926SeedIoOffMainTest {
                     "(phase=$teardownPhase)"
             }
             try {
-                val deadlineNanos =
-                    System.nanoTime() + TEARDOWN_DRAIN_TIMEOUT_MS * NANOS_PER_MILLISECOND
-                while (true) {
-                    createdVms.forEach { it.cancelOwnScopesForTest() }
-                    val activeChildren =
-                        createdVms.sumOf { it.activeOwnScopeChildCountForTest() }
-                    if (activeChildren == 0) break
-                    if (System.nanoTime() >= deadlineNanos) {
-                        throw AssertionError(
-                            "Issue #1355: $activeChildren TmuxSessionViewModel coroutine(s) " +
-                                "did not quiesce within ${TEARDOWN_DRAIN_TIMEOUT_MS}ms; " +
-                                "resetting Dispatchers.Main now would recreate the " +
-                                "TestMainDispatcher:72 race",
-                        )
-                    }
-                    Thread.sleep(1)
+                // Issue #2017: the bounded loop + the ONE audited generous deadline
+                // come from the shared settle-pump. Re-cancelling every pass is a
+                // load-bearing SIDE EFFECT (a completion handler can re-spawn a
+                // bridgeScope child), so it is the injected per-tick drain; the
+                // zero-child exit condition stays the load-bearing assertion.
+                val quiesced = drainMainLooperUntil(
+                    sleepMs = 1L,
+                    onTick = { createdVms.forEach { it.cancelOwnScopesForTest() } },
+                ) {
+                    createdVms.sumOf { it.activeOwnScopeChildCountForTest() } == 0
+                }
+                if (!quiesced) {
+                    throw AssertionError(
+                        "Issue #1355: ${createdVms.sumOf { it.activeOwnScopeChildCountForTest() }} " +
+                            "TmuxSessionViewModel coroutine(s) did not quiesce within " +
+                            "${GENEROUS_SETTLE_DEADLINE_MS}ms; resetting Dispatchers.Main now " +
+                            "would recreate the TestMainDispatcher:72 race",
+                    )
                 }
                 assertEquals(
                     "Issue #1355: every standalone #926 VM must be quiescent before resetMain()",
@@ -439,14 +443,21 @@ class Issue926SeedIoOffMainTest {
         )
     }
 
-    private fun waitUntil(what: String, timeoutMs: Long = 5_000L, predicate: () -> Boolean) {
-        val deadline = System.nanoTime() + timeoutMs * 1_000_000
-        while (!predicate()) {
-            if (System.nanoTime() > deadline) {
-                throw AssertionError("timed out waiting for: $what")
-            }
-            Thread.sleep(5)
-        }
+    /**
+     * Issue #2017: was a hand-rolled bounded pump with a 5 s REAL-time budget —
+     * the same shape (and the same too-tight budget) that made
+     * `Issue1574DeadReconnectTest` red only under contention. The loop and the ONE
+     * audited generous deadline now come from [drainMainLooperUntil]. This class
+     * runs on `runBlocking` + real dispatchers (no `TestScope`), so its per-tick
+     * drain is a pure poll — the helper's default `onTick` no-op. The pump's exit
+     * condition stays the load-bearing assertion and still HARD-FAILS.
+     */
+    private fun waitUntil(what: String, predicate: () -> Boolean) {
+        val settled = drainMainLooperUntil(sleepMs = 5L, condition = predicate)
+        assertTrue(
+            "timed out after ${GENEROUS_SETTLE_DEADLINE_MS}ms waiting for: $what",
+            settled,
+        )
     }
 
     private fun FakeTmuxClient.withSinglePaneRowButEmptyCapture(
@@ -513,7 +524,6 @@ class Issue926SeedIoOffMainTest {
         const val SEED_IO_THREAD_NAME = "issue926-seed-io"
         const val MAIN_PROBE_BUDGET_MS = 1_000L
         const val TEARDOWN_DRAIN_TIMEOUT_MS = 30_000L
-        const val NANOS_PER_MILLISECOND = 1_000_000L
     }
 
     private enum class TeardownPhase {

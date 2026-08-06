@@ -223,23 +223,33 @@ class TmuxSessionViewModelTerminalBackpressureTest : TmuxSessionViewModelTestBas
                 // renders. This strengthens, never weakens, the assertion: if the
                 // marker genuinely never lands the loop still times out and the
                 // assertTrue below fails.
+                //
+                // Issue #2017: the bounded loop + the deadline come from the ONE
+                // audited settle-pump instead of another hand-rolled
+                // `System.currentTimeMillis()` budget. The per-tick drain is this
+                // site's genuine one (virtual scheduler + one looper frame), the
+                // marker predicate stays the load-bearing exit condition, and the
+                // `assertTrue` below still HARD-FAILS on a genuine stall.
                 var transcript = ""
-                val markerDeadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
-                do {
-                    advanceUntilIdle()
-                    // Issue #803/#804: advance the virtual looper a frame so the
-                    // budgeted `postDelayed` drain-continuations fire (a bare `idle()`
-                    // never runs them), draining the queue tail and rendering the marker.
-                    shadowOf(Looper.getMainLooper())
-                        .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
-                    transcript = renderedTranscriptFrom(state)
-                    if (transcript.contains("ISSUE576-CODEX-LIKE-DONE")) break
-                    Thread.sleep(20)
-                } while (System.currentTimeMillis() < markerDeadline)
+                val markerRendered = drainMainLooperUntilShared(
+                    sleepMs = 20L,
+                    onTick = {
+                        advanceUntilIdle()
+                        // Issue #803/#804: advance the virtual looper a frame so the
+                        // budgeted `postDelayed` drain-continuations fire (a bare
+                        // `idle()` never runs them), draining the queue tail and
+                        // rendering the marker.
+                        shadowOf(Looper.getMainLooper())
+                            .idleFor(16L, java.util.concurrent.TimeUnit.MILLISECONDS)
+                        transcript = renderedTranscriptFrom(state)
+                    },
+                ) {
+                    transcript.contains("ISSUE576-CODEX-LIKE-DONE")
+                }
                 assertTrue(
                     "integrated fake tmux -> TerminalSurfaceState -> SshTerminalBridge path must render " +
                         "the final marker; tail=${transcript.takeLast(500)}",
-                    transcript.contains("ISSUE576-CODEX-LIKE-DONE"),
+                    markerRendered,
                 )
                 assertTrue(
                     "slow side-channel collector should prove the secondary output flow was subscribed",

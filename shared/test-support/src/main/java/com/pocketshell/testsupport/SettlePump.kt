@@ -1,6 +1,35 @@
 package com.pocketshell.testsupport
 
 /**
+ * The ONE audited generous wall-clock budget every Shape-B settle pump spends
+ * (issue #2017).
+ *
+ * A settle pump's deadline is a REAL-time budget being spent on a box whose real
+ * time is contended: sibling gate lanes, a cold Robolectric class load, a GC
+ * pause, or a CI runner that simply does not schedule the awaited thread for a
+ * few seconds all consume it without the awaited work being stalled at all. A
+ * budget sized for an idle box therefore reds only under load — the worst
+ * possible failure mode, because it is indistinguishable from a real regression
+ * at first glance and the "just re-run it" reflex manufactures a convincing
+ * green streak (a PASSING Gradle test task is skipped on re-run while a FAILING
+ * one always re-executes).
+ *
+ * That is exactly how `Issue1574DeadReconnectTest`'s hand-rolled 5 s pump
+ * behaved: green 3/3 in isolation, red at load ~13 with four parallel lanes. The
+ * cure is NOT nudging a local `5_000L` upward — it is that the audited helper
+ * owns ONE generous budget, so there is a single reviewed place where the
+ * project's contention headroom is decided and no per-file constant can drift
+ * back down.
+ *
+ * 30 s matches the budget the already-migrated tmux pumps converged on
+ * (`SLOW_FEED_DRAIN_TIMEOUT_MS`) and stays safely under `runTest`'s 60 s default
+ * global timeout, so the pump's own HARD-FAIL message fires first instead of
+ * `runTest` aborting the whole test with no diagnosis. It does NOT slow a
+ * healthy run: [drainMainLooperUntil] returns the instant its condition holds.
+ */
+const val GENEROUS_SETTLE_DEADLINE_MS: Long = 30_000L
+
+/**
  * The ONE audited settle-pump for the #1048 de-flake convention (Shape B —
  * wall-clock-bounded pump). It replaces 5+ hand-rolled, drifting near-duplicate
  * wall-clock pumps across the `:app` and `:shared:core-terminal` unit tests
@@ -9,9 +38,11 @@ package com.pocketshell.testsupport
  * NEXT timing flake.
  *
  * ## What this owns (the load-bearing, audited invariants)
- * - **A GENEROUS wall-clock deadline** measured on [System.currentTimeMillis].
- *   The loop returns the instant [condition] holds (no slowdown on a healthy
- *   run) and returns `false` the moment the deadline passes.
+ * - **A GENEROUS wall-clock deadline** measured on [System.currentTimeMillis],
+ *   defaulting to the ONE audited [GENEROUS_SETTLE_DEADLINE_MS] (#2017) so no
+ *   call site has to pick — or drift — its own contention headroom. The loop
+ *   returns the instant [condition] holds (no slowdown on a healthy run) and
+ *   returns `false` the moment the deadline passes.
  * - **A HARD boundary, never a silent swallow (#1102 lesson).** This function
  *   returns a `Boolean`; the deadline is the load-bearing assertion and the
  *   CALLER must `assertTrue(...)`/`throw` on `false`. It never weakens the
@@ -43,15 +74,27 @@ package com.pocketshell.testsupport
  * sites are untouched) and passes the drain it genuinely needs; the bounded
  * loop and the hard deadline live here, once.
  *
- * The two pumps that intentionally advance the kotlinx VIRTUAL clock
- * (`PromptComposerViewModelTest.advanceSchedulerUntil`, which `advanceTimeBy`s
- * and yields to real `Dispatchers.IO`, and `TmuxSessionWarmOpenTest.pumpUntil`,
- * which `advanceUntilIdle`s) are deliberately NOT migrated onto this helper —
- * advancing the virtual clock is their whole point and is incompatible with the
- * "never touch a clock" invariant above. They stay separate, by design.
+ * ## Clock-advancing drains ARE allowed — through [onTick] (revised by #2017)
+ * The "never touch a clock" invariant above is a property of THIS FUNCTION'S
+ * BODY, not a ban on callers. A call site whose genuine per-tick drain is
+ * `advanceUntilIdle()` (bridging the virtual clock to a real
+ * `Dispatchers.IO` continuation) passes it as [onTick] — that is precisely what
+ * the injected drain exists for, and the helper still advances nothing itself.
+ * #1048 originally read the invariant as a carve-out and left
+ * `TmuxSessionWarmOpenTest.pumpUntil` (and its copy in
+ * `Issue1574DeadReconnectTest`) hand-rolled; both then carried a 5 s real-time
+ * budget that reds only under contention (#2017). They are migrated.
+ *
+ * The one pump that genuinely cannot use this helper is
+ * `PromptComposerOutboundSendQueueViewModelTest.advanceSchedulerUntil`: its
+ * predicate is `suspend` (incompatible with the plain `() -> Boolean`
+ * [condition]) and each tick re-checks that predicate FOUR times between
+ * distinct clock/dispatcher nudges, so its loop body is load-bearing rather than
+ * a drain. It stays separate, by design, with its own generous 40 s budget.
  *
  * @param deadlineMs generous wall-clock budget; the pump returns `false` once it
- *   elapses without [condition] holding.
+ *   elapses without [condition] holding. Defaults to the ONE audited
+ *   [GENEROUS_SETTLE_DEADLINE_MS] — prefer the default over a per-call constant.
  * @param sleepMs real-wall-clock yield per tick so off-Main / real-IO threads
  *   get scheduling time before the next drain.
  * @param onTick the per-tick drain (see above); defaults to a no-op pure poll.
@@ -59,7 +102,7 @@ package com.pocketshell.testsupport
  * @return `true` if [condition] held within [deadlineMs]; `false` on timeout.
  */
 fun drainMainLooperUntil(
-    deadlineMs: Long,
+    deadlineMs: Long = GENEROUS_SETTLE_DEADLINE_MS,
     sleepMs: Long = 2L,
     onTick: () -> Unit = {},
     condition: () -> Boolean,

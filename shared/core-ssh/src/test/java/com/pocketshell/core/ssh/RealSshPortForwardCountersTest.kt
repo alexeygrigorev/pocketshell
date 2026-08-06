@@ -1,5 +1,6 @@
 package com.pocketshell.core.ssh
 
+import com.pocketshell.testsupport.drainMainLooperUntil
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.connection.Connection
 import net.schmizz.sshj.connection.channel.direct.DirectConnection
@@ -92,7 +93,7 @@ class RealSshPortForwardCountersTest {
             }
             assertTrue(
                 "accept loop should fill the active connection budget",
-                waitUntilReal(2_000L) { openCalls.get() >= 32 },
+                waitUntilReal { openCalls.get() >= 32 },
             )
             Thread.sleep(150)
             assertEquals(
@@ -266,13 +267,19 @@ class RealSshPortForwardCountersTest {
             else -> null
         }
 
-        fun waitUntilReal(timeoutMs: Long, predicate: () -> Boolean): Boolean {
-            val deadline = System.currentTimeMillis() + timeoutMs
-            while (System.currentTimeMillis() < deadline) {
-                if (predicate()) return true
-                Thread.sleep(10)
-            }
-            return predicate()
-        }
+        /**
+         * Issue #2017: was a hand-rolled bounded poll whose caller spent a **2 s**
+         * REAL-time budget — the tightest instance of the shape that made
+         * `Issue1574DeadReconnectTest` red only under contention (the accept loop
+         * here is a real background thread that a loaded box simply does not
+         * schedule promptly). The loop and the ONE audited generous deadline now
+         * come from the shared settle-pump; there is no per-tick drain to inject
+         * (no looper, no test scheduler), so the helper's default no-op `onTick` is
+         * the right pure poll. The returned boolean stays the caller's load-bearing
+         * `assertTrue`, and the following exact-count assertion still bounds the
+         * other side, so nothing is weakened.
+         */
+        fun waitUntilReal(predicate: () -> Boolean): Boolean =
+            drainMainLooperUntil(sleepMs = 10L, condition = predicate)
     }
 }

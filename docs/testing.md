@@ -1240,8 +1240,11 @@ condition.
   Handler/Thread, e.g. `SshTerminalBridge`): loop `advanceUntilIdle()` +
   `shadowOf(Looper.getMainLooper()).idleFor(16ms)` + small sleep to a
   `System.currentTimeMillis()` deadline that HARD-FAILS; assert the exit
-  condition, never the loop body. Reference: `TmuxSessionWarmOpenTest.pumpUntil`
-  (`:131-150`), codex pump (`TmuxSessionViewModelTest.kt:5602-5657`).
+  condition, never the loop body. **Do not hand-roll the loop** — call the ONE
+  audited `drainMainLooperUntil` below and inject the per-tick drain. Reference:
+  the codex pump (`TmuxSessionViewModelTest.kt:5602-5657`) and
+  `TmuxSessionWarmOpenTest.pumpUntil` (a virtual-clock drain injected as
+  `onTick`).
 
 **One shared Shape-B settle-pump (`drainMainLooperUntil`, #1048 criterion M).**
 The historically drifting, hand-rolled Shape-B pumps now converge on ONE
@@ -1256,9 +1259,27 @@ genuinely different and must NOT be forced into one: `awaitCondition` idles
 NOTHING and only `runCurrent()`s (idling would risk the #793 re-seed watchdog);
 the SshTerminalBridge-fed flood pumps `idleFor(16ms)` + `runCurrent()` for the
 #803 frame-paced drain; `SshTerminalBridgeTest` has no `TestScope` so idles the
-looper only. The two pumps that intentionally advance the virtual clock
-(`PromptComposerViewModelTest.advanceSchedulerUntil`,
-`TmuxSessionWarmOpenTest.pumpUntil`) stay separate by design.
+looper only.
+
+**A clock-ADVANCING drain is allowed — inject it as `onTick` (#2017).** The
+"never touches a clock" invariant is a property of the shared helper's BODY, not
+a ban on callers: a call site whose genuine per-tick drain is `advanceUntilIdle()`
+(bridging the virtual clock to a real `Dispatchers.IO` continuation) passes it as
+`onTick`. #1048 originally read that invariant as a carve-out and left
+`TmuxSessionWarmOpenTest.pumpUntil` — and its copy in
+`Issue1574DeadReconnectTest` — hand-rolled; both then carried a **5 s** real-time
+budget, which a contended box exhausts while the awaited continuation is merely
+unscheduled, so those classes red only under load (indistinguishable from a real
+regression, and the "just re-run it" reflex manufactures a green streak because
+Gradle skips a *passing* test task on re-run). Both are migrated. The single
+generous budget now lives in `GENEROUS_SETTLE_DEADLINE_MS` (30 s) as the
+`deadlineMs` default — **prefer the default; do not introduce a per-file
+constant, and never "fix" a contention timeout by nudging a local number up.**
+The one pump that genuinely cannot use the helper is
+`PromptComposerOutboundSendQueueViewModelTest.advanceSchedulerUntil`: its
+predicate is `suspend` and each tick re-checks it four times between distinct
+clock/dispatcher nudges, so its loop body is load-bearing rather than a drain. It
+stays separate, by design.
 
 **Banned:** a single `advanceUntilIdle()`+`idle()` then assert on real-thread
 output; a bare fixed `Thread.sleep(N)` as the only sync before a load-bearing

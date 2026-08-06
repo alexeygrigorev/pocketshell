@@ -12,6 +12,7 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.testsupport.GENEROUS_SETTLE_DEADLINE_MS
 import com.pocketshell.testsupport.drainMainLooperUntil as drainMainLooperUntilShared
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineScope
@@ -519,22 +520,31 @@ abstract class TmuxSessionViewModelTestBase {
         // (before its `resetMain()`), so every real-thread Main touch happens now
         // against a stable Main. HARD-FAIL if a VM never quiesces: a future real
         // leak is then a DETERMINISTIC red, not an inter-class flake.
-        val issue1355Deadline = System.currentTimeMillis() + SLOW_FEED_DRAIN_TIMEOUT_MS
-        while (true) {
-            vmsToDrain.forEach { it.cancelOwnScopesForTest() }
-            scheduler.runCurrent()
-            val active = vmsToDrain.sumOf { it.activeOwnScopeChildCountForTest() }
-            if (active == 0) break
-            assertTrue(
-                "Issue #1355: $active TmuxSessionViewModel coroutine(s) did not quiesce within " +
-                    "${SLOW_FEED_DRAIN_TIMEOUT_MS}ms of @After — one would survive into the next " +
-                    "test's Dispatchers.setMain and race it (TestMainDispatcher:72, the " +
-                    "leak-across-test-boundary flake). Root-cause the new un-drained " +
-                    "viewModelScope/bridgeScope launch rather than adding another point-fix.",
-                System.currentTimeMillis() < issue1355Deadline,
-            )
-            Thread.sleep(1)
+        //
+        // Issue #2017: the bounded loop and the deadline come from the ONE audited
+        // settle-pump rather than a hand-rolled `System.currentTimeMillis()` budget.
+        // The re-cancel + `runCurrent()` pair is the injected per-tick drain (it is
+        // a load-bearing side effect, and it must stay `runCurrent`, NEVER
+        // `advanceUntilIdle`); the zero-children exit condition stays the
+        // load-bearing assertion.
+        val issue1355Quiesced = drainMainLooperUntilShared(
+            sleepMs = 1L,
+            onTick = {
+                vmsToDrain.forEach { it.cancelOwnScopesForTest() }
+                scheduler.runCurrent()
+            },
+        ) {
+            vmsToDrain.sumOf { it.activeOwnScopeChildCountForTest() } == 0
         }
+        assertTrue(
+            "Issue #1355: ${vmsToDrain.sumOf { it.activeOwnScopeChildCountForTest() }} " +
+                "TmuxSessionViewModel coroutine(s) did not quiesce within " +
+                "${GENEROUS_SETTLE_DEADLINE_MS}ms of @After — one would survive into the next " +
+                "test's Dispatchers.setMain and race it (TestMainDispatcher:72, the " +
+                "leak-across-test-boundary flake). Root-cause the new un-drained " +
+                "viewModelScope/bridgeScope launch rather than adding another point-fix.",
+            issue1355Quiesced,
+        )
         defaultTeardownScope.cancel()
     }
 }

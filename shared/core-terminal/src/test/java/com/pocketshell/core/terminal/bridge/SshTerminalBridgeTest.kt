@@ -150,13 +150,10 @@ class SshTerminalBridgeTest {
 
             // And the producer must actually have been released (its blocked write
             // returned false on close), so no wedged producer leaks past teardown.
-            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
-                Thread.sleep(10)
-            }
+            val producerReleased = awaitProducerReleased(feed::isDone)
             assertTrue(
                 "the blocked producer must unwind once stop() closes the output queue",
-                feed.isDone,
+                producerReleased,
             )
         } finally {
             executor.shutdownNow()
@@ -242,13 +239,10 @@ class SshTerminalBridgeTest {
 
             // The blocked producer must have been unblocked (the looper drained the
             // queue so its write completed) — no wedged producer leaks.
-            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
-                Thread.sleep(10)
-            }
+            val producerReleased = awaitProducerReleased(feed::isDone)
             assertTrue(
                 "the blocked producer must unwind once the Main-thread reseed drains the queue",
-                feed.isDone,
+                producerReleased,
             )
             feed.get(1, TimeUnit.SECONDS)
 
@@ -399,13 +393,10 @@ class SshTerminalBridgeTest {
 
             // The blocked producer must have been released (the looper drained the queue
             // so its write completed) — no wedged producer leaks past the pump turn.
-            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
-                Thread.sleep(10)
-            }
+            val producerReleased = awaitProducerReleased(feed::isDone)
             assertTrue(
                 "the blocked producer must unwind once the on-looper pump drains the queue",
-                feed.isDone,
+                producerReleased,
             )
             feed.get(1, TimeUnit.SECONDS)
 
@@ -524,13 +515,10 @@ class SshTerminalBridgeTest {
                 elapsedMs < 5_000L,
             )
 
-            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
-                Thread.sleep(10)
-            }
+            val producerReleased = awaitProducerReleased(feed::isDone)
             assertTrue(
                 "the blocked producer must unwind once the on-looper gate-open drains the queue",
-                feed.isDone,
+                producerReleased,
             )
             feed.get(1, TimeUnit.SECONDS)
 
@@ -657,13 +645,10 @@ class SshTerminalBridgeTest {
 
             // The blocked producer must have been released (the looper drained the queue so
             // its write completed) — no wedged producer leaks past the backstop.
-            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
-                Thread.sleep(10)
-            }
+            val producerReleased = awaitProducerReleased(feed::isDone)
             assertTrue(
                 "the blocked producer must unwind once the on-looper acquire drains the queue",
-                feed.isDone,
+                producerReleased,
             )
             feed.get(1, TimeUnit.SECONDS)
 
@@ -768,13 +753,10 @@ class SshTerminalBridgeTest {
                 elapsedMs < 5_000L,
             )
 
-            val producerReleasedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (!feed.isDone && System.nanoTime() < producerReleasedDeadline) {
-                Thread.sleep(10)
-            }
+            val producerReleased = awaitProducerReleased(feed::isDone)
             assertTrue(
                 "the blocked multi-chunk producer must unwind once the reseed apply drains the queue",
-                feed.isDone,
+                producerReleased,
             )
             feed.get(1, TimeUnit.SECONDS)
 
@@ -1754,6 +1736,22 @@ class SshTerminalBridgeTest {
     private fun expectedDrainSlices(byteCount: Int): Int =
         (byteCount + SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES - 1) /
             SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
+
+    /**
+     * Issue #2017: the six "the blocked producer must unwind" waits each
+     * hand-rolled the SAME bounded poll with a 5 s REAL-time budget — the exact
+     * shape (and the exact too-tight budget) that made `Issue1574DeadReconnectTest`
+     * red only under contention, where the producer thread is merely unscheduled
+     * rather than wedged. The loop and the ONE audited generous deadline now come
+     * from the shared settle-pump. There is no per-tick drain to inject here (the
+     * producer is a plain background thread, and this wait must NOT idle the looper
+     * — that is what the sibling [drainMainLooperUntil] wrapper is for), so the
+     * helper's default no-op `onTick` is the right pure poll. The returned boolean
+     * is the caller's load-bearing `assertTrue`, so a genuinely wedged producer
+     * still reds.
+     */
+    private fun awaitProducerReleased(isDone: () -> Boolean): Boolean =
+        drainMainLooperUntilShared(sleepMs = 10L, condition = isDone)
 
     private fun drainMainLooperUntil(done: () -> Boolean) {
         // Issue #1048: the bounded-wall-clock loop + the HARD deadline now live in

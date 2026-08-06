@@ -10,6 +10,8 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.testsupport.GENEROUS_SETTLE_DEADLINE_MS
+import com.pocketshell.testsupport.drainMainLooperUntil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -83,23 +85,39 @@ class Issue1574DeadReconnectTest {
         )
 
     /**
-     * Issue #998 determinism helper (copied from TmuxSessionWarmOpenTest): the
-     * cold-restore `tmux has-session` preflight hops onto the REAL Dispatchers.IO,
-     * off the virtual clock, so `advanceUntilIdle()` can return while it is still
-     * parked. Bridge the two clocks by pumping the scheduler to idle, yielding a
-     * sliver of real time for the IO continuation to re-enqueue, and looping to a
-     * hard deadline. HARD-FAILS (never self-skips) so a real regression still reds.
+     * Issue #998 determinism helper: the cold-restore `tmux has-session`
+     * preflight hops onto the REAL Dispatchers.IO, off the virtual clock, so
+     * `advanceUntilIdle()` can return while it is still parked. Bridge the two
+     * clocks by pumping the scheduler to idle, yielding a sliver of real time for
+     * the IO continuation to re-enqueue, and looping to a hard deadline.
+     * HARD-FAILS (never self-skips) so a real regression still reds.
+     *
+     * Issue #2017: the bounded-wall-clock loop and — critically — the DEADLINE now
+     * come from the ONE audited settle-pump ([drainMainLooperUntil]) instead of a
+     * copy of `TmuxSessionWarmOpenTest`'s hand-rolled loop. That copy spent a 5 s
+     * REAL-time budget, which a contended box (load ~13, four parallel lanes)
+     * exhausts while the awaited continuation is merely unscheduled — so this
+     * class reds only under load, which reads exactly like a real reconnect
+     * regression and burns a review round. The per-tick drain stays
+     * `advanceUntilIdle()` (the injected [drainMainLooperUntil] `onTick` is
+     * precisely for a call site's genuinely-different drain; the helper itself
+     * still advances no clock), the pump's exit condition stays the load-bearing
+     * assertion, and it still HARD-FAILS on timeout — nothing here is widened
+     * except the one audited contention headroom, owned in one reviewed place.
      */
     private fun TestScope.pumpUntil(reason: String, condition: () -> Boolean) {
-        val deadlineNanos = System.nanoTime() + 5_000L * 1_000_000L
-        while (true) {
-            advanceUntilIdle()
-            if (condition()) return
-            if (System.nanoTime() >= deadlineNanos) {
-                throw AssertionError("pumpUntil timed out after 5000ms waiting for: $reason")
-            }
-            Thread.sleep(2)
-        }
+        val settled = drainMainLooperUntil(
+            sleepMs = 2L,
+            // Let the real Dispatchers.IO continuation (the preflight exec /
+            // failServerDied tryEmit) re-enqueue onto the test scheduler, then
+            // drain it. Advancing the virtual clock is this pump's whole point.
+            onTick = { advanceUntilIdle() },
+            condition = condition,
+        )
+        assertTrue(
+            "pumpUntil timed out after ${GENEROUS_SETTLE_DEADLINE_MS}ms waiting for: $reason",
+            settled,
+        )
     }
 
     private fun newVm(

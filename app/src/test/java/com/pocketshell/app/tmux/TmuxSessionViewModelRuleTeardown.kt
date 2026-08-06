@@ -2,6 +2,8 @@ package com.pocketshell.app.tmux
 
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.testsupport.GENEROUS_SETTLE_DEADLINE_MS
+import com.pocketshell.testsupport.drainMainLooperUntil
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -183,27 +185,36 @@ internal class TmuxSessionViewModelRuleTeardown(
         cancel: () -> Unit,
         debug: () -> String = { "" },
     ) {
-        val deadlineNanos = System.nanoTime() + timeoutMs * NANOS_PER_MILLISECOND
-        while (true) {
-            cancel()
-            runCurrent()
-            val active = remaining()
-            if (active == 0) return
-            if (System.nanoTime() >= deadlineNanos) {
-                throw AssertionError(
-                    "Issue #1355: $active $description child(ren) did not quiesce within " +
-                        "${timeoutMs}ms while Main was installed; resetting Main would " +
-                        "recreate the TestMainDispatcher:72 race" +
-                        debug().takeIf(String::isNotBlank)?.let { "\n$it" }.orEmpty(),
-                )
-            }
-            Thread.sleep(1L)
+        // Issue #2017: the bounded loop + the deadline come from the ONE audited
+        // settle-pump instead of another hand-rolled `System.nanoTime()` budget.
+        // `cancel()` every pass is a load-bearing SIDE EFFECT (a completion handler
+        // can re-spawn a child), and `runCurrent()` must NEVER become virtual-time
+        // advancement here (watchdog deadlines must not move), so both are the
+        // injected per-tick drain; the zero-children exit condition stays the
+        // load-bearing assertion and a genuine leak still HARD-FAILS.
+        val quiesced = drainMainLooperUntil(
+            deadlineMs = timeoutMs,
+            sleepMs = 1L,
+            onTick = {
+                cancel()
+                runCurrent()
+            },
+        ) {
+            remaining() == 0
+        }
+        if (!quiesced) {
+            throw AssertionError(
+                "Issue #1355: ${remaining()} $description child(ren) did not quiesce within " +
+                    "${timeoutMs}ms while Main was installed; resetting Main would " +
+                    "recreate the TestMainDispatcher:72 race" +
+                    debug().takeIf(String::isNotBlank)?.let { "\n$it" }.orEmpty(),
+            )
         }
     }
 
     private companion object {
-        const val DEFAULT_TIMEOUT_MS = 30_000L
-        const val NANOS_PER_MILLISECOND = 1_000_000L
+        // Issue #2017: the ONE audited generous wall-clock budget, not a local copy.
+        const val DEFAULT_TIMEOUT_MS = GENEROUS_SETTLE_DEADLINE_MS
     }
 }
 
@@ -218,7 +229,7 @@ private fun Job.debugTree(indent: String = ""): String =
     }
 
 internal fun MainDispatcherRule.tmuxSessionViewModelTeardown(
-    timeoutMs: Long = 30_000L,
+    timeoutMs: Long = GENEROUS_SETTLE_DEADLINE_MS,
 ): TmuxSessionViewModelRuleTeardown =
     TmuxSessionViewModelRuleTeardown(
         runCurrent = ::runCurrent,

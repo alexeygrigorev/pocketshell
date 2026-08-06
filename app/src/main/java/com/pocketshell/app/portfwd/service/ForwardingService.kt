@@ -83,7 +83,7 @@ class ForwardingService : Service() {
     lateinit var controller: ForwardingController
 
     /**
-     * Dispatcher backing the notification-observe coroutine ([startObserving]).
+     * Dispatcher backing the notification-observe coroutine ([launchObserver]).
      *
      * Injected (not a bare `Dispatchers.Default`) so a test can confine the
      * observe loop to its own [kotlinx.coroutines.test.TestDispatcher] — one it
@@ -104,7 +104,7 @@ class ForwardingService : Service() {
     @androidx.annotation.VisibleForTesting
     var observeDispatcher: CoroutineDispatcher = Dispatchers.Default
 
-    // Built lazily off [observeDispatcher] on first use ([startObserving]) so the
+    // Built lazily off [observeDispatcher] on first use ([armObserver]) so the
     // injected dispatcher (set by Hilt field injection before onStartCommand, or
     // by a test before it drives onStartCommand) backs the scope. `lazy` rather
     // than building it in onCreate because the generated `Hilt_ForwardingService`
@@ -116,7 +116,28 @@ class ForwardingService : Service() {
         CoroutineScope(SupervisorJob() + observeDispatcher)
     }
     private val scope: CoroutineScope by scopeDelegate
+
+    /**
+     * Guards [observeJob] + [observeGeneration] as ONE unit. They are written
+     * from the service thread (`onStartCommand` / `onDestroy`) and from the
+     * observe dispatcher (a zero snapshot tearing the service down), so the
+     * pair must move atomically — issue #2006 is exactly what happens when it
+     * does not (see [armObserver]).
+     */
+    private val observerLock = Any()
+
+    @Volatile
     private var observeJob: Job? = null
+
+    /**
+     * Notification generation [observeJob] was launched for, or
+     * [NO_GENERATION] when no observer is armed. The observer is only reusable
+     * for the generation it was bound to (issue #2006).
+     */
+    @Volatile
+    private var observeGeneration = NO_GENERATION
+
+    @Volatile
     private var hasStartedForeground = false
     private var notificationGeneration = 0L
 
@@ -140,7 +161,7 @@ class ForwardingService : Service() {
         get() = observeJob
 
     /** Issue #994 test seam: the dispatcher the observe collector resumed on,
-     * recorded in [startObserving]. Lets a test assert the observe loop is
+     * recorded in [launchObserver]. Lets a test assert the observe loop is
      * confined to the injected dispatcher, not a leaked Dispatchers.Default. */
     @androidx.annotation.VisibleForTesting
     internal var lastObserveDispatcherForTest: CoroutineDispatcher? = null
@@ -196,6 +217,9 @@ class ForwardingService : Service() {
             "pocketshell_forwarding",
         )
         private const val NOTIFICATION_ID = 0x70_46_53_56 // "pFSV" — unique within app
+
+        /** Sentinel for "no notification observer is armed" (issue #2006). */
+        private const val NO_GENERATION = 0L
 
         const val ACTION_START = "com.pocketshell.app.portfwd.action.START_FORWARDING"
         const val ACTION_STOP = "com.pocketshell.app.portfwd.action.STOP_FORWARDING"
@@ -268,18 +292,15 @@ class ForwardingService : Service() {
                 // now contains that throw and returns false rather than
                 // promote-or-die; on failure we stop the service cleanly instead
                 // of crashing the process.
-                val controllerCount = controller.activeHostIdsSnapshot().size
                 var promoted = false
-                notificationGeneration = notificationMutations.open(controllerCount) {
+                notificationGeneration = notificationMutations.open(liveControllerCount()) {
                     promoted = promoteToForegroundIfNeeded(initialNotification())
                 }
                 if (!promoted) {
                     stopForwarding(reason = "promotion_rejected")
                     return START_NOT_STICKY
                 }
-                if (observeJob == null || observeJob?.isActive != true) {
-                    startObserving(notificationGeneration)
-                }
+                armObserver(notificationGeneration)
             }
         }
         // START_STICKY: if Android kills us under memory pressure, the
@@ -293,17 +314,16 @@ class ForwardingService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        observeJob?.cancel()
-        observeJob = null
+        clearObserver(expectedGeneration = null)
         notificationMutations.close(
-            controllerCount = controllerCountForDiagnostics(),
+            controllerCount = ::liveControllerCount,
             reason = "service_destroy",
         ) { generation ->
             recordNotificationOperation(
                 ForwardingNotificationOperation(
                     kind = ForwardingNotificationOperation.Kind.REMOVE,
                     generation = generation,
-                    controllerCount = controllerCountForDiagnostics(),
+                    controllerCount = liveControllerCount(),
                     reason = "service_destroy",
                 ),
             )
@@ -333,8 +353,79 @@ class ForwardingService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
-    private fun startObserving(generation: Long) {
-        observeJob = scope.launch {
+    /**
+     * Bind the notification observer to [generation], replacing any observer
+     * that belongs to a different one.
+     *
+     * ## Issue #2006 — why the generation, not `isActive`, is the authority
+     *
+     * This used to be `if (observeJob == null || observeJob?.isActive != true)
+     * startObserving(...)`, i.e. "reuse whatever observer is still running".
+     * That is wrong, because the observer is fenced by the notification
+     * generation it was LAUNCHED with: every
+     * [ForwardingNotificationMutationAuthority.publish] it makes carries that
+     * generation, and once the generation is invalidated every one of its
+     * publishes is dropped as stale.
+     *
+     * The observer's teardown ([stopForwarding]) runs on the observe dispatcher
+     * while `onStartCommand` runs on the service thread, so an
+     * `ACTION_START` landing between the observer clearing itself and the
+     * generation actually closing armed a NEW observer on the still-open
+     * generation, which the very next instruction then invalidated. That
+     * observer stayed `isActive`, so the next `ACTION_START` — the one that
+     * re-promotes the service and posts the bootstrap "Connecting…" body —
+     * REUSED it. Every subsequent snapshot was dropped as stale and nothing
+     * re-armed, so the ongoing notification was permanently stranded on
+     * `Running in the background · Connecting…` while real tunnels were up.
+     *
+     * Comparing the generation instead makes the stale observer unusable: it is
+     * cancelled and replaced, so the fresh generation always has an observer
+     * whose publishes are accepted.
+     *
+     * This is one half of the fence; the other half is [clearObserver], which
+     * must be scoped to the generation being torn down for the same reason (see
+     * its KDoc).
+     */
+    private fun armObserver(generation: Long) {
+        synchronized(observerLock) {
+            if (observeGeneration == generation && observeJob?.isActive == true) return
+            observeJob?.cancel()
+            observeGeneration = generation
+            observeJob = launchObserver(generation)
+        }
+    }
+
+    /**
+     * Cancel and forget the observer bound to [expectedGeneration].
+     *
+     * ## Issue #2006 — the clear is generation-scoped too
+     *
+     * This used to cancel "whatever observer is currently armed", and it runs
+     * AFTER [ForwardingNotificationMutationAuthority.close] has released its
+     * monitor. An `ACTION_START` landing in that gap opens the NEXT generation,
+     * posts the bootstrap `Connecting…` body and arms an observer for it — and
+     * the old teardown's clear then cancelled that brand-new observer, leaving
+     * the fresh generation with no observer at all and the notification frozen
+     * on `Connecting…` forever. Same class of defect as [armObserver]: the
+     * generation is the authority for publishing and for closing, so it must be
+     * the authority for clearing as well.
+     *
+     * @param expectedGeneration the generation whose teardown is doing the
+     *   clearing; the clear is a no-op if a newer generation has since armed its
+     *   own observer. `null` means unconditional and is used ONLY by
+     *   [onDestroy], where the whole service (and its scope) is going away.
+     */
+    private fun clearObserver(expectedGeneration: Long?) {
+        synchronized(observerLock) {
+            if (expectedGeneration != null && observeGeneration != expectedGeneration) return
+            observeJob?.cancel()
+            observeJob = null
+            observeGeneration = NO_GENERATION
+        }
+    }
+
+    private fun launchObserver(generation: Long): Job {
+        return scope.launch {
             // Issue #994: record the dispatcher the collector actually resumed
             // on so a JVM test can assert the observe loop is confined to the
             // INJECTED dispatcher (not a free-running Dispatchers.Default thread
@@ -374,7 +465,18 @@ class ForwardingService : Service() {
                         // covers the edge case where the user toggled
                         // off before the service finished promoting to
                         // foreground.
-                        stopForwarding(reason = "zero_snapshot")
+                        //
+                        // Issue #2006: fenced on THIS observer's generation AND
+                        // re-validated against the live controller count inside
+                        // the close monitor. A leftover observer from an
+                        // invalidated generation must not tear down the
+                        // generation that superseded it, and a zero snapshot
+                        // that a newly started forward has since made false must
+                        // not tear down that live forward's notification.
+                        stopForwarding(
+                            reason = "zero_snapshot",
+                            observerGeneration = generation,
+                        )
                     } else {
                         updateNotification(
                             generation,
@@ -389,18 +491,34 @@ class ForwardingService : Service() {
         }
     }
 
-    private fun stopForwarding(reason: String) {
-        observeJob?.cancel()
-        observeJob = null
-        val controllerCount = controller.activeHostIdsSnapshot().size
-        notificationMutations.close(controllerCount, reason) { generation ->
+    /**
+     * Invalidate the current notification generation, remove the foreground
+     * notification and stop the service.
+     *
+     * @param observerGeneration passed ONLY by the notification observer, which
+     *   (a) may belong to a generation that has already been superseded and (b)
+     *   decided to tear down from a snapshot that a newly started forward may
+     *   already have invalidated (issue #2006). Either condition rejects the
+     *   whole teardown inside the close monitor: the observer neither removes
+     *   the notification nor stops the service, and it does not clear the
+     *   observer either — it simply goes back to collecting and publishes the
+     *   live state. Lifecycle commands from the service thread pass null and
+     *   always tear down.
+     */
+    private fun stopForwarding(reason: String, observerGeneration: Long? = null) {
+        ForwardingNotificationCloseBarrier.await(ForwardingNotificationCloseBarrier.Phase.BEFORE_CLOSE)
+        val closedGeneration = notificationMutations.close(
+            controllerCount = ::liveControllerCount,
+            reason = reason,
+            observerGeneration = observerGeneration,
+        ) { generation ->
             // STOP_FOREGROUND_REMOVE makes the notification disappear
             // immediately. The constant has been stable since API 24.
             recordNotificationOperation(
                 ForwardingNotificationOperation(
                     kind = ForwardingNotificationOperation.Kind.REMOVE,
                     generation = generation,
-                    controllerCount = controllerCount,
+                    controllerCount = liveControllerCount(),
                     reason = reason,
                 ),
             )
@@ -410,12 +528,14 @@ class ForwardingService : Service() {
                 ForwardingNotificationOperation(
                     kind = ForwardingNotificationOperation.Kind.SERVICE_STOP,
                     generation = generation,
-                    controllerCount = controllerCount,
+                    controllerCount = liveControllerCount(),
                     reason = reason,
                 ),
             )
             stopSelf()
         }
+        ForwardingNotificationCloseBarrier.await(ForwardingNotificationCloseBarrier.Phase.AFTER_CLOSE)
+        if (closedGeneration != null) clearObserver(expectedGeneration = closedGeneration)
     }
 
     /**
@@ -509,8 +629,17 @@ class ForwardingService : Service() {
         )
     }
 
-    private fun controllerCountForDiagnostics(): Int =
-        if (::controller.isInitialized) controller.activeHostIdsSnapshot().size else 0
+    /**
+     * The LIVE active-host count, read straight off the controller's StateFlow.
+     *
+     * Issue #2006: this is an authority input, not just a diagnostic — the
+     * notification-close monitor re-reads it to decide whether an observer's
+     * "no hosts left" conclusion is still true. It deliberately reads the
+     * conflated StateFlow rather than `activeHostIdsSnapshot()`, which walks the
+     * controller's mutable list off the controller's own monitor.
+     */
+    private fun liveControllerCount(): Int =
+        if (::controller.isInitialized) controller.flowOfActiveHostCount().value else 0
 
     /**
      * Snapshot of the controller state the notification renders (issue
@@ -764,6 +893,54 @@ class ForwardingService : Service() {
             enableLights(false)
         }
         manager.createNotificationChannel(channel)
+    }
+}
+
+/**
+ * Issue #2006 test-only barrier at the notification-generation close boundary.
+ *
+ * [ForwardingService.stopForwarding] runs on TWO threads — the service thread
+ * (`ACTION_STOP`, rejected promotion) and the observe dispatcher (a zero
+ * snapshot) — and the teardown it performs is not atomic with respect to a
+ * concurrent `ACTION_START`. There are TWO windows, and the #2006 defect had
+ * one bug in each:
+ *
+ *  - [Phase.BEFORE_CLOSE] — between "the observer decided to tear down" and
+ *    "the generation is actually invalidated". A forward that starts here makes
+ *    the observer's zero snapshot false; acting on it anyway removed a live
+ *    forward's notification and stopped the service.
+ *  - [Phase.AFTER_CLOSE] — between "the generation was invalidated" and "the
+ *    torn-down observer is cleared". A start here opens the NEXT generation,
+ *    posts the bootstrap `Connecting…` body and arms its own observer, which
+ *    the old, generation-blind clear then cancelled — stranding the tray on
+ *    `Connecting…`.
+ *
+ * Production always invokes [await]; with no barrier installed it is a plain
+ * no-op field read, so there is no production behaviour and no extra thread,
+ * timer, or background work (D21). A test installs a barrier to hold one of
+ * those windows open and drive the interleaving deterministically instead of
+ * hoping a loaded emulator reproduces a microsecond-wide preemption — the same
+ * hard-inject model as `BackgroundGraceTestOverride` (#450) and the #780
+ * synthetic IME inset.
+ *
+ * A barrier is process-wide, so the installed lambda must decide for itself
+ * which caller to hold (which phase, only the first call, only off the main
+ * thread) and MUST always return; it is released in the test's teardown.
+ */
+internal object ForwardingNotificationCloseBarrier {
+
+    /** Which side of the generation close the caller is on. */
+    enum class Phase { BEFORE_CLOSE, AFTER_CLOSE }
+
+    @Volatile
+    private var barrier: ((Phase) -> Unit)? = null
+
+    fun setForTest(barrier: ((Phase) -> Unit)?) {
+        this.barrier = barrier
+    }
+
+    fun await(phase: Phase) {
+        barrier?.invoke(phase)
     }
 }
 

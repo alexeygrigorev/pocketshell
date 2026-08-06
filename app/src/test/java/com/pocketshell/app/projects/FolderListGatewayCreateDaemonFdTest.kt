@@ -71,7 +71,7 @@ class FolderListGatewayCreateDaemonFdTest {
             )
 
             // Create returned promptly with no false timeout.
-            assertEquals(SESSION_NAME, name)
+            assertEquals(SessionCreateOutcome.Created(SESSION_NAME), name)
             // The capped create ran with the daemon-fd redirect (the fix marker).
             val capped = session.execCommands.single {
                 it.contains("create-detached") && it.contains(" -c ")
@@ -112,7 +112,7 @@ class FolderListGatewayCreateDaemonFdTest {
                 namePolicy = SessionNamePolicy.ExactName,
             )
 
-            assertEquals(SESSION_NAME, name)
+            assertEquals(SessionCreateOutcome.Created(SESSION_NAME), name)
             val sendKeys = session.execCommands.single { it.contains("send-keys") }
             assertTrue(
                 "send-keys must type the shell command into the new session: $sendKeys",
@@ -144,7 +144,7 @@ class FolderListGatewayCreateDaemonFdTest {
                 namePolicy = SessionNamePolicy.ExactName,
             )
 
-            assertEquals(SESSION_NAME, name)
+            assertEquals(SessionCreateOutcome.Created(SESSION_NAME), name)
             assertTrue(
                 "existing-server create must still launch the agent",
                 session.execCommands.any { it.contains("send-keys") && it.contains("agent codex") },

@@ -34,6 +34,7 @@ import com.pocketshell.app.projects.FolderListViewModel
 import com.pocketshell.app.projects.FolderSessionRow
 import com.pocketshell.app.projects.folderDetailRowTestTag
 import com.pocketshell.app.projects.folderListFlatRowTestTag
+import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.app.proof.clearLastSessionPrefs
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.AppDatabase
@@ -362,7 +363,7 @@ private class OverflowFolderListGateway(
         cwd: String,
         startCommand: String?,
         namePolicy: SessionNamePolicy,
-    ): Result<String> = Result.success(sessionName)
+    ): Result<SessionCreateOutcome> = Result.success(SessionCreateOutcome.Created(sessionName))
 
     override suspend fun createEmptyProject(
         host: HostEntity,

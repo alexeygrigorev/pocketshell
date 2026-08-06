@@ -16003,8 +16003,8 @@ public class TmuxSessionViewModel @Inject constructor(
      * created session honours every chosen option identically: the picker
      * synthesises [startCommand] (`pocketshell agent <kind> --dir … [--profile …]
      * [--no-skip-permissions]`) and the gateway `send-keys`-launches it inside
-     * the new pane. On success [onResolved] fires with the resolved session name
-     * so the screen can attach to it via navigation.
+     * the new pane. On FULL success [onResolved] fires with the resolved session
+     * name so the screen attaches; issue #1928's partial success does not.
      *
      * Creation requires the production gateway, host DAO, and an attached target.
      * A missing dependency or target is an explicit failure: this method never
@@ -16060,8 +16060,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 startCommand = startCommand,
                 namePolicy = SessionNamePolicy.UniqueOnHost,
             )
-            result.fold(
-                onSuccess = { resolvedName ->
+            // Issue #1928: [reportSessionCreate] owns the three-state accounting.
+            result.reportSessionCreate(
+                onCreated = { resolvedName ->
                     Log.i(
                         ISSUE_464_KILL_TAG,
                         "create-session-ok host=${current.hostId} name=$resolvedName " +
@@ -16069,14 +16070,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                     onResolved(resolvedName)
                 },
-                onFailure = { error ->
+                onProblem = { reason, message, error ->
                     reportSessionCreateFailure(
-                        reason = "gateway_failure",
+                        reason = reason,
                         creation = creation,
                         hostId = current.hostId,
                         error = error,
-                        message = error.message?.takeIf { it.isNotBlank() }
-                            ?: "Couldn't create the session.",
+                        message = message,
                     )
                 },
             )

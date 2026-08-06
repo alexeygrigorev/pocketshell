@@ -5,6 +5,7 @@ import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
 import com.pocketshell.app.projects.SessionNamePolicy
+import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.ssh.ExecResult
@@ -119,6 +120,11 @@ class AppAssistantActionsTest {
      */
     private class NameResolvingGateway(
         liveSessions: Set<String> = emptySet(),
+        /**
+         * Issue #1928: when set, every create reports PARTIAL success — the tmux
+         * session exists but its agent launch failed with this reason.
+         */
+        private val launchFailureDetail: String? = null,
     ) : FolderListGateway {
         val live = liveSessions.toMutableSet()
         val policies = mutableListOf<SessionNamePolicy>()
@@ -139,7 +145,7 @@ class AppAssistantActionsTest {
             cwd: String,
             startCommand: String?,
             namePolicy: SessionNamePolicy,
-        ): Result<String> {
+        ): Result<SessionCreateOutcome> {
             policies += namePolicy
             val resolved = when (namePolicy) {
                 SessionNamePolicy.ExactName -> sessionName
@@ -161,7 +167,11 @@ class AppAssistantActionsTest {
             }
             live += resolved
             createdNames += resolved
-            return Result.success(resolved)
+            return Result.success(
+                launchFailureDetail
+                    ?.let { SessionCreateOutcome.LaunchFailed(resolved, it) }
+                    ?: SessionCreateOutcome.Created(resolved),
+            )
         }
 
         override suspend fun createEmptyProject(
@@ -207,7 +217,7 @@ class AppAssistantActionsTest {
                 cwd: String,
                 startCommand: String?,
                 namePolicy: SessionNamePolicy,
-            ): Result<String> = Result.success(sessionName)
+            ): Result<SessionCreateOutcome> = Result.success(SessionCreateOutcome.Created(sessionName))
 
             override suspend fun createEmptyProject(
                 host: HostEntity,
@@ -427,7 +437,7 @@ class AppAssistantActionsTest {
                 cwd: String,
                 startCommand: String?,
                 namePolicy: SessionNamePolicy,
-            ): Result<String> = Result.success(sessionName)
+            ): Result<SessionCreateOutcome> = Result.success(SessionCreateOutcome.Created(sessionName))
             override suspend fun createEmptyProject(
                 host: HostEntity,
                 keyPath: String,
@@ -517,6 +527,52 @@ class AppAssistantActionsTest {
         assertEquals("proj-2", destination.sessionName)
     }
 
+    /**
+     * Issue #1928 — the ASSISTANT caller of the partial-success outcome.
+     *
+     * "Start a Claude session in ~/proj" that creates the session but fails to
+     * launch Claude used to answer `ok` ("Started claude session …") and
+     * navigate — the assistant confidently reporting an agent that is not there.
+     * Reporting a plain create failure would be the opposite lie: an orphan
+     * session on the host that the answer never mentions. The answer must name
+     * the session that exists AND say the agent did not start.
+     */
+    @Test
+    fun startSessionLaunchFailureIsReportedAsAProblemNamingTheCreatedSession() = runTest {
+        val gateway = NameResolvingGateway(launchFailureDetail = "can't find pane: =proj:")
+        val bridge = RecordingBridge()
+        val actions = actions(
+            bridge = bridge,
+            responder = { ExecResult("", "", 0) },
+            gateway = gateway,
+        )
+
+        val result = actions.startSession(host = "dev", cwd = "/home/dev/proj", agent = "claude")
+
+        assertFalse(
+            "an agent that never started must not be reported as ok: ${result.message}",
+            result.ok,
+        )
+        assertTrue("must name the created session: ${result.message}", result.message.contains("proj"))
+        assertTrue(
+            "must say the session WAS created: ${result.message}",
+            result.message.contains("was created"),
+        )
+        assertTrue(
+            "must carry the host's reason: ${result.message}",
+            result.message.contains("can't find pane: =proj:"),
+        )
+        assertTrue(
+            "must not navigate into a session whose agent never started",
+            bridge.navigated.none { it is AppDestination.TmuxSession },
+        )
+        assertEquals(
+            "the created session must be left alone on the host",
+            listOf("proj"),
+            gateway.createdNames,
+        )
+    }
+
     @Test
     fun startSessionAsksTheHostToResolveTheName() = runTest {
         val gateway = NameResolvingGateway()
@@ -594,7 +650,7 @@ class AppAssistantActionsTest {
                 cwd: String,
                 startCommand: String?,
                 namePolicy: SessionNamePolicy,
-            ): Result<String> = Result.failure(RuntimeException("start directory does not exist"))
+            ): Result<SessionCreateOutcome> = Result.failure(RuntimeException("start directory does not exist"))
             override suspend fun createEmptyProject(
                 host: HostEntity,
                 keyPath: String,

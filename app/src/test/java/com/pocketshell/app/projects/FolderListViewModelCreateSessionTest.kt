@@ -222,6 +222,72 @@ class FolderListViewModelCreateSessionTest {
         }
     }
 
+    /**
+     * Issue #1928 — the FOLDER-TREE caller of the partial-success outcome.
+     *
+     * The user picked "Agent → Codex" and the tmux session was created, but the
+     * launch failed on the host. Before the typed outcome this reported full
+     * success: the tree stamped a Codex badge on the row and the screen routed
+     * the user straight into a plain shell. All four properties below are the
+     * user-visible consequences of that lie, so all four are asserted here:
+     *
+     *  - the created session IS shown (it exists on the host and is kept),
+     *  - it is NOT badged with the agent that never started,
+     *  - the screen does NOT navigate into it as if the agent were running,
+     *  - and the reason is on screen, naming the session and what to do.
+     */
+    @Test
+    fun launchFailureKeepsTheSessionVisibleAndReportsInsteadOfNavigating() = runTest {
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha")),
+            launchFailureDetail = "can't find pane: =git-beta:",
+        )
+        val vm = newViewModel(gateway)
+        var resolved: String? = null
+        try {
+            bind(vm)
+            runCurrent()
+
+            vm.createSession(
+                sessionName = "git-beta",
+                cwd = "/home/alexey/git/beta",
+                startCommand = "pocketshell agent codex --dir '/home/alexey/git/beta'",
+                chosenKind = SessionAgentKind.Codex,
+                onResolved = { resolved = it },
+            )
+            runCurrent()
+
+            assertEquals(
+                "the created session must stay visible — it exists on the host",
+                setOf("alpha", "git-beta"),
+                readySessionNames(vm),
+            )
+            val row = (vm.state.value as FolderListUiState.Ready)
+                .flatSessions.first { it.sessionName == "git-beta" }
+            assertEquals(
+                "a session whose agent never started must not wear that agent's badge",
+                SessionAgentKind.Probing,
+                row.agentKind,
+            )
+            assertEquals(
+                "a launch failure must not route the user into the session",
+                null,
+                resolved,
+            )
+            val status = vm.actionStatus.value
+            assertTrue("expected a visible failure, got $status", status is FolderActionStatus.Failed)
+            val message = (status as FolderActionStatus.Failed).message
+            assertTrue("must name the created session: $message", message.contains("git-beta"))
+            assertTrue("must say it WAS created: $message", message.contains("was created"))
+            assertTrue(
+                "must carry the host's reason: $message",
+                message.contains("can't find pane: =git-beta:"),
+            )
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
     @Test
     fun createShellSessionWithoutChosenKindStaysProbingUntilProbe() = runTest {
         // A shell session (no agent kind) keeps the optimistic Probing
@@ -296,7 +362,7 @@ class FolderListViewModelCreateSessionTest {
 
     @Test
     fun createSessionShowsRunningStatusUntilGatewayReturns() = runTest {
-        val pendingCreate = CompletableDeferred<Result<String>>()
+        val pendingCreate = CompletableDeferred<Result<SessionCreateOutcome>>()
         val gateway = StubGateway(
             rows = listOf(sessionRow("alpha")),
             createResult = pendingCreate,
@@ -324,7 +390,7 @@ class FolderListViewModelCreateSessionTest {
                 (running as FolderActionStatus.Running).message,
             )
 
-            pendingCreate.complete(Result.success("beta"))
+            pendingCreate.complete(Result.success(SessionCreateOutcome.Created("beta")))
             runCurrent()
 
             assertEquals(FolderActionStatus.Idle, vm.actionStatus.value)
@@ -501,7 +567,13 @@ class FolderListViewModelCreateSessionTest {
     private class StubGateway(
         @Volatile var rows: List<FolderSessionRow>,
         @Volatile var createSucceeds: Boolean = true,
-        private val createResult: CompletableDeferred<Result<String>>? = null,
+        /**
+         * Issue #1928: when set, the gateway reports PARTIAL success — the tmux
+         * session was created but the requested agent launch failed with this
+         * reason. `null` keeps the full-success behaviour.
+         */
+        @Volatile var launchFailureDetail: String? = null,
+        private val createResult: CompletableDeferred<Result<SessionCreateOutcome>>? = null,
         // When true, a successful create makes the gateway's probe start
         // reporting the created session (i.e. the probe observed it).
         @Volatile var reportCreatedSession: Boolean = false,
@@ -531,7 +603,7 @@ class FolderListViewModelCreateSessionTest {
             cwd: String,
             startCommand: String?,
             namePolicy: SessionNamePolicy,
-        ): Result<String> {
+        ): Result<SessionCreateOutcome> {
             createCalls += 1
             // Issue #1820: record the policy the PRODUCTION caller chose. The
             // whole fix is "each call site declares its intent", so a fake that
@@ -557,7 +629,11 @@ class FolderListViewModelCreateSessionTest {
                     agentKind = SessionAgentKind.Shell,
                 )
             }
-            return Result.success(sessionName)
+            return Result.success(
+                launchFailureDetail
+                    ?.let { SessionCreateOutcome.LaunchFailed(sessionName, it) }
+                    ?: SessionCreateOutcome.Created(sessionName),
+            )
         }
 
         override suspend fun createEmptyProject(

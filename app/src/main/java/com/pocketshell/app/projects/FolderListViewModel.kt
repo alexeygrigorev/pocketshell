@@ -1064,11 +1064,11 @@ class FolderListViewModel internal constructor(
      * [startCommand] inside it via `send-keys` — invoked from the
      * [SessionTypePickerSheet] confirm path.
      *
-     * On success [onResolved] fires with the resolved tmux session name
-     * so the caller can route to `AppDestination.TmuxSession`. On
-     * failure the screen keeps the current list visible and shows the error
-     * through [actionStatus] (so the user sees what went wrong instead of a
-     * silent "nothing happened").
+     * On full success [onResolved] fires with the resolved tmux session name
+     * so the caller can route to `AppDestination.TmuxSession`. On failure —
+     * and on issue #1928's PARTIAL success, where the session exists but the
+     * agent did not start — the screen keeps the list visible and reports the
+     * reason through [actionStatus], not a silent "nothing happened".
      */
     fun createSession(
         sessionName: String,
@@ -1107,7 +1107,13 @@ class FolderListViewModel internal constructor(
                     namePolicy = SessionNamePolicy.UniqueOnHost,
                 )
                 result.fold(
-                    onSuccess = { resolvedName ->
+                    onSuccess = { outcome ->
+                        val resolvedName = outcome.sessionName
+                        // Issue #1928: a LaunchFailed session is a plain shell —
+                        // stamping the CHOSEN agent kind on it would put a Claude
+                        // badge on a session with no Claude in it. Fall back to
+                        // Probing so the reconcile settles the truth.
+                        val launched = outcome is SessionCreateOutcome.Created
                         // EPIC #679 (#678 create side): the app KNOWS it just created
                         // this session, so insert it into the maintained tree by id
                         // immediately — optimistically — instead of waiting for the
@@ -1133,13 +1139,28 @@ class FolderListViewModel internal constructor(
                                 sessionName = resolvedName,
                                 lastActivity = System.currentTimeMillis(),
                                 attached = false,
-                                agentKind = chosenKind ?: SessionAgentKind.Probing,
+                                agentKind = chosenKind?.takeIf { launched }
+                                    ?: SessionAgentKind.Probing,
                             ),
                             folderPath = cwd,
                         )
                         emitReady()
-                        _actionStatus.value = FolderActionStatus.Idle
-                        onResolved(resolvedName)
+                        // Issue #1928: the created session is inserted above in
+                        // BOTH states — it exists and stays. Only a full success
+                        // routes the user into it; a launch failure keeps them
+                        // here with the new row visible plus the reason, instead
+                        // of dropping them into a shell they asked to be an agent.
+                        outcome.fold(
+                            onCreated = {
+                                _actionStatus.value = FolderActionStatus.Idle
+                                onResolved(resolvedName)
+                            },
+                            onLaunchFailed = { name, detail ->
+                                _actionStatus.value = FolderActionStatus.Failed(
+                                    sessionLaunchFailedMessage(name, detail),
+                                )
+                            },
+                        )
                         refresh()
                     },
                     onFailure = { error ->

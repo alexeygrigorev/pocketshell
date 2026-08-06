@@ -315,7 +315,7 @@ class FolderListViewModelSessionsChangedTest {
             cwd: String,
             startCommand: String?,
             namePolicy: SessionNamePolicy,
-        ): Result<String> = error("not used")
+        ): Result<SessionCreateOutcome> = error("not used")
 
         override suspend fun createEmptyProject(
             host: HostEntity,

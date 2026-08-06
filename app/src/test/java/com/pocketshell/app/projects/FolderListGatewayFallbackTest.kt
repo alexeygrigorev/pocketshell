@@ -91,7 +91,7 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.ExactName,
         )
 
-        assertEquals(SESSION_NAME, name)
+        assertEquals(SessionCreateOutcome.Created(SESSION_NAME), name)
         val capped = session.execCommands.single { it.contains("create-detached") }
         // The recorded command is wrapped by pathAware (`/bin/sh -lc '<PATH=…;
         // body>'`), which re-escapes every inner single quote to `'"'"'`. Build
@@ -153,7 +153,7 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.ExactName,
         )
 
-        assertEquals(SESSION_NAME, name)
+        assertEquals(SessionCreateOutcome.Created(SESSION_NAME), name)
         val fallback = session.execCommands.single { it.contains("new-session -A -d") }
         // Same pathAware wrapping applies to the raw fallback create; assert the
         // EXACT wrapped string from the production builder.
@@ -199,7 +199,7 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.ExactName,
         )
 
-        assertEquals(SESSION_NAME, name)
+        assertEquals(SessionCreateOutcome.Created(SESSION_NAME), name)
         assertTrue(
             "verb-absent host must fall back to raw new-session, not error",
             session.execCommands.any {
@@ -346,6 +346,10 @@ class FolderListGatewayFallbackTest {
         // raw Click "No such command 'agent'" error. The launch must abort with
         // the actionable update hint, and must NOT type the doomed agent line
         // into the pane (no send-keys).
+        //
+        // Issue #1928: the pre-flight runs AFTER the session was created, so the
+        // hint is now the reason of a LAUNCH failure rather than a thrown CREATE
+        // failure — same words, and it no longer claims nothing was created.
         val session = CreateSessionFake(
             results = listOf(
                 CreateSessionFake.Rule(match = "create-detached", result = ok()),
@@ -371,18 +375,19 @@ class FolderListGatewayFallbackTest {
         )
         val gateway = SshFolderListGateway()
 
-        val ex = runCatching {
-            gateway.createSessionOnSession(
-                session = session,
-                sessionName = SESSION_NAME,
-                cwd = CWD,
-                startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
-                namePolicy = SessionNamePolicy.ExactName,
-            )
-        }.exceptionOrNull()
+        val outcome = gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
+            namePolicy = SessionNamePolicy.ExactName,
+        )
 
-        assertTrue("expected a surfaced RuntimeException, got $ex", ex is RuntimeException)
-        val message = ex?.message.orEmpty()
+        assertTrue(
+            "an outdated host is a LAUNCH failure — the session exists; got $outcome",
+            outcome is SessionCreateOutcome.LaunchFailed,
+        )
+        val message = (outcome as SessionCreateOutcome.LaunchFailed).detail
         // The friendly hint: names the concrete installed version, the required
         // minimum, and a copyable update command.
         assertTrue("hint must name installed version: $message", message.contains("0.3.33"))
@@ -444,18 +449,18 @@ class FolderListGatewayFallbackTest {
         )
         val gateway = SshFolderListGateway()
 
-        val ex = runCatching {
-            gateway.createSessionOnSession(
-                session = session,
-                sessionName = SESSION_NAME,
-                cwd = CWD,
-                startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
-                namePolicy = SessionNamePolicy.ExactName,
-            )
-        }.exceptionOrNull()
+        val outcome = gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = "pocketshell agent claude --dir '/home/me/proj dir'",
+            namePolicy = SessionNamePolicy.ExactName,
+        )
 
-        assertTrue("expected a surfaced RuntimeException, got $ex", ex is RuntimeException)
-        val message = ex?.message.orEmpty()
+        // Issue #1928: the hint arrives as a LAUNCH failure on a session that
+        // was created, not as a create failure.
+        assertTrue("expected a launch failure, got $outcome", outcome is SessionCreateOutcome.LaunchFailed)
+        val message = (outcome as SessionCreateOutcome.LaunchFailed).detail
         // Reached the version pre-flight: the hint names the installed version.
         assertTrue("must reach the version hint (installed version): $message", message.contains("0.3.33"))
         // The collision guard must NOT have short-circuited the launch.
@@ -501,18 +506,16 @@ class FolderListGatewayFallbackTest {
         )
         val gateway = SshFolderListGateway()
 
-        val ex = runCatching {
-            gateway.createSessionOnSession(
-                session = session,
-                sessionName = SESSION_NAME,
-                cwd = CWD,
-                startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
-                namePolicy = SessionNamePolicy.ExactName,
-            )
-        }.exceptionOrNull()
+        val outcome = gateway.createSessionOnSession(
+            session = session,
+            sessionName = SESSION_NAME,
+            cwd = CWD,
+            startCommand = "pocketshell agent codex --dir '/home/me/proj dir'",
+            namePolicy = SessionNamePolicy.ExactName,
+        )
 
-        assertTrue("expected a surfaced RuntimeException, got $ex", ex is RuntimeException)
-        val message = ex?.message.orEmpty()
+        assertTrue("expected a launch failure, got $outcome", outcome is SessionCreateOutcome.LaunchFailed)
+        val message = (outcome as SessionCreateOutcome.LaunchFailed).detail
         assertTrue("hint must fall back to generic phrasing: $message", message.contains("too old"))
         assertTrue(
             "hint must still name required minimum: $message",
@@ -781,7 +784,7 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.UniqueOnHost,
         )
 
-        assertEquals("$SESSION_NAME-2", resolved)
+        assertEquals(SessionCreateOutcome.Created("$SESSION_NAME-2"), resolved)
         val create = session.execCommands.single { it.contains("create-detached") }
         assertTrue(
             "the create must target the host-resolved name, got: $create",
@@ -819,7 +822,7 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.UniqueOnHost,
         )
 
-        assertEquals("$SESSION_NAME-3", resolved)
+        assertEquals(SessionCreateOutcome.Created("$SESSION_NAME-3"), resolved)
         val sendKeys = session.execCommands.single { it.contains("send-keys") }
         // The command is wrapped in `/bin/sh -lc '...'`, so the inner single
         // quotes are shell-escaped; match the quoted NAME token rather than the
@@ -860,7 +863,7 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.ExactName,
         )
 
-        assertEquals(SESSION_NAME, resolved)
+        assertEquals(SessionCreateOutcome.Created(SESSION_NAME), resolved)
         assertFalse(
             "ExactName must not run the free-name walk",
             session.execCommands.any { it.contains("__ps_n=") },
@@ -891,7 +894,7 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.UniqueOnHost,
         )
 
-        assertEquals(SESSION_NAME, resolved)
+        assertEquals(SessionCreateOutcome.Created(SESSION_NAME), resolved)
         assertTrue(
             "a failed probe must still create",
             session.execCommands.any { it.contains("create-detached") },

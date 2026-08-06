@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.projects.FolderListGateway
+import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.core.storage.dao.HostDao
 import kotlinx.coroutines.CoroutineDispatcher
@@ -133,6 +134,15 @@ class StaleSessionPromptController internal constructor(
      * recreates in the host home directory (`~`), so the user always recovers —
      * never a blank/error. Returns a failure when no create seam is wired (a bare
      * test controller) or the host row / create exec fails.
+     *
+     * Issue #1928: this returns the gateway's [SessionCreateOutcome] verbatim
+     * rather than flattening it back to a name. Recovery passes
+     * `startCommand = null`, so it should only ever see
+     * [SessionCreateOutcome.Created] — but "should" is exactly how a partial
+     * success gets collapsed into a full one. The caller
+     * (`MainActivity.recreateStaleSession`) decides, so if a start command is
+     * ever added here the compiler makes that decision explicit instead of
+     * silently attaching the user to an agent-less session.
      */
     suspend fun createSessionInFolder(
         hostId: Long,
@@ -140,7 +150,7 @@ class StaleSessionPromptController internal constructor(
         passphrase: CharArray?,
         sessionName: String,
         folderPath: String?,
-    ): Result<String> {
+    ): Result<SessionCreateOutcome> {
         val gateway = this.gateway
         val hostDao = this.hostDao
         if (gateway == null || hostDao == null) {

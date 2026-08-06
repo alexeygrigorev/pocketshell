@@ -323,8 +323,14 @@ interface FolderListGateway {
      * [SessionNamePolicy]; it is deliberately required at every call site so a
      * new caller has to state its intent rather than inherit a default.
      *
-     * Returns the RESOLVED session name — which for [SessionNamePolicy.UniqueOnHost]
-     * may carry a `-2`/`-3` suffix the caller did not ask for — or a failure.
+     * Issue #1928: returns a [SessionCreateOutcome], not a bare name. A create
+     * has two halves and the optional launch half can fail on its own, so the
+     * result must distinguish full success ([SessionCreateOutcome.Created]),
+     * create failure (`Result.failure`) and PARTIAL success
+     * ([SessionCreateOutcome.LaunchFailed] — the tmux session exists, the
+     * requested agent did not start). The outcome carries the RESOLVED session
+     * name in both states, which for [SessionNamePolicy.UniqueOnHost] may carry
+     * a `-2`/`-3` suffix the caller did not ask for.
      */
     suspend fun createSession(
         host: HostEntity,
@@ -334,7 +340,7 @@ interface FolderListGateway {
         cwd: String,
         startCommand: String?,
         namePolicy: SessionNamePolicy,
-    ): Result<String>
+    ): Result<SessionCreateOutcome>
 
     suspend fun createEmptyProject(
         host: HostEntity,
@@ -1152,7 +1158,7 @@ class SshFolderListGateway internal constructor(
         cwd: String,
         startCommand: String?,
         namePolicy: SessionNamePolicy,
-    ): Result<String> {
+    ): Result<SessionCreateOutcome> {
         return withLeaseSession(host, keyPath, passphrase) { session ->
             createSessionOnSession(
                 session = session,
@@ -1193,6 +1199,26 @@ class SshFolderListGateway internal constructor(
      *
      * Exposed as `internal` so the create + both fallback layers are covered by
      * JVM tests driving a fake [SshSession] (see FolderListGatewayFallbackTest).
+     *
+     * ## Issue #1928: the create half throws, the LAUNCH half never does
+     *
+     * Everything up to and including the tmux create still fails loudly: on
+     * those paths nothing exists on the host, so a thrown `RuntimeException`
+     * that surfaces as `Result.failure` is the honest answer. From the moment
+     * the session EXISTS the contract flips — the session is the user's and we
+     * keep it (issue #1928 non-goal: never kill a created session because its
+     * optional launch failed), so every launch-half failure is reported as
+     * [SessionCreateOutcome.LaunchFailed] instead.
+     *
+     * That covers all three ways the launch half can fail, which used to be
+     * mis-reported in two different directions:
+     *  - a NON-ZERO `send-keys` (pane target gone between create and send) was
+     *    DISCARDED entirely and reported as full success — the reported defect;
+     *  - the #759 outdated-host pre-flight and a bounded-exec timeout THREW,
+     *    reporting "couldn't create session" while an orphan session sat on the
+     *    host. The timeout was worse than cosmetic: `FolderListExecTimeoutException`
+     *    is a stale-channel symptom, so `withLeaseSession` retried the WHOLE
+     *    block on a fresh lease and created a SECOND session.
      */
     internal suspend fun createSessionOnSession(
         session: SshSession,
@@ -1200,7 +1226,7 @@ class SshFolderListGateway internal constructor(
         cwd: String,
         startCommand: String?,
         namePolicy: SessionNamePolicy,
-    ): String {
+    ): SessionCreateOutcome {
         if (session.execBounded(remoteStartDirectoryExistsCommand(cwd)).exitCode != 0) {
             throw RuntimeException(
                 startDirectoryMissingMessage(
@@ -1289,34 +1315,72 @@ class SshFolderListGateway internal constructor(
         // modal so the agent is immediately usable. The app just types
         // the one short line verbatim.
         if (startCommand != null) {
-            // Issue #759: an agent launch types the SHORT server-side wrapper
-            // line `pocketshell agent <kind> --dir …`. The `agent` subcommand
-            // only exists in pocketshell >= 0.3.34; on an OUTDATED host Click
-            // answers `No such command 'agent'`. Because the line is typed into
-            // a DETACHED pane via send-keys, that raw Click error would scroll
-            // past inside the pane and the user would just see a dead session
-            // with no idea why. So for agent launches we PRE-FLIGHT the same
-            // warm lease session (D21 — no new connection) with
-            // `pocketshell agent --help`: if the subcommand is missing we throw
-            // the actionable update hint, which surfaces through the normal
-            // createSession failure path instead of the cryptic Click error.
-            if (AgentLaunchVersionCheck.isAgentLaunchCommand(startCommand)) {
-                ensureAgentSubcommandAvailable(session)
+            val failure = launchStartCommand(session, resolvedName, startCommand)
+            if (failure != null) {
+                // Issue #1928: the session EXISTS. Log the resolved name and the
+                // host's reason (never the launch command — it can carry a
+                // profile / provider argument) and hand the caller the partial
+                // outcome so the user is told the truth.
+                Log.w(
+                    PROBE_LOG_TAG,
+                    "session-create-launch-failed name=$resolvedName reason=$failure",
+                )
+                return SessionCreateOutcome.LaunchFailed(resolvedName, failure)
             }
-            val quotedCommand = shellQuote(startCommand)
+        }
+        return SessionCreateOutcome.Created(resolvedName)
+    }
+
+    /**
+     * Issue #1928: run the post-create agent launch and REPORT its outcome —
+     * `null` when the agent really started, otherwise the host's reason.
+     *
+     * Nothing in here throws (except cancellation): by the time it runs the
+     * tmux session already exists, and a thrown failure would be reported to
+     * the user as "couldn't create session" for a session that is sitting right
+     * there. See the [createSessionOnSession] KDoc for the three failure shapes
+     * this collapses into one honest answer.
+     */
+    private suspend fun launchStartCommand(
+        session: SshSession,
+        resolvedName: String,
+        startCommand: String,
+    ): String? {
+        // Issue #759: an agent launch types the SHORT server-side wrapper
+        // line `pocketshell agent <kind> --dir …`. The `agent` subcommand
+        // only exists in pocketshell >= 0.3.34; on an OUTDATED host Click
+        // answers `No such command 'agent'`. Because the line is typed into
+        // a DETACHED pane via send-keys, that raw Click error would scroll
+        // past inside the pane and the user would just see a dead session
+        // with no idea why. So for agent launches we PRE-FLIGHT the same
+        // warm lease session (D21 — no new connection) with
+        // `pocketshell agent --help`: if the subcommand is missing we report
+        // the actionable update hint as the launch failure and never type the
+        // doomed line.
+        try {
+            if (AgentLaunchVersionCheck.isAgentLaunchCommand(startCommand)) {
+                agentSubcommandUnavailableHint(session)?.let { return it }
+            }
             // Issue #1820: EXACT pane target. A bare `-t <name>` prefix-matches,
             // so with `<name>-2` alive and `<name>` gone the launch line would be
             // typed into the NEIGHBOUR's pane — the #976 misroute, one line below
             // the guard that exists to prevent it. `=<name>:` is the exact form
             // for a pane target (see [TmuxTarget]).
-            session.execBounded(
+            val sent = session.execBounded(
                 pathAware(
                     "tmux send-keys -t ${shellQuote(TmuxTarget.pane(resolvedName))} " +
-                        "$quotedCommand Enter",
+                        "${shellQuote(startCommand)} Enter",
                 ),
             )
+            if (sent.exitCode == 0) return null
+            return sent.stderr.trim().ifBlank { sent.stdout.trim() }
+                .ifBlank { "tmux send-keys exited ${sent.exitCode}" }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Throwable) {
+            return error.message?.trim()?.ifBlank { null }
+                ?: error.javaClass.simpleName
         }
-        return resolvedName
     }
 
     /**
@@ -1360,16 +1424,21 @@ class SshFolderListGateway internal constructor(
      * Issue #759: pre-flight version guard for an agent launch. Probes the host
      * (over the already-warm lease [session]) for the `pocketshell agent`
      * subcommand; if it is missing — the host's `pocketshell` predates 0.3.34 —
-     * throws the actionable "update pocketshell on the host" hint instead of
+     * returns the actionable "update pocketshell on the host" hint instead of
      * letting the cryptic `No such command 'agent'` Click error scroll past
      * inside the detached pane.
      *
-     * When the probe succeeds (current host) this is a no-op. The version is
-     * fetched best-effort only when the probe shows a mismatch, so the hint can
-     * name the concrete installed version; a probe/version failure to fetch
-     * never blocks a healthy launch.
+     * Returns `null` when the probe succeeds (current host), i.e. the launch may
+     * proceed. The version is fetched best-effort only when the probe shows a
+     * mismatch, so the hint can name the concrete installed version; a
+     * probe/version failure to fetch never blocks a healthy launch.
+     *
+     * Issue #1928 hard-cut (D22): this used to THROW the hint, which surfaced to
+     * the user as "couldn't create session" even though the session had already
+     * been created one step earlier. The hint is now the launch-failure reason
+     * of a [SessionCreateOutcome.LaunchFailed] — same words, honest accounting.
      */
-    private suspend fun ensureAgentSubcommandAvailable(session: SshSession) {
+    private suspend fun agentSubcommandUnavailableHint(session: SshSession): String? {
         val probe = session.execBounded(pathAware(AgentLaunchVersionCheck.AGENT_PROBE_COMMAND))
         if (!AgentLaunchVersionCheck.isAgentSubcommandMissing(
                 stdout = probe.stdout,
@@ -1377,7 +1446,7 @@ class SshFolderListGateway internal constructor(
                 exitCode = probe.exitCode,
             )
         ) {
-            return
+            return null
         }
         // Outdated host: best-effort fetch of the installed version so the hint
         // can be concrete ("this host's pocketshell is 0.3.33").
@@ -1387,14 +1456,12 @@ class SshFolderListGateway internal constructor(
                 version.stdout.ifBlank { version.stderr },
             )
         }.getOrNull()
-        throw RuntimeException(
-            AgentLaunchVersionCheck.mapLaunchFailureToHint(
-                stdout = probe.stdout,
-                stderr = probe.stderr,
-                exitCode = probe.exitCode,
-                installedVersion = installedVersion,
-            ) ?: AgentLaunchVersionCheck.outdatedHint(installedVersion),
-        )
+        return AgentLaunchVersionCheck.mapLaunchFailureToHint(
+            stdout = probe.stdout,
+            stderr = probe.stderr,
+            exitCode = probe.exitCode,
+            installedVersion = installedVersion,
+        ) ?: AgentLaunchVersionCheck.outdatedHint(installedVersion)
     }
 
     override suspend fun killSession(

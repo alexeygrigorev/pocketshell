@@ -4,6 +4,8 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
 import com.pocketshell.app.projects.SessionNamePolicy
+import com.pocketshell.app.projects.fold
+import com.pocketshell.app.projects.sessionLaunchFailedMessage
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
@@ -326,21 +328,33 @@ internal class AppAssistantActions(
             namePolicy = SessionNamePolicy.UniqueOnHost,
         )
         return result.fold(
-            onSuccess = { resolved ->
-                bridge.navigate(
-                    AppDestination.TmuxSession(
-                        hostId = params.hostId,
-                        hostName = params.hostName,
-                        hostname = params.hostname,
-                        port = params.port,
-                        username = params.username,
-                        keyPath = params.keyPath,
-                        passphrase = params.passphrase,
-                        sessionName = resolved,
-                        startDirectory = cwd,
-                    ),
+            onSuccess = { outcome ->
+                outcome.fold(
+                    onCreated = { resolved ->
+                        bridge.navigate(
+                            AppDestination.TmuxSession(
+                                hostId = params.hostId,
+                                hostName = params.hostName,
+                                hostname = params.hostname,
+                                port = params.port,
+                                username = params.username,
+                                keyPath = params.keyPath,
+                                passphrase = params.passphrase,
+                                sessionName = resolved,
+                                startDirectory = cwd,
+                            ),
+                        )
+                        ActionResult.ok("Started $agent session \"$resolved\" in $cwd on $host.")
+                    },
+                    // Issue #1928: the tmux session exists — say so, name it, and
+                    // do NOT navigate. Reporting `ok` here is the exact lie this
+                    // issue is about ("your Codex session is ready" → empty shell),
+                    // and reporting a bare create failure would be the mirror lie:
+                    // the assistant would leave an orphan session unmentioned.
+                    onLaunchFailed = { name, detail ->
+                        ActionResult.error(sessionLaunchFailedMessage(name, detail))
+                    },
                 )
-                ActionResult.ok("Started $agent session \"$resolved\" in $cwd on $host.")
             },
             onFailure = { ActionResult.error("Failed to start session: ${it.message}") },
         )

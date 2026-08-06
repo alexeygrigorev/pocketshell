@@ -114,4 +114,117 @@ public class RectangularAreasTest extends TerminalTestCase {
 		assertEffectAttributesSet(effectLine(b, u, 0), effectLine(bu, bu, 0), effectLine(0, 0, 0));
 	}
 
+	private static final long OSC8_ACTIVE = TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK;
+	private static final long OSC8_OPENER = TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START;
+	/**
+	 * Deliberately spelled out from the two public bit constants rather than reusing a production
+	 * mask helper, so mutating that helper cannot silently move this test's expectation too.
+	 */
+	private static final long OSC8_PROVENANCE = OSC8_ACTIVE | OSC8_OPENER;
+
+	/**
+	 * Paints, on row 0 of an 8x4 terminal, columns 0..5 as:
+	 * <pre>
+	 *   col 0 'A' - first cell of hyperlink #1 (active + opener)
+	 *   col 1 'B' - continuation of hyperlink #1 (active only)
+	 *   col 2 'C' - after the closer, plain text (no provenance)
+	 *   col 3 'D' - first cell of an adjacent, independent hyperlink #2 (active + opener)
+	 *   col 4 'E' - continuation of hyperlink #2 (active only)
+	 *   col 5 'F' - after the second closer, plain text (no provenance)
+	 * </pre>
+	 * Foreground colour index 99 is applied throughout so the re-encode's colour path is exercised.
+	 */
+	private void paintTwoAdjacentOsc8LinksWithCloses() {
+		withTerminalSized(8, 4).enterString("\033[38;5;99m"
+			+ "\033]8;id=one;https://example.com/first\033\\AB\033]8;;\007"
+			+ "C"
+			+ "\033]8;id=two;https://example.com/second\033\\DE\033]8;;\007"
+			+ "F");
+		assertOsc8ProvenanceLayoutIntact("before the rectangular attribute mutation");
+	}
+
+	private void assertOsc8ProvenanceLayoutIntact(String when) {
+		assertEquals("col 0 must stay the opener cell of hyperlink #1 " + when,
+			OSC8_ACTIVE | OSC8_OPENER, getStyleAt(0, 0) & OSC8_PROVENANCE);
+		assertEquals("col 1 must stay an active continuation, never a second opener " + when,
+			OSC8_ACTIVE, getStyleAt(0, 1) & OSC8_PROVENANCE);
+		assertEquals("col 2 follows the closer and must carry no provenance " + when,
+			0L, getStyleAt(0, 2) & OSC8_PROVENANCE);
+		assertEquals("col 3 must stay the opener cell of the adjacent hyperlink #2 " + when,
+			OSC8_ACTIVE | OSC8_OPENER, getStyleAt(0, 3) & OSC8_PROVENANCE);
+		assertEquals("col 4 must stay an active continuation of hyperlink #2 " + when,
+			OSC8_ACTIVE, getStyleAt(0, 4) & OSC8_PROVENANCE);
+		assertEquals("col 5 follows the second closer and must carry no provenance " + when,
+			0L, getStyleAt(0, 5) & OSC8_PROVENANCE);
+		assertEquals("untouched blank rows must never gain provenance " + when,
+			0L, getStyleAt(1, 0) & OSC8_PROVENANCE);
+	}
+
+	private void assertRectangleWasActuallyMutatedToBold() {
+		for (int column = 0; column < 6; column++) {
+			assertTrue("column " + column + " must have received the requested bold bit; without a real"
+					+ " mutation the provenance assertions would pass vacuously",
+				(TextStyle.decodeEffect(getStyleAt(0, column)) & TextStyle.CHARACTER_ATTRIBUTE_BOLD) != 0);
+			assertEquals("column " + column + " must keep its foreground colour through the re-encode",
+				99, TextStyle.decodeForeColor(getStyleAt(0, column)));
+		}
+	}
+
+	/**
+	 * DECCARA re-encodes each cell's colours and effects. Regression for #1961: the re-encode must
+	 * carry the OSC 8 provenance bits (11/12) across, or #1955's hard-wrap link repair silently
+	 * declines to join a wrapped long link after any rectangular attribute change.
+	 * http://vt100.net/docs/vt510-rm/DECCARA
+	 */
+	public void testChangeAttributesInRectangularAreaPreservesOsc8Provenance() {
+		paintTwoAdjacentOsc8LinksWithCloses();
+		// DECSACE rectangular ("${CSI}2*x"), then DECCARA bold over rows 1..3, columns 1..8.
+		enterString("\033[2*x\033[1;1;3;8;1$r");
+		assertRectangleWasActuallyMutatedToBold();
+		assertOsc8ProvenanceLayoutIntact("after DECCARA");
+	}
+
+	/**
+	 * Same invariant through the stream (non-rectangular, DECSACE default) DECCARA path.
+	 * http://vt100.net/docs/vt510-rm/DECCARA
+	 */
+	public void testChangeAttributesInStreamAreaPreservesOsc8Provenance() {
+		paintTwoAdjacentOsc8LinksWithCloses();
+		enterString("\033[1;1;2;1;1$r");
+		assertRectangleWasActuallyMutatedToBold();
+		assertOsc8ProvenanceLayoutIntact("after stream-mode DECCARA");
+	}
+
+	/**
+	 * DECRARA takes the same re-encode path with reverse semantics.
+	 * http://www.vt100.net/docs/vt510-rm/DECRARA
+	 */
+	public void testReverseAttributesInRectangularAreaPreservesOsc8Provenance() {
+		paintTwoAdjacentOsc8LinksWithCloses();
+		// DECSACE rectangular, then DECRARA reversing bold (cells start non-bold, so they end bold).
+		enterString("\033[2*x\033[1;1;3;8;1$t");
+		assertRectangleWasActuallyMutatedToBold();
+		assertOsc8ProvenanceLayoutIntact("after DECRARA");
+	}
+
+	/**
+	 * A rectangular attribute mutation must not disturb the close/reset semantics either: after the
+	 * mutation, a still-open hyperlink cleared by {@link TerminalEmulator#reset()} must stop marking
+	 * newly painted cells.
+	 */
+	public void testRectangularAttributeMutationKeepsOsc8CloseAndResetSemantics() {
+		paintTwoAdjacentOsc8LinksWithCloses();
+		enterString("\033[2*x\033[1;1;3;8;1$r");
+		assertOsc8ProvenanceLayoutIntact("after DECCARA");
+
+		// Open a hyperlink, mutate the rectangle again, then reset: reset still closes it.
+		enterString("\033]8;;https://example.com/open-across-reset\033\\");
+		enterString("\033[2*x\033[1;1;3;8;1$r");
+		mTerminal.reset();
+		enterString("z");
+		int zColumn = mTerminal.getCursorCol() - 1;
+		assertEquals("terminal reset must still close an OSC 8 hyperlink that spanned a DECCARA",
+			0L, getStyleAt(0, zColumn) & OSC8_PROVENANCE);
+	}
+
 }

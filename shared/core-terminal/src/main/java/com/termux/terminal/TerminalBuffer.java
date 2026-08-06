@@ -554,7 +554,11 @@ public final class TerminalBuffer {
                 } else {
                     effect &= ~bits;
                 }
-                line.mStyle[x] = TextStyle.encode(foreColor, backColor, effect);
+                // This mutates an already-painted cell, so it must carry the cell's OSC 8
+                // provenance across the decode/re-encode round trip (#1961). A plain
+                // TextStyle.encode() would drop it and make the hard-wrap link repair
+                // decline to join a wrapped hyperlink after any rectangular attribute change.
+                line.mStyle[x] = TextStyle.encodePreservingProvenance(foreColor, backColor, effect, currentStyle);
             }
             // Style was written directly (bypassing TerminalRow.setChar), so the
             // renderer's dirty-region cache must see this row as changed (#469).

@@ -42,6 +42,55 @@ public class TextStyleTest extends TestCase {
 		);
 	}
 
+	/**
+	 * #1961: a post-paint re-encode of an existing cell must change only the requested colours and
+	 * effects and carry the OSC 8 provenance bits through untouched.
+	 */
+	public void testEncodePreservingProvenanceKeepsOsc8BitsAndOnlyThose() {
+		long previous = TextStyle.encode(99, 7, TextStyle.CHARACTER_ATTRIBUTE_ITALIC)
+			| TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+			| TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START;
+
+		long reencoded = TextStyle.encodePreservingProvenance(12, 34,
+			TextStyle.CHARACTER_ATTRIBUTE_BOLD, previous);
+
+		assertEquals("requested foreground must be applied", 12, TextStyle.decodeForeColor(reencoded));
+		assertEquals("requested background must be applied", 34, TextStyle.decodeBackColor(reencoded));
+		assertEquals("only the requested effect bits must survive",
+			TextStyle.CHARACTER_ATTRIBUTE_BOLD, TextStyle.decodeEffect(reencoded));
+		assertEquals("both OSC 8 provenance bits must be carried across",
+			TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK | TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START,
+			reencoded & TextStyle.OSC8_PROVENANCE_MASK);
+		assertEquals("the re-encode must add nothing beyond the requested style plus provenance",
+			TextStyle.encode(12, 34, TextStyle.CHARACTER_ATTRIBUTE_BOLD)
+				| TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+				| TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START,
+			reencoded);
+	}
+
+	/** A cell with no provenance must not gain any from a re-encode. */
+	public void testEncodePreservingProvenanceDoesNotInventProvenance() {
+		long previous = TextStyle.encode(1, 2, TextStyle.CHARACTER_ATTRIBUTE_UNDERLINE);
+		assertEquals(0L, previous & TextStyle.OSC8_PROVENANCE_MASK);
+
+		long reencoded = TextStyle.encodePreservingProvenance(3, 4,
+			TextStyle.CHARACTER_ATTRIBUTE_BOLD, previous);
+
+		assertEquals("a plain cell must stay plain", 0L, reencoded & TextStyle.OSC8_PROVENANCE_MASK);
+		assertEquals(TextStyle.encode(3, 4, TextStyle.CHARACTER_ATTRIBUTE_BOLD), reencoded);
+	}
+
+	/** Only the opener bit set (no active bit) must be carried through independently. */
+	public void testEncodePreservingProvenanceCarriesEachBitIndependently() {
+		long onlyActive = TextStyle.encode(0, 0, 0) | TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK;
+		assertEquals(TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK,
+			TextStyle.encodePreservingProvenance(5, 6, 0, onlyActive) & TextStyle.OSC8_PROVENANCE_MASK);
+
+		long onlyOpener = TextStyle.encode(0, 0, 0) | TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START;
+		assertEquals(TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START,
+			TextStyle.encodePreservingProvenance(5, 6, 0, onlyOpener) & TextStyle.OSC8_PROVENANCE_MASK);
+	}
+
 	public void testEncoding24Bit() {
 		int[] values = {255, 240, 127, 1, 0};
 		for (int red : values) {

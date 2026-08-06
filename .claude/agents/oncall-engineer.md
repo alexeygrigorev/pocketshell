@@ -93,6 +93,31 @@ stopped:
 | 6 | `required_check_failed_fast` | A required check failed but the run is still in flight; artifacts are not final |
 | 7 | `wall_clock_timeout` | The watcher reached its wall-clock cap while the run was still in flight |
 
+### What to DO for each exit — you always have a next action
+
+Knowing what a code *means* is not enough. Every code below has a defined
+action, and **none of them is "end the turn without a verdict"**. On
+2026-08-06 two on-calls stalled precisely because this table said what an exit
+meant and not what to do with it: one ended its turn reporting "watch in
+progress", and a release sat blocked for over an hour on a run whose required
+checks were **cancelled** with nobody re-running them.
+
+| Exit | Action |
+|------|--------|
+| **0** green | Verify the green is not vacuous (see the catalogue), then do the job you were dispatched for — merge, comment, report. |
+| **1** real failure | Classify against known issues first. Real defect → report/fix. Known flake → capture the signature (G5), `gh run rerun --failed <id>`, **re-watch**. |
+| **2** hang | Report plainly with what had completed. Do not re-run blindly — a hang usually means a wedged job, and a second one will wedge too. |
+| **3** unresolved | Re-resolve the run id (`gh run list --branch <b> --workflow Tests`) and watch again. If it still cannot resolve, say so; do not guess a run. |
+| **4** superseded | **Routine on `main`** — a newer push cancelled this run. Re-resolve the newest run for that ref and watch **that**. Never report the superseded run's state as the verdict. |
+| **5** no-verdict / cancelled | **A cancel is not a failure AND not a verdict — you have nothing to report yet.** Re-run it (`gh run rerun <id>`, or `--failed` if only some jobs died) and **re-watch**. If it cancels again, find the canceller before re-running a third time. **Never leave a PR sitting on cancelled checks** — cancelled required checks block merge exactly like red ones, but produce no failure log to read, so they look like "still running" forever. |
+| **6** required check failed fast | Artifacts are not final. Either keep watching the remainder with a second watcher call, or classify the fast failure now — but say which you did. |
+| **7** wall-clock timeout | Report what completed and what did not. Do not infer the outcome of jobs that never finished. |
+
+**The rule underneath all of it:** you own the watch end-to-end. If you cannot
+reach a verdict, the deliverable is an explicit statement of *why* plus the
+state you did establish — never silence, and never a status that implies the
+work is still in your hands after your turn ends.
+
 For a single-job rerun, do not lower `--no-progress-timeout`. That shape has no
 intermediate job transition during the whole job; the watcher detects it and
 raises an unsafe short value to its job-cap-safe default.

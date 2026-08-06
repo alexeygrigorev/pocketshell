@@ -45,6 +45,12 @@ public final class TextStyle {
     public final static long CHARACTER_ATTRIBUTE_OSC8_HYPERLINK = 1L << 11;
     /** Marks only the first cell emitted after an OSC 8 hyperlink opener. */
     public final static long CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START = 1L << 12;
+    /**
+     * Every bit that carries PocketShell OSC 8 provenance rather than a rendered attribute. These
+     * bits are pure marker provenance: no hyperlink URI payload is ever stored in a cell.
+     */
+    public final static long OSC8_PROVENANCE_MASK =
+        CHARACTER_ATTRIBUTE_OSC8_HYPERLINK | CHARACTER_ATTRIBUTE_OSC8_HYPERLINK_START;
 
     public final static int COLOR_INDEX_FOREGROUND = 256;
     public final static int COLOR_INDEX_BACKGROUND = 257;
@@ -74,6 +80,20 @@ public final class TextStyle {
         }
 
         return result;
+    }
+
+    /**
+     * Re-encodes colours and effects for a cell that already exists on screen, carrying its OSC 8
+     * provenance across.
+     * <p>
+     * {@link #encode(int, int, int)} builds a style from scratch and therefore returns zero in bits
+     * 11..12. Post-paint mutations that decode-then-re-encode an existing cell (DECCARA / DECRARA
+     * rectangular attribute changes) must use this instead, or the rectangular change erases the
+     * marker and #1955's hard-wrap link repair silently declines to join the wrapped link (#1961).
+     * </p>
+     */
+    static long encodePreservingProvenance(int foreColor, int backColor, int effect, long previousStyle) {
+        return encode(foreColor, backColor, effect) | (previousStyle & OSC8_PROVENANCE_MASK);
     }
 
     public static int decodeForeColor(long style) {

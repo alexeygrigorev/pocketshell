@@ -60,10 +60,14 @@ internal fun TmuxMoreMenu(
     // place (the manual escape hatch when auto-reconnect doesn't fire). Defaulted so
     // existing direct callers / tests of TmuxMoreMenu stay source-compatible.
     onReconnect: () -> Unit = {},
-    // Issue #993: gate the "Reconnect" item — disabled while there is no target to
-    // reconnect to OR a connect/reconnect is already in flight, so a tap is never a
-    // silent no-op nor a redundant re-dial. Defaulted true so existing callers/tests
-    // stay source-compatible.
+    // Issue #993/#1953: gate the "Reconnect" item — disabled while there is no target to
+    // reconnect to, or while the INITIAL cold dial / an ACTIVE target switch is in flight,
+    // so a tap is never a silent no-op nor a redundant re-dial. It stays ENABLED while
+    // automatic recovery is running (`Reconnecting`, which covers the controller's
+    // Reattaching heal AND its numbered ladder): an explicit manual Reconnect is a
+    // higher-priority user intent that PREEMPTS a wedged automatic ladder — see
+    // [reconnectKebabEnabled]. Defaulted true so existing callers/tests stay
+    // source-compatible.
     reconnectEnabled: Boolean = true,
 ) {
     DropdownMenu(
@@ -120,8 +124,10 @@ internal fun TmuxMoreMenu(
         // didn't fire — force an immediate reconnect of THIS session in place (no
         // session-switch dance), reusing the VM's single TransportEffects reconnect
         // entrypoint. On reconnect the #900 outbound queue auto-flushes the pending
-        // message. Disabled (greyed) when there is no target or a reconnect is already
-        // in flight so the tap is never a silent no-op / redundant re-dial.
+        // message. Issue #1953: it stays actionable while the automatic ladder is
+        // running/wedged (that is precisely when the user needs it) and is disabled
+        // (greyed) only when there is no target, or during the initial cold dial / an
+        // active target switch, so the tap is never a silent no-op / redundant re-dial.
         DropdownMenuItem(
             text = { Text("Reconnect") },
             onClick = onReconnect,

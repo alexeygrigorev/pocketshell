@@ -126,6 +126,24 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                     vm.liveTmuxClientForSendOrNullForTest() != null &&
                     vm.panes.value.isNotEmpty()
             }
+            // Issue #2016: the initial OPEN connect job must be fully complete before the
+            // peer fault. `Live` + a seeded pane is reached inside `runConnect`'s tail, so
+            // without this wait the peer death EOFs the STILL-IN-FLIGHT open's own `-CC`
+            // attach. That failure is classified as a stale-lease attach EOF, and the
+            // fallback for it — a one-shot `connect(AutoReconnect)` scoped by design to the
+            // INITIAL user-facing open — CANCELS the passive-grace reconnect ladder
+            // (`connect()` cancels `passiveDisconnectGraceJob` unconditionally) and, with the
+            // sustained outage blocking its single dial, ends the episode in `Unreachable`
+            // ("a genuinely-dead host falls through to the honest terminal Disconnected
+            // band"). Whether the grace ladder submitted its first `reconnect_failed` before
+            // that cancellation is a pure race: on CI run 31056720633 the fallback won, so
+            // `maxAttempt` never left 0 and the attempt-progress wait timed out. This proof
+            // is about a MID-SESSION drop on an established session, so the open must be a
+            // closed interval first. The #1954 sibling below already guards the same seam
+            // for the same reason.
+            awaitCondition(INITIAL_CONNECT_TIMEOUT_MS, "initial connect job completion") {
+                !vm.connectJobActiveForTest()
+            }
             val firstClient = requireNotNull(vm.liveTmuxClientForSendOrNullForTest())
             val firstClientHash = System.identityHashCode(firstClient)
             val firstSshIdentity = currentSshIdentity(vm)
@@ -136,6 +154,14 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                 graceMs = PASSIVE_GRACE_MS,
                 silentReattachTimeoutMs = REATTACH_TIMEOUT_MS,
             )
+            // Issue #2016: install a SHORT deterministic ladder so the sustained outage
+            // exhausts the single reconnect counter (attempt 2 -> 3 -> past budget ->
+            // Unreachable) well inside the bounded grace window. With the production
+            // 8-rung ladder the counter climbs but cannot reach the budget before the
+            // grace window elapses, so the episode would only ever terminalize through the
+            // racing stale-lease fallback this test now excludes. Deterministic, and it
+            // keeps the terminal state a REAL ladder exhaustion decided by the reducer.
+            vm.setAutoReconnectDelaysForTest(SUSTAINED_OUTAGE_LADDER_MS)
             // Issue #1965: hold the authoritative lease-manager connector down, not a
             // VM-local reconnect primitive. Confirmed-dead recovery now acquires through
             // DeadLeaseRecoveryAuthority, so the sustained outage must govern that exact
@@ -161,6 +187,12 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
             assertEquals("remote_failure", journalDrop["cause"])
             assertEquals(typedReason, journalDrop["causeReason"])
 
+            // Issue #2016 (D31 class guard): the passive-grace ladder must be the SOLE
+            // recovery owner of this mid-session drop. Assert that BEFORE waiting on the
+            // attempt trail, so a regression names its cause instead of surfacing as an
+            // opaque 12s attempt-progress timeout. Both halves matter: the ladder started,
+            // AND no `connect()`-based one-shot re-dial took the episode off it.
+            awaitPassiveGraceLadderIsSoleRecoveryOwner(diagnostics, firstClientHash)
             val maxAttempt = awaitAttemptBeyondOne(diagnostics, connector)
             assertTrue(
                 "sustained failure must progress beyond attempt 1; maxAttempt=$maxAttempt " +
@@ -173,13 +205,20 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
             )
             assertExactlyOneRecoveryStart(diagnostics, firstClientHash)
 
-            // The attempt-2 journal edge is emitted before the auto-ladder's blocked dial
-            // has fully terminalized. Starting manual Reconnect at that edge races the stale
-            // ladder: it can submit reconnect_gave_up after the fresh dial submits
-            // transport_live, leaving the controller Unreachable. Wait for the ladder's
-            // authoritative reconnect_gave_up projection, then cross the serialized Main
-            // dispatcher as a queue barrier before entering Reconnect there. This synchronizes
-            // on behavior and ownership quiescence, not elapsed time.
+            // The attempt journal edge is emitted before the blocked ladder has terminalized.
+            // Starting manual Reconnect at that edge races the still-running recovery owner:
+            // it can re-assert a stale terminal projection after the fresh dial submits
+            // transport_live, leaving the controller Unreachable. Wait for BOTH deterministic
+            // quiescence signals — the reducer's terminal Unreachable projection and the
+            // grace owner's own `silent_reattach_fail` (its loop has exited) — then cross the
+            // serialized Main dispatcher as a queue barrier before entering Reconnect there.
+            // This synchronizes on behavior and ownership quiescence, not elapsed time.
+            //
+            // Issue #2016: this used to wait on a `reconnect_gave_up` SUBMIT, which under the
+            // fixed ordering is not the terminal edge at all — a genuinely exhausted ladder
+            // terminalizes through the reducer's own budget decision on the last
+            // `reconnect_failed`. Waiting on the terminal STATE is both deterministic and
+            // agnostic to which honest edge produced it.
             awaitSustainedOutageTerminalization(vm, diagnostics)
 
             connector.outageActive = false
@@ -245,10 +284,7 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                     diagnostics.events
                         .filter { event ->
                             event.category == ConnectionJournalSchema.CATEGORY ||
-                                event.name == "silent_reattach_start" ||
-                                event.name == "silent_reattach_failed" ||
-                                event.name == "auto_reconnect_decision" ||
-                                event.name == "dead_lease_recovery"
+                                event.name in RECOVERY_OWNER_EVENTS
                         }
                         .joinToString("\n") { event ->
                             "${event.category}/${event.name} ${event.fields}"
@@ -619,6 +655,9 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
     ): Int {
         var maxAttempt = 0
         awaitCondition(ATTEMPT_PROGRESS_TIMEOUT_MS, "controller journal attempt > 1") {
+            // Issue #2016: the reason this wait could never be satisfied was a competing
+            // recovery owner, not a slow counter. Name it here instead of timing out.
+            assertNoCompetingRecoveryOwner(diagnostics)
             maxAttempt = diagnostics.events
                 .asSequence()
                 .filter { event ->
@@ -638,23 +677,65 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         return maxAttempt
     }
 
+    /**
+     * Issue #2016: the passive-grace ladder must OWN this mid-session drop end to end.
+     *
+     * The failure this pins is not "the attempt counter was slow" — it is that a competing
+     * `connect()`-based one-shot recovery cancelled the ladder before it could report a
+     * single rung failure, so the counter could never leave 0. That competing owner leaves a
+     * verbatim breadcrumb ([STALE_LEASE_REDIAL_STAGE]), so assert on the mechanism directly
+     * rather than on the symptom it produces twelve seconds later.
+     */
+    private suspend fun awaitPassiveGraceLadderIsSoleRecoveryOwner(
+        diagnostics: RecordingDiagnosticEventSink,
+        staleClientHash: Int,
+    ) {
+        awaitCondition(READER_EXIT_TIMEOUT_MS, "passive grace recovery owner started") {
+            assertNoCompetingRecoveryOwner(diagnostics)
+            diagnostics.eventsNamed("silent_reattach_start")
+                .any { it.fields["clientHash"] == staleClientHash }
+        }
+        assertNoCompetingRecoveryOwner(diagnostics)
+    }
+
+    /**
+     * Issue #2016: hard-fail the moment a competing one-shot re-dial claims the episode.
+     *
+     * Deliberately re-evaluated on EVERY poll of the recovery waits rather than sampled once:
+     * the competing owner arrives asynchronously, after the drop the test has already
+     * observed, so a single point-in-time check passes and the damage only surfaces later as
+     * an opaque timeout on a wait that can no longer be satisfied.
+     */
+    private fun assertNoCompetingRecoveryOwner(diagnostics: RecordingDiagnosticEventSink) {
+        val competingOwners = diagnostics.eventsNamed("cause_trail")
+            .filter { it.fields["stage"] == STALE_LEASE_REDIAL_STAGE }
+        assertTrue(
+            "the passive-grace ladder must be the SOLE recovery owner of a mid-session drop; " +
+                "the initial open's stale-lease transparent re-dial cancels the ladder and " +
+                "terminates the episode at attempt 1 (#2016): $competingOwners",
+            competingOwners.isEmpty(),
+        )
+    }
+
     private suspend fun awaitSustainedOutageTerminalization(
         vm: TmuxSessionViewModel,
         diagnostics: RecordingDiagnosticEventSink,
     ) {
-        awaitCondition(ATTEMPT_PROGRESS_TIMEOUT_MS, "sustained outage reconnect gave up") {
-            diagnostics.events.any { event ->
-                event.category == ConnectionJournalSchema.CATEGORY &&
-                    event.name == ConnectionJournalSchema.SUBMIT &&
-                    event.fields["event"] == "reconnect_gave_up"
-            }
+        awaitCondition(
+            TERMINALIZATION_TIMEOUT_MS,
+            "sustained outage ladder terminalized and grace owner finished",
+        ) {
+            assertNoCompetingRecoveryOwner(diagnostics)
+            vm.connectionControllerStateForTest() is ConnectionState.Unreachable &&
+                diagnostics.eventsNamed("silent_reattach_fail").isNotEmpty()
         }
-        // reconnect_gave_up is submitted synchronously on the dedicated test Main thread.
-        // Crossing that same dispatcher guarantees the stale recovery owner has finished its
-        // terminal projection before the test is allowed to restore and manually reconnect.
+        // The terminal projection is submitted synchronously on the dedicated test Main
+        // thread. Crossing that same dispatcher guarantees the recovery owner has finished
+        // its terminal projection before the test is allowed to restore and manually
+        // reconnect.
         withContext(Dispatchers.Main.immediate) { }
         assertTrue(
-            "the blocked auto-ladder must finish in Unreachable before manual Reconnect; " +
+            "the blocked ladder must finish in Unreachable before manual Reconnect; " +
                 "state=${vm.connectionControllerStateForTest()}",
             vm.connectionControllerStateForTest() is ConnectionState.Unreachable,
         )
@@ -777,10 +858,47 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         const val SSH_USER = "testuser"
         const val SESSION_NAME = "issue1952-typed-drop"
         const val INITIAL_CONNECT_TIMEOUT_MS = 30_000L
-        const val PASSIVE_GRACE_MS = 30_000L
+
+        /**
+         * Issue #2016: bounded so the grace owner's loop EXITS (its `silent_reattach_fail`
+         * is the ownership-quiescence signal the terminalization wait synchronizes on)
+         * without stretching the proof. Comfortably longer than the ladder below needs to
+         * exhaust, so the terminal state is a real reducer budget decision, not a
+         * grace-window cut-off.
+         */
+        const val PASSIVE_GRACE_MS = 10_000L
+
+        /**
+         * Issue #2016: the deterministic sustained-outage ladder. Three rungs means the
+         * grace loop's per-cycle rung feed climbs 2 -> 3 and the next failure is past the
+         * budget, so the reducer itself decides `Unreachable`. Short delays keep the whole
+         * exhaustion inside [PASSIVE_GRACE_MS] on a contended box; the ladder is still walked
+         * rung by rung through the real blocked dial, never short-circuited.
+         */
+        val SUSTAINED_OUTAGE_LADDER_MS = listOf(0L, 250L, 250L)
+
+        /** The `ReconnectCauseTrail` stage of the competing one-shot re-dial (#2016). */
+        const val STALE_LEASE_REDIAL_STAGE = "stale_lease_auto_recover"
+
+        /**
+         * Recovery-ownership diagnostics printed alongside the controller journal so a
+         * future failure shows WHICH owner drove the episode, not just the journal edges
+         * it produced. `silent_reattach_failed` (the old spelling here) never matched a
+         * real event name — the emitted name is `silent_reattach_fail`.
+         */
+        val RECOVERY_OWNER_EVENTS = setOf(
+            "silent_reattach_start",
+            "silent_reattach_fail",
+            "auto_reconnect_decision",
+            "dead_lease_recovery",
+            "cause_trail",
+            "connect_fail",
+            "reconnect_fail",
+        )
         const val REATTACH_TIMEOUT_MS = 1_000L
         const val READER_EXIT_TIMEOUT_MS = 10_000L
         const val ATTEMPT_PROGRESS_TIMEOUT_MS = 12_000L
+        const val TERMINALIZATION_TIMEOUT_MS = 30_000L
         const val RECOVERY_TIMEOUT_MS = 30_000L
         const val MARKER_TIMEOUT_MS = 10_000L
         const val WITHIN_GRACE_RECOVERY_MS = 10_000L

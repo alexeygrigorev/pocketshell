@@ -37,11 +37,18 @@ import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TmuxSessionLatencyTelemetry
+import com.pocketshell.app.proof.signals.SyntheticFocusOwnerHarness
+import com.pocketshell.app.proof.signals.activityWindowFocused
+import com.pocketshell.app.proof.signals.describeActiveWindow
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.testsupport.FOREIGN_WINDOW_OVER_VIEWPORT_SIGNATURE
+import com.pocketshell.testsupport.MarkerBandCaptureVerdict
+import com.pocketshell.testsupport.evaluateMarkerBandCapture
+import com.pocketshell.testsupport.requiredMarkerSpanPx
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -145,6 +152,16 @@ class SessionSwipeSwitchE2eTest {
      */
     private val pickerReadyWaitMs: Long =
         if (TerminalTestTimeouts.isRunningOnCi()) 120_000L else 45_000L
+
+    /**
+     * Issue #1994: how long the device surface is given to actually PAINT a band
+     * the emulator model already holds. The old capture allowed 150 ms with no
+     * retry, which is not a paint barrier at all — see [captureViewport]. The
+     * pump exits the instant the band appears, so a healthy device pays one
+     * settle; only a genuinely unpainted surface spends the whole budget.
+     */
+    private val capturePaintBudgetMs: Long =
+        if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 10_000L
 
     @After
     fun closeLaunchedActivity() {
@@ -445,6 +462,203 @@ class SessionSwipeSwitchE2eTest {
 
         Unit
     } }
+
+    /**
+     * Issue #1994, arm 1 — a foreign window over the viewport must be NAMED, not
+     * mistaken for the terminal failing to paint.
+     *
+     * **This arm is CLASS COVERAGE, not the reproduction of the `1ddeadb3`
+     * red.** Round 2 re-derived that failure from the run's own per-class
+     * logcat: the app was RESUMED and in front at capture time, with no ANR,
+     * dialog or foreign-window signature — see the [captureViewport] KDoc for
+     * the timestamps. The hosted red was the single-shot 150 ms non-composition
+     * barrier, and the bounded pump fixes it.
+     *
+     * What this arm does cover is the neighbouring capture world the same shard
+     * demonstrably contains: five OTHER classes on it failed with
+     * `active_window_pkg=android active_window_class=android.widget.FrameLayout`,
+     * i.e. a framework window owning the display. A window over the app does not
+     * merely dim the frame — the captured pixels are not the app's pixels at
+     * all, so a missing band there says nothing about what PocketShell painted,
+     * and the oracle must say so rather than blame the terminal.
+     *
+     * The state is injected SYNTHETICALLY (D33: the environment cannot be asked
+     * to raise a framework error dialog on demand inside a sibling-shared AVD)
+     * using the reviewed #1985 [SyntheticFocusOwnerHarness], expanded to actually
+     * cover the display so the injection is deterministic rather than relying on
+     * the dialog's dim amount.
+     *
+     * RED on base: the capture throws "device-visible viewport did not paint the
+     * complete 'A237-READY' cell band". GREEN with the fix: it throws the
+     * foreign-owner attribution instead. Note it still THROWS — attribution is
+     * never amnesty (pinned on the JVM by `MarkerBandCaptureVerdictTest`).
+     */
+    @Test
+    fun foreignWindowOverTheViewportIsNamedInsteadOfBlamingTheTerminalPaint() { runBlocking {
+        val key = attachToSessionAForCaptureProof()
+
+        // The injected owner is a Dialog hosted by the instrumented app, so the
+        // reading it produces is `active_window_pkg=<our own package>`, not a
+        // genuinely third-party package like the hosted `android` window. What
+        // is under test is the ORACLE's rule — "the app's Activity window did not
+        // own the display, so these are not the app's pixels" — which reads
+        // `activityWindowFocused`, not the package string; the package is only
+        // carried into the message so a red shard says WHO owned the display.
+        // A real cross-package owner cannot be commanded on demand inside a
+        // sibling-shared AVD (D33: inject synthetically, hard-fail otherwise).
+        val harness = SyntheticFocusOwnerHarness(
+            scenario = requireNotNull(launchedActivity),
+            label = "issue-1994 synthetic focus owner",
+        )
+        var captureFailure: Throwable? = null
+        harness.withOwner { dialog ->
+            // Cover the whole display so the injected state is "the captured
+            // frame is not the app's", deterministically, on every device
+            // density — not "the dialog's default dim happened to be enough".
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                dialog.window?.setLayout(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                )
+                dialog.window?.decorView?.setBackgroundColor(android.graphics.Color.BLACK)
+            }
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            SystemClock.sleep(500)
+            captureFailure = runCatching {
+                captureViewport("issue1994-01-foreign-window-over-viewport", A_MARKER)
+            }.exceptionOrNull()
+        }
+
+        val failure = requireNotNull(captureFailure) {
+            "expected the viewport capture to FAIL while a foreign window owned the " +
+                "display — a green there would mean the oracle accepted a frame that " +
+                "was never the app's"
+        }
+        val message = failure.message.orEmpty()
+        assertTrue(
+            "a capture taken while a foreign window owned the display must name that " +
+                "owner, not blame the terminal's paint; got:\n$message",
+            message.contains(FOREIGN_WINDOW_OVER_VIEWPORT_SIGNATURE),
+        )
+        assertTrue(
+            "the foreign-owner attribution must carry the active window reading so a " +
+                "red shard says WHO owned the display; got:\n$message",
+            message.contains("active_window_pkg="),
+        )
+        // Prove the app really is healthy afterwards: the same capture that just
+        // failed must pass once the foreign window is gone. Without this the test
+        // could pass against a genuinely broken terminal.
+        captureViewport("issue1994-02-after-foreign-window-dismissed", A_MARKER)
+        writeText(
+            "issue1994-foreign-window-attribution.txt",
+            "captured_failure_message=$message\n",
+        )
+        Unit
+    } }
+
+    /**
+     * Issue #1994, arm 2 — a device surface that has not painted the band YET
+     * must be given a bounded second look, not judged on one 150 ms shot.
+     *
+     * `waitForIdleSync()` is a main-thread barrier, not a composition barrier:
+     * it returns before SurfaceFlinger has necessarily put the frame on the
+     * display. On a hosted swiftshader emulator under a 300-test shard the model
+     * can lead the painted surface by well over the old flat 150 ms, which is
+     * how a correct app produced `matchingPixels=0`.
+     *
+     * The lag is injected SYNTHETICALLY as an opaque, NON-focusable overlay in
+     * the activity's own window (so window focus stays with the app and this arm
+     * cannot pass through arm 1's attribution path), removed after
+     * [SYNTHETIC_OCCLUSION_MS] — comfortably longer than the old single shot and
+     * far inside the bounded budget.
+     *
+     * RED on base: the single-shot capture fails with the paint message. GREEN
+     * with the fix: the pump keeps looking and captures the real frame.
+     */
+    @Test
+    fun transientlyOccludedSurfaceIsCapturedOnceItRepaints() { runBlocking {
+        attachToSessionAForCaptureProof()
+        val scenario = requireNotNull(launchedActivity)
+
+        var overlay: View? = null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            scenario.onActivity { activity ->
+                val cover = View(activity).apply {
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    isFocusable = false
+                    isFocusableInTouchMode = false
+                }
+                activity.addContentView(
+                    cover,
+                    ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    ),
+                )
+                overlay = cover
+            }
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        assertTrue(
+            "the synthetic occlusion must NOT steal window focus — otherwise this arm " +
+                "would exercise the foreign-owner attribution instead of the paint pump",
+            activityWindowFocused(scenario),
+        )
+
+        val remover = Thread {
+            SystemClock.sleep(SYNTHETIC_OCCLUSION_MS)
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                val cover = overlay ?: return@runOnMainSync
+                (cover.parent as? ViewGroup)?.removeView(cover)
+            }
+        }
+        remover.start()
+        try {
+            // Load-bearing: this must SUCCEED. On base it is evaluated once,
+            // 150 ms in, while the cover is still up, and hard-fails.
+            captureViewport("issue1994-03-transient-occlusion-repaint", A_MARKER)
+        } finally {
+            remover.join(SYNTHETIC_OCCLUSION_MS * 3)
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                val cover = overlay
+                if (cover != null) (cover.parent as? ViewGroup)?.removeView(cover)
+            }
+        }
+        Unit
+    } }
+
+    /**
+     * Shared prologue for the #1994 capture-attribution arms: seed SESSION_A,
+     * attach through the real host-row + picker journey, and wait until the
+     * emulator MODEL holds the marker. Everything after that is about what the
+     * DEVICE painted.
+     */
+    private suspend fun attachToSessionAForCaptureProof(): String {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSessions(key)
+        val hostRowTag = seedDockerHost(key, "Issue1994 Capture")
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+        compose.onNodeWithText(SESSION_A).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        selectTerminalTabForVisibleCapture()
+        waitForVisibleTerminal("session A ready") { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                A_MARKER,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        return key
+    }
 
     /**
      * Open the session pager with a swipe-DOWN gesture, then swipe it one page
@@ -847,61 +1061,176 @@ class SessionSwipeSwitchE2eTest {
         return grid ?: GridSize(columns = 80, rows = 24)
     }
 
+    /**
+     * Issue #1994 — the capture is a BOUNDED PUMP, not a single shot.
+     *
+     * The nightly (run 30961154855, shard 2, exact main `1ddeadb3`) failed the
+     * very FIRST capture with `magenta span=0 px … matchingPixels=0` — zero
+     * matching pixels, before any switch, on a device whose emulator model
+     * already held the marker.
+     *
+     * **Attribution, corrected in round 2 from that run's own per-class
+     * logcat.** The bundle's
+     * `logcat-…SessionSwipeSwitchE2eTest-swipeDownPagerSwitchesSessionAndActivatesCachedRuntimeOnReturn.txt`
+     * shows the app RESUMED and in front at capture time:
+     *
+     * ```
+     * 00:29:10.480 LifecycleMonitor: MainActivity … RESUMED
+     * 00:29:10.772 VRI[NexusLauncherActivity]: visibilityChanged … newVisibility=false
+     * 00:29:14.052 tmux-first-pane-output … bytes=8 elapsedMs=853
+     * 00:29:14.551 ISSUE237_VIEWPORT …issue237-01-attached-session-a-viewport.png  <-- the capture
+     * 00:29:15.390 VRI[MainActivity]: visibilityChanged … newVisibility=false      <-- teardown only
+     * ```
+     *
+     * No ANR, no dialog, no foreign-window signature anywhere in that file, and
+     * the shard's five `active_window_pkg=android` failures are at 00:04:44 and
+     * 00:31:39–00:38:29 — nowhere near this capture. **A foreign window did NOT
+     * own the display here.** The cause is the capture itself: it fired ~0.5 s
+     * after the first 8 bytes of pane output, judged ONCE, after
+     * `waitForIdleSync()` + a flat 150 ms sleep. That is a main-thread barrier,
+     * not a composition/SurfaceFlinger barrier — under hosted swiftshader load a
+     * late-but-correct paint is reported as a paint failure with no second look.
+     *
+     * The bounded pump is therefore the fix for THIS failure. The foreign-window
+     * arm below is CLASS COVERAGE for the neighbouring capture world (a dim
+     * scrim wipes the exact magenta match to zero while the band is still on the
+     * screen), not the reproduction of the `1ddeadb3` red.
+     *
+     * So the capture now:
+     *
+     *  1. re-reads the geometry, re-takes the screenshot and re-runs the pixel
+     *     oracle until it is satisfied or a CI-scaled deadline elapses (the
+     *     pump's exit condition IS the load-bearing assertion — the AGENTS.md
+     *     Shape-B bounded-pump rule); and
+     *  2. attributes a still-missing band: if the app window did not own the
+     *     display, the failure names that foreign owner
+     *     ([FOREIGN_WINDOW_OVER_VIEWPORT_SIGNATURE]) rather than blaming the
+     *     terminal for a frame that was never the app's.
+     *
+     * Attribution is NEVER amnesty: a missing band fails in both worlds (pinned
+     * on the JVM by `MarkerBandCaptureVerdictTest`).
+     */
     private fun captureViewport(name: String, expectedMarker: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
-        instrumentation.waitForIdleSync()
-        SystemClock.sleep(150)
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + capturePaintBudgetMs
+        var attempts = 0
+        var lastVerdict: MarkerBandCaptureVerdict? = null
+        val attemptTrail = StringBuilder()
 
-        var viewportLeft = 0
-        var viewportTop = 0
-        var viewportWidth = 0
-        var viewportHeight = 0
-        var fontWidthPx = 0f
-        launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            val location = IntArray(2)
-            view.getLocationOnScreen(location)
-            viewportLeft = location[0]
-            viewportTop = location[1]
-            viewportWidth = view.width
-            viewportHeight = view.height
-            fontWidthPx = view.mRenderer.fontWidth
+        while (true) {
+            instrumentation.waitForIdleSync()
+            SystemClock.sleep(CAPTURE_SETTLE_MS)
+            attempts++
+
+            var viewportLeft = 0
+            var viewportTop = 0
+            var viewportWidth = 0
+            var viewportHeight = 0
+            var fontWidthPx = 0f
+            launchedActivity?.onActivity { activity ->
+                val view = activity.window.decorView.findTerminalView() ?: return@onActivity
+                val location = IntArray(2)
+                view.getLocationOnScreen(location)
+                viewportLeft = location[0]
+                viewportTop = location[1]
+                viewportWidth = view.width
+                viewportHeight = view.height
+                fontWidthPx = view.mRenderer.fontWidth
+            }
+            val screen = instrumentation.uiAutomation.takeScreenshot()
+            val left = viewportLeft.coerceIn(0, screen.width)
+            val top = viewportTop.coerceIn(0, screen.height)
+            val width = viewportWidth.coerceAtMost(screen.width - left)
+            val height = viewportHeight.coerceAtMost(screen.height - top)
+            check(width > 0 && height > 0) {
+                "invalid terminal viewport crop left=$left top=$top width=$width height=$height " +
+                    "screen=${screen.width}x${screen.height}"
+            }
+            // Crop the pixels the emulator actually displayed. Drawing
+            // TerminalView into a fresh off-screen bitmap is not authoritative
+            // because its dirty renderer cache describes the already-painted
+            // device surface and can intentionally skip unchanged cells,
+            // producing a partial evidence image.
+            val bitmap = Bitmap.createBitmap(screen, left, top, width, height)
+            screen.recycle()
+
+            val band = measureMarkerBand(bitmap)
+            val bandComplete = fontWidthPx > 0f &&
+                band.spanPx >= requiredMarkerSpanPx(expectedMarker, fontWidthPx)
+            val outOfBudget = SystemClock.elapsedRealtime() >= deadline
+            // The window-owner diagnosis costs a full accessibility-tree fetch,
+            // so it is computed ONLY on the terminal failure path (the same
+            // laziness rule WindowFocusSignals documents). The per-attempt read
+            // is the cheap `hasWindowFocus()` one.
+            val focused = bandComplete || activityWindowFocused(requireNotNull(launchedActivity))
+            val focusDiagnosis = when {
+                focused -> "app_window_focused=true"
+                bandComplete || !outOfBudget -> "app_window_focused=false"
+                else -> "app_window_focused=false ${describeActiveWindow()}"
+            }
+            val verdict = evaluateMarkerBandCapture(
+                marker = expectedMarker,
+                artifactName = name,
+                paintedSpanPx = band.spanPx,
+                matchingPixels = band.matchingPixels,
+                fontWidthPx = fontWidthPx,
+                appWindowFocused = focused,
+                activeWindowDescription = focusDiagnosis,
+                attempts = attempts,
+                elapsedMs = SystemClock.elapsedRealtime() - startedAt,
+            )
+            lastVerdict = verdict
+            attemptTrail.append("attempt=").append(attempts)
+                .append(" elapsedMs=").append(SystemClock.elapsedRealtime() - startedAt)
+                .append(" outcome=").append(verdict.outcome)
+                .append(" span=").append(band.spanPx)
+                .append(" matching=").append(band.matchingPixels)
+                .append(' ').append(focusDiagnosis)
+                .append('\n')
+
+            if (verdict.painted || outOfBudget) {
+                // Persist the LAST observed frame either way: a failure must
+                // ship the evidence that produced it, not a stale earlier one.
+                writeBitmap("$name-viewport", bitmap)
+                var text = ""
+                launchedActivity?.onActivity { activity ->
+                    text = activity.window.decorView
+                        .findTerminalView()
+                        ?.currentSession
+                        ?.emulator
+                        ?.screen
+                        ?.visibleScreenText
+                        .orEmpty()
+                }
+                writeText("$name-visible-terminal.txt", text)
+                writeText(
+                    "$name-device-pixel-oracle.txt",
+                    "marker=$expectedMarker\nfont_width_px=$fontWidthPx\n" +
+                        "painted_magenta_span_px=${band.spanPx}\n" +
+                        "required_span_px=${requiredMarkerSpanPx(expectedMarker, fontWidthPx)}\n" +
+                        "matching_pixels=${band.matchingPixels}\n" +
+                        "capture_attempts=$attempts\n" +
+                        "capture_elapsed_ms=${SystemClock.elapsedRealtime() - startedAt}\n" +
+                        "outcome=${verdict.outcome}\n",
+                )
+                writeText("$name-capture-attempts.txt", attemptTrail.toString())
+                bitmap.recycle()
+                break
+            }
+            bitmap.recycle()
+            SystemClock.sleep(CAPTURE_RETRY_INTERVAL_MS)
         }
-        val screen = instrumentation.uiAutomation.takeScreenshot()
-        val left = viewportLeft.coerceIn(0, screen.width)
-        val top = viewportTop.coerceIn(0, screen.height)
-        val width = viewportWidth.coerceAtMost(screen.width - left)
-        val height = viewportHeight.coerceAtMost(screen.height - top)
-        check(width > 0 && height > 0) {
-            "invalid terminal viewport crop left=$left top=$top width=$width height=$height " +
-                "screen=${screen.width}x${screen.height}"
-        }
-        // Crop the pixels the emulator actually displayed. Drawing TerminalView
-        // into a fresh off-screen bitmap is not authoritative because its dirty
-        // renderer cache describes the already-painted device surface and can
-        // intentionally skip unchanged cells, producing a partial evidence image.
-        val bitmap = Bitmap.createBitmap(screen, left, top, width, height)
-        screen.recycle()
-        writeBitmap("$name-viewport", bitmap)
-        var text = ""
-        launchedActivity?.onActivity { activity ->
-            text = activity.window.decorView
-                .findTerminalView()
-                ?.currentSession
-                ?.emulator
-                ?.screen
-                ?.visibleScreenText
-                .orEmpty()
-        }
-        writeText("$name-visible-terminal.txt", text)
-        assertCompleteMarkerPainted(
-            bitmap = bitmap,
-            marker = expectedMarker,
-            fontWidthPx = fontWidthPx,
-            artifactName = name,
+
+        val verdict = requireNotNull(lastVerdict)
+        assertTrue(
+            "${verdict.message}\ncapture attempt trail:\n$attemptTrail",
+            verdict.painted,
         )
-        bitmap.recycle()
     }
+
+    /** Widest horizontal run of the seeded true-colour magenta cell background. */
+    private data class MarkerBand(val spanPx: Int, val matchingPixels: Int)
 
     /**
      * Device-pixel oracle for the complete marker. The seeded marker owns a
@@ -910,13 +1239,13 @@ class SessionSwipeSwitchE2eTest {
      * actually painted, independently of the emulator model text. A stale
      * #469 dirty clip that paints only `A2`/`B2` spans roughly two cells and
      * hard-fails against the full ten-cell marker width.
+     *
+     * The colour match stays EXACT (`r>=245, g<=10, b>=245`). Loosening it to
+     * survive a dim scrim would also accept a dimmed/obscured frame as proof the
+     * user can see the session — the opposite of what this oracle is for. The
+     * dim case is handled by attribution, not by tolerance.
      */
-    private fun assertCompleteMarkerPainted(
-        bitmap: Bitmap,
-        marker: String,
-        fontWidthPx: Float,
-        artifactName: String,
-    ) {
+    private fun measureMarkerBand(bitmap: Bitmap): MarkerBand {
         var minX = bitmap.width
         var maxX = -1
         var matchingPixels = 0
@@ -933,20 +1262,9 @@ class SessionSwipeSwitchE2eTest {
                 }
             }
         }
-        val paintedSpanPx = if (maxX >= minX) maxX - minX + 1 else 0
-        val requiredSpanPx = (fontWidthPx * (marker.length - 1)).toInt()
-        writeText(
-            "$artifactName-device-pixel-oracle.txt",
-            "marker=$marker\nfont_width_px=$fontWidthPx\n" +
-                "painted_magenta_span_px=$paintedSpanPx\n" +
-                "required_span_px=$requiredSpanPx\nmatching_pixels=$matchingPixels\n",
-        )
-        assertTrue(
-            "device-visible viewport did not paint the complete '$marker' cell band for " +
-                "$artifactName: magenta span=$paintedSpanPx px, required>=$requiredSpanPx px, " +
-                "fontWidth=$fontWidthPx, matchingPixels=$matchingPixels. The emulator model " +
-                "may already contain the marker, but a partial actual surface is a failure.",
-            fontWidthPx > 0f && paintedSpanPx >= requiredSpanPx,
+        return MarkerBand(
+            spanPx = if (maxX >= minX) maxX - minX + 1 else 0,
+            matchingPixels = matchingPixels,
         )
     }
 
@@ -1075,5 +1393,20 @@ class SessionSwipeSwitchE2eTest {
         // picker-ready signal.
         const val LOADING_PLACEHOLDER_STATUS: String = "loading same-host sessions"
         const val READY_CURRENT_STATUS: String = "current"
+
+        // Issue #1994 capture-pump cadence. The settle is the old flat wait kept
+        // as the FIRST attempt's delay so a healthy device behaves exactly as
+        // before; the retry interval paces the additional looks.
+        const val CAPTURE_SETTLE_MS: Long = 150L
+        const val CAPTURE_RETRY_INTERVAL_MS: Long = 250L
+
+        /**
+         * Issue #1994: how long the synthetic occlusion injected by
+         * [transientlyOccludedSurfaceIsCapturedOnceItRepaints] stays up. It must
+         * comfortably exceed the old single-shot 150 ms window (so the base
+         * capture is deterministically red) while staying far inside the bounded
+         * capture budget (so the fixed capture is deterministically green).
+         */
+        const val SYNTHETIC_OCCLUSION_MS: Long = 3_000L
     }
 }

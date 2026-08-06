@@ -21,23 +21,34 @@ import com.pocketshell.app.BackgroundGraceTestOverride
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.app.portfwd.PortForwardingTestIsolationRule
+import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.testsupport.TMUX_CLIENT_OWNERSHIP_FORMAT
+import com.pocketshell.testsupport.TmuxClientRecord
+import com.pocketshell.testsupport.describeOwnedDetachFailure
+import com.pocketshell.testsupport.evaluateOwnedClientDetach
+import com.pocketshell.testsupport.parseTmuxClients
+import com.pocketshell.testsupport.resolveOwnedClientNames
 import com.termux.view.TerminalView
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.runBlocking
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.PTYMode
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import org.junit.After
-import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
@@ -114,14 +125,31 @@ import java.nio.charset.StandardCharsets
 @RunWith(AndroidJUnit4::class)
 class TmuxDetachOnBackgroundE2eTest {
 
-    @get:Rule
     val compose = createEmptyComposeRule()
 
     // Issue #470 blocker #1: grant runtime permissions before the activity
     // launches so the system GrantPermissionsActivity never steals focus
     // from the Compose hierarchy ("No compose hierarchies found").
-    @get:Rule
     val grantPermissions = PreGrantPermissionsRule()
+
+    /**
+     * Issue #1994 (round 2), class coverage with
+     * [TmuxOrphanClientCleanupE2eTest]: this journey asserts the SAME
+     * background-detach contract against the SAME shared fixture session, so it
+     * is vulnerable to the SAME leaked always-on port-forward pin. A pin makes
+     * `App.dispatchGraceElapsedIfNeeded` SUPPRESS the bounded teardown (#1159
+     * Part 3), the client stays attached BY DESIGN, and the detach assertion
+     * reports a product regression that never happened. Isolated before the
+     * background transition; also an outer rule so this class cannot leak a pin
+     * onward.
+     */
+    private val forwardingIsolation = PortForwardingTestIsolationRule()
+
+    @get:Rule
+    val ruleChain: RuleChain = RuleChain
+        .outerRule(forwardingIsolation)
+        .around(grantPermissions)
+        .around(compose)
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
@@ -142,6 +170,15 @@ class TmuxDetachOnBackgroundE2eTest {
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
         clearLogcat()
+
+        // Issue #1994: the clients already on this SHARED fixture session before
+        // the app attaches. tmux moves (never kills) a client whose session is
+        // killed, so on the nightly's ~300-class single-process shard a stray
+        // client migrates onto this session by itself; counting it as
+        // PocketShell's would report a detach regression that never happened.
+        // Everything below is attributed by client IDENTITY instead.
+        val foreignBaseline = listClientNames(key, SEEDED_SESSION)
+        Log.i(LOG_TAG, "foreign client baseline on $SEEDED_SESSION = $foreignBaseline")
 
         val hostRowTag = seedDockerHost(key)
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
@@ -170,23 +207,37 @@ class TmuxDetachOnBackgroundE2eTest {
         // post-detach poll at the bottom of the test — without this
         // loop the round-2 reviewer observed `got 0` racing the
         // server-side registration on swiftshader (issue #235, r2).
-        var attachedClientCount = -1
+        var ownedNames = emptySet<String>()
         var attachedRawSnapshot = ""
         val preBackgroundDeadline =
             SystemClock.elapsedRealtime() + PRE_BACKGROUND_CLIENT_WAIT_MS
         while (SystemClock.elapsedRealtime() < preBackgroundDeadline) {
-            val raw = listClientsRaw(key, SEEDED_SESSION)
-            attachedRawSnapshot = raw
-            val count = raw.lines().count { it.isNotBlank() }
-            attachedClientCount = count
-            if (count >= 1) break
+            val records = listClientRecords(key, SEEDED_SESSION)
+            attachedRawSnapshot = records.joinToString("\n") { it.describe() }
+            ownedNames = resolveOwnedClientNames(foreignBaseline, records)
+            if (ownedNames.isNotEmpty()) break
             SystemClock.sleep(100)
         }
-        Log.i(LOG_TAG, "attached-state clients on $SEEDED_SESSION = $attachedClientCount")
+        Log.i(LOG_TAG, "app-owned clients on $SEEDED_SESSION = $ownedNames")
         assertTrue(
-            "expected at least one tmux client (the app's -CC connection) before background within " +
-                "${PRE_BACKGROUND_CLIENT_WAIT_MS}ms, got $attachedClientCount; raw=`$attachedRawSnapshot`",
-            attachedClientCount >= 1,
+            "expected the app's OWN tmux -CC client on $SEEDED_SESSION before background within " +
+                "${PRE_BACKGROUND_CLIENT_WAIT_MS}ms; foreignBaseline=$foreignBaseline " +
+                "current=`$attachedRawSnapshot`",
+            ownedNames.isNotEmpty(),
+        )
+
+        // ---- (2a) Issue #1994 round 2: clear any always-on port-forward pin
+        // leaked into this process by an earlier class. While a forward pins the
+        // connection, `App.dispatchGraceElapsedIfNeeded` SUPPRESSES the bounded
+        // teardown (#1159 Part 3) and the `-CC` client stays attached by design —
+        // which the detach assertion below would report as a product regression.
+        val pinBeforePrelude = portForwardPinActive()
+        forwardingIsolation.hardStopAndAssertZero("#1994 pre-background forwarding-pin isolation")
+        recordTiming("forwarding_pin_active_before_prelude", if (pinBeforePrelude) 1L else 0L)
+        assertFalse(
+            "the pre-background isolation must leave NO port-forward pin active, otherwise " +
+                "the bounded teardown stays suppressed and the detach verdict is meaningless",
+            portForwardPinActive(),
         )
 
         // ---- (2) Background the app via `moveToState(CREATED)`. Use a short
@@ -211,11 +262,13 @@ class TmuxDetachOnBackgroundE2eTest {
         // so this cannot become a test that merely delays before asserting zero.
         waitForGraceStart(POST_GRACE_MS)
         val conservativeGraceDeadline = backgroundStart + POST_GRACE_MS
-        val withinGraceRawSnapshot = listClientsRaw(key, SEEDED_SESSION)
+        val withinGraceRecords = listClientRecords(key, SEEDED_SESSION)
+        val withinGraceRawSnapshot = withinGraceRecords.joinToString("\n") { it.describe() }
         val withinGraceObservedAt = SystemClock.elapsedRealtime()
-        val clientsInsideGrace = withinGraceRawSnapshot
-            .lines()
-            .count { it.isNotBlank() }
+        // Issue #1994: count the app's OWN clients, not every client on the
+        // shared session — a foreign one would satisfy `>= 1` while the app's
+        // runtime had already been torn down.
+        val clientsInsideGrace = withinGraceRecords.count { it.name in ownedNames }
         writeText(
             "issue235-02-within-grace-clients.txt",
             buildString {
@@ -244,27 +297,40 @@ class TmuxDetachOnBackgroundE2eTest {
         // ---- (3) Poll list-clients until the post-grace detach lands. tmux
         // removes the entry within a single round-trip once `detach-client` is
         // received. The budget covers the injected grace, teardown, and CI load.
-        var orphanCount = -1
+        var detachVerdict = evaluateOwnedClientDetach(foreignBaseline, ownedNames, emptyList())
         var orphanRawSnapshot = ""
         val deadline = SystemClock.elapsedRealtime() + DETACH_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
-            val raw = listClientsRaw(key, SEEDED_SESSION)
-            orphanRawSnapshot = raw
-            val count = raw.lines().count { it.isNotBlank() }
-            orphanCount = count
-            if (count == 0) break
+            val records = listClientRecords(key, SEEDED_SESSION)
+            orphanRawSnapshot = records.joinToString("\n") { it.describe() }
+            detachVerdict = evaluateOwnedClientDetach(foreignBaseline, ownedNames, records)
+            if (detachVerdict.detached) break
             SystemClock.sleep(100)
         }
         recordTiming(
             "background_to_detach_ms",
             SystemClock.elapsedRealtime() - backgroundStart,
         )
-        writeText("issue235-02-after-background-clients.txt", orphanRawSnapshot)
-        assertEquals(
-            "expected zero tmux clients on $SEEDED_SESSION after bounded background grace elapsed; " +
-                "raw=`$orphanRawSnapshot`",
-            0,
-            orphanCount,
+        val pinAtVerdict = portForwardPinActive()
+        writeText(
+            "issue235-02-after-background-clients.txt",
+            buildString {
+                appendLine("foreign_baseline=$foreignBaseline")
+                appendLine("app_owned=$ownedNames")
+                appendLine("forwarding_pin_active_before_prelude=$pinBeforePrelude")
+                appendLine("forwarding_pin_active_at_verdict=$pinAtVerdict")
+                appendLine("verdict=${detachVerdict.diagnosis()}")
+                append(orphanRawSnapshot)
+            },
+        )
+        assertTrue(
+            describeOwnedDetachFailure(
+                verdict = detachVerdict,
+                portForwardPinActive = pinAtVerdict,
+                sessionName = SEEDED_SESSION,
+                rawClients = orphanRawSnapshot,
+            ).orEmpty() + " foreign_baseline=$foreignBaseline app_owned=$ownedNames",
+            detachVerdict.detached,
         )
 
         // ---- (4) Attach as the "desktop" from a sidecar SSH client
@@ -422,7 +488,15 @@ class TmuxDetachOnBackgroundE2eTest {
         }
     }
 
-    private suspend fun listClientsRaw(key: String, sessionName: String): String {
+    /**
+     * Issue #1994: parseable client rows (name + control-mode + flags) so the
+     * detach acceptance can be decided by client IDENTITY rather than by a total
+     * count that cannot tell this journey's client from a stray one.
+     */
+    private suspend fun listClientRecords(
+        key: String,
+        sessionName: String,
+    ): List<TmuxClientRecord> {
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
             port = DEFAULT_PORT,
@@ -433,12 +507,30 @@ class TmuxDetachOnBackgroundE2eTest {
         ).mapCatching { session ->
             session.use {
                 it.exec(
-                    "tmux list-clients -t ${shellQuote(sessionName)} 2>/dev/null || true",
+                    "tmux list-clients -t ${shellQuote(sessionName)} " +
+                        "-F ${shellQuote(TMUX_CLIENT_OWNERSHIP_FORMAT)} 2>/dev/null || true",
                 )
             }
         }
-        return result.getOrNull()?.stdout.orEmpty()
+        return parseTmuxClients(result.getOrNull()?.stdout.orEmpty())
     }
+
+    private suspend fun listClientNames(key: String, sessionName: String): Set<String> =
+        listClientRecords(key, sessionName).map { it.name }.toSet()
+
+    private fun forwardingController(): ForwardingController =
+        EntryPointAccessors.fromApplication(
+            InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+            TestAccessEntryPoint::class.java,
+        ).forwardingController()
+
+    /**
+     * The exact predicate `App.kt` uses for `holdWhilePinned` — true while a
+     * port-forward pins the connection always-on and the bounded-grace teardown
+     * is therefore SUPPRESSED (#1159 Part 3).
+     */
+    private fun portForwardPinActive(): Boolean =
+        forwardingController().flowOfActiveHostCount().value > 0
 
     /**
      * Issue #235: open a fresh plain-ssh shell, allocate a PTY of
@@ -541,7 +633,7 @@ class TmuxDetachOnBackgroundE2eTest {
     }
 
     /**
-     * Issue #235: same shape as [listClientsRaw] but explicitly asks
+     * Issue #235: same shape as [listClientRecords] but explicitly asks
      * for the `[WIDTHxHEIGHT]` rendering tmux uses in its default
      * `list-clients` format. We rely on the default format here
      * rather than `-F '#{client_width} #{client_height}'` because

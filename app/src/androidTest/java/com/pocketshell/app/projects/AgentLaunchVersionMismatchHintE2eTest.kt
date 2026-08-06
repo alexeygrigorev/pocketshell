@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.FakeOldHostSshSession
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -20,16 +21,22 @@ import java.io.File
  * This runs the REAL production wiring
  * ([SshFolderListGateway.createSessionOnSession], the same code the picker
  * confirm path calls) on the Android runtime, against an on-device fake
- * [SshSession] that injects the outdated-host `agent --help` probe output via a
- * test seam. The fake stands in for an outdated remote so the proof is
- * deterministic and needs no separate Docker fixture (the deterministic
- * `agents` fixture ships a CURRENT `pocketshell` that DOES have `agent`).
+ * [com.pocketshell.core.ssh.SshSession] that injects the outdated-host
+ * `agent --help` probe output via a test seam. The fake stands in for an
+ * outdated remote so the proof is deterministic and needs no separate Docker
+ * fixture (the deterministic `agents` fixture ships a CURRENT `pocketshell`
+ * that DOES have `agent`) — it is the non-happy-host fixture G10 asks for.
  *
- * The friendly hint is exactly the `RuntimeException` message that
- * `createSession` surfaces as `Result.failure`, which the folder-list view
- * model renders to the user as "Couldn't create session: <hint>"
- * (FolderListViewModel#createSession). Asserting the thrown message therefore
- * asserts the on-screen text.
+ * ## Issue #1928: the same hint, correctly ACCOUNTED FOR
+ *
+ * The version pre-flight runs AFTER the tmux session has been created, and it
+ * used to THROW — so this exact scenario reported "Couldn't create session:
+ * <hint>" while an empty session sat on the host, unmentioned. It is now the
+ * reason of a [SessionCreateOutcome.LaunchFailed]: same words, but the outcome
+ * says the session EXISTS, and the surfaces render it as "Session “…” was
+ * created, but the agent didn't start: <hint>". This class asserts the whole
+ * shape — the outcome type, the session it names, the hint, the doomed line NOT
+ * being typed, and the created session NOT being cleaned up.
  *
  * The captured before/after + recorded commands are written under the app's
  * external files dir (`agent-version-mismatch/`) per the artifact rules.
@@ -46,7 +53,7 @@ class AgentLaunchVersionMismatchHintE2eTest {
         // the `agent` subcommand — the #759 maintainer dogfood host.
         val session = FakeOldHostSshSession()
 
-        val error = runCatching {
+        val outcome = runCatching {
             gateway.createSessionOnSession(
                 session = session,
                 sessionName = "issue759-outdated",
@@ -56,13 +63,27 @@ class AgentLaunchVersionMismatchHintE2eTest {
                 startCommand = "pocketshell agent claude --dir '/home/alexey/tmp/test'",
                 namePolicy = SessionNamePolicy.UniqueOnHost,
             )
-        }.exceptionOrNull()
+        }
 
-        val hint = error?.message.orEmpty()
+        // Issue #1928: an outdated host is a LAUNCH failure, not a create
+        // failure — the tmux session was created one step earlier and is the
+        // user's to keep. Reporting it as a create failure left an orphan
+        // session the user was never told about.
+        val value = outcome.getOrNull()
+        assertTrue(
+            "an outdated host must not fail the CREATE — the session exists; got $outcome",
+            value is SessionCreateOutcome.LaunchFailed,
+        )
+        val launchFailed = value as SessionCreateOutcome.LaunchFailed
+        assertEquals(
+            "the outcome must name the session that exists on the host",
+            "issue759-outdated",
+            launchFailed.sessionName,
+        )
+        val hint = launchFailed.detail
 
         // The friendly, actionable hint — names the installed version, the
         // required minimum, and a copyable update command.
-        assertTrue("expected a surfaced failure, got $error", error is RuntimeException)
         assertTrue(
             "hint must name installed version: $hint",
             hint.contains(FakeOldHostSshSession.DEFAULT_OLD_VERSION),
@@ -97,11 +118,26 @@ class AgentLaunchVersionMismatchHintE2eTest {
             "must have pre-flighted `pocketshell agent --help`: ${session.execCommands}",
             session.execCommands.any { it.contains("pocketshell agent --help") },
         )
+        // Issue #1928: the session really was created, and the failed launch
+        // must not have taken it away again.
+        assertTrue(
+            "the tmux session must have been created before the launch: ${session.execCommands}",
+            session.execCommands.any { it.contains("create-detached") || it.contains("new-session") },
+        )
+        assertFalse(
+            "a failed launch must never kill the created session: ${session.execCommands}",
+            session.execCommands.any { it.contains("kill-session") },
+        )
 
-        writeArtifact(hint, session.execCommands)
+        // And the sentence the user actually reads names the session AND the hint.
+        val userMessage = sessionLaunchFailedMessage(launchFailed.sessionName, hint)
+        assertTrue(userMessage, userMessage.contains("issue759-outdated"))
+        assertTrue(userMessage, userMessage.contains(AgentLaunchVersionCheck.UPDATE_COMMAND))
+
+        writeArtifact(hint, userMessage, session.execCommands)
     } }
 
-    private fun writeArtifact(hint: String, commands: List<String>) {
+    private fun writeArtifact(hint: String, userMessage: String, commands: List<String>) {
         val dir = File(
             InstrumentationRegistry.getInstrumentation().targetContext
                 .getExternalFilesDir(null),
@@ -113,10 +149,13 @@ class AgentLaunchVersionMismatchHintE2eTest {
                 appendLine("--- raw Click error the OLD behaviour would have shown ---")
                 appendLine("Error: No such command 'agent'. (Did you mean one of: 'agent-log', 'usage'?)")
                 appendLine()
-                appendLine("--- friendly hint surfaced to the user (createSession failure) ---")
+                appendLine("--- launch-failure reason carried by SessionCreateOutcome.LaunchFailed ---")
                 appendLine(hint)
                 appendLine()
-                appendLine("--- commands the gateway issued over the lease (no send-keys) ---")
+                appendLine("--- issue #1928 sentence the user reads (session kept, agent absent) ---")
+                appendLine(userMessage)
+                appendLine()
+                appendLine("--- commands the gateway issued over the lease (no send-keys, no kill) ---")
                 commands.forEach { appendLine(it) }
             },
         )

@@ -23,6 +23,7 @@ import com.pocketshell.app.projects.SESSION_TYPE_PICKER_CONTENT_TAG
 import com.pocketshell.app.projects.SESSION_TYPE_PICKER_CREATE_TAG
 import com.pocketshell.app.projects.SESSION_TYPE_PICKER_CWD_TAG
 import com.pocketshell.app.projects.SESSION_TYPE_PICKER_SHELL_TAG
+import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -40,6 +41,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -243,9 +245,10 @@ class TmuxInSessionNewSessionCollisionDockerTest {
                 )
             }
             summary.appendLine("shell_requested=$baseName resolved=$shellResolved")
+            // Issue #1928: a no-launch create can only ever be a full success.
             assertEquals(
                 "[host] a colliding Shell create must resolve to the '-2' name, not the base",
-                "$baseName-2",
+                SessionCreateOutcome.Created("$baseName-2"),
                 shellResolved,
             )
             assertEquals(
@@ -270,7 +273,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
             summary.appendLine("launch_requested=$baseName resolved=$launchResolved")
             assertEquals(
                 "[host] a colliding LAUNCH create must walk past '-2' to '-3'",
-                "$baseName-3",
+                SessionCreateOutcome.Created("$baseName-3"),
                 launchResolved,
             )
             assertEquals(
@@ -303,7 +306,7 @@ class TmuxInSessionNewSessionCollisionDockerTest {
             summary.appendLine("exact_requested=$recoveryName resolved=$exactResolved")
             assertEquals(
                 "[host] ExactName must return the requested name verbatim",
-                recoveryName,
+                SessionCreateOutcome.Created(recoveryName),
                 exactResolved,
             )
             assertEquals(
@@ -324,6 +327,159 @@ class TmuxInSessionNewSessionCollisionDockerTest {
         )
         Log.i(LOG_TAG, "[host] issue1820 resolution: $summary")
     } }
+
+    /**
+     * Issue #1928 — the post-create agent launch, on a REAL tmux over real SSH.
+     *
+     * `createSessionOnSession` created the session, ran the optional agent
+     * launch (`tmux send-keys …`) and **threw the result away**. A launch that
+     * exited non-zero still came back as `Result.success(<name>)`, so the app
+     * announced a working Claude/Codex session and handed the user an empty
+     * shell (or, worse, routed them to a session that no longer existed).
+     *
+     * ## Why this is real rather than a scripted fake
+     *
+     * The failing exec is a REAL `tmux send-keys` answered by the REAL tmux
+     * server in the Docker fixture, over a REAL sshj transport. Only the TIMING
+     * is made deterministic: production hits this when the pane target stops
+     * matching between the create and the launch — another device or `t kill`
+     * removing the session, a `rename-session`, or the systemd login-scope
+     * teardown that takes the whole tmux server with it. That window is a real
+     * race we cannot schedule, so [MutateBeforeSendKeysSession] performs the
+     * mutation on the same real host in the instant before the launch is
+     * forwarded (the #780 synthetic-state model). Nothing about the failure
+     * itself is simulated — tmux really does refuse, with its own exit code and
+     * its own stderr.
+     *
+     * ## Class coverage (G2): the two shapes have OPPOSITE session outcomes
+     *
+     *  - **KILLED** — the session is gone by the time the launch runs. Pre-fix
+     *    this was reported as full success and the caller navigated into
+     *    nothing.
+     *  - **RENAMED** — the session is very much alive under another name. The
+     *    launch still fails, and the gateway must report that WITHOUT cleaning
+     *    up the session it created (issue #1928 non-goal). This is the half
+     *    that proves "keep the session" rather than merely "report a failure".
+     */
+    @Test
+    fun failedPostCreateLaunchIsReportedAsPartialSuccessOnARealHost() { runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        val suffix = "issue1928-${System.nanoTime().toString().takeLast(6)}"
+        val folder = "/tmp/$suffix"
+        createdFolders += folder
+        val killedName = "tmp-$suffix-killed"
+        val renamedName = "tmp-$suffix-renamed"
+        listOf(killedName, renamedName, "$renamedName-moved").forEach { createdSessions += it }
+        sshExec("mkdir -p '$folder'")
+
+        val gateway = SshFolderListGateway()
+        val summary = StringBuilder()
+
+        // (1) The session is REMOVED between create and launch.
+        val killedOutcome = withSshSession { real ->
+            gateway.createSessionOnSession(
+                session = MutateBeforeSendKeysSession(real, "tmux kill-session -t '=$killedName'"),
+                sessionName = killedName,
+                cwd = folder,
+                startCommand = "printf 'issue1928 launch\\n'",
+                namePolicy = SessionNamePolicy.ExactName,
+            )
+        }
+        summary.appendLine("killed_outcome=$killedOutcome")
+        summary.appendLine("killed_sessions_after=${listSessionsMatching(killedName)}")
+        // THE LOAD-BEARING ASSERTION (pre-fix: SessionCreateOutcome.Created, and
+        // before the type existed, a bare success carrying the name).
+        assertTrue(
+            "[host] a real non-zero `send-keys` must be reported as a partial success, " +
+                "not as a fully successful create; got $killedOutcome",
+            killedOutcome is SessionCreateOutcome.LaunchFailed,
+        )
+        assertEquals(
+            "[host] the outcome must name the session the create asked for",
+            killedName,
+            killedOutcome.sessionName,
+        )
+        assertTrue(
+            "[host] the reason must be the REAL tmux error, not an invented one: " +
+                (killedOutcome as SessionCreateOutcome.LaunchFailed).detail,
+            killedOutcome.detail.contains("find", ignoreCase = true) ||
+                killedOutcome.detail.contains("no server", ignoreCase = true) ||
+                killedOutcome.detail.contains("send-keys"),
+        )
+
+        // (2) The session is RENAMED between create and launch: the launch fails
+        //     and the created session is STILL THERE. The gateway must not tidy
+        //     it away, and must not create a replacement.
+        val renamedOutcome = withSshSession { real ->
+            val session = MutateBeforeSendKeysSession(
+                real,
+                "tmux rename-session -t '=$renamedName' '$renamedName-moved'",
+            )
+            val result = gateway.createSessionOnSession(
+                session = session,
+                sessionName = renamedName,
+                cwd = folder,
+                startCommand = "printf 'issue1928 launch\\n'",
+                namePolicy = SessionNamePolicy.ExactName,
+            )
+            assertFalse(
+                "[host] the gateway must never kill the session it created: " +
+                    session.gatewayCommands,
+                session.gatewayCommands.any { it.contains("kill-session") },
+            )
+            result
+        }
+        summary.appendLine("renamed_outcome=$renamedOutcome")
+        val survivors = listSessionsMatching(renamedName)
+        summary.appendLine("renamed_sessions_after=$survivors")
+        assertTrue(
+            "[host] a failed launch on a LIVE session must still be a partial success; " +
+                "got $renamedOutcome",
+            renamedOutcome is SessionCreateOutcome.LaunchFailed,
+        )
+        assertEquals(
+            "[host] the created session must SURVIVE a failed launch — it is the " +
+                "user's session and issue #1928 explicitly refuses to delete it",
+            listOf("$renamedName-moved"),
+            survivors,
+        )
+
+        artifactFile("issue1928-launch-failure.txt").writeText(
+            buildString {
+                appendLine("host=$DEFAULT_HOST port=$DEFAULT_PORT user=$DEFAULT_USER")
+                appendLine("folder=$folder")
+                append(summary)
+            },
+        )
+        Log.i(LOG_TAG, "[host] issue1928 launch accounting: $summary")
+    } }
+
+    /**
+     * Issue #1928: forwards every exec to the REAL host, but runs [mutation] on
+     * that same real host immediately before the gateway's `send-keys` — the
+     * deterministic stand-in for the real race where the pane target stops
+     * matching between the create and the launch.
+     *
+     * [gatewayCommands] records only what the GATEWAY asked for, so an assertion
+     * about what the gateway did (e.g. "it never killed the session") is not
+     * polluted by the mutation this class injects.
+     */
+    private class MutateBeforeSendKeysSession(
+        private val delegate: SshSession,
+        private val mutation: String,
+    ) : SshSession by delegate {
+        val gatewayCommands: MutableList<String> =
+            java.util.Collections.synchronizedList(mutableListOf<String>())
+
+        override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
+            gatewayCommands += command
+            if (command.contains("send-keys")) {
+                delegate.exec(mutation)
+            }
+            return delegate.exec(command)
+        }
+    }
 
     /**
      * Name the step a thrown create failure came from. Without this a

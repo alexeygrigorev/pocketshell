@@ -67,6 +67,9 @@ import com.pocketshell.app.projects.RepoBrowserScreen
 import com.pocketshell.app.projects.STALE_SESSION_CONFIRM_TAG
 import com.pocketshell.app.projects.STALE_SESSION_DIALOG_TAG
 import com.pocketshell.app.projects.STALE_SESSION_GO_HOME_TAG
+import com.pocketshell.app.projects.SessionCreateOutcome
+import com.pocketshell.app.projects.fold
+import com.pocketshell.app.projects.sessionLaunchFailedMessage
 import com.pocketshell.app.projects.WatchedFoldersScreen
 import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.session.InlineDictationViewModel
@@ -1921,12 +1924,28 @@ private fun AppNavigator(
 }
 
 internal suspend fun recreateStaleSession(
-    create: suspend () -> Result<String>,
+    create: suspend () -> Result<SessionCreateOutcome>,
     onSuccess: (String) -> Unit,
     onFailure: (String) -> Unit,
 ) {
     runCatching { create().getOrThrow() }.fold(
-        onSuccess = onSuccess,
+        onSuccess = { outcome ->
+            outcome.fold(
+                onCreated = onSuccess,
+                // Issue #1928: recovery asks for no start command, so this is
+                // unreachable today — but it is handled rather than assumed away.
+                // Attaching on a partial success would put the user back into a
+                // session that is not the agent they were recovering, so it takes
+                // the same visible-error path a failed recreate takes.
+                onLaunchFailed = { name, detail ->
+                    Log.w(
+                        "MainActivity",
+                        "stale-session-recreate-launch-failed name=$name reason=$detail",
+                    )
+                    onFailure(sessionLaunchFailedMessage(name, detail))
+                },
+            )
+        },
         onFailure = { error ->
             val message = error.message?.takeIf { it.isNotBlank() }
                 ?: "The host did not report a reason."

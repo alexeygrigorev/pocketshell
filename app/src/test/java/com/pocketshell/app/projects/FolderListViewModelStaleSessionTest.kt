@@ -224,9 +224,9 @@ class FolderListViewModelStaleSessionTest {
             cwd: String,
             startCommand: String?,
             namePolicy: SessionNamePolicy,
-        ): Result<String> {
+        ): Result<SessionCreateOutcome> {
             createdSessions.add(sessionName to cwd)
-            return Result.success(sessionName)
+            return Result.success(SessionCreateOutcome.Created(sessionName))
         }
 
         override suspend fun createEmptyProject(

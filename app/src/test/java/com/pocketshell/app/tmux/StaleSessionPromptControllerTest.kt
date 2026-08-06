@@ -5,6 +5,7 @@ import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
 import com.pocketshell.app.projects.SessionNamePolicy
+import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -198,7 +199,10 @@ class StaleSessionPromptControllerTest {
         )
 
         assertTrue("gateway create must succeed", result.isSuccess)
-        assertEquals("work", result.getOrNull())
+        // Issue #1928: recovery returns the gateway's typed outcome verbatim, so
+        // the caller (MainActivity.recreateStaleSession) is the one that decides
+        // what a partial success means instead of inheriting a flattened name.
+        assertEquals(SessionCreateOutcome.Created("work"), result.getOrNull())
         assertEquals("the gateway must be asked to create the gone session name", "work", gateway.lastSessionName)
         // Issue #1820: RECOVERY must recreate the EXACT gone name. This is the
         // one call site where `UniqueOnHost` would be wrong — a stray `-2` would
@@ -300,13 +304,13 @@ class StaleSessionPromptControllerTest {
             cwd: String,
             startCommand: String?,
             namePolicy: SessionNamePolicy,
-        ): Result<String> {
+        ): Result<SessionCreateOutcome> {
             called = true
             lastSessionName = sessionName
             lastCwd = cwd
             lastStartCommand = startCommand
             lastNamePolicy = namePolicy
-            return Result.success(resolvedName)
+            return Result.success(SessionCreateOutcome.Created(resolvedName))
         }
 
         override suspend fun listSessionsWithFolder(

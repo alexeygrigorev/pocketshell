@@ -5,6 +5,7 @@ import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
 import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.app.projects.WindowKillOutcome
+import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.ExecResult
@@ -21,10 +22,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.fail
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -274,6 +277,80 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
                 "sent=${client.sentCommands}",
             client.sentCommands.any { it.startsWith("new-session") },
         )
+    }
+
+    /**
+     * Issue #1928 — the IN-SESSION caller of the partial-success outcome.
+     *
+     * The in-session "+ New session" sheet's success branch attaches the user to
+     * the new session. On a partial success that would drop them into a plain
+     * shell they asked to be a Codex session, silently — the create was reported
+     * as fully successful, so nothing on screen said otherwise. The sheet must
+     * instead surface the reason through the same `sessionCreateError` channel a
+     * real create failure uses, and must NOT resolve.
+     */
+    @Test
+    fun createSessionLaunchFailureReportsInsteadOfAttaching() = runTest(scheduler) {
+        val gateway = RecordingStopGateway(
+            killSucceeds = true,
+            createResolvedName = "git-codex",
+            createLaunchFailureDetail = "can't find pane: =git-codex:",
+        )
+        val vm = newVm(
+            folderListGateway = gateway,
+            hostDao = StopHostDao(hostId = 7L),
+        )
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+        val failure = async { vm.sessionCreateError.first() }
+        runCurrent()
+
+        val attached = CompletableDeferred<String>()
+        vm.createSession(
+            name = "git-codex",
+            cwd = "/home/alex/git",
+            startCommand = "pocketshell agent codex --dir '/home/alex/git'",
+            chosenKind = SessionAgentKind.Codex,
+            onResolved = { attached.complete(it) },
+        )
+        // The create hops through a REAL Dispatchers.IO for the host lookup, so
+        // `advanceUntilIdle()` alone can return before the gateway call lands
+        // (the #708 virtual-clock-vs-real-dispatcher class). Racing the two
+        // outcomes is the deterministic sync point in BOTH directions: with the
+        // fix the error arrives; a caller that collapses the partial success
+        // attaches instead, and this fails immediately with that name rather
+        // than parking until the runTest timeout.
+        val message = select<String> {
+            failure.onAwait { it }
+            attached.onAwait { attachedName ->
+                fail(
+                    "a launch failure must not attach the user to the session; " +
+                        "attached to $attachedName",
+                )
+                ""
+            }
+        }
+        failure.cancel()
+        advanceUntilIdle()
+
+        assertFalse("a launch failure must not attach", attached.isCompleted)
+        assertTrue("must name the created session: $message", message.contains("git-codex"))
+        assertTrue("must say it WAS created: $message", message.contains("was created"))
+        assertTrue(
+            "must carry the host's reason: $message",
+            message.contains("can't find pane: =git-codex:"),
+        )
+        assertEquals("exactly one create must have run", 1, gateway.createCalls.size)
     }
 
     @Test
@@ -582,6 +659,12 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
         private val windowKillSessionSurvived: Boolean? = null,
         private val windowKillSucceeds: Boolean = true,
         private val createResolvedName: String? = null,
+        /**
+         * Issue #1928: when set, the gateway reports PARTIAL success — the tmux
+         * session [createResolvedName] exists but its agent launch failed with
+         * this reason. `null` keeps the full-success behaviour.
+         */
+        private val createLaunchFailureDetail: String? = null,
     ) : FolderListGateway {
         val killedSessionNames = mutableListOf<String>()
         val killedWindowTargets = mutableListOf<String>()
@@ -615,9 +698,14 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             cwd: String,
             startCommand: String?,
             namePolicy: SessionNamePolicy,
-        ): Result<String> {
+        ): Result<SessionCreateOutcome> {
             createCalls += CreateCall(sessionName, cwd, startCommand, namePolicy)
-            return createResolvedName?.let { Result.success(it) } ?: error("not used")
+            val name = createResolvedName ?: error("not used")
+            return Result.success(
+                createLaunchFailureDetail
+                    ?.let { SessionCreateOutcome.LaunchFailed(name, it) }
+                    ?: SessionCreateOutcome.Created(name),
+            )
         }
 
         override suspend fun createEmptyProject(

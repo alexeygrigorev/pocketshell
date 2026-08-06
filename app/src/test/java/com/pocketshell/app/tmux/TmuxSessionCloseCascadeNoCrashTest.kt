@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.SessionNamePolicy
+import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.ExecResult
@@ -668,7 +669,7 @@ class TmuxSessionCloseCascadeNoCrashTest {
             cwd: String,
             startCommand: String?,
             namePolicy: SessionNamePolicy,
-        ): Result<String> = error("not used")
+        ): Result<SessionCreateOutcome> = error("not used")
 
         override suspend fun createEmptyProject(
             host: HostEntity,

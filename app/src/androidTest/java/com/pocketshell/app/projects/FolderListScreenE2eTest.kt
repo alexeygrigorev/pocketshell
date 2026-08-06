@@ -2186,7 +2186,7 @@ private class MutableFolderListGateway(
         cwd: String,
         startCommand: String?,
         namePolicy: SessionNamePolicy,
-    ): Result<String> = Result.success(sessionName)
+    ): Result<SessionCreateOutcome> = Result.success(SessionCreateOutcome.Created(sessionName))
 
     override suspend fun createEmptyProject(
         host: HostEntity,
@@ -2252,7 +2252,7 @@ private class OpenFailedThenRecoveringGateway(
         cwd: String,
         startCommand: String?,
         namePolicy: SessionNamePolicy,
-    ): Result<String> = Result.success(sessionName)
+    ): Result<SessionCreateOutcome> = Result.success(SessionCreateOutcome.Created(sessionName))
 
     override suspend fun createEmptyProject(
         host: HostEntity,
@@ -2336,7 +2336,7 @@ private class FakeFolderListGateway(
         cwd: String,
         startCommand: String?,
         namePolicy: SessionNamePolicy,
-    ): Result<String> = Result.success(sessionName)
+    ): Result<SessionCreateOutcome> = Result.success(SessionCreateOutcome.Created(sessionName))
 
     override suspend fun createEmptyProject(
         host: HostEntity,

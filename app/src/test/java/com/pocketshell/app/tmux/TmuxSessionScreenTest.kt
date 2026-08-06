@@ -2702,14 +2702,20 @@ class TmuxSessionScreenTest {
     }
 
     @Test
-    fun reconnectKebabDisabledWhileReconnectAlreadyInFlight() {
-        // A connect/reconnect is already running — a manual reconnect would be a
-        // redundant re-dial that yanks an already-recovering session, so the item is
-        // disabled even with a target present (AC: "sensible state mid-reconnect").
+    fun reconnectKebabDisabledWhileInitialConnectOrSwitchInFlight() {
+        // The INITIAL cold dial and an ACTIVE target switch are protected from a redundant
+        // re-dial that would yank a connect the user just started (AC: "sensible state
+        // mid-connect").
+        //
+        // Issue #1953 (D22 hard cut of the old contract): `Reconnecting` is deliberately NOT
+        // in this list any more. It is the state BOTH controller automatic-recovery states
+        // project to (`Reattaching` heal + numbered ladder), and the ladder is asleep between
+        // rungs — so disabling here locked the user out of the escape hatch for the whole
+        // wedged window (exact-main run 30787372084). See
+        // [Issue1953ManualReconnectEscapeHatchTest] for the positive contract.
         listOf(
             SessionSurfaceState.Connecting(sid, "work", "h", 22, "u"),
             SessionSurfaceState.Attaching(sid, "work", "h", 22, "u"),
-            SessionSurfaceState.Reconnecting(sid, "work", "h", 22, "u", 1, 3, 0L),
         ).forEach { state ->
             assertEquals(
                 "in-flight → Reconnect disabled for $state",
@@ -2717,6 +2723,13 @@ class TmuxSessionScreenTest {
                 reconnectKebabEnabled(canReconnect = true, surfaceState = state),
             )
         }
+        assertTrue(
+            "issue #1953: a wedged automatic ladder must keep the manual escape hatch actionable",
+            reconnectKebabEnabled(
+                canReconnect = true,
+                surfaceState = SessionSurfaceState.Reconnecting(sid, "work", "h", 22, "u", 1, 3, 0L),
+            ),
+        )
     }
 
     // ---- Issue #1672: hide the quick-command chip band while the terminal is held ----

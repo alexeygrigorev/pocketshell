@@ -44,20 +44,51 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Issue #993: whether the kebab's "Reconnect" item is actionable right now.
+ * Issue #993 / #1953: whether the kebab's "Reconnect" item is actionable right now.
  *
  * The manual reconnect escape hatch is the half-measure for a dropped session whose
- * auto-reconnect didn't fire. It is only meaningful when:
- *  - there IS a known target to reconnect to ([canReconnect] — the same gate the
- *    in-session Reconnect band uses, so a tap never silently no-ops), AND
- *  - a connect/reconnect is NOT already in flight (Connecting/Switching/Reconnecting),
- *    so the tap is never a redundant re-dial that would yank an already-recovering
- *    session.
+ * auto-reconnect didn't fire. It requires a known target to reconnect to ([canReconnect] —
+ * the same gate the in-session Reconnect band uses, so a tap never silently no-ops).
  *
- * A `Connected` (possibly stale) or `Failed`/`Idle` session with a target stays
+ * ## Issue #1953: the wedged-ladder lockout (the state the hatch EXISTS for)
+ *
+ * The original #993 gate ALSO disabled the item for [SessionSurfaceState.Reconnecting], on
+ * the reasoning that "a reconnect is already in flight, so a tap would be a redundant
+ * re-dial". That reasoning is wrong for this state, and it disabled the escape hatch in
+ * exactly the situation it was built for:
+ *
+ *  - [SessionSurfaceState.Reconnecting] is what BOTH controller automatic-recovery states
+ *    project to — the pre-numbered silent heal (`ConnectionState.Reattaching` → calm
+ *    attempt-1) and the numbered ladder (`ConnectionState.Reconnecting(n)`). See
+ *    `ConnectionStatusProjection`'s §1 seam table.
+ *  - The ladder spends most of its life ASLEEP in `delay(retryDelayMs)` between rungs, so
+ *    "Reconnecting" on screen is NOT "a dial is on the wire right now". A wedged ladder can
+ *    sit in this state indefinitely with nothing on the wire at all.
+ *  - Exact-main run 30787372084 caught the consequence: the journey failed both attempts
+ *    stuck in `Reconnecting(attempt=1)` — the kebab node was present in semantics but
+ *    disabled, so `performClick()` invoked nothing (no `reconnect_tapped`, no manual
+ *    trigger, no transport replacement).
+ *
+ * So an explicit manual Reconnect is treated as a HIGHER-PRIORITY user intent that PREEMPTS
+ * automatic recovery, routed through the SINGLE existing manual effect
+ * ([TmuxSessionViewModel.reconnect] → `TransportEffects.onManualReconnect()`, which cancels
+ * the auto ladder, forces a fresh lease that evicts the known-dead transport, and re-enters
+ * `connect(trigger = Reconnect)` — the #1072 dedup guard already exempts that trigger). No
+ * second reconnect implementation and no second retry ladder (D28).
+ *
+ * ## What stays protected (issue #1953 acceptance criterion 4)
+ *
+ *  - [SessionSurfaceState.Connecting] — the INITIAL cold dial. There is no prior session to
+ *    escape from; a tap would restart a handshake the user just started.
+ *  - [SessionSurfaceState.Attaching] — an ACTIVE target switch (warm same-host reveal).
+ *    Yanking an in-flight switch is the #890 redundant-chrome/regression class.
+ *
+ * A `Connected` (possibly stale) or `Failed`/`Gone`/`Idle` session with a target stays
  * enabled — that is exactly the maintainer's "it dropped but the app still thinks it's
  * connected / it's sitting on Failed and nothing recovers it" case the button exists for.
- * Pure so the wiring is a unit-testable predicate rather than an inline boolean (G9).
+ * Pure so the wiring is a unit-testable predicate rather than an inline boolean (G9); pinned
+ * by [com.pocketshell.app.tmux.Issue1953ManualReconnectEscapeHatchTest] and driven on the
+ * real path by `ReconnectKebabInPlaceJourneyE2eTest`.
  */
 internal fun reconnectKebabEnabled(
     canReconnect: Boolean,
@@ -65,8 +96,7 @@ internal fun reconnectKebabEnabled(
 ): Boolean =
     canReconnect &&
         surfaceState !is SessionSurfaceState.Connecting &&
-        surfaceState !is SessionSurfaceState.Attaching &&
-        surfaceState !is SessionSurfaceState.Reconnecting
+        surfaceState !is SessionSurfaceState.Attaching
 
 /**
  * Issue #750 (4th occurrence — the beyond-grace RECONNECT path): the single

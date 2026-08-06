@@ -461,6 +461,39 @@ are looking at before proposing a fix:
   the verdict from `systemctl --user show <unit> -p Result -p ExecMainStatus` —
   **not** from the harness's own exit code, which reports 0 for a backgrounded
   wrapper whose Gradle build failed.
+- **`MemoryMax` below ~20G OOMs the Kotlin daemon, and it does NOT look like an
+  OOM.** On 2026-08-06 this cost four separate agents a run each — at 8G, 10G,
+  14G and again at 14G. The failure surfaces as:
+
+  ```
+  e: BackendException: Backend Internal error: Exception during IR lowering
+  Caused by: CompilationException: Back-end (JVM) Internal error:
+             Couldn't transform method node:
+  > Not enough memory to run compilation. Try to increase it via
+    'gradle.properties': kotlin.daemon.jvmargs=-Xmx<size>
+  ```
+
+  The first two lines read like a compiler bug or a malformed source tree, and
+  the actual cause is only on the last line — so the instinct is to go hunting
+  through the changed Kotlin for a defect that does not exist. Two independent
+  tells that it is memory, not code: the build dies at `compile*Kotlin` having
+  executed **zero tests** (so there is no result to misread), and the same tree
+  compiles fine with a larger cap.
+
+  Use `-p MemoryMax=20G` or more for a full-gate run, and still cap it — an
+  uncapped gate can OOM the box and take out every sibling lane, which is why
+  the memory-capped cgroup is required in the first place. (`MemoryHigh` remains
+  banned: its reclaim throttle turns a clean kill into an indefinite hang.)
+
+  Related trap, same root: **do not hand-roll `./gradlew` in place of
+  `scripts/full-jvm-gate.sh`.** The gate passes
+  `-Pkotlin.daemon.jvmargs=-Xmx3072m` and `-Dorg.gradle.jvmargs=-Xmx1536m`, and
+  the repo's `gradle.properties` sets **no** `kotlin.daemon.jvmargs` at all — so
+  an ad-hoc invocation leaves the Kotlin daemon on its default heap and OOMs no
+  matter how high the cgroup cap goes. Raising `MemoryMax` from 14G to 26G
+  changed nothing until the run switched to the canonical gate. process.md's
+  "run the task CI runs" is about the execution *profile*, not just which tests
+  are selected.
 - **Never pipe a long-running gate through `grep`.** The harness captures only
   what the pipeline emits, so a failing run leaves you a 2-line file with the
   task name and no error — and you must re-run the whole thing to learn anything.

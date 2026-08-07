@@ -1,5 +1,7 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -93,6 +95,27 @@ import java.util.concurrent.TimeUnit
  * `logTailRecoverableFailure` swallow path.
  */
 class RealSshSessionTailRecoverableFailureTest {
+
+    @Test
+    fun `tail preserves cancellation raised during dispatcher startup`() {
+        val cancellation = CancellationException("issue #2043 controlled tail-start cancellation")
+        val session = RealSshSession(ConnectedThrowingClient(cancellation))
+        val completion = CompletableDeferred<Throwable?>()
+        try {
+            val job = session.tail("/agent.jsonl") { /* unreachable */ }
+            job.invokeOnCompletion { completion.complete(it) }
+            val completionCause = runBlocking {
+                withTimeout(5_000) { completion.await() }
+            }
+
+            assertTrue(
+                "dispatcher-start cancellation must remain CancellationException; cause=$completionCause",
+                completionCause is CancellationException,
+            )
+        } finally {
+            session.close()
+        }
+    }
 
     @Test
     fun `tail swallows ConnectionException from startSession`() {

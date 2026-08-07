@@ -1078,6 +1078,8 @@ internal class RealSshSession(
                     // Channel-open / exec raced a recoverable transport drop.
                     logTailRecoverableFailure(path, e)
                     return@launch
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (t: Throwable) {
                     throw SshException("Failed to start tail session for `$path`: ${t.message}", t)
                 }

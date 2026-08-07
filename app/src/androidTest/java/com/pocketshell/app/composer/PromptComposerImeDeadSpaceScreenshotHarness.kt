@@ -129,7 +129,7 @@ class PromptComposerImeDeadSpaceScreenshotHarness {
                     FauxTerminalBackdrop()
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         viewModel = vm,
                     )
                 }

@@ -291,7 +291,6 @@ AWAIT1_BASELINE=(
 # hard failure so this list is removed when a class is promoted or deleted.
 # --------------------------------------------------------------------------
 J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
-  "com.pocketshell.app.composer.AttachmentStagerRealUploadDockerTest"
   "com.pocketshell.app.composer.ComposerPartialExpandE2eTest"
   "com.pocketshell.app.costs.CostsScreenE2eTest"
   "com.pocketshell.app.crash.ShareAllReportsDockerTest"

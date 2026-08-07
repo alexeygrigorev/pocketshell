@@ -18,6 +18,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
@@ -32,11 +33,14 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
+import com.pocketshell.app.composer.COMPOSER_CLOSE_TAG
 import com.pocketshell.app.composer.COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.app.composer.composerOutboundQueueItemRowTestTag
+import com.pocketshell.app.composer.composerOutboundQueueRetryTestTag
 import com.pocketshell.app.composer.OutboundState
+import com.pocketshell.app.composer.isComposerQueueRetryable
 import com.pocketshell.app.composer.OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE
 import com.pocketshell.app.composer.OUTBOUND_MAX_AUTO_ATTEMPTS
 import com.pocketshell.app.composer.OutboundQueueStore
@@ -94,75 +98,17 @@ import org.junit.rules.RuleChain
 import org.junit.rules.TestName
 import org.junit.runner.RunWith
 
-/**
- * Issue #1526 — Slice S1+S6: the OUTBOUND EXACTLY-ONCE across-a-flap journey
- * (the audit's `OutboundExactlyOnceAcrossFlapE2eTest`), at the DELIVERY level.
- *
- * ## The recurrence class this pins (D31)
- *
- * #961 already "fixed" the twice-delivered prompt at the ENQUEUE layer (dedup
- * to one queued row) — and the maintainer still saw duplicates, because the
- * duplicate is manufactured on the WIRE: a send whose exec result is lost
- * mid-flap has ALREADY run `tmux send-keys` server-side, the row requeues, and
- * the reconnect auto-flush re-pasted the full payload with no check of what
- * landed (audit A1/A2/B2). The existing store-level proofs
- * (`PromptComposerDegradedSendE2eTest` "exactly one queued ROW") pass even
- * while the pane receives the text twice — so this journey asserts the
- * SERVER-SIDE occurrence count via a sidecar `tmux capture-pane`, never a
- * client-store proxy.
- *
- * ## Journey (emulator + the deterministic Docker `agents:2222` fixture)
- *
- * Composer lane: seed a tmux session running the `pocketshell-fake-agent`
- * input box recorded as Claude with a fresh Claude transcript for its cwd so
- * REAL live source detection binds; attach through the app, open
- * the Conversation tab, then send a prompt from the REAL composer (launcher →
- * draft field → Send) with the flap seam armed
- * ([OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter], the #780
- * synthetic-injection model): the paste runs on the REAL server, then the
- * transport is genuinely dropped before the submit Enter — the exact audit cut
- * point (c). The app silently reconnects (a REAL redial to the fixture; the
- * client identity changes) and the deferred row is re-sent — by the #900
- * auto-flush, or (when that resend raced the dying transport and the in-window
- * exclusion holds it — audit A6, slice S4) by the maintainer's own recovery of
- * re-typing the same prompt + Send, which #961 coalesces onto the SAME queued
- * row. Either way the resend rides the SAME agent delivery chain, where S1
- * PROBES (#869 ack needle), finds the payload already in the input box, and
- * submits ONLY Enter.
- *
- * Keystroke lane: type through the REAL TerminalView session (the pane input
- * queue + pump) with the lane-B seam armed
- * ([OutboundDeliverySeams.failInputSendResultLostOnce]): the bytes land, the
- * result is lost, and the pre-S1 blind attempt-2 would double them.
- *
- * ## Load-bearing assertions (RED on base → GREEN with S1)
- *
- *  - server-side occurrence of the payload in `capture-pane` == 1 (base: the
- *    re-paste doubles it — the input box reads `<payload><payload>`), and
- *  - the prompt is SUBMITTED exactly once (one `FAKE-AGENT SUBMITTED:` line,
- *    input box empty after), and
- *  - delivery completes within a bound after the flap (no unbounded delay),
- *  - the flap was REAL: the tmux client identity changed across the send.
- *
- * No `Assume.assumeFalse(isRunningOnCi())` on any load-bearing assertion; uses
- * ONLY the deterministic `agents:2222` fixture `tests.yml` already brings up
- * (no toxiproxy — the flap is seam-injected, the reconnect is real), so it is
- * wired into the per-push `scripts/ci-journey-suite.sh`.
- */
 @RunWith(AndroidJUnit4::class)
 class OutboundExactlyOnceAcrossFlapE2eTest {
 
-    // Launch-owned MainActivity rule (#788/#848): the Compose test clock drives
-    // the SAME foreground MainActivity the TerminalView interop child is placed
-    // into.
     val compose = createAndroidComposeRule<MainActivity>()
 
-    @get:Rule
     val testName: TestName = TestName()
 
     @get:Rule
     val ruleChain: RuleChain = RuleChain
-        .outerRule(PreGrantPermissionsRule())
+        .outerRule(testName)
+        .around(PreGrantPermissionsRule())
         .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
         .around(compose)
 
@@ -212,11 +158,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         }
     }
 
-    /**
-     * Composer lane (+ the reconnect auto-flush): a prompt sent from the real
-     * composer during an injected mid-send flap must reach the pane EXACTLY
-     * ONCE and submit exactly once — the resend must verify before re-pasting.
-     */
     @Test
     fun composerPromptSentDuringFlapIsDeliveredExactlyOnce() { runBlocking<Unit> {
         attachSeededTmuxSession(hostRowTag)
@@ -226,11 +167,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         viewModel.setAgentSubmitEnterDelayForTest(0)
         val clientBeforeFlap = viewModel.currentClientIdentityForTest()
 
-        // REAL live source detection must bind from the recorded Claude
-        // identity plus its seeded fresh JSONL: a bound detection + the
-        // Conversation tab is what routes the composer send down the
-        // agent-payload delivery chain — the maintainer's duplicated-prompt
-        // lane. An unbound pane routes RawBytes instead.
         waitForDetectionBound(viewModel)
         openConversationTab(viewModel)
 
@@ -238,41 +174,15 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val payload = "exactly once across the flap $nonce"
         val payloadStripped = payload.filterNot { it.isWhitespace() }
 
-        // Arm the flap seam: the NEXT agent-payload send DROPS the transport
-        // AFTER the paste ran server-side, before the submit Enter — the exact
-        // audit cut point (c) the maintainer's flaky link produces.
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = true
 
-        // Drive the REAL composer: launcher -> draft -> Send.
         val sendTappedAtMs = SystemClock.elapsedRealtime()
         openComposerAndSend(payload)
 
-        // The ambiguous failure must actually defer the row to the durable
-        // queue (Option A) — the precondition the resend path exists for. Both
-        // signals are accepted: the deferral diagnostic, or the user-visible
-        // "Will send when reconnected." queue-row status.
         waitForDeferral()
 
-        // Issue #1819: the INJECTION must be asserted where it is injected.
-        // `triggerCleanPassiveDropForTest()` silently returns false when the
-        // live classification says Ignore, and the arm it selects may skip
-        // recovery entirely — so "the seam was armed" does NOT imply "a flap
-        // happened". Proving it here, bounded, is what stops a no-op injection
-        // from cascading into a 180s delivery timeout that reads like an
-        // outbound-delivery bug (the whole reason this class was suspected of a
-        // product race). The end-of-journey fresh-client assertion below is kept
-        // as well — this one only makes it fail EARLIER and for the true reason.
         val clientAfterInjection = assertFlapInjected(clientBeforeFlap)
 
-        // The flap heals (the within-grace silent reattach — a real redial to
-        // the fixture). Give the #900 auto-flush resend a short window; if the
-        // resend raced the dying transport and re-deferred (the in-window
-        // exclusion then holds it — audit A6, slice S4), do what the maintainer
-        // does: RE-TYPE the same prompt and tap Send. #961 coalesces it onto
-        // the SAME queued row, and the send rides the SAME agent delivery
-        // chain — where verify-before-resend must find the earlier paste and
-        // NOT re-paste it (on base this exact user retry is what produced the
-        // duplicated prompt).
         val submittedPredicate: (String) -> Boolean = {
             it.filterNot { ch -> ch.isWhitespace() }
                 .contains(FAKE_AGENT_SUBMITTED_STRIPPED + payloadStripped)
@@ -287,10 +197,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             openComposerAndSend(payload)
         }
 
-        // GREEN: the prompt must SUBMIT — exactly once — within a bound (the
-        // "timely" half of the acceptance). The authoritative signal is the
-        // SERVER-side `capture-pane` (the TerminalView is covered by the
-        // Conversation surface here).
         waitForSidecarCaptureWhileDrivingIssue1739Main(
             "prompt submitted after flap",
             SUBMIT_AFTER_FLAP_TIMEOUT_MS,
@@ -299,50 +205,258 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         recordTiming("submitted_after_send_tap_ms", SystemClock.elapsedRealtime() - sendTappedAtMs)
         captureArtifacts("composer-submitted")
 
-        // The flap was REAL: the send rode a reconnect (fresh client identity).
         waitForConnected("post-flap reconnect")
         val clientAfterFlap = currentViewModel().currentClientIdentityForTest()
         assertTrue(
-            "the seam must have dropped the transport (fresh tmux client after " +
-                "the flap); before=$clientBeforeFlap atInjection=$clientAfterInjection " +
-                "after=$clientAfterFlap " +
-                "seam=${diagnostics!!.eventsNamed("outbound_result_lost_seam")
-                    .map { it.fields }} " +
-                "events=${boundedEventTail(diagnostics!!.events)}",
+            "transport did not rotate: $clientBeforeFlap/$clientAfterInjection/$clientAfterFlap",
             clientAfterFlap != null && clientAfterFlap != clientBeforeFlap,
         )
 
-        // ===== THE delivery-level exactly-once assertions (server-side). =====
         val capture = waitForStableSidecarCapture()
         writeText("composer-final-capture.txt", capture)
         val captureStripped = capture.filterNot { it.isWhitespace() }
         assertFalse(
-            "REGRESSION (#1526 base signature): the payload must NOT appear " +
-                "doubled back-to-back (the blind re-paste writes " +
-                "'<payload><payload>' into the input box); capture:\n$capture",
+            "payload duplicated: $capture",
             captureStripped.contains(payloadStripped + payloadStripped),
         )
         assertEquals(
-            "the payload must occur EXACTLY ONCE in the visible pane frame " +
-                "(delivery-level exactly-once, not 'one queued row'); capture:\n$capture",
+            "payload occurrence: $capture",
             1,
             countOccurrences(captureStripped, payloadStripped),
         )
         assertEquals(
-            "the prompt must be SUBMITTED exactly once; capture:\n$capture",
+            "submitted occurrence: $capture",
             1,
             countOccurrences(captureStripped, FAKE_AGENT_SUBMITTED_STRIPPED + payloadStripped),
         )
         assertInputBoxEmpty("after the verified resend", capture)
 
-        // Wiring proof: the resend actually took the verify-before-resend gate.
         val verifies = diagnostics!!.eventsNamed("outbound_verify_before_resend")
         assertTrue(
-            "the resend must have PROBED before re-sending (verify-before-resend " +
-                "wired on the auto-flush path); recorded=$verifies",
+            "missing verify-before-resend: $verifies",
             verifies.any { it.fields["outcome"] == "AlreadyLanded" },
         )
         writeTimings()
+    } }
+
+    @Test
+    fun manualRetryOfUnconfirmedSubmitWaitsForLateAuthority() { runBlocking<Unit> {
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("manual retry initial attach") { it.contains(FAKE_AGENT_READY) }
+        waitForConnected("manual retry initial attach")
+        val tmuxVm = currentViewModel()
+        tmuxVm.setAgentSubmitEnterDelayForTest(0)
+        waitForDetectionBound(tmuxVm)
+        openConversationTab(tmuxVm)
+        val composerVm = currentPromptComposerViewModel()
+        val target = waitForDurableComposerTarget(tmuxVm, composerVm)
+        val store = composerVm.outboundQueueStore
+        store.clearSession(target)
+        val payload = "manual retry late authority ${SystemClock.elapsedRealtime().toString().takeLast(6)}"
+
+        openComposerAndSend(payload)
+        waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "manual send parks", {
+            outboundWaitDetails(store, target, composerVm)
+        }) {
+            store.itemsFor(target).singleOrNull()?.let { row ->
+                row.wireSubmitAttempted && row.wireAttemptGeneration > 0 && row.isComposerQueueRetryable()
+            } == true && !composerVm.uiState.value.sendInFlight
+        }
+        val parked = store.itemsFor(target).single()
+        assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
+        if (!hasNode(COMPOSER_DRAFT_TAG)) {
+            compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        }
+        waitForComposerReady(expectQueue = true)
+        val retryTag = composerOutboundQueueRetryTestTag(parked.id)
+        compose.waitUntil(UI_TIMEOUT_MS) { hasNode(retryTag) }
+        val verifiesBefore = diagnostics!!.eventsNamed("outbound_verify_before_resend").size
+        compose.onNodeWithTag(retryTag, useUnmergedTree = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assertIsEnabled()
+            .performClick()
+
+        waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "manual retry verifies", {
+            outboundWaitDetails(store, target, composerVm)
+        }) {
+            diagnostics!!.eventsNamed("outbound_verify_before_resend").size > verifiesBefore &&
+                store.item(parked.id)?.isComposerQueueRetryable() == true &&
+                !composerVm.uiState.value.sendInFlight
+        }
+        val retried = requireNotNull(store.item(parked.id))
+        assertEquals(parked.sendKey, retried.sendKey)
+        assertEquals(parked.wireAttemptGeneration, retried.wireAttemptGeneration)
+        assertEquals(parked.paneId, retried.paneId)
+        assertEquals(parked.tmuxSessionId, retried.tmuxSessionId)
+        assertEquals(parked.tmuxSessionCreated, retried.tmuxSessionCreated)
+        assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
+        assertTrue(diagnostics!!.eventsNamed("outbound_verify_before_resend").any {
+            it.fields["durableRowId"] == parked.id && it.fields["outcome"] == "Unknown" &&
+                it.fields["reason"] == "submit_attempt_unconfirmed"
+        })
+
+        publishDelayedTranscript()
+        compose.waitUntil(CONNECTED_TIMEOUT_MS) { store.item(parked.id) == null }
+        compose.waitUntil(UI_TIMEOUT_MS) { !hasNode(retryTag) }
+        assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
+        Unit
+    } }
+
+    @Test
+    fun lateAckSurvivesCloseAndRecreateWithoutDuplicate() { runBlocking<Unit> {
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("late-ack initial attach") { it.contains(FAKE_AGENT_READY) }
+        waitForConnected("late-ack initial attach")
+        val tmuxVm = currentViewModel()
+        tmuxVm.setAgentSubmitEnterDelayForTest(0)
+        waitForDetectionBound(tmuxVm)
+        openConversationTab(tmuxVm)
+        val composerVm = currentPromptComposerViewModel()
+        val target = waitForDurableComposerTarget(tmuxVm, composerVm)
+        val store = composerVm.outboundQueueStore
+        store.clearSession(target)
+        val payload = "late authoritative ack ${SystemClock.elapsedRealtime().toString().takeLast(6)}"
+
+        openComposerAndSend(payload)
+        waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "late send parks", {
+            outboundWaitDetails(store, target, composerVm)
+        }) {
+            store.itemsFor(target).singleOrNull()?.let { row ->
+                row.wireSubmitAttempted && row.wireAttemptGeneration > 0 && row.state != OutboundState.InFlight
+            } == true
+        }
+        val submitted = store.itemsFor(target).single()
+        requireNotNull(store.markFailed(submitted.id, "authoritative acknowledgement pending"))
+        composerVm.refreshOutboundQueueItemsFor(target)
+        val parked = requireNotNull(store.item(submitted.id))
+        assertEquals(OutboundState.Failed, parked.state)
+        assertEquals(submitted.sendKey, parked.sendKey)
+        assertEquals(submitted.wireAttemptGeneration, parked.wireAttemptGeneration)
+        assertTrue(parked.wireSubmitAttempted)
+        assertTrue(parked.sendKey.isNotBlank())
+        assertTrue(parked.tmuxSessionId != null && parked.tmuxSessionCreated != null)
+        assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
+        assertTrue(hasNode(COMPOSER_DRAFT_TAG))
+        val retryTag = composerOutboundQueueRetryTestTag(parked.id)
+        compose.waitUntil(UI_TIMEOUT_MS) { hasNode(retryTag) }
+        captureViewportArtifacts("issue2037-before-late-authoritative-ack")
+
+        compose.onNodeWithTag(COMPOSER_CLOSE_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
+        compose.activityRule.scenario.recreate()
+        waitForConnected("issue2037 activity recreate")
+        val rebuiltComposer = currentPromptComposerViewModel()
+        val rebuiltStore = rebuiltComposer.outboundQueueStore
+        val rebuilt = requireNotNull(rebuiltStore.item(parked.id))
+        assertEquals(parked.sendKey, rebuilt.sendKey)
+        assertEquals(parked.wireAttemptGeneration, rebuilt.wireAttemptGeneration)
+        assertEquals(parked.paneId, rebuilt.paneId)
+        assertEquals(parked.tmuxSessionId, rebuilt.tmuxSessionId)
+        assertEquals(parked.tmuxSessionCreated, rebuilt.tmuxSessionCreated)
+        assertTrue(rebuilt.isComposerQueueRetryable())
+        assertEquals(parked.attemptCount, rebuilt.attemptCount)
+        assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
+        if (!hasNode(COMPOSER_DRAFT_TAG)) {
+            compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        }
+        waitForComposerReady(expectQueue = true)
+        compose.waitUntil(UI_TIMEOUT_MS) {
+            !rebuiltComposer.uiState.value.sendInFlight && rebuiltStore.item(parked.id)?.isComposerQueueRetryable() == true
+        }
+        val claimsBefore = diagnostics!!.eventsNamed("row_state").count {
+            it.fields["itemId"] == parked.id && it.fields["reason"] == "claimed"
+        }
+
+        publishDelayedTranscript()
+
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) { rebuiltStore.itemsFor(target).isEmpty() }
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
+        assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
+        assertEquals(claimsBefore, diagnostics!!.eventsNamed("row_state").count {
+            it.fields["itemId"] == parked.id && it.fields["reason"] == "claimed"
+        })
+        assertTrue(
+            diagnostics!!.eventsNamed("agent_submit_transcript_late_ack")
+                .any { it.fields["pane"] == parked.paneId && it.fields["agent"] == AgentKind.ClaudeCode.name },
+        )
+        captureViewportArtifacts("issue2037-after-late-authoritative-ack")
+        Unit
+    } }
+
+    @Test
+    fun busyAgentOnStableWritableWireQueuesFifoWithoutBurningAttemptBudget() { runBlocking<Unit> {
+        attachSeededTmuxSession(hostRowTag)
+        waitForVisibleTerminal("busy initial") { it.contains(FAKE_AGENT_READY) }
+        waitForConnected("busy initial")
+        val tmuxVm = currentViewModel()
+        tmuxVm.setAgentSubmitEnterDelayForTest(0)
+        waitForDetectionBound(tmuxVm)
+        openConversationTab(tmuxVm)
+        val composer = currentPromptComposerViewModel()
+        val target = waitForDurableComposerTarget(tmuxVm, composer)
+        val store = composer.outboundQueueStore
+        store.clearSession(target)
+        val nonce = SystemClock.elapsedRealtime().toString().takeLast(6)
+        val payloads = listOf("busy first $nonce", "busy second $nonce")
+
+        openComposerAndSend(payloads[0])
+        waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "busy first parks", {
+            outboundWaitDetails(store, target, composer)
+        }) {
+            store.itemsFor(target).singleOrNull()?.state == OutboundState.Queued
+        }
+        assertTrue(tmuxVm.isSendTransportWritable())
+        openComposerAndSend(payloads[1])
+        waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "busy second parks", {
+            outboundWaitDetails(store, target, composer)
+        }) {
+            val rows = store.itemsFor(target)
+            rows.size == 2 && rows.first().wireSubmitAttempted &&
+                rows.all { it.state == OutboundState.Queued } && !composer.uiState.value.sendInFlight
+        }
+        val queuedSignature = store.itemsFor(target).map { it.id to it.attemptCount }
+        val heartbeatBefore = requireNotNull(
+            Regex("FAKE-AGENT HEARTBEAT: (\\d+)").find(sidecarCapturePane())?.groupValues?.get(1)?.toLongOrNull(),
+        )
+
+        val holdUntil = SystemClock.elapsedRealtime() + BUSY_BUDGET_HOLD_MS
+        var settledChecks = 0
+        while (SystemClock.elapsedRealtime() < holdUntil) {
+            assertTrue("real -CC wire stayed writable", tmuxVm.isSendTransportWritable())
+            assertTrue("busy output must not become transport failure", store.itemsFor(target).none { it.state == OutboundState.Failed })
+            val rows = store.itemsFor(target)
+            if (!composer.uiState.value.sendInFlight && rows.all { it.state == OutboundState.Queued }) {
+                assertEquals("settled row ids/order and attempt generations stay exact", queuedSignature, rows.map { it.id to it.attemptCount })
+                settledChecks += 1
+            }
+            pumpComposeMainFor(250)
+        }
+        val heartbeatAfter = requireNotNull(
+            Regex("FAKE-AGENT HEARTBEAT: (\\d+)").find(sidecarCapturePane())?.groupValues?.get(1)?.toLongOrNull(),
+        )
+        assertTrue("agent output advanced throughout the healthy hold", heartbeatAfter > heartbeatBefore)
+        assertTrue("the hold observed multiple completed retry/refund cycles", settledChecks >= 2)
+        assertEquals("busy agent accepted no duplicate Enter", listOf(payloads[0]), readFakeAgentSubmitLedger().map { it.second })
+        captureViewportArtifacts("issue2042-busy-stable-wire-queued")
+
+        val transcript = "/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL"
+        val relay = execRemoteSetupUntilReady(
+            SshKey.Pem(fixtureKey),
+            "nohup sh -c " + shellQuote(
+                "n=0; i=0; while [ \$i -lt 300 ]; do " +
+                    "if [ -s $LATE_ACK_STAGING_JSONL ]; then cat $LATE_ACK_STAGING_JSONL >> $transcript; " +
+                    ": > $LATE_ACK_STAGING_JSONL; n=\$((n+1)); [ \$n -ge 2 ] && break; fi; " +
+                    "i=\$((i+1)); sleep .2; done",
+            ) + " >/tmp/issue2042-relay.log 2>&1 &",
+            "issue2042 start transcript relay",
+        )
+        assertEquals(0, relay.exitCode)
+        compose.waitUntil(CONNECTED_TIMEOUT_MS) { store.itemsFor(target).isEmpty() }
+        assertTrue(tmuxVm.isSendTransportWritable())
+        assertEquals("FIFO drains once when authority catches up", payloads, readFakeAgentSubmitLedger().map { it.second })
+        captureViewportArtifacts("issue2042-busy-stable-wire-drained")
+        Unit
     } }
 
     @Test
@@ -1365,36 +1479,19 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             .isNotEmpty()
     }.getOrDefault(false)
 
-    /**
-     * Drive the REAL composer: launcher -> draft -> Send, and PROVE the send
-     * was dispatched before returning.
-     *
-     * Issue #1819 — the locally reproduced defect. This helper used to
-     * `performTextInput(payload)` and immediately `performClick()` Send with no
-     * wait and no check. When the sheet had not yet recomposed the draft, Send
-     * fired against an empty draft, production correctly did nothing, and NO
-     * `composer_send` was ever recorded — so the journey's own scenario never
-     * started and every downstream wait (deferral, ack capture, submission) then
-     * burned its full budget and failed with a message that reads like an
-     * outbound-delivery bug. Captured locally: `events=total=61` with no
-     * `composer_send`/`enqueue`, `rowsTotal=0`.
-     *
-     * The fix removes the race at its CAUSE rather than retrying an assertion:
-     * the draft content is confirmed committed before Send is tapped, and the
-     * dispatch is then confirmed from the production `composer_send` diagnostic.
-     * This is a DRIVER, not the property under test — the property is
-     * exactly-once delivery, and a driver that silently fails to drive is the
-     * #1778 shape (the injected scenario never happening). Both waits are
-     * bounded by the existing [UI_TIMEOUT_MS] and hard-fail.
-     */
+    private suspend fun publishDelayedTranscript() {
+        val publish = execRemoteSetupUntilReady(
+            key = SshKey.Pem(fixtureKey),
+            command = "cat ${shellQuote(LATE_ACK_STAGING_JSONL)} >> " +
+                shellQuote("/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL") +
+                " && : > ${shellQuote(LATE_ACK_STAGING_JSONL)}",
+            description = "issue2037 publish delayed transcript",
+        )
+        assertEquals(0, publish.exitCode)
+    }
+
     private fun openComposerAndSend(payload: String) {
-        // Open the composer via the launcher unless the sheet is already open
-        // (a deferred send leaves it open with the queue row visible).
         if (!hasNode(COMPOSER_DRAFT_TAG)) {
-            // A successful handoff dismisses the modal asynchronously. Let the
-            // launcher become the settled foreground hit target before opening
-            // the next real composer; its semantics node is structurally present
-            // during the closing animation but a tap in that overlap is ignored.
             pumpComposeMainFor(750)
             compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
                 hasNode(SESSION_COMPOSER_LAUNCHER_TAG)
@@ -1406,8 +1503,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         }
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true).performTextInput(payload)
 
-        // The draft must actually hold the payload before Send is tapped —
-        // otherwise the tap dispatches nothing and the journey silently no-ops.
         waitForIssue1739Boundary(
             timeoutMs = UI_TIMEOUT_MS,
             label = "composer draft committed before Send",
@@ -1416,15 +1511,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             draftText().contains(payload)
         }
 
-        // ...and Send must be ENABLED when it is tapped. `PromptComposerSheet`
-        // computes `sendEnabled = !state.outboundHandoffInProgress && ...`, and a
-        // performClick on a DISABLED Compose button silently does nothing — so a
-        // tap that lands while a previous handoff is still in flight dispatches
-        // no send at all. Observed on determinism run det4/6 with the draft fully
-        // committed: "the Send tap did not dispatch: no new 'composer_send'
-        // diagnostic; sendsBefore=0 draftText=<full payload>". Wait for the
-        // enabled state rather than retrying the click — same reason as above,
-        // the race is removed at its cause.
         waitForIssue1739Boundary(
             timeoutMs = UI_TIMEOUT_MS,
             label = "composer Send enabled before tap",
@@ -1439,8 +1525,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val sendsBefore = diagnostics!!.eventsNamed("composer_send").size
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true).performClick()
 
-        // The tap must have DISPATCHED a send. Without this the whole journey
-        // can proceed against a send that never happened.
         waitForIssue1739Boundary(
             timeoutMs = UI_TIMEOUT_MS,
             label = "composer Send dispatched a real send",
@@ -1454,11 +1538,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         }
     }
 
-    /**
-     * Is the composer's Send control currently ENABLED? A disabled Compose node
-     * carries [SemanticsProperties.Disabled]; `performClick` on it is a silent
-     * no-op, which is how a tap can leave no trace at all.
-     */
     private fun sendButtonEnabled(): Boolean = runCatching {
         val node = compose.onAllNodesWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .fetchSemanticsNodes()
@@ -1466,7 +1545,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         !node.config.contains(SemanticsProperties.Disabled)
     }.getOrDefault(false)
 
-    /** The live composer draft field's text, or "" when the sheet is not open. */
     private fun draftText(): String = runCatching {
         compose.onAllNodesWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .fetchSemanticsNodes()
@@ -1582,15 +1660,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     // ---------------------------------------------------------------- sidecar capture
 
-    /**
-     * The VISIBLE pane frame via a sidecar SSH `capture-pane -p` — the
-     * authoritative delivery-level surface. Deliberately NOT `-S -N`
-     * (scrollback): the fake-agent redraws its whole frame (clear + reprint) on
-     * reconnect/resize, so scrollback accumulates ECHOES of the single input
-     * line / submitted marker across frames; the visible frame always holds
-     * exactly READY + the (single) SUBMITTED line + the input box, so payload
-     * occurrence counts on it are deterministic.
-     */
     private suspend fun sidecarCapturePane(sessionName: String = SESSION_NAME): String {
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
@@ -1888,6 +1957,22 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
     }
 
+    private fun waitForDurableComposerTarget(
+        tmuxVm: TmuxSessionViewModel,
+        composerVm: PromptComposerViewModel,
+    ): String {
+        var target: String? = null
+        waitForIssue1739Boundary(HOST_ROW_TIMEOUT_MS, "durable composer target", {
+            "tmux=${tmuxVm.currentTargetSessionKeyForTest()} " +
+                "composer=${composerVm.composerTarget} status=${currentConnectionStatus()} " +
+                "events=${boundedEventTail(diagnostics!!.events)}"
+        }) {
+            target = composerVm.composerTarget
+            target?.startsWith("tmux:") == true
+        }
+        return requireNotNull(target)
+    }
+
     private fun waitForFreshClient(previousClient: Int?): Int {
         var current: Int? = null
         waitUntilWall(CONNECTED_TIMEOUT_MS, "fresh client after worker cut") {
@@ -1899,23 +1984,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         return requireNotNull(current)
     }
 
-    /**
-     * Issue #1819: this is the wait behind [waitForFreshClient], i.e. it waits
-     * for a PRODUCTION reconnect to install a replacement client. It used to
-     * sleep wall time with the Compose scheduler frozen, so the reconnect it
-     * waits for could be starved by the wait itself. Pump instead; the hard wall
-     * deadline stays the load-bearing bound.
-     *
-     * Audited against the [pumpComposeMainFor] rule and deliberately KEPT on the
-     * pump side, even though a reconnect is remote IO. A reconnect is not a
-     * one-shot round trip: it is a retry LADDER whose backoff/spacing are Main
-     * `delay`s (the grace `withTimeoutOrNull` loop and its 250ms retry spacing),
-     * so a frozen virtual clock wedges the ladder instead of protecting it — the
-     * opposite of [waitForDetectionBound]. And this wait's bound is
-     * [CONNECTED_TIMEOUT_MS] (45s local / 90s CI), many times a single attempt's
-     * dial/attach budget, so an attempt that the advancing clock does cancel is
-     * simply re-tried well inside the bound. Detection has neither property.
-     */
     private fun waitUntilWall(
         timeoutMs: Long,
         label: String,
@@ -1997,6 +2065,16 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             "tail=[$tail]"
     }
 
+    private fun outboundWaitDetails(
+        store: OutboundQueueStore,
+        target: String,
+        vm: PromptComposerViewModel,
+    ): String = "rows=${store.itemsFor(target)} send=${vm.uiState.value.sendInFlight} " +
+        "handoff=${vm.uiState.value.outboundHandoffInProgress} " +
+        "consumer=${vm.outboundSendConsumers.activeGenerationForDispatch()} " +
+        "owner=${vm.outboundDrainOwnership.activeRowId()} " +
+        "events=${boundedEventTail(diagnostics!!.events)}"
+
     private fun boundedFieldValue(value: Any?): String = when (value) {
         null -> "null"
         is CharSequence -> value.take(DIAGNOSTIC_FIELD_VALUE_LIMIT).toString()
@@ -2059,15 +2137,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         return matched ?: last
     }
 
-    /**
-     * Poll the real pane while pacing launch-owned Compose Main.
-     *
-     * The sidecar SSH read is wall-clock IO. Between reads, drive Main in the
-     * same bounded 20ms steps as the #1739 acknowledgement and redispatch
-     * helpers so a non-immediate capture, ack timeout, Enter, or queue
-     * continuation cannot be frozen merely because this journey is observing
-     * the real pane. The hard wall deadline remains authoritative.
-     */
     private fun pollSidecarCaptureWhileDrivingIssue1739Main(
         timeoutMs: Long,
         predicate: (String) -> Boolean,
@@ -2270,22 +2339,28 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         }
     }
 
-    /**
-     * Seed a tmux session running the deterministic `pocketshell-fake-agent`
-     * input box (echoes typed chars; on Enter prints `FAKE-AGENT SUBMITTED:
-     * <line>` and clears the box), recorded as Claude and paired with a FRESH
-     * Claude transcript for the pane's cwd so REAL live source detection
-     * binds — a bound detection + the Conversation tab is what routes the
-     * composer send down the agent-payload delivery chain
-     * (`sendToAgentPaneResult` → `sendAgentPayloadToPaneResult`), the lane the
-     * maintainer's duplicated prompts ride.
-     */
     private suspend fun seedFakeAgentSession(key: String) {
+        val delayedTranscriptTests = setOf(
+            "manualRetryOfUnconfirmedSubmitWaitsForLateAuthority",
+            "lateAckSurvivesCloseAndRecreateWithoutDuplicate",
+            "busyAgentOnStableWritableWireQueuesFifoWithoutBurningAttemptBudget",
+        )
+        val fakeAgentTranscript =
+            if (testName.methodName in delayedTranscriptTests) {
+                LATE_ACK_STAGING_JSONL
+            } else {
+                "/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL"
+            }
+        val heartbeatEnv = if (testName.methodName == "busyAgentOnStableWritableWireQueuesFifoWithoutBurningAttemptBudget") {
+            "POCKETSHELL_FAKE_AGENT_HEARTBEAT=1 "
+        } else ""
         val script = buildString {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true")
             appendLine("rm -f ${shellQuote(FAKE_AGENT_LEDGER_PATH)}")
+            appendLine("rm -f ${shellQuote(LATE_ACK_STAGING_JSONL)}")
+            appendLine("touch ${shellQuote(LATE_ACK_STAGING_JSONL)}")
             appendLine("mkdir -p /home/testuser/.claude/projects/-home-testuser")
             appendLine(
                 "cp /home/testuser/.claude/projects/-workspace-pocketshell/" +
@@ -2298,21 +2373,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                     "-c /home/testuser " +
                     shellQuote(
                         "POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER=$FAKE_AGENT_LEDGER_PATH " +
-                            "POCKETSHELL_FAKE_AGENT_TRANSCRIPT=/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL " +
+                            "POCKETSHELL_FAKE_AGENT_TRANSCRIPT=$fakeAgentTranscript " +
+                            heartbeatEnv +
                             "exec /usr/local/bin/pocketshell-fake-agent",
                     ),
             )
-            // Issue #1963: this exactly-once fixture is an intentionally fake
-            // Bash input surface, so the healthy host classifier correctly
-            // reports `none`. Recording it as `shell` made binding depend on
-            // the #975 masked-live fallback, which deliberately accepts JSONL
-            // evidence only after an UNREADABLE (`unknown`) classification —
-            // never after a readable `none`. Full-shard state exposed that
-            // mismatch as `agentConversations={}` after the first method.
-            // Record the identity this fixture is explicitly modelling, then
-            // keep the real source selector + transcript reader load-bearing.
-            // Nothing is injected into the ViewModel and the production
-            // `detection != null` precondition below remains unchanged.
             appendLine("tmux set-option -t ${shellQuote(SESSION_NAME)} @ps_agent_kind claude")
             appendLine(
                 "tmux show-options -v -t ${shellQuote(SESSION_NAME)} " +
@@ -2327,6 +2392,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             )
             appendLine("tmux set-option -t ${shellQuote(SESSION_B)} @ps_agent_kind shell")
             appendLine("sleep 1")
+            appendLine("pid=\$(tmux display-message -p -t ${shellQuote(SESSION_NAME)} '#{pane_pid}'); tr '\\0' '\\n' < /proc/\$pid/environ | grep -Fx ${shellQuote("POCKETSHELL_FAKE_AGENT_TRANSCRIPT=$fakeAgentTranscript")}")
             appendLine("tmux list-sessions")
         }
         val result = execRemoteSetupUntilReady(
@@ -2335,16 +2401,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             description = "issue1526 fake-agent tmux seed session",
         )
         assertTrue(
-            "expected fake-agent seeding to succeed; exit=${result.exitCode} stderr='${result.stderr}'",
+            "seed failed ${result.exitCode}: ${result.stderr}",
             result.exitCode == 0,
         )
     }
 
-    /**
-     * Give only the #1944 outage proof the framed Claude/Codex-shaped input.
-     * Other journeys in this class intentionally retain the legacy `>` fixture
-     * because their assertions characterize that readline surface.
-     */
     private suspend fun enableIssue1944FramedFakeAgent() {
         val command =
             "tmux respawn-pane -k -t ${shellQuote("=$SESSION_NAME:0.0")} " +
@@ -2378,6 +2439,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                             "tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true; " +
                             "rm -f /home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL " +
                             "${shellQuote(FAKE_AGENT_LEDGER_PATH)} " +
+                            "${shellQuote(LATE_ACK_STAGING_JSONL)} " +
                             "2>/dev/null || true",
                     )
                 }
@@ -2473,14 +2535,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     private fun writeText(name: String, text: String): File = artifacts.writeText(name, text)
 
-    /**
-     * Issue #1621 (round-three review follow-up): suffix the timings artifact with
-     * the TEST METHOD name. Both methods in this class used to write the one shared
-     * `timings.txt`, so in a normal full-class run the keystroke lane overwrote the
-     * composer lane's `user_retype_resend_used` / `submitted_after_send_tap_ms` —
-     * the branch-taken evidence was only recoverable by running a method in
-     * isolation. Per-method files make it readable from any run.
-     */
+    // Per-method file: full-class runs must not overwrite timing evidence.
     private fun writeTimings(): File = artifacts.writeTimings()
 
     private fun recordTiming(name: String, value: Long) = artifacts.recordTiming(name, value)
@@ -2513,6 +2568,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         const val SESSION_B: String = "issue1944-switch-b"
         const val SESSION_B_MARKER: String = "ISSUE1944-B-READY"
         const val FAKE_AGENT_LEDGER_PATH: String = "/tmp/pocketshell-fake-agent-submits.log"
+        const val LATE_ACK_STAGING_JSONL: String = "/tmp/pocketshell-issue2037-delayed.jsonl"
+        const val BUSY_BUDGET_HOLD_MS: Long = 25_000L
         const val SEEDED_JSONL: String = "issue1526-live-claude.jsonl"
         const val FAKE_AGENT_READY: String = "FAKE-AGENT-READY"
         const val CONVERSATION_SEGMENT_TAG: String = TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + "1"

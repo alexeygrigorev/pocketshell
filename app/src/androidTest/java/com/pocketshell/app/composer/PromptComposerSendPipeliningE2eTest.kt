@@ -76,7 +76,7 @@ class PromptComposerSendPipeliningE2eTest {
                                 }
                                 else -> error("unexpected callback payload: $payload")
                             }
-                            true
+                            ComposerSendResult.Delivered
                         },
                         onDelivered = {
                             dismissCount.incrementAndGet()
@@ -189,7 +189,7 @@ class PromptComposerSendPipeliningE2eTest {
                                 }
                                 else -> error("unexpected ${request.cleanDraft}")
                             }
-                            true
+                            ComposerSendResult.Delivered
                         },
                         onDelivered = {
                             dismissCount.incrementAndGet()

@@ -79,7 +79,7 @@ class ComposerHiltHostActivity : ComponentActivity() {
                     // path TmuxSessionScreen mounts.
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _ -> true },
+                        onSend = { ComposerSendResult.Delivered },
                     )
                 }
             }

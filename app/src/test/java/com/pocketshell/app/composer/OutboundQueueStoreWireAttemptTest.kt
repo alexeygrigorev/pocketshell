@@ -312,4 +312,97 @@ class OutboundQueueStoreWireAttemptTest {
         assertNull(rebuilt.wireCollapsedMarkerBaseline("session-b", rowB.id))
         assertFalse("a row id cannot be read through the wrong session", rebuilt.hasWireAttempt("session-b", rowA.id))
     }
+
+    @Test
+    fun lateDeliveryComparePrunesOnlyTheExactWireSubmitAttemptGeneration() {
+        val store = InMemoryOutboundQueueStore()
+        val row = store.enqueue("late-ack", "exact", paneId = "%7", sendKey = "key-1")
+        store.claim(row.id)!!
+        val attempt = store.markWireSubmitAttempted("late-ack", row.id)!!
+
+        assertFalse(
+            "late authority cannot prune while the send callback still owns the active row",
+            store.acknowledgeLateDelivered(row.id, "key-1", attempt.wireAttemptGeneration),
+        )
+        store.markFailed(row.id, "ambiguous", 2L)
+        assertFalse(store.acknowledgeLateDelivered(row.id, "wrong-key", attempt.wireAttemptGeneration))
+        assertFalse(store.acknowledgeLateDelivered(row.id, "key-1", attempt.wireAttemptGeneration + 1))
+        assertNotNull("stale evidence must leave the retryable row intact", store.item(row.id))
+        assertTrue(store.acknowledgeLateDelivered(row.id, "key-1", attempt.wireAttemptGeneration))
+        assertNull("the exact confirmed attempt is terminal and cannot remain Retry", store.item(row.id))
+        assertFalse(store.acknowledgeLateDelivered(row.id, "key-1", attempt.wireAttemptGeneration))
+    }
+
+    @Test
+    fun lateDeliveryCompareSurvivesProcessRestartAndPrunesWithoutRetry() {
+        val session = "late-ack-restart"
+        val first = SharedPrefsOutboundQueueStore(context)
+        first.clearSession(session)
+        val row = first.enqueue(session, "survive", paneId = "%7", sendKey = "key-restart")
+        first.claim(row.id)!!
+        val attempt = first.markWireSubmitAttempted(session, row.id)!!
+
+        val rebuilt = SharedPrefsOutboundQueueStore(context)
+        assertTrue(rebuilt.item(row.id)!!.wireSubmitAttempted)
+        assertFalse(rebuilt.acknowledgeLateDelivered(row.id, row.sendKey, attempt.wireAttemptGeneration))
+        assertEquals(listOf(row.id), rebuilt.requeueStaleInFlight(session, Long.MAX_VALUE).map { it.id })
+        assertTrue(rebuilt.acknowledgeLateDelivered(row.id, row.sendKey, attempt.wireAttemptGeneration))
+        assertNull(SharedPrefsOutboundQueueStore(context).item(row.id))
+    }
+
+    @Test
+    fun durableLateDeliveryCompareRejectsUploadingUntilIdle() {
+        val session = "late-ack-uploading"
+        val store = SharedPrefsOutboundQueueStore(context)
+        store.clearSession(session)
+        val row = store.enqueue(session, "upload first", paneId = "%7", sendKey = "upload-key")
+        store.markUploading(row.id, 1L)!!
+        val attempt = store.markWireSubmitAttempted(session, row.id)!!
+
+        assertFalse(store.acknowledgeLateDelivered(row.id, row.sendKey, attempt.wireAttemptGeneration))
+        assertEquals(OutboundState.Uploading, store.item(row.id)!!.state)
+        store.markFailed(row.id, "upload outcome unknown", 2L)
+        assertTrue(store.acknowledgeLateDelivered(row.id, row.sendKey, attempt.wireAttemptGeneration))
+        assertNull(store.item(row.id))
+    }
+
+    @Test
+    fun eachWireGenerationPersistsItsOwnTranscriptBaseline() {
+        val session = "wire-generation-baseline"
+        val store = SharedPrefsOutboundQueueStore(context)
+        store.clearSession(session)
+        val row = store.enqueue(session, "baseline", sendKey = "baseline-key")
+        val baselineA = OutboundSubmitTranscriptBaseline("a.jsonl", "a", "ClaudeCode", setOf("a1"))
+        val baselineB = OutboundSubmitTranscriptBaseline("b.jsonl", "b", "ClaudeCode", setOf("b1"))
+
+        store.claim(row.id)
+        val first = store.markWireSubmitAttempted(session, row.id, baselineA)!!
+        store.markFailed(row.id, "pending")
+        store.requeueForRetry(row.id, resetAttempts = true)
+        store.claim(row.id)
+        val second = store.markWireSubmitAttempted(session, row.id, baselineB)!!
+
+        assertEquals(1, first.wireAttemptGeneration)
+        assertEquals(2, second.wireAttemptGeneration)
+        assertEquals(baselineB, SharedPrefsOutboundQueueStore(context).item(row.id)!!.wireSubmitTranscriptBaseline)
+    }
+
+    @Test
+    fun legacySubmitAttemptMigratesToNonzeroWireGeneration() {
+        val submitted = OutboundItem(
+            id = "legacy-submitted",
+            sessionKey = "legacy",
+            cleanText = "payload",
+            createdAtMs = 1L,
+            wireSubmitAttempted = true,
+        )
+        val untouched = submitted.copy(id = "legacy-fresh", wireSubmitAttempted = false)
+        val legacyRaw = encodeOutboundItems(listOf(submitted, untouched))
+            .lineSequence()
+            .joinToString("\n") { it.substringBeforeLast('\t') }
+        val decoded = decodeOutboundItems("legacy", legacyRaw)
+
+        assertEquals(1, decoded.first { it.id == submitted.id }.wireAttemptGeneration)
+        assertEquals(0, decoded.first { it.id == untouched.id }.wireAttemptGeneration)
+    }
 }

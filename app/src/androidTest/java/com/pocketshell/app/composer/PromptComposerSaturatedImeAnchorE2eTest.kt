@@ -129,7 +129,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                         onSend = {
                             sendEntered.complete(Unit)
                             deliveryGate.await()
-                            true
+                            ComposerSendResult.Delivered
                         },
                         onDelivered = { visible.value = false },
                     )
@@ -358,7 +358,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                     SideEffect { sheetStateRef.set(sheetState) }
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { true },
+                        onSend = { com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         composerTargetKey = targetKey,
                         modifier = Modifier.observeProductionSheetIme(),
                         sheetState = sheetState,
@@ -488,7 +488,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                         onSend = {
                             sendEntered.complete(Unit)
                             deliveryGate.await()
-                            true
+                            ComposerSendResult.Delivered
                         },
                         onDelivered = { visible.value = false },
                     )
@@ -721,7 +721,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                         SideEffect { sheetStateRef.set(sheetState) }
                         PromptComposerSheet(
                             onDismiss = { visible.value = false },
-                            onSend = { true },
+                            onSend = { com.pocketshell.app.composer.ComposerSendResult.Delivered },
                             composerTargetKey = targetKey,
                             // Mount the real production availability contract:
                             // a selected URI deterministically yields one staged

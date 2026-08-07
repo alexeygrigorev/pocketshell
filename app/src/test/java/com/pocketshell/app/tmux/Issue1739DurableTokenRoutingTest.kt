@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.composer.OutboundRoute
+import com.pocketshell.app.composer.ComposerSendResult
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.tmux.CommandResponse
@@ -69,7 +70,7 @@ class Issue1739DurableTokenRoutingTest {
             val calls = mutableListOf<WireCall>()
             val sent = dispatch(case.request, calls)
 
-            assertTrue("${case.name} should dispatch", sent)
+            assertEquals("${case.name} should dispatch", ComposerSendResult.Delivered, sent)
             assertEquals("${case.name} must dispatch once", 1, calls.size)
             assertEquals(case.expectedLane, calls.single().lane)
             assertEquals(case.expectedPayload, calls.single().payload)
@@ -98,8 +99,8 @@ class Issue1739DurableTokenRoutingTest {
             outboundQueueItemId = null,
         )
 
-        assertTrue(dispatch(nonDurable, firstCalls))
-        assertTrue(dispatch(nonDurable, secondCalls))
+        assertEquals(ComposerSendResult.Delivered, dispatch(nonDurable, firstCalls))
+        assertEquals(ComposerSendResult.Delivered, dispatch(nonDurable, secondCalls))
 
         val firstToken = firstCalls.single().sendToken
         val secondToken = secondCalls.single().sendToken
@@ -141,7 +142,7 @@ class Issue1739DurableTokenRoutingTest {
             calls = calls,
             sendAgentPayload = sendAgentPayload,
         )
-        assertFalse("the first ambiguous paste remains queued", first)
+        assertEquals("the first ambiguous paste remains queued", ComposerSendResult.AuthoritativeAckPending, first)
 
         val landedChip = CommandResponse(
             number = 0L,
@@ -156,7 +157,7 @@ class Issue1739DurableTokenRoutingTest {
             sendAgentPayload = sendAgentPayload,
         )
 
-        assertTrue("the proven landed chip authorizes Enter-only completion", retry)
+        assertEquals("the proven landed chip authorizes Enter-only completion", ComposerSendResult.Delivered, retry)
         assertEquals(listOf(DURABLE_ROW_ID, DURABLE_ROW_ID), calls.map { it.sendToken })
         assertEquals("the retry must not duplicate-paste", 1, pasteCount)
         assertEquals("the proven retry submits exactly one Enter", 1, enterCount)
@@ -188,8 +189,8 @@ class Issue1739DurableTokenRoutingTest {
             onEnter = { enterCount += 1 },
         )
 
-        assertFalse(dispatch(durableRequest, calls, sendAgentPayload))
-        assertFalse(dispatch(durableRequest, calls, sendAgentPayload))
+        assertEquals(ComposerSendResult.AuthoritativeAckPending, dispatch(durableRequest, calls, sendAgentPayload))
+        assertEquals(ComposerSendResult.AuthoritativeAckPending, dispatch(durableRequest, calls, sendAgentPayload))
 
         assertEquals(listOf(DURABLE_ROW_ID, DURABLE_ROW_ID), calls.map { it.sendToken })
         assertEquals("unknown delivery must not duplicate-paste", 1, pasteCount)
@@ -235,7 +236,7 @@ class Issue1739DurableTokenRoutingTest {
             ),
         )
 
-        assertTrue("independent durable marker evidence authorizes completion", result)
+        assertEquals("independent durable marker evidence authorizes completion", ComposerSendResult.Delivered, result)
         assertEquals("the already-landed multiline payload must not be pasted again", 0, pasteCount)
         assertEquals("the proven collapsed marker authorizes exactly one Enter", 1, enterCount)
     }
@@ -279,7 +280,7 @@ class Issue1739DurableTokenRoutingTest {
             ),
         )
 
-        assertFalse("untrusted legacy evidence must remain retryable", result)
+        assertEquals("untrusted legacy evidence must remain retryable", ComposerSendResult.AuthoritativeAckPending, result)
         assertEquals("unknown evidence must not duplicate-paste", 0, pasteCount)
         assertEquals("unknown evidence must never authorize Enter", 0, enterCount)
     }
@@ -313,11 +314,11 @@ class Issue1739DurableTokenRoutingTest {
             sendToken: String,
             durableRow: DurableOutboundRowIdentity?,
             deliveryProof: AgentSubmitDeliveryProof,
-        ) -> Boolean = { paneId, text, _, sendToken, durableRow, deliveryProof ->
+        ) -> ComposerSendResult = { paneId, text, _, sendToken, durableRow, deliveryProof ->
             calls += WireCall("agent-payload", paneId, text, sendToken, durableRow, deliveryProof)
-            true
+            ComposerSendResult.Delivered
         },
-    ): Boolean =
+    ): ComposerSendResult =
         tmuxComposerSendResult(
             request = request,
             targetSessionId = SESSION_ID,
@@ -325,7 +326,7 @@ class Issue1739DurableTokenRoutingTest {
             sendAgentPayload = sendAgentPayload,
             sendToAgent = { paneId, text, sendToken, durableRow ->
                 calls += WireCall("agent-echo", paneId, text, sendToken, durableRow)
-                true
+                ComposerSendResult.Delivered
             },
             sendRawBytes = { paneId, bytes, sendToken, durableRow ->
                 calls += WireCall(
@@ -335,7 +336,7 @@ class Issue1739DurableTokenRoutingTest {
                     sendToken = sendToken,
                     durableRow = durableRow,
                 )
-                true
+                ComposerSendResult.Delivered
             },
             setTuiNotice = {},
         )
@@ -353,7 +354,7 @@ class Issue1739DurableTokenRoutingTest {
         String,
         DurableOutboundRowIdentity?,
         AgentSubmitDeliveryProof,
-    ) -> Boolean =
+    ) -> ComposerSendResult =
         { paneId, text, _, sendToken, durableRow, _ ->
             calls += WireCall("agent-payload", paneId, text, sendToken, durableRow)
             when (
@@ -369,9 +370,9 @@ class Issue1739DurableTokenRoutingTest {
                 DeliveryProbeOutcome.AlreadyLanded -> {
                     onEnter()
                     ledger.clear(paneId, sendToken)
-                    true
+                    ComposerSendResult.Delivered
                 }
-                DeliveryProbeOutcome.Unknown -> false
+                DeliveryProbeOutcome.Unknown -> ComposerSendResult.AuthoritativeAckPending
                 DeliveryProbeOutcome.NotLanded, null -> {
                     ledger.recordWireAttempt(
                         paneId = paneId,
@@ -382,7 +383,7 @@ class Issue1739DurableTokenRoutingTest {
                         durableRow = durableRow,
                     )
                     onPaste()
-                    false
+                    ComposerSendResult.AuthoritativeAckPending
                 }
             }
         }

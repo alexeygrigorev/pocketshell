@@ -155,7 +155,7 @@ class PromptComposerDismissReleasesMicTest {
                 if (sheetVisible) {
                     PromptComposerSheet(
                         onDismiss = { sheetVisible = false },
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         viewModel = viewModel,
                     )
                 }
@@ -240,7 +240,7 @@ class PromptComposerDismissReleasesMicTest {
             PocketShellTheme {
                 PromptComposerSheet(
                     onDismiss = {},
-                    onSend = { _ -> true },
+                    onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                     viewModel = viewModel,
                 )
             }

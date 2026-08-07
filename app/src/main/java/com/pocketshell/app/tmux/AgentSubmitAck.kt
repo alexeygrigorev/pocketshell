@@ -456,8 +456,11 @@ internal suspend fun awaitAgentSubmitTurnover(
     recordAgentSubmitTurnover(
         identity, paneId, terminalResult, polls, currentClientHash, currentGeneration,
     )
-    throw IllegalStateException("Agent submit turnover was not proven ($terminalResult); kept queued.")
+    throw AgentSubmitTurnoverNotProvenException(terminalResult)
 }
+
+internal class AgentSubmitTurnoverNotProvenException(result: String) :
+    IllegalStateException("Agent submit turnover was not proven ($result); kept queued.")
 
 /**
  * Row-correlated #1944 turnover oracle. Agent transcripts commonly keep the

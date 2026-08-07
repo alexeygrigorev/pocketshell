@@ -42,6 +42,12 @@ internal data class ComposerHandoffAcceptance(
     val outboundQueueItemId: String?,
 )
 
+public enum class ComposerSendResult {
+    Delivered,
+    AuthoritativeAckPending,
+    Failed,
+}
+
 /**
  * One-shot local-acceptance events, split out of the already oversized
  * composer ViewModel. The channel bridges the tiny commit-to-Compose gap; each
@@ -126,7 +132,7 @@ internal fun PromptComposerViewModel.completeAllHandoffAcceptanceReductions() {
  */
 internal suspend fun collectPromptComposerSendRequests(
     viewModel: PromptComposerViewModel,
-    onSend: suspend (SendRequest) -> Boolean,
+    onSend: suspend (SendRequest) -> ComposerSendResult,
     onDelivered: () -> Unit = {},
 ) {
     val consumerGeneration = viewModel.outboundSendConsumers.register()
@@ -161,27 +167,26 @@ internal suspend fun collectPromptComposerSendRequests(
             var terminalCallbackApplied = false
             try {
                 viewModel.awaitHandoffAcceptanceReduction(request.outboundQueueItemId)
-                val delivered = try {
+                val result = try {
                     withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
                         onSend(request)
-                    } == true
+                    } ?: ComposerSendResult.Failed
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Throwable) {
-                    false
+                    ComposerSendResult.Failed
                 }
-                if (delivered) {
-                    viewModel.markSendDelivered(request)
-                    if (request.outboundQueueItemId == null &&
-                        viewModel.consumeQuiescenceForAutoClose(request)
-                    ) {
-                        onDelivered()
+                when (result) {
+                    ComposerSendResult.Delivered -> {
+                        if (viewModel.markSendDelivered(request)) onDelivered()
                     }
-                } else {
-                    viewModel.markOutboundSendDeferred(
-                        request,
-                        resetAttemptBudget = !viewModel.isSendTransportWritable(),
-                    )
+                    ComposerSendResult.AuthoritativeAckPending ->
+                        viewModel.markOutboundSendDeferred(request, resetAttemptBudget = true)
+                    ComposerSendResult.Failed ->
+                        viewModel.markOutboundSendDeferred(
+                            request,
+                            resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                        )
                 }
                 terminalCallbackApplied = true
             } catch (cancelled: CancellationException) {
@@ -220,10 +225,6 @@ internal fun PromptComposerViewModel.recordComposerMutation(target: String? = co
     composerInteractionEpoch++
 }
 
-internal fun PromptComposerViewModel.onComposerOpened() {
-    composerInteractionEpoch++
-}
-
 internal fun PromptComposerViewModel.publishHandoffAcceptance(
     target: String,
     outboundQueueItemId: String?,
@@ -238,18 +239,30 @@ internal fun PromptComposerViewModel.publishHandoffAcceptance(
 }
 
 /**
- * Legacy delivery-quiescence query retained for queue/background-finalize
- * callers and its class matrix. Issue #695 moves actual dismissal to the local
- * acceptance reduction below.
+ * Delivery-quiescence query for authoritative queue/background finalization.
+ * Durable sends may close only after delivery and same-interaction checks.
  */
 public fun PromptComposerViewModel.consumeQuiescenceForAutoClose(
     request: SendRequest? = null,
 ): Boolean {
-    val state = _uiState.value
     val requestEpoch = request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::remove)
         ?: legacyAutoCloseEpoch.also { legacyAutoCloseEpoch = null }
-    val ownsCurrentInteraction = request == null || requestEpoch == composerInteractionEpoch
-    return ownsCurrentInteraction && state.draft.isEmpty() &&
+    return deliveryIsQuiescentAt(
+        requestEpoch,
+        allowWithoutEpoch = request == null,
+        requestTarget = request?.sendTarget?.sessionKey,
+    )
+}
+
+internal fun PromptComposerViewModel.deliveryIsQuiescentAt(
+    requestEpoch: Long?,
+    allowWithoutEpoch: Boolean = false,
+    requestTarget: String? = null,
+): Boolean {
+    val state = _uiState.value
+    val ownsCurrentInteraction = allowWithoutEpoch || requestEpoch == composerInteractionEpoch
+    val ownsCurrentTarget = requestTarget.isNullOrBlank() || requestTarget == composerTarget
+    return ownsCurrentInteraction && ownsCurrentTarget && state.draft.isEmpty() &&
         state.attachments.isEmpty() &&
         state.recording == PromptComposerViewModel.RecordingState.Idle &&
         !state.outboundHandoffInProgress &&
@@ -258,16 +271,43 @@ public fun PromptComposerViewModel.consumeQuiescenceForAutoClose(
         } != false
 }
 
+/** Prune one authoritative snapshot batch, then restart its FIFO exactly once. */
+internal fun PromptComposerViewModel.acknowledgeLateOutboundDeliveries(
+    items: List<OutboundItem>,
+    beforePrune: (OutboundItem) -> Unit = {},
+    onAcknowledged: (OutboundItem) -> Unit = {},
+): Boolean {
+    if (items.isEmpty()) return false
+    val acknowledged = items.mapNotNull { item ->
+        val epoch = outboundAutoCloseEpochs[item.id]
+        beforePrune(item)
+        if (outboundQueueStore.acknowledgeLateDelivered(item.id, item.sendKey, item.wireAttemptGeneration)) {
+            onAcknowledged(item)
+            item to epoch
+        } else {
+            null
+        }
+    }
+    if (acknowledged.isEmpty()) return false
+    acknowledged.forEach { (item, _) ->
+        outboundAutoCloseEpochs.remove(item.id)
+        launchSidecarRemoval(item.id)
+    }
+    acknowledged.map { it.first.sessionKey }.distinct().forEach(::refreshOutboundQueueItemsFor)
+    if (!outboundHandoffInProgress) retryNextOutboundItem()
+    return acknowledged.any { (item, epoch) -> deliveryIsQuiescentAt(epoch, requestTarget = item.sessionKey) }
+}
+
 /**
- * Consume a local-acceptance event for prompt composer dismissal without
- * waiting for its durable queue row to deliver or prune.
+ * Legacy no-row sends may close at local acceptance. Durable rows always wait
+ * for authoritative delivery and [deliveryIsQuiescentAt].
  */
 internal fun PromptComposerViewModel.consumeHandoffAcceptanceForAutoClose(
     acceptance: ComposerHandoffAcceptance,
 ): Boolean {
     val state = _uiState.value
     val ownsCurrentTarget = acceptance.target.isBlank() || acceptance.target == composerTarget
-    return ownsCurrentTarget &&
+    return acceptance.outboundQueueItemId == null && ownsCurrentTarget &&
         acceptance.interactionEpoch == composerInteractionEpoch &&
         state.draft.isEmpty() &&
         state.attachments.isEmpty() &&
@@ -414,7 +454,10 @@ internal fun PromptComposerViewModel.emitSendRequest(
             if (acknowledged) {
                 publishHandoffAcceptance(
                     target = durableTarget,
-                    outboundQueueItemId = backgroundDelivery.outboundQueueItemId,
+                    // The old row is already authoritatively delivered and pruned.
+                    // This is a local no-new-row dedup acceptance; retaining its id
+                    // would wait forever for a second acknowledgement that cannot exist.
+                    outboundQueueItemId = null,
                 )
             }
             backgroundDeliveredRequest = null
@@ -649,7 +692,7 @@ internal fun PromptComposerViewModel.hasLocalAttachmentsForSidecars(attachments:
     outboundQueueStore !== DisabledOutboundQueueStore &&
         outboundAttachmentSidecarStore != null &&
         outboundAttachmentUploader != null &&
-        attachments.any { it.previewUri != null }
+        attachments.any { it.transferState == AttachmentTransferState.PendingLocal }
 
 internal suspend fun PromptComposerViewModel.enqueueSidecarBackedSend(
     cleanDraft: String,
@@ -665,18 +708,31 @@ internal suspend fun PromptComposerViewModel.enqueueSidecarBackedSend(
     if (sessionKey == null) {
         return null
     }
+    val durableDraftRefs = sidecarStore.refsFor(draftAttachmentSidecarScope(sessionKey))
+        .associateBy { it.attachmentIndex }
     val localAttachments = attachments.mapIndexedNotNull { index, attachment ->
-        attachment.previewUri?.let { index to it }
+        if (attachment.transferState != AttachmentTransferState.PendingLocal) return@mapIndexedNotNull null
+        val durableRef = pendingAttachmentIndex(attachment.remotePath)?.let(durableDraftRefs::get)
+        val localUri = durableRef?.let { android.net.Uri.fromFile(java.io.File(it.localPath)) }
+            ?: attachment.previewUri
+            ?: error("Attachment upload failed: pending local bytes are unavailable")
+        index to localUri
     }
     val itemId = UUID.randomUUID().toString()
-    val sidecars = sidecarStore.stage(
+    val stagedSidecars = sidecarStore.stage(
         outboundItemId = itemId,
         uris = localAttachments.map { it.second },
         attachmentIndices = localAttachments.map { it.first },
     )
-    if (sidecars.size != localAttachments.size) {
+    if (stagedSidecars.size != localAttachments.size) {
         error("Attachment upload failed: could not preserve selected file bytes")
     }
+    val sidecars = sidecarStore.updateMetadata(
+        stagedSidecars.associate { ref ->
+            val attachment = attachments[requireNotNull(ref.attachmentIndex)]
+            ref.id to (attachment.displayName to attachment.mimeType)
+        },
+    )
     val item = OutboundItem(
         id = itemId,
         sessionKey = sessionKey,

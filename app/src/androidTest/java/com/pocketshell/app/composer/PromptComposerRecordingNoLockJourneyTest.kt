@@ -122,7 +122,7 @@ class PromptComposerRecordingNoLockJourneyTest {
                 if (sheetVisible) {
                     PromptComposerSheet(
                         onDismiss = { sheetVisible = false },
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         viewModel = viewModel,
                     )
                 }

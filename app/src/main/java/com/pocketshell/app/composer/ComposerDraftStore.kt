@@ -106,7 +106,14 @@ public data class DurableAttachmentRef(
     val remotePath: String,
     val displayName: String,
     val mimeType: String? = null,
+    val transferState: AttachmentTransferState = AttachmentTransferState.RemoteComplete,
 )
+
+/** Explicit ownership of attachment bytes; presentation URIs never decide transfer work. */
+public enum class AttachmentTransferState {
+    RemoteComplete,
+    PendingLocal,
+}
 
 /**
  * Issue #832: no-op [ComposerDraftStore] used when the ViewModel is
@@ -244,13 +251,13 @@ public class SharedPrefsComposerDraftStore @Inject constructor(
 internal fun attachmentKey(sessionKey: String): String = "@att/$sessionKey"
 
 /**
- * Issue #872: encode attachment refs as newline-separated `path\tname\tmime`
+ * Issue #872/#2036: encode refs as newline-separated `path\tname\tmime\ttransferState`
  * rows. Tabs/newlines inside fields are escaped so the round-trip is lossless;
  * a missing mime is the empty 3rd field.
  */
 internal fun encodeAttachments(attachments: List<DurableAttachmentRef>): String =
     attachments.joinToString(separator = "\n") { ref ->
-        listOf(ref.remotePath, ref.displayName, ref.mimeType.orEmpty())
+        listOf(ref.remotePath, ref.displayName, ref.mimeType.orEmpty(), ref.transferState.name)
             .joinToString(separator = "\t") { field ->
                 field.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
             }
@@ -268,6 +275,13 @@ internal fun decodeAttachments(raw: String): List<DurableAttachmentRef> {
             remotePath = remotePath,
             displayName = fields.getOrNull(1).orEmpty().ifEmpty { remotePath.substringAfterLast('/') },
             mimeType = fields.getOrNull(2).orEmpty().ifEmpty { null },
+            transferState = fields.getOrNull(3)
+                ?.let { runCatching { AttachmentTransferState.valueOf(it) }.getOrNull() }
+                ?: if (isPendingUploadRemotePath(remotePath)) {
+                    AttachmentTransferState.PendingLocal
+                } else {
+                    AttachmentTransferState.RemoteComplete
+                },
         )
     }
 }

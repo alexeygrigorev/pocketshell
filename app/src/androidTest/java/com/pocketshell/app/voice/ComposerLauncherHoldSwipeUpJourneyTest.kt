@@ -162,7 +162,7 @@ class ComposerLauncherHoldSwipeUpJourneyTest {
                 if (showComposer.value) {
                     PromptComposerSheet(
                         onDismiss = { showComposer.value = false },
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         viewModel = viewModel,
                         autoStartRecording = autoRecord.value,
                     )

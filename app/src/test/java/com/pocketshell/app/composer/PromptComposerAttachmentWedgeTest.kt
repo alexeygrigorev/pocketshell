@@ -184,6 +184,7 @@ class PromptComposerAttachmentWedgeTest {
         target: PromptComposerViewModel.SendTargetSnapshot,
         draft: String,
         fileName: String,
+        remoteComplete: Boolean = false,
     ) {
         val local = localAttachmentFile(fileName, "local bytes for $fileName")
         vm.onComposerTargetChanged(target.sessionKey)
@@ -194,7 +195,11 @@ class PromptComposerAttachmentWedgeTest {
                 PromptComposerViewModel.AttachmentPreview(Uri.fromFile(local), "text/plain"),
             ),
         ) {
-            Result.success(listOf("~/.pocketshell/attachments/old/$fileName"))
+            if (remoteComplete) {
+                Result.success(listOf("~/.pocketshell/attachments/old/$fileName"))
+            } else {
+                Result.failure(IllegalStateException("attach-time upload unavailable"))
+            }
         }
         settleUntil { vm.uiState.value.attachments.isNotEmpty() }
         assertTrue(vm.uiState.value.attachments.isNotEmpty())
@@ -370,8 +375,10 @@ class PromptComposerAttachmentWedgeTest {
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )
+        var sendUploadCalls = 0
         vm.setOutboundAttachmentSidecarUploader {
-            Result.success(it.map { ref -> "~/.pocketshell/attachments/uploaded/${ref.displayName}" })
+            sendUploadCalls++
+            Result.failure(AssertionError("RemoteComplete attachment must not upload on Send"))
         }
         val sent = collectSendRequests(vm)
         val target = PromptComposerViewModel.SendTargetSnapshot(
@@ -379,10 +386,11 @@ class PromptComposerAttachmentWedgeTest {
             route = OutboundRoute.RawBytes,
         )
 
-        attachAndSendForWedge(vm, sent, target, "with attachment", "ok.txt")
+        attachAndSendForWedge(vm, sent, target, "with attachment", "ok.txt", remoteComplete = true)
 
         assertEquals(1, sent.size)
-        assertTrue(sent.single().text.contains("uploaded/ok.txt"))
+        assertEquals(0, sendUploadCalls)
+        assertTrue(sent.single().text.contains("old/ok.txt"))
         assertEquals(1, sent.single().attachments.size)
         vm.markSendDelivered(sent.single())
         advanceUntilIdle()

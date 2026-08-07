@@ -125,7 +125,7 @@ class PromptComposerImeLayoutRegressionTest {
                                 dismissed = true
                                 composerVisible.value = false
                             },
-                            onSend = { _ -> true },
+                            onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                             viewModel = vm,
                         )
                     }
@@ -296,7 +296,7 @@ class PromptComposerImeLayoutRegressionTest {
                     FauxTerminalBackdrop()
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         viewModel = vm,
                     )
                 }

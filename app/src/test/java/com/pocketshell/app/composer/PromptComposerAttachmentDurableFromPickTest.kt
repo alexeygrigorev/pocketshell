@@ -211,6 +211,10 @@ class PromptComposerAttachmentDurableFromPickTest {
             1,
             vm.uiState.value.attachments.size,
         )
+        assertEquals(
+            AttachmentTransferState.PendingLocal,
+            vm.uiState.value.attachments.single().transferState,
+        )
         // The retained tile is backed by durable local bytes (a draft-scoped sidecar).
         assertTrue(
             "durable draft-sidecar bytes must be staged for the retained pick",
@@ -305,6 +309,189 @@ class PromptComposerAttachmentDurableFromPickTest {
         )
     }
 
+    @Test
+    fun partialFailureKeepsLaterRetainedPickBoundToItsOriginalIdentity() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(dispatcher)
+        val vm = newVm(dispatcher, outboundAttachmentSidecarStore = sidecars)
+        vm.onComposerTargetChanged("1/session-a")
+        val missingFirst = File(
+            ApplicationProvider.getApplicationContext<Context>().cacheDir,
+            "picked/missing-first.txt",
+        ).also { it.delete() }
+        val uploadedMiddle = pickedFile("uploaded-middle.txt", "MIDDLE")
+        val retainedLast = pickedFile("retained-last.txt", "LAST-BYTES")
+        val uploadedPath = "~/.pocketshell/attachments/session-a/uploaded-middle.txt"
+
+        vm.attachFiles(
+            count = 3,
+            previews = listOf(
+                preview(Uri.fromFile(missingFirst), "text/plain"),
+                preview(uploadedMiddle, "text/plain"),
+                preview(retainedLast, "text/plain"),
+            ),
+        ) {
+            Result.failure(
+                PartialAttachmentUploadException(
+                    uploadedPaths = listOf(uploadedPath),
+                    uploadedAttachmentIndices = listOf(1),
+                    failedAttachmentIndices = listOf(0, 2),
+                    failedCount = 2,
+                    message = "Attached 1 of 3 files; 2 failed",
+                ),
+            )
+        }
+        advanceUntilIdle()
+
+        assertEquals(
+            "the later retained survivor must keep original batch order",
+            listOf(uploadedPath, "retained-last.txt"),
+            vm.uiState.value.attachments.map { it.remotePath.takeIf { path -> path == uploadedPath } ?: it.displayName },
+        )
+        val retained = vm.uiState.value.attachments.last()
+        assertEquals(retainedLast, retained.previewUri)
+        assertEquals("retained-last.txt", retained.displayName)
+        val ref = sidecars.refsFor(draftAttachmentSidecarScope("1/session-a")).single()
+        assertEquals(1, ref.attachmentIndex)
+        assertEquals("LAST-BYTES", File(ref.localPath).readText())
+    }
+
+    @Test
+    fun sendUsesDurableRetainedBytesWhenPickerUriBecomesUnreadable() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore(dispatcher)
+        val vm = newVm(dispatcher, queue, sidecars)
+        val sent = collectSendRequests(vm)
+        val target = "1/session-a"
+        vm.onComposerTargetChanged(target)
+        vm.onDraftChange("send retained bytes")
+        val picked = pickedFile("revoked.txt", "DURABLE-BYTES")
+        vm.attachFiles(1, listOf(preview(picked, "text/plain"))) {
+            Result.failure(SshException("attach-time upload failed"))
+        }
+        advanceUntilIdle()
+        assertTrue("simulate picker access revocation after preservation", File(picked.path!!).delete())
+        var uploadedBytes: String? = null
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            uploadedBytes = File(refs.single().localPath).readText()
+            Result.success(listOf("/remote/revoked.txt"))
+        }
+
+        vm.requestSend(true, PromptComposerViewModel.SendTargetSnapshot(sessionKey = target))
+        settleUntil { sent.isNotEmpty() }
+
+        assertEquals("DURABLE-BYTES", uploadedBytes)
+        assertEquals(listOf("/remote/revoked.txt"), sent.single().attachments.map { it.remotePath })
+        vm.markSendDelivered(sent.single())
+        advanceUntilIdle()
+        assertFalse(vm.uiState.value.sendInFlight)
+    }
+
+    @Test
+    fun sequentialFailedPicksPreserveEarlierDurableBytesAndTileOrder() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val sidecars = newSidecarStore(dispatcher)
+        val vm = newVm(dispatcher, outboundAttachmentSidecarStore = sidecars)
+        vm.onComposerTargetChanged("1/session-a")
+        val first = pickedFile("first.txt", "FIRST")
+        val second = pickedFile("second.txt", "SECOND")
+
+        vm.attachFiles(1, listOf(preview(first))) { Result.failure(SshException("first failed")) }
+        advanceUntilIdle()
+        vm.attachFiles(1, listOf(preview(second))) { Result.failure(SshException("second failed")) }
+        advanceUntilIdle()
+
+        assertEquals(listOf("first.txt", "second.txt"), vm.uiState.value.attachments.map { it.displayName })
+        val refs = sidecars.refsFor(draftAttachmentSidecarScope("1/session-a"))
+        assertEquals("both sequential picks retain durable bytes", 2, refs.size)
+        assertEquals(listOf("FIRST", "SECOND"), refs.map { File(it.localPath).readText() })
+    }
+
+    @Test
+    fun processRecreateImmediateSendResolvesPendingLocalByDurableIdentity() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore(dispatcher)
+        val drafts = InMemoryComposerDraftStore()
+        val firstVm = newVm(dispatcher, queue, sidecars, drafts)
+        firstVm.onComposerTargetChanged("1/session-a")
+        val picked = pickedFile("recreated.txt", "RECREATED-BYTES")
+        firstVm.attachFiles(1, listOf(preview(picked))) { Result.failure(SshException("offline")) }
+        advanceUntilIdle()
+
+        val recreated = newVm(dispatcher, queue, sidecars, drafts)
+        val delivered = mutableListOf<PromptComposerViewModel.SendRequest>()
+        backgroundScope.launch {
+            collectPromptComposerSendRequests(recreated, onSend = { request ->
+                delivered += request
+                ComposerSendResult.Delivered
+            })
+        }
+        runCurrent()
+        var uploads = 0
+        recreated.setOutboundAttachmentSidecarUploader { refs ->
+            uploads += 1
+            Result.success(refs.map { "/remote/${it.displayName}" })
+        }
+        recreated.onComposerTargetChanged("1/session-a")
+        val restored = recreated.uiState.value.attachments.single()
+        assertNull("presentation URI is intentionally not persisted", restored.previewUri)
+
+        val row = recreated.enqueueSidecarBackedSend(
+            cleanDraft = "send immediately",
+            attachments = listOf(restored),
+            withEnter = true,
+            sendTarget = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a"),
+        )
+
+        val committed = requireNotNull(row)
+        assertEquals("RECREATED-BYTES", sidecars.refsFor(committed.id).single().let { File(it.localPath).readText() })
+        recreated.refreshOutboundQueueItemsFor("1/session-a")
+        assertEquals(committed.id, recreated.retryNextOutboundItem())
+        settleUntil { delivered.isNotEmpty() }
+        assertEquals(1, uploads)
+        assertEquals(listOf("/remote/recreated.txt"), delivered.single().attachments.map { it.remotePath })
+        settleUntil { queue.itemsFor("1/session-a").isEmpty() }
+        assertNull(recreated.retryNextOutboundItem())
+        assertEquals(1, delivered.size)
+    }
+
+    @Test
+    fun removedEarlierPendingTileCannotSubstituteItsBytesForLaterTileAfterRecreate() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore(dispatcher)
+        val drafts = InMemoryComposerDraftStore()
+        val firstVm = newVm(dispatcher, queue, sidecars, drafts)
+        firstVm.onComposerTargetChanged("1/session-a")
+        val a = pickedFile("a.txt", "A-BYTES")
+        val b = pickedFile("b.txt", "B-BYTES")
+        firstVm.attachFiles(1, listOf(preview(a))) { Result.failure(SshException("offline A")) }
+        advanceUntilIdle()
+        firstVm.attachFiles(1, listOf(preview(b))) { Result.failure(SshException("offline B")) }
+        advanceUntilIdle()
+        firstVm.removeAttachment(firstVm.uiState.value.attachments.first().remotePath)
+
+        val recreated = newVm(dispatcher, queue, sidecars, drafts)
+        recreated.setOutboundAttachmentSidecarUploader { Result.success(listOf("/remote/b.txt")) }
+        recreated.onComposerTargetChanged("1/session-a")
+        val visibleB = recreated.uiState.value.attachments.single()
+        assertEquals("b.txt", visibleB.displayName)
+        val row = requireNotNull(
+            recreated.enqueueSidecarBackedSend(
+                cleanDraft = "only B",
+                attachments = listOf(visibleB),
+                withEnter = true,
+                sendTarget = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a"),
+            ),
+        )
+
+        val queuedRef = sidecars.refsFor(row.id).single()
+        assertEquals("b.txt", queuedRef.displayName)
+        assertEquals("B-BYTES", File(queuedRef.localPath).readText())
+    }
+
     // ---- R-A durability across a session switch A→B→A (no bytes lost) ---------
 
     @Test
@@ -336,6 +523,10 @@ class PromptComposerAttachmentDurableFromPickTest {
 
         // A's retained tile is back, reconnected to its durable bytes.
         assertEquals("the retained tile survives A→B→A", 1, vm.uiState.value.attachments.size)
+        assertEquals(
+            AttachmentTransferState.PendingLocal,
+            vm.uiState.value.attachments.single().transferState,
+        )
         assertNotNull(
             "the tile is reconnected to its durable sidecar bytes",
             vm.uiState.value.attachments.single().previewUri,

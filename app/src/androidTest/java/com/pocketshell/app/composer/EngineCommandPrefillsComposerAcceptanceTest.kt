@@ -145,7 +145,7 @@ class EngineCommandPrefillsComposerAcceptanceTest {
                             onDismiss = { showSheet = false },
                             onSend = { _ ->
                                 sendCalled = true
-                                true
+                                ComposerSendResult.Delivered
                             },
                             viewModel = vm,
                         )

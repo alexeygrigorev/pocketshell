@@ -167,6 +167,9 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
             outboundQueueItems = promptComposerViewModel.outboundQueueItems,
             controller = controller,
             transportWritable = transportWritable,
+            unparkTransportFailedRows = {
+                promptComposerViewModel.unparkTransportFailedRows()
+            },
             retryNext = { excludingIds ->
                 promptComposerViewModel.retryNextOutboundItem(excludingIds = excludingIds)
             },
@@ -253,8 +256,23 @@ internal suspend fun runOutboundQueueAutoFlush(
     // there is no new reconnect pressure). Defaulted to `{ false }` so existing unit
     // call sites keep the pure-`sessionLive` gate and compile unchanged.
     transportWritable: () -> Boolean = { false },
+    // Issue #2042: a transport can recover while the coarse connection enum stays
+    // unchanged. Re-arm only on the wire oracle's false→true edge; a sustained true
+    // wire must not repeatedly reset a poison row's bounded retry budget.
+    unparkTransportFailedRows: () -> Unit = {},
 ): Unit = coroutineScope {
-    fun drainGateOpen(): Boolean = sessionLive || transportWritable()
+    // Treat an already-writable probe on effect startup as a recovery edge. A
+    // recreated screen may inherit durable auto-parked Failed rows while the
+    // coarse connection enum and wire both remain steadily healthy.
+    var previousTransportWritable = false
+    fun drainGateOpen(): Boolean {
+        val transportWritableNow = transportWritable()
+        if (transportWritableNow && !previousTransportWritable) {
+            unparkTransportFailedRows()
+        }
+        previousTransportWritable = transportWritableNow
+        return sessionLive || transportWritableNow
+    }
     launch {
         outboundQueueItems.collect {
             controller.onQueueSnapshotChanged(drainGateOpen(), hasPendingWork, retryNext)

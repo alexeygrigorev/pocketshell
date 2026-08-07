@@ -156,7 +156,7 @@ import kotlinx.coroutines.supervisorScope
 @Composable
 public fun PromptComposerSheet(
     onDismiss: () -> Unit,
-    onSend: suspend (PromptComposerViewModel.SendRequest) -> Boolean,
+    onSend: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult,
     modifier: Modifier = Modifier,
     hostId: Long? = null,
     // Issue #745: live SSH/tmux connection liveness pushed from the host
@@ -346,10 +346,6 @@ public fun PromptComposerSheet(
         viewModel.onComposerTargetChanged(composerTargetKey)
     }
 
-    LaunchedEffect(viewModel) {
-        viewModel.onComposerOpened()
-    }
-
     // Issue #585: the session launcher's hold+swipe-up ENTRY gesture opens this
     // sheet WITH recording already started — one gesture, not "open then tap the
     // mic". [autoStartRecording] carries that intent from the launcher; a
@@ -372,6 +368,7 @@ public fun PromptComposerSheet(
         ) {
             return@LaunchedEffect
         }
+        viewModel.onMicStartIntent()
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO,
@@ -450,6 +447,7 @@ public fun PromptComposerSheet(
             onDraftChange = viewModel::onDraftChange,
             onMicTap = {
                 // Three-step gate: permission, then key, then recorder.
+                viewModel.onMicStartIntent()
                 val granted = ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO,
@@ -489,7 +487,10 @@ public fun PromptComposerSheet(
                 { showSnippetPicker = true }
             } else null,
             onAttachFiles = if (onStageAttachments != null) {
-                { attachmentLauncher.launch(arrayOf("*/*")) }
+                {
+                    viewModel.onAttachmentPickIntent()
+                    attachmentLauncher.launch(arrayOf("*/*"))
+                }
             } else null,
             onRemoveAttachment = viewModel::removeAttachment,
             pendingItems = pendingItems,
@@ -1488,10 +1489,9 @@ internal fun SheetContent(
 @Composable
 public fun PromptComposerSendDispatcher(
     viewModel: PromptComposerViewModel,
-    onSend: suspend (PromptComposerViewModel.SendRequest) -> Boolean,
-    // Historical name retained for source-compatible standalone harnesses.
-    // Durable production rows now invoke it at local handoff acceptance;
-    // no-store fallback rows still invoke it on successful delivery.
+    onSend: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult,
+    // Historical name retained for source compatibility. Durable rows invoke
+    // it only after authoritative delivery; no-row sends may close at acceptance.
     onDelivered: () -> Unit = {},
 ) {
     val currentOnSend by rememberUpdatedState(onSend)
@@ -1500,10 +1500,8 @@ public fun PromptComposerSendDispatcher(
         try {
             viewModel.handoffAcceptances.collect { acceptance ->
                 try {
-                    // Issue #695 recurrence: dismissal belongs to local acceptance,
-                    // not the 5–10s host delivery callback. Pauseable test seam makes
-                    // the post-acceptance/new-draft race deterministic; production is
-                    // a no-op and reduces immediately.
+                    // Acceptance is a delivery barrier. Only legacy no-row sends
+                    // can close here; durable rows wait for authoritative delivery.
                     viewModel.beforeHandoffAutoCloseReductionForTest()
                     if (viewModel.consumeHandoffAcceptanceForAutoClose(acceptance)) {
                         currentOnDelivered()

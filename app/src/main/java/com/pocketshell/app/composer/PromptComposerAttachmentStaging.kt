@@ -68,6 +68,13 @@ internal fun pendingAttachmentRemotePath(scope: String, index: Int, displayName:
     "~/${PromptAttachmentStager.REMOTE_DIRECTORY}/${PromptAttachmentStager.safeScopeSegment(scope)}/" +
         "$PENDING_UPLOAD_MARKER-${(index + 1).toString().padStart(2, '0')}-$displayName"
 
+internal fun pendingAttachmentIndex(remotePath: String): Int? = remotePath
+    .substringAfter("$PENDING_UPLOAD_MARKER-", missingDelimiterValue = "")
+    .substringBefore('-')
+    .toIntOrNull()
+    ?.minus(1)
+    ?.takeIf { it >= 0 }
+
 /**
  * Issue #1569 (U1): whether [remotePath] is a provisional retained-on-failure tile
  * path (bytes durable locally, not yet uploaded). A restore reconnects such a tile to

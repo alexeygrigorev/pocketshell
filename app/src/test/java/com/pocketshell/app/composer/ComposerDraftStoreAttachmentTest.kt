@@ -27,6 +27,7 @@ class ComposerDraftStoreAttachmentTest {
                 remotePath = "~/.pocketshell/attachments/host-1/report.txt",
                 displayName = "report.txt",
                 mimeType = null,
+                transferState = AttachmentTransferState.PendingLocal,
             ),
         )
         val decoded = decodeAttachments(encodeAttachments(refs))
@@ -67,6 +68,21 @@ class ComposerDraftStoreAttachmentTest {
         assertEquals(1, decoded.size)
         assertEquals("photo.jpg", decoded.single().displayName)
         assertNull(decoded.single().mimeType)
+        assertEquals(AttachmentTransferState.RemoteComplete, decoded.single().transferState)
+    }
+
+    @Test
+    fun legacyThreeFieldRowDefaultsToRemoteCompleteRatherThanPreviewAuthority() {
+        val decoded = decodeAttachments("~/already-uploaded.png\talready-uploaded.png\timage/png")
+        assertEquals(AttachmentTransferState.RemoteComplete, decoded.single().transferState)
+    }
+
+    @Test
+    fun legacyThreeFieldPendingUploadRowRestoresLocalTransferAuthority() {
+        val decoded = decodeAttachments(
+            "~/.pocketshell/pending-upload-01-report.txt\treport.txt\ttext/plain",
+        )
+        assertEquals(AttachmentTransferState.PendingLocal, decoded.single().transferState)
     }
 
     @Test

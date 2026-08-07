@@ -143,13 +143,9 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         outboundQueueStore = queue,
     ).also { viewModel = it }
 
-    /**
-     * Issue #695 recurrence: the production screen-scoped dispatcher must close
-     * the empty real sheet at local queue acceptance, not after the host's slow
-     * suspend delivery callback.
-     */
+    /** Issue #2037: local handoff is not delivery; close only after authoritative ack. */
     @Test
-    fun acceptedPromptDismissesBeforeTenSecondHostDeliveryCompletes() {
+    fun acceptedPromptStaysOpenUntilTenSecondHostDeliveryIsAuthoritativelyAcknowledged() {
         val drafts = InMemoryComposerDraftStore()
         val queue = InMemoryOutboundQueueStore()
         val vm = newViewModel(drafts, queue)
@@ -176,7 +172,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                             sendEntered.complete(Unit)
                             delay(10_000)
                             sendCompleted.complete(Unit)
-                            true
+                            ComposerSendResult.Delivered
                         },
                         onDelivered = { visible.value = false },
                     )
@@ -207,37 +203,39 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
 
         compose.waitUntil(5_000) { reductionEntered.isCompleted }
         assertFalse(
-            "downstream delivery must not overtake durable local-acceptance dismissal",
+            "downstream delivery must not overtake the durable acceptance barrier",
             sendEntered.isCompleted,
         )
         assertTrue("the screen owner must remain until acceptance is reduced", visible.value)
         assertEquals("", vm.uiState.value.draft)
         WalkthroughScreenshotArtifacts.capture("issue-695-01-accepted-empty-before-reduction")
 
-        val releasedAt = SystemClock.elapsedRealtime()
         releaseReduction.complete(Unit)
-        compose.waitUntil(2_000) { !visible.value }
-        val dismissedAfterMs = SystemClock.elapsedRealtime() - releasedAt
-        assertTrue(
-            "local acceptance must dismiss promptly, took ${dismissedAfterMs}ms",
-            dismissedAfterMs < 2_000,
-        )
         compose.waitUntil(2_000) { sendEntered.isCompleted }
         assertTrue("host delivery must have started", sendEntered.isCompleted)
-        assertFalse(
-            "the accepted empty sheet must leave composition before host delivery starts",
-            sheetMountedAtSendStart.get() ?: true,
+        assertTrue(
+            "the empty sheet stays mounted while host delivery remains ambiguous",
+            sheetMountedAtSendStart.get() ?: false,
         )
-        assertFalse("dismissal must not await the injected 10s host callback", sendCompleted.isCompleted)
+        assertTrue("durable acceptance must not close before authoritative delivery", visible.value)
+        assertFalse("the injected host callback is still pending", sendCompleted.isCompleted)
         assertEquals("", vm.uiState.value.draft)
         assertEquals(1, queue.itemsFor(targetKey).size)
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue-2037-02-open-during-delivery")
+
+        compose.mainClock.advanceTimeBy(10_000)
+        compose.waitUntil(2_000) { sendCompleted.isCompleted }
+        compose.waitUntil(2_000) { !visible.value }
+        assertTrue("host delivery must have completed before dismissal", sendCompleted.isCompleted)
+        assertTrue("authoritative ack prunes the durable row", queue.itemsFor(targetKey).isEmpty())
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertDoesNotExist()
-        WalkthroughScreenshotArtifacts.capture("issue-695-02-dismissed-before-delivery")
+        WalkthroughScreenshotArtifacts.capture("issue-2037-03-dismissed-after-delivery-ack")
     }
 
     /**
-     * The local acceptance event and the dismissal reduction are distinct main
-     * loop turns. New typing in that window owns the sheet and must survive
+     * The acceptance barrier and its reduction are distinct main-loop turns.
+     * New typing in that window owns the sheet and must survive
      * exactly, even while the accepted row continues delivering.
      */
     @Test
@@ -262,7 +260,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                         viewModel = vm,
                         onSend = {
                             releaseDelivery.await()
-                            true
+                            ComposerSendResult.Delivered
                         },
                         onDelivered = { visible.value = false },
                     )
@@ -361,7 +359,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                             onSend = {
                                 sendEntered.complete(Unit)
                                 releaseDelivery.await()
-                                true
+                                ComposerSendResult.Delivered
                             },
                             composerTargetKey = targetKey,
                             sendTargetSnapshotProvider = {
@@ -402,7 +400,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         }
         releaseReduction.complete(Unit)
         compose.waitUntil(timeoutMillis = 5_000) { sendEntered.isCompleted }
-        assertTrue("new typing must defeat the pending acceptance dismissal", visible.value)
+        assertTrue("new typing must defeat later authoritative dismissal", visible.value)
         WalkthroughScreenshotArtifacts.capture("issue-1616-01-new-draft-during-send")
 
         // Previous prompt A finalizes in the background.
@@ -444,7 +442,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                         onSend = {
                             sendEntered.complete(Unit)
                             releaseDelivery.await()
-                            true
+                            ComposerSendResult.Delivered
                         },
                         composerTargetKey = targetKey,
                         sendTargetSnapshotProvider = {

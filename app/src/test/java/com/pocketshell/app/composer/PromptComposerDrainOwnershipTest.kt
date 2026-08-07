@@ -218,7 +218,7 @@ class PromptComposerDrainOwnershipTest {
         vm.onComposerTargetChanged("1/session-a")
         var physicalSendCount = 0
         val consumer = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
-            collectPromptComposerSendRequests(vm, onSend = { physicalSendCount++; true })
+            collectPromptComposerSendRequests(vm, onSend = { physicalSendCount++; ComposerSendResult.Delivered })
         }
         runCurrent()
 
@@ -237,7 +237,7 @@ class PromptComposerDrainOwnershipTest {
         vm.setTransportWritableProbe { true }
         val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
         val firstPhysicalSendStarted = CompletableDeferred<Unit>()
-        val firstPhysicalSendNeverReturns = CompletableDeferred<Boolean>()
+        val firstPhysicalSendNeverReturns = CompletableDeferred<ComposerSendResult>()
         val acceptedPayloads = mutableListOf<String>()
         vm.onComposerTargetChanged(target.sessionKey)
         val autoFlush = OutboundQueueAutoFlushController.boundTo(vm)
@@ -272,7 +272,7 @@ class PromptComposerDrainOwnershipTest {
         assertNull(vm.outboundDrainOwnership.activeRowId())
 
         val replacement = launch {
-            collectPromptComposerSendRequests(vm, onSend = { acceptedPayloads += it.cleanDraft; true })
+            collectPromptComposerSendRequests(vm, onSend = { acceptedPayloads += it.cleanDraft; ComposerSendResult.Delivered })
         }
         advanceUntilIdle()
         assertEquals(listOf("keep this across screen turnover"), acceptedPayloads)

@@ -14140,11 +14140,11 @@ public class TmuxSessionViewModel @Inject constructor(
         tailGenerationPresent = { paneAgentTailGenerations[it] != null },
     )
     @androidx.annotation.VisibleForTesting
-    internal fun setAgentTranscriptAuthorityForTest(paneId: String, active: Boolean) =
-        agentTranscriptAuthority.setActiveForTest(paneId, active)
+    internal fun setAgentTranscriptAuthorityForTest(paneId: String, active: Boolean) = agentTranscriptAuthority.setActiveForTest(paneId, active)
     @androidx.annotation.VisibleForTesting
-    internal fun setAgentTranscriptAuthorityStartingForTest(paneId: String, starting: Boolean) =
-        agentTranscriptAuthority.setStartingForTest(paneId, starting)
+    internal fun setAgentTranscriptAuthorityStartingForTest(paneId: String, starting: Boolean) = agentTranscriptAuthority.setStartingForTest(paneId, starting)
+    internal fun resolveLateAuthoritativeOutboundAck(item: com.pocketshell.app.composer.OutboundItem): Boolean = resolveLateOutboundAck(outboundDeliveryLedger, agentTranscriptAuthority, item)
+    internal fun consumeLateAuthoritativeOutboundAck(item: com.pocketshell.app.composer.OutboundItem) = outboundDeliveryLedger.clear(item.paneId, item.id)
     private fun isCurrentAgentSendRuntime(
         identity: AgentSendRuntimeIdentity,
         paneId: String,
@@ -14264,7 +14264,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 Result.failure(failure)
             }
             DeliveryProbeOutcome.Unknown -> return Result.failure(
-                IllegalStateException("Prior send outcome unknown; kept queued without resend."),
+                AgentSubmitTurnoverNotProvenException("prior_send_outcome_unknown"),
             )
             DeliveryProbeOutcome.NotLanded, null -> Unit
         }

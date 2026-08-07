@@ -247,7 +247,7 @@ class PromptComposerUndeliveredRetryTest {
                     )
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         viewModel = composerVm,
                         // Issue #1272: production resolves this shared VM via
                         // hiltViewModel(); the test injects it directly so the real

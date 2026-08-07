@@ -512,6 +512,10 @@ public class PromptComposerViewModel @Inject constructor(
         draftPersistence.clear(sessionKey)
     }
 
+    public fun onAttachmentPickIntent() = recordComposerMutation()
+
+    public fun onMicStartIntent() = recordComposerMutation()
+
     /**
      * Stage selected files through the host screen's uploader and add the
      * resulting remote paths to the structured [UiState.attachments] list
@@ -532,6 +536,7 @@ public class PromptComposerViewModel @Inject constructor(
             _uiState.update { it.copy(error = ATTACHMENT_UPLOAD_BUSY_MESSAGE) }
             return
         }
+        recordComposerMutation()
         DiagnosticEvents.record("action", "attachment_stage_start", "count" to count)
         attachmentJob = viewModelScope.launch {
             _uiState.update {
@@ -593,11 +598,30 @@ public class PromptComposerViewModel @Inject constructor(
                             "stagedCount" to partial.uploadedPaths.count { it.isNotBlank() },
                             "failedCount" to partial.failedCount,
                         )
+                        val beforeBatch = _uiState.value.attachments
+                        val uploadedPreviews = partial.uploadedAttachmentIndices.mapNotNull(previews::getOrNull)
                         mergeStagedPaths(
                             partial.uploadedPaths,
-                            previews,
+                            uploadedPreviews,
                             error = partial.message,
                         )
+                        val failedPreviews = partial.failedAttachmentIndices.mapNotNull { originalIndex ->
+                            previews.getOrNull(originalIndex)?.let { IndexedValue(originalIndex, it) }
+                        }
+                        val retained = retainFailedPickDurably(failedPreviews, error)
+                        if (retained.isNotEmpty()) {
+                            val uploadedByIndex = partial.uploadedAttachmentIndices
+                                .zip(partial.uploadedPaths)
+                                .associate { (index, path) ->
+                                    index to requireNotNull(_uiState.value.attachments.firstOrNull { it.remotePath == path })
+                                }
+                            val pendingByIndex = retained.associate { it.index to it.value }
+                            val orderedBatch = (uploadedByIndex + pendingByIndex).toSortedMap().values
+                            _uiState.update { current ->
+                                current.copy(attachments = beforeBatch + orderedBatch)
+                            }
+                            composerTarget?.let { composerDraftStore.saveAttachments(it, _uiState.value.attachments.toDurableRefs()) }
+                        }
                         return@fold
                     }
                     DiagnosticEvents.record(
@@ -607,18 +631,8 @@ public class PromptComposerViewModel @Inject constructor(
                         "cause" to error.javaClass.simpleName,
                         "message" to error.message,
                     )
-                    // Issue #1569 (U1 — P0 DATA LOSS): the picked files must NOT be
-                    // dropped when the (attach-time) upload fails. Before #1569 this
-                    // branch set Idle + an error and DISCARDED the picked URIs — no
-                    // tile, no durable bytes, no queue row, no Retry — so a mid-stream
-                    // teardown ("Stream closed") LOST the maintainer's attachment with
-                    // the false "Your draft was kept" copy (true only for draft TEXT).
-                    // Now we RETAIN the pick durably: stage the picked bytes as durable
-                    // local sidecars and add persisted tiles backed by them, so the
-                    // failed upload leaves a RETRYABLE representation — the send-time
-                    // queue leg (#1540 write-ahead, #1531 badge/Retry, #1554
-                    // exactly-once) uploads it on Send and auto-retries on reconnect.
-                    if (!retainFailedPickDurably(previews, error)) {
+                    // Retain failed picks as durable local sidecars for send-time retry.
+                    if (retainFailedPickDurably(previews.withIndex().toList(), error).isEmpty()) {
                         _uiState.update {
                             it.copy(
                                 attachmentUpload = AttachmentUploadState.Idle,
@@ -639,40 +653,40 @@ public class PromptComposerViewModel @Inject constructor(
      * tiles to the per-session [composerDraftStore]. A subsequent Send routes them
      * through the durable, auto-retrying, exactly-once send-time upload leg.
      *
-     * Returns `true` when at least one file was durably retained (the caller shows
-     * the "saved — will upload on Send" copy); `false` when nothing could be retained
-     * (no local URIs / no sidecar store), so the caller falls back to the plain
-     * error banner.
+     * Returns the retained tiles; an empty list makes the caller show the plain
+     * upload error because no local bytes could be preserved.
      */
     private suspend fun retainFailedPickDurably(
-        previews: List<AttachmentPreview>,
+        previews: List<IndexedValue<AttachmentPreview>>,
         error: Throwable,
-    ): Boolean {
-        val sidecarStore = outboundAttachmentSidecarStore ?: return false
-        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return false
-        val uris = previews.map { it.uri }
-        if (uris.isEmpty()) return false
+    ): List<IndexedValue<StagedAttachment>> {
+        val sidecarStore = outboundAttachmentSidecarStore ?: return emptyList()
+        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return emptyList()
+        val uris = previews.map { it.value.uri }
+        if (uris.isEmpty()) return emptyList()
         val scope = draftAttachmentSidecarScope(target)
-        // Fresh durable bytes for this draft scope: drop any stale draft sidecars
-        // first so a re-pick after a prior failure does not accumulate orphans.
-        sidecarStore.removeOutboundItem(scope)
+        val existing = sidecarStore.refsFor(scope)
+        val firstIndex = (existing.mapNotNull { it.attachmentIndex }.maxOrNull() ?: -1) + 1
         val sidecars = sidecarStore.stage(
             outboundItemId = scope,
             uris = uris,
-            attachmentIndices = uris.indices.toList(),
+            attachmentIndices = uris.indices.map { firstIndex + it },
         )
-        if (sidecars.isEmpty()) return false
-        val retainedTiles = sidecars.mapIndexed { index, ref ->
-            StagedAttachment(
-                // The provisional remote path is unique + non-blank so the tile
-                // de-dupes and composes; the send-time sidecar upload REPLACES it
-                // with the authoritative uploaded path (withUploadedSidecars), so it
-                // never reaches the wire.
-                remotePath = pendingAttachmentRemotePath(scope, ref.attachmentIndex ?: index, ref.displayName),
-                displayName = ref.displayName,
-                previewUri = previews.getOrNull(ref.attachmentIndex ?: index)?.uri
-                    ?: android.net.Uri.fromFile(java.io.File(ref.localPath)),
-                mimeType = ref.mimeType ?: previews.getOrNull(ref.attachmentIndex ?: index)?.mimeType,
+        if (sidecars.isEmpty()) return emptyList()
+        val retainedTiles = sidecars.mapNotNull { ref ->
+            val stagedIndex = (ref.attachmentIndex ?: return@mapNotNull null) - firstIndex
+            val preview = previews.getOrNull(stagedIndex) ?: return@mapNotNull null
+            IndexedValue(
+                preview.index,
+                StagedAttachment(
+                    // The provisional remote path is unique + non-blank so the tile
+                    // de-dupes and composes; send-time upload replaces it before wire delivery.
+                    remotePath = pendingAttachmentRemotePath(scope, ref.attachmentIndex, ref.displayName),
+                    displayName = ref.displayName,
+                    previewUri = preview.value.uri,
+                    mimeType = ref.mimeType ?: preview.value.mimeType,
+                    transferState = AttachmentTransferState.PendingLocal,
+                ),
             )
         }
         DiagnosticEvents.record(
@@ -682,7 +696,7 @@ public class PromptComposerViewModel @Inject constructor(
             "cause" to error.javaClass.simpleName,
         )
         _uiState.update { current ->
-            val merged = (current.attachments + retainedTiles)
+            val merged = (current.attachments + retainedTiles.map { it.value })
                 .distinctBy { it.remotePath }
             current.copy(
                 attachments = merged,
@@ -700,7 +714,7 @@ public class PromptComposerViewModel @Inject constructor(
         // process too; [rehydrateDraftAttachmentBytes] reconnects them on restore).
         composerDraftStore.saveAttachments(target, _uiState.value.attachments.toDurableRefs())
         recordComposerMutation(target)
-        return true
+        return retainedTiles
     }
 
     /**
@@ -717,7 +731,7 @@ public class PromptComposerViewModel @Inject constructor(
         val sidecarStore = outboundAttachmentSidecarStore ?: return
         if (target.isBlank()) return
         val hasRetainedTiles = _uiState.value.attachments.any {
-            it.previewUri == null && isPendingUploadRemotePath(it.remotePath)
+            it.previewUri == null && it.transferState == AttachmentTransferState.PendingLocal
         }
         if (!hasRetainedTiles) return
         viewModelScope.launch(outboundQueueDispatcher) {
@@ -726,12 +740,12 @@ public class PromptComposerViewModel @Inject constructor(
             withContext(Dispatchers.Main.immediate) {
                 if (composerTarget != target) return@withContext
                 _uiState.update { current ->
-                    val queue = ArrayDeque(refs)
+                    val refsByIndex = refs.associateBy { it.attachmentIndex }
                     val rehydrated = current.attachments.map { tile ->
-                        if (tile.previewUri != null || !isPendingUploadRemotePath(tile.remotePath)) {
+                        if (tile.previewUri != null || tile.transferState != AttachmentTransferState.PendingLocal) {
                             return@map tile
                         }
-                        val ref = queue.removeFirstOrNull() ?: return@map tile
+                        val ref = pendingAttachmentIndex(tile.remotePath)?.let(refsByIndex::get) ?: return@map tile
                         tile.copy(previewUri = android.net.Uri.fromFile(java.io.File(ref.localPath)))
                     }
                     if (rehydrated == current.attachments) current else current.copy(attachments = rehydrated)
@@ -880,6 +894,7 @@ public class PromptComposerViewModel @Inject constructor(
         }
         if (removed) {
             recordComposerMutation()
+            composerTarget?.let { composerDraftStore.saveAttachments(it, _uiState.value.attachments.toDurableRefs()) }
             DiagnosticEvents.record(
                 "action",
                 "attachment_remove",
@@ -903,7 +918,10 @@ public class PromptComposerViewModel @Inject constructor(
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     public fun onMicTap() {
         when (_uiState.value.recording) {
-            RecordingState.Idle -> startRecording()
+            RecordingState.Idle -> {
+                recordComposerMutation()
+                startRecording()
+            }
             RecordingState.Recording -> stopAndTranscribe()
             RecordingState.Transcribing -> DiagnosticEvents.record(
                 "action",
@@ -1005,13 +1023,16 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /** Finalize delivery without touching post-handoff editor input (#1616). */
-    public fun markSendDelivered(request: SendRequest? = null) {
+    public fun markSendDelivered(request: SendRequest? = null): Boolean {
         // Issue #891: the send resolved successfully — disarm the overall-send
         // watchdog so it cannot fire a spurious "Send failed" afterwards.
         watchdogs.disarmSend()
         // Issue #971: the in-flight send resolved — drop the captured request so a
         // later watchdog/strand cannot restore a stale prompt.
         val closeEpoch = request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::get)
+            ?: request?.takeIf { it.outboundQueueItemId == null }?.let {
+                legacyAutoCloseEpoch.also { legacyAutoCloseEpoch = null }
+            }
         backgroundDeliveredRequest = request?.takeIf {
             it.outboundQueueItemId != null && closeEpoch != composerInteractionEpoch
         }
@@ -1020,11 +1041,9 @@ public class PromptComposerViewModel @Inject constructor(
         inFlightSendRequest = null
         _uiState.update { it.copy(sendInFlight = false) }
         markOutboundSendDelivered(request)
-        // Issue #1621: delivery ownership is already released and the completed
-        // row has been pruned. Claim the next FIFO row immediately; relying only
-        // on an outer screen's queue observer leaves an enqueue-behind row stuck
-        // when the composer is mounted in another host/lifecycle boundary.
+        val autoClose = deliveryIsQuiescentAt(closeEpoch, requestTarget = request?.sendTarget?.sessionKey)
         if (!outboundHandoffInProgress) retryNextOutboundItem()
+        return autoClose
     }
 
     /**
@@ -1158,11 +1177,12 @@ public class PromptComposerViewModel @Inject constructor(
         inFlightSendRequest = null
         val id = request.outboundQueueItemId
         outboundDrainOwnership.release(id, request.outboundDrainLeaseToken)
-        id?.let(outboundAutoCloseEpochs::remove)
+        // Preserve the epoch for a possible late authoritative ack.
         val requeued = outboundQueueStore.requeueDeferredSend(
             id, request.sendTarget.sessionKey, request, outboundAttemptBudget, resetAttemptBudget,
         )
         if (requeued == null) {
+            id?.let(outboundAutoCloseEpochs::remove)
             // No durable row to keep queued — restore to the composer so it is not lost.
             restoreFailedSend(request, message = noRowFallbackMessage)
             return
@@ -1783,7 +1803,7 @@ public class PromptComposerViewModel @Inject constructor(
      * the on-device pipeline. Idempotent and a no-op when no sidecar store is
      * wired.
      */
-    private fun launchSidecarRemoval(outboundItemId: String) {
+    internal fun launchSidecarRemoval(outboundItemId: String) {
         val store = outboundAttachmentSidecarStore
         val seam = sidecarRemovalForTest
         if (store == null && seam == null) return
@@ -2995,6 +3015,7 @@ public class PromptComposerViewModel @Inject constructor(
         val displayName: String,
         val previewUri: Uri? = null,
         val mimeType: String? = null,
+        val transferState: AttachmentTransferState = AttachmentTransferState.RemoteComplete,
     )
 
     /** Tap-time route snapshot retained through deferred send work. */

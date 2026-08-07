@@ -97,7 +97,7 @@ class PromptComposerSlashButtonTest {
                     )
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         viewModel = vm,
                         agentKind = agentKind,
                     )

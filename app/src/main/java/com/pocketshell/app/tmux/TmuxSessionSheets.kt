@@ -8,6 +8,7 @@ import com.pocketshell.app.cards.SessionCardInteractions
 import com.pocketshell.app.cards.SessionCardsRemoteSource
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.ComposerSendResult
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.core.agents.AgentKind
@@ -26,7 +27,7 @@ internal fun TmuxSessionSheets(
     onDismissMicSheet: () -> Unit,
     connectionLost: Boolean,
     sendTargetSnapshotProvider: (withEnter: Boolean) -> PromptComposerViewModel.SendTargetSnapshot,
-    onSend: suspend (PromptComposerViewModel.SendRequest) -> Boolean,
+    onSend: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult,
     composerHostId: Long?,
     onStageAttachments: suspend (List<Uri>) -> Result<List<String>>,
     showSnippetPicker: Boolean,

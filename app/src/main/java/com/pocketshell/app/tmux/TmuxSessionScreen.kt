@@ -49,6 +49,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import com.pocketshell.app.composer.PromptComposerSendDispatcher
+import com.pocketshell.app.composer.ComposerSendResult
 import com.pocketshell.app.conversation.ConversationImageViewModel
 import com.pocketshell.app.conversation.LocalConversationImageLoader
 import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
@@ -1917,28 +1918,30 @@ private fun TmuxSessionSheetsRegion(
         }
     }
 
-    val composerSendHandler: suspend (PromptComposerViewModel.SendRequest) -> Boolean = { request ->
+    val composerSendHandler: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult = { request ->
         tmuxComposerSendResult(
             request = request,
             targetSessionId = composerQueueSessionKey,
             fallbackPaneId = surfacePane?.paneId.orEmpty(),
             sendAgentPayload = { paneId, text, agentKind, sendToken, durableRow, deliveryProof ->
-                viewModel.sendAgentPayloadToPaneResult(
+                val result = viewModel.sendAgentPayloadToPaneResult(
                     paneId,
                     text,
                     agentKind,
                     sendToken,
                     durableRow,
                     deliveryProof,
-                ).isSuccess
+                )
+                result.toComposerSendResult()
             },
             sendToAgent = { paneId, text, sendToken, durableRow ->
-                viewModel.sendToAgentPaneResult(
+                val result = viewModel.sendToAgentPaneResult(
                     paneId,
                     text,
                     sendToken,
                     durableRow,
-                ).isSuccess
+                )
+                result.toComposerSendResult()
             },
             sendRawBytes = { paneId, bytes, sendToken, durableRow ->
                 viewModel.writeInputToPaneResult(
@@ -1946,7 +1949,7 @@ private fun TmuxSessionSheetsRegion(
                     bytes,
                     sendToken,
                     durableRow,
-                ).isSuccess
+                ).toComposerSendResult()
             },
         ) { onTuiCommandNoticeChange(it) }
     }
@@ -1954,6 +1957,15 @@ private fun TmuxSessionSheetsRegion(
         viewModel = promptComposerViewModel,
         onSend = composerSendHandler,
         onDelivered = {
+            overlay.showMicSheet = false
+            overlay.micSheetAutoStartRecording = false
+        },
+    )
+    TmuxOutboundLateAckEffect(
+        tmuxViewModel = viewModel,
+        composerViewModel = promptComposerViewModel,
+        binding = outboundQueueBinding,
+        onQuiescentDelivery = {
             overlay.showMicSheet = false
             overlay.micSheetAutoStartRecording = false
         },

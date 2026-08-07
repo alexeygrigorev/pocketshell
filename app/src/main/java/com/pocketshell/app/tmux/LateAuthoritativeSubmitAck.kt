@@ -15,10 +15,11 @@ internal fun OutboundDeliveryLedger.resolveLateAuthoritativeTranscriptAck(
     payload: String,
     sendToken: String,
     durableRow: DurableOutboundRowIdentity?,
+    consumeOnSuccess: Boolean = true,
 ): Boolean {
     if (durableRow == null || !hasSubmitAttempt(paneId, sendToken, durableRow)) return false
     val baseline = submitTranscriptBaseline(durableRow) ?: return false
     if (!transcriptAuthority.acknowledgedFromDurableBaseline(paneId, payload, baseline)) return false
-    clear(paneId, sendToken)
+    if (consumeOnSuccess) clear(paneId, sendToken)
     return true
 }

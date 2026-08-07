@@ -26,6 +26,8 @@ import kotlin.coroutines.CoroutineContext
  */
 internal class PartialAttachmentUploadException(
     val uploadedPaths: List<String>,
+    val uploadedAttachmentIndices: List<Int> = uploadedPaths.indices.toList(),
+    val failedAttachmentIndices: List<Int> = emptyList(),
     val failedCount: Int,
     message: String,
     cause: Throwable? = null,
@@ -57,6 +59,7 @@ internal class PromptAttachmentStager(
         val preparedAttachments = mutableListOf<PreparedAttachment>()
         var firstFailure: Throwable? = null
         var failedCount = 0
+        val failedAttachmentIndices = mutableListOf<Int>()
         uris.forEachIndexed { index, uri ->
             try {
                 val prepared = withTimeoutOrNull(ATTACHMENT_SAF_TIMEOUT_MS) {
@@ -67,6 +70,7 @@ internal class PromptAttachmentStager(
                     )
                     val remoteName = composeAttachmentName(timestamp, index, sanitised)
                     PreparedAttachment(
+                        attachmentIndex = index,
                         remotePath = "$remoteDir/$remoteName",
                         displayPath = "$displayDir/$remoteName",
                         tempFile = drainToTempFile(uri),
@@ -78,6 +82,7 @@ internal class PromptAttachmentStager(
                 throw cancelled
             } catch (t: Throwable) {
                 failedCount++
+                failedAttachmentIndices += index
                 if (firstFailure == null) firstFailure = t
             }
         }
@@ -113,11 +118,13 @@ internal class PromptAttachmentStager(
         // paths are collected as they land; per-file failures are recorded
         // and aggregated after the loop.
         val uploadedPaths = mutableListOf<String>()
+        val uploadedAttachmentIndices = mutableListOf<Int>()
         try {
             preparedAttachments.forEach { prepared ->
                 try {
                     session.uploadFile(prepared.tempFile, prepared.remotePath)
                     uploadedPaths += prepared.displayPath
+                    uploadedAttachmentIndices += prepared.attachmentIndex
                 } catch (cancelled: CancellationException) {
                     // A cancellation (sheet dismissed, send-while-uploading
                     // override, or the [withTimeout] in the ViewModel) must
@@ -125,6 +132,7 @@ internal class PromptAttachmentStager(
                     throw cancelled
                 } catch (t: Throwable) {
                     failedCount++
+                    failedAttachmentIndices += prepared.attachmentIndex
                     if (firstFailure == null) firstFailure = t
                 } finally {
                     prepared.tempFile.delete()
@@ -163,6 +171,8 @@ internal class PromptAttachmentStager(
             else -> Result.failure(
                 PartialAttachmentUploadException(
                     uploadedPaths = uploadedPaths,
+                    uploadedAttachmentIndices = uploadedAttachmentIndices,
+                    failedAttachmentIndices = failedAttachmentIndices,
                     failedCount = failedCount,
                     message = partialFailureMessage(uploadedPaths.size, failedCount, firstFailure),
                     cause = firstFailure,
@@ -223,6 +233,7 @@ internal class PromptAttachmentStager(
     )
 
     private data class PreparedAttachment(
+        val attachmentIndex: Int,
         val remotePath: String,
         val displayPath: String,
         val tempFile: File,

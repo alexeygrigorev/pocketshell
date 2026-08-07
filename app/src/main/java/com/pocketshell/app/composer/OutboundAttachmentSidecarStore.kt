@@ -92,6 +92,19 @@ class OutboundAttachmentSidecarStore @Inject constructor(
         persistAll(updated)
     }
 
+    internal suspend fun updateMetadata(
+        metadataById: Map<String, Pair<String, String?>>,
+    ): List<LocalAttachmentSidecarRef> = withContext(ioDispatcher) {
+        if (metadataById.isEmpty()) return@withContext emptyList()
+        val updated = allRefsBlocking().map { ref ->
+            metadataById[ref.id]?.let { (displayName, mimeType) ->
+                ref.copy(displayName = displayName, mimeType = mimeType ?: ref.mimeType)
+            } ?: ref
+        }
+        persistAll(updated)
+        updated.filter { metadataById.containsKey(it.id) }
+    }
+
     suspend fun removeOutboundItem(outboundItemId: String) = withContext(ioDispatcher) {
         refsForBlocking(outboundItemId).forEach { ref -> runCatching { File(ref.localPath).delete() } }
         val remaining = allRefsBlocking().filterNot { it.outboundItemId == outboundItemId }

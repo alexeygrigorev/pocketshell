@@ -59,6 +59,7 @@ READY_MARKER="FAKE-AGENT-READY"
 RENDER_MODE="${POCKETSHELL_FAKE_AGENT_RENDER_MODE:-default}"
 SUBMIT_LEDGER="${POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER:-}"
 TRANSCRIPT_PATH="${POCKETSHELL_FAKE_AGENT_TRANSCRIPT:-}"
+HEARTBEAT="${POCKETSHELL_FAKE_AGENT_HEARTBEAT:-0}"
 ISSUE1153_RENDER_MODE="issue1153-incremental"
 ISSUE1944_RENDER_MODE="issue1944-framed-input"
 ISSUE1153_FRAME_MARKER="ISSUE1153-FRAME"
@@ -94,6 +95,7 @@ last_submitted_display=""
 # Issue #1687: session-relative paste counter, mirroring Claude Code's `#N`.
 paste_counter=0
 submit_counter=0
+heartbeat_counter=0
 
 # Redraw the whole viewport cleanly: home + clear screen, print the readiness
 # marker, the most-recent submitted line (if any), then the input box. Clearing
@@ -104,6 +106,7 @@ submit_counter=0
 render_default() {
   printf '\033[H\033[2J'
   printf '%s\r\n' "$READY_MARKER"
+  [ "$HEARTBEAT" = "1" ] && printf 'FAKE-AGENT HEARTBEAT: %s\r\n' "$heartbeat_counter"
   if [ -n "$last_submitted" ]; then
     printf '%s%s\r\n' "$SUBMIT_PREFIX" "$last_submitted"
   fi
@@ -361,7 +364,13 @@ json_escape() {
 }
 
 while true; do
-  if ! read_byte; then
+  if [ "$HEARTBEAT" = "1" ]; then
+    if ! IFS= read -r -s -N 1 -t 0.2 REPLY; then
+      heartbeat_counter=$((heartbeat_counter + 1))
+      render
+      continue
+    fi
+  elif ! read_byte; then
     # EOF on the channel — exit; the outer `exec sh` keeps the pane alive.
     cleanup
   fi

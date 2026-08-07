@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.app.agentcommands.AgentCommandCatalog
 import com.pocketshell.app.composer.OutboundRoute
+import com.pocketshell.app.composer.ComposerSendResult
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.session.AgentConversationUiState
@@ -16,6 +17,12 @@ internal data class PortForwardNavigationTarget(
     val remotePort: Int,
     val autoOpenLocalhostUrl: LocalhostUrl?,
 )
+
+internal fun Result<Unit>.toComposerSendResult(): ComposerSendResult = when {
+    isSuccess -> ComposerSendResult.Delivered
+    exceptionOrNull() is AgentSubmitTurnoverNotProvenException -> ComposerSendResult.AuthoritativeAckPending
+    else -> ComposerSendResult.Failed
+}
 
 internal fun acceptedLocalhostForwardNavigation(localhostUrl: LocalhostUrl): PortForwardNavigationTarget =
     PortForwardNavigationTarget(
@@ -592,18 +599,18 @@ internal fun tmuxAgentConversationSend(
 internal suspend fun tmuxAgentConversationSendResult(
     text: String,
     agentToken: String?,
-    sendAgentPayload: suspend (String, AgentKind, AgentSubmitDeliveryProof) -> Boolean,
-    sendToAgent: suspend (String) -> Boolean,
+    sendAgentPayload: suspend (String, AgentKind, AgentSubmitDeliveryProof) -> ComposerSendResult,
+    sendToAgent: suspend (String) -> ComposerSendResult,
     setTuiNotice: (String) -> Unit,
-): Boolean {
+): ComposerSendResult {
     val agentKind = tmuxComposerAgentKindFromToken(agentToken)
     return when (tmuxAgentConversationSend(text, agentKind)) {
         TmuxAgentConversationSend.TuiCommandNoEcho -> {
-            val ok = agentKind?.let {
+            val result = agentKind?.let {
                 sendAgentPayload(text, it, AgentSubmitDeliveryProof.TmuxEnterAccepted)
-            } ?: false
-            if (ok) setTuiNotice(text.trim())
-            ok
+            } ?: ComposerSendResult.Failed
+            if (result == ComposerSendResult.Delivered) setTuiNotice(text.trim())
+            result
         }
         TmuxAgentConversationSend.Echo -> sendToAgent(text)
     }
@@ -632,27 +639,27 @@ internal suspend fun tmuxComposerSendResult(
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
         deliveryProof: AgentSubmitDeliveryProof,
-    ) -> Boolean,
+    ) -> ComposerSendResult,
     sendToAgent: suspend (
         paneId: String,
         text: String,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
-    ) -> Boolean,
+    ) -> ComposerSendResult,
     sendRawBytes: suspend (
         paneId: String,
         bytes: ByteArray,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
-    ) -> Boolean,
+    ) -> ComposerSendResult,
     setTuiNotice: (String) -> Unit,
-): Boolean {
+): ComposerSendResult {
     val target = request.sendTarget
     if (target.sessionKey.isNotBlank() && target.sessionKey != targetSessionId) {
-        return false
+        return ComposerSendResult.Failed
     }
     val paneId = target.paneId.ifBlank { fallbackPaneId }
-    if (paneId.isBlank()) return false
+    if (paneId.isBlank()) return ComposerSendResult.Failed
 
     val sendToken = request.outboundQueueItemId ?: newOutboundDeliveryToken()
     val durableRow = request.outboundQueueItemId?.let { rowId ->
@@ -692,7 +699,7 @@ internal suspend fun tmuxComposerSendResult(
                     durableRow,
                     AgentSubmitDeliveryProof.AgentTurnover,
                 )
-            } ?: false
+            } ?: ComposerSendResult.Failed
         OutboundRoute.RawBytes -> {
             val payload = if (request.withEnter) request.text + "\r" else request.text
             sendRawBytes(

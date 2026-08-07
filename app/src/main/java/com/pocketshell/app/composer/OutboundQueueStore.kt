@@ -246,6 +246,17 @@ public interface OutboundQueueStore {
     public fun markDelivered(id: String): Boolean
 
     /**
+     * Issue #2037: terminally acknowledge one exact late-success attempt.
+     * The compare-and-prune is atomic so a stale UI snapshot or a newer retry
+     * generation cannot acknowledge the wrong row.
+     */
+    public fun acknowledgeLateDelivered(
+        id: String,
+        sendKey: String,
+        wireAttemptGeneration: Int,
+    ): Boolean
+
+    /**
      * Mark the item with [id] [OutboundState.Failed] with [lastError] and stamp
      * [lastAttemptAtMs]. Attempt counts are bumped when a row is claimed for an
      * attempt ([claimNext], [claim], [markInFlight]), not when the failure is
@@ -585,6 +596,7 @@ public data class OutboundItem(
     val wireNeedleBaselineCount: Int? = null,
     val wireCollapsedMarkerBaselineCount: Int? = null,
     val wireSubmitAttempted: Boolean = false,
+    val wireAttemptGeneration: Int = 0,
     val wireSubmitTranscriptBaseline: OutboundSubmitTranscriptBaseline? = null,
     /** Tap-time tmux generation. Both fields are required for identity promotion. */
     val tmuxSessionId: String? = null,
@@ -813,6 +825,21 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         true
     }
 
+    override fun acknowledgeLateDelivered(id: String, sendKey: String, wireAttemptGeneration: Int): Boolean =
+        synchronized(lock) {
+            val current = items[id] ?: return@synchronized false
+            if (
+                (current.state != OutboundState.Queued && current.state != OutboundState.Failed) ||
+                current.sendKey != sendKey ||
+                current.wireAttemptGeneration != wireAttemptGeneration ||
+                !current.wireSubmitAttempted
+            ) {
+                return@synchronized false
+            }
+            items.remove(id)
+            true
+        }
+
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? =
         synchronized(lock) {
             val existing = items[id] ?: return null
@@ -892,7 +919,8 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             ?: return null
         val updated = target.copy(
             wireSubmitAttempted = true,
-            wireSubmitTranscriptBaseline = target.wireSubmitTranscriptBaseline ?: transcriptBaseline,
+            wireAttemptGeneration = target.wireAttemptGeneration + 1,
+            wireSubmitTranscriptBaseline = transcriptBaseline,
         )
         items[itemId] = updated
         updated
@@ -972,6 +1000,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = null
     override fun markAttachmentsUploaded(id: String, attachments: List<DurableAttachmentRef>): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
+    override fun acknowledgeLateDelivered(id: String, sendKey: String, wireAttemptGeneration: Int): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
     override fun requeueForRetry(id: String, resetAttempts: Boolean, attemptDelta: Int): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
@@ -1281,6 +1310,24 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         true
     }
 
+    override fun acknowledgeLateDelivered(id: String, sendKey: String, wireAttemptGeneration: Int): Boolean =
+        synchronized(lock) {
+            val sessionKey = sessionOf(id) ?: return@synchronized false
+            val list = loadSession(sessionKey)
+            val current = list.firstOrNull { it.id == id } ?: return@synchronized false
+            if (
+                (current.state != OutboundState.Queued && current.state != OutboundState.Failed) ||
+                current.sendKey != sendKey ||
+                current.wireAttemptGeneration != wireAttemptGeneration ||
+                !current.wireSubmitAttempted
+            ) {
+                return@synchronized false
+            }
+            list.removeAll { it.id == id }
+            storeSession(sessionKey, list)
+            true
+        }
+
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? =
         synchronized(lock) {
             val sessionKey = sessionOf(id) ?: return null
@@ -1378,7 +1425,8 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         } ?: return null
         val updated = target.copy(
             wireSubmitAttempted = true,
-            wireSubmitTranscriptBaseline = target.wireSubmitTranscriptBaseline ?: transcriptBaseline,
+            wireAttemptGeneration = target.wireAttemptGeneration + 1,
+            wireSubmitTranscriptBaseline = transcriptBaseline,
         )
         val idx = list.indexOfFirst { it.id == updated.id }
         if (idx >= 0) list[idx] = updated else list.add(updated)
@@ -1622,6 +1670,7 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
             item.wireSubmitTranscriptBaseline?.confirmedMatchingIds
                 ?.joinToString(separator = "\n")
                 .orEmpty(),
+            item.wireAttemptGeneration.toString(),
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -1634,6 +1683,7 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
         val id = f.getOrNull(0).orEmpty()
         if (id.isEmpty()) return@mapNotNull null
         val createdAtMs = f.getOrNull(4)?.toLongOrNull() ?: return@mapNotNull null
+        val submitAttempted = f.getOrNull(19) == "1"
         OutboundItem(
             id = id,
             sessionKey = sessionKey,
@@ -1658,7 +1708,9 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
                 f.getOrNull(16)?.takeIf { it.isNotEmpty() }?.toIntOrNull(),
             tmuxSessionId = f.getOrNull(17)?.takeIf { it.isNotEmpty() },
             tmuxSessionCreated = f.getOrNull(18)?.takeIf { it.isNotEmpty() }?.toLongOrNull(),
-            wireSubmitAttempted = f.getOrNull(19) == "1",
+            wireSubmitAttempted = submitAttempted,
+            wireAttemptGeneration = f.getOrNull(24)?.toIntOrNull()
+                ?: if (submitAttempted) 1 else 0,
             wireSubmitTranscriptBaseline = f.getOrNull(20)
                 ?.takeIf { it.isNotEmpty() }
                 ?.let { sourcePath ->

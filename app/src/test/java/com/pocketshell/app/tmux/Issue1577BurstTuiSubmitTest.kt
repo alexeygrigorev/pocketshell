@@ -436,6 +436,122 @@ class Issue1577BurstTuiSubmitTest : TmuxSessionViewModelTestBase() {
         )
     }
 
+    /**
+     * Issue #2037: the authoritative turn can arrive after the bounded send call
+     * already returned failure. The exact durable row must be terminally
+     * acknowledged by that late turn itself; requiring a user Retry leaves a
+     * delivered prompt rendered as queued/retryable and makes the UI invite a
+     * duplicate send.
+     */
+    @Test
+    fun lateAuthoritativeTranscriptAckAutomaticallyPrunesExactDeliveredRowWithoutRetry() = runTest(scheduler) {
+        val payload = "make sure the links are preserved"
+        lateinit var vm: TmuxSessionViewModel
+        val client = BurstTuiFakeTmuxClient(
+            footer = footer,
+            busyReadDelayCaptures = 0,
+            forceNoPromptFrames = true,
+        )
+        vm = newBurstVm(client)
+        vm.setAgentTranscriptAuthorityForTest("%0", true)
+        durableStore.enqueueExisting(
+            OutboundItem(
+                id = "late-auto-ack-row",
+                sessionKey = "session-a",
+                cleanText = payload,
+                paneId = "%0",
+                sendKey = "send-key-late-auto-ack",
+                tmuxSessionId = "tmux-session-a",
+                tmuxSessionCreated = 11L,
+                createdAtMs = 1L,
+            ),
+        )
+        val claimed = requireNotNull(durableStore.claim("late-auto-ack-row"))
+        val row = DurableOutboundRowIdentity(claimed.sessionKey, claimed.id)
+
+        val first = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = row.rowId,
+            durableRow = row,
+        )
+        assertTrue("the bounded turnover wait must leave the exact row unresolved", first.isFailure)
+        assertTrue(durableStore.hasWireSubmitAttempt(row.sessionKey, row.rowId))
+        assertEquals(1, client.sentCommands.count { it.endsWith(" Enter") })
+        durableStore.markFailed(row.rowId, "bounded acknowledgement pending", 1L)
+
+        // This is the real JSONL-tail append boundary. No Retry/send call follows.
+        vm.appendAgentEventsForTest(
+            "%0",
+            listOf(transcriptUserTurn("confirmed-late-authoritative", payload)),
+        )
+        runCurrent()
+
+        val resolved = resolveLateOutboundAcks(
+            rows = durableStore.itemsFor(row.sessionKey),
+            binding = TmuxOutboundQueueBinding(
+                targetKey = row.sessionKey,
+                fallbackKey = "fallback",
+                durableKey = row.sessionKey,
+                tmuxSessionId = "tmux-session-a",
+                sessionCreated = 11L,
+                generationPaneIds = setOf("%0"),
+            ),
+            resolveAuthoritativeAck = vm::resolveLateAuthoritativeOutboundAck,
+        )
+        val stale = resolved.single()
+
+        // Deterministic manual-Retry interleaving: authority was resolved from
+        // attempt 1, then Retry advances the durable generation before the
+        // compare-and-prune. The stale prune must reject, and (critically) the
+        // transcript evidence must remain available because no prune owned it.
+        durableStore.markFailed(stale.id, "manual retry", 2L)
+        requireNotNull(durableStore.requeueForRetry(stale.id))
+        val retry = requireNotNull(durableStore.claim(stale.id))
+        durableStore.markWireSubmitAttempted(
+            retry.sessionKey,
+            retry.id,
+            stale.wireSubmitTranscriptBaseline,
+        )
+        val stalePruned = durableStore.acknowledgeLateDelivered(
+            stale.id,
+            stale.sendKey,
+            stale.wireAttemptGeneration,
+        )
+        if (stalePruned) vm.consumeLateAuthoritativeOutboundAck(stale)
+        assertFalse("attempt-1 evidence cannot prune retry generation 2", stalePruned)
+        assertEquals(2, requireNotNull(durableStore.item(stale.id)).attemptCount)
+
+        val current = requireNotNull(durableStore.item(stale.id))
+        val retryResult = vm.sendAgentPayloadToPaneResult(
+            "%0", payload, AgentKind.Codex,
+            sendToken = current.id,
+            durableRow = DurableOutboundRowIdentity(current.sessionKey, current.id),
+        )
+        assertTrue(
+            "manual Retry must reuse the retained late-success evidence",
+            retryResult.isSuccess,
+        )
+        // AlreadyLanded is a normal successful callback result. Production's
+        // collector therefore takes Delivered -> markSendDelivered; it does not
+        // inject another pending/requeue step after success.
+        assertTrue(durableStore.markDelivered(current.id))
+
+        assertTrue(
+            "the late confirmed exact-payload turn must prune the already-delivered durable row",
+            durableStore.item(row.rowId) == null,
+        )
+        assertEquals(
+            "late acknowledgement must never issue a second submit Enter",
+            1,
+            client.sentCommands.count { it.endsWith(" Enter") },
+        )
+        assertEquals(
+            "late acknowledgement must never paste the payload a second time",
+            1,
+            client.sentCommands.count { it.startsWith("send-keys -l ") },
+        )
+    }
+
     @Test
     fun preExistingOrOptimisticTranscriptTurnsDoNotAcknowledgeSubmit() = runTest(scheduler) {
         val payload = "identical prompt"

@@ -18,6 +18,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.composer.InMemoryOutboundQueueStore
 import com.pocketshell.app.composer.OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE
+import com.pocketshell.app.composer.OUTBOUND_MAX_AUTO_ATTEMPTS
 import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.OutboundState
 import com.pocketshell.app.composer.PromptComposerViewModel
@@ -245,11 +246,23 @@ class Issue1686QueueDrainWireOracleDockerTest {
                     cleanText = "# $marker",
                     createdAtMs = System.currentTimeMillis(),
                 )
-                queue.markInFlight(row.id)
-                queue.markFailed(row.id, lastError = OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE)
+                repeat(OUTBOUND_MAX_AUTO_ATTEMPTS) {
+                    checkNotNull(queue.claim(row.id))
+                    checkNotNull(queue.requeueForRetry(row.id))
+                }
                 composer.refreshOutboundQueueItemsFor(target)
+                // Exercise the production selection/parking transition instead of
+                // fabricating a Failed row: the exhausted Queued head is surfaced as
+                // the exact #1602 auto-retry failure shown in the user's screenshot.
+                val parkingController = OutboundQueueAutoFlushController.boundTo(composer)
+                parkingController.onConnectionWindowChanged(true, target) {}
+                parkingController.onQueueSnapshotChanged(true) { excludingIds ->
+                    composer.retryNextOutboundItem(excludingIds)
+                }
                 row.id
             }
+            assertEquals(OUTBOUND_MAX_AUTO_ATTEMPTS, queue.item(rowId)?.attemptCount)
+            assertEquals(OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE, queue.item(rowId)?.lastError)
             assertEquals(
                 "precondition: the row is auto-parked Failed (a storm-stranded backlog)",
                 OutboundState.Failed,
@@ -294,6 +307,98 @@ class Issue1686QueueDrainWireOracleDockerTest {
         }
     }
 
+    @Test
+    fun silentWireRecoveryUnparksAutoFailedRowWithoutConnectionEnumEdge() {
+        runBlocking {
+            val key = readFixtureKey()
+            waitForSshFixtureReady(SshKey.Pem(key))
+            seedInteractiveSession(key)
+            val hostRowTag = seedDockerHost(key, "Issue2042 Silent Wire Heal")
+
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            attachToOpencodeLab(hostRowTag)
+
+            val liveVm = liveTmuxViewModel()
+            val paneId = awaitAttachedPaneId(liveVm)
+            onMainUnit { liveVm.forceInlineReconnectingStatusKeepingClientForTest() }
+            assertTrue("precondition: the real transport is writable", liveVm.isSendTransportWritable())
+
+            val queue = InMemoryOutboundQueueStore()
+            val composer = newComposerVm(queue)
+            val target = "issue2042/silent-wire-heal"
+            var exposeWritableWire = false
+            val wireOracle = { exposeWritableWire && liveVm.isSendTransportWritable() }
+            onMainUnit {
+                composer.onComposerTargetChanged(target)
+                composer.setTransportWritableProbe(wireOracle)
+                composer.setSendWatchdogTimeoutForTest(null)
+            }
+
+            val marker = "PS2042${System.currentTimeMillis().toString(36).takeLast(6)}"
+            val rowId = onMain {
+                val row = queue.enqueue(
+                    sessionKey = target,
+                    cleanText = "# $marker",
+                    createdAtMs = System.currentTimeMillis(),
+                )
+                repeat(OUTBOUND_MAX_AUTO_ATTEMPTS) {
+                    checkNotNull(queue.claim(row.id))
+                    checkNotNull(queue.requeueForRetry(row.id))
+                }
+                composer.refreshOutboundQueueItemsFor(target)
+                val parkingController = OutboundQueueAutoFlushController.boundTo(composer)
+                parkingController.onConnectionWindowChanged(true, target) {}
+                parkingController.onQueueSnapshotChanged(true) { excludingIds ->
+                    composer.retryNextOutboundItem(excludingIds)
+                }
+                row.id
+            }
+            assertEquals(OUTBOUND_MAX_AUTO_ATTEMPTS, queue.item(rowId)?.attemptCount)
+            assertEquals(OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE, queue.item(rowId)?.lastError)
+
+            // Start while the wire oracle is false. The coarse connection enum stays
+            // Reconnecting for the entire journey, so there is deliberately NO
+            // LaunchedEffect(sessionLive,target) edge to rescue the row.
+            startProductionDrain(
+                composer = composer,
+                queue = queue,
+                liveVm = liveVm,
+                paneId = paneId,
+                target = target,
+                transportWritable = wireOracle,
+            )
+            // Cross a full production poll cadence while the wire stays hidden. This
+            // proves the pre-heal row really is parked, rather than merely waiting for
+            // the initial StateFlow collection turn.
+            SystemClock.sleep(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS + 500L)
+            assertEquals(OutboundState.Failed, queue.item(rowId)?.state)
+
+            // The underlying real socket was alive throughout; reveal that truth to
+            // the production poll oracle WITHOUT changing the enum. #2042 requires
+            // the wire false→true edge itself to unpark and drain the failed head.
+            exposeWritableWire = true
+
+            val pane = waitForPaneContains(key, marker, label = "issue2042-silent-wire-heal")
+            awaitTrue("silent wire recovery drains the failed row without Retry") {
+                composer.outboundQueueItems.value.isEmpty()
+            }
+            captureViewport("03-issue2042-silent-wire-heal")
+            writeSummary(
+                testName = "silentWireRecoveryUnparksAutoFailedRowWithoutConnectionEnumEdge",
+                lines = listOf(
+                    "target=$target",
+                    "pane_id=$paneId",
+                    "marker=$marker",
+                    "connection_enum_unchanged=Reconnecting",
+                    "wire_transition=false->true",
+                    "manual_retry=false",
+                    "captured_pane_contains_marker=${marker in pane}",
+                    "queue_empty_after_delivery=true",
+                ),
+            )
+        }
+    }
+
     // ------------------------------------------------------- Drain machinery
 
     /**
@@ -314,6 +419,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
         liveVm: TmuxSessionViewModel,
         paneId: String,
         target: String,
+        transportWritable: () -> Boolean = { liveVm.isSendTransportWritable() },
     ) {
         // The dispatcher: mirrors PromptComposerSendDispatcher's #745 bounded send
         // + #1686 failure taxonomy, but its onSend is the PRODUCTION send path.
@@ -332,7 +438,7 @@ class Issue1686QueueDrainWireOracleDockerTest {
                 } else {
                     composer.markOutboundSendDeferred(
                         request,
-                        resetAttemptBudget = !liveVm.isSendTransportWritable(),
+                        resetAttemptBudget = !transportWritable(),
                     )
                 }
             }
@@ -349,7 +455,8 @@ class Issue1686QueueDrainWireOracleDockerTest {
                 outboundQueueItems = composer.outboundQueueItems,
                 controller = controller,
                 retryNext = { excludingIds -> composer.retryNextOutboundItem(excludingIds) },
-                transportWritable = { liveVm.isSendTransportWritable() },
+                transportWritable = transportWritable,
+                unparkTransportFailedRows = { composer.unparkTransportFailedRows() },
             )
         }
     }

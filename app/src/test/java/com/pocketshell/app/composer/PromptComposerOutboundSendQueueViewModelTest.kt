@@ -1285,20 +1285,18 @@ class PromptComposerOutboundSendQueueViewModelTest {
     }
 
     @Test
-    fun requestSendWithLocalAttachmentStagesSidecarUploadsBeforeClaimAndDispatchesUploadedRefs() = runTest {
+    fun requestSendWithRemoteCompleteAttachmentReusesPathWithoutSendUpload() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
-        val uploadedSidecarBytes = mutableListOf<String>()
-        val uploadFinished = CompletableDeferred<Unit>()
+        var sendUploadCalls = 0
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
         )
-        vm.setOutboundAttachmentSidecarUploader { refs ->
-            uploadedSidecarBytes += refs.map { File(it.localPath).readText() }
-            uploadFinished.complete(Unit)
-            Result.success(refs.map { "~/.pocketshell/attachments/reuploaded/${it.displayName}" })
+        vm.setOutboundAttachmentSidecarUploader {
+            sendUploadCalls++
+            Result.failure(AssertionError("RemoteComplete attachment must not upload on Send"))
         }
         val sent = collectSendRequests(vm)
         val target = PromptComposerViewModel.SendTargetSnapshot(sessionKey = "1/session-a")
@@ -1315,21 +1313,20 @@ class PromptComposerOutboundSendQueueViewModelTest {
         advanceUntilIdle()
 
         vm.requestSend(withEnter = true, sendTarget = target)
-        uploadFinished.await()
         waitForSendCount(sent, 1)
 
         val request = sent.single()
         val queueId = requireNotNull(request.outboundQueueItemId)
-        assertEquals(listOf("local bytes"), uploadedSidecarBytes)
+        assertEquals(0, sendUploadCalls)
         assertEquals(
-            appendAttachmentPaths("review", listOf("~/.pocketshell/attachments/reuploaded/sidecar-report.txt")),
+            appendAttachmentPaths("review", listOf("~/.pocketshell/attachments/old/20260601-120000-01-sidecar-report.txt")),
             request.text,
         )
         assertEquals(
             listOf(
                 PromptComposerViewModel.StagedAttachment(
-                    remotePath = "~/.pocketshell/attachments/reuploaded/sidecar-report.txt",
-                    displayName = "sidecar-report.txt",
+                    remotePath = "~/.pocketshell/attachments/old/20260601-120000-01-sidecar-report.txt",
+                    displayName = "20260601-120000-01-sidecar-report.txt",
                     mimeType = "text/plain",
                 ),
             ),
@@ -1338,10 +1335,10 @@ class PromptComposerOutboundSendQueueViewModelTest {
         val inFlight = requireNotNull(queue.item(queueId))
         assertEquals(OutboundState.InFlight, inFlight.state)
         assertEquals(
-            listOf(DurableAttachmentRef("~/.pocketshell/attachments/reuploaded/sidecar-report.txt", "sidecar-report.txt", "text/plain")),
+            listOf(DurableAttachmentRef("~/.pocketshell/attachments/old/20260601-120000-01-sidecar-report.txt", "20260601-120000-01-sidecar-report.txt", "text/plain")),
             inFlight.attachments,
         )
-        assertEquals(listOf(queueId), sidecars.refsFor(queueId).map { it.outboundItemId })
+        assertTrue(sidecars.refsFor(queueId).isEmpty())
     }
 
     @Test
@@ -1372,7 +1369,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
             count = 1,
             previews = listOf(PromptComposerViewModel.AttachmentPreview(Uri.fromFile(local), "text/plain")),
         ) {
-            Result.success(listOf("~/.pocketshell/attachments/old/drop-upload.txt"))
+            Result.failure(IllegalStateException("attach-time upload unavailable"))
         }
         settleUntil { vm.uiState.value.attachments.isNotEmpty() }
 

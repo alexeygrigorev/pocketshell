@@ -753,6 +753,8 @@ class PromptComposerSendPipeliningTest {
         assertEquals(1, vm.uiState.value.attachments.size)
         assertEquals(1, drafts.loadAttachments(target.sessionKey).size)
         assertTrue(File(requireNotNull(picked.path)).delete())
+        val retainedSidecar = sidecars.refsFor(draftAttachmentSidecarScope(target.sessionKey)).single()
+        assertTrue(File(retainedSidecar.localPath).delete())
 
         vm.requestSend(true, target)
         runCurrent()

@@ -9,7 +9,7 @@ import java.security.MessageDigest
  * session-transient [StagedAttachment.previewUri]).
  */
 internal fun List<StagedAttachment>.toDurableRefs(): List<DurableAttachmentRef> =
-    map { DurableAttachmentRef(it.remotePath, it.displayName, it.mimeType) }
+    map { DurableAttachmentRef(it.remotePath, it.displayName, it.mimeType, it.transferState) }
 
 /**
  * Issue #961: the logical-send identity for the outbound queue's
@@ -83,6 +83,11 @@ internal fun List<StagedAttachment>.toSidecarAwareDurableRefs(
             remotePath = attachment.remotePath,
             displayName = sidecar?.displayName ?: attachment.displayName,
             mimeType = sidecar?.mimeType ?: attachment.mimeType,
+            transferState = if (sidecar == null) {
+                attachment.transferState
+            } else {
+                AttachmentTransferState.PendingLocal
+            },
         )
     }
 }
@@ -98,7 +103,10 @@ internal fun List<DurableAttachmentRef>.withUploadedSidecars(
             .toMap()
         if (replacements.size == sidecars.size) {
             return mapIndexed { index, existing ->
-                replacements[index]?.copy(mimeType = replacements[index]?.mimeType ?: existing.mimeType) ?: existing
+                replacements[index]?.copy(
+                    mimeType = replacements[index]?.mimeType ?: existing.mimeType,
+                    transferState = AttachmentTransferState.RemoteComplete,
+                ) ?: existing
             }
         }
     }
@@ -107,7 +115,10 @@ internal fun List<DurableAttachmentRef>.withUploadedSidecars(
         val next = remaining.firstOrNull()
         if (next != null && existing.matchesSidecar(next.first)) {
             remaining.removeFirst()
-            next.second.copy(mimeType = next.second.mimeType ?: existing.mimeType)
+            next.second.copy(
+                mimeType = next.second.mimeType ?: existing.mimeType,
+                transferState = AttachmentTransferState.RemoteComplete,
+            )
         } else {
             existing
         }
@@ -135,4 +146,12 @@ private fun String.isTimestampedAttachmentNameFor(sidecarDisplayName: String): B
  * name; the remote path is what the resend actually re-appends.
  */
 internal fun List<DurableAttachmentRef>.toStagedAttachments(): List<StagedAttachment> =
-    map { StagedAttachment(it.remotePath, it.displayName, previewUri = null, mimeType = it.mimeType) }
+    map {
+        StagedAttachment(
+            it.remotePath,
+            it.displayName,
+            previewUri = null,
+            mimeType = it.mimeType,
+            transferState = it.transferState,
+        )
+    }

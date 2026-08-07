@@ -1,26 +1,65 @@
 package com.pocketshell.app.composer
 
 import android.net.Uri
+import android.os.SystemClock
+import android.content.Context
+import android.view.inputmethod.InputMethodManager
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.LocalActivityResultRegistryOwner
+import androidx.activity.result.ActivityResultRegistry
+import androidx.activity.result.ActivityResultRegistryOwner
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
+import androidx.core.app.ActivityOptionsCompat
+import androidx.lifecycle.SavedStateHandle
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
+import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellTheme
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Connected/Docker E2E for issue #731 (parent audit #657, data-loss path
@@ -55,15 +94,68 @@ import java.security.MessageDigest
  * fixture it needs is the same one that workflow already starts
  * (`.github/workflows/nightly-extensive.yml` -> "Start Docker fixtures"), so
  * no new fixture is required. The per-push CI journey suite
- * (`scripts/ci-journey-suite.sh`) runs an explicit `JOURNEY_CLASSES` allowlist
- * that does NOT include this class, so it stays nightly-only as the issue asks.
+ * (`scripts/ci-journey-suite.sh`) explicitly includes this class so the
+ * production picker-to-Send transfer contract is a per-push release gate.
  */
 @RunWith(AndroidJUnit4::class)
+@OptIn(ExperimentalMaterial3Api::class)
 class AttachmentStagerRealUploadDockerTest {
+
+    @get:Rule
+    val compose = createAndroidComposeRule<ComponentActivity>()
 
     private var sshSession: SshSession? = null
     private var remoteScopeDir: String? = null
     private var cacheDir: File? = null
+
+    private class PickerResultRegistry(
+        private val uri: Uri,
+    ) : ActivityResultRegistry() {
+        var openMultipleDocumentsLaunches: Int = 0
+            private set
+
+        override fun <I : Any?, O : Any?> onLaunch(
+            requestCode: Int,
+            contract: ActivityResultContract<I, O>,
+            input: I,
+            options: ActivityOptionsCompat?,
+        ) {
+            check(contract is ActivityResultContracts.OpenMultipleDocuments) {
+                "expected production OpenMultipleDocuments contract, got ${contract::class.java.name}"
+            }
+            openMultipleDocumentsLaunches++
+            @Suppress("UNCHECKED_CAST")
+            dispatchResult(requestCode, listOf(uri) as O)
+        }
+    }
+
+    private class HeldExternalResultRegistry : ActivityResultRegistry() {
+        var attachmentLaunches = 0
+            private set
+        var permissionLaunches = 0
+            private set
+
+        override fun <I : Any?, O : Any?> onLaunch(
+            requestCode: Int,
+            contract: ActivityResultContract<I, O>,
+            input: I,
+            options: ActivityOptionsCompat?,
+        ) {
+            when (contract) {
+                is ActivityResultContracts.OpenMultipleDocuments -> attachmentLaunches++
+                is ActivityResultContracts.RequestPermission -> permissionLaunches++
+                else -> error("unexpected external contract ${contract::class.java.name}")
+            }
+            // Deliberately hold the external UI open: no result callback.
+        }
+    }
+
+    private data class PendingGateFixture(
+        val vm: PromptComposerViewModel,
+        val queue: InMemoryOutboundQueueStore,
+        val row: OutboundItem,
+        val visible: androidx.compose.runtime.MutableState<Boolean>,
+    )
 
     @After
     fun teardown() {
@@ -250,6 +342,308 @@ class AttachmentStagerRealUploadDockerTest {
         Unit
     } }
 
+    @Test
+    fun attachThenSendUsesOneRealUploadAndExactAttachTimeRemotePath() { runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val testContext = instrumentation.context
+        val appContext = instrumentation.targetContext
+        val key = testContext.assets.open("test_key").bufferedReader().use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
+        val marker = System.currentTimeMillis().toString()
+        val payloadBytes = Issue731AttachmentProvider.payloadBytes()
+        val displayName = "issue2036-$marker.bin"
+        val authority = "${testContext.packageName}.issue731attachments"
+        val attachmentUri = Uri.parse(
+            "content://$authority/attachment?name=${Uri.encode(displayName)}",
+        )
+        val tmpCache = File.createTempFile("issue2036-cache-", "").let {
+            it.delete()
+            it.mkdirs()
+            it
+        }
+        cacheDir = tmpCache
+        val ssh = withTimeout(20_000) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ).getOrThrow()
+        }
+        sshSession = ssh
+        val scopeKey = "issue2036-$marker"
+        val safeScope = PromptAttachmentStager.safeScopeSegment(scopeKey)
+        remoteScopeDir = "${PromptAttachmentStager.REMOTE_DIRECTORY}/$safeScope"
+        val stager = PromptAttachmentStager(testContext.contentResolver, tmpCache)
+
+        appContext.getSharedPreferences(OutboundAttachmentSidecarStore.PREFS_NAME, 0)
+            .edit().clear().commit()
+        File(appContext.filesDir, OutboundAttachmentSidecarStore.DIRECTORY_NAME).deleteRecursively()
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = OutboundAttachmentSidecarStore(appContext)
+        val vm = PromptComposerViewModel(
+            audioRecorder = ConnectedNoopMic,
+            whisperClientFactory = WhisperClientFactory { error("no transcription") },
+            apiKeyStorage = ConnectedNoopVault,
+            voiceSettings = ConnectedVoiceSettings,
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+            savedStateHandle = SavedStateHandle(),
+        )
+        vm.setSendWatchdogTimeoutForTest(null)
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val target = "1/issue2036"
+        var attachUploads = 0
+        var sendUploads = 0
+        var attachTimePathForRetention: String? = null
+        vm.setOutboundAttachmentSidecarUploader { refs ->
+            sendUploads++
+            stager.stage(
+                session = ssh,
+                scopeKey = scopeKey,
+                uris = refs.map { Uri.fromFile(File(it.localPath)) },
+                retainedAttachmentNames = {
+                    setOfNotNull(attachTimePathForRetention?.substringAfterLast('/'), "upload-ledger")
+                },
+            ).also { result ->
+                if (result.isSuccess) {
+                    ssh.exec("printf 'SEND\\n' >> \"\$HOME/${remoteScopeDir}/upload-ledger\"")
+                }
+            }
+        }
+        val pickerRegistry = PickerResultRegistry(attachmentUri)
+        val pickerOwner = object : ActivityResultRegistryOwner {
+            override val activityResultRegistry: ActivityResultRegistry = pickerRegistry
+        }
+        val visible = mutableStateOf(true)
+        compose.setContent {
+            CompositionLocalProvider(LocalActivityResultRegistryOwner provides pickerOwner) {
+                PocketShellTheme {
+                    Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                        if (visible.value) {
+                            PromptComposerSheet(
+                                onDismiss = { visible.value = false },
+                                onSend = { request ->
+                                    synchronized(sent) { sent += request }
+                                    ComposerSendResult.Delivered
+                                },
+                                composerTargetKey = target,
+                                sendTargetSnapshotProvider = {
+                                    PromptComposerViewModel.SendTargetSnapshot(sessionKey = target)
+                                },
+                                onStageAttachments = { uris ->
+                                    attachUploads++
+                                    stager.stage(ssh, scopeKey, uris).also { result ->
+                                        if (result.isSuccess) {
+                                            ssh.exec(
+                                                "printf 'ATTACH\\n' >> " +
+                                                    "\"\$HOME/${remoteScopeDir}/upload-ledger\"",
+                                            )
+                                        }
+                                    }
+                                },
+                                viewModel = vm,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        compose.waitUntil(10_000) {
+            vm.composerTarget == target &&
+                compose.onAllNodesWithTag(COMPOSER_ATTACH_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Drive the production UI path: Attach launches OpenMultipleDocuments;
+        // the registry returns the provider Uri exactly as a picker result.
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed().performClick()
+        waitUntil("attach-time real upload completes") {
+            !vm.isAttachmentJobActiveForTest() && vm.uiState.value.attachments.size == 1
+        }
+        assertEquals(1, pickerRegistry.openMultipleDocumentsLaunches)
+        val attachTimePath = vm.uiState.value.attachments.single().remotePath
+        attachTimePathForRetention = attachTimePath
+        assertEquals(AttachmentTransferState.RemoteComplete, vm.uiState.value.attachments.single().transferState)
+        assertTrue("preview remains thumbnail-only presentation state", vm.uiState.value.attachments.single().previewUri != null)
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+
+        // The editor remains usable beside the picked tile, and the production
+        // Send button performs the handoff without a second transfer.
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG)
+            .assertIsDisplayed()
+            .performTextInput("inspect the uploaded file")
+        compose.activityRule.scenario.onActivity { activity ->
+            val keyboard = activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+            keyboard.hideSoftInputFromWindow(activity.window.decorView.windowToken, 0)
+        }
+        compose.waitForIdle()
+        SystemClock.sleep(400)
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsEnabled().assertIsDisplayed()
+        WalkthroughScreenshotArtifacts.capture("issue-2036-picker-tile-draft-send-before-handoff")
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
+            .assertIsEnabled()
+            .performClick()
+        waitUntil("production composer emits one send") { synchronized(sent) { sent.size == 1 } }
+        val request = synchronized(sent) { sent.single() }
+
+        assertEquals("Attach picker + Send must perform exactly one transfer", 1, attachUploads)
+        assertEquals("Remote-complete preview must not enter the send-time uploader", 0, sendUploads)
+        assertEquals("Send reuses the exact attach-time host path", listOf(attachTimePath), request.attachments.map { it.remotePath })
+        assertTrue("wire payload references the exact attach-time path", request.text.contains(attachTimePath))
+        val relativePath = attachTimePath.removePrefix("~/")
+        assertEquals(
+            "host records only the attach-time upload invocation",
+            "ATTACH",
+            ssh.exec("cat \"\$HOME/${remoteScopeDir}/upload-ledger\"").stdout.trim(),
+        )
+        assertEquals(
+            "only one payload file exists remotely after Send",
+            "1",
+            ssh.exec("find \"\$HOME/${remoteScopeDir}\" -type f ! -name upload-ledger | wc -l").stdout.trim(),
+        )
+        assertEquals(
+            md5Hex(payloadBytes),
+            ssh.exec("md5sum \"\$HOME/$relativePath\" | awk '{print \$1}'").stdout.trim(),
+        )
+        vm.clearForTest()
+    } }
+
+    @Test
+    fun attachmentClickWithPickerHeldOpenPreventsLateAckFromClosingSheet() {
+        val registry = HeldExternalResultRegistry()
+        val fixture = mountPendingExternalGateComposer(
+            registry = registry,
+            vault = ConnectedNoopVault,
+            enableAttachment = true,
+        )
+
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed().performClick()
+        compose.waitUntil(2_000) { registry.attachmentLaunches == 1 }
+        acknowledgeLateAndApplyProductionClose(fixture)
+
+        assertTrue("the picker launch must remain held with no callback", registry.attachmentLaunches == 1)
+        assertTrue("Attach intent owns the still-open sheet", fixture.visible.value)
+        assertTrue("authoritative delivery still prunes the old row", fixture.queue.itemsFor(fixture.row.sessionKey).isEmpty())
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertIsDisplayed()
+        fixture.vm.clearForTest()
+    }
+
+    @Test
+    fun micClickAtApiKeyGatePreventsLateAckFromClosingSheet() {
+        val registry = HeldExternalResultRegistry()
+        val fixture = mountPendingExternalGateComposer(
+            registry = registry,
+            vault = MissingKeyVault,
+            enableAttachment = false,
+        )
+
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed().performClick()
+        compose.waitUntil(2_000) {
+            registry.permissionLaunches == 1 ||
+                compose.onAllNodesWithText("OpenAI API key").fetchSemanticsNodes().isNotEmpty()
+        }
+        if (registry.permissionLaunches == 0) {
+            compose.onNodeWithText("OpenAI API key").assertIsDisplayed()
+        } else {
+            assertEquals("denied permission routes to one held request", 1, registry.permissionLaunches)
+        }
+        assertEquals(PromptComposerViewModel.RecordingState.Idle, fixture.vm.uiState.value.recording)
+        acknowledgeLateAndApplyProductionClose(fixture)
+
+        assertTrue("Mic intent owns the sheet while its external gate is open", fixture.visible.value)
+        assertTrue("authoritative delivery still prunes the old row", fixture.queue.itemsFor(fixture.row.sessionKey).isEmpty())
+        fixture.vm.clearForTest()
+    }
+
+    private fun mountPendingExternalGateComposer(
+        registry: HeldExternalResultRegistry,
+        vault: PromptComposerViewModel.ApiKeyVault,
+        enableAttachment: Boolean,
+    ): PendingGateFixture {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = PromptComposerViewModel(
+            audioRecorder = ConnectedNoopMic,
+            whisperClientFactory = WhisperClientFactory { error("no transcription") },
+            apiKeyStorage = vault,
+            voiceSettings = ConnectedVoiceSettings,
+            outboundQueueStore = queue,
+            savedStateHandle = SavedStateHandle(),
+        )
+        vm.setSendWatchdogTimeoutForTest(null)
+        val target = "1/issue2034-external-gate"
+        val visible = mutableStateOf(true)
+        val sendCallbackCompleted = AtomicBoolean(false)
+        val owner = object : ActivityResultRegistryOwner {
+            override val activityResultRegistry: ActivityResultRegistry = registry
+        }
+        compose.setContent {
+            CompositionLocalProvider(LocalActivityResultRegistryOwner provides owner) {
+                PocketShellTheme {
+                    Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                        if (visible.value) {
+                            PromptComposerSheet(
+                                onDismiss = { visible.value = false },
+                                onSend = {
+                                    sendCallbackCompleted.set(true)
+                                    ComposerSendResult.AuthoritativeAckPending
+                                },
+                                composerTargetKey = target,
+                                sendTargetSnapshotProvider = {
+                                    PromptComposerViewModel.SendTargetSnapshot(sessionKey = target)
+                                },
+                                onStageAttachments = if (enableAttachment) {
+                                    { Result.failure(AssertionError("held picker must not stage")) }
+                                } else {
+                                    null
+                                },
+                                viewModel = vm,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        compose.waitUntil(5_000) {
+            vm.composerTarget == target &&
+                vm.outboundSendConsumers.activeGenerationForDispatch() != null
+        }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).performTextInput("delayed authority")
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
+        compose.waitUntil(5_000) {
+            queue.itemsFor(target).singleOrNull()?.state == OutboundState.Queued &&
+                !vm.uiState.value.sendInFlight &&
+                sendCallbackCompleted.get()
+        }
+        val queued = queue.itemsFor(target).single()
+        val row = requireNotNull(queue.markWireSubmitAttempted(target, queued.id))
+        assertEquals(OutboundState.Queued, row.state)
+        assertTrue(row.wireSubmitAttempted)
+        return PendingGateFixture(vm, queue, row, visible)
+    }
+
+    private fun acknowledgeLateAndApplyProductionClose(fixture: PendingGateFixture) {
+        var shouldClose = true
+        compose.runOnUiThread {
+            shouldClose = fixture.vm.acknowledgeLateOutboundDeliveries(listOf(fixture.row))
+            if (shouldClose) fixture.visible.value = false
+        }
+        compose.waitForIdle()
+        assertFalse("new external intent must reject the old interaction's close", shouldClose)
+    }
+
+    private fun waitUntil(label: String, predicate: () -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + 30_000L
+        while (!predicate() && SystemClock.elapsedRealtime() < deadline) {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            SystemClock.sleep(50)
+        }
+        assertTrue("timed out waiting for $label", predicate())
+    }
+
     private fun md5Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("MD5").digest(bytes)
             .joinToString("") { "%02x".format(it) }
@@ -262,4 +656,27 @@ class AttachmentStagerRealUploadDockerTest {
             .bufferedReader()
             .use { it.readText() }
     }.getOrNull()
+
+    private object ConnectedNoopMic : PromptComposerViewModel.MicCapture {
+        override fun start() = Unit
+        override fun stop(): ByteArray = ByteArray(0)
+        override fun currentAmplitude(): Float = 0f
+    }
+
+    private object ConnectedNoopVault : PromptComposerViewModel.ApiKeyVault {
+        override fun save(key: CharArray) = Unit
+        override fun load(): CharArray? = "sk-test".toCharArray()
+        override fun clear() = Unit
+    }
+
+    private object MissingKeyVault : PromptComposerViewModel.ApiKeyVault {
+        override fun save(key: CharArray) = Unit
+        override fun load(): CharArray? = null
+        override fun clear() = Unit
+    }
+
+    private object ConnectedVoiceSettings : PromptComposerViewModel.VoiceSettingsSnapshot {
+        override fun silenceWindowMs(): Long = PromptComposerViewModel.SILENCE_WINDOW_MS
+        override fun whisperLanguageHint(): String? = null
+    }
 }

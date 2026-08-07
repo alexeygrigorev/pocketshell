@@ -274,7 +274,7 @@ class PromptComposerLongDraftCaretVisibleTest {
                     FauxTerminalBackdrop()
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         modifier = Modifier.observeProductionSheetIme(),
                         viewModel = vm,
                     )
@@ -420,7 +420,7 @@ class PromptComposerLongDraftCaretVisibleTest {
                     FauxTerminalBackdrop()
                     PromptComposerSheet(
                         onDismiss = {},
-                        onSend = { _ -> true },
+                        onSend = { _ -> com.pocketshell.app.composer.ComposerSendResult.Delivered },
                         modifier = Modifier.observeProductionSheetIme(),
                         connectionLost = true,
                         viewModel = vm,

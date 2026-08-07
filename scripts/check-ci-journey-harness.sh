@@ -78,7 +78,6 @@ REQUIRED_PER_PUSH_ANDROID_TEST_CLASSES=(
 # wired into scripts/ci-journey-suite.sh or added here with an intentional
 # follow-up. Keep full FQCNs so moves are visible.
 KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
-  "com.pocketshell.app.composer.AttachmentStagerRealUploadDockerTest"
   "com.pocketshell.app.composer.ComposerPartialExpandE2eTest"
   "com.pocketshell.app.costs.CostsScreenE2eTest"
   "com.pocketshell.app.crash.ShareAllReportsDockerTest"

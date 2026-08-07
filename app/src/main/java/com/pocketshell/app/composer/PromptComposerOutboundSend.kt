@@ -178,7 +178,15 @@ internal suspend fun collectPromptComposerSendRequests(
                 }
                 when (result) {
                     ComposerSendResult.Delivered -> {
-                        if (viewModel.markSendDelivered(request)) onDelivered()
+                        val deliveryIsQuiescent = viewModel.markSendDelivered(request)
+                        // Durable rows already close at local acceptance. Their
+                        // later wire completion must never dismiss a composer
+                        // the user has reopened in the meantime. The no-row
+                        // fallback has no acceptance event, so delivery remains
+                        // its one close point.
+                        if (request.outboundQueueItemId == null && deliveryIsQuiescent) {
+                            onDelivered()
+                        }
                     }
                     ComposerSendResult.AuthoritativeAckPending ->
                         viewModel.markOutboundSendDeferred(request, resetAttemptBudget = true)
@@ -222,6 +230,11 @@ internal fun PromptComposerViewModel.composerRevision(target: String): Long =
 
 internal fun PromptComposerViewModel.recordComposerMutation(target: String? = composerTarget) {
     composerRevisionTracker.record(target)
+    composerInteractionEpoch++
+}
+
+/** A newly mounted sheet owns a fresh interaction even before the user types. */
+internal fun PromptComposerViewModel.onComposerOpened() {
     composerInteractionEpoch++
 }
 
@@ -271,7 +284,13 @@ internal fun PromptComposerViewModel.deliveryIsQuiescentAt(
         } != false
 }
 
-/** Prune one authoritative snapshot batch, then restart its FIFO exactly once. */
+/**
+ * Prune one authoritative snapshot batch, then restart its FIFO exactly once.
+ *
+ * A durable row already offered its one composer-close callback at local
+ * acceptance. Late authority may remove that row, but must never translate
+ * into a second close of whatever sheet is mounted now.
+ */
 internal fun PromptComposerViewModel.acknowledgeLateOutboundDeliveries(
     items: List<OutboundItem>,
     beforePrune: (OutboundItem) -> Unit = {},
@@ -279,35 +298,34 @@ internal fun PromptComposerViewModel.acknowledgeLateOutboundDeliveries(
 ): Boolean {
     if (items.isEmpty()) return false
     val acknowledged = items.mapNotNull { item ->
-        val epoch = outboundAutoCloseEpochs[item.id]
         beforePrune(item)
         if (outboundQueueStore.acknowledgeLateDelivered(item.id, item.sendKey, item.wireAttemptGeneration)) {
             onAcknowledged(item)
-            item to epoch
+            item
         } else {
             null
         }
     }
     if (acknowledged.isEmpty()) return false
-    acknowledged.forEach { (item, _) ->
+    acknowledged.forEach { item ->
         outboundAutoCloseEpochs.remove(item.id)
         launchSidecarRemoval(item.id)
     }
-    acknowledged.map { it.first.sessionKey }.distinct().forEach(::refreshOutboundQueueItemsFor)
+    acknowledged.map { it.sessionKey }.distinct().forEach(::refreshOutboundQueueItemsFor)
     if (!outboundHandoffInProgress) retryNextOutboundItem()
-    return acknowledged.any { (item, epoch) -> deliveryIsQuiescentAt(epoch, requestTarget = item.sessionKey) }
+    return true
 }
 
 /**
- * Legacy no-row sends may close at local acceptance. Durable rows always wait
- * for authoritative delivery and [deliveryIsQuiescentAt].
+ * Consume a local-acceptance event for prompt composer dismissal without
+ * waiting for its durable queue row to deliver or prune.
  */
 internal fun PromptComposerViewModel.consumeHandoffAcceptanceForAutoClose(
     acceptance: ComposerHandoffAcceptance,
 ): Boolean {
     val state = _uiState.value
     val ownsCurrentTarget = acceptance.target.isBlank() || acceptance.target == composerTarget
-    return acceptance.outboundQueueItemId == null && ownsCurrentTarget &&
+    return ownsCurrentTarget &&
         acceptance.interactionEpoch == composerInteractionEpoch &&
         state.draft.isEmpty() &&
         state.attachments.isEmpty() &&

@@ -42,6 +42,7 @@ import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -153,8 +154,10 @@ class AttachmentStagerRealUploadDockerTest {
     private data class PendingGateFixture(
         val vm: PromptComposerViewModel,
         val queue: InMemoryOutboundQueueStore,
-        val row: OutboundItem,
+        val target: String,
         val visible: androidx.compose.runtime.MutableState<Boolean>,
+        val releaseAcceptance: CompletableDeferred<Unit>,
+        val sendCallbackCompleted: AtomicBoolean,
     )
 
     @After
@@ -422,13 +425,18 @@ class AttachmentStagerRealUploadDockerTest {
             CompositionLocalProvider(LocalActivityResultRegistryOwner provides pickerOwner) {
                 PocketShellTheme {
                     Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                        PromptComposerSendDispatcher(
+                            viewModel = vm,
+                            onSend = { request ->
+                                synchronized(sent) { sent += request }
+                                ComposerSendResult.Delivered
+                            },
+                            onDelivered = { visible.value = false },
+                        )
                         if (visible.value) {
                             PromptComposerSheet(
                                 onDismiss = { visible.value = false },
-                                onSend = { request ->
-                                    synchronized(sent) { sent += request }
-                                    ComposerSendResult.Delivered
-                                },
+                                onSend = { error("screen-scoped dispatcher owns delivery") },
                                 composerTargetKey = target,
                                 sendTargetSnapshotProvider = {
                                     PromptComposerViewModel.SendTargetSnapshot(sessionKey = target)
@@ -445,6 +453,7 @@ class AttachmentStagerRealUploadDockerTest {
                                     }
                                 },
                                 viewModel = vm,
+                                collectSendRequests = false,
                             )
                         }
                     }
@@ -487,7 +496,18 @@ class AttachmentStagerRealUploadDockerTest {
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG)
             .assertIsEnabled()
             .performClick()
-        waitUntil("production composer emits one send") { synchronized(sent) { sent.size == 1 } }
+        waitUntil("durable attachment row commits before local close") {
+            vm.uiState.value.draft.isEmpty() &&
+                !vm.uiState.value.outboundHandoffInProgress &&
+                queue.itemsFor(target).size == 1
+        }
+        waitUntil("screen-scoped dispatcher claims the committed row") {
+            vm.uiState.value.sendInFlight
+        }
+        // Local acceptance yields one Compose frame before host IO. Drive that
+        // frame with the Compose clock; the generic wall-clock SSH pump above
+        // deliberately does not advance Compose time.
+        compose.waitUntil(5_000) { synchronized(sent) { sent.size == 1 } }
         val request = synchronized(sent) { sent.single() }
 
         assertEquals("Attach picker + Send must perform exactly one transfer", 1, attachUploads)
@@ -509,6 +529,8 @@ class AttachmentStagerRealUploadDockerTest {
             md5Hex(payloadBytes),
             ssh.exec("md5sum \"\$HOME/$relativePath\" | awk '{print \$1}'").stdout.trim(),
         )
+        compose.runOnUiThread { visible.value = false }
+        compose.waitForIdle()
         vm.clearForTest()
     } }
 
@@ -527,8 +549,10 @@ class AttachmentStagerRealUploadDockerTest {
 
         assertTrue("the picker launch must remain held with no callback", registry.attachmentLaunches == 1)
         assertTrue("Attach intent owns the still-open sheet", fixture.visible.value)
-        assertTrue("authoritative delivery still prunes the old row", fixture.queue.itemsFor(fixture.row.sessionKey).isEmpty())
+        assertTrue("authoritative delivery still prunes the old row", fixture.queue.itemsFor(fixture.target).isEmpty())
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertIsDisplayed()
+        compose.runOnUiThread { fixture.visible.value = false }
+        compose.waitForIdle()
         fixture.vm.clearForTest()
     }
 
@@ -555,7 +579,9 @@ class AttachmentStagerRealUploadDockerTest {
         acknowledgeLateAndApplyProductionClose(fixture)
 
         assertTrue("Mic intent owns the sheet while its external gate is open", fixture.visible.value)
-        assertTrue("authoritative delivery still prunes the old row", fixture.queue.itemsFor(fixture.row.sessionKey).isEmpty())
+        assertTrue("authoritative delivery still prunes the old row", fixture.queue.itemsFor(fixture.target).isEmpty())
+        compose.runOnUiThread { fixture.visible.value = false }
+        compose.waitForIdle()
         fixture.vm.clearForTest()
     }
 
@@ -577,6 +603,12 @@ class AttachmentStagerRealUploadDockerTest {
         val target = "1/issue2034-external-gate"
         val visible = mutableStateOf(true)
         val sendCallbackCompleted = AtomicBoolean(false)
+        val reductionEntered = CompletableDeferred<Unit>()
+        val releaseAcceptance = CompletableDeferred<Unit>()
+        vm.beforeHandoffAutoCloseReductionForTest = {
+            reductionEntered.complete(Unit)
+            releaseAcceptance.await()
+        }
         val owner = object : ActivityResultRegistryOwner {
             override val activityResultRegistry: ActivityResultRegistry = registry
         }
@@ -614,25 +646,38 @@ class AttachmentStagerRealUploadDockerTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).performTextInput("delayed authority")
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
         compose.waitUntil(5_000) {
-            queue.itemsFor(target).singleOrNull()?.state == OutboundState.Queued &&
-                !vm.uiState.value.sendInFlight &&
-                sendCallbackCompleted.get()
+            reductionEntered.isCompleted &&
+                queue.itemsFor(target).size == 1 &&
+                vm.uiState.value.draft.isEmpty()
         }
-        val queued = queue.itemsFor(target).single()
-        val row = requireNotNull(queue.markWireSubmitAttempted(target, queued.id))
-        assertEquals(OutboundState.Queued, row.state)
-        assertTrue(row.wireSubmitAttempted)
-        return PendingGateFixture(vm, queue, row, visible)
+        assertTrue("acceptance is held before close", visible.value)
+        assertFalse("host callback is held behind acceptance", sendCallbackCompleted.get())
+        return PendingGateFixture(
+            vm = vm,
+            queue = queue,
+            target = target,
+            visible = visible,
+            releaseAcceptance = releaseAcceptance,
+            sendCallbackCompleted = sendCallbackCompleted,
+        )
     }
 
     private fun acknowledgeLateAndApplyProductionClose(fixture: PendingGateFixture) {
-        var shouldClose = true
+        fixture.releaseAcceptance.complete(Unit)
+        compose.waitUntil(5_000) {
+            fixture.sendCallbackCompleted.get() &&
+                fixture.queue.itemsFor(fixture.target).singleOrNull()?.state == OutboundState.Queued
+        }
+        val queued = fixture.queue.itemsFor(fixture.target).single()
+        val row = requireNotNull(fixture.queue.markWireSubmitAttempted(fixture.target, queued.id))
+        assertTrue(row.wireSubmitAttempted)
+        var acknowledged = false
         compose.runOnUiThread {
-            shouldClose = fixture.vm.acknowledgeLateOutboundDeliveries(listOf(fixture.row))
-            if (shouldClose) fixture.visible.value = false
+            acknowledged = fixture.vm.acknowledgeLateOutboundDeliveries(listOf(row))
         }
         compose.waitForIdle()
-        assertFalse("new external intent must reject the old interaction's close", shouldClose)
+        assertTrue("exact late authority must prune the accepted row", acknowledged)
+        assertTrue("new external intent must retain the mounted composer", fixture.visible.value)
     }
 
     private fun waitUntil(label: String, predicate: () -> Boolean) {

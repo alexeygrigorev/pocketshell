@@ -19,7 +19,6 @@ internal fun TmuxOutboundLateAckEffect(
     tmuxViewModel: TmuxSessionViewModel,
     composerViewModel: PromptComposerViewModel,
     binding: TmuxOutboundQueueBinding,
-    onQuiescentDelivery: () -> Unit,
 ) {
     val conversations by tmuxViewModel.agentConversations.collectAsState()
     val rows by composerViewModel.outboundQueueItems.collectAsState()
@@ -29,12 +28,11 @@ internal fun TmuxOutboundLateAckEffect(
             binding = binding,
             resolveAuthoritativeAck = tmuxViewModel::resolveLateAuthoritativeOutboundAck,
         )
-        if (resolved.isNotEmpty() && composerViewModel.acknowledgeLateOutboundDeliveries(
+        if (resolved.isNotEmpty()) {
+            composerViewModel.acknowledgeLateOutboundDeliveries(
                 resolved,
                 onAcknowledged = tmuxViewModel::consumeLateAuthoritativeOutboundAck,
             )
-        ) {
-            onQuiescentDelivery()
         }
     }
 }

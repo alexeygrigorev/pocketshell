@@ -1965,10 +1965,6 @@ private fun TmuxSessionSheetsRegion(
         tmuxViewModel = viewModel,
         composerViewModel = promptComposerViewModel,
         binding = outboundQueueBinding,
-        onQuiescentDelivery = {
-            overlay.showMicSheet = false
-            overlay.micSheetAutoStartRecording = false
-        },
     )
 
     val ctrlModifierState by viewModel.ctrlModifier.collectAsState()

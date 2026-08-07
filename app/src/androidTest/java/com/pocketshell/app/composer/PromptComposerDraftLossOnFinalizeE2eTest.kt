@@ -143,9 +143,9 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         outboundQueueStore = queue,
     ).also { viewModel = it }
 
-    /** Issue #2037: local handoff is not delivery; close only after authoritative ack. */
+    /** Issue #695/#2048: an accepted empty composer closes before slow delivery. */
     @Test
-    fun acceptedPromptStaysOpenUntilTenSecondHostDeliveryIsAuthoritativelyAcknowledged() {
+    fun acceptedPromptDismissesBeforeTenSecondHostDeliveryCompletes() {
         val drafts = InMemoryComposerDraftStore()
         val queue = InMemoryOutboundQueueStore()
         val vm = newViewModel(drafts, queue)
@@ -211,26 +211,19 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         WalkthroughScreenshotArtifacts.capture("issue-695-01-accepted-empty-before-reduction")
 
         releaseReduction.complete(Unit)
+        compose.waitUntil(2_000) { !visible.value }
         compose.waitUntil(2_000) { sendEntered.isCompleted }
         assertTrue("host delivery must have started", sendEntered.isCompleted)
-        assertTrue(
-            "the empty sheet stays mounted while host delivery remains ambiguous",
-            sheetMountedAtSendStart.get() ?: false,
+        assertFalse(
+            "the accepted empty sheet must leave composition before host delivery starts",
+            sheetMountedAtSendStart.get() ?: true,
         )
-        assertTrue("durable acceptance must not close before authoritative delivery", visible.value)
+        assertFalse("local acceptance must dismiss before authoritative delivery", visible.value)
         assertFalse("the injected host callback is still pending", sendCompleted.isCompleted)
         assertEquals("", vm.uiState.value.draft)
         assertEquals(1, queue.itemsFor(targetKey).size)
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertExists()
-        WalkthroughScreenshotArtifacts.capture("issue-2037-02-open-during-delivery")
-
-        compose.mainClock.advanceTimeBy(10_000)
-        compose.waitUntil(2_000) { sendCompleted.isCompleted }
-        compose.waitUntil(2_000) { !visible.value }
-        assertTrue("host delivery must have completed before dismissal", sendCompleted.isCompleted)
-        assertTrue("authoritative ack prunes the durable row", queue.itemsFor(targetKey).isEmpty())
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertDoesNotExist()
-        WalkthroughScreenshotArtifacts.capture("issue-2037-03-dismissed-after-delivery-ack")
+        WalkthroughScreenshotArtifacts.capture("issue-2048-dismissed-before-delivery")
     }
 
     /**

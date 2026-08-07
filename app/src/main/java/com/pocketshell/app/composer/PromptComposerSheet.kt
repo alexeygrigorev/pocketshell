@@ -346,6 +346,12 @@ public fun PromptComposerSheet(
         viewModel.onComposerTargetChanged(composerTargetKey)
     }
 
+    // Reopening an empty sheet is user interaction too. Give it a fresh epoch
+    // so an older row's later delivery can never close the new composer.
+    LaunchedEffect(viewModel) {
+        viewModel.onComposerOpened()
+    }
+
     // Issue #585: the session launcher's hold+swipe-up ENTRY gesture opens this
     // sheet WITH recording already started — one gesture, not "open then tap the
     // mic". [autoStartRecording] carries that intent from the launcher; a
@@ -1491,7 +1497,7 @@ public fun PromptComposerSendDispatcher(
     viewModel: PromptComposerViewModel,
     onSend: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult,
     // Historical name retained for source compatibility. Durable rows invoke
-    // it only after authoritative delivery; no-row sends may close at acceptance.
+    // it at local acceptance; no-row fallback sends invoke it after delivery.
     onDelivered: () -> Unit = {},
 ) {
     val currentOnSend by rememberUpdatedState(onSend)
@@ -1500,8 +1506,8 @@ public fun PromptComposerSendDispatcher(
         try {
             viewModel.handoffAcceptances.collect { acceptance ->
                 try {
-                    // Acceptance is a delivery barrier. Only legacy no-row sends
-                    // can close here; durable rows wait for authoritative delivery.
+                    // Dismiss at local acceptance, before a potentially slow
+                    // host callback. The epoch check keeps newer composition.
                     viewModel.beforeHandoffAutoCloseReductionForTest()
                     if (viewModel.consumeHandoffAcceptanceForAutoClose(acceptance)) {
                         currentOnDelivered()

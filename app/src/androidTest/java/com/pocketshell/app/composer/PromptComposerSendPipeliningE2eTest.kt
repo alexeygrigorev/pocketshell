@@ -103,11 +103,16 @@ class PromptComposerSendPipeliningE2eTest {
             .performClick().performTextInput("prompt A")
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
         compose.waitUntil(5_000) {
-            firstEntered.isCompleted &&
-                vm.uiState.value.sendInFlight &&
-                dismissCount.get() == 1 &&
-                !visible.value
+            vm.uiState.value.draft.isEmpty() &&
+                !vm.uiState.value.outboundHandoffInProgress &&
+                queue.itemsFor(target).size == 1
         }
+        // Keep local acceptance, close, and host delivery as separate
+        // milestones. A composite timeout hid #2048's regression: the durable
+        // row was accepted and its blocked host callback started, but the empty
+        // composer alone stayed open until delivery.
+        compose.waitUntil(5_000) { dismissCount.get() == 1 && !visible.value }
+        compose.waitUntil(5_000) { firstEntered.isCompleted && vm.uiState.value.sendInFlight }
 
         // Local acceptance closes the empty composer promptly. Reopening it
         // while A is still delivering preserves #1621 pipelining: B can still
@@ -241,6 +246,84 @@ class PromptComposerSendPipeliningE2eTest {
         releaseNewer.complete(Unit)
         compose.waitUntil(5_000) { dismissCount.get() == 2 && !visible.value }
         assertEquals(2, dismissCount.get())
+    }
+
+    /**
+     * The no-store fallback has no local-acceptance event, so its delivery is
+     * allowed to request close. Remounting the sheet while that callback is
+     * blocked must therefore be protected by [onComposerOpened] itself, even
+     * before the user types. This is the mutation-valid remount oracle: remove
+     * the mount epoch and the released delivery closes the new sheet.
+     */
+    @Test
+    fun noRowCompletionCannotDismissRemountedEmptyComposerOrResubmitPayload() {
+        val vm = newViewModel(DisabledOutboundQueueStore)
+        val target = "1/session-a"
+        val visible = mutableStateOf(true)
+        val deliveryEntered = CompletableDeferred<Unit>()
+        val releaseDelivery = CompletableDeferred<Unit>()
+        val closeCallbacks = AtomicInteger(0)
+        val hostSubmissions = Collections.synchronizedList(mutableListOf<String>())
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
+                    PromptComposerSendDispatcher(
+                        viewModel = vm,
+                        onSend = { request ->
+                            hostSubmissions.add(request.cleanDraft)
+                            deliveryEntered.complete(Unit)
+                            releaseDelivery.await()
+                            ComposerSendResult.Delivered
+                        },
+                        onDelivered = {
+                            closeCallbacks.incrementAndGet()
+                            visible.value = false
+                        },
+                    )
+                    if (visible.value) {
+                        PromptComposerSheet(
+                            onDismiss = { visible.value = false },
+                            onSend = { error("screen-scoped dispatcher owns delivery") },
+                            composerTargetKey = target,
+                            sendTargetSnapshotProvider = {
+                                PromptComposerViewModel.SendTargetSnapshot(sessionKey = target)
+                            },
+                            viewModel = vm,
+                            collectSendRequests = false,
+                        )
+                    }
+                }
+            }
+        }
+        compose.waitUntil(5_000) { vm.composerTarget == target }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true)
+            .performClick().performTextInput("older no-row prompt")
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, true).performClick()
+        compose.waitUntil(5_000) {
+            deliveryEntered.isCompleted &&
+                vm.uiState.value.sendInFlight &&
+                vm.uiState.value.draft.isEmpty()
+        }
+        assertEquals(listOf("older no-row prompt"), hostSubmissions.toList())
+
+        compose.runOnUiThread { visible.value = false }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertDoesNotExist()
+        compose.runOnUiThread { visible.value = true }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertExists()
+
+        releaseDelivery.complete(Unit)
+        compose.waitUntil(5_000) { !vm.uiState.value.sendInFlight }
+        compose.waitForIdle()
+
+        assertTrue("the remounted empty composer owns the new epoch", visible.value)
+        assertEquals("older completion must not close the remount", 0, closeCallbacks.get())
+        assertEquals(
+            "the older payload must reach the host exactly once",
+            listOf("older no-row prompt"),
+            hostSubmissions.toList(),
+        )
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, true).assertExists()
     }
 
     private fun newViewModel(queue: OutboundQueueStore): PromptComposerViewModel =

@@ -26,8 +26,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Issue #695/#2034: legacy sends may dismiss at local acceptance, while a durable
- * queue row keeps the composer visible until authoritative delivery confirms it.
+ * Issue #695/#2048: accepted empty composers dismiss promptly, while interaction
+ * epochs keep a reopened or edited composer safe from older completion.
  *
  * The connected sibling mounts the real sheet and injects the reported 10s
  * callback. This deterministic matrix covers the state boundary itself:
@@ -51,7 +51,7 @@ class PromptComposerAcceptanceDismissalTest {
     }
 
     @Test
-    fun durableAcceptanceKeepsEmptyComposerOpenUntilDeliveryResult() = runTest {
+    fun durableAcceptanceClosesEmptyComposerBeforeDeliveryResult() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(StandardTestDispatcher(testScheduler), queue)
         val accepted = collectAcceptances(vm)
@@ -68,7 +68,7 @@ class PromptComposerAcceptanceDismissalTest {
         assertEquals(1, accepted.size)
         assertEquals(1, sent.size)
         assertTrue(vm.uiState.value.sendInFlight)
-        assertFalse(vm.consumeHandoffAcceptanceForAutoClose(accepted.single()))
+        assertTrue(vm.consumeHandoffAcceptanceForAutoClose(accepted.single()))
         assertTrue(vm.markSendDelivered(sent.single()))
         assertTrue(queue.itemsFor(target.sessionKey).isEmpty())
     }
@@ -150,26 +150,34 @@ class PromptComposerAcceptanceDismissalTest {
     }
 
     @Test
-    fun lateExactAckClosesOnlyTheStillEmptyOriginalInteraction() = runTest {
+    fun durableAcceptanceAndLateExactAckProduceExactlyOneCloseCallback() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(StandardTestDispatcher(testScheduler), queue)
+        val accepted = collectAcceptances(vm)
         val sent = collectSends(vm)
         val target = target()
         vm.onComposerTargetChanged(target.sessionKey)
         vm.onDraftChange("late ack")
         vm.requestSend(withEnter = true, sendTarget = target)
         advanceUntilIdle()
+        var closeCallbacks = 0
+        if (vm.consumeHandoffAcceptanceForAutoClose(accepted.single())) closeCallbacks++
         val request = sent.single()
         queue.markWireSubmitAttempted(target.sessionKey, requireNotNull(request.outboundQueueItemId))
         val row = requireNotNull(queue.item(request.outboundQueueItemId))
         queue.markFailed(row.id, "bounded acknowledgement pending", 1L)
 
         assertTrue(vm.acknowledgeLateOutboundDeliveries(listOf(row)))
+        assertEquals(
+            "one durable row closes exactly once at acceptance, never again at late ack",
+            1,
+            closeCallbacks,
+        )
         assertTrue(queue.itemsFor(target.sessionKey).isEmpty())
     }
 
     @Test
-    fun openingAttachmentPickerWithoutAResultBlocksDelayedAckClose() = runTest {
+    fun lateAckPrunesWithoutTouchingHeldAttachmentPickerInteraction() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(StandardTestDispatcher(testScheduler), queue)
         val sent = collectSends(vm)
@@ -186,12 +194,12 @@ class PromptComposerAcceptanceDismissalTest {
 
         vm.onAttachmentPickIntent()
 
-        assertFalse(vm.acknowledgeLateOutboundDeliveries(listOf(row)))
+        assertTrue(vm.acknowledgeLateOutboundDeliveries(listOf(row)))
         assertTrue(queue.itemsFor(target.sessionKey).isEmpty())
     }
 
     @Test
-    fun openingMicPermissionGateWithoutStartingBlocksDelayedAckClose() = runTest {
+    fun lateAckPrunesWithoutTouchingHeldMicPermissionInteraction() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(StandardTestDispatcher(testScheduler), queue)
         val sent = collectSends(vm)
@@ -208,12 +216,12 @@ class PromptComposerAcceptanceDismissalTest {
 
         vm.onMicStartIntent()
 
-        assertFalse(vm.acknowledgeLateOutboundDeliveries(listOf(row)))
+        assertTrue(vm.acknowledgeLateOutboundDeliveries(listOf(row)))
         assertTrue(queue.itemsFor(target.sessionKey).isEmpty())
     }
 
     @Test
-    fun deferredAmbiguousAttemptKeepsOriginalEpochSoLateAckCanCloseEmptyComposer() = runTest {
+    fun deferredAmbiguousAttemptIsPrunedByExactLateAckWithoutASecondClose() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(StandardTestDispatcher(testScheduler), queue)
         val sent = collectSends(vm)
@@ -229,7 +237,7 @@ class PromptComposerAcceptanceDismissalTest {
         val deferred = requireNotNull(queue.item(request.outboundQueueItemId))
         assertEquals(OutboundState.Queued, deferred.state)
 
-        assertTrue("the exact late ack still owns the original empty interaction", vm.acknowledgeLateOutboundDeliveries(listOf(deferred)))
+        assertTrue("the exact late ack prunes the accepted durable row", vm.acknowledgeLateOutboundDeliveries(listOf(deferred)))
         assertTrue(queue.itemsFor(target.sessionKey).isEmpty())
     }
 
@@ -502,7 +510,7 @@ class PromptComposerAcceptanceDismissalTest {
         queue.markFailed(row.id, "bounded acknowledgement pending", 1L)
         vm.onDraftChange("new draft")
 
-        assertFalse(vm.acknowledgeLateOutboundDeliveries(listOf(row)))
+        assertTrue(vm.acknowledgeLateOutboundDeliveries(listOf(row)))
         assertTrue(queue.itemsFor(target.sessionKey).isEmpty())
         assertEquals("new draft", vm.uiState.value.draft)
         assertEquals("new draft", drafts.load(target.sessionKey))
@@ -584,7 +592,7 @@ class PromptComposerAcceptanceDismissalTest {
             ),
         )
 
-        assertFalse(vm.acknowledgeLateOutboundDeliveries(listOf(first, second)))
+        assertTrue(vm.acknowledgeLateOutboundDeliveries(listOf(first, second)))
         advanceUntilIdle()
 
         assertNull(queue.item(first.id))

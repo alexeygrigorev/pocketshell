@@ -24,10 +24,12 @@ import javax.inject.Inject
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -220,6 +222,15 @@ class ForwardingService : Service() {
 
         /** Sentinel for "no notification observer is armed" (issue #2006). */
         private const val NO_GENERATION = 0L
+
+        /**
+         * Android drops notification updates when one package exceeds its
+         * enqueue rate. One controller mutation advances several StateFlows,
+         * so the observer must collapse that synchronous burst before writing
+         * to NotificationManager (issue #2047). Zero remains immediate so the
+         * foreground service never outlives its last forward.
+         */
+        private const val POSITIVE_NOTIFICATION_SETTLE_MS = 300L
 
         const val ACTION_START = "com.pocketshell.app.portfwd.action.START_FORWARDING"
         const val ACTION_STOP = "com.pocketshell.app.portfwd.action.STOP_FORWARDING"
@@ -424,6 +435,7 @@ class ForwardingService : Service() {
         }
     }
 
+    @OptIn(FlowPreview::class)
     private fun launchObserver(generation: Long): Job {
         return scope.launch {
             // Issue #994: record the dispatcher the collector actually resumed
@@ -457,6 +469,19 @@ class ForwardingService : Service() {
                 )
             }
                 .distinctUntilChanged()
+                // Issue #2047: recomputeSnapshot updates five independent
+                // StateFlows synchronously. `combine` exposes intermediate
+                // tuples (for example two hosts with the previous tunnel
+                // count), and posting every tuple can cross Android's package
+                // notification enqueue-rate limit. The platform then drops the
+                // trailing authoritative removal, leaving the tray stuck on
+                // "2 ports forwarded" even though the controller is back to
+                // one. Collapse each positive topology burst to its settled
+                // tuple. A zero snapshot is deliberately never delayed: it is
+                // the lifecycle signal that removes the foreground service.
+                .debounce { snapshot ->
+                    if (snapshot.activeHosts == 0) 0L else POSITIVE_NOTIFICATION_SETTLE_MS
+                }
                 .collect { snapshot ->
                     if (snapshot.activeHosts == 0) {
                         // All hosts disabled — tear down. The

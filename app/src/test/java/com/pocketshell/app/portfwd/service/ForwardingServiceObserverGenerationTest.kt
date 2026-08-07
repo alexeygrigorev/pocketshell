@@ -11,6 +11,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -279,6 +280,53 @@ class ForwardingServiceObserverGenerationTest {
         )
     }
 
+    /**
+     * Issue #2047 — Android rate-limits rapid updates to one notification. A
+     * controller mutation updates several StateFlows synchronously, and the
+     * old five-way `combine` rendered every intermediate tuple. Adding and
+     * immediately removing a second forward could therefore spend the
+     * platform's enqueue budget on duplicate/intermediate bodies; the final
+     * one-forward body was then discarded and the tray stayed on two.
+     *
+     * The service must collapse each synchronous topology burst to one
+     * platform publication. The user-visible final-body checks remain the
+     * load-bearing connected oracle; this JVM count makes the rate-budget
+     * mechanism deterministic instead of relying on emulator load.
+     */
+    @Test
+    fun addThenRemoveSecondForwardPublishesOnlySettledTopologyBodies() {
+        startServiceWithSettledForward()
+
+        val publishAttempts = AtomicInteger(0)
+        service.beforeNotificationPublishForTest = { publishAttempts.incrementAndGet() }
+
+        controller.registerActiveHost(HOST_C, "Second host")
+        controller.updateActiveTunnels(HOST_C, mapOf(4444 to 4444))
+        assertEquals(
+            "adding the second forward must reach the tray",
+            "Running in the background · Race Host + 1 more · 3 ports forwarded",
+            awaitForwardingNotificationText(
+                "Running in the background · Race Host + 1 more · 3 ports forwarded",
+            ),
+        )
+
+        controller.unregisterActiveHost(HOST_C)
+        assertEquals(
+            "removing the second forward must reach the tray instead of leaving " +
+                "the stale multi-forward body (issue #2047)",
+            SETTLED_TEXT,
+            awaitForwardingNotificationText(SETTLED_TEXT),
+        )
+        drainObserveDispatcher()
+
+        assertEquals(
+            "one settled platform notification write is allowed for add and one for " +
+                "remove; intermediate StateFlow tuples exhaust Android's update budget",
+            2,
+            publishAttempts.get(),
+        )
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private fun startServiceWithSettledForward() {
@@ -396,6 +444,7 @@ class ForwardingServiceObserverGenerationTest {
     private companion object {
         const val HOST_A = 2_006_001L
         const val HOST_B = 2_006_002L
+        const val HOST_C = 2_047_003L
         const val HOST_NAME = "Race Host"
         val TUNNELS = mapOf(2222 to 2222, 3333 to 3333)
         val MORE_TUNNELS = mapOf(2222 to 2222, 3333 to 3333, 4444 to 4444)

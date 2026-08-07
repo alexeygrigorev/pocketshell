@@ -74,6 +74,29 @@ class ShareTargetE2eTest {
     private var registeredHostId: Long? = null
     private var registeredSessionName: String = ""
 
+    @Test
+    fun remoteUploadListingSelectsSettledFinalNameInsteadOfAtomicTempSibling() {
+        val marker = "psshare-oracle"
+        val finalName = "$marker.txt"
+        val listing = "${finalName}.part-2aa12d12\n$finalName\n"
+
+        assertEquals(
+            "the share oracle must wait for the settled final name after atomic rename",
+            finalName,
+            selectSettledUploadName(listing, marker),
+        )
+        assertEquals(
+            "a listing containing only the in-flight atomic sibling is not settled",
+            null,
+            selectSettledUploadName("${finalName}.part-92669c76\n", marker),
+        )
+        assertEquals(
+            "an unrelated settled filename must not satisfy this upload marker",
+            null,
+            selectSettledUploadName("different-upload.txt\n", marker),
+        )
+    }
+
     @After
     fun teardown() {
         launchedActivity?.close()
@@ -849,13 +872,10 @@ class ShareTargetE2eTest {
                 key = SshKey.Pem(key),
                 knownHosts = KnownHostsPolicy.AcceptAll,
             ).getOrThrow().use { session ->
-                session.exec(
-                    "ls -1 \"$attachmentScopeDir\" 2>/dev/null | grep \"$marker\" | head -n 1",
-                )
+                session.exec("ls -1 \"$attachmentScopeDir\" 2>/dev/null | grep \"$marker\"")
             }
             if (listing.exitCode == 0) {
-                val name = listing.stdout.trim()
-                if (name.isNotEmpty()) return name
+                selectSettledUploadName(listing.stdout, marker)?.let { return it }
             }
             delay(500)
         }
@@ -940,13 +960,10 @@ class ShareTargetE2eTest {
                 key = SshKey.Pem(key),
                 knownHosts = KnownHostsPolicy.AcceptAll,
             ).getOrThrow().use { session ->
-                session.exec(
-                    "ls -1 \"$projectPath/.inbox\" 2>/dev/null | grep \"$marker\" | head -n 1",
-                )
+                session.exec("ls -1 \"$projectPath/.inbox\" 2>/dev/null | grep \"$marker\"")
             }
             if (listing.exitCode == 0) {
-                val name = listing.stdout.trim()
-                if (name.isNotEmpty()) return name
+                selectSettledUploadName(listing.stdout, marker)?.let { return it }
             }
             delay(500)
         }
@@ -1017,12 +1034,11 @@ class ShareTargetE2eTest {
                 knownHosts = KnownHostsPolicy.AcceptAll,
             ).getOrThrow().use { session ->
                 session.exec(
-                    "ls -1 \"\$HOME/inbox/pocketshell\" 2>/dev/null | grep \"$marker\" | head -n 1",
+                    "ls -1 \"\$HOME/inbox/pocketshell\" 2>/dev/null | grep \"$marker\"",
                 )
             }
             if (listing.exitCode == 0) {
-                val name = listing.stdout.trim()
-                if (name.isNotEmpty()) {
+                selectSettledUploadName(listing.stdout, marker)?.let { name ->
                     return "\$HOME/inbox/pocketshell/$name"
                 }
             }
@@ -1043,6 +1059,15 @@ class ShareTargetE2eTest {
             }
         }
     }
+
+    private fun selectSettledUploadName(listing: String, marker: String): String? =
+        listing.lineSequence()
+            .map(String::trim)
+            .firstOrNull { name ->
+                name.isNotEmpty() &&
+                    marker in name &&
+                    !ATOMIC_UPLOAD_TEMP_SUFFIX.containsMatchIn(name)
+            }
 
     private suspend fun seedHost(context: Context, key: String, marker: String): Long {
         val db = Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_NAME)
@@ -1136,6 +1161,7 @@ class ShareTargetE2eTest {
     }
 
     private companion object {
+        val ATOMIC_UPLOAD_TEMP_SUFFIX: Regex = Regex("\\.part-[0-9a-f]{8}$")
         const val DATABASE_NAME: String = "pocketshell.db"
     }
 }

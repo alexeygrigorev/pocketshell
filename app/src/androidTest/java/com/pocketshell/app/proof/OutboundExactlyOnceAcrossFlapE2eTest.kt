@@ -337,7 +337,17 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertTrue(parked.sendKey.isNotBlank())
         assertTrue(parked.tmuxSessionId != null && parked.tmuxSessionCreated != null)
         assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
-        assertTrue(hasNode(COMPOSER_DRAFT_TAG))
+        // #2048: durable local acceptance owns the prompt immediately. The
+        // composer must close before the delayed authoritative ack arrives;
+        // keeping it open here is the stale pre-#2048 oracle that reddened CI.
+        compose.waitUntil(UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
+        assertFalse("accepted composer must close while the exact row stays parked", hasNode(COMPOSER_DRAFT_TAG))
+
+        // Reopen explicitly to inspect the parked row. This keeps the actual
+        // #1819 subject matter unchanged: close again, recreate the activity,
+        // reconcile the late ack, and prove no duplicate host submission.
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        waitForComposerReady(expectQueue = true)
         val retryTag = composerOutboundQueueRetryTestTag(parked.id)
         compose.waitUntil(UI_TIMEOUT_MS) { hasNode(retryTag) }
         captureViewportArtifacts("issue2037-before-late-authoritative-ack")
@@ -357,10 +367,10 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertTrue(rebuilt.isComposerQueueRetryable())
         assertEquals(parked.attemptCount, rebuilt.attemptCount)
         assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
-        if (!hasNode(COMPOSER_DRAFT_TAG)) {
-            compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
-        }
-        waitForComposerReady(expectQueue = true)
+        // The row was already inspected before close/recreate. Keep the
+        // rebuilt composer closed: a late acknowledgement prunes durable
+        // state but must not spend a second close callback (#2048).
+        compose.waitUntil(UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
         compose.waitUntil(UI_TIMEOUT_MS) {
             !rebuiltComposer.uiState.value.sendInFlight && rebuiltStore.item(parked.id)?.isComposerQueueRetryable() == true
         }

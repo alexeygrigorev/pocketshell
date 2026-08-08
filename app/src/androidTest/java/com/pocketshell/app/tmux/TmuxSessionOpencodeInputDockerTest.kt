@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import android.app.ActivityManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -36,10 +37,14 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.proof.signals.activityWindowFocused
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
+import com.pocketshell.app.proof.signals.dismissFocusedLauncherFrameworkDialog
+import com.pocketshell.app.proof.signals.focusedFrameworkErrorPackage
 import com.pocketshell.app.proof.signals.InheritedJourneyFocus
 import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
 import com.pocketshell.app.proof.signals.requireNoJourneyOwnedFocusRegression
+import com.pocketshell.app.proof.signals.resolveHomePackage
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.proof.waitForSshFixtureReady
@@ -540,7 +545,17 @@ class TmuxSessionOpencodeInputDockerTest {
             val scenario = checkNotNull(launchedActivity) {
                 "#1977: the real OpenCode activity must remain open for the click-effect proof"
             }
-            val focus = awaitActivityWindowFocus(scenario, timeoutMs = 10_000)
+            // #1977 recurrence (run 31229288850): an Android-owned ANR dialog
+            // whose subject was the resolved HOME package survived over both
+            // attempts. Use the already gate-proven #1985 owner boundary at the
+            // load-bearing point: it closes ONLY a framework error whose
+            // dumpsys subject equals HOME, then still hard-fails for a
+            // PocketShell/unknown/app-owned focus thief.
+            val focus = acquireIssue1977KeyboardFocus(
+                scenario = scenario,
+                context = "before #1977 one real keyboard-chip tap",
+                timeoutMs = 10_000,
+            ).also { journeyEntryFocus = it }
             assertTrue(
                 "#1977: the app window must own input focus before the one real keyboard-chip tap; " +
                     focus.diagnosis,
@@ -584,11 +599,26 @@ class TmuxSessionOpencodeInputDockerTest {
             captureFullFrame("issue1977-opencode-toolbar-after-keyboard-tap-full")
             writeTimings()
         } finally {
-            launchedActivity?.close()
-            launchedActivity = null
-            runCatching {
-                withTimeout(20_000) {
-                    killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
+            val scenarioToClose = launchedActivity
+            try {
+                scenarioToClose?.let { scenario ->
+                    requireNoJourneyOwnedFocusRegression(
+                        scenario = scenario,
+                        entry = journeyEntryFocus,
+                        context = "after #1977 OpenCode keyboard-chip journey",
+                    )
+                }
+            } finally {
+                try {
+                    scenarioToClose?.close()
+                } finally {
+                    launchedActivity = null
+                    journeyEntryFocus = null
+                    runCatching {
+                        withTimeout(20_000) {
+                            killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
+                        }
+                    }
                 }
             }
         }
@@ -1455,6 +1485,127 @@ class TmuxSessionOpencodeInputDockerTest {
         writeText(
             "issue1979-opencode-hotkeys-$stage.txt",
             "stage=$stage\nhotkeys_panel_visible=true\nctrl_c_label=^C\nctrl_d_label=^D\n",
+        )
+    }
+
+    /**
+     * Reacquires the exact activity task only when the currently focused
+     * framework Error/ANR is proven to be about the device HOME package.
+     *
+     * `active_window_pkg=android` is deliberately insufficient (#1879): a
+     * PocketShell ANR has the same window owner. The subject parsed from
+     * `dumpsys window` must equal the dynamically resolved HOME package before
+     * either the Android-owned close action or task move is allowed. Every
+     * other focus owner falls through to the existing hard focus assertion.
+     */
+    private fun acquireIssue1977KeyboardFocus(
+        scenario: ActivityScenario<MainActivity>,
+        context: String,
+        timeoutMs: Long,
+    ): InheritedJourneyFocus {
+        val initial = awaitActivityWindowFocus(scenario, timeoutMs = 250)
+        if (!initial.focused) {
+            val focusedFramework = focusedFrameworkErrorPackage()
+            val homePackage = resolveHomePackage()
+            if (focusedFramework == homePackage) {
+                assertTrue(
+                    "#1977 recognized a framework Error/ANR for HOME but could not close it; " +
+                        "home_package=$homePackage",
+                    dismissFocusedLauncherFrameworkDialog(),
+                )
+                // aerr_close completes asynchronously: the launcher process is
+                // restarted and may retake focus after the click. Do not race
+                // that restart with our task restore. Require two full seconds
+                // of settled HOME readings with no framework Error/ANR first;
+                // the short 150ms form still let a later launcher restart steal
+                // focus during the hard teardown oracle on an immediate repeat.
+                val instrumentation = InstrumentationRegistry.getInstrumentation()
+                val settleDeadline = SystemClock.elapsedRealtime() + 10_000
+                var stableHomeReadings = 0
+                var settledPackage = "<unavailable>"
+                do {
+                    val root = instrumentation.uiAutomation.rootInActiveWindow
+                    settledPackage = root?.packageName?.toString().orEmpty()
+                    @Suppress("DEPRECATION")
+                    runCatching { root?.recycle() }
+                    if (
+                        focusedFrameworkErrorPackage() == null &&
+                        settledPackage == homePackage
+                    ) {
+                        stableHomeReadings++
+                    } else {
+                        stableHomeReadings = 0
+                    }
+                    if (stableHomeReadings >= 40) break
+                    SystemClock.sleep(50)
+                } while (SystemClock.elapsedRealtime() < settleDeadline)
+                assertTrue(
+                    "#1977 launcher framework-dialog close did not settle on HOME; " +
+                        "home_package=$homePackage active_window_pkg=$settledPackage " +
+                        "stable_readings=$stableHomeReadings",
+                    stableHomeReadings >= 40,
+                )
+                // Foreground the exact ActivityScenario task. Starting an
+                // activity from the shell can construct a second task, while
+                // lifecycle bookkeeping can report RESUMED even though HOME
+                // still owns the window. AppTask is the platform operation for
+                // bringing this already-existing task to the front.
+                var identityBefore = 0
+                var scenarioTask: ActivityManager.AppTask? = null
+                scenario.onActivity { activity ->
+                    identityBefore = System.identityHashCode(activity)
+                    val taskId = activity.taskId
+                    scenarioTask = activity.getSystemService(ActivityManager::class.java)
+                        .appTasks
+                        .singleOrNull { it.taskInfo.taskId == taskId }
+                        ?: throw AssertionError(
+                            "#1977 could not find the ActivityScenario-owned task_id=$taskId",
+                        )
+                    scenarioTask?.moveToFront()
+                }
+                instrumentation.waitForIdleSync()
+                // Hold the exact task at the front until its window has owned
+                // focus continuously for two seconds. A different package
+                // immediately breaks this narrow recovery and remains a hard
+                // failure below.
+                val appFocusDeadline = SystemClock.elapsedRealtime() + 10_000
+                var stableAppReadings = 0
+                var lateOwner = homePackage
+                do {
+                    if (activityWindowFocused(scenario)) {
+                        stableAppReadings++
+                    } else {
+                        val root = instrumentation.uiAutomation.rootInActiveWindow
+                        lateOwner = root?.packageName?.toString().orEmpty()
+                        @Suppress("DEPRECATION")
+                        runCatching { root?.recycle() }
+                        if (lateOwner != homePackage) break
+                        stableAppReadings = 0
+                        scenarioTask?.moveToFront()
+                        instrumentation.waitForIdleSync()
+                    }
+                    if (stableAppReadings >= 40) break
+                    SystemClock.sleep(50)
+                } while (SystemClock.elapsedRealtime() < appFocusDeadline)
+                assertTrue(
+                    "#1977 could not establish stable focus on the original task after the " +
+                        "proven launcher restart; active_window_pkg=$lateOwner " +
+                        "stable_readings=$stableAppReadings",
+                    stableAppReadings >= 40,
+                )
+                var identityAfter = -1
+                scenario.onActivity { identityAfter = System.identityHashCode(it) }
+                assertEquals(
+                    "#1977 focus restore must reuse the ActivityScenario-owned MainActivity",
+                    identityBefore,
+                    identityAfter,
+                )
+            }
+        }
+        return recordJourneyEntryFocus(
+            scenario = scenario,
+            context = context,
+            timeoutMs = timeoutMs,
         )
     }
 

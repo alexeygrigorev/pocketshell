@@ -45,6 +45,7 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.UUID
 
 /**
  * Issue #1072 (v0.4.19 release blocker, maintainer dogfood): "When I attach
@@ -148,8 +149,7 @@ class AttachmentDropReconnectRecoversE2eTest {
         val key = requireNotNull(seededKey)
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
-        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
-        waitForConnected("initial attach")
+        awaitInitialSessionReady(key)
         emitMarkerIntoPane(key, "LIVE-$MARKER")
         waitForVisibleTerminal("pre-drop-live") { it.contains("LIVE-$MARKER") }
 
@@ -227,8 +227,7 @@ class AttachmentDropReconnectRecoversE2eTest {
         val key = requireNotNull(seededKey)
         val hostRowTag = requireNotNull(seededHostRowTag)
         attachSeededTmuxSession(hostRowTag)
-        waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
-        waitForConnected("initial attach")
+        awaitInitialSessionReady(key)
 
         val vm = currentViewModel()
         emitMarkerIntoPane(key, "LIVE-$MARKER")
@@ -448,6 +447,51 @@ class AttachmentDropReconnectRecoversE2eTest {
         }
     }
 
+    /**
+     * Issue #2049: prove readiness with output produced after this exact target is
+     * attached. The old proof waited 180 seconds for a one-shot READY banner
+     * printed before MainActivity launched. A healthy tmux session can no
+     * longer have that historical row in the client's seeded viewport, making the
+     * attachment subject fail before an upload began. A fresh independent-SSH
+     * marker exercises the selected pane -> `-CC` -> render path and cannot be
+     * satisfied by a stale pre-attach frame.
+     */
+    private suspend fun awaitInitialSessionReady(key: String) {
+        waitForConnected("initial attach")
+        val invocationMarker = "$INITIAL_ROUND_TRIP_MARKER_PREFIX-${UUID.randomUUID()}"
+        emitMarkerIntoPane(key, invocationMarker)
+
+        val deadline = SystemClock.elapsedRealtime() + INITIAL_READY_TIMEOUT_MS
+        var visible = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            visible = visibleTerminalText()
+            if (visible.contains(invocationMarker)) return
+            SystemClock.sleep(100)
+        }
+
+        val vm = currentViewModel()
+        val remoteState = captureRemoteTmuxState(key)
+        val diagnostic = buildString {
+            appendLine(
+                "#2049 initial attach did not render fresh marker " +
+                    "'$invocationMarker' within ${INITIAL_READY_TIMEOUT_MS}ms.",
+            )
+            appendLine("connection=${vm.connectionStatus.value}")
+            appendLine("controller=${vm.connectionControllerStateForTest()}")
+            appendLine("reveal=${vm.revealState.value}")
+            appendLine("targetSessionKey=${vm.currentTargetSessionKeyForTest()}")
+            appendLine("activeSession=${vm.activeSessionNameForTest()}")
+            appendLine("connectingSession=${vm.connectingSessionNameForTest()}")
+            appendLine("clientIdentity=${vm.currentClientIdentityForTest()}")
+            appendLine("renderOwner=${vm.activePaneRenderOwnerSnapshotForTest()}")
+            appendLine("visibleTerminal=<<<${visible.takeLast(8_000)}>>>")
+            appendLine("remoteTmux=<<<$remoteState>>>")
+        }
+        val diagnosticFile = artifactFile("issue2049-initial-readiness-failure.txt")
+        diagnosticFile.writeText(diagnostic)
+        throw AssertionError("$diagnostic\ndiagnosticArtifact=${diagnosticFile.absolutePath}")
+    }
+
     private suspend fun emitMarkerIntoPane(key: String, marker: String) {
         SshConnection.connect(
             host = DEFAULT_HOST,
@@ -465,6 +509,29 @@ class AttachmentDropReconnectRecoversE2eTest {
             }
         }.getOrThrow()
     }
+
+    private suspend fun captureRemoteTmuxState(key: String): String =
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                val result = it.exec(
+                    "tmux list-sessions -F '#{session_name}|#{session_id}|#{session_attached}' 2>&1; " +
+                        "tmux display-message -p -t ${shellQuote(SESSION_NAME)} " +
+                        "'target=#{session_name}|#{session_id}|#{pane_id}|#{pane_current_command}' 2>&1; " +
+                        "tmux capture-pane -p -J -S -100 -t ${shellQuote(SESSION_NAME)} 2>&1",
+                )
+                "exit=${result.exitCode}\nstdout=${result.stdout}\nstderr=${result.stderr}"
+            }
+        }.fold(
+            onSuccess = { it },
+            onFailure = { "capture failed: ${it::class.java.simpleName}: ${it.message}" },
+        )
 
     private fun waitForConnected(label: String) {
         compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
@@ -588,8 +655,7 @@ class AttachmentDropReconnectRecoversE2eTest {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
             appendLine(
-                "tmux new-session -d -s ${shellQuote(SESSION_NAME)} " +
-                    shellQuote("printf '$READY_MARKER\\n'; exec sh -i"),
+                "tmux new-session -d -s ${shellQuote(SESSION_NAME)} " + shellQuote("exec sh -i"),
             )
             appendLine("sleep 1")
             appendLine("tmux list-sessions")
@@ -691,7 +757,7 @@ class AttachmentDropReconnectRecoversE2eTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue1072-attach-drop-reconnect"
         const val SESSION_NAME: String = "issue1072-attach-proof"
-        const val READY_MARKER: String = "ISSUE1072-ATTACH-READY"
+        const val INITIAL_ROUND_TRIP_MARKER_PREFIX: String = "ISSUE2049-INITIAL-ROUND-TRIP"
         const val MARKER: String = "issue1072attach"
 
         // Large enough that the byte stream stays in flight on the warm `-CC`
@@ -708,6 +774,8 @@ class AttachmentDropReconnectRecoversE2eTest {
         val WEDGE_RECOVER_WINDOW_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 45_000L
         val ROUND_TRIP_WINDOW_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 45_000L else 30_000L
+        val INITIAL_READY_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 45_000L else 30_000L
         val HOST_ROW_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L

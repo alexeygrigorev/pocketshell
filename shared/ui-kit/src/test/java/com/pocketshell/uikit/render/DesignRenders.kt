@@ -941,6 +941,19 @@ class DesignRenders {
     fun composerOffline() = render("composer-offline") { ComposerQueueStateRender(offline = true) }
 
     /**
+     * Issue #2057: static mirror of the composer with staged attachment tiles
+     * BELOW the draft field — field, then tiles, then the controls row — which is
+     * the arrangement the maintainer asked to restore after #1619 hoisted the
+     * tiles above the field. The real `PromptComposerSheet` / `AttachmentTileGrid`
+     * are `:app`-module composables the ui-kit render harness cannot import, so
+     * this mirrors the ORDER with the same theme tokens. Fast first design check
+     * only: the production layout is proven by
+     * `Issue2057AttachmentTilesBelowDraftProofTest` and the emulator screenshot.
+     */
+    @Test
+    fun composerAttachmentsBelowField() = render("composer-attachments-below-field") { ComposerAttachmentsBelowFieldRender() }
+
+    /**
      * Issue #1245: static mirror of the VOICE-RECORDING composer bottom area after
      * the hands-free Lock was removed ENTIRELY (the pill, the inline toggle, the
      * swipe-up-to-lock gesture, the "recording locked" indicator, and the hint) and

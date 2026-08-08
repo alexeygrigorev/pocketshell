@@ -337,15 +337,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertTrue(parked.sendKey.isNotBlank())
         assertTrue(parked.tmuxSessionId != null && parked.tmuxSessionCreated != null)
         assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
-        // #2048: durable local acceptance owns the prompt immediately. The
-        // composer must close before the delayed authoritative ack arrives;
-        // keeping it open here is the stale pre-#2048 oracle that reddened CI.
+        // #2048: durable acceptance closes before delayed authority arrives.
         compose.waitUntil(UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
         assertFalse("accepted composer must close while the exact row stays parked", hasNode(COMPOSER_DRAFT_TAG))
 
-        // Reopen explicitly to inspect the parked row. This keeps the actual
-        // #1819 subject matter unchanged: close again, recreate the activity,
-        // reconcile the late ack, and prove no duplicate host submission.
+        // #1819: reopen only to inspect the parked row before close/recreate.
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
         waitForComposerReady(expectQueue = true)
         val retryTag = composerOutboundQueueRetryTestTag(parked.id)
@@ -367,9 +363,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertTrue(rebuilt.isComposerQueueRetryable())
         assertEquals(parked.attemptCount, rebuilt.attemptCount)
         assertEquals(listOf(payload), readFakeAgentSubmitLedger().map { it.second })
-        // The row was already inspected before close/recreate. Keep the
-        // rebuilt composer closed: a late acknowledgement prunes durable
-        // state but must not spend a second close callback (#2048).
+        // #2048: late authority prunes state without a second close callback.
         compose.waitUntil(UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
         compose.waitUntil(UI_TIMEOUT_MS) {
             !rebuiltComposer.uiState.value.sendInFlight && rebuiltStore.item(parked.id)?.isComposerQueueRetryable() == true
@@ -1389,39 +1383,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     // ---------------------------------------------------------------- drive helpers
 
     /**
-     * Wait for REAL live detection to bind (the #975 transcript-evidence path).
-     *
-     * DO NOT convert this [SystemClock.sleep] into [pumpComposeMainFor]. It is a
-     * DELIBERATE exception to the #1739/#1773/#1798/#1819 pump sweep, and the
-     * exception is load-bearing.
-     *
-     * The sweep's rationale is that a bare wall sleep freezes the
-     * [createAndroidComposeRule]-installed Main [kotlinx.coroutines.test.TestDispatcher]
-     * scheduler, so a production continuation the test is waiting FOR — a Main
-     * `delay` retry timer, an ack/cleanup `withTimeoutOrNull` that must EXPIRE —
-     * can never run. That rationale does not apply here, and inverts.
-     *
-     * This wait's subject is not a Main continuation: it is a WALL-CLOCK remote
-     * round trip. `startAgentDetectionForPane` launches on `bridgeScope`
-     * (= `viewModelScope` context, i.e. the virtual-time Main dispatcher) and the
-     * pane/detection chain it depends on is wrapped in Main-scoped
-     * `withTimeoutOrNull` budgets (`awaitPanesReadyForAttach`'s
-     * `attachPanesReadyTimeoutMs`, the conversation load watchdog). Those budgets
-     * are sized for a real device, not for a starved swiftshader AVD whose SSH
-     * `list-panes` / `/proc/<pid>/fd` round trips run far slower in WALL time.
-     * Freezing the virtual clock is exactly what lets those round trips finish:
-     * the budgets simply never expire while the probe is in flight. Advancing the
-     * clock ~1:1 with wall time re-arms them, and the probe gets CANCELLED rather
-     * than completing — leaving `_agentConversations` entirely empty, which is why
-     * the failure signature is `conversations={}` (an empty map, not a map with an
-     * unbound row) rather than a slow bind.
-     *
-     * Measured, paired A/B on one lane, full 5-test class per run: `origin/main`
-     * base 5/5 green; this diff with ONLY this hunk reverted 3/3 green; this diff
-     * with the hunk pumped 4/9 green — every failure this function's own assertion
-     * (Fisher one-tailed p ~ 0.020). [currentViewModel]'s `SystemClock.sleep(100)`
-     * is left alone for the same reason: its subject is also a remote-IO
-     * completion (panes arriving), not a Main continuation.
+     * Wait for real #975 detection. Keep this wall sleep: unlike retry/timeout
+     * waits, its subject is remote I/O. Advancing the virtual Main clock can
+     * expire the detection budgets before a slow AVD's SSH round trip returns.
      */
     private fun waitForDetectionBound(vm: TmuxSessionViewModel) {
         val deadline = SystemClock.elapsedRealtime() + DETECTION_TIMEOUT_MS
@@ -1450,10 +1414,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             ) {
                 return
             }
-            // Prefer the real UI tap on the Conversation segment; ALSO drive
-            // the SAME production entry the tap dispatches (selectSessionTab)
-            // so a momentarily-unhittable pill on a loaded AVD cannot wedge the
-            // precondition (the tab mechanics are not the property under test).
+            // Exercise the tap, then its same production entry point so an
+            // overloaded AVD cannot wedge this unrelated precondition.
             if (hasNode(CONVERSATION_SEGMENT_TAG)) {
                 runCatching {
                     compose.onNodeWithTag(CONVERSATION_SEGMENT_TAG, useUnmergedTree = true)
@@ -1464,15 +1426,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
                 vm.selectSessionTab(paneId, com.pocketshell.app.session.SessionTab.Conversation)
             }
             compose.waitForIdle()
-            // Issue #1819 audit: pumping is safe HERE even though opening the
-            // Conversation does a remote window read, because this loop already
-            // calls `compose.waitForIdle()` on every iteration — which advances
-            // the Compose clock — so base was never clock-frozen across this
-            // wait and the pump introduces no new clock advancement. (Contrast
-            // [waitForDetectionBound], whose base loop was a bare sleep and
-            // therefore genuinely frozen.) The exit condition is also the TAB
-            // being open, not the transcript having loaded, so no one-shot
-            // remote completion is riding on this wait.
+            // Safe to pump: waitForIdle already advances this clock, and the
+            // exit condition is tab selection rather than remote completion.
             pumpComposeMainFor(TAB_POLL_STEP_MS)
         }
         assertTrue(

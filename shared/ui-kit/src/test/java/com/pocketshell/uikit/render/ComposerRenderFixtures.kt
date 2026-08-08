@@ -914,3 +914,195 @@ internal fun ComposerQueueStateRender(failed: Boolean = false, offline: Boolean 
         }
     }
 }
+
+/**
+ * Issue #2057: the composer with staged attachment tiles BELOW the draft field —
+ * between the editor and the bottom controls row (📎 · `{}` · `/` · Send · mic),
+ * which is where the maintainer wants them and where they sat before #1619
+ * hoisted them above the field.
+ *
+ * NOTE (honest limitation): the real `PromptComposerSheet` / `AttachmentTileGrid`
+ * live in the `:app` module, which the ui-kit render harness cannot see, so this
+ * is a hand-written static MIRROR of the arrangement, not the production
+ * composable. It is the fast "does the order read right?" check only. The
+ * acceptance for the layout itself is
+ * `Issue2057AttachmentTilesBelowDraftProofTest` plus the full-device emulator
+ * screenshot; a change to the production layout does NOT change this render.
+ */
+@Composable
+internal fun ComposerAttachmentsBelowFieldRender() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(20.dp))
+            .padding(horizontal = 18.dp, vertical = 14.dp),
+    ) {
+        // Grabber.
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .width(40.dp)
+                .height(4.dp)
+                .background(PocketShellColors.Border, RoundedCornerShape(2.dp)),
+        )
+        Spacer(Modifier.height(14.dp))
+        // Header: title + circular close chip (keyboard-DOWN state — the state
+        // the maintainer reported).
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = "Prompt Composer",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = PocketShellColors.Text,
+            )
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(CircleShape)
+                    .background(PocketShellColors.SurfaceElev, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(text = "×", color = PocketShellColors.TextSecondary, fontSize = 20.sp)
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        // 1) The draft field FIRST.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(96.dp)
+                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                .border(1.dp, PocketShellColors.Border, RoundedCornerShape(12.dp))
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+        ) {
+            Text(
+                text = "Compose prompt…",
+                color = PocketShellColors.TextMuted,
+                fontSize = 14.sp,
+            )
+        }
+        // 2) THEN the staged attachment tiles, directly under the field.
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AttachmentTileMirror(label = "Screenshot_2026…png", type = "PNG")
+            AttachmentTileMirror(label = "deploy-notes.pdf", type = "PDF")
+        }
+        // 3) THEN the controls row.
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(PocketShellColors.SurfaceElev, RoundedCornerShape(22.dp))
+                    .padding(horizontal = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                    Text(text = "📎", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
+                }
+                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "{ }",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+                Box(modifier = Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "/",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Row(
+                modifier = Modifier
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(PocketShellColors.Accent, RoundedCornerShape(22.dp))
+                    .padding(horizontal = 18.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Text(
+                    text = "Send",
+                    color = PocketShellColors.OnAccent,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(text = "➤", color = PocketShellColors.OnAccent, fontSize = 13.sp)
+            }
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(PocketShellColors.Accent, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(text = "●", color = PocketShellColors.OnAccent, fontSize = 18.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AttachmentTileMirror(label: String, type: String) {
+    Box(
+        modifier = Modifier
+            .size(64.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp)),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text(
+                text = type,
+                color = PocketShellColors.Accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(start = 5.dp, end = 5.dp, bottom = 4.dp),
+        ) {
+            Text(
+                text = label,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 9.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .padding(2.dp)
+                .size(22.dp)
+                .background(PocketShellColors.Surface, CircleShape)
+                .border(1.dp, PocketShellColors.BorderSoft, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "×",
+                color = PocketShellColors.Text,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}

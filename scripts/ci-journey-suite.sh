@@ -152,6 +152,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerLongDraftCaretVisibleTest"  # #1619/#765 D33/G10: synthetic + real-IME long-draft caret containment above sticky controls
   "com.pocketshell.app.composer.PromptComposerImeTightScreenSquishProofTest"  # #801 #567 #780 #657 the keyboard-up squish on a REALISTIC TIGHT screen
   "com.pocketshell.app.composer.PromptComposerOfflineComposeUsableProofTest"  # #1613 #801 #780 #657 offline compose: the OFFLINE banner + keyboard up must NOT crush the draft — the user must be able to type + queue while disconnected
+  "com.pocketshell.app.composer.Issue2057AttachmentTilesBelowDraftProofTest"  # #2057 #1619 #780 #657 staged attachment tiles must sit BELOW the draft field (real modal keyboard-down + synthetic-IME empty/long/saturated/many-tile containment)
   "com.pocketshell.app.tmux.Issue887TerminalFixedUnderImeProofTest"  # #887 #457 #780 the terminal must stay FIXED when the soft keyboard
   "com.pocketshell.app.composer.PromptComposerRecordingTimerAndTailTest"  # #870 #880 Issues /: the Android-recognizer recording-surface dogfood p…
   "com.pocketshell.app.composer.PromptComposerLiveTranscriptTwoLineTest"  # #870 the live Android-recognizer transcript was STILL cut on devi…

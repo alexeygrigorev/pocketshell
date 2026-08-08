@@ -1237,18 +1237,6 @@ internal fun SheetContent(
                 onResendAllOutbound = onResendAllOutbound,
             )
 
-            // Issue #566: staged attachments render as compact square tiles at
-            // the bottom of the composer (above the controls row), ChatGPT /
-            // Claude style. The draft text stays clean while composing; remote
-            // paths are folded into the outgoing prompt only at SEND.
-            if (state.attachments.isNotEmpty()) {
-                AttachmentTileGrid(
-                    attachments = state.attachments,
-                    onRemove = onRemoveAttachment,
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-            }
-
             // Issue #745: connection-lost indicator. Surfaced the moment the host
             // reports the SSH/tmux link is degraded/lost, BEFORE the user taps
             // Send, so a send into a dead link is never a silent blind wait.
@@ -1300,46 +1288,115 @@ internal fun SheetContent(
             }
         }
 
-        // Issue #453/#1619: the primary surface is state-driven. Idle makes the
-        // real editor the DIRECT weighted child, so its effective max is the
-        // actual room left between the bounded status region and sticky controls.
-        // That restores BasicTextField's native caret-follow as the only editor
-        // scroll; no outer draft scroll competes with or clips it.
-        when (state.recording) {
-            PromptComposerViewModel.RecordingState.Recording -> {
-                RecordingSurface(
-                    amplitude = state.amplitude,
-                    capturing = state.hasDetectedSpeech,
-                    elapsedLabel = formatElapsed(state.recordingElapsedMs),
-                    liveTranscript = state.liveTranscript,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
+        // Issue #453/#1619/#2057: the FLEXIBLE compose area — the editor plus, when
+        // attachments are staged, the tile strip directly under it. It is the ONLY
+        // weighted child of the sheet body, so it takes exactly the room left after
+        // the bounded status region and the sticky controls row, and it can never
+        // push those controls under the keyboard (a Column measures its non-weighted
+        // children FIRST, so an unweighted tile strip here would claim its 64dp
+        // before the controls row is measured — the #567/#682/#1744 squish).
+        //
+        // `BoxWithConstraints` is what makes the split inside this area principled
+        // instead of a hand-tuned constant: `maxHeight` IS the flexible room, so the
+        // strip can be capped at exactly "whatever is left above the editor's
+        // one-line floor". The editor is then the weighted child INSIDE, so it
+        // absorbs the remainder and keeps BasicTextField's native caret-follow as
+        // the only editor scroll (#1619). Result, on the measured ~175dp keyboard-up
+        // budget: with no banners the strip shows a full tile row and the editor
+        // keeps its line; with the Offline banner also up the strip shrinks to a
+        // scrollable sliver rather than crushing the editor. Neither case can move
+        // the controls row.
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f, fill = false),
+        ) {
+            val flexibleRoom = maxHeight
+            val editorFloor = if (keyboardUp) {
+                PromptComposerDraftImeOneLineFloor
+            } else {
+                PromptComposerDraftOneLineFloor
             }
-
-            PromptComposerViewModel.RecordingState.Transcribing -> {
-                Box(modifier = Modifier.weight(1f, fill = false)) {
-                    TranscribingSurface()
-                }
+            val attachmentStripCap = if (keyboardUp) {
+                PromptComposerAttachmentRegionImeMaxHeight
+            } else {
+                PromptComposerAttachmentRegionMaxHeight
             }
+            val attachmentStripMax =
+                (flexibleRoom - editorFloor - PromptComposerAttachmentStripGap)
+                    .coerceIn(0.dp, attachmentStripCap)
 
-            PromptComposerViewModel.RecordingState.Idle -> {
-                ComposerDraftField(
-                    value = draftFieldValue,
-                    onValueChange = { newValue ->
-                        draftFieldValue = newValue
-                        if (newValue.text != state.draft) {
-                            onDraftChange(newValue.text)
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // The primary surface is state-driven. Idle makes the real editor
+                // the weighted child of this area, so its effective max is the
+                // actual room left beside the tile strip; no outer draft scroll
+                // competes with or clips its caret-follow.
+                when (state.recording) {
+                    PromptComposerViewModel.RecordingState.Recording -> {
+                        RecordingSurface(
+                            amplitude = state.amplitude,
+                            capturing = state.hasDetectedSpeech,
+                            elapsedLabel = formatElapsed(state.recordingElapsedMs),
+                            liveTranscript = state.liveTranscript,
+                            modifier = Modifier.weight(1f, fill = false),
+                        )
+                    }
+
+                    PromptComposerViewModel.RecordingState.Transcribing -> {
+                        Box(modifier = Modifier.weight(1f, fill = false)) {
+                            TranscribingSurface()
                         }
-                    },
-                    placeholder = COMPOSER_PLACEHOLDER,
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .testTag(COMPOSER_DRAFT_VIEWPORT_TAG),
-                    fieldTag = COMPOSER_DRAFT_TAG,
-                    minHeight = if (keyboardUp) 24.dp else 96.dp,
-                    maxHeight = 220.dp,
-                    focusRequester = draftFocusRequester,
-                )
+                    }
+
+                    PromptComposerViewModel.RecordingState.Idle -> {
+                        ComposerDraftField(
+                            value = draftFieldValue,
+                            onValueChange = { newValue ->
+                                draftFieldValue = newValue
+                                if (newValue.text != state.draft) {
+                                    onDraftChange(newValue.text)
+                                }
+                            },
+                            placeholder = COMPOSER_PLACEHOLDER,
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .testTag(COMPOSER_DRAFT_VIEWPORT_TAG),
+                            fieldTag = COMPOSER_DRAFT_TAG,
+                            minHeight = if (keyboardUp) 24.dp else 96.dp,
+                            maxHeight = 220.dp,
+                            focusRequester = draftFocusRequester,
+                        )
+                    }
+                }
+
+                // Issue #566/#2057: staged attachments render as compact square
+                // tiles BELOW the draft field — between the editor and the bottom
+                // controls row (📎 · {} · / · Send · mic), ChatGPT / Claude style.
+                // The draft text stays clean while composing; remote paths are
+                // folded into the outgoing prompt only at SEND.
+                //
+                // #1619 had temporarily hoisted the tiles into the bounded status
+                // scroll region ABOVE the editor, as a side effect of making the
+                // editor the single weighted caret-follow child. The maintainer
+                // reported that placement as a regression, so the strip is back
+                // under the field. Only the tiles moved: the offline /
+                // connection-lost and queue banners stay in the #1613 status
+                // region above the draft.
+                if (state.attachments.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(PromptComposerAttachmentStripGap))
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = attachmentStripMax)
+                            .testTag(COMPOSER_ATTACHMENT_VIEWPORT_TAG)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        AttachmentTileGrid(
+                            attachments = state.attachments,
+                            onRemove = onRemoveAttachment,
+                        )
+                    }
+                }
             }
         }
 
@@ -2172,6 +2229,13 @@ internal const val COMPOSER_DRAFT_VIEWPORT_TAG = "prompt-composer-draft-viewport
 internal const val COMPOSER_STATUS_VIEWPORT_TAG = "prompt-composer-status-viewport"
 
 /**
+ * Issue #2057: the bounded, independently scrollable strip that hosts the staged
+ * attachment tiles BELOW the draft field and above the sticky controls row.
+ * Present only while at least one attachment is staged.
+ */
+internal const val COMPOSER_ATTACHMENT_VIEWPORT_TAG = "prompt-composer-attachment-viewport"
+
+/**
  * Issue #767: test tags for the `/`-autocomplete dropdown. Connected tests
  * assert the dropdown appears when the draft starts with `/`, filters as more
  * characters are typed, and that tapping a row inserts the command into the
@@ -2228,6 +2292,35 @@ internal const val COMPOSER_CANCEL_TRANSCRIPTION_TAG = "prompt-composer-cancel-t
 // before this region scrolls, without changing the editor's 220dp cap.
 private val PromptComposerStatusRegionImeMaxHeight = 48.dp
 private val PromptComposerStatusRegionMaxHeight = 96.dp
+
+// Issue #2057: upper bound on the staged-attachment strip below the editor.
+// Keyboard-DOWN there is room for two full 64dp tile rows plus the 8dp FlowRow
+// gap; keyboard-UP the strip is deliberately smaller than one tile (the tile top
+// with its remove control stays visible and the strip scrolls) because 40dp is
+// the most it can take on the measured ~175dp budget while the editor still
+// keeps the multi-line height the #801 tight-screen squish proof pins. Beyond
+// these bounds the strip scrolls internally instead of growing.
+private val PromptComposerAttachmentRegionImeMaxHeight = 40.dp
+private val PromptComposerAttachmentRegionMaxHeight = 144.dp
+
+// Issue #2057: the gap between the editor and the tile strip below it.
+private val PromptComposerAttachmentStripGap = 8.dp
+
+// Issue #2057: the editor's guaranteed floor inside the flexible compose area —
+// the room the attachment strip may never take. It is the ComposerDraftField box
+// at its `minHeight`: the 24dp keyboard-up / 96dp keyboard-down editor minimum
+// passed below, plus the draft box's 2 x 14dp vertical padding
+// (`DraftFieldBox` in UnifiedComposer.kt). The strip's effective cap is
+// `flexibleRoom - floor - gap` clamped to the bound above, so it yields to the
+// editor rather than the other way round: with the Offline banner also up
+// (the saturated keyboard-up case) the strip shrinks to a scrollable sliver, but
+// it can never crush the editor below one complete caret line (#1619). The
+// sticky controls row is not in the contest at all — the whole editor + strip
+// area is the single weighted child of the sheet body.
+// `Issue2057AttachmentTilesBelowDraftProofTest` fails if either value drifts
+// away from the real draft-box geometry.
+private val PromptComposerDraftImeOneLineFloor = 24.dp + 28.dp
+private val PromptComposerDraftOneLineFloor = 96.dp + 28.dp
 
 // Issue #767: cap the `/`-autocomplete dropdown so a long catalog scrolls
 // internally instead of squeezing the draft field / pushing the controls under

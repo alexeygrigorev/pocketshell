@@ -368,8 +368,16 @@ grep -q 'emulator-journey-verdict-shard-' "$WORKFLOW" \
   || fail "(w7) each shard must upload an emulator-journey-verdict-shard-<N> token artifact"
 grep -q 'pattern: emulator-journey-verdict-shard-\*' "$WORKFLOW" \
   || fail "(w8) aggregation job must download the shard verdict artifacts by pattern"
-grep -q 'EXPECTED_SHARDS: 3' "$WORKFLOW" \
-  || fail "(w9) aggregation job must pass EXPECTED_SHARDS matching the 3-shard matrix"
+# Issue #2060: this used to pin the LITERAL `EXPECTED_SHARDS: 3`, so changing
+# the matrix meant editing the pin to a new literal — which re-arms the same
+# drift every time. Derive the matrix length instead and CROSS-CHECK the
+# aggregation job's expectation against it, so the assertion keeps its force at
+# any shard count. An EXPECTED_SHARDS below the matrix length would let a
+# missing shard's verdict pass unnoticed (the #1458 rollup's whole job).
+workflow_shards="$(bash "$SCRIPT_DIR/ci-journey-shard-count.sh" "$WORKFLOW")" \
+  || fail "(w9) could not derive the emulator-journey shard count from the matrix"
+grep -q "EXPECTED_SHARDS: ${workflow_shards}\$" "$WORKFLOW" \
+  || fail "(w9) aggregation job must pass EXPECTED_SHARDS: ${workflow_shards} to match the ${workflow_shards}-shard matrix (found: $(grep -n 'EXPECTED_SHARDS:' "$WORKFLOW" | tr '\n' ' '))"
 pass "(w) classify continue-on-error + verdict tokens + aggregation job wired in tests.yml"
 
 # The #1458 budget-neutral emulator/Gradle contention cuts. Count only the

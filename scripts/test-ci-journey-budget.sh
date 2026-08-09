@@ -1972,11 +1972,18 @@ pass "(shard-stable-det) the partition is identical under 4 locales and under a 
 #     actually catches a broken/collapsing hash.
 #
 #   `budget` — additionally, an UPPER cap at 125% of the ideal share, applied
-#     only to the total=3 configuration CI really runs. A shard 25% over its
-#     share spends 25% more wall-clock against the #835 suite budget, so it is
-#     worth a human look. Only the upper bound is capped: an UNDER-full shard
-#     costs nothing, and capping it too would double the false-trip surface for
-#     no benefit.
+#     to the configuration CI really runs. A shard 25% over its share spends 25%
+#     more wall-clock against the #835 suite budget, so it is worth a human look.
+#     Only the upper bound is capped: an UNDER-full shard costs nothing, and
+#     capping it too would double the false-trip surface for no benefit.
+#
+#     Issue #2060: that total used to be the literal `3`, so when the matrix went
+#     to 5 the SHIPPED configuration would have been left covered by the loose
+#     3-sigma band and by NO budget cap at all — the guard would have kept
+#     asserting balance for a total CI no longer runs. The shipped total is now
+#     read from the matrix itself via scripts/ci-journey-shard-count.sh, so the
+#     cap follows the workflow and cannot drift off it again. (That helper is
+#     itself self-tested in the same `guards-ci-harness` job.)
 #
 # Characterised over the REAL list at three totals and over synthetic 60/300-class
 # lists, so the property is measured across sizes rather than sampled once.
@@ -2008,8 +2015,14 @@ assert_balanced() {   # $1 = label, $2 = total, $3 = budget|uniform, classes on 
     echo "  ok: balance $label total=$total -> ${counts[*]} (ideal $ideal, uniform band [$low,$high])"
   fi
 }
-assert_balanced "real" 3 budget  < "$SANDBOX/classes-base.txt"
+# Issue #2060: the budget cap applies to whatever the matrix actually ships.
+shipped_shard_total="$("$SCRIPT_DIR/ci-journey-shard-count.sh")" \
+  || fail "(shard-balance) could not read the shipped shard total from the tests.yml matrix"
+[[ "$shipped_shard_total" =~ ^[0-9]+$ && "$shipped_shard_total" -ge 2 ]] \
+  || fail "(shard-balance) implausible shipped shard total '$shipped_shard_total' from the tests.yml matrix"
+assert_balanced "real(shipped)" "$shipped_shard_total" budget < "$SANDBOX/classes-base.txt"
 assert_balanced "real" 2 uniform < "$SANDBOX/classes-base.txt"
+assert_balanced "real" 3 uniform < "$SANDBOX/classes-base.txt"
 assert_balanced "real" 4 uniform < "$SANDBOX/classes-base.txt"
 for synth_n in 60 300; do
   seq 1 "$synth_n" \
@@ -2054,7 +2067,7 @@ tilt_out="$SANDBOX/balance-tilted.log"
   && fail "(shard-balance) red control is not live: a shard one class over the 125% budget cap passed the budget check"
 grep -q 'budget cap' "$tilt_out" \
   || { cat "$tilt_out"; fail "(shard-balance) the tilted control ($tilt_target of $real_class_count on one shard) failed for the wrong reason — it must trip the 125% BUDGET CAP, not the uniform band"; }
-pass "(shard-balance) the partition is uniform to 3 sigma on the real list (totals 2/3/4) and on synthetic 60/300-class lists, and stays under the 125% budget cap at total=3; degenerate and tilted partitions are both rejected"
+pass "(shard-balance) the partition is uniform to 3 sigma on the real list (totals 2/3/4) and on synthetic 60/300-class lists, and stays under the 125% budget cap at the SHIPPED total read from the tests.yml matrix (currently $shipped_shard_total); degenerate and tilted partitions are both rejected"
 
 # ---------------------------------------------------------------------------
 # (shard) ACCEPTANCE — Issue #835 (REOPENED): CI-matrix sharding partitions
@@ -2070,6 +2083,13 @@ pass "(shard-balance) the partition is uniform to 3 sigma on the real list (tota
 # by class-name hash, which is statistically rather than exactly balanced. The
 # tight per-shard spread is pinned separately by (shard-balance) above; what THIS
 # block owns is that the end-to-end suite really runs the partition it computes.
+#
+# Issue #2060: "the partition it computes" means the SHIPPED one. This block used
+# to pin `shard_total=3` / `for shard_idx in 0 1 2` — 70 lines below the balance
+# cap that had the same literal — so after the matrix grew it would have driven
+# the end-to-end suite over a 3-way partition CI no longer runs, leaving the real
+# upper legs never exercised end-to-end. It now reads the shipped total from the
+# matrix like every other shipped-configuration assertion in this file.
 echo "== CI-matrix sharding: hash partition is disjoint + complete =="
 cat > "$SANDBOX/gradlew" <<'STUB'
 #!/usr/bin/env bash
@@ -2077,10 +2097,12 @@ exit 0
 STUB
 chmod +x "$SANDBOX/gradlew"
 
-shard_total=3
+shard_total="$shipped_shard_total"
+[[ "$shard_total" =~ ^[0-9]+$ && "$shard_total" -ge 2 ]] \
+  || fail "(shard) implausible shipped shard total '$shard_total' — refusing to drive the suite over an unknown partition"
 declare -A seen_class_shard=()
 shard_union_count=0
-for shard_idx in 0 1 2; do
+for (( shard_idx = 0; shard_idx < shard_total; shard_idx++ )); do
   shard_log="$SANDBOX/run-shard-$shard_idx.log"
   set +e
   PATH="$STUBBIN:$PATH" \
@@ -2110,7 +2132,7 @@ for shard_idx in 0 1 2; do
 done
 [[ "$shard_union_count" -eq "$class_count" ]] \
   || fail "(shard) union of all shards = $shard_union_count classes, expected the full $class_count (a class ran on no shard or twice)"
-pass "(shard) hash partition: 3 shards each ~1/3, disjoint, union = all $class_count classes; proofs on every shard"
+pass "(shard) hash partition: the SHIPPED $shard_total shards each ~1/$shard_total, disjoint, union = all $class_count classes; proofs on every shard"
 
 # ---------------------------------------------------------------------------
 # (m) ACCEPTANCE — Issue #835 (REOPENED): the six core-terminal proofs are now

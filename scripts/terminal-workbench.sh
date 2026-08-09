@@ -19,6 +19,19 @@ fi
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+
+# Issue #2054: the optional terminal release gate (TERMINAL_RELEASE_GATE=1) runs
+# this workbench inside the release validation, and its `04-build-apks` step is
+# the same unbounded-heap APK build that OOMed elsewhere in the chain. The
+# resource args are the machine-appropriate half (hosted 1536m/8G vs local
+# 3072m/24G), paired with the scope applied at the point of use below.
+pocketshell_assert_gradle_execution_profile \
+  "terminal workbench APK build" \
+  "${POCKETSHELL_GRADLE_RESOURCE_ARGS[*]}"
+# Build-scope ceiling is asserted at the point of use, inside the BUILD_APKS
+# branch below (a BUILD_APKS=0 workbench run needs no build headroom).
+
 pocketshell_acquire_avd_lock "$ROOT_DIR"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -379,9 +392,10 @@ if [[ "$BUILD_APKS" == "1" ]]; then
   if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
     GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$POCKETSHELL_APP_ID_SUFFIX")
   fi
+  pocketshell_apply_release_gate_scope_memory "terminal workbench APK build"
   run_logged "04-build-apks" \
     "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-terminal-workbench-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
-    ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
+    ./gradlew --no-daemon "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
 else
   [[ -f "$APP_APK" ]] || fail "app APK missing at $APP_APK"
   [[ -f "$TEST_APK" ]] || fail "test APK missing at $TEST_APK"

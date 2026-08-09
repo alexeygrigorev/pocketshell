@@ -6,6 +6,28 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+
+# Issue #2054: this script's `08-build-apks` step is where release run
+# 20260809-v0442 died with `OutOfMemoryError: Java heap space` in
+# zipflinger's Compressor.deflate on :app:packageDebug — the Gradle process had
+# only gradle.properties' 2048m and the build scope only 8G. Pin the shared
+# release-chain resource profile before anything heavy starts, and before the
+# shared AVD lock is taken so a bad profile never blocks a sibling lane.
+#
+# POCKETSHELL_GRADLE_RESOURCE_ARGS is the EFFECTIVE half for this machine: the
+# hosted release workflow's own GRADLE_FLAGS (1536m launcher / 8G scope, pinned
+# by scripts/check-release-emulator-memory-budget.sh) wins there, the local
+# 3072m / 24G pair applies here. Heap and scope always move together.
+pocketshell_assert_gradle_execution_profile \
+  "phone walkthrough APK build" \
+  "${POCKETSHELL_GRADLE_RESOURCE_ARGS[*]}"
+# The build-scope ceiling is asserted at the POINT OF USE in
+# build_and_install_apks, not here: `--help` and
+# PHONE_WALKTHROUGH_VERIFY_DISPATCH_ONLY=1 runs build nothing, and the canonical
+# JVM gate drives both of those through tests/scripts harnesses with its own
+# POCKETSHELL_TEST_MEM=8G exported. See scripts/lib/gradle-profile.sh.
+
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -677,9 +699,12 @@ build_and_install_apks() {
     if [[ -n "$POCKETSHELL_APP_ID_SUFFIX" ]]; then
       GRADLE_SUFFIX_ARGS+=("-PpocketshellAppIdSuffix=$POCKETSHELL_APP_ID_SUFFIX")
     fi
+    # Issue #2054: point-of-use build-scope assertion — this is the step that
+    # OOMed in release run 20260809-v0442 (zipflinger, :app:packageDebug).
+    pocketshell_apply_release_gate_scope_memory "phone walkthrough APK build"
     run_logged "08-build-apks" \
       "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-phone-walkthrough-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
-      ./gradlew --no-daemon --no-build-cache --no-parallel :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
+      ./gradlew --no-daemon --no-build-cache "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" :app:assembleDebug :app:assembleDebugAndroidTest "${GRADLE_SUFFIX_ARGS[@]}" --stacktrace
   else
     [[ -f "$APP_APK" ]] || fail "BUILD_APKS=0 but app APK is missing at $APP_APK"
     [[ -f "$TEST_APK" ]] || fail "BUILD_APKS=0 but androidTest APK is missing at $TEST_APK"

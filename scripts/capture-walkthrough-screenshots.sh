@@ -6,6 +6,18 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+
+# Issue #2054: the visual-audit stage of the release gate builds the same APKs
+# that OOMed the terminal-lab walkthrough. Same shared resource profile, same
+# fail-fast assertion, before the shared AVD lock is taken. The profile is
+# machine-appropriate: hosted keeps its pinned 1536m/8G pair, local gets
+# 3072m/24G — never one half of one and one half of the other.
+pocketshell_assert_gradle_execution_profile \
+  "visual-audit APK build" \
+  "${POCKETSHELL_GRADLE_RESOURCE_ARGS[*]}"
+# Build-scope ceiling is asserted at the point of use, before step 10.
+
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -341,9 +353,10 @@ run_logged "08-clear-device-screenshots" "$ADB" shell rm -rf "$DEVICE_OUTPUT_DIR
 run_logged "09-stop-gradle-daemons" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-stop-gradle" -- \
   ./gradlew --stop
+pocketshell_apply_release_gate_scope_memory "visual-audit APK build"
 run_logged "10-build-walkthrough-visual-apks" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
-  ./gradlew --no-daemon --no-build-cache :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
+  ./gradlew --no-daemon --no-build-cache "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 install_apks "11-install-walkthrough-visual-apks"
 run_instrumentation_class "12-run-main-walkthrough-visual-instrumentation" "$MAIN_TEST_CLASS"
 pull_device_screenshots "13-collect-main-device-screenshots"

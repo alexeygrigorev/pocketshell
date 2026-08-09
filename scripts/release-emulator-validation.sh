@@ -5,6 +5,26 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+
+# Issue #2054: apply and assert the release build resource profile ONCE, at the
+# top of the whole validation, before the ~30-60 minute run takes the shared AVD
+# lock. Every stage below inherits POCKETSHELL_TEST_MEM from here (each stage
+# also re-asserts, so running a stage standalone is still protected).
+#
+# NOTE for whoever launches this via `systemd-run --user -p MemoryMax=...`: that
+# OUTER cap is cosmetic for the build. Each heavy stage re-enters
+# scripts/cgroup-run.sh, which creates its own SIBLING scope under robust.slice
+# via scripts/lib/scope-run.sh. Only POCKETSHELL_TEST_MEM binds the compile.
+pocketshell_assert_gradle_execution_profile \
+  "release emulator validation" \
+  "${POCKETSHELL_GRADLE_RESOURCE_ARGS[*]}"
+# The build-scope ceiling is applied+asserted after the --help handler below, so
+# `--help` stays a pure query. This is the release entry point and it always
+# builds, so it keeps the EARLY assertion rather than a point-of-use one — and
+# because it exports POCKETSHELL_TEST_MEM, every child stage inherits 24G and
+# their own point-of-use assertions pass without repeating the export.
+
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/release-emulator-validation}"
@@ -108,6 +128,8 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
+pocketshell_apply_release_gate_scope_memory "release emulator validation"
+
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   printf 'Summary: %s\n' "$SUMMARY_PATH" >&2
@@ -147,6 +169,10 @@ write_summary_header() {
     printf 'Visual audit inspected: no\n'
     printf 'Optional terminal release gate: %s\n' "$([[ "$TERMINAL_RELEASE_GATE" == "1" ]] && printf enabled || printf skipped)"
     printf 'Optional long-running session hold: %s\n' "$([[ "$LONG_RUNNING_TEST" == "1" ]] && printf enabled || printf skipped)"
+    # Issue #2054: record the execution profile the build actually ran with, so a
+    # future "the gate OOMed" triage does not have to guess at heaps and scopes.
+    printf 'Gradle resource profile: %s\n' "${POCKETSHELL_GRADLE_RESOURCE_ARGS[*]}"
+    printf 'Build scope MemoryMax (POCKETSHELL_TEST_MEM): %s\n' "${POCKETSHELL_TEST_MEM:-unset}"
     printf '\n## Required Artifacts\n\n'
   } > "$SUMMARY_PATH"
 }

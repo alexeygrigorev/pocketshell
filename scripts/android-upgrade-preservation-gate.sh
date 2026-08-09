@@ -6,6 +6,30 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+
+# Issue #2054: this gate assembles the APK TWICE (current tree + an old-ref
+# worktree), which is exactly the unbounded-heap build that OOMed the v0.4.42
+# release validation. Assert the execution profile BEFORE taking the shared AVD
+# lock — queuing behind another emulator-touching run can take an hour, and an
+# under-resourced profile should be rejected in the first second, not after that
+# wait. Same ordering as the other six release-chain scripts.
+GRADLE_FLAGS="${GRADLE_FLAGS:-$(pocketshell_release_gate_gradle_flags)}"
+pocketshell_assert_gradle_execution_profile "android upgrade preservation gate" "$GRADLE_FLAGS"
+# The build-scope ceiling is applied at the POINT OF USE, once per assemble, so
+# a BUILD_NEW_APK=0 / BUILD_OLD_APK=0 run needs no build headroom.
+#
+# INVARIANT — this file has TWO assembles in TWO SIBLING branches, and each one
+# carries its OWN apply. They are not redundant: `BUILD_NEW_APK=0` (documented
+# below) skips the first branch entirely, so if the second apply were removed
+# the old-worktree assemble would run at scope-run.sh's 8G default and OOM
+# exactly the way the v0.4.42 release validation did. Deleting either apply is a
+# RED in scripts/check-release-gate-execution-profile.sh (reachability rule);
+# verified at runtime, not only statically — with BUILD_NEW_APK=0 the
+# old-worktree assemble starts with POCKETSHELL_TEST_MEM=24G in force.
+# Do NOT "simplify" the two into one hoisted call above these branches: that is
+# the load-time assertion that broke the no-build harnesses in round 1.
+
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -24,7 +48,6 @@ if [[ "$LOG_ROOT" != /* ]]; then
 fi
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
-GRADLE_FLAGS="${GRADLE_FLAGS:---no-daemon --no-build-cache --no-parallel --max-workers=2}"
 
 usage() {
   cat <<'USAGE'
@@ -65,6 +88,7 @@ install_apk() {
 }
 
 if [[ "$BUILD_NEW_APK" == "1" ]]; then
+  pocketshell_apply_release_gate_scope_memory "android upgrade preservation gate"
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-upgrade-preservation-$(pocketshell_unit_token "$RUN_ID")-new-apk" -- \
     ./gradlew $GRADLE_FLAGS :app:assembleDebug
 fi
@@ -75,6 +99,7 @@ if [[ -z "$OLD_APK_PATH" ]]; then
     exit 1
   fi
   old_worktree="$RUN_DIR/old-$OLD_REF"
+  pocketshell_apply_release_gate_scope_memory "android upgrade preservation gate"
   git worktree add --detach "$old_worktree" "$OLD_REF"
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-upgrade-preservation-$(pocketshell_unit_token "$RUN_ID")-old-apk" -- \
     "$old_worktree/gradlew" $GRADLE_FLAGS -p "$old_worktree" :app:assembleDebug

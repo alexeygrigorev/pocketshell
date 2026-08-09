@@ -475,8 +475,24 @@ are looking at before proposing a fix:
   ```
 
   This is the same class as the FROM-CACHE XML and the killed-run partial
-  counts: the artifact that says "fine" when nothing ran. Treat
-  `LoadState=not-found` as an error, never as a pass.
+  counts: the artifact that says "fine" when nothing ran.
+
+  **And checking `LoadState` after the run is NOT enough either (#2054 round 6,
+  same day).** systemd garbage-collects a *successful* transient unit, so once
+  it finishes `LoadState=not-found` is what you get for **both** a clean success
+  and a unit that never existed — the two are again indistinguishable. The first
+  version of this very note got that wrong. Sound options, in order of
+  preference:
+
+  1. **Have the unit record its own verdict.** Wrap the command so it writes its
+     exit status to a file the harness reads afterwards. The artifact then comes
+     from the run itself and cannot be confused with an absent unit.
+  2. **Sample `systemctl show` while the unit is still alive** (inside the
+     `is-active` wait loop), so you observe `LoadState=loaded` before GC.
+  3. Treat a never-observed-loaded unit as an error.
+
+  Whichever you use, the rule is the same one this catalogue keeps re-learning:
+  **"I could not check" must never read the same as "I checked and it is fine."**
 - **`MemoryMax` below ~20G OOMs the Kotlin daemon, and it does NOT look like an
   OOM.** On 2026-08-06 this cost four separate agents a run each — at 8G, 10G,
   14G and again at 14G. The failure surfaces as:

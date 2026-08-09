@@ -33,6 +33,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.signals.waitForComposeLayoutStable
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -403,10 +404,6 @@ class RootProjectAddSheetKeyboardLayoutTest {
                 WindowInsetsCompat.Type.statusBars(),
                 Insets.of(0, statusBarTopPx, 0, 0),
             )
-            .setInsets(
-                WindowInsetsCompat.Type.systemBars(),
-                Insets.of(0, statusBarTopPx, 0, 0),
-            )
             .build()
         compose.activityRule.scenario.onActivity { activity ->
             val roots = activeAppWindowRoots(activity)
@@ -434,7 +431,7 @@ class RootProjectAddSheetKeyboardLayoutTest {
             // tree keeps observing ime=0 and the exact-inset oracle above goes
             // red before any geometry is judged.
             roots.forEach { root ->
-                ViewCompat.dispatchApplyWindowInsets(root, insets)
+                dispatchSyntheticWindowInsets(root, insets)
             }
             // -----------------------------------------------------------------
         }

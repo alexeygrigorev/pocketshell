@@ -26,6 +26,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
@@ -356,7 +357,7 @@ class Issue796ImeRecompositionProofTest {
             val insets = WindowInsetsCompat.Builder()
                 .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
             observed = ViewCompat.getRootWindowInsets(decor)
                 ?.getInsets(WindowInsetsCompat.Type.ime())
                 ?.bottom

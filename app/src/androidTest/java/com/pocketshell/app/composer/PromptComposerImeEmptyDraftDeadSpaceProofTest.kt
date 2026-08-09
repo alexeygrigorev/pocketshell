@@ -21,11 +21,11 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -116,12 +116,21 @@ class PromptComposerImeEmptyDraftDeadSpaceProofTest {
                         text = "alex@pocketshell:~$ tail -f deploy.log",
                         color = PocketShellColors.Text,
                     )
-                    // Fixed-height host modelling the composer window exactly as
-                    // production sees it (#780 note): the ModalBottomSheet window
-                    // does NOT reposition above the keyboard; its content is
-                    // top-anchored and the body is capped to the room above the
-                    // keyboard. All geometry below is measured RELATIVE to this
-                    // tagged container.
+                    // Fixed-height host that the keyboard OVERLAPS; its content is
+                    // top-anchored.
+                    //
+                    // Issue #1622 correction — the #780-era note here claimed this
+                    // "models the composer window exactly as production sees it"
+                    // because "the ModalBottomSheet window does NOT reposition above
+                    // the keyboard". That is FALSE on material3 1.3.2, which wraps
+                    // the modal's window content in
+                    // `Box(Modifier.fillMaxSize().imePadding())` — the real window IS
+                    // resized. Nor is the body "capped to the room above the
+                    // keyboard": that second subtraction was the #1622 double-count
+                    // and is deleted. This host is the harsher UN-resized shape, kept
+                    // as a containment guard; the real-window measurement lives in
+                    // [Issue1622ComposerSheetGeometryProofTest]. All geometry below is
+                    // measured RELATIVE to this tagged container.
                     Box(
                         modifier = Modifier
                             .width(CONTAINER_WIDTH_DP.dp)
@@ -254,12 +263,8 @@ class PromptComposerImeEmptyDraftDeadSpaceProofTest {
                     WindowInsetsCompat.Type.statusBars(),
                     Insets.of(0, statusBarTopPx, 0, 0),
                 )
-                .setInsets(
-                    WindowInsetsCompat.Type.systemBars(),
-                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-                )
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 

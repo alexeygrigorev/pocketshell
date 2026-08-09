@@ -38,6 +38,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinOwningRoot
@@ -651,12 +652,8 @@ class Issue2057AttachmentTilesBelowDraftProofTest {
                     WindowInsetsCompat.Type.statusBars(),
                     Insets.of(0, statusBarTopPx, 0, 0),
                 )
-                .setInsets(
-                    WindowInsetsCompat.Type.systemBars(),
-                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-                )
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 

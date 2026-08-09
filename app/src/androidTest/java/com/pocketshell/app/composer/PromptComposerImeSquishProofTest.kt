@@ -28,6 +28,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
@@ -43,12 +44,19 @@ import org.junit.runner.RunWith
  *
  * The maintainer's keyboard-up screenshot showed the draft field crushed to a
  * single line and the Send/attach row crammed together (Send half-clipped) while
- * the keyboard was up. The #567 fix is the single-subtract
- * `availableAboveKeyboard = maxHeight - (ime - navBars)` in [SheetContent]'s
- * `BoxWithConstraints` (with NO additional `imePadding()`). This test asserts the
- * composer body is NOT squished when the keyboard is up: the "Prompt Composer"
- * header stays on-screen, the body fits within the room above the keyboard, and
- * Send + attach stay reachable just above the keyboard with only a small gap.
+ * the keyboard was up. This test asserts the composer body is NOT squished when
+ * the keyboard is up: the body fits within the room above the keyboard, and Send +
+ * attach stay reachable just above the keyboard with only a small gap.
+ *
+ * Issue #1622 correction: the #567-era subtraction this comment used to name
+ * (`availableAboveKeyboard = maxHeight - (ime - navBars)`) is GONE from
+ * [SheetContent]. material3 1.3.2's modal container is already IME-padded, so that
+ * subtraction was counting the keyboard twice; the body is now bounded only by the
+ * top safe-area cap. This class keeps its value as an UN-resized-host containment
+ * guard — a 740dp host whose bottom the keyboard overlaps, which is a shape the
+ * production window is not, and never was after material3 started resizing it. The
+ * production-window measurement lives in
+ * [Issue1622ComposerSheetGeometryProofTest].
  *
  * ## Why this is CI-DETERMINISTIC (the #780 fix)
  *
@@ -60,8 +68,8 @@ import org.junit.runner.RunWith
  *
  * Instead we:
  *  - compose the PRODUCTION [SheetContent] (the exact pure-renderer that
- *    [PromptComposerSheet] delegates to — same `availableAboveKeyboard` math,
- *    same pinned-header / sticky-controls layout) directly in the activity
+ *    [PromptComposerSheet] delegates to — same body-bound math, same
+ *    pinned-header / sticky-controls layout) directly in the activity
  *    window (NOT inside a `ModalBottomSheet` dialog window, so its
  *    `WindowInsets.ime` / `.navigationBars` / `.statusBars` consumers read the
  *    activity decor insets we control);
@@ -139,17 +147,26 @@ class PromptComposerImeSquishProofTest {
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     FauxTerminalBackdrop()
-                    // Fixed-height host modelling the composer's WINDOW exactly as
-                    // production sees it: the `ModalBottomSheet` dialog window does
-                    // NOT reposition above the soft keyboard (#567 note) — its
-                    // bottom sits at screen-bottom-minus-navbar, partly BEHIND the
-                    // keyboard, and the content is TOP-anchored within it. So this
-                    // container is the un-resized window area and SheetContent's
-                    // BoxWithConstraints sees `maxHeight = CONTAINER_HEIGHT_DP`,
-                    // then caps its body to `maxHeight - (ime - navBars)` to keep it
-                    // above the keyboard — the exact #567 lever. All geometry below
-                    // is measured RELATIVE to this tagged container, never relative
-                    // to the device decor (which varies per AVD).
+                    // Fixed-height host that the keyboard OVERLAPS: its bottom sits
+                    // at screen-bottom-minus-navbar, partly behind the keyboard, and
+                    // the content is TOP-anchored within it.
+                    //
+                    // Issue #1622 correction — this used to claim the host modelled
+                    // "the composer's WINDOW exactly as production sees it", because
+                    // the #567-era note said the `ModalBottomSheet` dialog window
+                    // does NOT reposition above the soft keyboard. That is FALSE on
+                    // material3 1.3.2: the modal wraps its window content in
+                    // `Box(Modifier.fillMaxSize().imePadding())`, so the real
+                    // production window IS resized to the room above the keyboard.
+                    // This host is therefore the UN-resized shape, which production
+                    // is not — a deliberately harsher containment case, not a model
+                    // of the real window. Nor does `SheetContent` cap its body to
+                    // `maxHeight - (ime - navBars)` any more; that second subtraction
+                    // was the #1622 double-count and is deleted. The real-window
+                    // measurement lives in [Issue1622ComposerSheetGeometryProofTest].
+                    // All geometry below is measured RELATIVE to this tagged
+                    // container, never relative to the device decor (which varies per
+                    // AVD).
                     Box(
                         modifier = Modifier
                             .width(CONTAINER_WIDTH_DP.dp)
@@ -215,11 +232,11 @@ class PromptComposerImeSquishProofTest {
             .fetchSemanticsNode()
             .boundsInRoot
 
-        // The keyboard intrudes into this window by (ime - navBars); the room left
-        // above it is measured from the container bottom up — exactly the lever
-        // SheetContent's `availableAboveKeyboard = maxHeight - (ime - navBars)`
-        // uses. `imeTop` is the top edge of that synthetic keyboard within the
-        // container's coordinate space.
+        // The keyboard intrudes into this un-resized window by (ime - navBars);
+        // `imeTop` is the top edge of that synthetic keyboard within the container's
+        // coordinate space. Since #1622 SheetContent no longer subtracts it — the
+        // production host does — so what this class still proves is that the body
+        // wraps compactly and leaves the controls reachable, not that a cap fires.
         val keyboardIntrusionPx = (imeBottomPx - navBottomPx).coerceAtLeast(0)
         val containerTop = containerBounds.top
         val containerBottom = containerBounds.bottom
@@ -228,9 +245,14 @@ class PromptComposerImeSquishProofTest {
 
         val draftHeightDp = draftBounds.height / density
         // Issue #801: the "Prompt Composer" header (its close × is COMPOSER_CLOSE_TAG)
-        // is HIDDEN when the keyboard is up — on a real Pixel only ~175dp is
-        // available above the keyboard, and the header would steal ~58dp of it. So
-        // keyboard-up the body now starts at the draft, not a header.
+        // is HIDDEN when the keyboard is up, so keyboard-up the body starts at the
+        // draft, not a header.
+        //
+        // Issue #1622 correction: #801's stated reason — "on a real Pixel only
+        // ~175dp is available above the keyboard" — was the double-subtracted
+        // budget, not the device. With the second subtraction gone the real sheet
+        // has ~485dp keyboard-up. Hiding the header keyboard-up is kept because it
+        // is decoration while typing, NOT because room is scarce.
         val bodyTopPx = draftBounds.top
         val bodyBottomPx = maxOf(sendBounds.bottom, attachBounds.bottom)
         val bodyHeightPx = bodyBottomPx - bodyTopPx
@@ -301,12 +323,14 @@ class PromptComposerImeSquishProofTest {
             draftHeightDp >= MIN_DRAFT_HEIGHT_DP,
         )
 
-        // 4) Issue #801: keyboard-UP the header is intentionally HIDDEN to reclaim
-        //    its ~58dp for the draft in the ~175dp above the keyboard. Assert it is
-        //    ABSENT (the close × node does not exist while the keyboard is up) — the
-        //    inverse of the old "header must be on-screen" guard, updated for the
-        //    #801 compact keyboard-up layout. The draft body must still start at or
-        //    below the container top (never clipped above it).
+        // 4) Issue #801: keyboard-UP the header is intentionally HIDDEN. Assert it
+        //    is ABSENT (the close × node does not exist while the keyboard is up) —
+        //    the inverse of the old "header must be on-screen" guard, updated for
+        //    the #801 compact keyboard-up layout. (#1622: the "~175dp above the
+        //    keyboard" this used to cite as the reason was the double-subtracted
+        //    budget; the header stays hidden because it is decoration while typing.)
+        //    The draft body must still start at or below the container top (never
+        //    clipped above it).
         assertTrue(
             "Composer body clipped above the top of the sheet (squish). " +
                 "bodyTop=$bodyTopPx containerTop=$containerTop statusTopPx=$statusTopPx",
@@ -374,12 +398,8 @@ class PromptComposerImeSquishProofTest {
                     WindowInsetsCompat.Type.statusBars(),
                     Insets.of(0, statusBarTopPx, 0, 0),
                 )
-                .setInsets(
-                    WindowInsetsCompat.Type.systemBars(),
-                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-                )
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 

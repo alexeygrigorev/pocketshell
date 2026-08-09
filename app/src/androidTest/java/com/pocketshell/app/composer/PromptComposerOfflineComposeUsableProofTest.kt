@@ -32,11 +32,11 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.core.agents.AgentKind
@@ -61,8 +61,14 @@ import org.junit.runner.RunWith
  * the maintainer actually hit — and `performTextInput` bypasses viewport
  * reachability, so it passes even when the field is invisible on-device.
  *
- * The REAL blocker is a LAYOUT crush. Keyboard-up in the resized `ModalBottomSheet`
- * window there is only ~175dp above the keyboard (measured pixel_7, #801). When the
+ * The REAL blocker is a LAYOUT crush. This proof stages a DELIBERATELY TIGHT host
+ * (see [HOST_HEIGHT_DP]) so the crush is reachable at all. Issue #1622 correction:
+ * the "only ~175dp above the keyboard (measured pixel_7, #801)" this paragraph used
+ * to assert as a property of the device was the DOUBLE-SUBTRACTED budget, not the
+ * room a Pixel has — `SheetContent` subtracted the keyboard a second time from an
+ * already-IME-padded modal container. The real sheet has ~485dp keyboard-up. The
+ * tight host below is therefore a synthetic worst case that keeps this banner
+ * ordering honest, not a model of the maintainer's phone. When the
  * link is down the sticky "Connection lost — Send will retry once reconnected."
  * banner ([PromptComposerSheet.kt] ~:1254) wraps to TWO lines and, together with
  * the sticky control row, consumes almost the whole budget — crushing the
@@ -141,11 +147,18 @@ class PromptComposerOfflineComposeUsableProofTest {
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     FauxTerminalBackdrop()
-                    // RESIZED-sheet host (measured real pixel_7, #801): its height
-                    // IS the room above the keyboard, the keyboard sits at its
-                    // bottom edge. SheetContent's BoxWithConstraints reads
-                    // `maxHeight = HOST_HEIGHT_DP` and subtracts the keyboard
-                    // intrusion to land on the genuine ~175dp above the keyboard.
+                    // RESIZED-sheet host: its height IS the room above the keyboard,
+                    // the keyboard sits at its bottom edge, and SheetContent's
+                    // BoxWithConstraints reads `maxHeight = HOST_HEIGHT_DP`.
+                    //
+                    // Issue #1622 correction: the note here said the body then
+                    // "subtracts the keyboard intrusion to land on the genuine
+                    // ~175dp above the keyboard". Both halves are now wrong —
+                    // `SheetContent` no longer subtracts anything keyboard-derived
+                    // (that was the #1622 double-count), and ~175dp was the product
+                    // of that double-count rather than a real Pixel budget. This
+                    // host stays small ON PURPOSE so the banner-ordering crush is
+                    // reachable at all; see [HOST_HEIGHT_DP].
                     Box(
                         modifier = Modifier
                             .width(HOST_WIDTH_DP.dp)
@@ -330,12 +343,8 @@ class PromptComposerOfflineComposeUsableProofTest {
                     WindowInsetsCompat.Type.statusBars(),
                     Insets.of(0, statusBarTopPx, 0, 0),
                 )
-                .setInsets(
-                    WindowInsetsCompat.Type.systemBars(),
-                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-                )
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 
@@ -386,15 +395,19 @@ class PromptComposerOfflineComposeUsableProofTest {
     private companion object {
         const val HOST_TAG = "issue1613-offline-sheet-host"
 
-        // Model the maintainer's real keyboard-up state faithfully. On a real
-        // pixel_7 the resized sheet leaves ~175dp of room above the keyboard, and
-        // keyboard-up the nav bar is COVERED by the keyboard so `WindowInsets.
-        // navigationBars` reads 0 (the composer's `navigationBarsPadding()`
-        // contributes nothing keyboard-up). We reproduce those EFFECTIVE inputs:
-        // NAV = 0 (no nav padding stealing room), a small IME inset so `keyboardUp`
-        // is true (the field uses its 24dp keyboard-up min) while the intrusion
-        // subtracted from the host is small. `availableAboveKeyboard ≈ HOST - IME`,
-        // which we size into the crush→usable band (see below).
+        // A deliberately TIGHT keyboard-up host. Keyboard-up the nav bar is COVERED
+        // by the keyboard so `WindowInsets.navigationBars` reads 0 (the composer's
+        // `navigationBarsPadding()` contributes nothing keyboard-up), which is why
+        // NAV = 0 here, with a small IME inset so `keyboardUp` is true (the field
+        // uses its 24dp keyboard-up min).
+        //
+        // Issue #1622 correction: this block used to justify the numbers as
+        // "modelling the maintainer's real keyboard-up state faithfully — on a real
+        // pixel_7 the resized sheet leaves ~175dp above the keyboard". That budget
+        // was the double-subtraction inside `SheetContent`, now deleted; the real
+        // sheet has ~485dp keyboard-up, where this banner ordering cannot crush
+        // anything. The host is kept small BECAUSE the crush must stay reachable —
+        // it is an honest worst case, not a claim about the device.
         const val HOST_HEIGHT_DP = 470f
 
         // A narrow content width (the sheet's inner width after its 18dp side
@@ -404,12 +417,17 @@ class PromptComposerOfflineComposeUsableProofTest {
         // base, crushes the weighted draft region below one line.
         const val HOST_WIDTH_DP = 360f
 
-        // Small IME (keyboardUp true) with NAV 0. `availableAboveKeyboard ≈ 188-48 =
-        // 140dp`. On base the sticky two-line offline banner (~56dp) + control row
-        // (~48dp) + bottom padding (~26dp) leave the weighted draft region ~10dp —
-        // a sub-line crush (editor → ~0). The #1613 fix moves the banner into the
-        // scroll region, so the sticky chrome is just the control row (~74dp) and the
-        // draft region is ~66dp — the one-line field is fully visible.
+        // Small IME (keyboardUp true) with NAV 0. On base the sticky two-line
+        // offline banner (~56dp) + control row (~48dp) + bottom padding (~26dp)
+        // leave the weighted draft region a sub-line sliver (editor → ~0). The
+        // #1613 fix moves the banner into the scroll region, so the sticky chrome
+        // is just the control row and the one-line field is fully visible.
+        //
+        // Issue #1622 correction: the arithmetic here was written as
+        // `availableAboveKeyboard ≈ 188-48 = 140dp`, naming a variable that no
+        // longer exists — `SheetContent` does not derive any bound from the ime
+        // inset. The body now sees the host height less only the top safe-area cap,
+        // so the numbers above are the layout's own stack, not a keyboard budget.
         const val IME_HEIGHT_DP = 295f
         const val NAV_BAR_DP = 0f
         const val STATUS_BAR_DP = 52f

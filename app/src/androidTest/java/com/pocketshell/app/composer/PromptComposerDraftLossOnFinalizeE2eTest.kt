@@ -46,6 +46,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.core.voice.WhisperClient
@@ -531,26 +532,49 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
         )
         val keyboardTopPx = modalRoot.boundsInRoot.bottom - syntheticIme.observedImeBottomPx
         val keyboardUpDraftHeight = draftNode.boundsInRoot.height
-        val requiredDraftCompression =
-            syntheticIme.observedImeBottomPx * MINIMUM_DRAFT_COMPRESSION_FRACTION
+        val keyboardUpDraftHeightDp = keyboardUpDraftHeight / displayDensity()
 
         assertNoPhysicalImeWindow(
             "Physical IME appeared before the final #1743 geometry and screenshot proof.",
         )
-        // This cap-specific oracle intentionally precedes the broader keyboard-
-        // boundary checks below. With the cap neutralized, both describe the same
-        // bad geometry, but the overflowing editor's failure must identify the
-        // missing available-above-keyboard cap directly.
+        // Issue #1622 rewrote this oracle, and the rewrite is the point rather
+        // than a constant nudge.
+        //
+        // It used to require the keyboard-up editor to be at least 8% of the ime
+        // inset SHORTER than keyboard-down — "the production
+        // available-above-keyboard cap must bind". That cap was `maxHeight -
+        // (ime - navBars)` in `SheetContent`, and #1622 proved it subtracted a
+        // keyboard material3 1.3.2 had already excluded (the modal's container is
+        // `Box(Modifier.fillMaxSize().imePadding())`). Deleting it is the whole
+        // fix, so this assertion had become a demand that the DEFECT still be
+        // present: measured on emulator API 35 / 1080x2400 / density 2.625, the
+        // editor is 578 px in BOTH states with the fix and this line failed at
+        // `requiredCompression=61.92`, while the pre-#1622 tree passed it.
+        //
+        // What the old wording was actually reaching for — in its own words, "the
+        // overflowing editor must not take room the sticky Send needs" — is
+        // BOUNDEDNESS, not shrinkage. So assert exactly that, in both directions:
+        // this deliberately overflowing real editor must stop at its designed
+        // ceiling (it cannot grow into the room Send and the banners need) and
+        // must not be crushed below a usable multi-line height. The named mutation
+        // that reddens it is deleting `maxHeight = 220.dp` from the production
+        // `ComposerDraftField` call, which lets the overflowing draft consume the
+        // ~485 dp of genuine keyboard-up room.
         assertTrue(
-            "The exact nonzero modal IME inset must make the production " +
-                "available-above-keyboard cap bind: this deliberately overflowing " +
-                "real editor must surrender measurable viewport height while sticky " +
-                "Send remains reachable. keyboardDownDraftHeight=" +
-                "${keyboardDown.draftHeightPx} keyboardUpDraftHeight=$keyboardUpDraftHeight " +
-                "requiredCompression=$requiredDraftCompression observedImeBottomPx=" +
-                "${syntheticIme.observedImeBottomPx} draft=${draftNode.boundsInRoot} " +
-                "send=${sendNode.boundsInRoot}",
-            keyboardDown.draftHeightPx - keyboardUpDraftHeight >= requiredDraftCompression,
+            "The deliberately overflowing real editor must stop at its designed " +
+                "${COMPOSER_EDITOR_CEILING_DP}dp ceiling keyboard-up, so the sticky " +
+                "Send row and the status stack keep their room. " +
+                "keyboardDownDraftHeight=${keyboardDown.draftHeightPx} " +
+                "keyboardUpDraftHeightDp=$keyboardUpDraftHeightDp " +
+                "observedImeBottomPx=${syntheticIme.observedImeBottomPx} " +
+                "draft=${draftNode.boundsInRoot} send=${sendNode.boundsInRoot}",
+            keyboardUpDraftHeightDp <= COMPOSER_EDITOR_CEILING_DP + EDITOR_CEILING_SLOP_DP,
+        )
+        assertTrue(
+            "The keyboard-up editor must stay usable, not crushed to a sliver. " +
+                "keyboardUpDraftHeightDp=$keyboardUpDraftHeightDp " +
+                "minimumDp=$MINIMUM_USABLE_DRAFT_HEIGHT_DP draft=${draftNode.boundsInRoot}",
+            keyboardUpDraftHeightDp >= MINIMUM_USABLE_DRAFT_HEIGHT_DP,
         )
         assertTrue(
             "Queue banner must be contained by the #1619 status viewport in the same " +
@@ -748,7 +772,6 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
             .setVisible(WindowInsetsCompat.Type.ime(), imeBottomPx > 0)
             .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.of(0, 0, 0, 0))
             .setInsets(WindowInsetsCompat.Type.statusBars(), Insets.of(0, 0, 0, 0))
-            .setInsets(WindowInsetsCompat.Type.systemBars(), Insets.of(0, 0, 0, 0))
             .build()
         compose.activityRule.scenario.onActivity { activity ->
             val roots = activeAppWindowRoots(activity)
@@ -765,7 +788,7 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
                     "modalCount=${modalRoots.size} " +
                     "roots=${roots.map { "${it.javaClass.name}:${it.width}x${it.height}" }}",
             )
-            roots.forEach { root -> ViewCompat.dispatchApplyWindowInsets(root, insets) }
+            roots.forEach { root -> dispatchSyntheticWindowInsets(root, insets) }
         }
     }
 
@@ -924,7 +947,37 @@ class PromptComposerDraftLossOnFinalizeE2eTest {
     private companion object {
         const val SYNTHETIC_IME_HEIGHT_DP = 295f
         const val MINIMUM_LIFT_FRACTION = 0.5f
-        const val MINIMUM_DRAFT_COMPRESSION_FRACTION = 0.08f
+
+        /**
+         * `ComposerDraftField(maxHeight = 220.dp)` in `SheetContent`. Kept as a
+         * literal — the same convention (and the same value) as
+         * [Issue1622ComposerSheetGeometryProofTest] — so a silent shrink of the
+         * production ceiling is a red test rather than a moving target.
+         *
+         * Issue #1622 replaced the `MINIMUM_DRAFT_COMPRESSION_FRACTION = 0.08f`
+         * that used to sit here. That constant demanded the keyboard-up editor be
+         * SHORTER than keyboard-down, which only held while `SheetContent`
+         * subtracted the keyboard a second time from an already-IME-padded modal
+         * container. It is deleted rather than retuned: no value of it expresses a
+         * property the fixed layout has.
+         */
+        const val COMPOSER_EDITOR_CEILING_DP = 220f
+
+        /**
+         * Rounding slack only. An overflowing draft makes the editor measure the
+         * `heightIn(max)` bound exactly (220.19 dp observed at density 2.625), so
+         * there is no text-line quantisation to absorb and a wide band would only
+         * blunt the assertion.
+         */
+        const val EDITOR_CEILING_SLOP_DP = 4f
+
+        /**
+         * The editor's keyboard-up floor is a 24 dp `minHeight` plus the field's
+         * own padding; this is comfortably above a one-line sliver and far below
+         * the 220 dp observed, so it catches a crush without pinning the exact
+         * measured value.
+         */
+        const val MINIMUM_USABLE_DRAFT_HEIGHT_DP = 40f
         const val ROOT_SLOP_PX = 2f
         const val REAL_IME_TIMEOUT_MS = 30_000L
         const val PHYSICAL_IME_ABSENCE_STABILITY_MS = 500L

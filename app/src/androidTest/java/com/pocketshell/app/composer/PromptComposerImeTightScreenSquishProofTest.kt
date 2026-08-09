@@ -21,11 +21,11 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.core.agents.AgentKind
@@ -52,8 +52,18 @@ import org.junit.runner.RunWith
  * left no room for a full draft + the sticky control row, so the reserve-and-floor
  * math fired and crushed the field to one line and the controls into a sliver —
  * the #567 double-subtract, re-introduced because the sheet's resize behaviour was
- * mis-modelled. The #801 fix uses `maxHeight` directly (no second subtraction) and
- * weights the scroll region to the genuine room.
+ * mis-modelled.
+ *
+ * Issue #1622 correction: this paragraph described the intended #801 shape, and
+ * the code did NOT match it. `SheetContent` kept `maxHeight - (ime - navBars)`
+ * until #1622 removed it, so "uses `maxHeight` directly (no second subtraction)"
+ * only became true then — and this proof stayed green throughout, because a 470dp
+ * host with a 3-line draft never presses on either budget. The load-bearing
+ * red->green for the double subtraction is
+ * [Issue1622ComposerSheetGeometryProofTest], which measures the REAL
+ * `ModalBottomSheet`; this class remains the tight-host containment guard it is
+ * good at. It now also documents the correct model rather than a claim about code
+ * that had not landed.
  *
  * ## Why a NEW test next to [PromptComposerImeSquishProofTest]
  *
@@ -135,11 +145,10 @@ class PromptComposerImeTightScreenSquishProofTest {
                     // 470dp). The keyboard sits at this host's BOTTOM edge — the
                     // sheet window already resized to it — so the room above the
                     // keyboard is exactly HOST_HEIGHT_DP. SheetContent's
-                    // BoxWithConstraints sees `maxHeight = HOST_HEIGHT_DP` and (post
-                    // #801) uses it DIRECTLY as the room above the keyboard. Pre-#801
-                    // it subtracted `(ime - navBars)` again, collapsing the usable
-                    // room to ~176dp → the squish. All geometry is measured RELATIVE
-                    // to this tagged host.
+                    // BoxWithConstraints sees `maxHeight = HOST_HEIGHT_DP` and (since
+                    // #1622, not #801 — see the class comment) uses it directly, less
+                    // only the top safe-area cap. All geometry is measured RELATIVE to
+                    // this tagged host.
                     Box(
                         modifier = Modifier
                             .width(HOST_WIDTH_DP.dp)
@@ -286,12 +295,8 @@ class PromptComposerImeTightScreenSquishProofTest {
                     WindowInsetsCompat.Type.statusBars(),
                     Insets.of(0, statusBarTopPx, 0, 0),
                 )
-                .setInsets(
-                    WindowInsetsCompat.Type.systemBars(),
-                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-                )
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 
@@ -318,9 +323,10 @@ class PromptComposerImeTightScreenSquishProofTest {
         const val HOST_WIDTH_DP = 392f
 
         // The synthetic IME inset only needs to make WindowInsets.ime report
-        // keyboard-up (the production `keyboardUp` branch). Its magnitude no longer
-        // feeds the room math post #801, but a realistic value keeps the model
-        // honest.
+        // keyboard-up (the production `keyboardUp` branch). Since #1622 its
+        // magnitude genuinely no longer feeds the room math (before #1622 it still
+        // did, contrary to the note that used to sit here), but a realistic value
+        // keeps the model honest.
         const val IME_HEIGHT_DP = 343f
         const val NAV_BAR_DP = 48f
         const val STATUS_BAR_DP = 52f

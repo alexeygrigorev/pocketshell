@@ -217,6 +217,21 @@ internal class SyntheticImeStage(
         // nonzero one can, so the same before/after mutation that classifies
         // `imePadding()` also classifies `navigationBarsPadding()`.
         val navBarBottomPx = this.navBarBottomPx
+        // Issue #1622: there is deliberately NO `setInsets(Type.systemBars(), …)`
+        // call here, and adding one back is a bug. `systemBars()` is a COMPOUND
+        // mask and `Builder.setInsets` copies the value into every constituent
+        // slot, so this builder used to end by overwriting `navigationBars` with
+        // `(0, 52dp, 0, 48dp)` — a navigation bar with a TOP edge, which no device
+        // reports. `SheetContent`'s `navigationBarsPadding()` pads every edge of
+        // that inset, so the phantom became a real 52 dp dead band inside the
+        // composer the moment #1622 stopped an ancestor consuming the top inset:
+        // a fixture defect presenting exactly as a product defect.
+        //
+        // The compound value is not lost by deleting the call —
+        // `getInsets(systemBars())` returns the union of the three constituents
+        // that ARE set below. [dispatchSyntheticWindowInsets] hard-fails if the
+        // call is ever re-added; see its KDoc for the full mechanism and the
+        // measured 136 px blast radius.
         val insets = WindowInsetsCompat.Builder()
             .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
             .setVisible(WindowInsetsCompat.Type.ime(), imeBottomPx > 0)
@@ -226,10 +241,6 @@ internal class SyntheticImeStage(
             )
             .setVisible(WindowInsetsCompat.Type.navigationBars(), true)
             .setInsets(WindowInsetsCompat.Type.statusBars(), Insets.of(0, statusBarTopPx, 0, 0))
-            .setInsets(
-                WindowInsetsCompat.Type.systemBars(),
-                Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-            )
             .build()
         repeat(INSET_DISPATCH_REPEATS) {
             scenario.onActivity { activity ->
@@ -256,7 +267,7 @@ internal class SyntheticImeStage(
                 // `StandaloneContentImePaddingLivenessTest` cases stayed green
                 // (their content lives in the activity's own window). That is
                 // the non-vacuity guarantee for this whole oracle.
-                roots.forEach { root -> ViewCompat.dispatchApplyWindowInsets(root, insets) }
+                roots.forEach { root -> dispatchSyntheticWindowInsets(root, insets) }
                 // ---------------------------------------------------------------
             }
             compose.waitForIdle()

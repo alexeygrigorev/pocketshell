@@ -46,6 +46,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.core.voice.WhisperClient
@@ -1040,7 +1041,6 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             .setVisible(WindowInsetsCompat.Type.ime(), imeBottomPx > 0)
             .setInsets(WindowInsetsCompat.Type.navigationBars(), Insets.of(0, 0, 0, 0))
             .setInsets(WindowInsetsCompat.Type.statusBars(), Insets.of(0, 0, 0, 0))
-            .setInsets(WindowInsetsCompat.Type.systemBars(), Insets.of(0, 0, 0, 0))
             .build()
         compose.activityRule.scenario.onActivity { activity ->
             val roots = activeAppWindowRoots(activity)
@@ -1070,7 +1070,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             // synthetic inset, so the activity remains an independent physical-
             // IME sentinel and screenshots can never silently mix LatinIME with
             // the synthetic boundary.
-            modalRoots.forEach { ViewCompat.dispatchApplyWindowInsets(it, insets) }
+            modalRoots.forEach { dispatchSyntheticWindowInsets(it, insets) }
         }
     }
 

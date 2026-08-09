@@ -23,6 +23,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.termux.view.TerminalView
@@ -362,7 +363,7 @@ class Issue796ComposerOpenDuringCodexBurstProofTest {
             val insets = WindowInsetsCompat.Builder()
                 .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 

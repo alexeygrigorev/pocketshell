@@ -36,13 +36,13 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.insets.SyntheticImeStage
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.core.voice.WhisperClient
@@ -634,10 +634,6 @@ class PromptComposerLongDraftCaretVisibleTest {
                 WindowInsetsCompat.Type.statusBars(),
                 Insets.of(0, statusBarTopPx, 0, 0),
             )
-            .setInsets(
-                WindowInsetsCompat.Type.systemBars(),
-                Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-            )
             .build()
         compose.activityRule.scenario.onActivity { activity ->
             val roots = activeAppWindowRoots(activity)
@@ -655,7 +651,7 @@ class PromptComposerLongDraftCaretVisibleTest {
                     "roots=${roots.map { "${it.javaClass.name}:${it.width}x${it.height}" }}",
             )
             roots.forEach { root ->
-                ViewCompat.dispatchApplyWindowInsets(root, insets)
+                dispatchSyntheticWindowInsets(root, insets)
             }
         }
     }

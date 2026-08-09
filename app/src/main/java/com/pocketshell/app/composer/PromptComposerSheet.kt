@@ -19,12 +19,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
-import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,7 +40,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
@@ -116,7 +112,8 @@ import kotlinx.coroutines.supervisorScope
  *
  * Layout, top to bottom inside the [ModalBottomSheet]:
  *
- *  1. Grabber bar (drawn by Material 3's `ModalBottomSheet` itself).
+ *  1. Grabber bar (issue #1622's compact [ComposerDragHandle], passed to
+ *     Material 3's `ModalBottomSheet` in place of the 48dp-tall default).
  *  2. Header: title `Prompt Composer` + close `×` button.
  *  3. Editable text area (`composer-text`) — `OutlinedTextField` styled to
  *     match the mockup's surface-elev fill.
@@ -411,41 +408,21 @@ public fun PromptComposerSheet(
         onDismiss()
     }
 
-    ModalBottomSheet(
+    // Issue #682: the composer is a CONTENT-HEIGHT (wrap-content) sheet that sits
+    // directly above the soft keyboard, like a normal chat composer. #615
+    // reworked this into a fully-expanded sheet + a host-window IME inset read +
+    // an explicit `padding(bottom = hostImeBottomPx)` on the sheet body; that
+    // over-sized the sheet, pushed the controls to the top of the screen and
+    // opened a keyboard-height void. It stays wrap-content.
+    //
+    // Issue #1622: the Material chrome (content insets, drag handle) now lives in
+    // ONE place — `ComposerModalBottomSheet` — because every geometry proof used
+    // to re-declare it by hand and the copies drifted. That file's block comment
+    // carries the measured dead-band diagnosis.
+    ComposerModalBottomSheet(
         onDismissRequest = dismissComposer,
         sheetState = sheetState,
-        containerColor = PocketShellColors.Surface,
-        contentColor = PocketShellColors.Text,
-        // Issue #1744: measure Material's real Surface and move a settled partial
-        // anchor only when that Surface crosses this modal root's exact IME
-        // boundary. The policy owns only expansions it initiated, so a
-        // user-expanded sheet is never collapsed when the keyboard hides.
-        modifier = modifier.composerImeAnchorPolicy(sheetState),
-        // Issue #682: the composer is a CONTENT-HEIGHT (wrap-content) sheet that
-        // sits directly above the soft keyboard, like a normal chat composer.
-        //
-        // #615 reworked this into a fully-expanded sheet + a host-window IME
-        // inset read + an explicit `padding(bottom = hostImeBottomPx)` on the
-        // sheet body. That over-sized the sheet and grew the content height by the
-        // keyboard height — pushing the controls up to the top of the screen (the
-        // jump-to-top + cut-off) and opening a keyboard-height empty void.
-        //
-        // Reserve only the TOP + horizontal safe area here. That keeps the status
-        // bar / cutout clear at the top while letting the sheet's own dialog
-        // window resize for the soft keyboard: when the IME shows, the window
-        // (and so `BoxWithConstraints.maxHeight` inside `SheetContent`) shrinks by
-        // the keyboard height and the sheet sits directly above the keyboard.
-        //
-        // Issue #567: `SheetContent` therefore caps the body to that ALREADY
-        // IME-resized `maxHeight` and does NOT additionally `imePadding()` or
-        // subtract `WindowInsets.ime` — doing either double-counted the keyboard
-        // height and crushed the composer into a thin strip. See the long note in
-        // `SheetContent`.
-        contentWindowInsets = {
-            WindowInsets.safeDrawing.only(
-                WindowInsetsSides.Top + WindowInsetsSides.Horizontal,
-            )
-        },
+        modifier = modifier,
     ) {
         SheetContent(
             state = state,
@@ -586,7 +563,7 @@ public fun PromptComposerSheet(
  * whenever `currentValue` / `targetValue` changes during an animation.
  */
 @OptIn(ExperimentalMaterial3Api::class)
-private fun Modifier.composerImeAnchorPolicy(
+internal fun Modifier.composerImeAnchorPolicy(
     sheetState: SheetState,
 ): Modifier = composed {
     val density = LocalDensity.current
@@ -934,88 +911,108 @@ internal fun SheetContent(
             commitAndSend()
         }
     }
-    // Issue #682 / #567: bound the composer body to the room ABOVE the keyboard.
+    // Issue #682 / #567 / #1622: bound the composer body to the room this sheet's
+    // host actually gives it.
     //
-    // KEY FACT (measured on-device, issue #567): the `ModalBottomSheet`'s dialog
-    // window does NOT reposition itself above the soft keyboard, and `imePadding()`
-    // does NOT lift content inside this sheet's window. The sheet content stays
-    // top-anchored in a window whose bottom sits at the screen bottom (partly
-    // behind the keyboard). So the only reliable lever is a height CAP that clips
-    // the body to the room left above the keyboard — see the `availableAboveKeyboard`
-    // note below. The scrollable upper region then absorbs a long draft / a stack
-    // of attachment tiles + banners so the sticky Send row always stays on-screen
-    // above the keyboard (the #682 long-content cut-off).
+    // KEY FACT (issue #1622, replacing the #567-era one that stood here for six
+    // rounds): **the host has ALREADY excluded the keyboard.** material3 1.3.2's
+    // `ModalBottomSheet` wraps its whole window content in
+    // `Box(Modifier.fillMaxSize().imePadding())` — verified in the 1.3.2 bytecode,
+    // `ModalBottomSheetKt$ModalBottomSheet$3`, and visible on the maintainer's
+    // device as a sheet whose bottom edge sits exactly on the keyboard top. So the
+    // `maxHeight` this `BoxWithConstraints` receives is the room ABOVE the
+    // keyboard already; there is nothing left to subtract.
     //
-    // History (issue #567 squish): the prior code applied BOTH `heightIn(max =
-    // maxHeight - ime)` AND `imePadding()` on the SAME Column. `.heightIn().
-    // imePadding()` on one element makes the IME padding eat INTO the cap, so the
-    // usable content area collapsed to `maxHeight - 2*ime`, crushing the 96dp
-    // draft to ~36dp, clipping the "Prompt Composer" header, and pushing the
-    // attachment tiles off-screen. Removing `imePadding()` and capping to exactly
-    // the room above the keyboard subtracts the keyboard height once, so the
-    // composer renders full-size above the keyboard.
+    // The comment this replaces asserted the opposite — that the dialog window
+    // "does NOT reposition itself above the soft keyboard" and that a height cap
+    // against `maxHeight - (ime - navBars)` was "the only reliable lever". That was
+    // true of some older material3, but on 1.3.2 it made the code subtract the
+    // keyboard TWICE, which is what held the body to ~173 dp of a genuinely
+    // available ~485 dp. Its own recorded numbers already contained the
+    // contradiction: a `maxHeight` of 470 dp on a 914 dp-tall Pixel 7 only
+    // arithmetics if the container is IME-resized (un-resized it would have been
+    // ~820 dp). Every patch in the chain (#567 -> #615 -> #682 -> #765 -> #790 ->
+    // #801) was a different way of dividing too little room, and **the room was
+    // never that little** — it was self-inflicted. Do not reintroduce an
+    // `ime`-derived subtraction here; if a future material3 stops IME-padding its
+    // container, `Issue1622ComposerSheetGeometryProofTest` goes red on the real
+    // sheet and says so.
+    //
+    // History worth keeping (issue #567 squish): the code before that applied BOTH
+    // `heightIn(max = maxHeight - ime)` AND `imePadding()` on the SAME Column.
+    // `.heightIn().imePadding()` on one element makes the padding eat INTO the cap,
+    // so the usable area collapsed to `maxHeight - 2*ime`. Neither is present now:
+    // the cap below is not keyboard-derived at all, and there is no `imePadding()`
+    // in this subtree (it would be a no-op anyway — the sheet consumed the inset;
+    // issue #1812).
     val density = LocalDensity.current
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        // Room above the keyboard, MEASURED on a real pixel_7 inside this
-        // `ModalBottomSheet` dialog window (issue #801 diagnostic):
-        //
-        //   sheet maxHeight       = 470dp     (the sheet content area, IME up)
-        //   sheet content TOP     = ~1100px   (where the body is anchored)
-        //   keyboard TOP          = 1499px    (decorHeight - ime)
-        //   genuine room above kb = maxHeight - (ime - navBars) ≈ 175dp
-        //
-        // KEY FINDING: the `ModalBottomSheet` content area is only ~470dp tall when
-        // the keyboard is up (the sheet window is IME-resized), and its body is
-        // top-anchored LOW, so the usable room ABOVE the keyboard is only ~175dp —
-        // and the sheet CANNOT be expanded past that (the Expanded anchor is itself
-        // the IME-resized maxHeight; `expand()` is a no-op when the keyboard is up).
-        // So ~175dp is genuinely all the vertical room there is. The earlier code
-        // tried to fit the pinned header + a 96..220dp draft + the control row into
-        // that 175dp and crushed — and every patch (#567 → #615 → #682 → #765 →
-        // #790 → #784) was a different way of dividing too little room.
-        //
-        // The `maxHeight - (ime - navBars)` room formula is CORRECT (it lands on the
-        // genuine ~175dp). What was wrong was trying to keep ALL the keyboard-DOWN
-        // chrome in that tight budget. `WindowInsets.ime` is read here only to find
-        // that room + the keyboard-up flag.
+        // `WindowInsets.ime` is read here for the keyboard-up FLAG only (which
+        // chrome to show, which floor to use) — never to size the body. A raw
+        // inset read is unaffected by the host's consumption, so the flag is
+        // correct inside the IME-padded sheet.
         val imeBottomDp = with(density) { WindowInsets.ime.getBottom(this).toDp() }
-        val navBarsBottomDp = with(density) {
-            WindowInsets.navigationBars.getBottom(this).toDp()
-        }
-        val keyboardIntrusionDp = (imeBottomDp - navBarsBottomDp).coerceAtLeast(0.dp)
         val keyboardUp = imeBottomDp > 0.dp
-        val availableAboveKeyboard = (maxHeight - keyboardIntrusionDp).coerceAtLeast(0.dp)
+        // Issue #1622 (mechanism A's real requirement). Dropping `Top` from the
+        // sheet's `contentWindowInsets` removed 45 dp of dead padding that was
+        // charged in every state; what that padding was incidentally protecting is
+        // a saturated sheet growing up UNDER the status bar / cutout. This cap is
+        // that protection, and only that: it costs nothing until the body would
+        // actually reach the unsafe strip, whereas the padding cost 45 dp always.
+        val safeDrawingTopDp = with(density) {
+            WindowInsets.safeDrawing.getTop(this).toDp()
+        }
+        val bodyMaxHeight = (maxHeight - safeDrawingTopDp).coerceAtLeast(0.dp)
         // Issue #801 (clean rebuild of the keyboard-up sizing; supersedes the
         // #790/#765 reserve-constant approach, D22 hard-cut):
         //
-        // Given that only ~175dp is available above the keyboard, the layout is a
-        // proper chat-composer: a WEIGHTED scrollable draft that takes exactly the
-        // room left after the fixed control row, and — keyboard-up only — the
-        // "Prompt Composer" header is DROPPED (it is not needed while actively
-        // typing; the close affordance is swipe-down / back / scrim, and the header
-        // returns the moment the keyboard hides). Dropping the ~58dp header reclaims
-        // it for the draft, so in ~175dp the draft gets ~3 readable lines and the
-        // full-size control row sits below it, above the keyboard — instead of the
-        // old reserve-and-floor that crushed the field to one line and crammed the
-        // controls into a sliver. The `weight(1f)` region replaces the brittle
-        // hand-estimated `PROMPT_SCROLL_REGION_IME_CHROME_RESERVE`/floor pair (both
-        // deleted): no constant to drift, the control row always lays out, and a
-        // long draft scrolls WITHIN the weighted region (the #682 long-draft
-        // invariant) rather than pushing the controls off-screen.
+        // The layout is a proper chat-composer: a WEIGHTED scrollable draft that
+        // takes exactly the room left after the fixed control row, and — keyboard-up
+        // only — the "Prompt Composer" header is DROPPED (it is not needed while
+        // actively typing; the close affordance is swipe-down / back / scrim, and
+        // the header returns the moment the keyboard hides). The `weight(1f)` region
+        // replaces the brittle hand-estimated
+        // `PROMPT_SCROLL_REGION_IME_CHROME_RESERVE`/floor pair (both deleted): no
+        // constant to drift, the control row always lays out, and a long draft grows
+        // WITHIN the weighted region (the #682 long-content invariant) rather than
+        // pushing the controls off-screen.
+        //
+        // Issue #1622 amends #801's PREMISE, not its shape. #801 reasoned from
+        // "only ~175dp is available above the keyboard"; that budget was the
+        // double-subtraction, not the device. With it gone the same weighted layout
+        // has ~485dp keyboard-up, so the editor's designed 220dp ceiling is
+        // reachable for the first time instead of being clipped at ~119dp. Hiding
+        // the header keyboard-up stays — it is decoration while typing — but it is
+        // no longer load-bearing triage.
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                // The nav-bar clearance only matters when the keyboard is DOWN
-                // (the keyboard covers the nav bar when up); it contributes 0
-                // under the IME.
+                // The nav-bar clearance only matters when the keyboard is DOWN. With
+                // the keyboard up, Material's container `imePadding()` has already
+                // consumed a bottom inset larger than the nav bar, so
+                // `windowInsetsPadding` applies 0 here (issue #1812).
+                //
+                // Issue #1622 considered narrowing this to
+                // `windowInsetsPadding(navigationBars.only(Bottom))` after a TEST
+                // FIXTURE fabricated a nav-bar inset with a top edge and this call —
+                // which pads every edge — turned it into a visible dead band. That
+                // narrowing is deliberately NOT taken. No device reports a nav bar
+                // above the content, and the horizontal edges (a landscape 3-button
+                // bar) are already consumed by the sheet's
+                // `contentWindowInsets = safeDrawing.only(Horizontal)`, so `.only(
+                // Bottom)` is a no-op on every real device — production shaped
+                // around a broken fixture, with no gate able to tell the two forms
+                // apart. The fixture is fixed at the fixture, and
+                // `dispatchSyntheticWindowInsets` now hard-fails any impossible
+                // inset set before it reaches a window.
                 .navigationBarsPadding()
-                // Cap to the room above the keyboard (see note above). The sheet
-                // content is top-anchored within its window and the window extends
-                // behind the keyboard, so clipping the body to this room is what
-                // keeps the sticky Send row above the keyboard. The scrollable
-                // upper region absorbs a long draft / a stack of attachment tiles +
-                // banners (the #682 long-content cut-off).
-                .heightIn(max = availableAboveKeyboard)
+                // Issue #1622: the ONLY height bound on the body, and it is not
+                // keyboard-derived — `maxHeight` already excludes the keyboard (see
+                // the KEY FACT above). This keeps a saturated sheet from growing up
+                // under the status bar / cutout. The weighted region below absorbs a
+                // long draft / a stack of tiles + banners so the sticky Send row is
+                // never pushed off (the #682 long-content cut-off).
+                .heightIn(max = bodyMaxHeight)
                 .background(PocketShellColors.Surface)
                 .padding(horizontal = 18.dp)
                 // Keyboard-down keeps the visual breathing room above the nav
@@ -1044,13 +1041,17 @@ internal fun SheetContent(
             // it is NOT inside the scroll region below — so a focused draft can't
             // auto-scroll it off the top.
             //
-            // Issue #801: keyboard-UP the header is HIDDEN. On a real Pixel only
-            // ~175dp is available above the keyboard, and the header ("Prompt
-            // Composer" title + close ×) costs ~58dp of it — the difference between
-            // a one-line crushed draft and a usable ~3-line one. The header is not
-            // needed while actively typing: the user can dismiss via swipe-down /
-            // system back / scrim tap, and the header returns the instant the
-            // keyboard hides. So it renders only when the keyboard is DOWN.
+            // Issue #801: keyboard-UP the header is HIDDEN. The header ("Prompt
+            // Composer" title + close ×) costs ~58dp, and it is decoration while
+            // actively typing: the user can dismiss via swipe-down / system back /
+            // scrim tap, and the header returns the instant the keyboard hides. So
+            // it renders only when the keyboard is DOWN.
+            //
+            // Issue #1622: #801 justified this by "only ~175dp is available above
+            // the keyboard". That budget was a double-subtraction of the keyboard,
+            // not a device limit, and is gone. The hide stays on the design
+            // argument above — reclaiming ~58dp for the draft is still the right
+            // trade while typing — but it is no longer triage.
             if (!keyboardUp) {
                 Row(
                     modifier = Modifier
@@ -1097,11 +1098,15 @@ internal fun SheetContent(
                     // Issue #1619: status content owns a SEPARATE bounded scroll
                     // ABOVE the editor. It may scroll internally when several
                     // banners/tiles are present, but it can no longer make the
-                    // 220dp editor a child of a smaller clipping viewport. In the
-                    // measured ~175dp keyboard-up budget, 48dp is enough for the
-                    // standalone two-line Offline banner while still reserving a
-                    // complete editable line plus the sticky controls. Keyboard-
-                    // down keeps a roomier 96dp status history.
+                    // 220dp editor a child of a smaller clipping viewport. 48dp
+                    // keyboard-up is the standalone two-line Offline banner, whole.
+                    // Keyboard-down keeps a roomier 96dp status history.
+                    //
+                    // Issue #1622 deliberately did NOT grow these caps with the
+                    // reclaimed room: the whole point of the slice is that the
+                    // reclaimed space goes to the DRAFT. A bounded status region is
+                    // also the #1613 contract — banners stay a bounded strip above
+                    // the field, never a growing stack that pushes it down.
                     .fillMaxWidth()
                     .heightIn(
                         max = if (keyboardUp) {
@@ -1301,11 +1306,15 @@ internal fun SheetContent(
         // strip can be capped at exactly "whatever is left above the editor's
         // one-line floor". The editor is then the weighted child INSIDE, so it
         // absorbs the remainder and keeps BasicTextField's native caret-follow as
-        // the only editor scroll (#1619). Result, on the measured ~175dp keyboard-up
-        // budget: with no banners the strip shows a full tile row and the editor
-        // keeps its line; with the Offline banner also up the strip shrinks to a
-        // scrollable sliver rather than crushing the editor. Neither case can move
-        // the controls row.
+        // the only editor scroll (#1619). With no banners the strip shows a full
+        // tile row and the editor takes the rest; with the Offline banner also up
+        // the strip shrinks to a scrollable sliver rather than crushing the editor.
+        // Neither case can move the controls row.
+        //
+        // Issue #1622: keyboard-up this area went from ~125dp of flexible room to
+        // ~425dp once the double-subtracted keyboard was removed, so the editor's
+        // designed 220dp ceiling is now reachable with the tile strip still at its
+        // cap — the two no longer compete on a real draft.
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2286,20 +2295,28 @@ internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recor
 internal const val COMPOSER_CANCEL_TRANSCRIPTION_TAG = "prompt-composer-cancel-transcription"
 
 // Issue #1619: status banners/tiles scroll independently above the weighted
-// editor. The tight keyboard-up cap was calibrated against the measured 175dp
-// budget: a 48dp two-line Offline banner remains whole while one complete editor
-// line and the sticky controls still fit. Keyboard-down can show two status rows
-// before this region scrolls, without changing the editor's 220dp cap.
+// editor. 48dp keyboard-up is exactly the two-line Offline banner, whole.
+// Keyboard-down can show two status rows before this region scrolls, without
+// changing the editor's 220dp cap.
+//
+// Issue #1622 kept both numbers where they are. They were originally sized
+// against the double-subtracted ~175dp budget, but they are not a share of a
+// budget — they are the deliberate BOUND on how much of the sheet status chrome
+// may ever own (#1613). The room #1622 reclaimed goes to the draft, so growing
+// these would spend the fix on the thing the fix was taking room back from.
 private val PromptComposerStatusRegionImeMaxHeight = 48.dp
 private val PromptComposerStatusRegionMaxHeight = 96.dp
 
 // Issue #2057: upper bound on the staged-attachment strip below the editor.
 // Keyboard-DOWN there is room for two full 64dp tile rows plus the 8dp FlowRow
 // gap; keyboard-UP the strip is deliberately smaller than one tile (the tile top
-// with its remove control stays visible and the strip scrolls) because 40dp is
-// the most it can take on the measured ~175dp budget while the editor still
-// keeps the multi-line height the #801 tight-screen squish proof pins. Beyond
-// these bounds the strip scrolls internally instead of growing.
+// with its remove control stays visible and the strip scrolls). Beyond these
+// bounds the strip scrolls internally instead of growing.
+//
+// Issue #1622 kept the keyboard-up 40dp. It no longer has to contend with the
+// editor at all — the flexible area is ~425dp keyboard-up, so 220dp of editor
+// plus a 40dp strip both fit — but a taller strip would take the reclaimed room
+// straight back off the draft, which is the opposite of this slice.
 private val PromptComposerAttachmentRegionImeMaxHeight = 40.dp
 private val PromptComposerAttachmentRegionMaxHeight = 144.dp
 

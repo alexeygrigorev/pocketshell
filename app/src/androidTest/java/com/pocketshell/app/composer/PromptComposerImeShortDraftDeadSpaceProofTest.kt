@@ -21,11 +21,11 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.core.agents.AgentKind
@@ -276,12 +276,8 @@ class PromptComposerImeShortDraftDeadSpaceProofTest {
                     WindowInsetsCompat.Type.statusBars(),
                     Insets.of(0, statusBarTopPx, 0, 0),
                 )
-                .setInsets(
-                    WindowInsetsCompat.Type.systemBars(),
-                    Insets.of(0, statusBarTopPx, 0, navBarBottomPx),
-                )
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 

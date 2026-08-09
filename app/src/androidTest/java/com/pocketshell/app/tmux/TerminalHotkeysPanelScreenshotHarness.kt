@@ -22,11 +22,11 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -144,7 +144,7 @@ class TerminalHotkeysPanelScreenshotHarness {
             val insets = WindowInsetsCompat.Builder()
                 .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 

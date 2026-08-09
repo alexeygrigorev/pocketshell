@@ -26,10 +26,10 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
@@ -273,7 +273,7 @@ class ReservedTmuxTerminalBottomBandTest {
                     visibleNavBottomPx > 0,
                 )
                 .build()
-            ViewCompat.dispatchApplyWindowInsets(decor, insets)
+            dispatchSyntheticWindowInsets(decor, insets)
         }
     }
 

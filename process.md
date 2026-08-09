@@ -538,6 +538,26 @@ Minimum pre-push gate:
   last round; copy connected/journey artifacts to a preservation path promptly.
   And when artifacts are missing, **re-run** — a plausible explanation for
   missing evidence is not evidence.
+
+  **A SYMLINKED mutation root writes through into the tree under review
+  (#2054 round 7, 2026-08-09).** Building the mutant root out of symlinks back
+  to the real `scripts/` looks like a cheap way to avoid copying — until the
+  guard's own `--self-test` runs `sed -i` on what it believes is a private
+  copy. `sed -i` replaces the symlink's *target*, so the self-test silently
+  edited `scripts/lib/gradle-profile.sh` in the reviewed worktree. The reviewer
+  caught it on its next integrity check and restored the file byte-exactly from
+  a pre-mutation snapshot (md5 + mode verified, `git status` back to the same
+  13 entries) — and disclosed it rather than quietly fixing it, which is the
+  only reason it is in this catalogue.
+
+  Two rules follow. **Build mutant roots with `cp -a`, never symlinks** — the
+  #2054 lane's own earlier harness had it right: copy into a `mktemp -d`,
+  mutate only the copy, clean up via a `RETURN` trap, which makes a
+  killed-loop mutant-left-in-tree structurally unreachable. And **snapshot
+  md5s before the first mutation and re-check them after the last**, so a
+  write-through is detected rather than shipped: a mutation harness that can
+  edit the tree it is measuring produces results about a tree that no longer
+  exists.
 - **A single green run is NOT evidence on a nondeterministic suite. For any
   change that introduces randomness, timing, or jitter, prove determinism with
   N>=20 consecutive `--rerun-tasks` runs of the affected tests, each with its

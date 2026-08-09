@@ -461,6 +461,22 @@ are looking at before proposing a fix:
   the verdict from `systemctl --user show <unit> -p Result -p ExecMainStatus` —
   **not** from the harness's own exit code, which reports 0 for a backgrounded
   wrapper whose Gradle build failed.
+
+  **But that verdict read is itself a vacuous-green shape unless you check
+  `LoadState` first (found on #2054, 2026-08-09).** `systemctl --user show` on a
+  unit that does not exist returns `Result=success` / `ExecMainStatus=0` —
+  byte-identical to a real pass. So a typo'd unit name, a unit systemd already
+  garbage-collected, or a `systemd-run` that never started all read exactly like
+  a green gate. Always assert the unit is real before trusting its result:
+
+  ```bash
+  systemctl --user show <unit> -p LoadState -p Result -p ExecMainStatus
+  # LoadState=not-found  =>  you have NO verdict, not a passing one
+  ```
+
+  This is the same class as the FROM-CACHE XML and the killed-run partial
+  counts: the artifact that says "fine" when nothing ran. Treat
+  `LoadState=not-found` as an error, never as a pass.
 - **`MemoryMax` below ~20G OOMs the Kotlin daemon, and it does NOT look like an
   OOM.** On 2026-08-06 this cost four separate agents a run each — at 8G, 10G,
   14G and again at 14G. The failure surfaces as:

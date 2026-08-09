@@ -48,7 +48,12 @@ SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 COLD_SECS=6
-SHARD_TOTAL=3
+# Issue #2060: mirror the REAL matrix instead of a hardcoded 3. This fixture
+# asserts the #1814 warm-build property once per shard, each with its own first
+# class — so with a hardcoded total it would have stopped covering the shard the
+# 3 -> 4 change added, and a per-shard regression there would be invisible.
+SHARD_TOTAL="$(bash "$SCRIPT_DIR/ci-journey-shard-count.sh" "$WORKFLOW")" \
+  || { echo "TEST FAIL: could not derive the shard count from the matrix" >&2; exit 1; }
 
 # Issue #1862: shard membership is derived from the CLASS NAME, not the array
 # index, so a fixture that needs "the class shard N runs first" must ASK the real
@@ -268,7 +273,12 @@ passed_elapsed() {
 echo "== #1814 AC1/AC4: the first class on a shard is not charged for the cold build =="
 echo "   (gradle stub: the first APK-producing invocation costs ${COLD_SECS}s, later ones are up-to-date)"
 
-for shard in 0 1 2; do
+# Issue #2060: the loop bound is the SHIPPED total, not a literal 0 1 2. Deriving
+# SHARD_TOTAL above while still enumerating three shards here would have made the
+# `(ac4) verified on all $SHARD_TOTAL shards` line below assert something it had
+# not done — it would print "all 6 shards" having exercised 0/1/2 only, and a
+# regression on the upper legs would be invisible behind a truthful-looking pass.
+for (( shard = 0; shard < SHARD_TOTAL; shard++ )); do
   fixed_log="$SANDBOX/fixed-shard-$shard.log"
   mutant_log="$SANDBOX/mutant-shard-$shard.log"
   run_suite "$FIXED_REPO" "$shard" "$fixed_log" "$SANDBOX/state-fixed-$shard" \

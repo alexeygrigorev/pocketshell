@@ -15,19 +15,36 @@ pass() { echo "PASS: $*"; }
 
 [[ -f "$WORKFLOW" ]] || fail "workflow not found: $WORKFLOW"
 
-# The readiness step must remain inside the three-shard emulator job and before
-# the action that launches ci-journey-suite.sh. One shared matrix job definition
-# means this ordering is exercised independently by shards 0, 1, and 2.
-python3 - "$WORKFLOW" <<'PY' || fail "mobile-RTT readiness is not on the exact three-shard journey path"
+# The readiness step must remain inside the SHARDED emulator job and before the
+# action that launches ci-journey-suite.sh. One shared matrix job definition
+# means this ordering is exercised independently by every shard.
+#
+# Issue #2060: this used to assert the literal `shard: [0, 1, 2]`, which the
+# 3 -> 4 shard change would simply have re-pinned to a new literal. It now takes
+# the matrix length from scripts/ci-journey-shard-count.sh (which itself rejects
+# a gapped / non-zero-based / duplicated matrix) and CROSS-CHECKS the job's
+# POCKETSHELL_JOURNEY_CI_SHARD_TOTAL against it. That pairing is the property
+# that actually matters and nothing checked before: the suite selects classes
+# with `hash % TOTAL == INDEX`, so a _TOTAL LARGER than the matrix leaves whole
+# hash buckets SELECTED BY NO SHARD — every class in them silently stops running
+# while the gate still reports green.
+shard_total="$(bash "$SCRIPT_DIR/ci-journey-shard-count.sh" "$WORKFLOW")" \
+  || fail "could not derive the emulator-journey shard count from the matrix"
+python3 - "$WORKFLOW" "$shard_total" <<'PY' || fail "mobile-RTT readiness is not on the exact sharded journey path"
 import sys
 from pathlib import Path
 
 text = Path(sys.argv[1]).read_text()
+shard_total = int(sys.argv[2])
 job_start = text.index("\n  emulator-journey:\n")
 job_end = text.index("\n  emulator-journey-verdict:\n", job_start)
 job = text[job_start:job_end]
 
-assert "shard: [0, 1, 2]" in job
+assert shard_total >= 3, f"emulator-journey must stay sharded, got {shard_total}"
+assert f"POCKETSHELL_JOURNEY_CI_SHARD_TOTAL: {shard_total}" in job, (
+    "POCKETSHELL_JOURNEY_CI_SHARD_TOTAL must equal the matrix length "
+    f"({shard_total}); a mismatch silently drops or duplicates journey classes"
+)
 readiness = job.index(
     "- name: Start Docker fixture (mobile RTT packet-loss proxy, issue #1876)"
 )

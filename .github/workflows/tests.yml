@@ -27,8 +27,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Issue #2060 (CI Phase A): the ~25 SERIAL guard steps this job used to carry in
+  # front of the Gradle run (~20 min unrelated to the tests) now run CONCURRENTLY
+  # in `guards-static`, `guards-ci-harness` and `dex`, all still blocking through
+  # `unit-gate` below.
   unit:
-    name: Unit tests
+    name: JVM unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -55,6 +59,139 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      # Issue #1897: the #1646 result guard correctly rejects FROM-CACHE test
+      # tasks, but it cannot force the preceding Gradle invocation to execute.
+      # Keep the required Unit command aligned with the canonical forced local
+      # gate: rerun every task and disable cache restoration. The cheap
+      # self-test proves this wiring guard fails closed when either flag is
+      # removed, duplicated, contradicted, or moved off the complete test graph.
+      - name: CI Unit forced-execution wiring guard (issue #1897)
+        run: |
+          chmod +x scripts/check-ci-unit-forced-execution.sh
+          scripts/check-ci-unit-forced-execution.sh --self-test
+          scripts/check-ci-unit-forced-execution.sh
+
+      # Issue #1646: the executed-test-count guard's OWN red->green self-test.
+      # Proves — with synthetic result XML + synthetic Gradle console output, no
+      # Gradle, no Android SDK, no emulator — that the guard FAILS a vacuous run
+      # (missing task / UP-TO-DATE / FROM-CACHE / all-skipped / below-floor) and
+      # PASSES a genuine one, and that NO-SOURCE on a genuinely test-free module
+      # does not trip it. Runs BEFORE the Gradle step so a broken guard is caught
+      # in seconds, not 20 minutes in. The self-test asserts its own check count,
+      # so the anti-vacuous-test guard cannot itself pass vacuously.
+      - name: Executed-test-count guard self-test (issue #1646)
+        run: |
+          chmod +x scripts/check-executed-test-counts.sh
+          scripts/check-executed-test-counts.sh --self-test
+
+      # Issue #1646: mark the start of the test run. Any TEST-*.xml older than
+      # this marker is a leftover from an earlier run whose task was skipped as
+      # UP-TO-DATE, not evidence from THIS run.
+      - name: Mark test-run start (issue #1646)
+        run: |
+          touch "${RUNNER_TEMP}/unit-test-run-start"
+
+      # Issue #760: the unit job occasionally failed with ALL visible tests
+      # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
+      # Unbounded gradle worker fan-out plus an oversized test JVM heap can push
+      # the runner into the OOM-killer, which kills the gradle process mid-run
+      # AFTER the tests reported green. Bound BOTH the gradle worker count and
+      # the JVM heaps so the job stays inside the runner's memory budget: the
+      # explicit -Dorg.gradle.jvmargs caps the gradle daemon/launcher heap while
+      # -Pkotlin/test forks inherit the project's modest -Xmx. This is infra
+      # robustness only — no test is removed, skipped, or weakened.
+      #
+      # Issue #2060 (CI Phase A): the #760 note above sized --max-workers=2 for
+      # "7 GB RAM and 2 cores". That box is gone (public-repo runners have been
+      # 4 vCPU / 16 GB since Jan 2024), so the job ran at half of it. This raises
+      # CONCURRENCY, not memory: `org.gradle.parallel` stays false, so at most ONE
+      # Test task (one 1536m fork) is alive at a time and only intra-task Worker
+      # API actions (AGP dexing/resources) widen. `--parallel`/`maxParallelForks`
+      # WOULD multiply live forks and feed the #708/#882 virtual-clock flake
+      # class, so they are deliberately NOT bundled here. One variable at a time —
+      # the AGENTS.md memory trap surfaces as a fake "Backend Internal error:
+      # Exception during IR lowering", not as an OOM.
+      #
+      # Issue #1646: tee the console to a log (--console=plain) so the count
+      # guard below can see which test tasks actually EXECUTED vs came back
+      # UP-TO-DATE / FROM-CACHE / NO-SOURCE. pipefail keeps Gradle's exit code
+      # authoritative through the tee.
+      - name: Run JVM unit tests
+        id: unit_tests
+        timeout-minutes: 35
+        run: |
+          set -o pipefail
+          ./gradlew test --rerun-tasks --no-build-cache \
+            --no-daemon --stacktrace --console=plain \
+            --max-workers=4 \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            2>&1 | tee "${RUNNER_TEMP}/unit-test-gradle.log"
+
+      # Issue #1646: a green Gradle run that executed ZERO tests is not evidence.
+      # Gradle prints test counts ONLY on failure, so before this step a green
+      # run had no log line and no artifact proving any test ran. Parse the
+      # result XML, hard-fail any expected test task that executed 0 tests (or
+      # fell below its floor), and ECHO the per-task counts into the job log and
+      # the job summary so a human/agent certifying a PR can read them without
+      # downloading an artifact.
+      #
+      # Runs whenever the test step itself ran — on GREEN (the point of the
+      # issue) and on RED alike, since "killed mid-run but reported exit 0"
+      # (incident 3) is a case where the count is the only thing that exposes the
+      # truth. Scoped to the test step's own conclusion rather than a bare
+      # always() so an earlier guard failing (Gradle never ran, no log written)
+      # does not add a confusing second red about a missing log file.
+      - name: Assert tests actually executed (issue #1646)
+        if: always() && steps.unit_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/check-executed-test-counts.sh
+          scripts/check-executed-test-counts.sh \
+            --newer-than "${RUNNER_TEMP}/unit-test-run-start" \
+            --gradle-log "${RUNNER_TEMP}/unit-test-gradle.log"
+
+      # Issue #1646: upload ALWAYS, not just on failure. A green run's result XML
+      # IS the evidence that the run was real; throwing it away and keeping only
+      # failures is precisely why CI could not prove a green run executed
+      # anything.
+      - name: Upload unit test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-test-reports
+          path: |
+            **/build/reports/tests/
+            **/build/test-results/
+          # Issue #1809: a re-run of this job replaces its OWN attempt's upload
+          # instead of hitting a duplicate-name failure; the previous attempt's
+          # artifact is in a different scope and is left intact.
+          overwrite: true
+          if-no-files-found: ignore
+
+
+  # ---------------------------------------------------------------------------
+  # Issue #2060 (CI Phase A): static source-tree guards, split out of the `unit`
+  # job so they run in PARALLEL with the Gradle test graph instead of in front of
+  # it. Every guard is byte-identical to the step it replaced — same script, same
+  # self-test, same failure semantics — and still blocking, since `unit-gate`
+  # (named `Unit tests`) fails if this job fails. No Gradle, so no Gradle cache.
+  guards-static:
+    name: Static guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
       # Issue #1766: render PNGs are direct test side effects, so Gradle can
       # otherwise return FROM-CACHE/UP-TO-DATE for a second, differently
       # filtered DesignRenders method without creating its PNG. This fake-Gradle
@@ -75,7 +212,8 @@ jobs:
       # (a small baseline allowlists the catalogued-but-not-yet-rewritten cases,
       # and an inline `// JUSTIFIED:` comment opts a legitimate non-IME guard
       # out), so it adds protection without reddening CI for tests it is not its
-      # job to fix. Runs BEFORE the Gradle test step. This is the machine backstop
+      # job to fix. Runs in `guards-static`, alongside rather than in front of the
+      # Gradle test step (#2060). This is the machine backstop
       # for the process.md "Regression-proof validity rules" (F2/F3) so the rule
       # does not rely solely on reviewer memory. Additive — it does not touch the
       # existing Unit/Python/Integration/emulator jobs. The guard now also carries
@@ -87,6 +225,12 @@ jobs:
       # assumeTrue("x", false) mutant plus legal block/newline-comment callee
       # trivia, so literal-boolean self-skips cannot hide behind the older
       # IME/keyboard vocabulary filter or raw-source call formatting.
+      #
+      # Issue #2060 — COST NOTE. ~281 s on CI, and "it grew a full-tree scan,
+      # scope it" is the WRONG diagnosis: one real-tree pass is ~30 s; the bulk is
+      # the SELF-TEST re-running the guard once per planted fixture state (#1430
+      # already memoized ~30 runs to ~1 per state), so cutting it deletes detector
+      # coverage. The cost stays and moves off the critical path instead.
       - name: Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1857)
         run: |
           chmod +x scripts/check-test-validity.sh scripts/check-test-validity-selftest.sh
@@ -141,9 +285,10 @@ jobs:
       # per-file baseline of the raw `AlertDialog(` / `CircularProgressIndicator(`
       # / `TextButton(` call-sites that remain and FAILS only when a file gains a
       # NEW one (or a new file ships with any). Stops the migrated backlog from
-      # silently re-growing. Cheap (< 1 s grep), no emulator — belongs in the Unit
-      # job. Re-baseline with `scripts/check-component-drift.sh --update` after a
-      # screen migrates (lowering a count is encouraged).
+      # silently re-growing. Cheap (< 1 s grep), no emulator — runs in the
+      # parallel `guards-static` job (#2060). Re-baseline with
+      # `scripts/check-component-drift.sh --update` after a screen migrates
+      # (lowering a count is encouraged).
       - name: Raw-component drift guard (issue #865)
         run: |
           chmod +x scripts/check-component-drift.sh
@@ -157,7 +302,7 @@ jobs:
       # literal (or a new file ships with any). The script existed but was never
       # wired in, so the Conversation view silently drifted to hardcoded 4/6.dp
       # radii and 10/12.sp text undetected. Cheap (< 1 s grep), no emulator —
-      # belongs in the Unit job. Re-baseline with
+      # runs in the parallel `guards-static` job (#2060). Re-baseline with
       # `scripts/check-design-tokens.sh --update` after a screen migrates.
       - name: Design-token ladder guard (issue #901)
         run: |
@@ -187,36 +332,62 @@ jobs:
       #   with `scripts/check-connection-vm-ratchet.sh --update` only after an
       #   extraction slice LOWERS a count (S4-S8 of the consolidation roadmap).
       #   --self-test first proves the guard's own red->green logic, then the
-      #   bare run checks the real VM. Cheap (< 1 s grep), no emulator — belongs
-      #   in the Unit job.
+      #   bare run checks the real VM. Cheap (< 1 s grep), no emulator — runs in
+      #   the parallel `guards-static` job (#2060).
       - name: Connection-VM ratchet guard (issue #1047)
         run: |
           chmod +x scripts/check-connection-vm-ratchet.sh
           scripts/check-connection-vm-ratchet.sh --self-test
           scripts/check-connection-vm-ratchet.sh
 
-      # Issue #1685: dex register-pressure ratchet for the TmuxSessionScreen
-      # composable family. TmuxSessionScreen is the app's MAIN screen and a single
-      # enormous composable; when its compiled dex method frame crosses ART's
-      # 256-register WIDE-REGISTER cliff the class fails on-device verification
-      # (java.lang.VerifyError) and the screen crashes at load — invisible to the
-      # JVM unit tests. This has recurred THREE times (#1158/#1362/#1685). The
-      # existing on-device proof (TmuxSessionScreenArtVerifyE2eTest) only runs in
-      # the batched post-merge emulator lane, which is exactly why recurrence #3
-      # shipped. This guard runs PER-PR in the cheap Unit lane: it dexes the debug
-      # APK and asserts every TmuxSessionScreen* method stays under a budget (200)
-      # that keeps a hard margin below the 256 cliff, so a creep back toward the
-      # cliff is a per-PR RED here instead of a phone crash later. --self-test
-      # proves the parser/budget red->green logic (no APK) first; then a debug
-      # build + the real check. dexdump comes from the runner's Android build-tools.
-      - name: Dex register-pressure ratchet (issue #1685)
+      # Issue #1724: the hosted release-confidence gate reproducibly exhausted
+      # the Kotlin compiler heap before any journey ran because debug + release
+      # compilation shared a 2 GiB daemon concurrently. Pin the hosted-only
+      # single-worker / split-heap budget, and prove the guard rejects renewed
+      # parallelism or either missing heap bound.
+      - name: Release-emulator compiler-memory guard (issue #1724)
         run: |
-          chmod +x scripts/check-dex-register-pressure.sh
-          scripts/check-dex-register-pressure.sh --self-test
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
-            --max-workers=2 \
-            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
-          scripts/check-dex-register-pressure.sh
+          chmod +x scripts/check-release-emulator-memory-budget.sh
+          scripts/check-release-emulator-memory-budget.sh --self-test
+          scripts/check-release-emulator-memory-budget.sh
+
+      # Issue #1761: the local forced full-JVM gate hit Kotlin compiler OOM when
+      # Worker API sessions overlapped inside the 8 GiB scope. Keep its complete
+      # `test --rerun-tasks` graph on the proven single-worker / split-heap
+      # profile, and reject missing, duplicated, or conflicting resource flags.
+      # The 119-check direct / 118-check authenticated nested fake matrix also
+      # proves local/GitHub Android SDK discovery, fail-closed invalid roots,
+      # and stripping of hosted toolchain/profile variables before the guard.
+      - name: Forced full-JVM resource-profile guard (issue #1761)
+        run: |
+          scripts/full-jvm-gate.sh --profile-guard-self-test
+          scripts/full-jvm-gate.sh --profile-guard-check
+
+  # ---------------------------------------------------------------------------
+  # Issue #2060 (CI Phase A): CI/harness fixture guards, split out of the `unit`
+  # job. They drive the real emulator-journey / nightly / release harness scripts
+  # against stubbed gradle/adb/docker. Several are intentionally WALL-CLOCK bound
+  # (`test-ci-journey-budget.sh` ~5 min models timeouts/wedges/stalls with real
+  # `sleep`s — a kernel timer is the only host-throughput-independent way to
+  # prove a timeout fires), so stop paying that on the critical path rather than
+  # shortening the sleeps. Same contract as `guards-static`.
+  guards-ci-harness:
+    name: CI harness guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
 
       # Issue #835: gate the emulator-journey suite's OWN budget/labelling logic
       # so the #470-stall hardening cannot silently regress. This is a fast
@@ -226,7 +397,14 @@ jobs:
       # REOPENED, the DURABLE GUARD) that the workflow classifier now routes that
       # summary to a HARD-RED timeout verdict — NOT advisory-green and NOT the
       # #771 EMULATOR INFRA UNAVAILABLE branch — so a cut-short load-bearing class
-      # can never again be masked. Cheap (< 15 s), no emulator.
+      # can never again be masked. No emulator, no JVM, no Gradle.
+      #
+      # Issue #2060 — COST CORRECTION. "Cheap (< 15 s)" had long been untrue: it
+      # is ~286 s on CI, the priciest step in the old serial Unit job after the
+      # dex assemble. NOT scan bloat to optimise away — it proves TIMEOUT
+      # behaviour, and the only host-throughput-independent way to fire a timeout
+      # is a kernel timer, so its ~20 `sleep`s ARE the proof. Structural fix: it
+      # now overlaps the Gradle graph in parallel.
       - name: CI journey-suite budget guard (issue #835)
         run: |
           chmod +x scripts/test-ci-journey-budget.sh
@@ -311,6 +489,19 @@ jobs:
           chmod +x scripts/test-shared-tmux-wrapper-fixtures.sh \
             scripts/test-shared-tmux-wrapper-fixtures-selftest.sh
           scripts/test-shared-tmux-wrapper-fixtures-selftest.sh
+
+      # Issue #2060: the #1876/#1458 guards and the #835 balance cap derive the
+      # shard count from the matrix via this helper instead of pinning a literal,
+      # so 3 -> 6 cannot silently orphan a hash bucket no shard selects. They are
+      # only as good as the helper, so prove it fails closed. The second is the
+      # downward-only ratchet: it reddens when a journey-CI guard grows a
+      # hardcoded shard total in one of three known shapes. (< 2 s)
+      - name: "Journey shard-count helper + hardcoded-total ratchet (issue #2060)"
+        run: |
+          chmod +x scripts/ci-journey-shard-count.sh scripts/check-journey-shard-literals.sh
+          scripts/ci-journey-shard-count.sh --self-test
+          scripts/check-journey-shard-literals.sh --self-test
+          scripts/check-journey-shard-literals.sh
 
       # Issue #1458: fast, JVM-free fixture test for the emulator-journey
       # aggregate verdict (scripts/ci-journey-aggregate-verdict.sh) + the
@@ -481,126 +672,108 @@ jobs:
           chmod +x scripts/ci-assemble-with-ndk-retry.sh scripts/test-ci-ndk-retry.sh
           scripts/test-ci-ndk-retry.sh
 
-      # Issue #1724: the hosted release-confidence gate reproducibly exhausted
-      # the Kotlin compiler heap before any journey ran because debug + release
-      # compilation shared a 2 GiB daemon concurrently. Pin the hosted-only
-      # single-worker / split-heap budget, and prove the guard rejects renewed
-      # parallelism or either missing heap bound.
-      - name: Release-emulator compiler-memory guard (issue #1724)
-        run: |
-          chmod +x scripts/check-release-emulator-memory-budget.sh
-          scripts/check-release-emulator-memory-budget.sh --self-test
-          scripts/check-release-emulator-memory-budget.sh
+  # ---------------------------------------------------------------------------
+  # Issue #2060 (CI Phase A): the dex ratchet needs a real `:app:assembleDebug` —
+  # ~5 min of the old `unit` job's serial prefix and the ONLY guard step that
+  # compiles anything. Splitting it out takes it off the Unit critical path AND
+  # gives the workflow a cheap "the tree compiles and packages" signal ~6 min in,
+  # which is what `emulator-journey` gates on (see its `needs:` note).
+  dex:
+    name: Dex register-pressure ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
 
-      # Issue #1761: the local forced full-JVM gate hit Kotlin compiler OOM when
-      # Worker API sessions overlapped inside the 8 GiB scope. Keep its complete
-      # `test --rerun-tasks` graph on the proven single-worker / split-heap
-      # profile, and reject missing, duplicated, or conflicting resource flags.
-      # The 119-check direct / 118-check authenticated nested fake matrix also
-      # proves local/GitHub Android SDK discovery, fail-closed invalid roots,
-      # and stripping of hosted toolchain/profile variables before the guard.
-      - name: Forced full-JVM resource-profile guard (issue #1761)
-        run: |
-          scripts/full-jvm-gate.sh --profile-guard-self-test
-          scripts/full-jvm-gate.sh --profile-guard-check
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      # Issue #1897: the #1646 result guard correctly rejects FROM-CACHE test
-      # tasks, but it cannot force the preceding Gradle invocation to execute.
-      # Keep the required Unit command aligned with the canonical forced local
-      # gate: rerun every task and disable cache restoration. The cheap
-      # self-test proves this wiring guard fails closed when either flag is
-      # removed, duplicated, contradicted, or moved off the complete test graph.
-      - name: CI Unit forced-execution wiring guard (issue #1897)
-        run: |
-          chmod +x scripts/check-ci-unit-forced-execution.sh
-          scripts/check-ci-unit-forced-execution.sh --self-test
-          scripts/check-ci-unit-forced-execution.sh
-
-      # Issue #1646: the executed-test-count guard's OWN red->green self-test.
-      # Proves — with synthetic result XML + synthetic Gradle console output, no
-      # Gradle, no Android SDK, no emulator — that the guard FAILS a vacuous run
-      # (missing task / UP-TO-DATE / FROM-CACHE / all-skipped / below-floor) and
-      # PASSES a genuine one, and that NO-SOURCE on a genuinely test-free module
-      # does not trip it. Runs BEFORE the Gradle step so a broken guard is caught
-      # in seconds rather than 20 minutes in. The self-test asserts its own check
-      # count, so the anti-vacuous-test guard cannot itself pass vacuously.
-      - name: Executed-test-count guard self-test (issue #1646)
-        run: |
-          chmod +x scripts/check-executed-test-counts.sh
-          scripts/check-executed-test-counts.sh --self-test
-
-      # Issue #1646: mark the start of the test run. Any TEST-*.xml older than
-      # this marker is a leftover from an earlier run whose task was skipped as
-      # UP-TO-DATE, not evidence from THIS run.
-      - name: Mark test-run start (issue #1646)
-        run: |
-          touch "${RUNNER_TEMP}/unit-test-run-start"
-
-      # Issue #760: the unit job occasionally failed with ALL visible tests
-      # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
-      # ubuntu-latest gives 7 GB RAM and 2 cores; unbounded gradle worker fan-out
-      # plus an oversized test JVM heap can push the runner into the OOM-killer,
-      # which kills the gradle process mid-run AFTER the tests reported green.
-      # Bound BOTH the gradle worker count and the JVM heaps so the job stays
-      # inside the runner's memory budget: --max-workers=2 matches the 2 vCPUs,
-      # and the explicit -Dorg.gradle.jvmargs caps the gradle daemon/launcher
-      # heap while -Pkotlin/test forks inherit the project's modest -Xmx. This is
-      # infra robustness only — no test is removed, skipped, or weakened.
-      #
-      # Issue #1646: tee the console to a log (--console=plain) so the count
-      # guard below can see which test tasks actually EXECUTED vs came back
-      # UP-TO-DATE / FROM-CACHE / NO-SOURCE. pipefail keeps Gradle's exit code
-      # authoritative through the tee.
-      - name: Run JVM unit tests
-        id: unit_tests
-        timeout-minutes: 35
-        run: |
-          set -o pipefail
-          ./gradlew test --rerun-tasks --no-build-cache \
-            --no-daemon --stacktrace --console=plain \
-            --max-workers=2 \
-            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
-            2>&1 | tee "${RUNNER_TEMP}/unit-test-gradle.log"
-
-      # Issue #1646: a green Gradle run that executed ZERO tests is not evidence.
-      # Gradle prints test counts ONLY on failure, so before this step a green
-      # run had no log line and no artifact proving any test ran. Parse the
-      # result XML, hard-fail any expected test task that executed 0 tests (or
-      # fell below its floor), and ECHO the per-task counts into the job log and
-      # the job summary so a human/agent certifying a PR can read them without
-      # downloading an artifact.
-      #
-      # Runs whenever the test step itself ran — on GREEN (the point of the
-      # issue) and on RED alike, since "killed mid-run but reported exit 0"
-      # (incident 3) is a case where the count is the only thing that exposes the
-      # truth. Scoped to the test step's own conclusion rather than a bare
-      # always() so an earlier guard failing (Gradle never ran, no log written)
-      # does not add a confusing second red about a missing log file.
-      - name: Assert tests actually executed (issue #1646)
-        if: always() && steps.unit_tests.conclusion != 'skipped'
-        run: |
-          chmod +x scripts/check-executed-test-counts.sh
-          scripts/check-executed-test-counts.sh \
-            --newer-than "${RUNNER_TEMP}/unit-test-run-start" \
-            --gradle-log "${RUNNER_TEMP}/unit-test-gradle.log"
-
-      # Issue #1646: upload ALWAYS, not just on failure. A green run's result XML
-      # IS the evidence that the run was real; throwing it away and keeping only
-      # failures is precisely why CI could not prove a green run executed
-      # anything.
-      - name: Upload unit test reports
-        if: always()
-        uses: actions/upload-artifact@v7
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
         with:
-          name: unit-test-reports
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
           path: |
-            **/build/reports/tests/
-            **/build/test-results/
-          # Issue #1809: a re-run of this job replaces its OWN attempt's upload
-          # instead of hitting a duplicate-name failure; the previous attempt's
-          # artifact is in a different scope and is left intact.
-          overwrite: true
-          if-no-files-found: ignore
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # Issue #1685: dex register-pressure ratchet for the TmuxSessionScreen
+      # composable family. TmuxSessionScreen is the app's MAIN screen and a single
+      # enormous composable; when its compiled dex method frame crosses ART's
+      # 256-register WIDE-REGISTER cliff the class fails on-device verification
+      # (java.lang.VerifyError) and the screen crashes at load — invisible to the
+      # JVM unit tests. This has recurred THREE times (#1158/#1362/#1685). The
+      # existing on-device proof (TmuxSessionScreenArtVerifyE2eTest) only runs in
+      # the batched post-merge emulator lane, which is exactly why recurrence #3
+      # shipped. This guard runs PER-PR in the cheap Unit lane: it dexes the debug
+      # APK and asserts every TmuxSessionScreen* method stays under a budget (200)
+      # that keeps a hard margin below the 256 cliff, so a creep back toward the
+      # cliff is a per-PR RED here instead of a phone crash later. --self-test
+      # proves the parser/budget red->green logic (no APK) first; then a debug
+      # build + the real check. dexdump comes from the runner's Android build-tools.
+      - name: Dex register-pressure ratchet (issue #1685)
+        run: |
+          chmod +x scripts/check-dex-register-pressure.sh
+          scripts/check-dex-register-pressure.sh --self-test
+          # Issue #2060: --max-workers matches the real 4-vCPU runner (was 2,
+          # sized for the pre-2024 box). AGP dexing/resources are Worker API tasks
+          # that genuinely fan out; peak memory is unchanged (parallel=false).
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace \
+            --max-workers=4 \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
+          scripts/check-dex-register-pressure.sh
+
+  # ---------------------------------------------------------------------------
+  # Issue #2060 (CI Phase A): the protected-branch required check. `main`'s
+  # ruleset requires a check literally named `Unit tests`; splitting the old
+  # monolithic job into four would have silently DEMOTED every guard to
+  # non-blocking until someone edited the ruleset by hand — a real loss of
+  # enforcement dressed up as a speed-up. This ~10-second aggregator keeps the
+  # name and fails unless all four jobs succeeded, so the blocking contract is
+  # bit-for-bit the same with zero admin action. `if: always()` so it still
+  # reports (as a failure) when a dependency fails, is cancelled or is skipped —
+  # a `needs:` job that never reports would leave it pending forever.
+  unit-gate:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    needs: [unit, guards-static, guards-ci-harness, dex]
+    if: always()
+    timeout-minutes: 5
+    steps:
+      - name: Require every unit-lane job to have succeeded
+        env:
+          UNIT: ${{ needs.unit.result }}
+          GUARDS_STATIC: ${{ needs.guards-static.result }}
+          GUARDS_CI_HARNESS: ${{ needs.guards-ci-harness.result }}
+          DEX: ${{ needs.dex.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for pair in "JVM unit tests:$UNIT" \
+                      "Static guards:$GUARDS_STATIC" \
+                      "CI harness guards:$GUARDS_CI_HARNESS" \
+                      "Dex register-pressure ratchet:$DEX"; do
+            job="${pair%%:*}"
+            result="${pair##*:}"
+            printf '%-32s %s\n' "$job" "$result"
+            if [[ "$result" != "success" ]]; then
+              failed=1
+            fi
+          done
+          if (( failed )); then
+            echo "::error title=Unit lane failed::A unit-lane job did not succeed (#2060). The required \`Unit tests\` check covers all four; open the failing job above for the diagnosis."
+            exit 1
+          fi
+          echo "All four unit-lane jobs succeeded."
 
   python:
     name: Python utility tests (pocketshell)
@@ -784,35 +957,75 @@ jobs:
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
     if: github.event_name != 'pull_request'
-    needs: [unit, python, integration]
+    # Issue #2060 (CI Phase A) — THE ACTIONS-BUDGET DECISION, recorded here
+    # because this one line owned ~37 of `main`'s ~99-minute wall clock. It was
+    # `needs: [unit, python, integration]`, so the shards could not start until
+    # the ~39-min Unit job finished though they share nothing with it but the
+    # checkout. That gate was NOT pointless: it stopped a red commit burning one
+    # emulator runner per shard for ~40 min each against a 20-concurrent-job
+    # ceiling (process.md). Peak `main`-push concurrency goes ~3 -> ~10 (unit +
+    # both guard jobs + integration overlapping the 6 shards); a PR runs no
+    # shards, so its peak is the 6-job unit lane.
+    #
+    # Option (a) was to drop `needs:` and accept the emulator spend on red runs.
+    # We took option (b): a CHEAP fast-fail dependency recovering almost all of
+    # the 37 min while keeping the cost protection. `dex` is it — the ~6-min
+    # `:app:assembleDebug`, proof the tree COMPILES AND PACKAGES, the failure
+    # class that would otherwise waste every runner (each ~8 min into the suite's
+    # warm build before hitting the same break). `python` is ~1 min and fully
+    # overlapped by `dex`, so it is free and keeps fail-fast on version coupling.
+    # Given up deliberately: a commit whose TESTS are red but which compiles still
+    # spends the runners. Bounded — `main` pushes already passed the required
+    # `Unit tests` check on their PR head (G7), and the main-push concurrency
+    # group cancels superseded runs.
+    needs: [dex, python]
     runs-on: ubuntu-latest
     # Issue #835 (REOPENED, SHARD): the right-size-only fix (#1055, 45->95 cap +
     # 4200s budget + Gradle daemon reuse) STILL could not finish the full
     # selection serially on ONE swiftshader AVD — its own validation run
-    # (98384e91, run 28307686762) ran the full 95 min and was CANCELLED. ~83
-    # journey classes + 6 proofs run serially is ~69+ min of wall-clock AND
-    # degrades the single emulator (the #470 enumeration stall worsens the more
-    # the one AVD is churned). Fix: SHARD the journey class list across a matrix
-    # of runners — each leg is its OWN runner + cold-booted emulator + Docker
-    # `agents` fixtures and runs only its 1/N round-robin slice (the suite reads
-    # POCKETSHELL_JOURNEY_CI_SHARD_INDEX/_TOTAL; see scripts/ci-journey-suite.sh).
-    # That cuts each leg's wall-clock to ~1/N (comfortably inside the budget) and
-    # keeps each emulator far healthier (~1/N install/teardown cycles), attacking
-    # the #470 root. `fail-fast: false` so one shard's failure does not cancel the
-    # others (we want every shard's verdict). The 6 core-terminal proofs are NOT
-    # sharded — they run on every leg (cheap in-process Compose UI tests).
+    # (98384e91, run 28307686762) ran the full 95 min and was CANCELLED, and the
+    # churn on that one AVD worsens the #470 enumeration stall. Fix: SHARD the
+    # class list across a matrix of runners — each leg its OWN runner +
+    # cold-booted emulator + Docker `agents` fixtures, running only its slice
+    # (the suite reads POCKETSHELL_JOURNEY_CI_SHARD_INDEX/_TOTAL; see
+    # scripts/ci-journey-suite.sh), so each leg's wall clock drops and each
+    # emulator stays healthier (~1/N install/teardown cycles). `fail-fast: false`
+    # so one shard's failure does not cancel the others. The 6 core-terminal
+    # proofs run on every leg (cheap Compose UI tests), not sharded.
+    #
+    # Issue #2060 (CI Phase A): 3 -> 6 shards, as much a RELIABILITY fix as a
+    # speed one. The registry has grown to 173 entries and on BOTH recent green
+    # `main` runs all three shards reported `retry_affordable=false /
+    # insufficient_remaining_budget` — the #1850 hole is live: at that per-shard
+    # load the cold-boot retry that IS this gate's flake resilience is
+    # unaffordable, so one swiftshader flake reddens `main` instead of recovering.
+    # Sharding changes only WHICH runner a class lands on: membership is by
+    # class-name hash (#1862), every class still runs on every push.
+    #
+    # SIX is chosen on #1850's OWN bar — every leg's drift headroom must exceed
+    # one twice-failing class (~420s) — not on "affordable on a clean run". Five
+    # leaves three legs under that bar and its tightest hosts the 330s
+    # ReconnectStormLivelockE2eTest; six gives every leg >= 488s. Six is the
+    # FIRST total clearing it, NOT the fastest — 8/9 beat it by ~1.4 min for +2/3
+    # runners. Tables/headroom/flakes: scripts/ci-journey-shard-count.sh, which
+    # owns this number. The three places that must agree on it — matrix.shard,
+    # POCKETSHELL_JOURNEY_CI_SHARD_TOTAL and the aggregation job's
+    # EXPECTED_SHARDS — were "keep in sync" comments; they are now cross-checked
+    # from the matrix by that helper, and check-journey-shard-literals.sh is a
+    # downward-only ratchet over three shapes a new hardcoded total takes.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: [0, 1, 2, 3, 4, 5]
     env:
-      # Set by the matrix; the suite partitions JOURNEY_CLASSES round-robin by
-      # (index % total). Keep _TOTAL in sync with the length of matrix.shard.
+      # Set by the matrix; the suite partitions JOURNEY_CLASSES by class-name
+      # hash into (index % total). _TOTAL must equal len(matrix.shard).
       POCKETSHELL_JOURNEY_CI_SHARD_INDEX: ${{ matrix.shard }}
-      POCKETSHELL_JOURNEY_CI_SHARD_TOTAL: 3
+      POCKETSHELL_JOURNEY_CI_SHARD_TOTAL: 6
     # Issue #835 (REOPENED, RIGHT-SIZE): raised 45 -> 95 originally so the FULL
-    # serial selection could finish; with sharding each leg runs ~1/3 the classes
-    # and finishes well under this cap. `timeout-minutes` is a CAP, not a fixed
+    # serial selection could finish; with sharding each leg runs ~1/N the classes
+    # (#2060: ~38 min modelled worst leg at 6) and finishes well under this cap.
+    # `timeout-minutes` is a CAP, not a fixed
     # duration: the job ENDS when the suite ends (early on a healthy run), so this
     # only bounds the absolute worst case. The suite owns its OWN 4200s budget and
     # bails cleanly before this cap; the arithmetic is
@@ -1865,8 +2078,11 @@ jobs:
 
       - name: Aggregate the per-shard verdicts into ONE verdict
         env:
-          # Keep in sync with the length of the emulator-journey matrix.shard.
-          EXPECTED_SHARDS: 3
+          # Must equal the length of the emulator-journey matrix.shard. Issue
+          # #2060 replaced the "keep in sync" honour system with a machine
+          # cross-check: test-ci-journey-aggregate-verdict.sh (w9) derives the
+          # matrix length via ci-journey-shard-count.sh and fails on disagreement.
+          EXPECTED_SHARDS: 6
           # Issue #1913: a failed matrix with no RED token means the classifier
           # lost a commit-bound failure. Genuine typed INFRA shards finish green,
           # so their matrix result is success and remains neutral RE-RUN.

@@ -20,8 +20,12 @@ import com.pocketshell.app.composer.InMemoryOutboundQueueStore
 import com.pocketshell.app.composer.OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE
 import com.pocketshell.app.composer.OUTBOUND_MAX_AUTO_ATTEMPTS
 import com.pocketshell.app.composer.OutboundQueueStore
+import com.pocketshell.app.composer.OutboundRoute
 import com.pocketshell.app.composer.OutboundState
+import com.pocketshell.app.composer.acknowledgeLateOutboundDeliveries
+import com.pocketshell.app.composer.collectPromptComposerSendRequests
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
@@ -30,6 +34,8 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.session.SessionTab
+import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -125,6 +131,11 @@ class Issue1686QueueDrainWireOracleDockerTest {
     @After
     fun tearDown() {
         harnessScope.cancel()
+        runCatching {
+            SharedPrefsOutboundQueueStore(
+                InstrumentationRegistry.getInstrumentation().targetContext,
+            ).clearSession(ISSUE_2056_TARGET)
+        }
         compose.runOnUiThread {
             createdComposerVms.forEach { runCatching { it.clearForTest() } }
         }
@@ -399,6 +410,213 @@ class Issue1686QueueDrainWireOracleDockerTest {
         }
     }
 
+    /**
+     * Issue #2056 (D33/G4 connected acceptance) — "the payload was delivered but the
+     * composer queue is never cleared".
+     *
+     * Drives an AGENT-ROUTE composer send over the REAL `-CC` transport to a REAL
+     * tmux pane that has NO transcript authority at all (a plain interactive shell,
+     * exactly the `csp`-style relaunch the maintainer reported). The production
+     * delivery path runs unmodified: [TmuxSessionViewModel.sendAgentPayloadToPaneResult]
+     * with the row's durable identity, the production result -> deferral mapping in
+     * [collectPromptComposerSendRequests], the production auto-flush drain, and the
+     * production late-authority bridge.
+     *
+     * RED on base (this class, this fixture): the payload lands in the pane exactly
+     * once, and the durable row NEVER leaves the queue — the bounded turnover proof
+     * cannot read the pane's prompt, the durable submit baseline is null so #2037's
+     * transcript-only late ack can never fire, and every auto-flush dispatch reports
+     * the same unknown outcome while re-granting its retry budget, so the row also
+     * holds the FIFO head forever.
+     *
+     * GREEN: the payload still reaches the pane EXACTLY ONCE (no duplicate), the row
+     * reaches a terminal acknowledgement, the queue empties, and a second prompt
+     * queued behind it also drains.
+     */
+    @Test
+    fun deliveredAgentRouteRowLeavesTheQueueWithNoTranscriptAuthority() {
+        runBlocking {
+            val key = readFixtureKey()
+            waitForSshFixtureReady(SshKey.Pem(key))
+            seedInteractiveSession(key, prompt = "\u276f ")
+            val hostRowTag = seedDockerHost(key, "Issue2056 Delivered Row")
+
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            attachToOpencodeLab(hostRowTag)
+
+            val liveVm = liveTmuxViewModel()
+            val paneId = awaitAttachedPaneId(liveVm)
+            val identity = readTmuxSessionIdentity(key)
+
+            // The durable store the LIVE VM's delivery ledger writes its wire/submit
+            // write-ahead into is the app's SharedPreferences-backed singleton, so the
+            // journey's composer must read the SAME durable rows (Android caches one
+            // SharedPreferences instance per name per process).
+            val queue = SharedPrefsOutboundQueueStore(
+                InstrumentationRegistry.getInstrumentation().targetContext,
+            )
+            val composer = newComposerVm(queue)
+            // A durable `tmux:` session key: the rows carry a real tmux generation, and
+            // `hasGenerationBoundRowsAwaitingPromotion` deliberately holds the drain for a
+            // generation-stamped row parked under a host/name fallback key (#1944).
+            val target = ISSUE_2056_TARGET
+            onMainUnit {
+                composer.onComposerTargetChanged(target)
+                composer.setTransportWritableProbe { liveVm.isSendTransportWritable() }
+                composer.setSendWatchdogTimeoutForTest(null)
+            }
+
+            val marker = "PS2056${System.currentTimeMillis().toString(36).takeLast(6)}"
+            val tailMarker = "PS2056T${System.currentTimeMillis().toString(36).takeLast(5)}"
+
+            // The PRODUCTION consumer: its onSend is the production agent-payload
+            // delivery, and its result -> deferral mapping is the code under test.
+            harnessScope.launch {
+                collectPromptComposerSendRequests(
+                    viewModel = composer,
+                    onSend = { request ->
+                        val rowId = request.outboundQueueItemId
+                        liveVm.sendAgentPayloadToPaneResult(
+                            paneId,
+                            request.text,
+                            AgentKind.ClaudeCode,
+                            sendToken = rowId ?: "",
+                            durableRow = rowId?.let { DurableOutboundRowIdentity(target, it) },
+                        ).toComposerSendResult()
+                    },
+                )
+            }
+            // The PRODUCTION late-authority bridge, on the same bounded cadence the
+            // composable effect uses.
+            val binding = TmuxOutboundQueueBinding(
+                targetKey = target,
+                fallbackKey = target,
+                durableKey = target,
+                tmuxSessionId = identity.first,
+                sessionCreated = identity.second,
+                generationPaneIds = setOf(paneId),
+            )
+            harnessScope.launch {
+                while (true) {
+                    reconcileLateOutboundAcks(
+                        rows = composer.outboundQueueItems.value,
+                        binding = binding,
+                        resolveAuthoritativeAck = liveVm::resolveLateAuthoritativeOutboundAck,
+                        acknowledge = { resolved ->
+                            composer.acknowledgeLateOutboundDeliveries(
+                                resolved,
+                                onAcknowledged = liveVm::consumeLateAuthoritativeOutboundAck,
+                            )
+                        },
+                    )
+                    kotlinx.coroutines.delay(500L)
+                }
+            }
+            val controller =
+                OutboundQueueAutoFlushController.boundTo(composer, clock = { SystemClock.elapsedRealtime() })
+            harnessScope.launch {
+                controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = target) {}
+                runOutboundQueueAutoFlush(
+                    sessionLive = true,
+                    outboundQueueItems = composer.outboundQueueItems,
+                    controller = controller,
+                    retryNext = { excludingIds -> composer.retryNextOutboundItem(excludingIds) },
+                    transportWritable = { liveVm.isSendTransportWritable() },
+                    unparkTransportFailedRows = { composer.unparkTransportFailedRows() },
+                )
+            }
+
+            onMainUnit {
+                listOf(marker to 0L, tailMarker to 1L).forEach { (text, offset) ->
+                    queue.enqueue(
+                        sessionKey = target,
+                        cleanText = "# $text",
+                        createdAtMs = System.currentTimeMillis() + offset,
+                        paneId = paneId,
+                        route = OutboundRoute.AgentPayload,
+                        agentKind = "claude",
+                        sendKey = "sk-$text",
+                        tmuxSessionId = identity.first,
+                        tmuxSessionCreated = identity.second,
+                    )
+                }
+                composer.refreshOutboundQueueItemsFor(target)
+            }
+
+            // 1) The payload physically reaches the REAL pane.
+            val pane = waitForPaneContains(key, marker, label = "issue2056-delivered")
+            // 2) ... and the durable row must LEAVE the queue. RED on base: it never does.
+            awaitTrue("the delivered row leaves the composer queue") {
+                composer.outboundQueueItems.value.none { it.cleanText.contains(marker) }
+            }
+            // 3) The tail behind it also drains — a clogged head must not poison it.
+            val tailPane = waitForPaneContains(key, tailMarker, label = "issue2056-tail")
+            awaitTrue("the whole queue drains") { composer.outboundQueueItems.value.isEmpty() }
+
+            // Exactly once means exactly once. The assertion used to allow `<= 2` while
+            // its message claimed "exactly once" — a wording/constraint mismatch (G6)
+            // that would have accepted a genuine duplicate re-paste. The `sh -i` pane
+            // echoes each `# <marker>` comment line once and nothing re-prints it.
+            val occurrences = Regex(Regex.escape(marker)).findAll(tailPane).count()
+            assertEquals(
+                "the delivered payload must reach the pane EXACTLY once (no duplicate " +
+                    "re-paste); pane:\n$tailPane",
+                1,
+                occurrences,
+            )
+            val tailOccurrences = Regex(Regex.escape(tailMarker)).findAll(tailPane).count()
+            assertEquals(
+                "the tail payload must also reach the pane EXACTLY once; pane:\n$tailPane",
+                1,
+                tailOccurrences,
+            )
+
+            // Reviewer-usable artifacts: the app's OWN rendered terminal text next to the
+            // authoritative server-side capture, and a viewport taken with the Terminal
+            // tab selected so the PNG shows the delivered payload rather than whatever
+            // tab happened to be mounted. The user-visible queue state is written out as
+            // text because this journey's composer is a harness-owned view model that is
+            // not mounted in the activity's UI.
+            selectTerminalTabForArtifacts(liveVm, paneId)
+            writeArtifactText(
+                "issue2056-delivered-row-leaves-queue-visible-terminal.txt",
+                visibleTerminalText(),
+            )
+            writeArtifactText(
+                "issue2056-delivered-row-leaves-queue-server-capture.txt",
+                tailPane,
+            )
+            writeArtifactText(
+                "issue2056-delivered-row-leaves-queue-queue-surface.txt",
+                buildString {
+                    appendLine("composer_queue_rows=${composer.outboundQueueItems.value.size}")
+                    composer.outboundQueueItems.value.forEach { row ->
+                        appendLine("  id=${row.id} state=${row.state} text=${row.cleanText}")
+                    }
+                    appendLine("durable_rows_for_target=${queue.itemsFor(target).size}")
+                },
+            )
+            captureViewport("04-issue2056-delivered-row-leaves-queue")
+            writeSummary(
+                testName = "deliveredAgentRouteRowLeavesTheQueueWithNoTranscriptAuthority",
+                lines = listOf(
+                    "target=$target",
+                    "pane_id=$paneId",
+                    "tmux_session_id=${identity.first} created=${identity.second}",
+                    "marker=$marker tail_marker=$tailMarker",
+                    "transcript_authority=none (plain interactive shell)",
+                    "captured_pane_contains_marker=${marker in pane}",
+                    "captured_pane_contains_tail_marker=${tailMarker in tailPane}",
+                    "marker_occurrences=$occurrences",
+                    "tail_marker_occurrences=$tailOccurrences",
+                    "composer_queue_rows_after_delivery=${composer.outboundQueueItems.value.size}",
+                    "durable_rows_after_delivery=${queue.itemsFor(target).size}",
+                    "queue_empty_after_delivery=true",
+                ),
+            )
+        }
+    }
+
     // ------------------------------------------------------- Drain machinery
 
     /**
@@ -598,13 +816,20 @@ class Issue1686QueueDrainWireOracleDockerTest {
      * the drain assertion looks for. A `# <marker>` comment line echoes the token
      * without any command-not-found noise.
      */
-    private suspend fun seedInteractiveSession(key: String) {
+    private suspend fun seedInteractiveSession(key: String, prompt: String? = null) {
+        val shellCommand = if (prompt == null) {
+            "printf 'ISSUE1686-READY\\n'; exec sh -i"
+        } else {
+            // Issue #2056: an explicit prompt glyph so the pane's input surface is
+            // identifiable — that identification is exactly what the submit-turnover
+            // oracle needs, and what it could not do before this fix.
+            "printf 'ISSUE1686-READY\\n'; PS1='$prompt'; export PS1; exec sh -i"
+        }
         val script = buildString {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_LAB)} 2>/dev/null || true")
             appendLine(
-                "tmux new-session -d -s ${shellQuote(SESSION_LAB)} " +
-                    shellQuote("printf 'ISSUE1686-READY\\n'; exec sh -i"),
+                "tmux new-session -d -s ${shellQuote(SESSION_LAB)} " + shellQuote(shellCommand),
             )
             appendLine("sleep 1")
             appendLine("tmux list-sessions")
@@ -625,6 +850,24 @@ class Issue1686QueueDrainWireOracleDockerTest {
                 "stderr='${exec?.stderr}'",
             exec?.exitCode == 0,
         )
+    }
+
+    /** Issue #2056: the REAL tmux generation the durable row and its binding are stamped with. */
+    private suspend fun readTmuxSessionIdentity(key: String): Pair<String, Long> {
+        val script =
+            "tmux display-message -p -t ${shellQuote(SESSION_LAB)} " +
+                shellQuote("#{session_id} #{session_created}")
+        val out = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session -> session.use { it.exec(script) } }.getOrNull()?.stdout.orEmpty().trim()
+        val parts = out.split(Regex("\\s+"))
+        assertTrue("could not read the tmux session identity; got '$out'", parts.size >= 2)
+        return parts[0] to (parts[1].toLongOrNull() ?: 0L)
     }
 
     private suspend fun capturePane(key: String): String {
@@ -691,6 +934,54 @@ class Issue1686QueueDrainWireOracleDockerTest {
     }
 
     // ------------------------------------------------------------ Artifacts
+
+    /**
+     * Issue #2056 reviewer feedback: the journey's viewport PNG caught whatever tab
+     * happened to be mounted (a Conversation tab mid "Loading conversation…"), so it
+     * neither corroborated nor contradicted the delivery claim. Select the real
+     * Terminal tab first so the screenshot shows the delivered payload.
+     */
+    private fun selectTerminalTabForArtifacts(liveVm: TmuxSessionViewModel, paneId: String) {
+        onMainUnit { liveVm.selectSessionTab(paneId, SessionTab.Terminal) }
+        // The view-model flag alone does not repaint the chrome the screenshot shows —
+        // the first attempt at this left the PNG on "Loading conversation…". Tap the
+        // real Terminal pill and wait for the Conversation surface to actually leave
+        // the tree before capturing.
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = 15_000) {
+            liveVm.agentConversations.value[paneId]?.selectedTab == SessionTab.Terminal &&
+                compose.onAllNodesWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+        }
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        SystemClock.sleep(250)
+    }
+
+    /** The text the APP itself is rendering, alongside the server-side capture. */
+    private fun visibleTerminalText(): String {
+        var text = ""
+        launchedActivity?.onActivity { activity ->
+            text = activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.screen
+                ?.transcriptText
+                .orEmpty()
+        }
+        return text
+    }
+
+    private fun writeArtifactText(name: String, text: String) {
+        artifactFile(name).writeText(text)
+    }
 
     private fun captureViewport(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -774,5 +1065,8 @@ class Issue1686QueueDrainWireOracleDockerTest {
         const val SESSION_LAB: String = "opencode-lab"
 
         const val PANE_DRAIN_TIMEOUT_MS: Long = 30_000L
+
+        /** Issue #2056: a durable `tmux:` session key (see the drain-promotion guard). */
+        const val ISSUE_2056_TARGET: String = "tmux:issue2056/delivered"
     }
 }

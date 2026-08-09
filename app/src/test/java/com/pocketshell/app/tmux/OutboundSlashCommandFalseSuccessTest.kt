@@ -236,8 +236,12 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
         assertTrue("attempt 1 must surface the ambiguous failure", first.await().isFailure)
         assertEquals("attempt 1 pastes exactly once", 1, client.literalPasteCount(payload))
 
-        // The resend (reconnect auto-flush / manual retry) probes: count (1) exceeds
-        // the baseline (0) ⇒ AlreadyLanded ⇒ Enter-only, NO second paste.
+        // The resend (reconnect auto-flush / manual retry). Issue #2056 makes the
+        // terminal acknowledgement route-complete: the pane's input surface is now
+        // readable, it no longer holds the payload, so the ambiguous prior Enter is
+        // AUTHORITATIVELY resolved instead of wedging the row forever. The
+        // load-bearing exactly-once invariants below are unchanged and still assert
+        // that NOTHING new reached the wire — no second paste, no second Enter.
         val second = async {
             vm.sendAgentPayloadToPaneResult(
                 "%0",
@@ -249,8 +253,9 @@ class OutboundSlashCommandFalseSuccessTest : TmuxSessionViewModelTestBase() {
         }
         advanceUntilIdle()
         assertTrue(
-            "an unconfirmed prior Enter must stay unresolved without a blind second submit",
-            second.await().isFailure,
+            "an unconfirmed prior Enter must resolve from authority, never from a blind " +
+                "second submit (#2056)",
+            second.await().isSuccess,
         )
         assertEquals(
             "a genuine resend of a payload that already LANDED must be deduped to " +

@@ -28,7 +28,6 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextClearance
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.Lifecycle
-import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
@@ -47,8 +46,6 @@ import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticPrivacy
-import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
-import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.AgentSubmitCaptureSeams
 import com.pocketshell.app.tmux.OutboundDeliverySeams
 import com.pocketshell.app.tmux.PasteChunkSeams
@@ -75,8 +72,6 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.agents.AgentKind
-import com.pocketshell.core.storage.AppDatabase
-import com.pocketshell.core.storage.entity.HostEntity
 import com.termux.view.TerminalView
 import dagger.hilt.android.EntryPointAccessors
 import java.io.File
@@ -124,11 +119,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     private suspend fun seedBeforeLaunch() {
         clearLastSessionPrefs()
-        val key = readFixtureKey()
+        val key = OutboundExactlyOnceFixture.readFixtureKey()
         fixtureKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
-        seedFakeAgentSession(key)
-        hostRowTag = seedDockerHost(key)
+        OutboundExactlyOnceFixture.seedFakeAgentSession(key, testName.methodName)
+        hostRowTag = OutboundExactlyOnceFixture.seedDockerHost(key)
     }
 
     @Before
@@ -154,7 +149,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         diagnostics = null
         clearLastSessionPrefs()
         if (::fixtureKey.isInitialized) {
-            runCatching { runBlocking { cleanupRemoteTmuxSession(fixtureKey) } }
+            runCatching { runBlocking { OutboundExactlyOnceFixture.cleanupRemoteTmuxSession(fixtureKey) } }
         }
     }
 
@@ -253,6 +248,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val store = composerVm.outboundQueueStore
         store.clearSession(target)
         val payload = "manual retry late authority ${SystemClock.elapsedRealtime().toString().takeLast(6)}"
+        // #2056: prove the induced ambiguity is real before relying on it.
+        assertPaneSubmitOracleIsUndecidable("manual retry", payload)
 
         openComposerAndSend(payload)
         waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "manual send parks", {
@@ -317,6 +314,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val store = composerVm.outboundQueueStore
         store.clearSession(target)
         val payload = "late authoritative ack ${SystemClock.elapsedRealtime().toString().takeLast(6)}"
+        // #2056: prove the induced ambiguity is real before relying on it.
+        assertPaneSubmitOracleIsUndecidable("late-ack", payload)
 
         openComposerAndSend(payload)
         waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "late send parks", {
@@ -403,6 +402,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         store.clearSession(target)
         val nonce = SystemClock.elapsedRealtime().toString().takeLast(6)
         val payloads = listOf("busy first $nonce", "busy second $nonce")
+        // #2056: prove the induced ambiguity is real before relying on it.
+        assertPaneSubmitOracleIsUndecidable("busy", payloads[0])
 
         openComposerAndSend(payloads[0])
         waitForIssue1739Boundary(CONNECTED_TIMEOUT_MS, "busy first parks", {
@@ -416,7 +417,10 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             outboundWaitDetails(store, target, composer)
         }) {
             val rows = store.itemsFor(target)
-            rows.size == 2 && rows.first().wireSubmitAttempted &&
+            // #2056 CONTRACT FLIP (see the ledger assertion below): BOTH rows now reach
+            // the wire. The head no longer holds the tail, so `all { wireSubmitAttempted }`
+            // replaces `first().wireSubmitAttempted` — strictly more than before.
+            rows.size == 2 && rows.all { it.wireSubmitAttempted } &&
                 rows.all { it.state == OutboundState.Queued } && !composer.uiState.value.sendInFlight
         }
         val queuedSignature = store.itemsFor(target).map { it.id to it.attemptCount }
@@ -441,18 +445,58 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
         assertTrue("agent output advanced throughout the healthy hold", heartbeatAfter > heartbeatBefore)
         assertTrue("the hold observed multiple completed retry/refund cycles", settledChecks >= 2)
-        assertEquals("busy agent accepted no duplicate Enter", listOf(payloads[0]), readFakeAgentSubmitLedger().map { it.second })
+        // Issue #2056 CONTRACT FLIP, stated explicitly (was `listOf(payloads[0])`).
+        //
+        // The previous expectation encoded head-of-line BLOCKING: while the head's
+        // outcome was unproven, the tail was not allowed to reach the agent. That is
+        // exactly the behaviour #2056 was filed against — "once the first message gets
+        // clogged, every following message gets clogged too, even though those
+        // following messages are in fact being delivered." An unresolvable head must
+        // not hold the tail (issue #2056 acceptance criterion 5).
+        //
+        // The flip is sound, not a relaxation: a row only reaches this ambiguous state
+        // AFTER its paste was ack-proven on the pane and tmux accepted its Enter, so
+        // the head's bytes are already on the pane. Dispatching the tail therefore
+        // cannot reorder anything — which is why the expectation below is still an
+        // EXACT list in FIFO order, and still pins exactly-once (each payload appears
+        // once, neither is re-Entered). It is strictly stronger than the old one: it
+        // now also proves the non-poisoning drain on the REAL wire, during the hold,
+        // while both durable rows are still parked awaiting the late authority.
+        assertEquals(
+            "an unresolvable head must not hold the tail, and neither payload may be " +
+                "Entered twice (#2056 / #1944)",
+            payloads,
+            readFakeAgentSubmitLedger().map { it.second },
+        )
+        assertEquals(
+            "both rows are still durably parked awaiting the late authority while their " +
+                "payloads have already reached the agent (#2056)",
+            2,
+            store.itemsFor(target).count { it.wireSubmitAttempted && it.isComposerQueueRetryable() },
+        )
         captureViewportArtifacts("issue2042-busy-stable-wire-queued")
 
         val transcript = "/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL"
+        // Issue #2056 round 2 — the relay must stop after ONE publish, and its pid must
+        // be recorded so a crashed run cannot leave it behind.
+        //
+        // It used to break at `n >= 2`, because on the old head-of-line-BLOCKING
+        // contract the two payloads reached the staging file in two separate waves
+        // (the tail was only sent after the head resolved). Under the #2056 contract
+        // BOTH payloads are already staged before the relay starts, so one copy
+        // publishes both and `n` never reaches 2 — leaving the relay polling this
+        // shared fixture for a further 60 s, straight into the NEXT test in the class,
+        // where it published that test's staged submit and pruned the row that test
+        // was waiting to see parked (observed: manualRetry... green in isolation, red
+        // as `rows=[]` when it ran after this one).
         val relay = execRemoteSetupUntilReady(
             SshKey.Pem(fixtureKey),
             "nohup sh -c " + shellQuote(
-                "n=0; i=0; while [ \$i -lt 300 ]; do " +
+                "i=0; while [ \$i -lt 300 ]; do " +
                     "if [ -s $LATE_ACK_STAGING_JSONL ]; then cat $LATE_ACK_STAGING_JSONL >> $transcript; " +
-                    ": > $LATE_ACK_STAGING_JSONL; n=\$((n+1)); [ \$n -ge 2 ] && break; fi; " +
+                    ": > $LATE_ACK_STAGING_JSONL; break; fi; " +
                     "i=\$((i+1)); sleep .2; done",
-            ) + " >/tmp/issue2042-relay.log 2>&1 &",
+            ) + " >/tmp/issue2042-relay.log 2>&1 & echo \$! > $TRANSCRIPT_RELAY_PID_PATH",
             "issue2042 start transcript relay",
         )
         assertEquals(0, relay.exitCode)
@@ -465,7 +509,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     @Test
     fun fallbackQueueRowsSurviveSessionSwitchAndDrainOnlyIntoSameGeneration() { runBlocking<Unit> {
-        enableIssue1944FramedFakeAgent()
+        OutboundExactlyOnceFixture.enableIssue1944FramedFakeAgent(fixtureKey)
         attachSeededTmuxSession(hostRowTag)
         waitForVisibleTerminal("initial attach") { it.contains(FAKE_AGENT_READY) }
         waitForConnected("initial attach")
@@ -2038,6 +2082,15 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         "handoff=${vm.uiState.value.outboundHandoffInProgress} " +
         "consumer=${vm.outboundSendConsumers.activeGenerationForDispatch()} " +
         "owner=${vm.outboundDrainOwnership.activeRowId()} " +
+        // #2056: the composer's CURRENT target (a changed key makes `rows=[]` mean
+        // "looked in the wrong place", not "pruned") plus a delivery-scoped event tail,
+        // because the raw tail is per-frame render-heal churn.
+        "composerTargetNow=${vm.composerTarget} expectedTarget=$target " +
+        "delivery=${boundedEventTail(
+            diagnostics!!.events.filter {
+                it.name in Issue2056InducedSubmitAmbiguity.DELIVERY_EVENT_NAMES
+            },
+        )} " +
         "events=${boundedEventTail(diagnostics!!.events)}"
 
     private fun boundedFieldValue(value: Any?): String = when (value) {
@@ -2264,152 +2317,25 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         return null
     }
 
-    // ---------------------------------------------------------------- seeding
+    // ------------------------------------------------- seeding (see OutboundExactlyOnceFixture)
 
-    private fun readFixtureKey(): String =
-        InstrumentationRegistry.getInstrumentation()
-            .context
-            .assets
-            .open("test_key")
-            .bufferedReader()
-            .use { it.readText() }
-
-    private suspend fun seedDockerHost(key: String): String {
-        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-        val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
-            .fallbackToDestructiveMigration(dropAllTables = true)
-            .build()
-        return try {
-            db.clearAllTables()
-            val storedKey = SshKeyStorage.persistKey(
-                context = appContext,
-                sshKeyDao = db.sshKeyDao(),
-                name = "issue1526-exactly-once-key-${System.currentTimeMillis()}",
-                content = key,
-            )
-            val hostId = db.hostDao().insert(
-                HostEntity(
-                    name = "Issue1526 ExactlyOnce",
-                    hostname = DEFAULT_HOST,
-                    port = DEFAULT_PORT,
-                    username = DEFAULT_USER,
-                    keyId = storedKey.id,
-                    tmuxInstalled = true,
-                    lastBootstrapAt = System.currentTimeMillis(),
-                ),
-            )
-            HOST_ROW_TAG_PREFIX + hostId
-        } finally {
-            db.close()
+    /** Issue #2056 HARD precondition — see [Issue2056InducedSubmitAmbiguity]. */
+    private fun assertPaneSubmitOracleIsUndecidable(label: String, payload: String) {
+        // Require the fixture's own banner in the frame first: a blank sidecar read
+        // would answer Unknown for the wrong reason. Deliberately NOT a settled-frame
+        // wait — the heartbeat fixture repaints continuously and the oracle's verdict
+        // does not depend on settling.
+        var capture = ""
+        waitForIssue1739Boundary(
+            timeoutMs = CONNECTED_TIMEOUT_MS,
+            label = "$label pane frame for the submit-oracle precondition",
+            timeoutDetails = { "lastCapture=${capture.take(DIAGNOSTIC_CAPTURE_LIMIT)} failure=$lastSidecarFailure" },
+        ) {
+            capture = runBlocking { sidecarCapturePane() }
+            capture.contains(FAKE_AGENT_READY)
         }
-    }
-
-    private suspend fun seedFakeAgentSession(key: String) {
-        val delayedTranscriptTests = setOf(
-            "manualRetryOfUnconfirmedSubmitWaitsForLateAuthority",
-            "lateAckSurvivesCloseAndRecreateWithoutDuplicate",
-            "busyAgentOnStableWritableWireQueuesFifoWithoutBurningAttemptBudget",
-        )
-        val fakeAgentTranscript =
-            if (testName.methodName in delayedTranscriptTests) {
-                LATE_ACK_STAGING_JSONL
-            } else {
-                "/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL"
-            }
-        val heartbeatEnv = if (testName.methodName == "busyAgentOnStableWritableWireQueuesFifoWithoutBurningAttemptBudget") {
-            "POCKETSHELL_FAKE_AGENT_HEARTBEAT=1 "
-        } else ""
-        val script = buildString {
-            appendLine("set -eu")
-            appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
-            appendLine("tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true")
-            appendLine("rm -f ${shellQuote(FAKE_AGENT_LEDGER_PATH)}")
-            appendLine("rm -f ${shellQuote(LATE_ACK_STAGING_JSONL)}")
-            appendLine("touch ${shellQuote(LATE_ACK_STAGING_JSONL)}")
-            appendLine("mkdir -p /home/testuser/.claude/projects/-home-testuser")
-            appendLine(
-                "cp /home/testuser/.claude/projects/-workspace-pocketshell/" +
-                    "pocketshell-claude.jsonl " +
-                    "/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL",
-            )
-            appendLine("touch /home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL")
-            appendLine(
-                "tmux new-session -d -s ${shellQuote(SESSION_NAME)} -x 80 -y 40 " +
-                    "-c /home/testuser " +
-                    shellQuote(
-                        "POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER=$FAKE_AGENT_LEDGER_PATH " +
-                            "POCKETSHELL_FAKE_AGENT_TRANSCRIPT=$fakeAgentTranscript " +
-                            heartbeatEnv +
-                            "exec /usr/local/bin/pocketshell-fake-agent",
-                    ),
-            )
-            appendLine("tmux set-option -t ${shellQuote(SESSION_NAME)} @ps_agent_kind claude")
-            appendLine(
-                "tmux show-options -v -t ${shellQuote(SESSION_NAME)} " +
-                    "@ps_agent_kind | grep -qx claude",
-            )
-            appendLine(
-                "test -s /home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL",
-            )
-            appendLine(
-                "tmux new-session -d -s ${shellQuote(SESSION_B)} -x 80 -y 40 " +
-                    shellQuote("printf '$SESSION_B_MARKER\\n'; exec sh"),
-            )
-            appendLine("tmux set-option -t ${shellQuote(SESSION_B)} @ps_agent_kind shell")
-            appendLine("sleep 1")
-            appendLine("pid=\$(tmux display-message -p -t ${shellQuote(SESSION_NAME)} '#{pane_pid}'); tr '\\0' '\\n' < /proc/\$pid/environ | grep -Fx ${shellQuote("POCKETSHELL_FAKE_AGENT_TRANSCRIPT=$fakeAgentTranscript")}")
-            appendLine("tmux list-sessions")
-        }
-        val result = execRemoteSetupUntilReady(
-            key = SshKey.Pem(key),
-            command = script,
-            description = "issue1526 fake-agent tmux seed session",
-        )
-        assertTrue(
-            "seed failed ${result.exitCode}: ${result.stderr}",
-            result.exitCode == 0,
-        )
-    }
-
-    private suspend fun enableIssue1944FramedFakeAgent() {
-        val command =
-            "tmux respawn-pane -k -t ${shellQuote("=$SESSION_NAME:0.0")} " +
-                shellQuote(
-                    "POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER=$FAKE_AGENT_LEDGER_PATH " +
-                        "POCKETSHELL_FAKE_AGENT_TRANSCRIPT=/home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL " +
-                        "POCKETSHELL_FAKE_AGENT_RENDER_MODE=issue1944-framed-input " +
-                        "exec /usr/local/bin/pocketshell-fake-agent",
-                )
-        val result = execRemoteSetupUntilReady(
-            key = SshKey.Pem(fixtureKey),
-            command = command,
-            description = "issue1944 framed fake-agent input surface",
-        )
-        assertEquals("framed fake-agent respawn must succeed: ${result.stderr}", 0, result.exitCode)
-    }
-
-    private suspend fun cleanupRemoteTmuxSession(key: String) {
-        runCatching {
-            SshConnection.connect(
-                host = DEFAULT_HOST,
-                port = DEFAULT_PORT,
-                user = DEFAULT_USER,
-                key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-                timeoutMs = 15_000,
-            ).mapCatching { session ->
-                session.use {
-                    it.exec(
-                        "tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true; " +
-                            "tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true; " +
-                            "rm -f /home/testuser/.claude/projects/-home-testuser/$SEEDED_JSONL " +
-                            "${shellQuote(FAKE_AGENT_LEDGER_PATH)} " +
-                            "${shellQuote(LATE_ACK_STAGING_JSONL)} " +
-                            "2>/dev/null || true",
-                    )
-                }
-            }
-        }
+        Issue2056InducedSubmitAmbiguity
+            .assertPaneSubmitOracleIsUndecidable(label, payload, capture)
     }
 
     // ---------------------------------------------------------------- artifacts
@@ -2527,16 +2453,18 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     }
 
     private companion object {
-        const val DATABASE_NAME: String = "pocketshell.db"
+        // Fixture identity lives in OutboundExactlyOnceFixture (#2056 file-size split).
         const val DEVICE_DIR_NAME: String = "issue1526-exactly-once"
-        const val SESSION_NAME: String = "issue1526-exactly-once"
-        const val SESSION_B: String = "issue1944-switch-b"
-        const val SESSION_B_MARKER: String = "ISSUE1944-B-READY"
-        const val FAKE_AGENT_LEDGER_PATH: String = "/tmp/pocketshell-fake-agent-submits.log"
-        const val LATE_ACK_STAGING_JSONL: String = "/tmp/pocketshell-issue2037-delayed.jsonl"
+        const val SESSION_NAME: String = OutboundExactlyOnceFixture.SESSION_NAME
+        const val SESSION_B: String = OutboundExactlyOnceFixture.SESSION_B
+        const val SESSION_B_MARKER: String = OutboundExactlyOnceFixture.SESSION_B_MARKER
+        const val FAKE_AGENT_LEDGER_PATH: String = OutboundExactlyOnceFixture.FAKE_AGENT_LEDGER_PATH
+        const val LATE_ACK_STAGING_JSONL: String = OutboundExactlyOnceFixture.LATE_ACK_STAGING_JSONL
+        const val TRANSCRIPT_RELAY_PID_PATH: String =
+            OutboundExactlyOnceFixture.TRANSCRIPT_RELAY_PID_PATH
+        const val SEEDED_JSONL: String = OutboundExactlyOnceFixture.SEEDED_JSONL
+        const val FAKE_AGENT_READY: String = OutboundExactlyOnceFixture.FAKE_AGENT_READY
         const val BUSY_BUDGET_HOLD_MS: Long = 25_000L
-        const val SEEDED_JSONL: String = "issue1526-live-claude.jsonl"
-        const val FAKE_AGENT_READY: String = "FAKE-AGENT-READY"
         const val CONVERSATION_SEGMENT_TAG: String = TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + "1"
 
         val DETECTION_TIMEOUT_MS: Long =

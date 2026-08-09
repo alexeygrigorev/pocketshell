@@ -391,6 +391,13 @@ public interface OutboundQueueStore {
     /** Whether Enter was attempted without a proven agent-side turnover. */
     public fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean
 
+    /**
+     * Issue #2056: durably record that the last delivery attempt for [id] resolved with
+     * an UNPROVABLE outcome (see [OutboundItem.wireOutcomeUnknown]). No-op for an
+     * unknown or already-delivered row. Returns the updated row, or `null`.
+     */
+    public fun markDeliveryOutcomeUnknown(id: String): OutboundItem?
+
     /** Transcript authority captured by the same synchronous pre-Enter write-ahead. */
     public fun wireSubmitTranscriptBaseline(
         sessionKey: String,
@@ -561,6 +568,16 @@ public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDu
  * @property wireCollapsedMarkerBaselineCount issue #1739: the pre-send count of
  *   Claude's collapsed multiline-paste chips. A retry may treat a higher current
  *   count as proof that the ambiguous paste landed, then submit Enter-only.
+ * @property wireOutcomeUnknown issue #2056: the LAST delivery attempt resolved with a
+ *   genuinely UNPROVABLE outcome — the payload may well have landed (it usually has),
+ *   but no authority could confirm it. This is a first-class user-visible state, not a
+ *   failure and not "still sending": the drain must not keep re-dispatching the row
+ *   (every such dispatch can only reproduce the same unknown answer, and while it owns
+ *   the FIFO head nothing behind it can drain), and the UI must say so instead of
+ *   claiming "Queued — sending next". Cleared whenever a fresh attempt is claimed
+ *   ([claimedForAttempt]) or the user explicitly re-drives the row
+ *   ([requeueForRetry] with `resetAttempts`), so it always describes the latest
+ *   resolved attempt.
  * @property wireSubmitAttempted issue #1944: durably records that Enter was sent
  *   after the payload paste. If turnover could not be confirmed, a rebuilt VM
  *   keeps the row unresolved and must not issue another blind Enter.
@@ -597,6 +614,7 @@ public data class OutboundItem(
     val wireCollapsedMarkerBaselineCount: Int? = null,
     val wireSubmitAttempted: Boolean = false,
     val wireAttemptGeneration: Int = 0,
+    val wireOutcomeUnknown: Boolean = false,
     val wireSubmitTranscriptBaseline: OutboundSubmitTranscriptBaseline? = null,
     /** Tap-time tmux generation. Both fields are required for identity promotion. */
     val tmuxSessionId: String? = null,
@@ -864,6 +882,10 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             state = OutboundState.Queued,
             lastError = null,
             attemptCount = existing.adjustedAttemptCount(resetAttempts, attemptDelta),
+            // Issue #2056: an explicit user re-drive ("Resend all" / per-row Retry
+            // budget reset) discards the previous attempt's unprovable verdict so the
+            // row is genuinely re-dispatched instead of staying permanently unknown.
+            wireOutcomeUnknown = if (resetAttempts) false else existing.wireOutcomeUnknown,
         )
         items[updated.id] = updated
         updated
@@ -928,6 +950,14 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
 
     override fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean = synchronized(lock) {
         items[itemId]?.let { it.sessionKey == sessionKey && it.wireSubmitAttempted } == true
+    }
+
+    override fun markDeliveryOutcomeUnknown(id: String): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return null
+        if (existing.state == OutboundState.Delivered) return existing
+        val updated = existing.copy(wireOutcomeUnknown = true)
+        items[updated.id] = updated
+        updated
     }
 
     override fun wireSubmitTranscriptBaseline(
@@ -1022,6 +1052,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     ): OutboundItem? = null
 
     override fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean = false
+    override fun markDeliveryOutcomeUnknown(id: String): OutboundItem? = null
     override fun wireSubmitTranscriptBaseline(
         sessionKey: String,
         itemId: String,
@@ -1356,6 +1387,10 @@ public class SharedPrefsOutboundQueueStore internal constructor(
             state = OutboundState.Queued,
             lastError = null,
             attemptCount = existing.adjustedAttemptCount(resetAttempts, attemptDelta),
+            // Issue #2056: an explicit user re-drive ("Resend all" / per-row Retry
+            // budget reset) discards the previous attempt's unprovable verdict so the
+            // row is genuinely re-dispatched instead of staying permanently unknown.
+            wireOutcomeUnknown = if (resetAttempts) false else existing.wireOutcomeUnknown,
         )
         replaceAndStore(sessionKey, list, updated)
         updated
@@ -1440,6 +1475,16 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         loadSession(sessionKey).any {
             it.id == itemId && it.sessionKey == sessionKey && it.wireSubmitAttempted
         }
+    }
+
+    override fun markDeliveryOutcomeUnknown(id: String): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return null
+        val list = loadSession(sessionKey)
+        val existing = list.firstOrNull { it.id == id } ?: return null
+        if (existing.state == OutboundState.Delivered) return existing
+        val updated = existing.copy(wireOutcomeUnknown = true)
+        replaceAndStore(sessionKey, list, updated)
+        updated
     }
 
     override fun wireSubmitTranscriptBaseline(
@@ -1583,14 +1628,20 @@ private fun OutboundItem.claimedForAttempt(): OutboundItem {
     // ([OutboundQueueStore.markWireAttempted], driven by the ledger's
     // `recordWireAttempt` right before the first byte). A first send now has
     // `wireAttempted=false`, so it is delivered normally with no probe.
+    //
+    // Issue #2056: a FRESH attempt invalidates the previous attempt's unprovable
+    // verdict ([OutboundItem.wireOutcomeUnknown]) — the new attempt gets to decide
+    // for itself. Clearing it here (rather than at the deferral) is what makes a
+    // user's explicit Retry a real re-decision instead of a permanent label.
     val atMs = System.currentTimeMillis()
     return if (state == OutboundState.InFlight) {
-        copy(lastAttemptAtMs = atMs)
+        copy(lastAttemptAtMs = atMs, wireOutcomeUnknown = false)
     } else {
         copy(
             state = OutboundState.InFlight,
             attemptCount = attemptCount + 1,
             lastAttemptAtMs = atMs,
+            wireOutcomeUnknown = false,
         )
     }
 }
@@ -1671,6 +1722,7 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
                 ?.joinToString(separator = "\n")
                 .orEmpty(),
             item.wireAttemptGeneration.toString(),
+            if (item.wireOutcomeUnknown) "1" else "0",
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -1711,6 +1763,7 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
             wireSubmitAttempted = submitAttempted,
             wireAttemptGeneration = f.getOrNull(24)?.toIntOrNull()
                 ?: if (submitAttempted) 1 else 0,
+            wireOutcomeUnknown = f.getOrNull(25) == "1",
             wireSubmitTranscriptBaseline = f.getOrNull(20)
                 ?.takeIf { it.isNotEmpty() }
                 ?.let { sourcePath ->

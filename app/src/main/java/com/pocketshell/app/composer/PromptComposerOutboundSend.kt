@@ -188,8 +188,18 @@ internal suspend fun collectPromptComposerSendRequests(
                             onDelivered()
                         }
                     }
+                    // Issue #2056: the row is recorded as a genuinely UNKNOWN delivery
+                    // outcome — stated as such in the UI and SKIPPED by the auto-flush
+                    // drain, because every re-dispatch can only reproduce the same
+                    // unknown answer while holding the FIFO head and starving every
+                    // prompt behind it. #1944's budget re-grant is preserved: turnover
+                    // ambiguity is not a transport failure, so it burns no attempt.
                     ComposerSendResult.AuthoritativeAckPending ->
-                        viewModel.markOutboundSendDeferred(request, resetAttemptBudget = true)
+                        viewModel.markOutboundSendDeferred(
+                            request,
+                            resetAttemptBudget = true,
+                            deliveryOutcomeUnknown = true,
+                        )
                     ComposerSendResult.Failed ->
                         viewModel.markOutboundSendDeferred(
                             request,

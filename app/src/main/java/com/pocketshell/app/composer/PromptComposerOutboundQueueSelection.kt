@@ -205,6 +205,22 @@ internal const val OUTBOUND_UPLOAD_FAILURE_ATTEMPT_DELTA: Int = 1
 internal fun OutboundItem.isComposerQueueRetryable(): Boolean =
     state == OutboundState.Queued || state == OutboundState.Failed
 
+/**
+ * Issue #2056: this row's last delivery attempt resolved with a genuinely UNPROVABLE
+ * outcome — the payload very probably landed, but no authority could confirm it.
+ *
+ * Such a row is NOT auto-dispatchable. Its retry is ledger-gated
+ * (`verifyBeforeAgentResend` refuses to re-paste once the submit was attempted), so
+ * every auto-flush dispatch can only reproduce the same unknown answer — while
+ * occupying the FIFO head and starving every prompt behind it. On base that starve
+ * was permanent, because the deferral re-granted the row's whole retry budget so it
+ * could never even park: the maintainer's "once the first message gets clogged,
+ * every following message gets clogged too". It is skipped here (never dropped, and
+ * still surfaced + user-retryable) so the tail drains on its own evidence.
+ */
+internal fun OutboundItem.isComposerQueueDeliveryUnconfirmed(): Boolean =
+    isComposerQueueRetryable() && wireOutcomeUnknown
+
 internal fun OutboundItem.isComposerQueueUndelivered(): Boolean =
     state != OutboundState.Delivered
 
@@ -236,13 +252,15 @@ internal fun Iterable<OutboundItem>.firstComposerAutoFlushable(
 ): OutboundItem? {
     // Preserve physical FIFO across identity promotion. An older InFlight or
     // Uploading row may still own bytes already pasted into the same pane; it
-    // blocks every younger row until its terminal callback. Exhausted retryable
-    // rows are the sole exception: this cycle parks/surfaces them, so selection
-    // may continue to the next row without hiding a poison head forever.
+    // blocks every younger row until its terminal callback. Two retryable shapes
+    // are the exceptions, and both are surfaced rather than hidden: an exhausted
+    // row (this cycle parks it, #1602) and a delivery-unconfirmed row (#2056 — the
+    // auto-flush can never resolve it, so re-picking it only starves the tail).
     val head = firstOrNull { item ->
         item.sessionKey == sessionKey &&
             item.isComposerQueueUndelivered() &&
-            !(item.isComposerQueueRetryable() && item.attemptCount >= maxAutoAttempts)
+            !(item.isComposerQueueRetryable() && item.attemptCount >= maxAutoAttempts) &&
+            !item.isComposerQueueDeliveryUnconfirmed()
     } ?: return null
     return head.takeIf {
         it.isComposerQueueRetryable() && it.id !in excludingIds

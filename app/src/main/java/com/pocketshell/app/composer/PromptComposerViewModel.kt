@@ -1171,6 +1171,10 @@ public class PromptComposerViewModel @Inject constructor(
         request: SendRequest,
         noRowFallbackMessage: String = "Not sent. Reconnect, then send again or discard the draft.",
         resetAttemptBudget: Boolean = false,
+        // Issue #2056: the attempt resolved with an UNPROVABLE outcome (the payload
+        // may well have landed). Recorded durably on the row so the drain stops
+        // re-dispatching it and the UI stops claiming it is "sending next".
+        deliveryOutcomeUnknown: Boolean = false,
     ) {
         // #891: disarm the watchdog (no stale "Send failed"); #971: drop the captured request.
         watchdogs.disarmSend()
@@ -1187,6 +1191,7 @@ public class PromptComposerViewModel @Inject constructor(
             restoreFailedSend(request, message = noRowFallbackMessage)
             return
         }
+        if (deliveryOutcomeUnknown) outboundQueueStore.markDeliveryOutcomeUnknown(requeued.id)
         requeued.recordQueueRowState("InFlight", "Queued", "deferred") // #1682
         DiagnosticEvents.record(
             "action",

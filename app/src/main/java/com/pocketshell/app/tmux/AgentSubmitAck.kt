@@ -471,17 +471,53 @@ internal class AgentSubmitTurnoverNotProvenException(result: String) :
  */
 internal enum class AgentInputSurfaceState { PendingPayload, Ready, Unknown }
 
+/**
+ * Issue #2056: characters an agent/shell prompt may be WRAPPED in before its
+ * marker glyph. Claude Code draws its input inside a box, so the live prompt row
+ * reads `│ > ` — its first non-blank character is the box edge, not the marker.
+ * The pre-#2056 matcher only looked at `line.trimStart()`, so it never found
+ * Claude's prompt, [agentInputSurfaceState] answered [AgentInputSurfaceState.Unknown]
+ * on every Claude frame, and the generic submit-turnover proof
+ * ([awaitAgentSubmitTurnover]) could therefore NEVER succeed for Claude Code —
+ * every send fell into the ambiguous `wireSubmitAttempted` state.
+ */
+private val AGENT_INPUT_PROMPT_DECORATION: Set<Char> =
+    setOf('│', '┃', '┆', '┊', '╎', '║', '▌', '|')
+
+/**
+ * Issue #2056: marker glyphs that introduce an interactive input line. `>` / `›`
+ * are the agent TUIs; `❯` / `➜` / `❭` are the maintainer's shell prompt, needed so
+ * a shell-hosted send (`csp`, which relaunches an agent) is decidable at all
+ * instead of being permanently unknown.
+ */
+private val AGENT_INPUT_PROMPT_GLYPHS: Set<Char> = setOf('>', '›', '❯', '➜', '❭', '$')
+
+/** The prompt line's content with any leading blanks/box decoration removed. */
+private fun agentInputPromptBody(line: String): String? {
+    var index = 0
+    while (
+        index < line.length &&
+        (line[index].isWhitespace() || line[index] in AGENT_INPUT_PROMPT_DECORATION)
+    ) {
+        index += 1
+    }
+    return line.substring(index).takeIf { it.isNotEmpty() }
+}
+
+/** Issue #2056: does [line] carry the pane's interactive input marker? */
+internal fun isAgentInputPromptLine(line: String): Boolean {
+    val body = agentInputPromptBody(line) ?: return false
+    if (body[0] !in AGENT_INPUT_PROMPT_GLYPHS) return false
+    return body.length == 1 || body[1] == ' ' || body[1] == '\t'
+}
+
 internal fun agentInputSurfaceState(
     response: CommandResponse,
     payload: String,
 ): AgentInputSurfaceState {
     if (response.isError) return AgentInputSurfaceState.Unknown
     val needle = agentSubmitAckNeedle(payload) ?: return AgentInputSurfaceState.Unknown
-    val promptIndex = response.output.indexOfLast { line ->
-        val trimmed = line.trimStart()
-        trimmed == ">" || trimmed.startsWith("> ") ||
-            trimmed == "›" || trimmed.startsWith("› ")
-    }
+    val promptIndex = response.output.indexOfLast(::isAgentInputPromptLine)
     if (promptIndex < 0) return AgentInputSurfaceState.Unknown
     val candidate = response.output.drop(promptIndex)
     val pending = agentSubmitVisibleTextContainsNeedle(candidate, needle) ||
@@ -491,9 +527,6 @@ internal fun agentInputSurfaceState(
             )
     return if (pending) AgentInputSurfaceState.PendingPayload else AgentInputSurfaceState.Ready
 }
-
-internal fun agentPaneShowsPayloadInInput(response: CommandResponse, payload: String): Boolean =
-    agentInputSurfaceState(response, payload) != AgentInputSurfaceState.Ready
 
 private fun recordAgentSubmitTurnoverCapture(
     identity: AgentSendRuntimeIdentity,

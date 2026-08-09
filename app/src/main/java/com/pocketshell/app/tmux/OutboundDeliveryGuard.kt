@@ -10,6 +10,7 @@ import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * Issue #1526 — Slice S1: verify-before-resend for exactly-once OUTBOUND delivery.
@@ -280,6 +281,29 @@ internal suspend fun deliverRawInputWithGuard(
         ledger.clear(paneId, sendToken)
         afterDelivered(client, paneId, bytes)
     }
+}
+
+/**
+ * Issue #1944: the pre-Enter write-ahead barrier — persist "Enter was attempted"
+ * BEFORE the Enter reaches tmux, so a crash/VM-clear in that window can never turn
+ * the uncertainty into a blind second Enter. Fails closed: an unpersisted barrier
+ * means the Enter is not sent at all. Extracted out of the connection-core
+ * god-object (D28 / the #1047 downward ratchet); [ioContext] is the caller's
+ * off-Main IO hop, because the durable write is a synchronous `commit()`.
+ */
+internal suspend fun OutboundDeliveryLedger.persistSubmitWriteAhead(
+    ioContext: kotlin.coroutines.CoroutineContext,
+    paneId: String,
+    sendToken: String,
+    durableRow: DurableOutboundRowIdentity?,
+    transcriptBaseline: OutboundSubmitTranscriptBaseline?,
+) {
+    if (durableRow == null) return
+    check(
+        withContext(ioContext) {
+            recordSubmitAttempt(paneId, sendToken, durableRow, transcriptBaseline)
+        },
+    ) { "Agent submit write-ahead persistence failed; Enter not sent." }
 }
 
 /** Bounded round-trip for a verify-before-resend `capture-pane` probe. */

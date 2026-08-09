@@ -2,11 +2,14 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.app.composer.OutboundState
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class OutboundLateAckReconcilerTest {
     private val binding = TmuxOutboundQueueBinding(
         targetKey = "1/\$42/1700",
@@ -32,7 +35,7 @@ class OutboundLateAckReconcilerTest {
     )
 
     @Test
-    fun exactGenerationAndAttemptAreResolvedOnce() {
+    fun exactGenerationAndAttemptAreResolvedOnce() = runTest {
         var calls = 0
         val resolved = resolveLateOutboundAcks(
             rows = listOf(row()),
@@ -44,7 +47,7 @@ class OutboundLateAckReconcilerTest {
     }
 
     @Test
-    fun staleOrForeignEvidenceNeverReachesTranscriptAuthority() {
+    fun staleOrForeignEvidenceNeverReachesTranscriptAuthority() = runTest {
         val rejected = listOf(
             row().copy(sessionKey = "1/other"),
             row().copy(paneId = "%8"),
@@ -66,7 +69,7 @@ class OutboundLateAckReconcilerTest {
     }
 
     @Test
-    fun missingAuthorityIsNotReturnedForDurablePrune() {
+    fun missingAuthorityIsNotReturnedForDurablePrune() = runTest {
         val resolved = resolveLateOutboundAcks(
             listOf(row()), binding,
             resolveAuthoritativeAck = { false },
@@ -75,7 +78,7 @@ class OutboundLateAckReconcilerTest {
     }
 
     @Test
-    fun activeWireAttemptNeverReachesLateAuthorityUntilItIsRequeued() {
+    fun activeWireAttemptNeverReachesLateAuthorityUntilItIsRequeued() = runTest {
         val active = listOf(
             row().copy(id = "uploading", state = OutboundState.Uploading),
             row().copy(id = "in-flight", state = OutboundState.InFlight),
@@ -93,7 +96,7 @@ class OutboundLateAckReconcilerTest {
     }
 
     @Test
-    fun mixedBacklogReturnsEveryConfirmedExactRowInFifoOrderAsOneBatch() {
+    fun mixedBacklogReturnsEveryConfirmedExactRowInFifoOrderAsOneBatch() = runTest {
         val rows = listOf(
             row().copy(id = "row-1", createdAtMs = 1L),
             row().copy(id = "foreign", paneId = "%8", createdAtMs = 2L),

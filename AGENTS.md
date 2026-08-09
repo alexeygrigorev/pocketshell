@@ -491,6 +491,16 @@ are looking at before proposing a fix:
      `is-active` wait loop), so you observe `LoadState=loaded` before GC.
   3. Treat a never-observed-loaded unit as an error.
 
+  **Do NOT reach for `-p RemainAfterExit=yes` as the fix.** It does keep a
+  successful unit `loaded` / `active (exited)` so `systemctl show` reads
+  soundly afterwards — but that is exactly why it breaks the wait: the
+  `until ! systemctl --user is-active --quiet <unit>; do sleep 30; done` loop
+  recommended above **never returns**, because the unit stays active forever.
+  Reproduced deterministically on #2063 round 6. If you use
+  `RemainAfterExit=yes`, you must also change the wait (poll `SubState=exited`
+  instead of `is-active`, or use `systemd-run --user --wait`, which propagates
+  the child's exit code as its own).
+
   Whichever you use, the rule is the same one this catalogue keeps re-learning:
   **"I could not check" must never read the same as "I checked and it is fine."**
 - **`MemoryMax` below ~20G OOMs the Kotlin daemon, and it does NOT look like an

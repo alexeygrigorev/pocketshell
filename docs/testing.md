@@ -931,9 +931,15 @@ Docker SSH/tmux smoke, then builds and installs
 under `build/pre-release-confidence-gate/<run-id>/`. By default the gate also
 uses `build/pre-release-confidence-gate/gradle-home` as an isolated
 `GRADLE_USER_HOME`, so unrelated local Gradle daemon/cache activity cannot stop
-or corrupt the scripted run. Gate Gradle invocations use `--no-build-cache`,
-`--no-parallel`, and `--max-workers=2` to avoid cache-packing,
-generated-source races, and local resource oversubscription. The
+or corrupt the scripted run. Gate Gradle invocations use the shared
+release-chain profile from `scripts/lib/gradle-profile.sh` — `--no-build-cache`,
+`--no-parallel`, `--max-workers=1`, `-Dorg.gradle.jvmargs=-Xmx3072m`,
+`-Pkotlin.daemon.jvmargs=-Xmx3072m`, inside a `POCKETSHELL_TEST_MEM=24G` build
+scope — to avoid cache-packing, generated-source races, local resource
+oversubscription, and the Kotlin/packaging heap exhaustion that killed three
+v0.4.42 release runs before any assertion ran (issue #2054). Check a machine's
+profile in milliseconds with
+`scripts/pre-release-confidence-gate.sh --check-profile`. The
 compile/check phase pre-generates focused app KSP/Hilt sources for debug,
 release, androidTest, and unit-test variants before `check`, which keeps lint
 from depending on stale generated files in the checkout without building a full

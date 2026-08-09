@@ -1673,6 +1673,27 @@ Two operational gotchas learned cutting v0.4.22 on the dev box:
   background-kill), which reports PASS/FAIL so the orchestrator tags. The tag
   helper requires `main` to stay pinned at the validated commit — hold all
   non-release merges (release freeze) until after the tag is pushed.
+- **The `-p MemoryMax=` on that outer `systemd-run` is COSMETIC for the build —
+  `POCKETSHELL_TEST_MEM` is the knob that binds (issue #2054).** Every heavy
+  stage re-enters `scripts/cgroup-run.sh`, which creates its OWN transient
+  SIBLING scope under `robust.slice` via `scripts/lib/scope-run.sh`. A sibling
+  is not a child, so the wrapper's cap never applies to the compile. The v0.4.42
+  cut lost three runs and ~2h to this: the gate died in the BUILD each time
+  (`OOMErrorException ... kotlin.daemon.jvmargs`, then a 43m58s swap-thrash into
+  a zipflinger `packageDebug` heap OOM, then `GC overhead limit exceeded`) while
+  ~44 GiB was free on the box. Raising the cgroup alone is not enough either — a
+  Kotlin daemon never told `-Xmx` stays on gradle.properties' inherited 2048m at
+  any cgroup size. Both halves now default correctly
+  (`scripts/lib/gradle-profile.sh`: `--max-workers=1`, split 3072m/3072m heaps,
+  `POCKETSHELL_TEST_MEM=24G` locally; 1536m/3072m + 8G on the hosted 16 GiB
+  runner, the pair `scripts/check-release-emulator-memory-budget.sh` requires)
+  and are asserted before Gradle starts. Never mix halves — a raised heap inside
+  an unraised scope is the same defect wearing a fix's clothes. Verify a
+  machine's profile in milliseconds with
+  `scripts/pre-release-confidence-gate.sh --check-profile`, and note that a
+  build-stage OOM is a gate-resource failure, NOT the source defect the
+  accompanying `BackendException: Exception during IR lowering` makes it look
+  like.
 
 Manual Release Emulator Validation can also be run from GitHub Actions when a
 local emulator is unavailable:

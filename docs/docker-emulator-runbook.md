@@ -466,10 +466,53 @@ Unless `GRADLE_USER_HOME` is already set, the gate uses
 `build/pre-release-confidence-gate/gradle-home` for its Gradle cache and daemon
 registry. This isolates the release gate from unrelated local Gradle daemon
 stops and generated-output churn in other worktrees. Gate Gradle invocations
-also run through `scripts/cgroup-run.sh` and pass `--no-build-cache`,
-`--no-parallel`, and `--max-workers=2` to avoid cache-packing races,
+also run through `scripts/cgroup-run.sh` and pass the shared release-chain
+execution profile from `scripts/lib/gradle-profile.sh` — `--no-build-cache`,
+`--no-parallel`, `--max-workers=1`, `-Dorg.gradle.jvmargs=-Xmx3072m`, and
+`-Pkotlin.daemon.jvmargs=-Xmx3072m` — to avoid cache-packing races,
 generated-source ordering races, and resource oversubscription when other local
 Gradle jobs are active.
+
+The two heap flags and the single worker are load-bearing, not cosmetic (issue
+#2054). Without them the Kotlin daemon inherits `gradle.properties`' 2048 MiB
+and two compile workers overlap inside it, which killed three consecutive
+v0.4.42 release validations in the BUILD before any emulator assertion ran. The
+gate also raises its `scripts/cgroup-run.sh` build scope to
+`POCKETSHELL_TEST_MEM=24G` (floor 20G locally; hosted CI keeps its pinned 8G with
+the same single-worker/split-heap profile). Both are asserted before Gradle
+starts, so a bad profile fails in milliseconds:
+
+```bash
+scripts/pre-release-confidence-gate.sh --check-profile
+```
+
+An outer `systemd-run --user -p MemoryMax=...` around the gate does NOT bound the
+compile — each heavy step creates its own sibling scope under `robust.slice`, so
+only `POCKETSHELL_TEST_MEM` binds.
+
+There are exactly two supported profiles, and each one's heap half is only valid
+next to its own scope half — both move together or neither does:
+
+| profile | Gradle launcher | Kotlin daemon | workers | build scope |
+| --- | --- | --- | --- | --- |
+| local (dev box) | `-Xmx3072m` | `-Xmx3072m` | 1 | `POCKETSHELL_TEST_MEM=24G` |
+| hosted (16 GiB runner) | `-Xmx1536m` | `-Xmx3072m` | 1 | `POCKETSHELL_TEST_MEM=8G` |
+
+`scripts/lib/gradle-profile.sh` picks between them with one rule for both halves:
+an explicit `GRADLE_FLAGS` / `POCKETSHELL_TEST_MEM` wins (the hosted release
+workflow sets both), otherwise local off CI and hosted on CI. The hosted numbers
+mirror what `scripts/check-release-emulator-memory-budget.sh` requires (#1724),
+and `scripts/check-release-gate-execution-profile.sh` reads the hosted workflow
+and fails if the two guards ever disagree.
+
+If you add a Gradle build to the release chain, put the script that runs it in
+`RELEASE_CHAIN_SCRIPTS` (top of
+`scripts/check-release-gate-execution-profile.sh`) and wire it to the profile
+lib. The guard walks the scripts the chain actually invokes, so a build moved
+into a helper outside that list is a hard failure at PR time rather than a
+silent regression: a child process inherits the `POCKETSHELL_TEST_MEM` export
+but NOT the heap flags, which puts the Kotlin daemon straight back on the
+inherited 2048 MiB.
 
 By default, the script copies the current working tree to
 `build/pre-release-confidence-gate/<run-id>/worktree` and re-execs from that
@@ -485,7 +528,7 @@ The fast pre-release gate does all of the following:
    first runs focused app KSP/Hilt generated-source tasks for debug, release,
    androidTest, and unit-test variants so lint has deterministic generated
    source inputs, then runs
-   `scripts/cgroup-run.sh -- ./gradlew --no-daemon --no-build-cache --no-parallel --max-workers=2 assembleDebug check -x lint -x lintDebug --stacktrace`.
+   `scripts/cgroup-run.sh -- ./gradlew --no-daemon --no-build-cache --no-parallel --max-workers=1 -Dorg.gradle.jvmargs=-Xmx3072m -Pkotlin.daemon.jvmargs=-Xmx3072m assembleDebug check -x lint -x lintDebug --stacktrace`.
    Lint is intentionally excluded from this local pre-release gate so unrelated
    dirty-worktree lint findings do not block the install and focused
    instrumentation checks; run lint separately from a clean checkout before
@@ -583,11 +626,13 @@ EMULATOR=/path/to/emulator
 AVD_NAME=test
 LOG_ROOT=build/pre-release-confidence-gate
 GRADLE_USER_HOME=/tmp/pocketshell-gate-gradle-home
-GRADLE_FLAGS="--no-daemon --no-build-cache --no-parallel --max-workers=2"
+# Leave GRADLE_FLAGS and POCKETSHELL_TEST_MEM unset to inherit the asserted
+# defaults from scripts/lib/gradle-profile.sh. Overriding either is allowed, but
+# the gate rejects a profile missing a heap bound or below the 20G scope floor.
 GATE_ISOLATED_WORKTREE=1
 TEST_APK_DIR=app/build/outputs/apk/androidTest/debug
 TEST_APK_PATH="$TEST_APK_DIR/app-debug-androidTest.apk"
-export ANDROID_SDK ADB EMULATOR AVD_NAME LOG_ROOT GRADLE_USER_HOME GRADLE_FLAGS GATE_ISOLATED_WORKTREE TEST_APK_PATH
+export ANDROID_SDK ADB EMULATOR AVD_NAME LOG_ROOT GRADLE_USER_HOME GATE_ISOLATED_WORKTREE TEST_APK_PATH
 scripts/pre-release-confidence-gate.sh
 ```
 

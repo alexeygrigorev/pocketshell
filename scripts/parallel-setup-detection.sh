@@ -33,6 +33,17 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+
+# Issue #2054: the sharded setup-detection matrix builds the APKs ONCE up front
+# for every shard, so an unbounded-heap build here fails the whole fan-out. The
+# resource args are the machine-appropriate half (hosted 1536m/8G vs local
+# 3072m/24G), paired with the scope applied at the point of use below.
+pocketshell_assert_gradle_execution_profile \
+  "parallel setup-detection APK build" \
+  "${POCKETSHELL_GRADLE_RESOURCE_ARGS[*]}"
+# Build-scope ceiling is asserted at the point of use, inside the
+# PARALLEL_BUILD_APKS branch below.
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -284,8 +295,9 @@ export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
 if [[ "$PARALLEL_BUILD_APKS" = "1" ]]; then
   build_log="$RUN_DIR/00-build-apks.log"
   printf 'building app + androidTest APKs once (shared by all shards) -> %s\n' "$build_log"
+  pocketshell_apply_release_gate_scope_memory "parallel setup-detection APK build"
   if ! "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-parallel-setup-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
-      ./gradlew --no-daemon --no-build-cache --no-parallel \
+      ./gradlew --no-daemon --no-build-cache "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" \
       :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace \
       >"$build_log" 2>&1; then
     tail -n 40 "$build_log" >&2 || true

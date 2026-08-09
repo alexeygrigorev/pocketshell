@@ -6,7 +6,11 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
-pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+# Issue #2054: the AVD lock is acquired further down, AFTER the execution-profile
+# assertion. Queuing behind another emulator-touching run can take an hour; an
+# under-resourced profile should be rejected in the first second, not after that
+# wait. The lock still guards every emulator-touching step.
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -20,7 +24,16 @@ fi
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
-GRADLE_FLAGS="${GRADLE_FLAGS:---no-daemon --no-build-cache --no-parallel --max-workers=2}"
+# Issue #2054: reuse the shared release-chain Gradle execution profile instead of
+# maintaining a private flag string here. The old default
+# (`--no-daemon --no-build-cache --no-parallel --max-workers=2`, no heap flags at
+# all) let the Kotlin daemon inherit gradle.properties' 2048m and ran two compile
+# workers inside it, which OOMed the v0.4.42 release validation three times before
+# any product assertion executed. See scripts/lib/gradle-profile.sh for the
+# evidence and the sizing rationale. An explicit GRADLE_FLAGS from the caller
+# (e.g. the hosted release workflow's 16 GiB-runner profile) still wins, and the
+# assertion below rejects it fast if it lost a heap bound.
+GRADLE_FLAGS="${GRADLE_FLAGS:-$(pocketshell_release_gate_gradle_flags)}"
 GATE_ISOLATED_WORKTREE="${GATE_ISOLATED_WORKTREE:-1}"
 COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 SSH_KEY="${SSH_KEY:-tests/docker/test_key}"
@@ -104,7 +117,10 @@ APP_WALKTHROUGH_TESTS=(
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/pre-release-confidence-gate.sh
+Usage: scripts/pre-release-confidence-gate.sh [--check-profile]
+
+  --check-profile   Assert the Gradle execution profile + build-scope ceiling
+                    and exit (issue #2054). No Gradle, no emulator, no AVD lock.
 
 Runs the local APK pre-release-confidence gate:
   - compile/unit checks
@@ -127,7 +143,17 @@ Environment overrides:
   AVD_NAME=test
   LOG_ROOT=build/pre-release-confidence-gate
   GRADLE_USER_HOME=build/pre-release-confidence-gate/gradle-home
-  GRADLE_FLAGS="--no-daemon --no-build-cache --no-parallel --max-workers=2"
+USAGE
+  # Issue #2054: print the two resource knobs from the SAME source of truth the
+  # gate actually runs with, so this help text cannot drift back into
+  # documenting a profile nobody uses (the old copy still advertised
+  # `--max-workers=2` with no heap flags long after that combination started
+  # OOMing the release build).
+  printf '  GRADLE_FLAGS="%s"\n' "$(pocketshell_release_gate_gradle_flags)"
+  printf '  POCKETSHELL_TEST_MEM=%s   (build-scope MemoryMax; floor %sG locally)\n' \
+    "$POCKETSHELL_RELEASE_GATE_SCOPE_MEM_DEFAULT" \
+    "$POCKETSHELL_RELEASE_GATE_SCOPE_MEM_FLOOR_GIB"
+  cat <<'USAGE'
   GATE_ISOLATED_WORKTREE=1
   COMPOSE_FILE=tests/docker/docker-compose.yml
   APK_PATH=app/build/outputs/apk/debug/app-debug.apk
@@ -149,6 +175,23 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
+# Issue #2054: fail on an under-resourced execution profile in the first second,
+# not 40 minutes into a compile. Runs before the isolated-worktree rsync (so a
+# bad profile does not even pay for the copy) and again in the re-exec'd child,
+# which re-derives GRADLE_FLAGS from the exported value.
+pocketshell_assert_gradle_execution_profile "pre-release confidence gate" "$GRADLE_FLAGS"
+pocketshell_apply_release_gate_scope_memory "pre-release confidence gate"
+
+# Issue #2054: let an operator (or the orchestrator, before committing a machine
+# to a ~40 minute run) verify the execution profile on its own. No Gradle, no
+# emulator, no AVD lock, no isolated-worktree rsync.
+if [[ "${1:-}" == "--check-profile" ]]; then
+  printf 'Execution-profile preflight only: no Gradle, no emulator, no AVD lock taken.\n'
+  exit 0
+fi
+
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+
 mkdir -p "$RUN_DIR"
 
 if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-}" ]]; then
@@ -161,7 +204,10 @@ if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-
     "$ROOT_DIR/" "$isolated_root/"
   export POCKETSHELL_GATE_ISOLATED_COPY=1
   export POCKETSHELL_GATE_SOURCE_ROOT="$ROOT_DIR"
-  export LOG_ROOT RUN_ID GRADLE_USER_HOME GRADLE_FLAGS
+  # Issue #2054: POCKETSHELL_TEST_MEM must cross into the isolated copy too — the
+  # child is what actually invokes scripts/cgroup-run.sh for every heavy step, so
+  # without this the build scope silently falls back to scope-run.sh's 8G default.
+  export LOG_ROOT RUN_ID GRADLE_USER_HOME GRADLE_FLAGS POCKETSHELL_TEST_MEM
   exec "$isolated_root/scripts/pre-release-confidence-gate.sh" "$@"
 fi
 
@@ -276,6 +322,10 @@ write_summary() {
     printf 'Docker compose file: %s\n' "$COMPOSE_FILE"
     printf 'Docker profile/service: agents\n'
     printf 'Docker SSH target: 127.0.0.1:2222\n'
+    # Issue #2054: the execution profile is release evidence. Three v0.4.42 gate
+    # runs died in the build with no artifact naming the heap/scope they used.
+    printf 'Gradle flags: %s\n' "$GRADLE_FLAGS"
+    printf 'Build scope MemoryMax (POCKETSHELL_TEST_MEM): %s\n' "${POCKETSHELL_TEST_MEM:-unset}"
     printf 'Connected core-terminal burst proof (step 12, non-fatal — issue #1314): %s\n' "$CONNECTED_TERMINAL_INPUT_STATUS"
     printf 'Focused app cold-reset APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
     printf 'Final data-preserving update install status: %s\n' "$FINAL_INSTALL_STATUS"

@@ -351,6 +351,20 @@ jobs:
           scripts/check-release-emulator-memory-budget.sh --self-test
           scripts/check-release-emulator-memory-budget.sh
 
+      # Issue #2054: keeps every release-chain Gradle build on the shared
+      # heap-bounded profile after the v0.4.42 validation OOMed three times in
+      # the BUILD. `--self-test` mutates real script copies and requires a RED
+      # for each; it also re-runs its whole body under both `CI` shapes because
+      # the >=20G floor is CI-exempt. Rationale, the exact property enforced and
+      # its residual gaps live in ONE place — the header of
+      # scripts/check-release-gate-execution-profile.sh. Do not restate them
+      # here; a copy only drifts.
+      - name: Release-gate execution-profile guard (issue #2054)
+        run: |
+          chmod +x scripts/check-release-gate-execution-profile.sh
+          scripts/check-release-gate-execution-profile.sh --self-test
+          scripts/check-release-gate-execution-profile.sh
+
       # Issue #1761: the local forced full-JVM gate hit Kotlin compiler OOM when
       # Worker API sessions overlapped inside the 8 GiB scope. Keep its complete
       # `test --rerun-tasks` graph on the proven single-worker / split-heap

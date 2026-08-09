@@ -512,6 +512,18 @@ internal fun pendingSummarySubline(items: List<PendingTranscriptionItem>): Strin
     }
 }
 
+/**
+ * Issue #2056: a delivery whose outcome could not be proven must be STATED as
+ * unproven. "Queued — sending next" was an outright lie for these rows: nothing was
+ * being sent, nothing ever would be, and the payload had usually already run — so
+ * the user could not tell which visibly-queued prompts had already landed, and a
+ * Retry risked duplicating one the agent had already accepted.
+ */
+internal const val OUTBOUND_DELIVERY_UNCONFIRMED_SUMMARY: String = "Sent — delivery unconfirmed"
+
+internal const val OUTBOUND_DELIVERY_UNCONFIRMED_MESSAGE: String =
+    "Sent, but delivery could not be confirmed — check the terminal before retrying"
+
 internal data class OutboundQueueSummary(
     val primary: String,
     val preview: String? = null,
@@ -530,6 +542,9 @@ internal fun outboundQueueSummary(
         ?: outboundAttachmentCountLabel(oldest.attachments.size).takeIf { oldest.attachments.isNotEmpty() }
     val preview = previewText?.let { "“$it”" }
     if (items.size == 1) {
+        if (oldest.isComposerQueueDeliveryUnconfirmed()) {
+            return OutboundQueueSummary(OUTBOUND_DELIVERY_UNCONFIRMED_SUMMARY, preview, attention = true)
+        }
         val primary = when (oldest.state) {
             OutboundState.Queued -> if (connectionDegraded) {
                 "Queued — will send on reconnect"
@@ -544,7 +559,16 @@ internal fun outboundQueueSummary(
         return OutboundQueueSummary(primary, preview, oldest.state == OutboundState.Failed)
     }
 
+    val unconfirmedCount = items.count { it.isComposerQueueDeliveryUnconfirmed() }
     val failedCount = items.count { it.state == OutboundState.Failed }
+    if (unconfirmedCount > 0) {
+        return OutboundQueueSummary(
+            primary = "${items.size} queued",
+            preview = preview,
+            attention = true,
+            attentionSuffix = "$unconfirmedCount unconfirmed",
+        )
+    }
     val primary = when {
         failedCount > 0 -> "${items.size} queued"
         connectionDegraded -> "${items.size} queued · will send on reconnect"
@@ -558,7 +582,11 @@ internal fun outboundQueueSummary(
     )
 }
 
-internal fun outboundQueueStateLabel(item: OutboundItem): String = when (item.state) {
+internal fun outboundQueueStateLabel(item: OutboundItem): String = if (
+    item.isComposerQueueDeliveryUnconfirmed()
+) {
+    OUTBOUND_DELIVERY_UNCONFIRMED_MESSAGE
+} else when (item.state) {
     OutboundState.Queued -> PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE
     OutboundState.Uploading -> "Uploading attachments"
     OutboundState.InFlight -> "Sending"

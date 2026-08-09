@@ -118,9 +118,31 @@ render_default() {
 # while deliberately remaining Unknown to the generic submit-turnover oracle.
 # The #1944 outage journey must therefore wait for the authoritative transcript
 # event appended on Enter, including when its tail starts after reconnect.
+#
+# Issue #2056 — WHY THIS MODE IS NOW LOAD-BEARING FOR THE LATE-AUTHORITY JOURNEYS.
+# #2056 made the PANE a real late-delivery authority: when a row's submit outcome
+# is ambiguous the product re-reads the pane, and an input surface that no longer
+# holds the payload proves the agent consumed the submit. That is correct, and it
+# is exactly what the readline `render_default` surface now reports — so a submit
+# to the DEFAULT fixture is no longer ambiguous for more than one poll.
+#
+# The framed surface models the state where the product genuinely CANNOT decide,
+# which is the real Claude/Codex shape while the agent is working: the box is
+# drawn but no marker glyph is rendered, so
+# `agentInputSurfaceState` answers Unknown BOTH before and after Enter (the frame
+# row strips to empty once the buffer clears, so there is no prompt line at all).
+# The late-authority chain then fails CLOSED on the pane arm and only an
+# authoritative transcript turn can resolve the row — which is precisely the path
+# the #1944/#2037/#1819 journeys exist to protect. Keep this surface free of any
+# `AGENT_INPUT_PROMPT_GLYPHS` marker (`> › ❯ ➜ ❭ $`); adding one would silently
+# hand those journeys a pane authority and stop them exercising the late arm.
+#
+# The heartbeat line mirrors `render_default` so the #2042 busy-agent hold can
+# prove the agent kept producing output throughout on this surface too.
 render_issue1944_framed() {
   printf '\033[H\033[2J'
   printf '%s\r\n' "$READY_MARKER"
+  [ "$HEARTBEAT" = "1" ] && printf 'FAKE-AGENT HEARTBEAT: %s\r\n' "$heartbeat_counter"
   if [ -n "$last_submitted" ]; then
     printf '%s%s\r\n' "$SUBMIT_PREFIX" "$last_submitted"
   fi

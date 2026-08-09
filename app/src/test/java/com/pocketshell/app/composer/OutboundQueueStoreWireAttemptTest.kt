@@ -397,9 +397,12 @@ class OutboundQueueStoreWireAttemptTest {
             wireSubmitAttempted = true,
         )
         val untouched = submitted.copy(id = "legacy-fresh", wireSubmitAttempted = false)
+        // A row persisted BEFORE `wireAttemptGeneration` existed carries no field at
+        // index 24 or beyond (issue #2056 appended `wireOutcomeUnknown` at 25), so the
+        // legacy fixture truncates the record at that boundary.
         val legacyRaw = encodeOutboundItems(listOf(submitted, untouched))
             .lineSequence()
-            .joinToString("\n") { it.substringBeforeLast('\t') }
+            .joinToString("\n") { it.split('\t').take(24).joinToString("\t") }
         val decoded = decodeOutboundItems("legacy", legacyRaw)
 
         assertEquals(1, decoded.first { it.id == submitted.id }.wireAttemptGeneration)

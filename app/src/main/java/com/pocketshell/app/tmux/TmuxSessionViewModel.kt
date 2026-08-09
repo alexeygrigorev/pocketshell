@@ -14143,7 +14143,9 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setAgentTranscriptAuthorityForTest(paneId: String, active: Boolean) = agentTranscriptAuthority.setActiveForTest(paneId, active)
     @androidx.annotation.VisibleForTesting
     internal fun setAgentTranscriptAuthorityStartingForTest(paneId: String, starting: Boolean) = agentTranscriptAuthority.setStartingForTest(paneId, starting)
-    internal fun resolveLateAuthoritativeOutboundAck(item: com.pocketshell.app.composer.OutboundItem): Boolean = resolveLateOutboundAck(outboundDeliveryLedger, agentTranscriptAuthority, item)
+    // Issue #2056: the late authority may need the PANE (a row with no transcript source).
+    internal suspend fun resolveLateAuthoritativeOutboundAck(item: com.pocketshell.app.composer.OutboundItem): Boolean =
+        clientRef?.let { resolveLateOutboundAck(outboundDeliveryLedger, agentTranscriptAuthority, item, boundedPaneCapture(snapshotAgentSendRuntime(it))) } == true
     internal fun consumeLateAuthoritativeOutboundAck(item: com.pocketshell.app.composer.OutboundItem) = outboundDeliveryLedger.clear(item.paneId, item.id)
     private fun isCurrentAgentSendRuntime(
         identity: AgentSendRuntimeIdentity,
@@ -14168,6 +14170,12 @@ public class TmuxSessionViewModel @Inject constructor(
             paneRows.containsKey(paneId) ||
             _agentConversations.value.containsKey(paneId)
     }
+
+    /** Issue #1739/#2056: the caller-bounded, runtime-pinned capture boundary. */
+    private fun boundedPaneCapture(identity: AgentSendRuntimeIdentity): OutboundPaneCapture =
+        { pane, timeoutMs, lines ->
+            captureAgentPaneBounded(identity, pane, timeoutMs, lines).takeIf { it.status == AgentPaneCaptureStatus.Captured }?.response
+        }
 
     private suspend fun captureAgentPaneBounded(
         identity: AgentSendRuntimeIdentity,
@@ -14202,15 +14210,8 @@ public class TmuxSessionViewModel @Inject constructor(
         if (!isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
             return Result.failure(IllegalStateException("Agent send target is stale or foreign."))
         }
-        val boundedCapture: OutboundPaneCapture = { capturePaneId, timeoutMs, scrollbackLines ->
-            captureAgentPaneBounded(
-                identity = runtimeIdentity,
-                paneId = capturePaneId,
-                timeoutMs = timeoutMs,
-                scrollbackLines = scrollbackLines,
-            ).takeIf { it.status == AgentPaneCaptureStatus.Captured }?.response
-        }
-        if (outboundDeliveryLedger.resolveLateAuthoritativeTranscriptAck(agentTranscriptAuthority, paneId, payload, sendToken, durableRow)) return Result.success(Unit).also { requestReconcile(client, paneId, ReconcileReason.Send) }
+        val boundedCapture = boundedPaneCapture(runtimeIdentity)
+        if (outboundDeliveryLedger.resolveLateAuthoritativeSubmitAck(agentTranscriptAuthority, paneId, payload, sendToken, durableRow, boundedCapture)) return Result.success(Unit).also { requestReconcile(client, paneId, ReconcileReason.Send) }
         // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt for THIS send —
         // keyed by the #1529 [sendToken], NOT the payload, so two distinct identical sends
         // never false-dedup — the paste may have run server-side (audit A1/A2). Probe (#869
@@ -14236,11 +14237,7 @@ public class TmuxSessionViewModel @Inject constructor(
                         .response ?: error("Agent submit frame unavailable before Enter; kept queued.")
                 }
                 val transcriptBaseline = agentTranscriptAuthority.baselineFor(deliveryProof, paneId, payload)
-                durableRow?.let { row ->
-                    check(withContext(seedIoDispatcher) {
-                        outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row, transcriptBaseline?.durable())
-                    }) { "Agent submit write-ahead persistence failed; Enter not sent." }
-                }
+                outboundDeliveryLedger.persistSubmitWriteAhead(seedIoDispatcher, paneId, sendToken, durableRow, transcriptBaseline?.durable())
                 sendNamedKeyToPane(client, paneId, "Enter")
                     .throwIfTmuxError("submit previously pasted agent input")
                 if (preEnterFrame != null && deliveryProof == AgentSubmitDeliveryProof.AgentTurnover) {
@@ -14355,11 +14352,7 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             consumeSendResultLostSeamForTest()
             val transcriptBaseline = agentTranscriptAuthority.baselineFor(deliveryProof, paneId, payload)
-            durableRow?.let { row ->
-                check(withContext(seedIoDispatcher) {
-                    outboundDeliveryLedger.recordSubmitAttempt(paneId, sendToken, row, transcriptBaseline?.durable())
-                }) { "Agent submit write-ahead persistence failed; Enter not sent." }
-            }
+            outboundDeliveryLedger.persistSubmitWriteAhead(seedIoDispatcher, paneId, sendToken, durableRow, transcriptBaseline?.durable())
             sendNamedKeyToPane(client, paneId, "Enter")
                 .throwIfTmuxError("submit pasted agent input")
             if (durableRow != null && deliveryProof == AgentSubmitDeliveryProof.AgentTurnover) {

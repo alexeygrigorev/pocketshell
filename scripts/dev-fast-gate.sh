@@ -104,56 +104,61 @@ compute_changed_paths() {
 #   bootstrap    host setup-detection / bootstrap
 #   terminal     terminal/SSH/tmux render path
 #   migration    Room schema / migrations / install-update path
+#
+# ISSUE #2063: the case arms that used to live here are now DATA, in
+# scripts/test-areas.txt, read through scripts/lib/test-areas.sh. The same
+# manifest drives CI area selection and the coverage guard, so the local fast
+# path and CI can no longer disagree about what a path is.
+#
+# Two things are preserved exactly and one is deliberately tightened:
+#   * the ORDER (force-full -> migration -> area allowlist -> force-full
+#     default) is unchanged; only the last two steps read the manifest;
+#   * every stage decision this script made before is unchanged for every
+#     tracked file in the repo, EXCEPT paths that the manifest force-fulls more
+#     aggressively than the old arms did (TmuxSessionViewModel.kt, the Docker
+#     bootstrap fixtures, shared/test-support). Those move toward MORE
+#     validation, never less.
+# scripts/dev-fast-gate-parity-selftest.sh proves both statements over every
+# tracked file, and pins the tightened set so it cannot grow unnoticed.
 # ---------------------------------------------------------------------------
+# shellcheck source=lib/test-areas.sh
+source "$ROOT_DIR/scripts/lib/test-areas.sh"
+
+if ! pocketshell_test_areas_load "${POCKETSHELL_TEST_AREAS_MANIFEST:-$ROOT_DIR/scripts/test-areas.txt}"; then
+  echo "error: scripts/test-areas.txt failed to load:" >&2
+  printf '  %s\n' "${POCKETSHELL_TA_LOAD_ERRORS[@]}" >&2
+  echo "error: refusing to guess — run the FULL gate (scripts/release-emulator-validation.sh)" >&2
+  exit 2
+fi
+
 classify_path() {
   local p="$1"
 
+  pocketshell_test_area_classify "$p"
+
   # ---- FORCE FULL (fail-safe). Evaluated first; any match => full gate. ----
-  case "$p" in
-    # build files
-    *build.gradle.kts|*.gradle|*.gradle.kts|gradle.properties|settings.gradle|settings.gradle.kts)
-      echo "force-full"; return ;;
-    gradle/*|*/gradle/*)
-      echo "force-full"; return ;;
-    # tooling / CI / scripts
-    scripts/*)
-      echo "force-full"; return ;;
-    .github/*)
-      echo "force-full"; return ;;
-  esac
+  # The manifest's `full` rows are a strict superset of the old inline arms
+  # (build files, gradle, scripts/, .github/) and add the blast-radius escapes
+  # the old arms reached only via the unmatched default.
+  if [[ "$POCKETSHELL_TEST_AREA_KIND" == "full" ]]; then
+    echo "force-full"; return
+  fi
 
   # Room schema / migrations / install-update path -> needs pre-release gate.
+  # Stays inline: `migration` is a release/DB concern that cuts across every
+  # test area, so it is not expressible as an area and must keep its original
+  # position — after force-full, before the allowlist.
   case "$p" in
     *[Mm]igration*|*/schemas/*|*schemas/*.json)
       echo "migration"; return ;;
   esac
 
-  # ---- bootstrap / setup-detection ----
-  case "$p" in
-    app/src/main/*/bootstrap/*|*/bootstrap/*)
-      echo "bootstrap"; return ;;
-    tests/docker/*bootstrap*|tests/docker/*[Bb]ootstrap*)
-      echo "bootstrap"; return ;;
+  # ---- the allowlist, now read from the manifest's `devgate` column ----
+  # `full` here is the old "not on the conservative allowlist" default.
+  case "$POCKETSHELL_TEST_AREA_DEVGATE" in
+    ui|bootstrap|terminal) echo "$POCKETSHELL_TEST_AREA_DEVGATE"; return ;;
+    *) echo "force-full"; return ;;
   esac
-
-  # ---- terminal / SSH / tmux render path ----
-  case "$p" in
-    shared/core-terminal/*|shared/core-ssh/*|shared/core-tmux/*)
-      echo "terminal"; return ;;
-    app/src/main/*/terminal/*|app/src/main/*/ssh/*|app/src/main/*/tmux/*)
-      echo "terminal"; return ;;
-  esac
-
-  # ---- UI-only (no SSH/tmux/bootstrap surface) ----
-  case "$p" in
-    shared/ui-kit/*)
-      echo "ui"; return ;;
-    app/src/main/*/projects/*)
-      echo "ui"; return ;;
-  esac
-
-  # Anything not on the conservative allowlist -> full gate.
-  echo "force-full"
 }
 
 # ---------------------------------------------------------------------------

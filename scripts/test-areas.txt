@@ -1,0 +1,409 @@
+# PocketShell test-area manifest — the coverage-guard taxonomy (issue #2063).
+#
+# This taxonomy exists to make coverage MECHANICALLY CHECKABLE (is every class
+# mapped, reachable, and actually executed within a bounded window — the
+# #1851/#1853/#1859/#1509 class), and it scopes CI selection as a by-product.
+# It is not a speed feature: measured over 104 `main` commits it is 1.09x on the
+# emulator lane and neutral-to-slightly-negative on Unit. docs/testing.md has
+# the numbers. Edit this file to keep the map honest, not to chase a runtime.
+#
+# ONE data file drives all four consumers, so the taxonomy cannot drift:
+#   * scripts/select-test-areas.sh            — changed paths -> areas -> what to run
+#   * scripts/check-test-execution-ledger.sh  — proves every class still executes
+#   * scripts/dev-fast-gate.sh                — local emulator fast path (devgate col)
+#   * docs/testing.md                         — the documented rule for a NEW test
+#
+# GRAMMAR (whitespace-separated; the last column may contain spaces)
+#
+#   area   <name>  <tier>  <description...>     tier = always | changed
+#   full   <glob>  <reason...>                  changing this => run EVERYTHING
+#   noop   <glob>  <reason...>                  provably cannot affect any test
+#   src    <glob>  <area>  <devgate>            production path -> area
+#   test   <glob>  <area>  <devgate>            test path      -> area
+#   class  <fqcn>  <area>                       per-class override (beats globs)
+#   couple <area>  <area,area,...>              selecting <area> also selects these
+#
+# Globs are bash `[[ path == glob ]]` patterns with extglob on, so `*` crosses
+# `/` and `+(...)` / `!(...)` are available where a rule must NOT cross a path
+# segment. Rows are first-match-wins IN FILE ORDER within their record type.
+# Evaluation order across types is fixed in scripts/lib/test-areas.sh:
+#
+#   full -> test-infrastructure rule -> noop -> class -> test -> src -> FULL
+#
+# THE RULE FOR A NEW TEST (this is the whole rule; do not re-litigate)
+#
+#   A test's area is the area of its Gradle module, or — inside :app — of its
+#   top-level `com.pocketshell.app.<pkg>` package. Add a test to an existing
+#   package and it inherits that package's area with no manifest edit at all.
+#   Only three things need a manifest edit:
+#     1. a NEW top-level package or Gradle module  -> add a src + test row;
+#     2. a class whose regression class belongs to a DIFFERENT area than its
+#        package (rare; the conversation-source cluster living in app.tmux is
+#        the only case today) -> add a `class` row;
+#     3. a new production path with cross-area blast radius -> add a `full` row.
+#   Forget all three and the guard fails with "unmapped path" while the run
+#   falls back to FULL: the map can only lag LOUDLY, never silently.
+#
+# TIERS
+#   always  — this area's tests run on EVERY push regardless of the diff. Held
+#             for the D28/G8 worst-reopen areas (connection/reconnect/lease,
+#             conversation-source/agent-detection, terminal render/ANR) plus the
+#             app shell. Per-area justification: docs/testing.md.
+#   changed — runs when the area (or something coupled to it, or a force-full
+#             path) is in the diff, plus nightly, plus the release gate.
+#
+# WHAT DECIDES THAT A TEST RUNS (read this before adding a `couple` row)
+#
+# A test CLASS runs on a push when any of these holds:
+#
+#   1. the run is FULL (force-full path, unmapped path, manifest load failure);
+#   2. its area is `always`-tier;
+#   3. its own area is in the diff, or in the `couple` closure of the diff;
+#   4. it IMPORTS the production code of an area that is in the diff — derived
+#      from the class's own `import com.pocketshell.…` lines, NOT from any row
+#      in this file;
+#   5. it lives in — or imports — a package on the host-CLI WIRE SEAM, and
+#      `tools/pocketshell/**` is in the diff.
+#
+# THE WIRE SEAM MARKS BOTH ENDS OF THE CONTRACT (rule 5, round-2 finding B6)
+#
+# A wire contract has a producer and a consumer, and marking only the invoking
+# end left the entire `shared/*` half of the tree outside the seam by
+# construction — no shared module ever shells out. That is how
+# `:shared:core-usage:test`, the STRICT / fail-loud reader of the NDJSON
+# `tools/pocketshell/src/pocketshell/usage.py` emits, was not run by a change to
+# the code that produces it, with every guard green. A production package is on
+# the seam when ANY of these holds:
+#
+#   (a) PRODUCER  — a file in it invokes the CLI (`PocketshellCommand`, or a
+#                   literal `pocketshell …` command string);
+#   (b) CONSUMER  — an INVOKING FILE imports it (one hop): the invoker builds the
+#                   request and hands the reply to something, and that something
+#                   is in the invoking file's own import set;
+#   (c) VOCABULARY— a file in it NAMES a real host-CLI subcommand, where the
+#                   subcommand list is extracted from the producer itself
+#                   (`cli.add_command(…, name="…")` in
+#                   tools/pocketshell/src/pocketshell/cli.py). This is the case
+#                   with no in-app invoker at all: the settings QR importer
+#                   parses what `pocketshell qr-share` emits, and that payload
+#                   arrives by QR scan, so no import edge exists to follow.
+#
+# Rules 4 and 5 are computed in scripts/lib/test-areas.sh; that file's index
+# comment carries the full rationale, the two stronger designs that were
+# measured and rejected (both degenerate to "run everything" because the
+# production import graph is strongly connected), and the bound this one accepts
+# (direct compile edges only — transitive production dependencies are not
+# chased; the always tier, nightly and the release gate are the backstops).
+# `--verify-manifest` check 7 floors each seam END separately, including how far
+# the seam reaches into `shared/*`, because a total-only floor is exactly what
+# hid B6: 15 packages looked healthy while one whole end was at zero.
+#
+# So `couple` rows exist ONLY for BEHAVIOURAL coupling that no import expresses:
+# composer-always-present across screens, ui-kit tokens reaching every surface,
+# a host record the tree reads. Do not add a `couple` row for a compile-level
+# dependency — rule 4 already has it, and a hand row that duplicates the import
+# graph is how round 1 ended up asserting two edges it did not have.
+#
+# devgate is consumed ONLY by scripts/dev-fast-gate.sh, whose coarse emulator
+# stages (ui | bootstrap | terminal | full) answer a different question from the
+# test areas. It is a per-ROW column, not a per-AREA one, precisely because the
+# old inline arms split some areas across stages (shared/core-ssh was
+# `terminal` while shared/core-connection fell through to force-full). Keeping
+# it per-row is what let dev-fast-gate move onto this manifest with every one of
+# its decisions unchanged — proven over every tracked file by
+# scripts/dev-fast-gate-parity-selftest.sh.
+
+# ---------------------------------------------------------------------------
+# AREAS
+# ---------------------------------------------------------------------------
+area   connection-core      always   SSH transport, lease, reconnect, grace, tmux -CC control protocol (D28 core)
+area   terminal-render      always   Terminal emulation, parsing, render and the drain scheduler (#796/#803 ANR class)
+area   conversation-agents  always   Agent detection, conversation source binding and the parsed transcript (#819/#825 class)
+area   app-shell            always   Application entry, DI graph, navigation, startup and test-access seams
+area   tmux-session         changed  The tmux session screen, chrome, pager and session UI state
+area   composer-voice       changed  Prompt composer, outbound queue, dictation, voice assistant and messaging
+area   projects-tree        changed  Session tree, folders, repos and git surfaces
+area   portfwd              changed  Port forwarding core, panel and forwarding service
+area   files                changed  File viewer and file explorer
+area   hosts-settings       changed  Hosts, settings, preferences and local storage
+area   share                changed  Share target and attachment intake
+area   usage-costs          changed  Usage panel, provider quotas and cost reporting
+area   bootstrap            changed  Host setup detection, server bootstrap and the host CLI wrapper
+area   notifications        changed  Notifications and system surfaces
+area   release-update       changed  In-app update, release checks and APK install
+area   diagnostics-crash    changed  Diagnostics, crash reporting, env and snippets
+area   ui-shell             changed  Shared ui-kit design system, layout, insets and branding
+area   ci-harness           changed  JVM-driven shell harness tests for the CI scripts
+# host-cli has ZERO Kotlin test classes of its own (its unit tests are the
+# separate `Python utility tests` job). It matters because host-CLI/client
+# version is a RUNTIME lockstep — #847 / v0.4.10, the most expensive break this
+# repo has shipped. Its coupling to the Kotlin tests is derived from the
+# two-ended wire seam (rule 5 above), not from a `couple` row, and I9 in
+# --coverage-invariant pins both journeys (#1509, FolderListOldCliHydrateDockerTest)
+# and UNIT consumers (PocketshellUsageJsonParserTest, AppDatabaseTest,
+# SessionAgentKindOptionTest) to it by name. Measured consequence, stated rather
+# than buried: with both ends marked, a `tools/pocketshell/**` change selects
+# 158 of 161 journeys and 570 of 659 unit classes — a host-CLI change is now
+# effectively a full run. That is the deliberate answer for the #847 class.
+area   host-cli             changed  The host-side `pocketshell` Python CLI
+
+# ---------------------------------------------------------------------------
+# FORCE-FULL — blast-radius escapes. Evaluated FIRST, in this order.
+#
+# The test that would have caught a cross-area change must never be skipped, so
+# anything whose effect provably leaves its own area runs everything. Every row
+# here is a deliberate cost, and every one is cheaper than a missed regression.
+# ---------------------------------------------------------------------------
+full   .github/*                     CI workflow definitions decide what runs at all
+full   scripts/*                     the gate harnesses, including this manifest and its consumers
+full   tests/*                       Docker fixtures and shell harnesses every journey depends on
+full   gradle/*                      version catalogue and wrapper properties
+full   */gradle/*                    nested gradle directories
+full   gradlew*                      the wrapper entry points
+full   *build.gradle.kts             module build configuration
+full   *.gradle.kts                  any Gradle Kotlin script
+full   *.gradle                      any Gradle Groovy script
+full   gradle.properties             daemon/heap/parallelism config changes every test task
+full   cgroups.toml                  local run confinement used by the gates
+full   debug.keystore                signing input for every built APK
+full   shared/test-support/*         the ONE audited settle pump; every runTest consumer depends on it
+full   app/src/main/java/com/pocketshell/app/di/*             the Hilt/DI graph wires every area together
+full   app/src/main/java/com/pocketshell/app/nav/*            the navigation graph reaches every screen
+full   app/src/main/java/com/pocketshell/app/startup/*        process startup ordering affects every surface
+full   app/src/main/java/com/pocketshell/app/testaccess/*     the seams every androidTest drives the app through
+full   app/src/main/java/com/pocketshell/app/layout/*         shared layout scaffolding used by every screen
+full   app/src/main/java/com/pocketshell/app/App.kt           application object: lifecycle fan-out to every surface
+full   app/src/main/java/com/pocketshell/app/MainActivity.kt  single activity host for every destination
+full   app/src/main/java/com/pocketshell/app/AppTeardownScope.kt      global teardown ordering
+full   app/src/main/java/com/pocketshell/app/MainThreadConfinement.kt main-thread policy enforced app-wide
+full   app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt  D28 god-object seam (#766 residue) where cross-area wedge bugs hide
+full   app/src/main/res/*            theme tokens, strings and drawables reach every screen (#453/#641 class)
+full   app/src/main/AndroidManifest.xml        components, permissions and exported surfaces
+full   app/src/androidTest/AndroidManifest.xml instrumentation manifest for every connected test
+full   app/src/debug/*               debug-variant instrumentation seams (Hilt host activity, Toxiproxy control) every journey builds against
+full   app/lint.xml                  lint configuration applied to every module build
+full   app/*.pro                     R8/ProGuard rules change every release-variant test
+
+# ---------------------------------------------------------------------------
+# NOOP — provably cannot affect any test.
+#
+# Narrow on purpose: prose only. No Gradle test and no journey reads a repo
+# markdown file at runtime, and `select-test-areas.sh --verify-manifest`
+# re-proves that on every run by scanning the test trees for doc-file reads, so
+# this row set cannot quietly become wrong. A noop-only diff still runs the
+# always tier — "select nothing" is unreachable by construction (the always-tier
+# union in lib/test-areas.sh happens last and unconditionally).
+# ---------------------------------------------------------------------------
+noop   *.md                          prose; no test reads a markdown file at runtime
+noop   docs/*                        planning docs and mockups
+noop   mockups/*                     static HTML mockups
+noop   .claude/*                     agent role prompts
+noop   .gitignore                    ignore rules
+
+# ---------------------------------------------------------------------------
+# PRODUCTION PATHS -> AREA. Ordered specific-before-general.
+# ---------------------------------------------------------------------------
+
+# -- shared modules --
+src    shared/core-ssh/*             connection-core      terminal
+src    shared/core-tmux/*            connection-core      terminal
+src    shared/core-connection/*      connection-core      full
+src    shared/core-terminal/*        terminal-render      terminal
+src    shared/core-agents/*          conversation-agents  full
+src    shared/core-voice/*           composer-voice       full
+src    shared/core-assistant/*       composer-voice       full
+src    shared/core-portfwd/*         portfwd              full
+src    shared/core-storage/*         hosts-settings       full
+src    shared/core-usage/*           usage-costs          full
+src    shared/ui-kit/*               ui-shell             ui
+
+# -- :app production packages --
+src    app/src/main/java/com/pocketshell/app/ssh/*            connection-core      terminal
+src    app/src/main/java/com/pocketshell/app/sessions/*       connection-core      full
+src    app/src/main/java/com/pocketshell/app/session/*        connection-core      full
+src    app/src/main/java/com/pocketshell/app/connectivity/*   connection-core      full
+src    app/src/main/java/com/pocketshell/app/jobs/*           connection-core      full
+src    app/src/main/java/com/pocketshell/app/terminal/*       terminal-render      terminal
+src    app/src/main/java/com/pocketshell/app/tmux/*           tmux-session         terminal
+src    app/src/main/java/com/pocketshell/app/composer/*       composer-voice       full
+src    app/src/main/java/com/pocketshell/app/voice/*          composer-voice       full
+src    app/src/main/java/com/pocketshell/app/assistant/*      composer-voice       full
+src    app/src/main/java/com/pocketshell/app/messaging/*      composer-voice       full
+src    app/src/main/java/com/pocketshell/app/conversation/*   conversation-agents  full
+src    app/src/main/java/com/pocketshell/app/agents/*         conversation-agents  full
+src    app/src/main/java/com/pocketshell/app/agentcommands/*  conversation-agents  full
+src    app/src/main/java/com/pocketshell/app/cards/*          conversation-agents  full
+src    app/src/main/java/com/pocketshell/app/projects/*       projects-tree        ui
+src    app/src/main/java/com/pocketshell/app/repos/*          projects-tree        full
+src    app/src/main/java/com/pocketshell/app/git/*            projects-tree        full
+src    app/src/main/java/com/pocketshell/app/portfwd/*        portfwd              full
+src    app/src/main/java/com/pocketshell/app/fileviewer/*     files                full
+src    app/src/main/java/com/pocketshell/app/fileexplorer/*   files                full
+src    app/src/main/java/com/pocketshell/app/hosts/*          hosts-settings       full
+src    app/src/main/java/com/pocketshell/app/settings/*       hosts-settings       full
+src    app/src/main/java/com/pocketshell/app/prefs/*          hosts-settings       full
+src    app/src/main/java/com/pocketshell/app/share/*          share                full
+src    app/src/main/java/com/pocketshell/app/usage/*          usage-costs          full
+src    app/src/main/java/com/pocketshell/app/costs/*          usage-costs          full
+src    app/src/main/java/com/pocketshell/app/bootstrap/*      bootstrap            bootstrap
+src    app/src/main/java/com/pocketshell/app/pocketshell/*    bootstrap            full
+src    app/src/main/java/com/pocketshell/app/notifications/*  notifications        full
+src    app/src/main/java/com/pocketshell/app/systemsurfaces/* notifications        full
+src    app/src/main/java/com/pocketshell/app/release/*        release-update       full
+src    app/src/main/java/com/pocketshell/app/diagnostics/*    diagnostics-crash    full
+src    app/src/main/java/com/pocketshell/app/crash/*          diagnostics-crash    full
+src    app/src/main/java/com/pocketshell/app/env/*            diagnostics-crash    full
+src    app/src/main/java/com/pocketshell/app/snippets/*       diagnostics-crash    full
+
+# -- host CLI --
+src    tools/pocketshell/*           host-cli             full
+
+# ---------------------------------------------------------------------------
+# TEST PATHS -> AREA. Ordered specific-before-general.
+#
+# Files in a test source set that are NOT named *Test.kt never reach these
+# rows: the test-infrastructure rule in lib/test-areas.sh force-fulls them
+# first, because a shared fixture's blast radius is exactly as unknown as a DI
+# module's.
+# ---------------------------------------------------------------------------
+
+# -- shared module test trees --
+test   shared/core-ssh/*             connection-core      terminal
+test   shared/core-tmux/*            connection-core      terminal
+test   shared/core-connection/*      connection-core      full
+test   shared/core-terminal/*        terminal-render      terminal
+test   shared/core-agents/*          conversation-agents  full
+test   shared/core-voice/*           composer-voice       full
+test   shared/core-assistant/*       composer-voice       full
+test   shared/core-portfwd/*         portfwd              full
+test   shared/core-storage/*         hosts-settings       full
+test   shared/core-usage/*           usage-costs          full
+test   shared/ui-kit/*               ui-shell             ui
+
+# -- :app test packages (unit + androidTest share one taxonomy) --
+test   app/src/*/java/com/pocketshell/app/proof/*           connection-core      full
+test   app/src/*/java/com/pocketshell/app/ssh/*             connection-core          full
+test   app/src/*/java/com/pocketshell/app/sessions/*        connection-core      full
+test   app/src/*/java/com/pocketshell/app/session/*         connection-core      full
+test   app/src/*/java/com/pocketshell/app/connectivity/*    connection-core      full
+test   app/src/*/java/com/pocketshell/app/jobs/*            connection-core      full
+test   app/src/*/java/com/pocketshell/app/terminal/*        terminal-render          full
+test   app/src/*/java/com/pocketshell/app/tmux/*            tmux-session             full
+test   app/src/*/java/com/pocketshell/app/composer/*        composer-voice       full
+test   app/src/*/java/com/pocketshell/app/voice/*           composer-voice       full
+test   app/src/*/java/com/pocketshell/app/assistant/*       composer-voice       full
+test   app/src/*/java/com/pocketshell/app/messaging/*       composer-voice       full
+test   app/src/*/java/com/pocketshell/app/conversation/*    conversation-agents  full
+test   app/src/*/java/com/pocketshell/app/agents/*          conversation-agents  full
+test   app/src/*/java/com/pocketshell/app/agentcommands/*   conversation-agents  full
+test   app/src/*/java/com/pocketshell/app/cards/*           conversation-agents  full
+test   app/src/*/java/com/pocketshell/app/projects/*        projects-tree        full
+test   app/src/*/java/com/pocketshell/app/repos/*           projects-tree        full
+test   app/src/*/java/com/pocketshell/app/git/*             projects-tree        full
+test   app/src/*/java/com/pocketshell/app/portfwd/*         portfwd              full
+test   app/src/*/java/com/pocketshell/app/fileviewer/*      files                full
+test   app/src/*/java/com/pocketshell/app/fileexplorer/*    files                full
+test   app/src/*/java/com/pocketshell/app/hosts/*           hosts-settings       full
+test   app/src/*/java/com/pocketshell/app/settings/*        hosts-settings       full
+test   app/src/*/java/com/pocketshell/app/prefs/*           hosts-settings       full
+test   app/src/*/java/com/pocketshell/app/share/*           share                full
+test   app/src/*/java/com/pocketshell/app/usage/*           usage-costs          full
+test   app/src/*/java/com/pocketshell/app/costs/*           usage-costs          full
+test   app/src/*/java/com/pocketshell/app/bootstrap/*       bootstrap            bootstrap
+test   app/src/*/java/com/pocketshell/app/pocketshell/*     bootstrap            full
+test   app/src/*/java/com/pocketshell/app/docker/*          bootstrap            full
+test   app/src/*/java/com/pocketshell/app/notifications/*   notifications        full
+test   app/src/*/java/com/pocketshell/app/systemsurfaces/*  notifications        full
+test   app/src/*/java/com/pocketshell/app/release/*         release-update       full
+test   app/src/*/java/com/pocketshell/app/diagnostics/*     diagnostics-crash    full
+test   app/src/*/java/com/pocketshell/app/crash/*           diagnostics-crash    full
+test   app/src/*/java/com/pocketshell/app/env/*             diagnostics-crash    full
+test   app/src/*/java/com/pocketshell/app/snippets/*        diagnostics-crash    full
+test   app/src/*/java/com/pocketshell/app/ui/*              ui-shell             full
+test   app/src/*/java/com/pocketshell/app/insets/*          ui-shell             full
+test   app/src/*/java/com/pocketshell/app/branding/*        ui-shell             full
+test   app/src/*/java/com/pocketshell/app/scripts/*         ci-harness           full
+test   app/src/*/java/com/pocketshell/app/nav/*             app-shell            full
+test   app/src/*/java/com/pocketshell/app/di/*              app-shell            full
+test   app/src/*/java/com/pocketshell/app/testaccess/*      app-shell            full
+test   app/src/*/java/com/pocketshell/app/test/*            app-shell            full
+# :app ROOT-level test classes (App / MainActivity / lease lifecycle / back trap).
+# `+([A-Za-z0-9_])` cannot cross `/`, so this row matches only files sitting
+# directly in the `app` package — a test in a NEW subpackage falls through to
+# unmapped => FULL + a loud guard failure, which is the point.
+test   app/src/*/java/com/pocketshell/app/+([A-Za-z0-9_])Test.kt  app-shell  full
+
+# -- host CLI tests --
+test   tools/pocketshell/tests/*     host-cli             full
+
+# ---------------------------------------------------------------------------
+# PER-CLASS OVERRIDES
+#
+# The conversation-source cluster lives in the com.pocketshell.app.tmux package
+# (it drives the tmux session screen) but its regression class is
+# conversation-source binding — the #819/#825/#962/#1057 worst-reopen area. It
+# must run on every push, so it is pinned to the always-tier
+# conversation-agents area instead of the changed-tier tmux-session area.
+# ---------------------------------------------------------------------------
+class  com.pocketshell.app.tmux.AgentConversationReconnectDockerTest  conversation-agents
+class  com.pocketshell.app.tmux.ConversationToggleVisibleForLiveAgentInShellRecordedSessionDockerTest  conversation-agents
+class  com.pocketshell.app.tmux.ConversationStaysReachableAfterDetectionDropsDockerTest  conversation-agents
+class  com.pocketshell.app.tmux.ConversationTuiCommandJourneyDockerTest  conversation-agents
+class  com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest  conversation-agents
+class  com.pocketshell.app.tmux.TmuxConversationBottomComposerScreenshotTest  conversation-agents
+
+# ---------------------------------------------------------------------------
+# AREA COUPLING — BEHAVIOURAL edges only.
+#
+# Selecting the left area also selects everything on the right, transitively.
+# Each edge exists because a change on the left has repeatedly broken the right
+# in a way NO import expresses — a screen-level invariant, a shared design
+# token, a record one surface writes and another reads.
+#
+# Compile-level coupling is NOT listed here and must not be added here: it is
+# derived per test class from the import graph (rule 4 in the header). Round 1
+# hand-listed compile coupling, claimed two edges the file did not contain, and
+# 29 journeys that compile against connection-core production types were not
+# run by a connection-core change.
+# ---------------------------------------------------------------------------
+# The AGENTS.md coupling invariant: composer-always-present and
+# conversation-default are one seam; ComposerAlwaysPresentSwitchJourneyE2eTest
+# breaks across all three.
+couple composer-voice       tmux-session,conversation-agents
+couple tmux-session         composer-voice,conversation-agents,terminal-render
+couple conversation-agents  tmux-session,composer-voice
+# The two always-tier engine areas fan OUT to the session screen when they
+# actually change. Note this is not redundant with their `always` tier: the
+# closure in lib/test-areas.sh runs over the CHANGED seed areas only and unions
+# the always tier afterwards, so these edges fire on a real connection/terminal
+# change and stay silent when those areas are merely the always-on floor.
+# Without them a pure connection-core change would skip
+# TmuxConnectingStatesScreenshotTest (#750, a D31 third occurrence) and
+# Issue1686QueueDrainWireOracleDockerTest (#1686), both of which live in the
+# app.tmux package but are driven by the transport.
+couple connection-core      tmux-session
+couple terminal-render      tmux-session
+# ui-kit tokens reach every screen (#453/#641): a design-system change selects
+# every UI-bearing area. Deliberately near-full — do not try to be clever here.
+couple ui-shell             tmux-session,composer-voice,projects-tree,files,hosts-settings,share,usage-costs,bootstrap,notifications,release-update,diagnostics-crash,portfwd,conversation-agents
+# The tree creates and resumes sessions and lands on the session screen
+# (#889 ProfileChipRelaunchDockerTest, #881 FolderListScreenE2eTest profiles).
+couple projects-tree        tmux-session
+# The file viewer is reached from the session screen's path tap and more-menu
+# (TmuxMoreMenuOpenFileTest lives in the tmux package), so a viewer change must
+# run those. There is deliberately NO projects-tree <-> files edge: no journey
+# crosses that boundary, and inventing the edge would cost ~200 classes per
+# tree change for nothing.
+couple files                tmux-session
+# Host setup writes the host record the tree and sessions read.
+couple hosts-settings       bootstrap,projects-tree
+couple bootstrap            hosts-settings
+# The forwarding service is observed through its notification. BOTH directions:
+# #1198/#1487/#2006 are forwarding-notification regressions, so a change on
+# either side must run the other's journeys.
+couple portfwd              notifications
+couple notifications        portfwd
+# Share hands its payload to the composer, and the composer renders it. Both
+# directions for the same reason.
+couple share                composer-voice
+couple composer-voice       share

@@ -30,7 +30,8 @@ jobs:
   # Issue #2060 (CI Phase A): the ~25 SERIAL guard steps this job used to carry in
   # front of the Gradle run (~20 min unrelated to the tests) now run CONCURRENTLY
   # in `guards-static`, `guards-ci-harness` and `dex`, all still blocking through
-  # `unit-gate` below.
+  # `unit-gate` below. Issue #2067 added `guards-test-selection` on the same
+  # principle, for #2063's coverage guards.
   unit:
     name: JVM unit tests
     runs-on: ubuntu-latest
@@ -377,6 +378,18 @@ jobs:
           scripts/full-jvm-gate.sh --profile-guard-self-test
           scripts/full-jvm-gate.sh --profile-guard-check
 
+      # Issue #2067: `unit-gate` holds THREE lists nothing forced to agree —
+      # `needs:`, the `env:` result mapping, and the result-checking loop. A job
+      # in the first but not the third RUNS, can go RED, and the required check
+      # stays GREEN: the silent-gate failure #2060 exists to prevent. #2060 left
+      # that pairing to a comment; this makes it mechanical. Eleven self-test
+      # cases, own-count-asserted. Detail in the script header. ~1 s, no Gradle.
+      - name: "Unit-gate wiring guard (issue #2067)"
+        run: |
+          chmod +x scripts/check-unit-gate-wiring.sh
+          scripts/check-unit-gate-wiring.sh --self-test
+          scripts/check-unit-gate-wiring.sh
+
   # ---------------------------------------------------------------------------
   # Issue #2060 (CI Phase A): CI/harness fixture guards, split out of the `unit`
   # job. They drive the real emulator-journey / nightly / release harness scripts
@@ -687,6 +700,30 @@ jobs:
           scripts/test-ci-ndk-retry.sh
 
   # ---------------------------------------------------------------------------
+  # Issue #2067: the #2063 test-area coverage guards, as a DEDICATED job. Reached
+  # through a JVM test they were paid TWICE per push (both variants) on the Unit
+  # critical path for work that compiles nothing, which cancelled the scheme's
+  # own saving; here they are paid once, in parallel, still blocking through
+  # `unit-gate`. The JVM driver is deleted, not duplicated (D22). No
+  # JDK/Gradle/SDK/Docker, so a depth-1 checkout is the whole setup, and
+  # `timeout-minutes` is a hang guard rather than the budget (the suite's wall
+  # clock varies 33% run to run, so the script reports its seconds instead of
+  # asserting them). Rationale: scripts/ci-test-selection-guards.sh, docs/testing.md.
+  guards-test-selection:
+    name: Test-selection coverage guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: "Run the #2063 test-area coverage guards"
+        run: |
+          chmod +x scripts/ci-test-selection-guards.sh
+          scripts/ci-test-selection-guards.sh
+
+  # ---------------------------------------------------------------------------
   # Issue #2060 (CI Phase A): the dex ratchet needs a real `:app:assembleDebug` —
   # ~5 min of the old `unit` job's serial prefix and the ONLY guard step that
   # compiles anything. Splitting it out takes it off the Unit critical path AND
@@ -749,17 +786,24 @@ jobs:
   # ---------------------------------------------------------------------------
   # Issue #2060 (CI Phase A): the protected-branch required check. `main`'s
   # ruleset requires a check literally named `Unit tests`; splitting the old
-  # monolithic job into four would have silently DEMOTED every guard to
+  # monolithic job into several would have silently DEMOTED every guard to
   # non-blocking until someone edited the ruleset by hand — a real loss of
   # enforcement dressed up as a speed-up. This ~10-second aggregator keeps the
-  # name and fails unless all four jobs succeeded, so the blocking contract is
-  # bit-for-bit the same with zero admin action. `if: always()` so it still
-  # reports (as a failure) when a dependency fails, is cancelled or is skipped —
-  # a `needs:` job that never reports would leave it pending forever.
+  # name and fails unless every unit-lane job succeeded, so the blocking
+  # contract is bit-for-bit the same with zero admin action. `if: always()` so it
+  # still reports (as a failure) when a dependency fails, is cancelled or is
+  # skipped — a `needs:` job that never reports would leave it pending forever.
+  #
+  # Issue #2067 — THIS JOB HAS THREE LISTS AND THEY MUST AGREE: `needs:`, the
+  # `env:` mapping, and the loop. A job in `needs:` but not in the loop runs, can
+  # go RED, and this gate stays GREEN — the silent-gate failure #2060 exists to
+  # prevent; a loop entry with no `needs:` reads an empty result and is equally
+  # useless. Do not hand-verify: `scripts/check-unit-gate-wiring.sh` (per push,
+  # in `guards-static`) asserts it. A comment did not stop it the first time.
   unit-gate:
     name: Unit tests
     runs-on: ubuntu-latest
-    needs: [unit, guards-static, guards-ci-harness, dex]
+    needs: [unit, guards-static, guards-ci-harness, guards-test-selection, dex]
     if: always()
     timeout-minutes: 5
     steps:
@@ -768,6 +812,7 @@ jobs:
           UNIT: ${{ needs.unit.result }}
           GUARDS_STATIC: ${{ needs.guards-static.result }}
           GUARDS_CI_HARNESS: ${{ needs.guards-ci-harness.result }}
+          GUARDS_TEST_SELECTION: ${{ needs.guards-test-selection.result }}
           DEX: ${{ needs.dex.result }}
         run: |
           set -euo pipefail
@@ -775,6 +820,7 @@ jobs:
           for pair in "JVM unit tests:$UNIT" \
                       "Static guards:$GUARDS_STATIC" \
                       "CI harness guards:$GUARDS_CI_HARNESS" \
+                      "Test-selection coverage guards:$GUARDS_TEST_SELECTION" \
                       "Dex register-pressure ratchet:$DEX"; do
             job="${pair%%:*}"
             result="${pair##*:}"
@@ -784,10 +830,10 @@ jobs:
             fi
           done
           if (( failed )); then
-            echo "::error title=Unit lane failed::A unit-lane job did not succeed (#2060). The required \`Unit tests\` check covers all four; open the failing job above for the diagnosis."
+            echo "::error title=Unit lane failed::A unit-lane job did not succeed (#2060). The required \`Unit tests\` check covers all of them; open the failing job above for the diagnosis."
             exit 1
           fi
-          echo "All four unit-lane jobs succeeded."
+          echo "All unit-lane jobs succeeded."
 
   python:
     name: Python utility tests (pocketshell)

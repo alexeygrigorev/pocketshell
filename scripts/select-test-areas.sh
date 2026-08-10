@@ -65,6 +65,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${POCKETSHELL_TEST_AREAS_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 MANIFEST="${POCKETSHELL_TEST_AREAS_MANIFEST:-$SCRIPT_DIR/test-areas.txt}"
 JOURNEY_SUITE="${POCKETSHELL_TEST_AREAS_JOURNEY_SUITE:-$SCRIPT_DIR/ci-journey-suite.sh}"
+# Reviewed exemptions for @Test-bearing files outside the naming convention
+# (#2065). Data, not an inline array, so each row carries a checkable
+# justification and so the guard's own reds are self-testable.
+UNCONVENTIONAL="${POCKETSHELL_TEST_AREAS_UNCONVENTIONAL:-$SCRIPT_DIR/test-unconventional-test-files.txt}"
+NIGHTLY_SUITE="${POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE:-$SCRIPT_DIR/nightly-extensive-suite.sh}"
 
 # shellcheck source=lib/test-areas.sh
 source "$SCRIPT_DIR/lib/test-areas.sh"
@@ -515,47 +520,159 @@ verify_manifest() {
   # 5. Hidden test classes. Every registry, guard and Gradle filter in this
   #    repo keys off the `*Test.kt` / `*Test.java` naming convention, so a
   #    @Test-bearing class that does not follow it is invisible to all of them —
-  #    the #1851 shape. Five exist today (four screenshot harnesses and the
-  #    ui-kit render target); they are baselined by name so a NEW one fails.
-  #    Baselining is per FILE, deliberately, not by a `*Harness.kt` suffix rule:
-  #    a suffix would be a self-serve escape hatch (name a real regression test
-  #    `…Harness.kt` and it hides), whereas a name list forces a reviewed
-  #    decision each time. #2065 tracks the general problem.
-  local -a KNOWN_UNCONVENTIONAL_TEST_CLASS_FILES=(
-    "app/src/androidTest/java/com/pocketshell/app/composer/Issue1622DeadBandScreenshotHarness.kt"
-    "app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerImeDeadSpaceScreenshotHarness.kt"
-    "app/src/androidTest/java/com/pocketshell/app/tmux/TerminalHotkeysPanelScreenshotHarness.kt"
-    "app/src/androidTest/java/com/pocketshell/app/tmux/TmuxComposerLauncherLargeFontScreenshotHarness.kt"
-    "shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt"
-  )
-  local -a hidden_new=() hidden_stale=()
-  local -A hidden_seen=()
-  local known
+  #    the #1851 shape. #2063 baselined the offenders here as a flat array of
+  #    paths so a NEW one fails; #2065 moved that baseline into
+  #    scripts/test-unconventional-test-files.txt and gave every row a
+  #    justification this guard CHECKS: how the file's @Test methods actually
+  #    reach a runner, and what accounts for the file given no registry can see
+  #    it. The list stays per FILE, deliberately, and is NOT a `*Harness.kt`
+  #    suffix rule — a suffix would be a self-serve escape hatch (name a real
+  #    regression test `…Harness.kt` and it hides itself), whereas a row with a
+  #    checked executor and a checked gate keeps a human decision in the path
+  #    and rots loudly in every direction.
+  local -a hidden_new=() hidden_stale=() exempt_bad=()
+  local -A hidden_seen=() exempt_exec=() exempt_gate=() exempt_reason=()
+  local -a exempt_paths=()
+  if [[ ! -f "$UNCONVENTIONAL" ]]; then
+    echo "FAIL: unconventional-test-file exemptions not found: $UNCONVENTIONAL"
+    failures=$((failures + 1))
+  else
+    local line lineno=0 e_path e_exec e_gate e_reason rest
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      lineno=$((lineno + 1))
+      [[ -z "${line//[[:space:]]/}" ]] && continue
+      [[ "$line" == \#* ]] && continue
+      IFS=$'\t' read -r e_path e_exec e_gate rest <<<"$line"
+      e_reason="${rest%%$'\t'*}"
+      if [[ -z "$e_path" || -z "$e_exec" || -z "$e_gate" || -z "${e_reason//[[:space:]]/}" ]]; then
+        exempt_bad+=("line $lineno: expected <path>TAB<executor>TAB<gate>TAB<reason>, got: $line")
+        continue
+      fi
+      if [[ -n "${exempt_exec[$e_path]:-}" ]]; then
+        exempt_bad+=("$e_path: listed twice")
+        continue
+      fi
+      exempt_paths+=("$e_path")
+      exempt_exec["$e_path"]="$e_exec"
+      exempt_gate["$e_path"]="$e_gate"
+      exempt_reason["$e_path"]="$e_reason"
+    done < "$UNCONVENTIONAL"
+  fi
+
   while IFS= read -r f; do
     [[ -z "$f" ]] && continue
     pocketshell_test_areas_is_test_path "$f" || continue
     pocketshell_test_areas_is_test_class_file "$f" && continue
     grep -qE '^[[:space:]]*@Test([[:space:]]|\(|$)' "$REPO_ROOT/$f" 2>/dev/null || continue
     hidden_seen["$f"]=1
-    local pinned=0
-    for known in "${KNOWN_UNCONVENTIONAL_TEST_CLASS_FILES[@]}"; do
-      [[ "$f" == "$known" ]] && pinned=1 && break
-    done
-    [[ "$pinned" -eq 0 ]] && hidden_new+=("$f")
+    [[ -z "${exempt_exec[$f]:-}" ]] && hidden_new+=("$f")
   done < <(tracked_files)
-  for known in "${KNOWN_UNCONVENTIONAL_TEST_CLASS_FILES[@]}"; do
-    [[ -z "${hidden_seen[$known]:-}" ]] && hidden_stale+=("$known")
+
+  # The PREMISE under every `nightly-connected` row, checked ONCE: nightly
+  # phase 1 runs :app:connectedDebugAndroidTest WHOLESALE and subtracts a
+  # `notClass` list. Without this, a per-row "the class is not excluded" check
+  # is a green assertion over a property that no longer holds — flip phase 1 to
+  # a `class=` allowlist and every row would silently start lying while the
+  # guard stayed green (G6). Checked only when a row actually depends on it.
+  local nightly_wholesale=1 nightly_phase1=""
+  local -a nightly_rows=()
+  local e_path
+  for e_path in "${exempt_paths[@]}"; do
+    [[ "${exempt_exec[$e_path]}" == "nightly-connected" ]] && nightly_rows+=("$e_path")
   done
+  if [[ "${#nightly_rows[@]}" -gt 0 && -f "$NIGHTLY_SUITE" ]]; then
+    nightly_phase1="$(sed -n '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/p' "$NIGHTLY_SUITE")"
+    if [[ -z "$nightly_phase1" ]]; then
+      nightly_wholesale=0
+      exempt_bad+=("$(basename "$NIGHTLY_SUITE"): phase-1 invocation block not found, so the wholesale premise behind every 'nightly-connected' row is unverifiable")
+    elif ! grep -Fq ':app:connectedDebugAndroidTest' <<<"$nightly_phase1" ||
+         ! grep -Fq 'RunnerArguments.notClass=' <<<"$nightly_phase1"; then
+      nightly_wholesale=0
+      exempt_bad+=("$(basename "$NIGHTLY_SUITE"): phase 1 no longer runs :app:connectedDebugAndroidTest minus a notClass list — the 'nightly-connected' rows rest on that shape")
+    elif grep -Eq 'RunnerArguments\.(class|package|annotation)=' <<<"$nightly_phase1"; then
+      nightly_wholesale=0
+      exempt_bad+=("$(basename "$NIGHTLY_SUITE"): phase 1 now restricts what it runs (class/package/annotation filter) — it is an allowlist, so 'nightly-connected' no longer follows from merely not being excluded")
+    fi
+  fi
+
+  for e_path in "${exempt_paths[@]}"; do
+    if [[ -z "${hidden_seen[$e_path]:-}" ]]; then
+      hidden_stale+=("$e_path")
+      continue
+    fi
+    # The executor claim answers "does it execute in any gate?" — the question
+    # #2065 exists to force per file. Only the SHAPE of each claim is machine-
+    # checkable, and that is exactly what is checked: an unverifiable claim is
+    # rejected rather than believed.
+    case "${exempt_exec[$e_path]}" in
+      unit-source-set)
+        case "$e_path" in
+          */src/test/*) : ;;
+          *) exempt_bad+=("$e_path: executor 'unit-source-set' but the path is not under */src/test/, so \`./gradlew test\` does not run it") ;;
+        esac
+        ;;
+      nightly-connected)
+        case "$e_path" in
+          app/src/androidTest/*) : ;;
+          *) exempt_bad+=("$e_path: executor 'nightly-connected' but the path is not under app/src/androidTest/") ;;
+        esac
+        if [[ ! -f "$NIGHTLY_SUITE" ]]; then
+          exempt_bad+=("$e_path: executor 'nightly-connected' cannot be checked — nightly suite not found: $NIGHTLY_SUITE")
+        elif [[ "$nightly_wholesale" -eq 1 ]]; then
+          # Nightly phase 1 runs :app:connectedDebugAndroidTest WHOLESALE with a
+          # `notClass` exclusion list, which is why a class in no explicit suite
+          # still executes. Fail-closed on ANY mention of the simple name: an
+          # exclusion, a shard pin or even a comment means the wholesale claim
+          # has to be argued again rather than inherited.
+          local simple="${e_path##*/}"; simple="${simple%.kt}"; simple="${simple%.java}"
+          if grep -Fq "$simple" "$NIGHTLY_SUITE"; then
+            exempt_bad+=("$e_path: executor 'nightly-connected' claims the wholesale nightly run reaches it, but $simple is named in $(basename "$NIGHTLY_SUITE") — re-argue the claim")
+          fi
+        fi
+        ;;
+      *)
+        exempt_bad+=("$e_path: unknown executor '${exempt_exec[$e_path]}' (expected unit-source-set or nightly-connected)")
+        ;;
+    esac
+    # The gate is what accounts for the file. A FQCN is resolved through the
+    # SAME class index the area manifest and the ledger use, so a gate is
+    # provably a registered, area-resolved class rather than a name that reads
+    # well; an `enumerated-by:` script must actually reference the path.
+    case "${exempt_gate[$e_path]}" in
+      enumerated-by:*)
+        local script="${exempt_gate[$e_path]#enumerated-by:}"
+        if [[ ! -f "$REPO_ROOT/$script" ]]; then
+          exempt_bad+=("$e_path: gate 'enumerated-by:$script' names a script that does not exist")
+        elif ! grep -Fq "$e_path" "$REPO_ROOT/$script"; then
+          exempt_bad+=("$e_path: gate 'enumerated-by:$script' does not reference this path, so it cannot be enumerating it")
+        fi
+        ;;
+      *)
+        if [[ -z "${POCKETSHELL_TA_CLASS_PATH[${exempt_gate[$e_path]}]:-}" ]]; then
+          exempt_bad+=("$e_path: gate '${exempt_gate[$e_path]}' is not a known test class — a gate must be a conventional, area-resolved class the registries can see")
+        fi
+        ;;
+    esac
+  done
+
   if [[ "${#hidden_new[@]}" -gt 0 ]]; then
     echo "FAIL: ${#hidden_new[@]} @Test-bearing file(s) do not follow the *Test.kt/*Test.java convention, so no registry or filter can see them:"
     printf '  %s\n' "${hidden_new[@]}"
+    echo "  Rename to *Test.kt, or add a justified row to ${UNCONVENTIONAL#"$REPO_ROOT/"} (read its header first — a row is not a formality)."
     failures=$((failures + 1))
-  elif [[ "${#hidden_stale[@]}" -gt 0 ]]; then
-    echo "FAIL: stale baseline — these no longer carry @Test or no longer exist; drop them from KNOWN_UNCONVENTIONAL_TEST_CLASS_FILES:"
+  fi
+  if [[ "${#hidden_stale[@]}" -gt 0 ]]; then
+    echo "FAIL: stale exemption(s) — these no longer carry @Test, no longer exist, or now follow the convention; drop them from ${UNCONVENTIONAL#"$REPO_ROOT/"}:"
     printf '  %s\n' "${hidden_stale[@]}"
     failures=$((failures + 1))
-  else
-    echo "OK: no new @Test-bearing file outside the *Test.kt/*Test.java convention (${#KNOWN_UNCONVENTIONAL_TEST_CLASS_FILES[@]} baselined)"
+  fi
+  if [[ "${#exempt_bad[@]}" -gt 0 ]]; then
+    echo "FAIL: ${#exempt_bad[@]} unconventional-test-file exemption(s) are not justified:"
+    printf '  %s\n' "${exempt_bad[@]}"
+    failures=$((failures + 1))
+  fi
+  if [[ "${#hidden_new[@]}" -eq 0 && "${#hidden_stale[@]}" -eq 0 && "${#exempt_bad[@]}" -eq 0 ]]; then
+    echo "OK: no new @Test-bearing file outside the *Test.kt/*Test.java convention (${#exempt_paths[@]} exempted, each with a checked executor and gate)"
   fi
 
   # 6. The `noop` premise: no test source reads a repo doc/markdown file at

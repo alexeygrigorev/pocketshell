@@ -387,6 +387,529 @@ command for cwd `/workspace/pocketshell` finds it via `find ... -mmin -5`.
 | Instrumented UI / smoke | `app/src/androidTest/` on emulator | Compose screen tests, navigation, local emulator-to-Docker agent smoke |
 | Manual smoke | Emulator + Docker | Issue-based implementer/reviewer flow, with reviewer emulator evidence before approval |
 
+## Host-CLI / area coverage guard suite, with area-scoped selection (issue #2063)
+
+The maintainer's directive: *"split our test set into different areas and run
+those areas depending on the part we're changing, and run all the tests before
+we release … the goal is not to increase the speed, the goal is to increase the
+speed while maintaining the quality — I still want the same coverage."*
+
+**Coverage is invariant. Only the *when* is granular.** Every test still runs on
+a bounded cadence; nothing is deleted, weakened, or skipped to hit a number.
+
+### What this is worth, measured — read this before treating it as a speed feature
+
+It is **not** a speed feature. It is a coverage-guard suite that also scopes
+selection, and that is the honest headline. Measured over the last 104 `main`
+commits, reproduced independently by the reviewer:
+
+| Measurement | Value |
+|---|---|
+| commits that force-full | **58–62%** (51 of the 88 with a file list; empty diffs force-full too) |
+| journeys selected, average | **143.6 of 161 — 89%** |
+| `:app` unit classes selected, average | **567.6 of 659 — 86%** |
+| emulator lane | **1.09x** (~45 min → ~41 min through the #2059 model) |
+| Unit lane | **neutral to slightly negative** — ~14% of unit test-case time saved on the 42% of commits that scope, against the guards' own cost on the rest |
+| the guards' own cost | **~170–195 s per Unit variant** on a loaded box, i.e. **+6.1 min on a full Unit run** |
+
+Nothing here is over-force-fulling: the big buckets (`scripts/*`, a non-`*Test`
+file in a test source set) are coarse but each is defensible, and no bucket has
+an obvious narrower correct answer. The selection is simply *nearly full* on a
+typical commit, because this codebase's production graph is strongly connected.
+
+**What earns the merge is the safety half.** Building this found, mechanically,
+coverage holes nothing else in the repo could see: 183 of 1047 classes resolving
+to no area through a second resolver; four `@Test`-bearing files invisible to
+every registry and Gradle filter (the #1851 shape, now baselined so a NEW one
+fails — and one promptly did: #1622's `Issue1622DeadBandScreenshotHarness.kt`
+reached `main` hours later carrying three invisible `@Test` methods and this
+guard caught it before it merged, so the baseline is five; #2065 owns
+rename-vs-exempt for all five); 29 journeys compiling against connection-core
+that a connection-core change did not run; and `:shared:core-usage:test` — the
+deliberately fail-loud reader of `pocketshell usage --json` — having no
+mechanical link to the Python that produces it. The ledger guard is the first
+mechanism here that can answer
+"did every registered class actually execute in a bounded window", which is
+exactly how #1851/#1853/#1859 were all missed until someone tripped over them.
+
+Two consequences, stated so nobody has to re-derive them:
+
+- **The guards do not run inside `./gradlew test` — they are their own CI job**
+  (`guards-test-selection`, added by **#2067**, which landed in the same batch as
+  this slice for exactly this reason). Wired into a JVM test they were paid TWICE
+  per push (debug + release) on the Unit critical path for work that touches no
+  Kotlin: `+6.1 min on every Unit job and nothing faster`, which over the last
+  104 `main` commits exactly cancelled the scoped saving. Note the cost grew as
+  the guards got stricter (~100 s → ~137 s when the B9 vocabulary mutations were
+  added, → ~155–205 s once the receiver-agnostic registrar census and the round-6
+  non-registrar-attribute case were added — a range that is mostly box load, see
+  below), which is the other reason these belong in a cheap job that runs ONCE
+  rather than inside a test task that runs per variant. **Never move them back
+  into a Gradle test task**; if a new guard needs a home, add a step to that job.
+- **The selection plan is still not consumed by CI — nothing is skipped yet.**
+  Every push remains a full run. This slice plus #2067 buy the *safety* half (the
+  coverage guards, now blocking and off the critical path) and pay for it once
+  instead of twice; the *speed* half arrives only when a later, deliberate step
+  wires the emitted plan into the test invocation. That step is where the four
+  Known limits below stop being a reporting gap and become a real coverage hole
+  (a host-CLI change whose consumer is reachable only through one of the four
+  would select a narrow set and genuinely not run the protecting test — the
+  #847 / v0.4.10 class). Re-weigh all four *for skipping* before enabling it.
+- The remaining speed is in narrowing the `scripts/*` (18 commits) and
+  test-infrastructure (15) force-full rules — 41 of the 65 force-fulls. That is
+  its own issue with its own escape oracle, not a widening inside this one.
+
+### The four pieces
+
+| Piece | What it is |
+|---|---|
+| `scripts/test-areas.txt` | the manifest — the whole taxonomy, as data |
+| `scripts/lib/test-areas.sh` | the shared classification engine every consumer reads |
+| `scripts/select-test-areas.sh` | changed paths → areas → the run plan, plus the manifest/coverage guards |
+| `scripts/check-test-execution-ledger.sh` | proves, from real JUnit results, that every class still executes |
+
+### The rule for a NEW test (do not re-litigate this)
+
+> A test's area is the area of its Gradle module, or — inside `:app` — of its
+> top-level `com.pocketshell.app.<pkg>` package.
+
+Add a test to an existing package and it inherits that package's area with **no
+manifest edit at all**. Only three things need an edit:
+
+1. a NEW top-level package or Gradle module → add a `src` + `test` row;
+2. a class whose regression class belongs to a DIFFERENT area than its package
+   → add a `class` row (today the only case is the conversation-source cluster,
+   which lives in `com.pocketshell.app.tmux` but belongs to
+   `conversation-agents`);
+3. a new production path with cross-area blast radius → add a `full` row.
+
+Forget all three and the guard fails with **"unmapped path"** while the run
+falls back to FULL. The map can only lag loudly, never silently.
+
+### Areas and tiers
+
+Nineteen areas, keyed to the existing module/package structure. Four are
+**`always`** — they run on every push regardless of the diff — and they are the
+D28/G8 worst-reopen areas plus the app shell:
+
+| always-tier area | Why it never becomes conditional |
+|---|---|
+| `connection-core` | SSH transport / lease / reconnect / grace / `tmux -CC` — D28, the #1 regression source |
+| `terminal-render` | terminal emulation + the #796/#803 drain-scheduler ANR class |
+| `conversation-agents` | conversation-source binding + agent detection — the #819/#825/#962/#1057 reopen cluster |
+| `app-shell` | App / MainActivity / DI / nav / startup / test-access seams |
+
+The other fifteen (`tmux-session`, `composer-voice`, `projects-tree`, `portfwd`,
+`files`, `hosts-settings`, `share`, `usage-costs`, `bootstrap`, `notifications`,
+`release-update`, `diagnostics-crash`, `ui-shell`, `ci-harness`, `host-cli`) are
+**`changed`**: they run when their area, an area coupled to them, or a
+force-full path is in the diff — plus nightly, plus the release gate.
+
+### Cadence — what runs when
+
+| Tier | Trigger | Scope |
+|---|---|---|
+| per-PR / per-push | every push | always-tier + affected areas + their couplings |
+| nightly | `nightly-extensive.yml` cron | everything |
+| release gate | `scripts/release-emulator-validation.sh` | everything, unchanged |
+
+### Force-full triggers (blast-radius escapes)
+
+A change whose effect leaves its own area must never silently skip the test that
+would have caught it. Any of these ⇒ run **everything**:
+
+- `.github/**`, `scripts/**`, `tests/**` — the harnesses that decide what runs
+- `gradle/**`, `**/*.gradle*`, `gradle.properties`, `gradlew*`, `cgroups.toml`,
+  `debug.keystore`, `app/lint.xml`, `app/*.pro`
+- `shared/test-support/**` — the one audited settle pump
+- `app/src/main/**/di/**`, `nav/**`, `startup/**`, `testaccess/**`, `layout/**`,
+  `App.kt`, `MainActivity.kt`, `AppTeardownScope.kt`, `MainThreadConfinement.kt`
+- `app/src/main/**/tmux/TmuxSessionViewModel.kt` — the D28 god-object seam
+  (#766 residue) where cross-area wedge bugs hide
+- `app/src/main/res/**`, both `AndroidManifest.xml`s, `app/src/debug/**`
+- **any file inside a test source set that is not itself a `*Test.kt` /
+  `*Test.java`** — a shared fixture's blast radius is exactly as unknown as a DI
+  module's
+- **any path the manifest does not match at all** (fail-safe)
+
+`shared/ui-kit/**` is an area rather than a force-full trigger, but it *couples*
+to every UI-bearing area, so a design-token change is near-full in practice.
+That is deliberate — the #453/#641 "one token, every screen" class.
+
+### The fail-safe direction is structural, not a convention
+
+`pocketshell_test_area_classify` sets its verdict to `full` **before it looks at
+anything**, and every narrower answer requires an explicit manifest row to have
+matched. There is no code path ending in "nothing matched, so run nothing": the
+fall-through *is* `full`. Deleting a rule, mistyping a glob, or dropping a whole
+record type all degrade toward running MORE. Three more one-way ratchets sit on
+top: a manifest that fails to load ⇒ full; an empty diff ⇒ full; and the
+always tier is unioned in unconditionally and last, so the smallest possible
+selection is the always tier, never the empty set.
+
+`scripts/select-test-areas-selftest.sh` proves each of those by mutating the
+input rather than asserting it in prose.
+
+### Running it
+
+```bash
+scripts/select-test-areas.sh                      # plan for the current branch diff
+scripts/select-test-areas.sh --print-plan-only    # machine-readable KEY=VALUE
+scripts/select-test-areas.sh --journeys           # every journey class + area + tier
+scripts/select-test-areas.sh --verify-manifest    # guard: the manifest is total
+scripts/select-test-areas.sh --coverage-invariant # guard: coverage is invariant
+```
+
+```bash
+scripts/select-test-areas.sh --list-classes       # every class + area + module + deps
+```
+
+`--coverage-invariant --only I8,I9` runs a subset. It exists so a self-test
+mutation can drive the one invariant it targets without paying for the other
+nine; **it is never a CI mode**, and a filtered run says so in its own verdict
+line so a partial pass cannot be read as the whole guard.
+
+The plan emits `UNIT_SHARED_TASKS` (module test tasks, unfiltered) and
+`UNIT_GRADLE_TASKS` + `UNIT_GRADLE_FILTERS` (`:app:test` with `--tests`) as
+**two invocations**, because a single `--tests` applies to every test task in
+one invocation and would filter the shared modules to nothing. In `full` mode it
+emits the byte-identical whole-graph `test` task the Unit job runs today, which
+is what keeps `scripts/check-ci-unit-forced-execution.sh` satisfied on the full
+path.
+
+`UNIT_GRADLE_FILTERS` carries **exact fully-qualified class names, never
+patterns**. Gradle's `--tests` wildcard crosses package dots — `--tests
+"com.pocketshell.app.*UsageWindowLabelTest"` really does run
+`com.pocketshell.app.usage.UsageWindowLabelTest` — so a package-shaped pattern
+silently runs far more than the plan reports. `--coverage-invariant`'s **I10**
+asserts the emitted filter set is exactly the selected `:app` unit class set and
+contains no glob metacharacter, so the reported number and the executed command
+cannot drift apart again.
+
+`UNIT_SHARED_TASKS` is derived from the selected classes' own module paths, not
+from an area→task table. **I11** asserts every shared module is run by a change
+to its own source, which is the check a hardcoded table did not have.
+
+### What actually decides that a test runs
+
+| # | Rule | Where it comes from |
+|---|---|---|
+| 1 | the run is FULL | force-full path, unmapped path, manifest load failure |
+| 2 | the class's area is `always`-tier | `area … always` rows |
+| 3 | the class's area is in the diff, or in the `couple` closure of the diff | `couple` rows |
+| 4 | the class **imports** production code of an area in the diff | the class's own `import com.pocketshell.…` lines |
+| 5 | the class sits in — or imports — a package on the host-CLI **wire seam**, and `tools/pocketshell/**` changed | the seam, derived at **both ends** |
+
+Rules 4 and 5 are the reason `couple` rows are now few and behavioural. A
+compile-level dependency must **not** get a `couple` row: rule 4 already has it,
+per class, derived from the compile graph rather than from anybody's memory.
+
+**Rule 5 exists because of #847 / v0.4.10.** `tools/pocketshell/**` is Python, so
+no Kotlin import can see it, and host-CLI/client version is a *runtime* lockstep
+— a new client calling a new subcommand against an older host CLI hangs.
+
+**A wire contract has two ends, and marking only the invoker misses half of it.**
+The first version of this seam marked "packages that invoke the CLI". No shared
+module ever shells out, so that seam had *zero* reach into `shared/*` — and
+`shared/core-usage`, whose `PocketshellUsageJsonParser` is the deliberately
+STRICT, fail-loud reader of the NDJSON `tools/pocketshell/.../usage.py` emits,
+was therefore not run by a change to the code that produces it. Every check and
+every invariant stayed green. A production package is now on the seam when any
+of these holds, each derived mechanically:
+
+| End | Rule | Reaches (examples) |
+|---|---|---|
+| **producer** | a file in it invokes the CLI (`PocketshellCommand`, literal `pocketshell …`) | `app.usage`, `app.projects`, `app.tmux` … (15 packages) |
+| **consumer** | an *invoking file* imports it — one hop; the invoker hands the reply to something, and that something is in its import set | `core.usage` (the parser), `core.storage.entity` (the CLI lockstep version columns), `uikit.model` (`HostSetupState`) … (21) |
+| **vocabulary** | a file in it names a real subcommand, where the list is read out of the producer's own top-level registrations — **every** form, through Python's `ast` | `app.settings`, which parses the `pocketshell qr-share` payload although nothing in the app ever invokes it — the payload arrives by QR scan, so no import edge exists to follow (20) |
+
+**Why the vocabulary is read with a parser and not a grep (finding B9).** That
+list used to come from one grep for `cli.add_command(…, name="…")` — *one* of
+the forms click offers. `cli.py` already registers `daemon` as
+`@cli.group(name="daemon")`, so the reader was under-reading the producer on the
+shipped tree while the guard printed a healthy-looking "16 subcommands".
+Converting four more registrations to the form `daemon` already used dropped
+`usage`, `tree`, `agents` and `qr-share` from the vocabulary, took
+`com.pocketshell.app.settings` — the one package this end exists for — **off the
+seam**, cut unit selection 570 → 560, and left **every floor green**. A floor
+cannot see that: under-reading produces a plausible number. So the reader is now
+`ast` over `cli.py` (the producer's own grammar), and it is fail-closed twice
+over: it counts registration **sites** independently of the names it resolves
+and check 7 asserts **names == sites**, and anything it cannot decode — a
+registration inside a loop or function, a `name=` behind a constant, an omitted
+name, a bare `@cli.group`, an unparseable `cli.py`, a missing `python3`, or a
+sibling module taking the group object so a registration could live outside
+`cli.py` — is reported by name and fails the guard. `python3` is therefore a
+hard dependency of `--verify-manifest`; it is already one for
+`scripts/check-ci-unit-forced-execution.sh` in the same job.
+
+**Why detection is receiver-agnostic, and not a list of recognised shapes.**
+Equality is only worth what the reader can *see*, and for five rounds the reader
+saw a registration only when its receiver was the literal name `cli`. Anything
+reached through a different binding — `_g = cli; _g.add_command(…)`, or a helper
+that takes the group as a parameter — was neither a SITE nor a NAME, so
+`names == sites` held vacuously at 13 == 13 while four subcommands vanished, the
+seam dropped from 32 packages / 820 classes to 31 / 809, and the guard printed
+a healthy-looking "13 subcommands read from 13 registration sites". Six rounds
+closed six spellings one at a time, which does not converge: the ways to name an
+object are unbounded.
+
+The reader therefore takes a **census**. It collects every `add_command` /
+`group` / `command` call node in `cli.py` whatever the receiver, resolves each
+receiver through a module-level binding environment, and gives each node exactly
+one verdict: it registers on the root group (must yield a literal name), it
+registers on a provably different object (a sub-group such as `daemon_group`, or
+the `@click.group` that defines the root — neither adds a top-level word), or the
+receiver does not resolve at all — which is UNREADABLE, because that call might
+be adding a top-level subcommand. The shipped tree reads **22 registrar calls =
+17 top-level sites + 5 non-root + 0 unresolved**, and check 7 asserts that
+identity so a node cannot silently fall out of the census. An alias is now *read
+correctly* rather than refused: reddening on it would only force the producer
+into one writing style, and the property we need is a complete vocabulary.
+
+Two escapes remain once the file itself is fully censused, and both are closed
+because the group **object** can leave `cli.py`: by import (any sibling module
+that binds this module or the root name, including `from pocketshell import cli`,
+`from .cli import *` and a run-time `importlib` — an `ast` walk, because the
+round-4 regex over import lines let all three through), and **as a value** handed
+to a helper. The second is not hypothetical: `cli.py` already does
+`register_push_card_commands(push_group)`, whose body in `cards.py` runs
+`@push_group.command("checklist")`, so passing the *root* group the same way is
+one character away. The scope is deliberate — a whole-package receiver-agnostic
+scan is unsound in the other direction, since nine `re.Match.group(…)` calls in
+this package have local receivers that no environment can resolve, and each would
+become a permanent false red. Exhaustive over the module that owns the group,
+plus a hard trip the moment the group can leave it, is the narrowest sound rule.
+
+**Round 6 corrected a false claim in that "exhaustive" premise, and the
+correction is the reason the rule is now stated as an inversion.** The census
+covers registrar *calls*, and round 5 additionally waved through every attribute
+access on the root binding on the grounds that "registrar attributes are already
+in the census". That is true of `add_command`/`group`/`command` and false of
+every other attribute — and `click.Group.commands` is a **plain dict**
+(`add_command` is literally `self.commands[name] = cmd`), so
+`cli.commands["x"] = cmd` and `cli.commands.update({…})` register a top-level
+subcommand through a path that is not a registrar call at all. Neither entered
+the census; the identity balanced over a smaller file (18 = 13 + 5 + 0) with zero
+UNREADABLE, `com.pocketshell.app.settings` fell off the seam again (32 -> 31
+packages, 820 -> 809 classes, unit selection 570 -> 560), and `--verify-manifest`
+returned rc=0. The group never left `cli.py`, so no escape check could see it.
+
+The fix applies the same inversion the receiver resolution already uses: the
+reader allows only the four attributes it can *prove* inert — `add_command`,
+`group` and `command`, each of which the census collects as an `ast.Attribute`
+node whether or not it is called, plus `main`, click's invocation entry — and
+reports **every other attribute read of the root by name**, including ones nobody
+has thought of. Adding `commands` to the registrar list was rejected: that is one
+more entry on a list of recognised spellings, which is the pattern that produced
+seven of them. Case 16g-l pins it, with `result_callback` alongside the four
+`commands` forms so the case fails if the check ever narrows back to one name.
+
+Correspondingly, the guard's OK line no longer claims it read *all* registration
+sites. It says it read the sites **it could see**, which is the claim the reader
+can actually support; the completeness argument lives in the census identity,
+the non-registrar-attribute trip, the value-escape trip and the cross-module
+trip, each of which is separately asserted and separately self-tested.
+
+**Known limits — four spellings that are still silent, measured not assumed.**
+Round 6 searched for an eighth spelling instead of waiting for one, and found
+four, all reproducing the same signature as the seventh (census 18 = 13 + 5 + 0,
+zero UNREADABLE, `com.pocketshell.app.settings` off the seam, 820 -> 809 classes,
+unit selection 570 -> 560, `--verify-manifest` rc=0). They are NOT closed, on
+purpose: the spelling-by-spelling game does not converge, and the honest move is
+to state the bound rather than buy another round.
+
+- `sys.modules[__name__].cli.commands["x"] = cmd`
+- `importlib.import_module(__name__).cli.commands["x"] = cmd`
+- `globals()["cli"].commands["x"] = cmd`
+- `@click.group(cls=DynGroup)` where the subclass's `list_commands` /
+  `get_command` synthesise entries that are never stored in `commands` at all
+
+The first three share one axis the reader cannot reach by construction: every
+check from step 1b onward is anchored on a module-level *binding*, so an
+expression that reaches the group object without ever producing an `ast.Name`
+that resolves to the root is invisible to all of them. The fourth is a different
+axis again — there is no registration to see, static or otherwise, because the
+command table is computed at run time.
+
+Closing either axis properly means the reader stops being a static reader:
+importing `cli.py` and asking the live `Group` object for `list_commands()` would
+cover all four at once, and would make the census, the escape checks and the
+cross-module scan largely redundant. That is a different design, not a patch, and
+it costs a Python import of the package inside a shell guard. Until someone makes
+that call, treat the vocabulary end as sound against every spelling that names
+the group and unsound against the four above, and read the guard's own OK line
+literally: it read the sites **it could see**.
+
+The one hop is deliberately unfiltered: it also marks collaborators that are not
+wire consumers (theme tokens imported by an invoking Composable). That
+over-selection costs time on a `tools/pocketshell/**` change *only* — `host-cli`
+is a changed-tier area nothing else puts in the diff — and a false negative
+there is #847. Measured consequence: a host-CLI change now selects **158 of 161
+journeys and 570 of 659 unit classes**, i.e. effectively a full run. That is the
+right answer for this class of change.
+
+`--verify-manifest` check 7 floors **each end separately** — producer ≥ 12,
+consumer ≥ 15, vocabulary ≥ 14, registration sites ≥ 12, seam packages under
+`shared/` ≥ 8, host-CLI-coupled classes ≥ 600 — plus the four non-floor
+assertions the vocabulary end needs (`names == sites`, `undecodable == 0`,
+`unresolved receivers == 0`, and the census identity
+`scanned == sites + non-root + unresolved`),
+because a floor is the wrong instrument for under-reading and the site floor's
+only remaining job is catching a *totally dead* reader, where the equality is
+vacuous at 0 == 0. A total-only floor is
+exactly what hid the missing end (15 packages looked healthy at zero shared
+reach), and a `>= 1` floor detects only a *totally dead* mechanism: dropping the
+two string-literal alternatives from the invoke marker used to cut the seam 15→9
+packages / 569→210 classes with nothing noticing.
+`--coverage-invariant`'s **I9** pins both journeys
+(`FolderListHostOutdatedTreeVersionDaemonDockerTest` #1509 G10,
+`FolderListOldCliHydrateDockerTest`) **and unit consumers**
+(`PocketshellUsageJsonParserTest`, `AppDatabaseTest`,
+`SessionAgentKindOptionTest`) to it by name — and for a unit pin it additionally
+asserts the emitted plan really carries that class's `:shared:…:test` task,
+because "selected" and "executed" are not the same claim.
+
+**The bound this design accepts, stated rather than hidden.** Rule 4 is the
+*direct* compile edge. It does not chase transitive production dependencies
+(test → `fileviewer` → `core-ssh`). Two stronger designs were measured on this
+tree and both degenerate: derived area-level edges applied transitively make the
+19-area graph strongly connected (every change selects 17 areas), and the
+production-to-production graph is strongly connected too (93 edges,
+composer-voice ⇄ connection-core ⇄ hosts-settings). A fully sound
+dependency-based selection on this codebase *is* "run everything". The backstops
+for the bound are the always tier, the nightly full run, and the release gate.
+
+### The executed-classes ledger — the mechanism that PROVES the invariant
+
+`check-executed-test-counts.sh` (#1646) proves a test *task* executed more than
+zero tests. That is one level too low to see this repo's recurring failure: a
+class that belongs to no suite, so nothing ever runs it, unnoticed for months
+(#1851's `ColdInstallE2eTest` / `EmulatorWorkflowE2eTest`, #1853's twelve dead
+harnesses, #1859's shard truncating at 98 of 226). All three were found
+*incidentally*. Area selection makes that class strictly more dangerous, because
+"this test did not run in this job" becomes normal and stops being suspicious.
+
+```bash
+# after any test tier, credit what actually executed
+scripts/check-test-execution-ledger.sh --record build/test-results --tier unit
+
+# fail when any registered class is unmapped, never executed, or stale
+scripts/check-test-execution-ledger.sh --verify --max-age-days 7
+```
+
+"Executed" means *appeared in a JUnit result as a testcase that was not
+skipped*. A class whose every case is `<skipped/>` is recorded as
+seen-but-skipped and does **not** satisfy the guard — an all-skipped class is
+the G3 vacuous pass, and the 72-entry
+`KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES` baseline currently invites exactly
+that mistake. A missing or empty ledger **fails**: a guard that passes with no
+evidence is decoration.
+
+The ledger is a plain TSV (`<fqcn>\t<epoch>\t<tier>`); where it is persisted is
+the CI wiring's business, not the guard's. `--verify` resolves each registered
+class through **the same single resolver** the manifest guard uses. There used
+to be two — one keyed on tracked file paths, one on FQCNs against a hardcoded
+list of source roots that contained no `shared/*/src/test/java` — and the second
+reported 183 of 1047 classes as belonging to no area, so the guard was red on
+the real tree while its self-test (synthetic `app/src/test` trees only) was
+green. Seed a complete ledger from `--list-classes` if you need one:
+
+```bash
+scripts/select-test-areas.sh --list-classes |
+  awk -v n="$(date +%s)" -F'\t' '{print $1"\t"n"\tseed"}' > build/test-execution-ledger.tsv
+```
+
+### Self-tests (all wired into the `guards-test-selection` CI job)
+
+```bash
+scripts/select-test-areas.sh --verify-manifest
+scripts/select-test-areas.sh --coverage-invariant
+scripts/select-test-areas-selftest.sh
+scripts/check-test-execution-ledger-selftest.sh
+scripts/dev-fast-gate-parity-selftest.sh
+```
+
+Those five are exactly the steps of the **`guards-test-selection`** job in
+`.github/workflows/tests.yml` (#2067). The job is a dependency of the `unit-gate`
+aggregator, which carries the literal `Unit tests` check name branch protection
+requires — so these guards are **blocking on every push**, for the same reason
+`AvdLockScriptTest` exists: a guard no lane runs is not a guard. They are NOT a
+Gradle test: no JDK, no Gradle, no Android SDK, no Docker in that job.
+
+They were briefly driven from a JVM test (`SmartTestSelectionScriptTest`) so
+`./gradlew test` would pick them up. That is deleted. Do not recreate it: a test
+task runs per variant, so it charged the suite twice per push on the Unit
+critical path — see the cost note below and the two consequences under "What
+this is worth, measured". If you add a guard, add a step to the job.
+
+**A local `scripts/full-jvm-gate.sh` green therefore does NOT cover these**, the
+same way it does not cover `check-file-size-hygiene.sh` or
+`check-test-validity.sh`. Run the five commands above directly when you touch the
+manifest, the classification engine, the journey registry, or `cli.py`.
+
+**Where its cost lands.** The five invocations take **~155–205 s**, now paid
+ONCE per push in a parallel job instead of once per Unit variant on the critical
+path. Four measurements, all at 46 cases except the first:
+
+| Run | Cases | debug | release | box load |
+|---|---|---|---|---|
+| round 5 (in `./gradlew test`) | 45 | 169.5 s | 196.1 s | ~18 |
+| round 6, run 1 (in `./gradlew test`) | 46 | 205.3 s | (not reached) | ~12–14 |
+| round 6, run 2 (in `./gradlew test`) | 46 | 154.2 s | 165.3 s | ~12 |
+| #2067, as the five direct invocations | 46 | 164.4 s (once) | — | ~12–16 |
+
+**Read the absolute number as noise-dominated, not as a budget.** The round-6
+runs are the SAME tree at the SAME case count and differ by 51 s (33%) on the
+debug variant, so a wall-clock delta cannot measure the cost of adding a case.
+The meaningful figure is structural: each mutation case rebuilds the dependency
+index once, ~11.6 s, and there are ~20 such builds across the suite. Budget by
+that, not by a stopwatch reading. The selection self-test is ~80% of the total
+and grows by one index build per case added.
+
+**The ceiling, so a later round has a number instead of drift.** The dedicated
+job's ceiling is **5 minutes wall clock**, because beyond that it becomes the
+critical path on a docs-only push. #2067 did **not** remove the ~11.6 s marginal
+cost of a mutation case — it removed the x2-variant and critical-path factors
+only. So a round that wants more than ~2 new index-rebuilding cases must
+share/cache the dependency-index build across cases FIRST. The job prints its
+per-guard and total seconds into the GitHub step summary so that drift is
+visible; that is deliberately a *reported* number and not an asserted one,
+because a 33%-variance quantity makes a terrible assertion (G6). The job also
+runs unconditionally on every push — it is a workflow job, so no area selection
+spares it, and there is no selection consumption in CI to spare it with. The
+dominant term inside it is the dependency index, rebuilt in ~20 subprocesses
+across the self-tests, which is why the import scan is one awk pass rather than a
+5709-iteration bash loop (~1.9 s → ~0.9 s per build).
+
+### The `unit-gate` aggregator has three lists, and a guard keeps them equal
+
+`unit-gate` is the job named `Unit tests`. Adding a job to the unit lane means
+touching it in **three** places — `needs:`, the `env:` mapping of
+`${{ needs.<job>.result }}`, and the `for pair in "Label:$VAR"` result loop. A
+job in the first but not the third runs, can go **RED**, and the required check
+stays **GREEN**: a red job under a green required check, which is the silent-gate
+failure #2060 exists to prevent.
+
+`scripts/check-unit-gate-wiring.sh` (run per push in `guards-static`) makes that
+mechanical instead of a comment:
+
+```bash
+scripts/check-unit-gate-wiring.sh --self-test   # eleven red->green cases
+scripts/check-unit-gate-wiring.sh               # check the real workflow
+```
+
+It asserts the check name is still literally `Unit tests`, that the three lists
+are the same set, that each env var name is its job key upper-snake-cased (so a
+label cannot be printed next to a different job's result while all three lists
+still "agree"), that every needed job exists, and that every workflow job is
+either wired into the gate or in a short named exempt list — so a NEW job cannot
+be added ungated by accident. Its C9 check additionally refuses to let the five
+selection guards above be reached from a Gradle test source or build script,
+which is the one way a well-meaning later round would silently put the ~165 s
+suite back on the Unit critical path at twice the cost. The self-test asserts its
+own case count, so the anti-vacuous guard cannot itself pass vacuously.
+
 ### Fast Static Guards
 
 `scripts/check-file-size-hygiene.sh` is a cheap repo-wide `git ls-files` guard
@@ -763,8 +1286,21 @@ scripts/dev-fast-gate.sh --profile fish-user-local-path   # scope setup-detectio
 It diffs the branch against the `origin/main` merge base, maps the changed
 paths to a minimal stage set, and calls the existing building blocks directly
 (`scripts/phone-walkthrough.sh <scenarios>` and/or
-`scripts/pre-release-confidence-gate.sh`). Mapping (default-to-full when in
-doubt):
+`scripts/pre-release-confidence-gate.sh`).
+
+Since #2063 the mapping is **data, not inline case arms**: it reads the
+`devgate` column of `scripts/test-areas.txt` through
+`scripts/lib/test-areas.sh`, so the local fast path and CI area selection can no
+longer disagree about what a path is. `devgate` is a per-ROW column rather than
+a per-AREA one precisely because the old arms split some areas across stages
+(`shared/core-ssh` was `terminal` while `shared/core-connection` fell through to
+force-full), and that is what let the refactor keep every decision unchanged.
+`scripts/dev-fast-gate-parity-selftest.sh` re-runs the original case arms
+alongside the manifest over every tracked file and asserts (a) no path became
+less conservative and (b) the paths that became MORE conservative are exactly a
+pinned, reasoned set — the `TmuxSessionViewModel.kt` seam, the Docker fixtures,
+`shared/test-support`, `app/.../layout/`, test-infrastructure files, and
+markdown. Mapping (default-to-full when in doubt):
 
 | Changed area | Stages run |
 |---|---|

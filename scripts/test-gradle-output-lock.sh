@@ -4,7 +4,7 @@ set -uo pipefail
 # Gradle output-tree lock harness (issue #2007).
 #
 # THE DEFECT this harness exists to stop coming back. `scripts/connected-test.sh`
-# and `scripts/full-jvm-gate.sh` are both canonical wrappers around `./gradlew`,
+# and `scripts/full-jvm-gate.py` are both canonical wrappers around `./gradlew`,
 # and both rewrite the SAME `app/build/...` output graph of the checkout they run
 # from. Nothing stopped them overlapping. During #893 validation in
 # `.worktrees/issue-893-recurrence` a connected `--rerun-tasks` build and the
@@ -107,7 +107,7 @@ make_worktree() {
   mkdir -p "$root/scripts/lib" "$root/tests/docker" \
     "$root/app/build/intermediates/processDebugResources/debug"
   local script
-  for script in connected-test.sh full-jvm-gate.sh; do
+  for script in connected-test.sh full-jvm-gate.py; do
     cp "$ROOT_DIR/scripts/$script" "$root/scripts/$script" 2>/dev/null || true
   done
   # Glob the WHOLE scripts/lib rather than enumerating it. An enumerated list
@@ -296,7 +296,7 @@ start_full_gate_style_lane() {
     PATH="$STUB_BIN:$PATH" \
     POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$OUTPUT_LOCK_DIR" \
     "$root/scripts/lib/gradle-output-lock.sh" \
-    --output-root "$root" --label "full-jvm-gate.sh style lane" \
+    --output-root "$root" --label "full-jvm-gate.py style lane" \
     -- "$root/gradlew" test --rerun-tasks \
     > "$log" 2>&1 &
   LANE_PID="$!"
@@ -611,7 +611,7 @@ lock_path_is_machine_anchored_and_per_output_tree() {
 
 # --------------------------------------------------------------------------
 # 6. The two implementations must agree. connected-test.sh resolves the lock in
-#    Bash; scripts/full-jvm-gate.sh resolves it in Python because it distrusts
+#    Bash; scripts/full-jvm-gate.py resolves it in Python because it distrusts
 #    the inherited environment. Two wrappers that disagree about the path
 #    exclude nothing -- and the disagreement would be SILENT, which is exactly
 #    how #1657 and #1842 stayed broken.
@@ -625,7 +625,7 @@ the_gate_and_the_wrappers_resolve_one_lock_file() {
   from_bash="$(resolve_lock_file "$wt" "")" || { fail "$from_bash"; return 1; }
   from_python="$(printf '' | env -u CI \
     POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$OUTPUT_LOCK_DIR" \
-    "$wt/scripts/full-jvm-gate.sh" --output-lock-probe 2>"$tmp/equiv.err" \
+    "$wt/scripts/full-jvm-gate.py" --output-lock-probe 2>"$tmp/equiv.err" \
     | sed -n 's/^gradle_output_lock=//p')"
 
   if [[ -z "$from_python" ]]; then
@@ -633,7 +633,7 @@ the_gate_and_the_wrappers_resolve_one_lock_file() {
     return 1
   fi
   if [[ "$from_bash" != "$from_python" ]]; then
-    fail "scripts/lib/gradle-output-lock.sh and scripts/full-jvm-gate.sh resolve DIFFERENT lock files for one output tree ($from_bash vs $from_python) -- the connected wrapper and the gate would never exclude each other (issue #2007)"
+    fail "scripts/lib/gradle-output-lock.sh and scripts/full-jvm-gate.py resolve DIFFERENT lock files for one output tree ($from_bash vs $from_python) -- the connected wrapper and the gate would never exclude each other (issue #2007)"
     return 1
   fi
   pass "the Bash wrapper half and the Python gate half resolve the identical lock file"
@@ -662,7 +662,7 @@ a_blocked_gate_reports_the_owner_and_never_starts() {
   printf '' | env -u CI \
     POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$OUTPUT_LOCK_DIR" \
     POCKETSHELL_GRADLE_OUTPUT_LOCK_WAIT_SECONDS=2 \
-    "$wt/scripts/full-jvm-gate.sh" --output-lock-probe \
+    "$wt/scripts/full-jvm-gate.py" --output-lock-probe \
     > "$tmp/queue-gate.out" 2> "$tmp/queue-gate.err" || rc=$?
   touch "$release"; kill_group "$holder_pid"
 
@@ -793,7 +793,7 @@ a_nested_wrapper_reuses_its_ancestors_ownership() {
     POCKETSHELL_GRADLE_OUTPUT_LOCK_WAIT_SECONDS=3 \
     "$wt/scripts/lib/gradle-output-lock.sh" --output-root "$wt" \
     --label "ancestor holding for a nested gate" \
-    -- env -u CI "$wt/scripts/full-jvm-gate.sh" --output-lock-probe \
+    -- env -u CI "$wt/scripts/full-jvm-gate.py" --output-lock-probe \
     > "$tmp/nested-gate.out" 2> "$tmp/nested-gate.err" || rc=$?
 
   if [[ "$rc" != "0" ]]; then
@@ -1197,7 +1197,7 @@ the_avd_lock_stays_a_separate_concern() {
 # --------------------------------------------------------------------------
 both_canonical_wrappers_take_the_lock_before_gradle() {
   local connected="$ROOT_DIR/scripts/connected-test.sh"
-  local gate="$ROOT_DIR/scripts/full-jvm-gate.sh"
+  local gate="$ROOT_DIR/scripts/full-jvm-gate.py"
 
   # Comments ABOUT the call are not the call, at either end.
   local acquire_line first_gradle_line
@@ -1222,7 +1222,7 @@ both_canonical_wrappers_take_the_lock_before_gradle() {
   gate_acquire_line="$(grep -n '^acquire_gradle_output_lock(' "$gate" | head -n1 | cut -d: -f1)"
   gate_exec_line="$(grep -n '^os.execve(' "$gate" | head -n1 | cut -d: -f1)"
   if [[ -z "$gate_acquire_line" ]]; then
-    fail "scripts/full-jvm-gate.sh no longer acquires the gradle output lock before exec (issue #2007)"
+    fail "scripts/full-jvm-gate.py no longer acquires the gradle output lock before exec (issue #2007)"
     return 1
   fi
   if [[ -z "$gate_exec_line" ]]; then
@@ -1230,7 +1230,7 @@ both_canonical_wrappers_take_the_lock_before_gradle() {
     return 1
   fi
   if (( gate_acquire_line > gate_exec_line )); then
-    fail "scripts/full-jvm-gate.sh acquires the output lock (line $gate_acquire_line) after its exec (line $gate_exec_line)"
+    fail "scripts/full-jvm-gate.py acquires the output lock (line $gate_acquire_line) after its exec (line $gate_exec_line)"
     return 1
   fi
   pass "both canonical wrappers acquire the output lock before they run gradle"

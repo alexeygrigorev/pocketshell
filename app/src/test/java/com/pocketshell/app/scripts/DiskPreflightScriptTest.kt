@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
  * a test (#1640/#1646/#1853). `tests/scripts/` accumulated twelve harnesses that
  * had never executed, four of which were failing when #1853 finally ran them.
  * Wiring this one here means it runs in the per-PR required check AND inside
- * `scripts/full-jvm-gate.sh`'s complete graph, with no workflow YAML edit to
+ * `scripts/full-jvm-gate.py`'s complete graph, with no workflow YAML edit to
  * drift out of sync.
  *
  * The harness is emulator-free, Docker-daemon-free, and disk-free: it uses a
@@ -56,7 +56,7 @@ class DiskPreflightScriptTest {
         //   * a driving gate exports AVD/output-lock acquire state, which would
         //     short-circuit the wrapper's own lock calls inside the fixtures
         //     (the #1702 lesson);
-        //   * `CI` is set in the required Unit job, and scripts/full-jvm-gate.sh
+        //   * `CI` is set in the required Unit job, and scripts/full-jvm-gate.py
         //     rejects any run with CI set outside its guard-only modes — the
         //     harness drives its real preflight probe, so CI must be absent.
         //     Removing CI also disables scripts/lib/scope-run.sh's hosted-runner

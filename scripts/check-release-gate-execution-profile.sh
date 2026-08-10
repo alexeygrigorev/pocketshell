@@ -1323,11 +1323,11 @@ check_default_profile() {
   # keep these literals honest.
   CHECKS_RUN=$((CHECKS_RUN + 1))
   [[ "$POCKETSHELL_KOTLIN_DAEMON_HEAP_FLOOR_MIB" -ge 3072 ]] ||
-    { fail "Kotlin daemon heap floor must stay >= 3072 MiB (the canonical scripts/full-jvm-gate.sh value), got $POCKETSHELL_KOTLIN_DAEMON_HEAP_FLOOR_MIB" || rc=1; }
+    { fail "Kotlin daemon heap floor must stay >= 3072 MiB (the canonical scripts/full-jvm-gate.py value), got $POCKETSHELL_KOTLIN_DAEMON_HEAP_FLOOR_MIB" || rc=1; }
 
   CHECKS_RUN=$((CHECKS_RUN + 1))
   [[ "$POCKETSHELL_GRADLE_LAUNCHER_HEAP_FLOOR_MIB" -ge 1536 ]] ||
-    { fail "Gradle launcher heap floor must stay >= 1536 MiB (the canonical scripts/full-jvm-gate.sh value), got $POCKETSHELL_GRADLE_LAUNCHER_HEAP_FLOOR_MIB" || rc=1; }
+    { fail "Gradle launcher heap floor must stay >= 1536 MiB (the canonical scripts/full-jvm-gate.py value), got $POCKETSHELL_GRADLE_LAUNCHER_HEAP_FLOOR_MIB" || rc=1; }
 
   CHECKS_RUN=$((CHECKS_RUN + 1))
   [[ "$POCKETSHELL_RELEASE_GATE_SCOPE_MEM_FLOOR_GIB" -ge 20 ]] ||
@@ -1487,7 +1487,7 @@ self_test() {
   # script LOAD time, which hard-failed
   # `AvdLockScriptTest.avdLockHelperOwnershipHarnessPasses` and
   # `ReleaseGateScriptTest.phoneWalkthroughDispatchesEveryScenario`.
-  # `scripts/full-jvm-gate.sh` exports POCKETSHELL_TEST_MEM=8G into every unit
+  # `scripts/full-jvm-gate.py` exports POCKETSHELL_TEST_MEM=8G into every unit
   # test, and those tests drive these scripts in modes that build nothing.
   #
   # Every probe runs through `as_local`: the floor is CI-exempt, so on GitHub

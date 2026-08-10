@@ -1844,6 +1844,96 @@ loop.
 
 ---
 
+## CI Unit lane: sizing and sharding (issues #760, #2060, #2069)
+
+The required `Unit tests` check is the `unit-gate` aggregator over five jobs
+(`unit` × 2 shards, `guards-static`, `guards-ci-harness`, `guards-test-selection`,
+`dex`). This section is the long-form rationale that used to sit inline in
+`.github/workflows/tests.yml`, which is close to the 128 KiB hygiene cap.
+
+### Heap and worker caps (#760, #2060)
+
+`#760`: the job occasionally failed with ALL visible tests PASSED — a
+gradle-daemon/runner OOM abort, not an assertion failure. Unbounded gradle
+worker fan-out plus an oversized test JVM heap pushes the runner into the
+OOM-killer, which kills gradle mid-run *after* the tests reported green. Both
+the worker count and the JVM heaps are bounded so the job stays inside the
+runner's memory budget: the explicit `-Dorg.gradle.jvmargs` caps the gradle
+daemon/launcher heap while the test forks inherit the project's modest `-Xmx`.
+Infra robustness only — no test is removed, skipped or weakened.
+
+`#2060`: #760 sized `--max-workers=2` for "7 GB RAM and 2 cores". That box is
+gone (public-repo runners have been 4 vCPU / 16 GB since Jan 2024), so the job
+ran at half of it. Raising it to 4 raises CONCURRENCY, not memory:
+`org.gradle.parallel` stays false, so at most ONE `Test` task (one 1536m fork)
+is alive at a time and only intra-task Worker API actions (AGP dexing/resources)
+widen. `--parallel` / `maxParallelForks` WOULD multiply live forks and feed the
+#708/#882 virtual-clock flake class, so they are deliberately NOT bundled. One
+variable at a time — and note the AGENTS.md memory trap surfaces as a fake
+`Backend Internal error: Exception during IR lowering`, not as an OOM.
+
+### Why more workers is the wrong next knob (#2069)
+
+Measured on [run 31319201177](https://github.com/alexeygrigorev/pocketshell/actions/runs/31319201177):
+`--max-workers 2 -> 4` moved the Gradle test step **1141s -> 1084s, ~57s (5%)**.
+The suite does not parallelize further on a 4-vCPU runner. Do not spend another
+round on workers, `--parallel`, or `maxParallelForks`; the step is not
+core-starved.
+
+Where the time actually goes, derived from the `main` run 31339684629 result XML
+plus its console timestamps (sum of per-task deltas = 1089s of a 1125s step):
+
+| Bucket | Debug | Release | Variant-neutral |
+| --- | ---: | ---: | ---: |
+| Test execution | 398s | 376s | — |
+| Build (compile/resources/KSP) | 114s | 177s | 25s |
+
+`:app` alone is 285.4s + 283.9s of the 863.9s total test-case time (66%), across
+24 test tasks / 12362 tests. Both halves are close to balanced, and nearly all
+the non-test cost is variant-specific, so splitting by variant halves both.
+
+### The split, and why two shards and not six
+
+`unit` is a `strategy.matrix.variant: [Debug, Release]` job: one leg runs
+`./gradlew testDebugUnitTest`, the other `testReleaseUnitTest`. It is a matrix
+rather than two hand-written jobs on purpose — `needs.unit.result` aggregates
+every leg, so the `unit-gate` three-list wiring (`needs:` / `env:` / the result
+loop) is untouched and the #2067 silent-gate hazard cannot apply.
+
+Two, not more, because the unit job stops being the critical path at that point:
+`guards-ci-harness` runs 644–666s across recent `main` runs, so once `unit` is
+near that it is the floor. A third or fourth shard would shrink `unit` further
+and leave the lane exactly where two shards put it, while paying #2060's
+measured ~38s per-job checkout/JDK/cache overhead each time. That is the knee.
+
+### The coverage invariant, and how it is proved
+
+`./gradlew test` ran everything; `testDebugUnitTest` + `testReleaseUnitTest` runs
+everything **only while every module's test task is one of those two**. Today it
+is (all 13 modules apply an Android plugin), and `./gradlew test --dry-run`
+versus `./gradlew testDebugUnitTest testReleaseUnitTest --dry-run` differ by
+exactly the 13 no-op `:module:test` lifecycle aggregators — no executing task is
+lost. But one plain `kotlin("jvm")` module with tests would get a bare `test`
+task that neither shard names, and its tests would stop running with the
+required check still green.
+
+Two guards hold the invariant, and neither is sufficient alone:
+
+- `scripts/check-ci-unit-forced-execution.sh` — the workflow asks for both
+  halves: the task argument is the matrix expression (not a hardcoded variant,
+  which would make both legs run the same half) and the shard list is exactly
+  `[Debug, Release]`. Its `--self-test` rejects 13 mutations, including a
+  dropped shard, a duplicated shard, lowercase names, and a matrix belonging to
+  a different job.
+- `scripts/check-executed-test-counts.sh` — the two halves together are
+  everything. `--variant Debug|Release` scopes each shard's expected-task set,
+  and an unconditional **shard partition check** fails when a required module
+  expects a task outside the two. Its `--self-test` asserts
+  `union(Debug, Release) == the unsharded task set` and that the halves are
+  disjoint, plus the plain-`test`-module red case.
+
+---
+
 ## CI matrix
 
 GitHub Actions runs:

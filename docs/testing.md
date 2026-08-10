@@ -574,7 +574,7 @@ The plan emits `UNIT_SHARED_TASKS` (module test tasks, unfiltered) and
 **two invocations**, because a single `--tests` applies to every test task in
 one invocation and would filter the shared modules to nothing. In `full` mode it
 emits the byte-identical whole-graph `test` task the Unit job runs today, which
-is what keeps `scripts/check-ci-unit-forced-execution.sh` satisfied on the full
+is what keeps `scripts/check-ci-unit-forced-execution.py` satisfied on the full
 path.
 
 `UNIT_GRADLE_FILTERS` carries **exact fully-qualified class names, never
@@ -641,7 +641,7 @@ name, a bare `@cli.group`, an unparseable `cli.py`, a missing `python3`, or a
 sibling module taking the group object so a registration could live outside
 `cli.py` — is reported by name and fails the guard. `python3` is therefore a
 hard dependency of `--verify-manifest`; it is already one for
-`scripts/check-ci-unit-forced-execution.sh` in the same job.
+`scripts/check-ci-unit-forced-execution.py` in the same job.
 
 **Why detection is receiver-agnostic, and not a list of recognised shapes.**
 Equality is only worth what the reader can *see*, and for five rounds the reader
@@ -843,7 +843,7 @@ task runs per variant, so it charged the suite twice per push on the Unit
 critical path — see the cost note below and the two consequences under "What
 this is worth, measured". If you add a guard, add a step to the job.
 
-**A local `scripts/full-jvm-gate.sh` green therefore does NOT cover these**, the
+**A local `scripts/full-jvm-gate.py` green therefore does NOT cover these**, the
 same way it does not cover `check-file-size-hygiene.sh` or
 `check-test-validity.sh`. Run the five commands above directly when you touch the
 manifest, the classification engine, the journey registry, or `cli.py`.
@@ -931,7 +931,7 @@ scripts/check-file-size-hygiene.sh --update   # only after files shrink
 runs `df`.** During #1963 validation the dev box's root filesystem hit 100%
 (436G, 24M available) and two gates died before a single test ran: a connected
 lane could not write `~/.docker/buildx` and then could not create
-`~/.gradle/caches/8.13`, and `scripts/full-jvm-gate.sh` failed in
+`~/.gradle/caches/8.13`, and `scripts/full-jvm-gate.py` failed in
 `:app:kspDebugKotlin` at 1m12s. Neither is an assertion failure, but both look
 like one, so a full disk burns a review round and gets blamed on the change
 under test.
@@ -960,7 +960,7 @@ layers. 10 GiB is roughly 3x that.
 An earlier revision set the floor at 4 GiB on the premise that these wrappers
 run on hosted CI runners where free space is tight mid-job. **That premise is
 false**, and it is recorded here so it is not rediscovered as a reason to lower
-the floor again. `scripts/full-jvm-gate.sh`'s real path never runs on a hosted
+the floor again. `scripts/full-jvm-gate.py`'s real path never runs on a hosted
 runner — `.github/workflows/tests.yml` invokes it only as
 `--profile-guard-self-test` / `--profile-guard-check`, both exempt from this
 preflight and both building nothing, and the real path additionally refuses to
@@ -978,7 +978,7 @@ timeout (75), and from the #1842 disturbed-fixture verdict (90), so "the box was
 full" is never read as "this change is red".
 
 `scripts/connected-test.sh` resolves the preflight through
-`scripts/lib/disk-preflight.sh`; `scripts/full-jvm-gate.sh` is an isolated
+`scripts/lib/disk-preflight.sh`; `scripts/full-jvm-gate.py` is an isolated
 Python program that sources no shell library, so it reimplements the identical
 thresholds and the identical statvfs arithmetic.
 `tests/scripts/disk-preflight-test.sh` pins the two halves against each other —

@@ -120,7 +120,7 @@ found` until these explicit paths have been tried:
 - SDK root from `local.properties`: `/home/alexey/Android/Sdk`
 - Available local AVD: `test`
 
-The canonical `scripts/full-jvm-gate.sh` does not depend on ignored
+The canonical `scripts/full-jvm-gate.py` does not depend on ignored
 `local.properties`. It validates `ANDROID_HOME` and/or `ANDROID_SDK_ROOT` (both
 must resolve to the same complete SDK), then checks the standard Linux local and
 hosted-runner locations documented in `process.md`.
@@ -395,7 +395,7 @@ are looking at before proposing a fix:
   **#882 miss (2026-06-21):** a recording-timer `while(recording){delay(50)}`
   coroutine left active spun `advanceUntilIdle` forever under `runTest` virtual
   time → the CI Unit job (`./gradlew test --no-daemon`, whole suite, 35-min cap;
-  canonical forced local repros use `scripts/full-jvm-gate.sh`)
+  canonical forced local repros use `scripts/full-jvm-gate.py`)
   hit its timeout and `main` went red, but every gate ran the filtered subset and
   never saw it. Mandatory especially when a change adds a coroutine loop / ticker /
   new `runTest` test. A CI job that ends with "timed out after N minutes" + all
@@ -528,7 +528,7 @@ are looking at before proposing a fix:
   banned: its reclaim throttle turns a clean kill into an indefinite hang.)
 
   Related trap, same root: **do not hand-roll `./gradlew` in place of
-  `scripts/full-jvm-gate.sh`.** The gate passes
+  `scripts/full-jvm-gate.py`.** The gate passes
   `-Pkotlin.daemon.jvmargs=-Xmx3072m` and `-Dorg.gradle.jvmargs=-Xmx1536m`, and
   the repo's `gradle.properties` sets **no** `kotlin.daemon.jvmargs` at all — so
   an ad-hoc invocation leaves the Kotlin daemon on its default heap and OOMs no
@@ -536,6 +536,19 @@ are looking at before proposing a fix:
   changed nothing until the run switched to the canonical gate. process.md's
   "run the task CI runs" is about the execution *profile*, not just which tests
   are selected.
+- **Run repository programs DIRECTLY; never pick an interpreter from the
+  filename. Machine-enforced by `scripts/check-script-interpreter-hygiene.sh`
+  (#2066).** `bash <a python program>` mis-executes it line by line, and
+  `import os` runs **ImageMagick's `import`**, which blocks forever on X: a
+  process that stays "active" with a ~1-line log, zero test XML, and — inside
+  the shared `flock` — the gate lock held while every sibling lane starves.
+  This was documented for months as a property of ONE named file
+  (`full-jvm-gate.sh`), which taught agents that its two equally-Python
+  siblings were safe; a briefed reviewer still `bash`-ed one and read its
+  `rc=0` as a pass. All three are now `.py`, and the guard enforces with no
+  allowlist that extensions match shebangs and that nothing shells a non-shell
+  program. Corollary for reading results: a ~1-line gate log is not a slow run
+  and not a failure — it is a run that never happened.
 - **Never pipe a long-running gate through `grep`.** The harness captures only
   what the pipeline emits, so a failing run leaves you a 2-line file with the
   task name and no error — and you must re-run the whole thing to learn anything.

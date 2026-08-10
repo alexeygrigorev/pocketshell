@@ -281,7 +281,7 @@ class_selected() {
 # invocation, so a shared-module task would be filtered by an :app class name
 # and fail with "no tests found". Full mode emits the byte-identical whole-graph
 # command the Unit job runs today, which is what keeps
-# check-ci-unit-forced-execution.sh satisfied on the full path.
+# check-ci-unit-forced-execution.py satisfied on the full path.
 #
 # TWO round-1 defects are fixed here.
 #

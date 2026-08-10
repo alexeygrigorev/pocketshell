@@ -72,7 +72,7 @@
 #
 # Heap sizing rationale:
 #   -Pkotlin.daemon.jvmargs=-Xmx3072m  the canonical value from
-#       scripts/full-jvm-gate.sh, proven on the complete `test --rerun-tasks`
+#       scripts/full-jvm-gate.py, proven on the complete `test --rerun-tasks`
 #       graph. Kept exactly, in BOTH profiles.
 #   -Dorg.gradle.jvmargs=-Xmx3072m     (LOCAL only) ABOVE the canonical 1536m on
 #       purpose. The canonical gate only runs `test`; the release chain also runs
@@ -108,7 +108,7 @@
 #   ./gradlew --no-daemon "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" :app:assembleDebug
 #
 # The asymmetry is deliberate and was learned the hard way. `POCKETSHELL_TEST_MEM`
-# is AMBIENT ENVIRONMENT, not a constant, and `scripts/full-jvm-gate.sh` exports
+# is AMBIENT ENVIRONMENT, not a constant, and `scripts/full-jvm-gate.py` exports
 # `POCKETSHELL_TEST_MEM=8G` (its MEMORY_LIMIT) into every JVM unit test. Several
 # unit tests drive these scripts through `tests/scripts/*.sh` harnesses in modes
 # that never build anything (`--help`, `PHONE_WALKTHROUGH_VERIFY_DISPATCH_ONLY=1`),

@@ -8,7 +8,7 @@ set -uo pipefail
 # The reported defect is a dev-box root filesystem at 100% turning two canonical
 # gates into infrastructure failures that LOOK like product failures. The
 # reproduction therefore drives the REAL `scripts/connected-test.sh` and the REAL
-# `scripts/full-jvm-gate.sh` — not a stand-in — against a filesystem whose free
+# `scripts/full-jvm-gate.py` — not a stand-in — against a filesystem whose free
 # space is below the bar, and asserts they refuse to start.
 #
 # The "below the bar" condition is created by lowering the BAR, not by filling
@@ -74,7 +74,7 @@ BELOW_FLOOR_MB=999999999999
 # ---------------------------------------------------------------------------
 # 1. The two halves of the preflight must agree.
 #
-# connected-test.sh resolves the preflight in Bash and full-jvm-gate.sh (an
+# connected-test.sh resolves the preflight in Bash and full-jvm-gate.py (an
 # isolated Python program that deliberately sources no shell library) resolves
 # it in Python. Two canonical wrappers that disagree about "is there room"
 # protect nothing — the same failure mode as the #2007 lock's two halves, which
@@ -93,11 +93,11 @@ halves_agree_on_thresholds_and_rc() {
   )"
 
   python_min="$(sed -n 's/^DISK_PREFLIGHT_DEFAULT_MIN_FREE_MB = \([0-9]*\)$/\1/p' \
-    "$ROOT_DIR/scripts/full-jvm-gate.sh")"
+    "$ROOT_DIR/scripts/full-jvm-gate.py")"
   python_warn="$(sed -n 's/^DISK_PREFLIGHT_DEFAULT_WARN_FREE_MB = \([0-9]*\)$/\1/p' \
-    "$ROOT_DIR/scripts/full-jvm-gate.sh")"
+    "$ROOT_DIR/scripts/full-jvm-gate.py")"
   python_rc="$(sed -n 's/^DISK_PREFLIGHT_FAIL_RC = \([0-9]*\)$/\1/p' \
-    "$ROOT_DIR/scripts/full-jvm-gate.sh")"
+    "$ROOT_DIR/scripts/full-jvm-gate.py")"
 
   [[ -n "$python_min" && -n "$python_warn" && -n "$python_rc" ]] \
     || fail "could not read the python half's disk-preflight constants"
@@ -213,7 +213,7 @@ malformed_threshold_fails_closed() {
 
   rc=0
   output="$(POCKETSHELL_DISK_MIN_FREE_MB="10 GiB" \
-    "$ROOT_DIR/scripts/full-jvm-gate.sh" --disk-preflight-probe 2>&1)" || rc=$?
+    "$ROOT_DIR/scripts/full-jvm-gate.py" --disk-preflight-probe 2>&1)" || rc=$?
   (( rc == 76 )) || fail "python half accepted a malformed threshold (rc=$rc)"
   [[ "$output" == *"must be a whole number of MiB"* ]] \
     || fail "python half did not name the malformed threshold: $output"
@@ -221,25 +221,25 @@ malformed_threshold_fails_closed() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. full-jvm-gate.sh refuses below the floor and proceeds above it.
+# 4. full-jvm-gate.py refuses below the floor and proceeds above it.
 # ---------------------------------------------------------------------------
 full_jvm_gate_probe_refuses_and_allows() {
   local rc=0 output
   output="$(POCKETSHELL_DISK_MIN_FREE_MB="$BELOW_FLOOR_MB" \
-    "$ROOT_DIR/scripts/full-jvm-gate.sh" --disk-preflight-probe 2>&1)" || rc=$?
-  (( rc == 76 )) || fail "full-jvm-gate.sh did not refuse below the floor (rc=$rc): $output"
+    "$ROOT_DIR/scripts/full-jvm-gate.py" --disk-preflight-probe 2>&1)" || rc=$?
+  (( rc == 76 )) || fail "full-jvm-gate.py did not refuse below the floor (rc=$rc): $output"
   [[ "$output" == *"=== DISK PREFLIGHT FAILED (issue #1989) ==="* ]] \
-    || fail "full-jvm-gate.sh refusal is missing the operator-facing banner: $output"
+    || fail "full-jvm-gate.py refusal is missing the operator-facing banner: $output"
   [[ "$output" == *"scripts/disk-cleanup.sh"* ]] \
-    || fail "full-jvm-gate.sh refusal does not name the cleanup path: $output"
+    || fail "full-jvm-gate.py refusal does not name the cleanup path: $output"
   [[ "$output" == *"required:  $BELOW_FLOOR_MB MiB"* ]] \
-    || fail "full-jvm-gate.sh refusal does not report the required space: $output"
+    || fail "full-jvm-gate.py refusal does not report the required space: $output"
 
   rc=0
   POCKETSHELL_DISK_MIN_FREE_MB=0 \
-    "$ROOT_DIR/scripts/full-jvm-gate.sh" --disk-preflight-probe >/dev/null 2>&1 || rc=$?
-  (( rc == 0 )) || fail "full-jvm-gate.sh refused above the floor (rc=$rc)"
-  pass_case "full-jvm-gate.sh refuses below the floor with a full report, and proceeds above it"
+    "$ROOT_DIR/scripts/full-jvm-gate.py" --disk-preflight-probe >/dev/null 2>&1 || rc=$?
+  (( rc == 0 )) || fail "full-jvm-gate.py refused above the floor (rc=$rc)"
+  pass_case "full-jvm-gate.py refuses below the floor with a full report, and proceeds above it"
 }
 
 # ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ warn_line_fires_before_the_floor() {
 
   rc=0
   output="$(POCKETSHELL_DISK_MIN_FREE_MB=0 POCKETSHELL_DISK_WARN_FREE_MB="$BELOW_FLOOR_MB" \
-    "$ROOT_DIR/scripts/full-jvm-gate.sh" --disk-preflight-probe 2>&1)" || rc=$?
+    "$ROOT_DIR/scripts/full-jvm-gate.py" --disk-preflight-probe 2>&1)" || rc=$?
   (( rc == 0 )) || fail "the python warn line must not block the run (rc=$rc)"
   [[ "$output" == *"WARN: disk preflight (issue #1989)"* ]] \
     || fail "python half did not warn below the comfort line: $output"
@@ -286,7 +286,7 @@ make_connected_sandbox() {
   export POCKETSHELL_AVD_LOCK_DIR="$sandbox/avd-locks"
   export POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$sandbox/gradle-output-locks"
 
-  # This harness unsets CI (full-jvm-gate.sh rejects any run with CI set outside
+  # This harness unsets CI (full-jvm-gate.py rejects any run with CI set outside
   # its guard-only modes), and scripts/lib/scope-run.sh keys its hosted-runner
   # fallback off exactly that variable: with no reachable `systemd --user`
   # manager AND no CI, pocketshell_scope_run fails closed with rc 125 rather
@@ -403,7 +403,7 @@ connected_test_cleanup_mode_is_exempt() {
 # 6b. The fixtures must survive a HOSTED-RUNNER host, not just this dev box.
 #
 # This harness runs in the required `Unit tests` check, where CI=true — but it
-# must unset CI, because full-jvm-gate.sh rejects any run with CI set outside
+# must unset CI, because full-jvm-gate.py rejects any run with CI set outside
 # its guard-only modes. scripts/lib/scope-run.sh keys its bare-execution
 # fallback off exactly that variable, so unsetting CI on a host with no
 # reachable `systemd --user` manager makes pocketshell_scope_run fail closed

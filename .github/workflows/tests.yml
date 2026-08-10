@@ -68,9 +68,9 @@ jobs:
       # removed, duplicated, contradicted, or moved off the complete test graph.
       - name: CI Unit forced-execution wiring guard (issue #1897)
         run: |
-          chmod +x scripts/check-ci-unit-forced-execution.sh
-          scripts/check-ci-unit-forced-execution.sh --self-test
-          scripts/check-ci-unit-forced-execution.sh
+          chmod +x scripts/check-ci-unit-forced-execution.py
+          scripts/check-ci-unit-forced-execution.py --self-test
+          scripts/check-ci-unit-forced-execution.py
 
       # Issue #1646: the executed-test-count guard's OWN red->green self-test.
       # Proves — with synthetic result XML + synthetic Gradle console output, no
@@ -375,8 +375,16 @@ jobs:
       # and stripping of hosted toolchain/profile variables before the guard.
       - name: Forced full-JVM resource-profile guard (issue #1761)
         run: |
-          scripts/full-jvm-gate.sh --profile-guard-self-test
-          scripts/full-jvm-gate.sh --profile-guard-check
+          scripts/full-jvm-gate.py --profile-guard-self-test
+          scripts/full-jvm-gate.py --profile-guard-check
+
+      # Issue #2066: extension/shebang disagreement, and any caller that shells
+      # a non-shell program. Rationale and the exact rules live in ONE place —
+      # the script header. ~2 s, no Gradle.
+      - name: "Script interpreter hygiene guard (issue #2066)"
+        run: |
+          scripts/check-script-interpreter-hygiene.sh --self-test
+          scripts/check-script-interpreter-hygiene.sh
 
       # Issue #2067: `unit-gate` holds THREE lists nothing forced to agree —
       # `needs:`, the `env:` result mapping, and the result-checking loop. A job
@@ -478,7 +486,7 @@ jobs:
           chmod +x scripts/test-agents-pool-isolation.sh
           scripts/test-agents-pool-isolation.sh
 
-      # Issue #2007: connected-test.sh and full-jvm-gate.sh are both canonical
+      # Issue #2007: connected-test.sh and full-jvm-gate.py are both canonical
       # wrappers around ./gradlew and both rewrite the SAME app/build graph of
       # the checkout they run from. Nothing stopped them overlapping, so during
       # #893 validation a connected --rerun-tasks build and the full JVM gate

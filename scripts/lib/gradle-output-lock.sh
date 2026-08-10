@@ -4,7 +4,7 @@
 # Gradle output-tree lock (issue #2007)
 #
 # THE DEFECT this exists to stop coming back. `scripts/connected-test.sh` and
-# `scripts/full-jvm-gate.sh` are both canonical wrappers around `./gradlew`, and
+# `scripts/full-jvm-gate.py` are both canonical wrappers around `./gradlew`, and
 # both write the SAME `app/build/...` output graph of the checkout they are run
 # from. Nothing stopped them overlapping. During #893 validation in
 # `.worktrees/issue-893-recurrence` a connected `--rerun-tasks` build and the
@@ -38,7 +38,7 @@
 #     from the PASSWD entry, not the environment. A caller with an unusual
 #     exported HOME must not silently get a different lock directory than its
 #     sibling — that is exactly the split-lock bug #1657 fixed for the AVD half,
-#     and the Python half of this lock (scripts/full-jvm-gate.sh) reads the
+#     and the Python half of this lock (scripts/full-jvm-gate.py) reads the
 #     passwd entry because it deliberately distrusts the inherited environment.
 #     Both halves must agree byte-for-byte or the lock protects nothing.
 #
@@ -112,7 +112,7 @@ pocketshell_gradle_output_lock_resolved_root() {
 # Lock path for one (output root, lane) pair. The digest keeps the filename
 # bounded and path-safe; the human-readable key is written INTO the file by the
 # holder. Must stay byte-identical to gradle_output_lock_file() in
-# scripts/full-jvm-gate.sh — scripts/test-gradle-output-lock.sh pins that.
+# scripts/full-jvm-gate.py — scripts/test-gradle-output-lock.sh pins that.
 pocketshell_gradle_output_lock_file() {
   local output_root="$1"
   local lane="${2:-}"

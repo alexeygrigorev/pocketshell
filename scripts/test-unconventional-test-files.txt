@@ -1,0 +1,76 @@
+# Reviewed exemptions: @Test-bearing files outside the *Test.kt / *Test.java
+# naming convention (issue #2065, mechanism from #2063).
+#
+# WHY THIS FILE EXISTS
+#
+# Every registry, guard and Gradle filter in this repo keys off the *Test.kt /
+# *Test.java convention: the journey registry (scripts/ci-journey-suite.sh), the
+# area manifest (scripts/test-areas.txt via pocketshell_test_areas_fqcn_for_path),
+# the executed-classes ledger (scripts/check-test-execution-ledger.sh) and the
+# validity guards. A @Test-bearing file that does not follow it is invisible to
+# all of them — the #1851 shape, and worse than a missing test because it looks
+# like coverage in the tree and in review.
+#
+# #2063 baselined the offenders inside select-test-areas.sh as a flat array of
+# paths, so a NEW one fails. #2065 is the other half: each existing file gets a
+# decision, and the decision is recorded here in a form the guard can CHECK
+# rather than a comment it has to be trusted about.
+#
+# IT IS DELIBERATELY NOT A `*Harness.kt` SUFFIX RULE. A suffix would be a
+# self-serve escape hatch — name a real regression test `…Harness.kt` and it
+# hides itself, with no reviewer in the loop. A per-file row with a machine-
+# checked justification keeps a human decision in the path.
+#
+# FORMAT — four TAB-separated fields, one row per file. `#` comments and blank
+# lines are ignored.
+#
+#   <path>  <executor>  <gate>  <reason>
+#
+# <path>     repo-relative. Must be tracked, live in a test source set, carry
+#            @Test, and NOT match the naming convention — otherwise the row is
+#            stale and the guard fails (an exemption that has outlived its file
+#            is how a baseline rots into a lie).
+#
+# <executor> HOW the file's @Test methods actually reach a runner. Answering
+#            "does it execute in any gate?" per file is the whole point of
+#            #2065; a claim is only allowed if the guard can confirm its shape.
+#              unit-source-set    the path is under */src/test/, so
+#                                 `./gradlew test` — the required `Unit tests`
+#                                 check — runs it unconditionally.
+#              nightly-connected  the path is under app/src/androidTest/ and
+#                                 nightly-extensive phase 1 runs
+#                                 :app:connectedDebugAndroidTest WHOLESALE with
+#                                 only a `notClass` exclusion list, so the class
+#                                 executes even though it is in no explicit
+#                                 suite. The guard asserts the class's simple
+#                                 name appears NOWHERE in
+#                                 scripts/nightly-extensive-suite.sh, which is
+#                                 fail-closed: the moment somebody names it
+#                                 there (exclusion, shard pin, comment) the
+#                                 executor claim has to be re-argued.
+#
+# <gate>     WHAT accounts for the file, given no registry can see it.
+#              <FQCN>                 a conventional test class that carries the
+#                                     load-bearing assertion for the same
+#                                     behaviour. The guard resolves it through
+#                                     the SAME class index the area manifest and
+#                                     the ledger use, so the gate is provably a
+#                                     registered, area-resolved, ledger-visible
+#                                     class — not just a name that reads well.
+#              enumerated-by:<script> a purpose-built registry that enumerates
+#                                     THIS file's @Test methods. The guard
+#                                     asserts the script exists and references
+#                                     the path.
+#
+# <reason>   free text, required. Why renaming is the wrong answer for this
+#            file.
+#
+# ADDING A ROW IS NOT A FORMALITY. If the file's @Test methods carry the
+# load-bearing assertion for anything, the answer is to RENAME it, not to list
+# it here.
+#
+shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt	unit-source-set	enumerated-by:scripts/render.sh	Fast design-render harness (#555). Observed executing 68 testcases, 0 skipped, in :shared:ui-kit:testDebugUnitTest, so it is not silently dead. It is also the ONE file here with a stronger registry than the ledger could give it: scripts/render.sh parses every @Test method out of this source and hard-fails when one has no `fun m() = render("label")` mapping — per-METHOD accounting, pinned per push by scripts/render-selftest.sh in the guards-static job ("missing test-to-label mapping is rejected"). The module's execution is separately ledger-observed through the sibling conventional DesignRenderStaticLoadingPolicyTest in this same package. Renaming would break render.sh's RENDER_CLASS/RENDER_SOURCE constants, ~10 render-selftest.sh fixtures and four docs that name the file as the design-iteration entry point, and buy no accounting that is not already there.
+app/src/androidTest/java/com/pocketshell/app/composer/Issue1622DeadBandScreenshotHarness.kt	nightly-connected	com.pocketshell.app.composer.Issue1622ComposerSheetGeometryProofTest	Screenshot STAGING harness (#1622), inert by construction: every method reads the `issue1622HoldMs` instrumentation argument and returns before composing anything when it is absent, so a normal or nightly run passes without asserting. Renaming it would put a deliberately vacuous class into every registry as though it were a gate — the same "looks like coverage, contributes nothing" deception #2065 exists to end, pointed the other way. The geometry it stages a picture of is HARD-asserted by the gate class, which is conventional and wired into scripts/ci-journey-suite.sh.
+app/src/androidTest/java/com/pocketshell/app/composer/PromptComposerImeDeadSpaceScreenshotHarness.kt	nightly-connected	com.pocketshell.app.composer.PromptComposerImeEmptyDraftDeadSpaceProofTest	Screenshot STAGING harness (#790), inert by construction: gated on the `issue790HoldMs` instrumentation argument, and additionally assumeTrue-skipped when the AVD cannot raise the real soft IME — both justified in the file because the load-bearing dead-space assertion lives in the gate class, which drives a synthetic ime() inset and cannot skip. Renaming would present a skip-prone staging harness as a gate.
+app/src/androidTest/java/com/pocketshell/app/tmux/TerminalHotkeysPanelScreenshotHarness.kt	nightly-connected	com.pocketshell.app.tmux.TerminalHotkeysPanelNoTruncationTest	Screenshot harness (#755): it renders the redesigned hotkeys panel and the keyboard-up launcher chip to PNGs under additional_test_output/ for the maintainer. Its two assertExists() calls only prove the bitmap it is about to save is not of an empty screen; the no-truncation property is asserted by the gate class, and the launcher-above-the-IME property by com.pocketshell.app.tmux.TmuxHotkeysLauncherImeProofTest. An artifact producer named like a gate is the wrong signal to leave in the tree.
+app/src/androidTest/java/com/pocketshell/app/tmux/TmuxComposerLauncherLargeFontScreenshotHarness.kt	nightly-connected	com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest	Screenshot harness (#813): renders the production bottom controls at the maintainer's 412dp / 1.5x-font profile, keyboard down and up, to PNGs for the issue. Same shape as #755 — its assertExists() calls guard the bitmap, not the geometry. The containment proof is the gate class, which is conventional and wired into scripts/ci-journey-suite.sh.

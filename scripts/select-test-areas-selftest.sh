@@ -338,6 +338,11 @@ cp "$SCRIPT_DIR/select-test-areas.sh" "$MUTDIR/select-test-areas.sh"
 cp "$SCRIPT_DIR/lib/test-areas.sh" "$MUTDIR/lib/test-areas.sh"
 cp "$SCRIPT_DIR/test-areas.txt" "$MUTDIR/test-areas.txt"
 cp "$SCRIPT_DIR/ci-journey-suite.sh" "$MUTDIR/ci-journey-suite.sh"
+# The copies resolve their data relative to their own dir, so a copy that is not
+# given these reads a MISSING exemption list / nightly suite and reddens for a
+# reason that has nothing to do with the mutation under test (#2065).
+cp "$SCRIPT_DIR/test-unconventional-test-files.txt" "$MUTDIR/test-unconventional-test-files.txt"
+cp "$SCRIPT_DIR/nightly-extensive-suite.sh" "$MUTDIR/nightly-extensive-suite.sh"
 
 run_mut() {  # run the MUTATED copy against the REAL tree
   POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
@@ -418,6 +423,10 @@ mut_copy() {  # $1 = dir name -> echoes a runner-ready dir
   cp "$SCRIPT_DIR/lib/test-areas.sh"    "$d/lib/test-areas.sh"
   cp "$SCRIPT_DIR/test-areas.txt"       "$d/test-areas.txt"
   cp "$SCRIPT_DIR/ci-journey-suite.sh"  "$d/ci-journey-suite.sh"
+  # See the MUTDIR note: without these a copy fails on missing #2065 data
+  # rather than on the mutation the case is about.
+  cp "$SCRIPT_DIR/test-unconventional-test-files.txt" "$d/test-unconventional-test-files.txt"
+  cp "$SCRIPT_DIR/nightly-extensive-suite.sh" "$d/nightly-extensive-suite.sh"
   printf '%s\n' "$d"
 }
 run_copy() {  # $1 = dir, rest = args
@@ -1050,6 +1059,184 @@ if [[ "$mismatch" -eq 0 ]]; then
   ok "20 every registered class resolves by FQCN on the real tree (one resolver, no shared-module blind spot)"
 else
   bad "20 $mismatch registered class(es) resolve to no area by FQCN"
+fi
+
+# ---------------------------------------------------------------------------
+# CASE 21 (#2065) — the unconventional-@Test-file guard, and the exemption rows
+# that keep it honest.
+#
+# #2063 proved a NEW offender fails. #2065 added the other half: an exemption is
+# only allowed when the guard can CHECK how the file executes and what accounts
+# for it. Every row below mutates one of those claims and asserts the specific
+# red — because a baseline whose justifications are prose is a baseline that can
+# say anything (G6: name the mutation that must redden this assertion, then
+# actually apply it).
+#
+# These run against the REAL tree deliberately: the property under test is about
+# the real exemption list and the real files it pins, and a synthetic mini-repo
+# would only prove the parser parses. Only the exemption file (and, for 21f, the
+# nightly suite) is swapped for a mutated copy; everything else is the shipped
+# guard reading the shipped tree. The verdict is read from the specific FAIL
+# line, not the exit code, since the real tree emits many other checks.
+# ---------------------------------------------------------------------------
+UNCONV_REAL="$SCRIPT_DIR/test-unconventional-test-files.txt"
+UNCONVDIR="$SANDBOX/unconventional"
+mkdir -p "$UNCONVDIR"
+
+run_unconv() {  # $1 = exemption file, $2 = nightly suite (optional)
+  POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$1" \
+  POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE="${2:-$SCRIPT_DIR/nightly-extensive-suite.sh}" \
+  bash "$SELECT" --verify-manifest 2>&1
+}
+
+if [[ ! -f "$UNCONV_REAL" ]]; then
+  bad "21 the exemption file is missing: $UNCONV_REAL"
+else
+  out="$(run_unconv "$UNCONV_REAL")"
+  if grep -q 'OK: no new @Test-bearing file outside' <<<"$out"; then
+    ok "21 the shipped exemption list is green on the real tree (every row's executor and gate check out)"
+  else
+    bad "21 the shipped exemption list is RED on the real tree:\n$(grep -E 'convention|exemption' <<<"$out")"
+  fi
+
+  # 21a — A NEW offender. Dropping a row makes its file unpinned, which is the
+  # SAME code path a newly added unconventional @Test file takes: this is the
+  # #1851 shape, and it is the one red that must never be losable.
+  grep -v '^shared/ui-kit' "$UNCONV_REAL" > "$UNCONVDIR/no-designrenders.txt"
+  if grep -q 'DesignRenders' "$UNCONVDIR/no-designrenders.txt"; then
+    bad "21a MUTATION DID NOT APPLY — the DesignRenders row is still in the copy, so 21a's verdict would be meaningless"
+  fi
+  out="$(run_unconv "$UNCONVDIR/no-designrenders.txt")"
+  if grep -q 'FAIL: 1 @Test-bearing file(s) do not follow' <<<"$out" &&
+     grep -q 'render/DesignRenders.kt' <<<"$out"; then
+    ok "21a an unpinned @Test-bearing file outside the convention reddens BY NAME (the #1851 shape)"
+  else
+    bad "21a an unpinned unconventional @Test file did NOT redden:\n$(grep -E 'convention|exemption' <<<"$out")"
+  fi
+
+  # 21b — Anti-rot the other way: a row that no longer pins a hidden file (the
+  # file was renamed to the convention, or deleted) must fail rather than sit
+  # there forever pretending to justify something.
+  { cat "$UNCONV_REAL"
+    printf 'app/src/test/java/com/pocketshell/app/GhostHarness.kt\tunit-source-set\tenumerated-by:scripts/render.sh\tstale row\n'
+  } > "$UNCONVDIR/stale.txt"
+  out="$(run_unconv "$UNCONVDIR/stale.txt")"
+  if grep -q 'FAIL: stale exemption' <<<"$out" && grep -q 'GhostHarness.kt' <<<"$out"; then
+    ok "21b a row that no longer pins a hidden @Test file reddens as stale (the list cannot rot into a lie)"
+  else
+    bad "21b a stale exemption row survived:\n$(grep -E 'convention|exemption' <<<"$out")"
+  fi
+
+  # 21c — The reason is mandatory. "Recorded exemption" means recorded; an empty
+  # justification is the baseline-by-default #2065 exists to stop.
+  sed 's|\(render/DesignRenders.kt\tunit-source-set\tenumerated-by:scripts/render.sh\t\).*|\1|' \
+    "$UNCONV_REAL" > "$UNCONVDIR/no-reason.txt"
+  if grep -qP 'DesignRenders\.kt\tunit-source-set\tenumerated-by:scripts/render\.sh\t.' \
+       "$UNCONVDIR/no-reason.txt"; then
+    bad "21c MUTATION DID NOT APPLY — the DesignRenders reason is still present in the copy"
+  fi
+  out="$(run_unconv "$UNCONVDIR/no-reason.txt")"
+  if grep -q 'FAIL: 1 unconventional-test-file exemption' <<<"$out" &&
+     grep -q 'expected <path>TAB<executor>TAB<gate>TAB<reason>' <<<"$out"; then
+    ok "21c an exemption with no recorded reason reddens"
+  else
+    bad "21c an exemption with no reason survived:\n$(grep -E 'convention|exemption' <<<"$out")"
+  fi
+
+  # 21d — The executor claim must match the path. Claiming the unit source set
+  # for an androidTest file would assert `./gradlew test` runs it, which is the
+  # exact false "it executes somewhere" this guard is supposed to refuse.
+  sed 's|\(TerminalHotkeysPanelScreenshotHarness.kt\t\)nightly-connected|\1unit-source-set|' \
+    "$UNCONV_REAL" > "$UNCONVDIR/wrong-executor.txt"
+  out="$(run_unconv "$UNCONVDIR/wrong-executor.txt")"
+  if grep -q "executor 'unit-source-set' but the path is not under \*/src/test/" <<<"$out"; then
+    ok "21d claiming the unit source set for an androidTest path reddens"
+  else
+    bad "21d a false unit-source-set executor claim survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+
+  # 21e — An executor the guard cannot check is rejected, not believed. This is
+  # the "I could not check" != "I checked and it is fine" rule.
+  sed 's|\(TerminalHotkeysPanelScreenshotHarness.kt\t\)nightly-connected|\1runs-somewhere-trust-me|' \
+    "$UNCONV_REAL" > "$UNCONVDIR/unknown-executor.txt"
+  out="$(run_unconv "$UNCONVDIR/unknown-executor.txt")"
+  if grep -q "unknown executor 'runs-somewhere-trust-me'" <<<"$out"; then
+    ok "21e an unverifiable executor claim is rejected rather than believed"
+  else
+    bad "21e an unknown executor claim survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+
+  # 21f — `nightly-connected` rests on nightly phase 1 running
+  # :app:connectedDebugAndroidTest WHOLESALE. The moment a class is named in the
+  # nightly suite (exclusion, shard pin, even a comment) that claim stops being
+  # inherited and has to be re-argued. Fail-closed on the simple name.
+  cp "$SCRIPT_DIR/nightly-extensive-suite.sh" "$UNCONVDIR/nightly.sh"
+  printf '\n# MUTANT 21f\nJOURNEY_EXCLUDED_CLASSES+=("$FQCN_PREFIX.TerminalHotkeysPanelScreenshotHarness")\n' \
+    >> "$UNCONVDIR/nightly.sh"
+  if ! grep -q 'MUTANT 21f' "$UNCONVDIR/nightly.sh"; then
+    bad "21f MUTATION DID NOT APPLY — the nightly exclusion is not live in the copy"
+  fi
+  out="$(run_unconv "$UNCONV_REAL" "$UNCONVDIR/nightly.sh")"
+  if grep -q "executor 'nightly-connected' claims the wholesale nightly run reaches it" <<<"$out" &&
+     grep -q 'TerminalHotkeysPanelScreenshotHarness' <<<"$out"; then
+    ok "21f excluding an exempted harness from the nightly wholesale run reddens its executor claim"
+  else
+    bad "21f a harness excluded from nightly kept its 'nightly-connected' claim:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+
+  # 21i / 21j — The PREMISE under `nightly-connected`, not just the per-row
+  # check. "The class is not excluded" only implies "it runs" while phase 1 is a
+  # WHOLESALE run minus a notClass list. Flip phase 1 to an allowlist, or drop
+  # the subtraction, and every row would silently start lying with the per-row
+  # check still green — the G6 shape where the assertion survives the bug.
+  sed 's|\(-Pandroid.testInstrumentationRunnerArguments.notClass="\$JOURNEY_NOTCLASS_ARG" \\\)|\1\n  -Pandroid.testInstrumentationRunnerArguments.class="com.pocketshell.app.proof.Allowlisted" \\|' \
+    "$SCRIPT_DIR/nightly-extensive-suite.sh" > "$UNCONVDIR/nightly-allowlist.sh"
+  if [[ "$(sed -n '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/p' "$UNCONVDIR/nightly-allowlist.sh" |
+           grep -c 'RunnerArguments.class=')" -ne 1 ]]; then
+    bad "21i MUTATION DID NOT APPLY — phase 1 in the copy is not an allowlist, so 21i's verdict would be meaningless"
+  fi
+  out="$(run_unconv "$UNCONV_REAL" "$UNCONVDIR/nightly-allowlist.sh")"
+  if grep -q 'phase 1 now restricts what it runs' <<<"$out"; then
+    ok "21i turning nightly phase 1 into a class= allowlist reddens every nightly-connected row's premise"
+  else
+    bad "21i phase 1 became an allowlist and the nightly-connected rows stayed green:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+
+  sed '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/ s|^  -Pandroid.testInstrumentationRunnerArguments.notClass=.*|  \\|' \
+    "$SCRIPT_DIR/nightly-extensive-suite.sh" > "$UNCONVDIR/nightly-noexclude.sh"
+  if [[ "$(sed -n '/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/p' "$UNCONVDIR/nightly-noexclude.sh" |
+           grep -c 'RunnerArguments.notClass=')" -ne 0 ]]; then
+    bad "21j MUTATION DID NOT APPLY — phase 1 in the copy still subtracts a notClass list"
+  fi
+  out="$(run_unconv "$UNCONV_REAL" "$UNCONVDIR/nightly-noexclude.sh")"
+  if grep -q 'phase 1 no longer runs :app:connectedDebugAndroidTest minus a notClass list' <<<"$out"; then
+    ok "21j losing the wholesale-minus-notClass shape reddens the nightly-connected premise"
+  else
+    bad "21j the wholesale premise survived losing its shape:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+
+  # 21g — The gate must be a class the registries can actually see. Resolved
+  # through the SAME class index the area manifest and the ledger use, so
+  # "the real assertion lives over there" cannot point at a name that does not
+  # exist, or at another invisible file.
+  sed 's|com.pocketshell.app.tmux.TerminalHotkeysPanelNoTruncationTest|com.pocketshell.app.tmux.TotallyFineGateTest|' \
+    "$UNCONV_REAL" > "$UNCONVDIR/ghost-gate.txt"
+  out="$(run_unconv "$UNCONVDIR/ghost-gate.txt")"
+  if grep -q "gate 'com.pocketshell.app.tmux.TotallyFineGateTest' is not a known test class" <<<"$out"; then
+    ok "21g a gate naming a class no registry knows reddens"
+  else
+    bad "21g a ghost gate class survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+
+  # 21h — An `enumerated-by:` registry must actually enumerate THIS file.
+  sed 's|enumerated-by:scripts/render.sh|enumerated-by:scripts/ci-journey-suite.sh|' \
+    "$UNCONV_REAL" > "$UNCONVDIR/wrong-enumerator.txt"
+  out="$(run_unconv "$UNCONVDIR/wrong-enumerator.txt")"
+  if grep -q 'does not reference this path, so it cannot be enumerating it' <<<"$out"; then
+    ok "21h an enumerated-by: script that never mentions the file reddens"
+  else
+    bad "21h a bogus enumerated-by: claim survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
 fi
 
 echo

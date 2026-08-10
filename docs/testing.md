@@ -423,8 +423,9 @@ to no area through a second resolver; four `@Test`-bearing files invisible to
 every registry and Gradle filter (the #1851 shape, now baselined so a NEW one
 fails — and one promptly did: #1622's `Issue1622DeadBandScreenshotHarness.kt`
 reached `main` hours later carrying three invisible `@Test` methods and this
-guard caught it before it merged, so the baseline is five; #2065 owns
-rename-vs-exempt for all five); 29 journeys compiling against connection-core
+guard caught it before it merged, so the baseline is five; #2065 then resolved
+all five — see "The five unconventional `@Test` files" below); 29 journeys
+compiling against connection-core
 that a connection-core change did not run; and `:shared:core-usage:test` — the
 deliberately fail-loud reader of `pocketshell usage --json` — having no
 mechanical link to the Python that produces it. The ledger guard is the first
@@ -459,7 +460,7 @@ Two consequences, stated so nobody has to re-derive them:
   test-infrastructure (15) force-full rules — 41 of the 65 force-fulls. That is
   its own issue with its own escape oracle, not a widening inside this one.
 
-### The four pieces
+### The five pieces
 
 | Piece | What it is |
 |---|---|
@@ -467,6 +468,67 @@ Two consequences, stated so nobody has to re-derive them:
 | `scripts/lib/test-areas.sh` | the shared classification engine every consumer reads |
 | `scripts/select-test-areas.sh` | changed paths → areas → the run plan, plus the manifest/coverage guards |
 | `scripts/check-test-execution-ledger.sh` | proves, from real JUnit results, that every class still executes |
+| `scripts/test-unconventional-test-files.txt` | the reviewed exemptions for `@Test`-bearing files outside the naming convention (#2065) |
+
+### The five unconventional `@Test` files (#2065)
+
+Five files carry `@Test` methods without matching `*Test.kt` / `*Test.java`, so
+no registry that keys off the filename — the journey registry, the area
+manifest, the executed-classes ledger, the validity guards — can see them.
+#2063 baselined them as a flat array of paths inside `select-test-areas.sh`, so
+a NEW one fails. #2065 is the other half: a decision per file.
+
+**The premise the decision had to correct first.** "Zero hits in
+`scripts/ci-journey-suite.sh`" was read as "does not execute". It is not.
+Nightly-extensive **phase 1 runs `:app:connectedDebugAndroidTest` wholesale**,
+with only a `notClass` exclusion list — so an androidTest class in no explicit
+suite still executes every night. And `DesignRenders` runs 68 testcases in
+`:shared:ui-kit:testDebugUnitTest` on every push. All five execute. The
+non-conventional name never opted them out of *execution*; it opted them out of
+*accounting*, which is the harm and is what the rows now fix.
+
+| File | Executes | Decision |
+|---|---|---|
+| `render/DesignRenders.kt` | `:shared:ui-kit:testDebugUnitTest`, 68 cases/push | exempt — `render.sh` already enumerates it per `@Test` **method** |
+| `Issue1622DeadBandScreenshotHarness.kt` | nightly wholesale (inert without `issue1622HoldMs`) | exempt — gate is `Issue1622ComposerSheetGeometryProofTest` |
+| `PromptComposerImeDeadSpaceScreenshotHarness.kt` | nightly wholesale (inert without `issue790HoldMs`) | exempt — gate is `PromptComposerImeEmptyDraftDeadSpaceProofTest` |
+| `TerminalHotkeysPanelScreenshotHarness.kt` | nightly wholesale | exempt — gate is `TerminalHotkeysPanelNoTruncationTest` |
+| `TmuxComposerLauncherLargeFontScreenshotHarness.kt` | nightly wholesale | exempt — gate is `TmuxComposerLauncherNarrowFontClipProofTest` |
+
+None was renamed, and the reason is not convenience. Four are screenshot
+*staging* harnesses: two are inert without an instrumentation argument, and the
+other two only `assertExists()` to prove the bitmap they are about to save is
+not of an empty screen. Renaming those to `*Test.kt` would put four vacuous or
+artifact-producing classes into every registry **as though they were gates** —
+the same "looks like coverage, contributes nothing" deception this issue exists
+to end, pointed the other way. `DesignRenders` is the one that genuinely runs a
+gate's worth of work, and it already has a *stronger* registry than renaming
+would give it: `scripts/render.sh` parses every `@Test` method out of the source
+and hard-fails when one lacks a `render("label")` mapping — per-method
+accounting, pinned per push by `render-selftest.sh` — while the module's
+execution is separately ledger-observed through the sibling conventional
+`DesignRenderStaticLoadingPolicyTest`.
+
+**What makes these exemptions different from a baseline.** Each row in
+`scripts/test-unconventional-test-files.txt` is
+`<path>TAB<executor>TAB<gate>TAB<reason>`, and the guard checks the first three:
+
+- `<executor>` is `unit-source-set` (path must be under `*/src/test/`) or
+  `nightly-connected` (path must be under `app/src/androidTest/`, **and** the
+  class's simple name must appear nowhere in `nightly-extensive-suite.sh` —
+  fail-closed, so naming it there for any reason forces the claim to be
+  re-argued). An executor the guard cannot check is rejected, not believed.
+- `<gate>` is either a FQCN, resolved through the **same class index** the area
+  manifest and the ledger use — so "the real assertion lives over there" cannot
+  point at a name that does not exist or at another invisible file — or
+  `enumerated-by:<script>`, which must exist and reference the path.
+- `<reason>` is mandatory and non-empty.
+
+It is deliberately **not** a `*Harness.kt` suffix rule. A suffix is a self-serve
+escape hatch: name a real regression test `…Harness.kt` and it hides itself with
+no reviewer in the loop. Cases 21a–21h of `select-test-areas-selftest.sh` mutate
+each claim and assert its specific red, including the load-bearing one — an
+unpinned unconventional `@Test` file reddens by name.
 
 ### The rule for a NEW test (do not re-litigate this)
 

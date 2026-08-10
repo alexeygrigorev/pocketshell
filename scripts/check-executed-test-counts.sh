@@ -64,6 +64,30 @@
 # a module's tests for real therefore requires deleting its floors line in the
 # same change — an intentional act, which is the point.
 #
+# SHARDED LANE: --variant, AND THE PARTITION PROOF (issue #2069)
+# --------------------------------------------------------------
+# The CI Unit lane no longer runs `./gradlew test` in one job. Since #2069 it is
+# a two-way matrix — one job runs `testDebugUnitTest`, the other
+# `testReleaseUnitTest` — because the single Gradle step was the whole 18-minute
+# critical path and more workers bought ~57 s. `--variant Debug|Release` scopes
+# this guard to the half of the graph its own shard was asked to run: without it
+# each shard would fail on the twelve tasks the OTHER shard owns.
+#
+# That scoping introduces exactly one new way to lose coverage, and it is the
+# quiet one: a module whose test task is NEITHER `testDebugUnitTest` NOR
+# `testReleaseUnitTest`. `./gradlew test` would have run it; neither shard task
+# names it, so it would vanish from CI with every shard still green — a whole
+# module's tests silently unrun, which is the #1646 disease in a new costume.
+# Today every module applies an Android plugin so every task is one of the two,
+# but adding one plain `kotlin("jvm")` module with tests is a two-line change
+# nobody would connect to CI coverage.
+#
+# So the SHARD PARTITION CHECK below is unconditional (it runs with or without
+# --variant, so the local full gate catches it too): every task a required
+# module expects must be one of the two shard tasks. It is the mechanical form
+# of the coverage invariant "union of the shards == the whole graph" — asserted
+# from the module set rather than eyeballed from a task list.
+#
 # WHAT THIS SCRIPT DOES NOT COVER
 # -------------------------------
 # Modules with no declared floor and no test sources are exempt, and their tests
@@ -80,10 +104,15 @@
 #
 # Usage:
 #   scripts/check-executed-test-counts.sh [--newer-than FILE] [--gradle-log FILE]
-#                                         [--root DIR]
+#                                         [--root DIR] [--variant Debug|Release]
 #   scripts/check-executed-test-counts.sh --self-test
 #
 # Options:
+#   --variant V        scope the expected-task set to one CI shard's half of the
+#                      graph: Debug -> testDebugUnitTest, Release ->
+#                      testReleaseUnitTest (issue #2069). Omit for the whole
+#                      graph (the local full gate). The shard partition check is
+#                      unconditional either way.
 #   --newer-than FILE  require each task's XML to be strictly newer than FILE
 #                      (the --rerun-tasks / UP-TO-DATE-skip enforcement).
 #                      Omit to only check coverage + counts.
@@ -204,10 +233,21 @@ explicit_floor_for_task() {
 # The check.
 # ---------------------------------------------------------------------------
 check_root() {
-  local root="$1" marker="${2:-}" gradle_log="${3:-}"
+  local root="$1" marker="${2:-}" gradle_log="${3:-}" variant="${4:-}"
   local violations=() rows=() module task task_path results_dir count floor
   local total_executed=0 checked_tasks=0 nosource_modules=()
   local expected_task_paths=() testfree_task_paths=() sourceless_task_paths=()
+  local unshardable_task_paths=() shard_task=""
+
+  if [ -n "$variant" ]; then
+    case "$variant" in
+      Debug|Release) shard_task="test${variant}UnitTest" ;;
+      *)
+        echo "FAIL: --variant must be Debug or Release, got: $variant" >&2
+        return 1
+        ;;
+    esac
+  fi
 
   local module_list
   module_list="$(modules_from_settings "$root")"
@@ -229,6 +269,27 @@ check_root() {
     while IFS= read -r task; do
       [ -n "$task" ] || continue
       task_path="$task_prefix:$task"
+
+      # ---- SHARD PARTITION CHECK (issue #2069) ----------------------------
+      # Unconditional, and deliberately BEFORE the --variant filter: the point
+      # is to catch a task that belongs to NO shard, and a variant filter would
+      # skip exactly that task first. Only required modules matter — a task-free
+      # module's unrun task loses nothing.
+      case "$task" in
+        testDebugUnitTest|testReleaseUnitTest) ;;
+        *)
+          if [ "$has_sources" -eq 1 ] ||
+             [ -n "$(explicit_floor_for_task "$root" "$task_path")" ]; then
+            unshardable_task_paths+=("$task_path")
+          fi
+          ;;
+      esac
+
+      # ---- scope to this shard's half of the graph ------------------------
+      if [ -n "$shard_task" ] && [ "$task" != "$shard_task" ]; then
+        continue
+      fi
+
       results_dir="$dir/build/test-results/$task"
       module_tasks=$(( module_tasks + 1 ))
 
@@ -302,6 +363,18 @@ check_root() {
       nosource_modules+=("$task_prefix")
     fi
   done <<< "$module_list"
+
+  # ---- the coverage invariant behind the sharded lane (issue #2069) -------
+  # The CI Unit lane runs `testDebugUnitTest` in one job and `testReleaseUnitTest`
+  # in another; their union is the whole graph ONLY while every required task is
+  # one of those two. A task outside that pair is run by neither shard, so its
+  # module's tests would stop running with the required check still green.
+  if [ ${#unshardable_task_paths[@]} -gt 0 ]; then
+    local u
+    for u in "${unshardable_task_paths[@]}"; do
+      violations+=("$u is not one of the two CI Unit shard tasks (testDebugUnitTest / testReleaseUnitTest), so NEITHER shard job runs it and its tests would silently stop running with the required \`Unit tests\` check still green (issue #2069). This module is not an Android application/library, so Gradle gives it a plain \`test\` task. Either apply the Android plugin so it produces both variant tasks, or re-shard the Unit lane in .github/workflows/tests.yml so this task is owned by a shard.")
+    done
+  fi
 
   # ---- Gradle console scan: a no-op task must FAIL, not pass silently -----
   # Needed on top of the XML check because org.gradle.caching=true means a
@@ -401,6 +474,12 @@ check_root() {
     if [ ${#nosource_modules[@]} -gt 0 ]; then
       echo "  NO-SOURCE (no src/test sources — legitimately exempt): ${nosource_modules[*]}"
     fi
+    if [ -n "$variant" ]; then
+      # Say the scope out loud: a reader comparing this number against the
+      # familiar whole-graph total must not read a healthy shard as a shortfall.
+      echo "  SHARD: $variant (this job runs $shard_task only; the other variant"
+      echo "         is the sibling matrix job — issue #2069)"
+    fi
     echo "  TOTAL EXECUTED: $total_executed across $checked_tasks task(s)"
   }
 
@@ -417,6 +496,10 @@ check_root() {
       echo
       if [ ${#nosource_modules[@]} -gt 0 ]; then
         echo "NO-SOURCE (no \`src/test\` sources — legitimately exempt): ${nosource_modules[*]}"
+        echo
+      fi
+      if [ -n "$variant" ]; then
+        echo "Shard: \`$variant\` — this job runs \`$shard_task\` only (issue #2069)."
         echo
       fi
       echo "**Total executed: $total_executed** across $checked_tasks task(s)."
@@ -792,8 +875,159 @@ EOF
     SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
   fi
 
+  # =========================================================================
+  # Issue #2069: the sharded Unit lane. --variant scoping, and the coverage
+  # invariant that makes the two shards safe to believe.
+  # =========================================================================
+
+  # Task paths this script REPORTED as in-scope, one per line.
+  selftest_reported_tasks() { grep -oE '^  :[A-Za-z0-9_:.-]+' <<< "$1" | tr -d ' '; }
+
+  # -- T17 a shard job sees only its own half and PASSES on it --------------
+  root="$tmp/t17"; mkdir -p "$root"; selftest_make_root "$root"
+  selftest_write_results "$root" "testDebugUnitTest" 4553
+  # testReleaseUnitTest deliberately absent: it belongs to the sibling shard.
+  out="$(check_root "$root" "" "" "Debug" 2>&1)"; rc=$?
+  selftest_assert "T17 --variant Debug PASSES with only the debug half present" 0 "$rc"
+  SELFTEST_RUN=$(( SELFTEST_RUN + 1 ))
+  if grep -q 'SHARD: Debug' <<< "$out" &&
+     [ "$(selftest_reported_tasks "$out")" = ":app:testDebugUnitTest" ]; then
+    echo "  ok   T17 scope is stated and exactly one task is in scope"
+  else
+    echo "  FAIL T17: shard scope not stated, or the wrong task set was checked" >&2
+    echo "$out" | sed 's/^/       /' >&2
+    SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
+  fi
+
+  # -- T18 ...and --variant is NOT a blanket excuse -------------------------
+  # The load-bearing negative for T17: the SAME tree under the sibling shard
+  # must still fail, or "--variant" would just mean "check less".
+  out="$(check_root "$root" "" "" "Release" 2>&1)"; rc=$?
+  selftest_assert "T18 --variant Release on the same tree FAILS (its half never ran)" 1 "$rc"
+  SELFTEST_RUN=$(( SELFTEST_RUN + 1 ))
+  if grep -q ':app:testReleaseUnitTest' <<< "$out"; then
+    echo "  ok   T18 message names the task the release shard failed to run"
+  else
+    echo "  FAIL T18: message did not name the missing release task" >&2
+    SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
+  fi
+
+  # -- T19 THE COVERAGE INVARIANT: union(shards) == the unsharded graph -----
+  # Asserted mechanically from the reported task sets, not eyeballed. This is
+  # the property the whole two-job split rests on.
+  root="$tmp/t19"; mkdir -p "$root"; selftest_make_root "$root"
+  mkdir -p "$root/shared/core-ssh/src/test/java"
+  echo "class SshTest" > "$root/shared/core-ssh/src/test/java/SshTest.kt"
+  cat > "$root/shared/core-ssh/build.gradle.kts" <<'EOF'
+plugins { alias(libs.plugins.android.library) }
+EOF
+  echo 'include(":shared:core-ssh")' >> "$root/settings.gradle.kts"
+  local ssh_results="$root/shared/core-ssh/build/test-results"
+  local vtask
+  for vtask in testDebugUnitTest testReleaseUnitTest; do
+    selftest_write_results "$root" "$vtask" 4553
+    mkdir -p "$ssh_results/$vtask"
+    cp "$root/app/build/test-results/$vtask/TEST-SomeTest.xml" "$ssh_results/$vtask/"
+  done
+  local whole debug_half release_half
+  whole="$(selftest_reported_tasks "$(check_root "$root" 2>&1)" | sort -u)"
+  debug_half="$(selftest_reported_tasks "$(check_root "$root" "" "" Debug 2>&1)" | sort -u)"
+  release_half="$(selftest_reported_tasks "$(check_root "$root" "" "" Release 2>&1)" | sort -u)"
+  SELFTEST_RUN=$(( SELFTEST_RUN + 1 ))
+  if [ -n "$whole" ] && [ -n "$debug_half" ] && [ -n "$release_half" ] &&
+     [ "$(printf '%s\n%s\n' "$debug_half" "$release_half" | sort -u)" = "$whole" ]; then
+    echo "  ok   T19 union(Debug shard, Release shard) == the unsharded task set"
+  else
+    echo "  FAIL T19: the two shards do NOT cover the unsharded task set" >&2
+    echo "       whole:   $(tr '\n' ' ' <<< "$whole")" >&2
+    echo "       debug:   $(tr '\n' ' ' <<< "$debug_half")" >&2
+    echo "       release: $(tr '\n' ' ' <<< "$release_half")" >&2
+    SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
+  fi
+  # ...and no task is charged to both shards (a double-run would be waste, and
+  # would also let one shard's green hide the other's missing task).
+  SELFTEST_RUN=$(( SELFTEST_RUN + 1 ))
+  if [ -z "$(comm -12 <(echo "$debug_half") <(echo "$release_half"))" ]; then
+    echo "  ok   T19b the two shards are disjoint (no task runs twice)"
+  else
+    echo "  FAIL T19b: a task is owned by BOTH shards" >&2
+    SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
+  fi
+
+  # -- T20 THE HOLE THE SPLIT OPENS: a task no shard owns -------------------
+  # A plain kotlin("jvm") module WITH tests gets a `test` task. `./gradlew test`
+  # ran it; neither shard task names it. Every shard would stay green while a
+  # whole module's tests stopped running. That must be RED — and red in the
+  # unsharded local gate too, which is why the partition check is unconditional.
+  root="$tmp/t20"; mkdir -p "$root"; selftest_make_root "$root"
+  mkdir -p "$root/tools/analyzer/src/test/java"
+  echo "class AnalyzerTest" > "$root/tools/analyzer/src/test/java/AnalyzerTest.kt"
+  cat > "$root/tools/analyzer/build.gradle.kts" <<'EOF'
+plugins { kotlin("jvm") }
+EOF
+  echo 'include(":tools:analyzer")' >> "$root/settings.gradle.kts"
+  selftest_write_results "$root" "testDebugUnitTest" 4553
+  selftest_write_results "$root" "testReleaseUnitTest" 4541
+  mkdir -p "$root/tools/analyzer/build/test-results/test"
+  cp "$root/app/build/test-results/testDebugUnitTest/TEST-SomeTest.xml" \
+     "$root/tools/analyzer/build/test-results/test/"
+  out="$(check_root "$root" "" "" Debug 2>&1)"; rc=$?
+  selftest_assert "T20 a module whose task belongs to NO shard FAILS the shard job" 1 "$rc"
+  SELFTEST_RUN=$(( SELFTEST_RUN + 1 ))
+  if grep -q ':tools:analyzer:test is not one of the two CI Unit shard tasks' <<< "$out"; then
+    echo "  ok   T20 message names the unowned task and why no shard runs it"
+  else
+    echo "  FAIL T20: message did not name the unowned task" >&2
+    echo "$out" | sed 's/^/       /' >&2
+    SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
+  fi
+  # The same hole is red WITHOUT --variant: the local full gate catches it too.
+  check_root "$root" >/dev/null 2>&1
+  selftest_assert "T20b the unsharded local gate FAILS on the same unowned task" 1 "$?"
+
+  # -- T21 the load-bearing negative (G6): a test-FREE jvm module is fine ---
+  # Otherwise the partition check would ban a perfectly ordinary build-logic or
+  # support module and get switched off.
+  rm -rf "$root/tools/analyzer/src/test" "$root/tools/analyzer/build"
+  check_root "$root" "" "" Debug >/dev/null 2>&1
+  selftest_assert "T21 a jvm module with NO tests does not trip the partition check" 0 "$?"
+
+  # -- T22 an unknown --variant is a hard failure, not a silent whole-graph --
+  # A typo ("debug", "release", "Both") must not quietly widen or narrow scope.
+  out="$(check_root "$root" "" "" "debug" 2>&1)"; rc=$?
+  selftest_assert "T22 a mis-spelled --variant FAILS instead of guessing" 1 "$rc"
+  SELFTEST_RUN=$(( SELFTEST_RUN + 1 ))
+  if grep -q 'must be Debug or Release' <<< "$out"; then
+    echo "  ok   T22 message states the accepted shard names"
+  else
+    echo "  FAIL T22: message did not state the accepted shard names" >&2
+    SELFTEST_FAIL=$(( SELFTEST_FAIL + 1 ))
+  fi
+
+  # -- T23 the console scan is scoped to the shard too ----------------------
+  # A shard's Gradle log only ever contains its own tasks. Without scoping, the
+  # #1646 "expected task never observed" rule would redden every shard.
+  root="$tmp/t23"; mkdir -p "$root"; selftest_make_root "$root"
+  selftest_write_results "$root" "testDebugUnitTest" 4553
+  log="$tmp/t23.log"
+  cat > "$log" <<'EOF'
+> Task :app:testDebugUnitTest
+> Task :shared:test-support:testDebugUnitTest NO-SOURCE
+BUILD SUCCESSFUL in 9m 33s
+EOF
+  check_root "$root" "" "$log" Debug >/dev/null 2>&1
+  selftest_assert "T23 a debug shard's own console log PASSES the scan" 0 "$?"
+  # ...and the scan still bites inside the shard: FROM-CACHE on its own task.
+  cat > "$log" <<'EOF'
+> Task :app:testDebugUnitTest FROM-CACHE
+> Task :shared:test-support:testDebugUnitTest NO-SOURCE
+BUILD SUCCESSFUL in 12s
+EOF
+  out="$(check_root "$root" "" "$log" Debug 2>&1)"; rc=$?
+  selftest_assert "T23b FROM-CACHE on the shard's OWN task still FAILS" 1 "$rc"
+
   # -- meta: assert the self-test itself is not vacuous ---------------------
-  local expected_checks=33
+  local expected_checks=47
   echo
   # G3 on the self-test itself: a self-test that ran ZERO cases and reported
   # PASS would be this script's own disease. Assert count > 0 explicitly before
@@ -818,7 +1052,7 @@ EOF
 
 # ---------------------------------------------------------------------------
 main() {
-  local root="$DEFAULT_ROOT" marker="" gradle_log="" self_test=0
+  local root="$DEFAULT_ROOT" marker="" gradle_log="" self_test=0 variant=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -826,6 +1060,7 @@ main() {
       --newer-than) marker="${2:-}"; shift 2 || true ;;
       --gradle-log) gradle_log="${2:-}"; shift 2 || true ;;
       --root) root="${2:-}"; shift 2 || true ;;
+      --variant) variant="${2:-}"; shift 2 || true ;;
       -h|--help) usage; return 0 ;;
       *) echo "FAIL: unknown argument: $1" >&2; usage >&2; return 2 ;;
     esac
@@ -841,7 +1076,7 @@ main() {
     return 1
   fi
 
-  check_root "$root" "$marker" "$gradle_log"
+  check_root "$root" "$marker" "$gradle_log" "$variant"
 }
 
 main "$@"

@@ -32,10 +32,20 @@ jobs:
   # in `guards-static`, `guards-ci-harness` and `dex`, all still blocking through
   # `unit-gate` below. Issue #2067 added `guards-test-selection` on the same
   # principle, for #2063's coverage guards.
+  #
+  # Issue #2069 (CI Phase B): after that, ONE Gradle step WAS the whole critical
+  # path (18m04s) and --max-workers 2->4 bought 57s. Sharded by variant: the
+  # union of the two legs is exactly the old `./gradlew test` graph. Rationale +
+  # the coverage-invariant proof: scripts/check-ci-unit-forced-execution.sh and
+  # the shard partition check in scripts/check-executed-test-counts.sh.
   unit:
     name: JVM unit tests
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [Debug, Release]
 
     steps:
       - name: Checkout
@@ -92,26 +102,9 @@ jobs:
         run: |
           touch "${RUNNER_TEMP}/unit-test-run-start"
 
-      # Issue #760: the unit job occasionally failed with ALL visible tests
-      # PASSED — a gradle-daemon/runner OOM abort, not a real assertion failure.
-      # Unbounded gradle worker fan-out plus an oversized test JVM heap can push
-      # the runner into the OOM-killer, which kills the gradle process mid-run
-      # AFTER the tests reported green. Bound BOTH the gradle worker count and
-      # the JVM heaps so the job stays inside the runner's memory budget: the
-      # explicit -Dorg.gradle.jvmargs caps the gradle daemon/launcher heap while
-      # -Pkotlin/test forks inherit the project's modest -Xmx. This is infra
-      # robustness only — no test is removed, skipped, or weakened.
-      #
-      # Issue #2060 (CI Phase A): the #760 note above sized --max-workers=2 for
-      # "7 GB RAM and 2 cores". That box is gone (public-repo runners have been
-      # 4 vCPU / 16 GB since Jan 2024), so the job ran at half of it. This raises
-      # CONCURRENCY, not memory: `org.gradle.parallel` stays false, so at most ONE
-      # Test task (one 1536m fork) is alive at a time and only intra-task Worker
-      # API actions (AGP dexing/resources) widen. `--parallel`/`maxParallelForks`
-      # WOULD multiply live forks and feed the #708/#882 virtual-clock flake
-      # class, so they are deliberately NOT bundled here. One variable at a time —
-      # the AGENTS.md memory trap surfaces as a fake "Backend Internal error:
-      # Exception during IR lowering", not as an OOM.
+      # Issues #760/#2060/#2069: why --max-workers=4 and the capped heaps, why
+      # `--parallel`/`maxParallelForks` are deliberately absent, and the measured
+      # cost of each knob — docs/testing.md "CI Unit lane: sizing and sharding".
       #
       # Issue #1646: tee the console to a log (--console=plain) so the count
       # guard below can see which test tasks actually EXECUTED vs came back
@@ -122,7 +115,8 @@ jobs:
         timeout-minutes: 35
         run: |
           set -o pipefail
-          ./gradlew test --rerun-tasks --no-build-cache \
+          ./gradlew "test${{ matrix.variant }}UnitTest" \
+            --rerun-tasks --no-build-cache \
             --no-daemon --stacktrace --console=plain \
             --max-workers=4 \
             -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
@@ -147,6 +141,7 @@ jobs:
         run: |
           chmod +x scripts/check-executed-test-counts.sh
           scripts/check-executed-test-counts.sh \
+            --variant "${{ matrix.variant }}" \
             --newer-than "${RUNNER_TEMP}/unit-test-run-start" \
             --gradle-log "${RUNNER_TEMP}/unit-test-gradle.log"
 
@@ -158,7 +153,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: unit-test-reports
+          name: unit-test-reports-${{ matrix.variant }}
           path: |
             **/build/reports/tests/
             **/build/test-results/
@@ -817,7 +812,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for pair in "JVM unit tests:$UNIT" \
+          for pair in "JVM unit tests (both shards):$UNIT" \
                       "Static guards:$GUARDS_STATIC" \
                       "CI harness guards:$GUARDS_CI_HARNESS" \
                       "Test-selection coverage guards:$GUARDS_TEST_SELECTION" \

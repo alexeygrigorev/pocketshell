@@ -38,11 +38,12 @@
 #      nothing legitimate to exempt. An exemption list would reintroduce exactly
 #      the "these named files are special" lesson that failed.
 #
-#   2. NO SHELL-INVOCATION OF A NON-SHELL PROGRAM. No tracked file may contain
-#      `bash <path>` / `sh <path>` / `source <path>` / `. <path>` where <path>
-#      resolves to a tracked file whose shebang is not a shell. Rule 1 makes the
-#      extension honest; rule 2 stops a caller from lying about it anyway
-#      (`bash scripts/full-jvm-gate.py` is still the same hang).
+#   2. NO SHELL-INVOCATION OF A NON-SHELL PROGRAM. No tracked command may invoke
+#      a non-shell program through bash/sh/dash/zsh (bare or by executable
+#      path), `source`, or `.`. Options, including the `--` separator, do not
+#      exempt the target. Rule 1 makes the extension honest; rule 2 stops a
+#      caller from lying about it anyway (`bash scripts/full-jvm-gate.py` is
+#      still the same hang).
 #
 # Both rules are checked against the index (`git ls-files` / `git grep -I`), so
 # binaries and untracked scratch are out of scope by construction.
@@ -143,6 +144,50 @@ resolve_tracked_path() {
   return 1
 }
 
+# Return success when a regex match starts inside shell quoting or after an
+# unquoted shell comment marker. The match offset comes from `grep -bo` and this
+# function runs under the same byte-oriented C locale.
+command_offset_is_inert() {
+  local text="$1" offset="$2" quote='' escaped=0 at_word_start=1 ch i
+  for ((i = 0; i < offset; i++)); do
+    ch="${text:i:1}"
+    if (( escaped )); then
+      escaped=0
+      at_word_start=0
+      continue
+    fi
+    if [[ -n "$quote" ]]; then
+      if [[ "$quote" != "'" && "$ch" == "\\" ]]; then
+        escaped=1
+      elif [[ "$ch" == "$quote" ]]; then
+        quote=''
+      fi
+      continue
+    fi
+    case "$ch" in
+      "'" | '"' | '`')
+        quote="$ch"
+        at_word_start=0
+        ;;
+      "\\")
+        escaped=1
+        at_word_start=0
+        ;;
+      '#')
+        (( at_word_start )) && return 0
+        at_word_start=0
+        ;;
+      ' ' | $'\t' | ';' | '&' | '|' | '(' | ')')
+        at_word_start=1
+        ;;
+      *)
+        at_word_start=0
+        ;;
+    esac
+  done
+  [[ -n "$quote" ]]
+}
+
 declare -A TRACKED=()
 load_tracked() {
   local root="$1" path
@@ -179,8 +224,21 @@ check_extension_matches_shebang() {
 }
 
 check_no_shell_invocation_of_non_shell() {
-  local root="$1" line path lineno text token resolved entry family
-  local pattern='(^|[^-[:alnum:]_./])(bash|sh|source|\.)([[:space:]]+-[[:alnum:]]+)*[[:space:]]+[^[:space:];&|)]*\.(sh|py)'
+  local root="$1" line path lineno text match_record match_offset match_text
+  local token resolved entry family
+  local LC_ALL=C
+  # Match only command positions: start of a command, a shell control/prefix
+  # keyword, or a workflow `run:` field. The older "any non-word boundary"
+  # admitted prose and quoted arguments such as
+  # `printf '%s' 'bash scripts/x.py'`. Assignment/option prefixes cover the
+  # live `PATH=... /bin/bash <script>` spelling and `bash -- <script>` without
+  # turning an arbitrary mention of a shell into an invocation.
+  local command_prefix='(^[[:space:]]*|[;&|()][[:space:]]*|(^|[[:space:]])(if|then|elif|while|until|do|else|exec|command|builtin|env|nohup|setsid|sudo|time|run:)[[:space:]]+)'
+  local leading_words='([[:alnum:]_]+=[^[:space:]]+[[:space:]]+|[-+][[:alnum:]_-]+[[:space:]]+)*'
+  local interpreter='((/[^[:space:];&|()]*/)?(bash|sh|dash|zsh)|source|\.)'
+  local options='([[:space:]]+(--|--?[[:alnum:]_][[:alnum:]_-]*|\+[[:alnum:]_][[:alnum:]_-]*))*'
+  local target='[[:space:]]+[^[:space:];&|)]*\.(sh|py)'
+  local pattern="${command_prefix}${leading_words}${interpreter}${options}${target}"
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     path="${line%%:*}"
@@ -189,16 +247,26 @@ check_no_shell_invocation_of_non_shell() {
     text="${line#*:}"
     # The guard's own source documents the banned form; it must not flag itself.
     [[ "$path" == "scripts/check-script-interpreter-hygiene.sh" ]] && continue
-    for token in $(printf '%s\n' "$text" \
-      | grep -oE "$pattern" \
-      | grep -oE '[^[:space:]]+\.(sh|py)$' || true); do
+    # Documentation names the dangerous command to explain it; it is not a
+    # caller. Executable examples belong in scripts/workflows, not prose files.
+    case "$path" in
+      *.md | *.rst | *.txt | *.adoc) continue ;;
+    esac
+    while IFS= read -r match_record; do
+      [[ -n "$match_record" ]] || continue
+      match_offset="${match_record%%:*}"
+      match_text="${match_record#*:}"
+      command_offset_is_inert "$text" "$match_offset" && continue
+      token="$(printf '%s\n' "$match_text" \
+        | grep -oE '[^[:space:]]+\.(sh|py)$' || true)"
+      [[ -n "$token" ]] || continue
       resolved="$(resolve_tracked_path "$root" "$token")" || continue
       entry="${SHEBANG_FAMILY[$resolved]:-}"
       [[ -n "$entry" ]] || continue
       family="${entry%%|*}"
       [[ "$family" == "shell" ]] && continue
       report "$path:$lineno invokes '$resolved' through a shell ('$token'), but $resolved is a ${family} program. Run it directly; a shell reading a python program mis-executes it line by line (issue #2066)."
-    done
+    done < <(printf '%s\n' "$text" | grep -boE "$pattern" || true)
   done < <(git -C "$root" grep -I -n -E --no-color -e "$pattern" -- . 2>/dev/null || true)
 }
 
@@ -251,11 +319,26 @@ make_fixture_tree() {
   printf '#!/usr/bin/python3 -I\nprint("ok")\n' > "$dir/scripts/real-python.py"
   printf '#!/bin/sh\n. scripts/lib.sh\n' > "$dir/scripts/sourcer.sh"
   printf '#!/usr/bin/env bash\n:\n' > "$dir/scripts/lib.sh"
-  # A legitimate shell invocation of a shell script, and prose naming a python
-  # program without shelling it. Neither may be flagged.
-  printf 'Run `bash scripts/real-shell.sh`, then scripts/real-python.py.\n' \
-    > "$dir/docs/readme.md"
+  printf 'Run scripts/real-python.py directly.\n' > "$dir/docs/readme.md"
   git -C "$dir" init -q
+  git -C "$dir" add -A
+}
+
+add_selectivity_controls() {
+  local dir="$1"
+  # shellcheck disable=SC2016 # literal variable reference belongs in fixture.
+  printf '#!/usr/bin/env bash\nPATH="$minimal_bin" /bin/bash scripts/real-shell.sh\n' \
+    > "$dir/scripts/absolute-shell-caller.sh"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    "printf '%s\\n' 'bash scripts/real-python.py'" \
+    "printf '%s\\n' 'not a command; bash scripts/real-python.py'" \
+    '# not a command; bash scripts/real-python.py' \
+    > "$dir/scripts/quoted-command-example.sh"
+  # A legitimate shell invocation of a shell script, prose naming the banned
+  # command, and a quoted string containing it. None may be flagged.
+  printf 'This prose has a semicolon; bash scripts/real-python.py is still not a caller.\n' \
+    > "$dir/docs/readme.md"
   git -C "$dir" add -A
 }
 
@@ -266,6 +349,24 @@ run_guard_on() {
   return "$rc"
 }
 
+self_test_rule2_invocation() {
+  local tmp="$1" fixture_name="$2" invocation="$3" description="$4"
+  local dir out rc=0
+  dir="$tmp/$fixture_name"
+  mkdir -p "$dir"
+  make_fixture_tree "$dir"
+  printf '#!/usr/bin/env bash\n%s\n' "$invocation" > "$dir/scripts/caller.sh"
+  git -C "$dir" add -A
+  out="$(run_guard_on "$dir")" || rc=$?
+  if (( rc != 0 )) && \
+      [[ "$out" == *"scripts/caller.sh:2 invokes 'scripts/real-python.py' through a shell"* ]] && \
+      [[ "$out" == *": 1 violation(s)"* ]]; then
+    self_pass "$description"
+  else
+    self_fail "$description (rc=$rc): $out"
+  fi
+}
+
 self_test() {
   local tmp
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/ps-2066-selftest-XXXXXX")"
@@ -274,15 +375,17 @@ self_test() {
 
   local dir out rc
 
-  # Case 1: a clean tree passes, and the legitimate `bash scripts/real-shell.sh`
-  # caller is NOT flagged (selectivity: no false positive on real shell work).
+  # Case 1: a clean tree passes, and the legitimate absolute-path
+  # `/bin/bash scripts/real-shell.sh` caller is NOT flagged. Prose and a quoted
+  # string that name the banned form are also NOT callers (selectivity).
   dir="$tmp/clean"
   mkdir -p "$dir"
   make_fixture_tree "$dir"
+  add_selectivity_controls "$dir"
   rc=0
   out="$(run_guard_on "$dir")" || rc=$?
   if (( rc == 0 )) && [[ "$out" == OK:* ]]; then
-    self_pass "a clean tree passes, and 'bash scripts/real-shell.sh' is not flagged"
+    self_pass "clean real-shell, prose, and quoted-string controls are not flagged"
   else
     self_fail "a clean tree should pass (rc=$rc): $out"
   fi
@@ -340,6 +443,7 @@ self_test() {
   dir="$tmp/bash-invokes-python-varpath"
   mkdir -p "$dir"
   make_fixture_tree "$dir"
+  # shellcheck disable=SC2016 # literal variable reference belongs in fixture.
   printf '#!/usr/bin/env bash\nbash -n "$ROOT_DIR/scripts/real-python.py"\n' \
     > "$dir/scripts/caller.sh"
   git -C "$dir" add -A
@@ -364,6 +468,47 @@ self_test() {
   else
     self_fail "a shebang-free tree passed vacuously (rc=$rc): $out"
   fi
+
+  # Rule 2's interpreter spelling is a class: every supported shell must be
+  # caught both through an absolute executable path and with `--` separating
+  # interpreter options from the tracked non-shell program.
+  self_test_rule2_invocation "$tmp" "absolute-bash" \
+    "/bin/bash scripts/real-python.py" \
+    "rule 2 reddens on '/bin/bash scripts/real-python.py'"
+  # shellcheck disable=SC2016 # literal variable reference belongs in fixture.
+  self_test_rule2_invocation "$tmp" "live-prefix-absolute-bash" \
+    'PATH="$minimal_bin" /bin/bash scripts/real-python.py' \
+    "rule 2 reddens on the live 'PATH=... /bin/bash scripts/real-python.py' route"
+  self_test_rule2_invocation "$tmp" "option-bash" \
+    "bash -- scripts/real-python.py" \
+    "rule 2 reddens on 'bash -- scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "absolute-option-bash" \
+    "/usr/local/bin/bash -n -- scripts/real-python.py" \
+    "rule 2 reddens on an arbitrary absolute bash path with options and '--'"
+  self_test_rule2_invocation "$tmp" "absolute-sh" \
+    "/bin/sh scripts/real-python.py" \
+    "rule 2 reddens on '/bin/sh scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "option-sh" \
+    "sh -- scripts/real-python.py" \
+    "rule 2 reddens on 'sh -- scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "absolute-dash" \
+    "/bin/dash scripts/real-python.py" \
+    "rule 2 reddens on '/bin/dash scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "option-dash" \
+    "dash -- scripts/real-python.py" \
+    "rule 2 reddens on 'dash -- scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "absolute-zsh" \
+    "/usr/bin/zsh scripts/real-python.py" \
+    "rule 2 reddens on '/usr/bin/zsh scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "option-zsh" \
+    "zsh -- scripts/real-python.py" \
+    "rule 2 reddens on 'zsh -- scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "source-python" \
+    "source scripts/real-python.py" \
+    "rule 2 still reddens on 'source scripts/real-python.py'"
+  self_test_rule2_invocation "$tmp" "dot-python" \
+    ". scripts/real-python.py" \
+    "rule 2 still reddens on '. scripts/real-python.py'"
 
   printf '\nself-test: %d case(s), %d failure(s)\n' \
     "$SELF_TEST_CASES" "$SELF_TEST_FAILURES"

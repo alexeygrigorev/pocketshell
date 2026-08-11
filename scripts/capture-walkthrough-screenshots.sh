@@ -7,6 +7,15 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+
+# Issue #2064: see scripts/phone-walkthrough.sh — same contract, same
+# device-free verification mode, same reason it must not queue on the AVD lock.
+POCKETSHELL_VERIFY_APK_IDENTITY_ONLY=0
+if [[ "${1:-}" == "--verify-apk-identity" ]]; then
+  POCKETSHELL_VERIFY_APK_IDENTITY_ONLY=1
+  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+fi
 
 # Issue #2054: the visual-audit stage of the release gate builds the same APKs
 # that OOMed the terminal-lab walkthrough. Same shared resource profile, same
@@ -53,8 +62,23 @@ SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
 SSH_PORT="${SSH_PORT:-2222}"
 SSH_USER="${SSH_USER:-testuser}"
-APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+# Issue #2064: the release chain hands this stage the pair the pre-release
+# confidence gate built, validated and publishes, so the visual-audit
+# screenshots are of the SHIPPED binary rather than of a byte-different rebuild.
+APP_APK="${APP_APK:-$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk}"
+TEST_APK="${TEST_APK:-$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
+# 1 keeps the historical standalone behaviour (build the pair here). The release
+# chain exports 0 together with the expected digests.
+VISUAL_AUDIT_BUILD_APKS="${VISUAL_AUDIT_BUILD_APKS:-1}"
+
+if [[ "$POCKETSHELL_VERIFY_APK_IDENTITY_ONLY" == "1" ]]; then
+  pocketshell_require_walkthrough_apk_identity "visual audit" || exit 1
+  printf 'PASS: visual-audit APK identity verified (issue #2064)\n'
+  printf '  app  %s\n' "$APP_APK"
+  printf '  test %s\n' "$TEST_APK"
+  exit 0
+fi
+pocketshell_verify_walkthrough_apks "visual audit" || exit 1
 
 usage() {
   cat <<'USAGE'
@@ -350,11 +374,44 @@ run_logged "06-cold-reset-emulator-app-state" bash -lc \
   _ "$ADB"
 run_logged "07-clear-logcat" "$ADB" logcat -c
 run_logged "08-clear-device-screenshots" "$ADB" shell rm -rf "$DEVICE_OUTPUT_DIR"
-run_logged "09-stop-gradle-daemons" \
-  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-stop-gradle" -- \
-  ./gradlew --stop
+# Issue #2064: when the release chain supplies the pair the pre-release gate
+# already built, validated and will publish, this stage must NOT rebuild — its
+# screenshots would otherwise be of a different binary than the one shipped.
+#
+# The skip is a command PREFIX rather than an `if` wrapped around the build.
+# That is deliberate: scripts/check-release-gate-execution-profile.sh (issue
+# #2054) anchors roughly twenty reachability mutations on the exact text and
+# column of the apply line and the `10-build-walkthrough-visual-apks` step
+# below, and re-indenting them silently turns those mutations into no-ops — a
+# stale anchor is the "mutation that never happened" failure this repo has
+# already paid for. Keeping the build statement byte-stable keeps every one of
+# those mutations live. The prefix swallows the build command and verifies the
+# supplied pair instead.
+visual_audit_reuse_validated_apks() {
+  printf 'Skipped because VISUAL_AUDIT_BUILD_APKS=0 (issue #2064).\n'
+  printf 'App APK: %s\n' "$APP_APK"
+  printf 'Test APK: %s\n' "$TEST_APK"
+  pocketshell_verify_walkthrough_apks "visual audit (install)"
+}
+
+VISUAL_AUDIT_BUILD_PREFIX=()
+if [[ "$VISUAL_AUDIT_BUILD_APKS" != "1" ]]; then
+  [[ -f "$APP_APK" ]] || fail "VISUAL_AUDIT_BUILD_APKS=0 but the app APK is missing at $APP_APK"
+  [[ -f "$TEST_APK" ]] || fail "VISUAL_AUDIT_BUILD_APKS=0 but the androidTest APK is missing at $TEST_APK"
+  VISUAL_AUDIT_BUILD_PREFIX=(visual_audit_reuse_validated_apks)
+fi
+
+# Nothing is built when reusing, so there is no daemon to stop either — and
+# `gradlew --stop` is machine-wide, i.e. it kills SIBLING lanes' daemons (a
+# documented cross-agent hazard). Skipping the build removes that too.
+if [[ "$VISUAL_AUDIT_BUILD_APKS" = "1" ]]; then
+  run_logged "09-stop-gradle-daemons" \
+    "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-stop-gradle" -- \
+    ./gradlew --stop
+fi
 pocketshell_apply_release_gate_scope_memory "visual-audit APK build"
 run_logged "10-build-walkthrough-visual-apks" \
+  "${VISUAL_AUDIT_BUILD_PREFIX[@]}" \
   "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-visual-audit-$(pocketshell_unit_token "$RUN_ID")-build-apks" -- \
   ./gradlew --no-daemon --no-build-cache "${POCKETSHELL_GRADLE_RESOURCE_ARGS[@]}" :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 install_apks "11-install-walkthrough-visual-apks"

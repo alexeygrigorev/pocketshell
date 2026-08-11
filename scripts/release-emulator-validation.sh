@@ -6,6 +6,10 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+# Issue #2064: one binary for the whole chain — the pre-release gate builds it,
+# every downstream stage installs it, publish_validated_apk ships it, and each
+# hop re-checks the sha256.
+source "$ROOT_DIR/scripts/lib/apk-identity.sh"
 
 # Issue #2054: apply and assert the release build resource profile ONCE, at the
 # top of the whole validation, before the ~30-60 minute run takes the shared AVD
@@ -25,6 +29,14 @@ pocketshell_assert_gradle_execution_profile \
 # because it exports POCKETSHELL_TEST_MEM, every child stage inherits 24G and
 # their own point-of-use assertions pass without repeating the export.
 
+# Issue #2064: `--verify-apk-identity` drives the REAL chain wiring — this
+# script's export of the gate-recorded pair, its publish-time digest assertion,
+# and each downstream stage's own verification — with no emulator, no Docker and
+# no Gradle. It touches no device, so it must not queue on the AVD lock.
+if [[ "${1:-}" == "--verify-apk-identity" ]]; then
+  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+fi
+
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/release-emulator-validation}"
@@ -35,7 +47,9 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 SUMMARY_PATH="$RUN_DIR/summary.md"
 PRE_RELEASE_RUN_ID="$RUN_ID-pre-release"
-PRE_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/pre-release-confidence-gate"
+# Overridable so the #2064 identity test can point the whole chain at a fixture
+# gate run without an emulator; the release default is unchanged.
+PRE_RELEASE_GATE_LOG_ROOT="${PRE_RELEASE_GATE_LOG_ROOT:-$ROOT_DIR/build/pre-release-confidence-gate}"
 PRE_RELEASE_GATE_RUN_DIR="$PRE_RELEASE_GATE_LOG_ROOT/$PRE_RELEASE_RUN_ID"
 PRE_RELEASE_GATE_APK="$PRE_RELEASE_GATE_RUN_DIR/worktree/app/build/outputs/apk/debug/app-debug.apk"
 VALIDATED_APK="$RUN_DIR/app-debug.apk"
@@ -197,6 +211,38 @@ print_failure_log_tail() {
   fi
 }
 
+# Issue #2064: run_required already measured every stage and threw the number
+# away. Keep them so the release summary carries its own wall-clock breakdown
+# and a "before/after" is a `grep`, not an archaeology exercise across artefact
+# mtimes (which is how the 41m56s baseline for run 20260809-v0442-r3 had to be
+# reconstructed).
+STAGE_LABELS=()
+STAGE_SECONDS=()
+STAGE_STATUSES=()
+
+write_stage_timings() {
+  local i total=0
+  for i in "${!STAGE_LABELS[@]}"; do
+    total=$((total + STAGE_SECONDS[i]))
+  done
+  {
+    printf '\n## Stage wall clock (issue #2064)\n\n'
+    printf -- '- Total stage seconds: **%s** (%sm%ss)\n\n' "$total" "$((total / 60))" "$((total % 60))"
+    printf '| Stage | Seconds | %% | Status |\n'
+    printf '| --- | ---: | ---: | --- |\n'
+    for i in "${!STAGE_LABELS[@]}"; do
+      if [[ "$total" -gt 0 ]]; then
+        printf '| %s | %s | %s%% | %s |\n' \
+          "${STAGE_LABELS[$i]}" "${STAGE_SECONDS[$i]}" \
+          "$((STAGE_SECONDS[i] * 100 / total))" "${STAGE_STATUSES[$i]}"
+      else
+        printf '| %s | %s | n/a | %s |\n' \
+          "${STAGE_LABELS[$i]}" "${STAGE_SECONDS[$i]}" "${STAGE_STATUSES[$i]}"
+      fi
+    done
+  } >> "$SUMMARY_PATH"
+}
+
 run_required() {
   local label="$1"
   local artifact="$2"
@@ -223,24 +269,60 @@ run_required() {
   set -e
   end_seconds="$(date +%s)"
   elapsed_seconds=$((end_seconds - start_seconds))
+  STAGE_LABELS+=("$label")
+  STAGE_SECONDS+=("$elapsed_seconds")
   if [[ "$status" -eq 0 ]]; then
+    STAGE_STATUSES+=("passed")
     printf 'PASS: %s (%ss)\n' "$label" "$elapsed_seconds"
     return 0
   fi
 
+  STAGE_STATUSES+=("failed")
   printf 'FAIL: %s exited %s after %ss\n' "$label" "$status" "$elapsed_seconds" >&2
   print_failure_log_tail "$log_file"
   {
     sed -i 's/^Automated status: RUNNING$/Automated status: FAIL/' "$SUMMARY_PATH"
+    write_stage_timings
     fail "$label failed"
   }
 }
 
+# Issue #2064: turn the gate's recorded identity into the environment every
+# downstream stage consumes, and verify the gate APKs are still the recorded
+# bytes before a single stage is launched. Hard-fails: the gate we just ran
+# always writes apk-identity.txt, so a missing/mismatched one means the release
+# chain is not describing one binary and must not continue.
+export_validated_apk_identity() {
+  pocketshell_export_walkthrough_apk_env "$PRE_RELEASE_GATE_RUN_DIR" ||
+    fail "the pre-release confidence gate did not leave a usable APK identity record at $PRE_RELEASE_GATE_RUN_DIR/$POCKETSHELL_APK_IDENTITY_FILE_NAME (issue #2064). Every downstream stage installs and ships that exact pair; without the record the chain cannot prove it validated the binary it publishes."
+  {
+    printf '\n## Validated APK identity (issue #2064)\n\n'
+    printf -- '- app APK: `%s`\n' "$APP_APK"
+    printf -- '- app APK sha256: `%s`\n' "$POCKETSHELL_EXPECTED_APP_APK_SHA256"
+    printf -- '- androidTest APK: `%s`\n' "$TEST_APK"
+    printf -- '- androidTest APK sha256: `%s`\n' "$POCKETSHELL_EXPECTED_TEST_APK_SHA256"
+    printf -- '- Every walkthrough/visual-audit stage below installs THESE bytes (BUILD_APKS=0) and re-verifies the digest before installing.\n'
+  } >> "$SUMMARY_PATH"
+}
+
 publish_validated_apk() {
-  [[ -f "$PRE_RELEASE_GATE_APK" ]] ||
-    fail "validated debug APK was not created by the pre-release gate at $PRE_RELEASE_GATE_APK"
-  cp "$PRE_RELEASE_GATE_APK" "$VALIDATED_APK"
+  # Issue #2064: ship the RECORDED file, not a second hardcoded guess at where
+  # the gate put it. `$PRE_RELEASE_GATE_APK` and the gate's `app_apk` record
+  # were two independent derivations of the same path — if they ever diverged
+  # (a variant/output-dir change, a suffixed applicationId, a relocated
+  # worktree) the chain would validate one binary and publish another, with
+  # nothing to notice. `$APP_APK` comes from the identity record and has already
+  # been digest-verified by export_validated_apk_identity.
+  local source_apk="${APP_APK:-$PRE_RELEASE_GATE_APK}"
+  [[ -f "$source_apk" ]] ||
+    fail "validated debug APK was not created by the pre-release gate at $source_apk"
+  cp "$source_apk" "$VALIDATED_APK"
+  # Issue #2064: the published artifact must be provably the validated one.
+  pocketshell_assert_apk_identity "release publish" "$VALIDATED_APK" \
+    "${POCKETSHELL_EXPECTED_APP_APK_SHA256:-}" ||
+    fail "the published debug APK does not match the sha256 the pre-release gate validated (issue #2064)"
   record_artifact "tested debug APK" "build/release-emulator-validation/$RUN_ID/app-debug.apk"
+  printf -- '- published APK sha256: `%s`\n' "$POCKETSHELL_EXPECTED_APP_APK_SHA256" >> "$SUMMARY_PATH"
 }
 
 real_agent_release_gate_instrumentation_log_has_success() {
@@ -624,6 +706,38 @@ run_long_running_session_instrumentation() {
   return 0
 }
 
+# Issue #2064: the device-free end-to-end proof of the APK identity chain.
+# Runs the REAL export, the REAL publish assertion, and then the REAL
+# `--verify-apk-identity` mode of every downstream stage as child processes,
+# exactly as the release flow launches them — so the test exercises production
+# wiring rather than a re-spelling of it. No emulator, no Docker, no Gradle.
+if [[ "${1:-}" == "--verify-apk-identity" ]]; then
+  write_summary_header
+  export_validated_apk_identity
+  for stage_script in \
+    scripts/terminal-workbench.sh \
+    scripts/phone-walkthrough.sh \
+    scripts/capture-walkthrough-screenshots.sh \
+    scripts/parallel-setup-detection.sh; do
+    printf '\n[%s --verify-apk-identity]\n' "$stage_script"
+    "$ROOT_DIR/$stage_script" --verify-apk-identity ||
+      fail "$stage_script rejected the validated APK pair"
+  done
+  # Test-only boundary seam: prove the publish-time assertion catches a file
+  # replaced after every install stage has passed. It is intentionally limited
+  # to this device-free verification mode.
+  if [[ -n "${POCKETSHELL_APK_IDENTITY_POST_STAGE_HOOK:-}" ]]; then
+    [[ -x "$POCKETSHELL_APK_IDENTITY_POST_STAGE_HOOK" ]] ||
+      fail "APK identity post-stage proof hook is not executable: $POCKETSHELL_APK_IDENTITY_POST_STAGE_HOOK"
+    "$POCKETSHELL_APK_IDENTITY_POST_STAGE_HOOK" "$APP_APK" "$TEST_APK" ||
+      fail "APK identity post-stage proof hook failed"
+  fi
+  publish_validated_apk
+  printf '\nPASS: release APK identity chain verified (issue #2064)\n'
+  printf 'Summary: %s\n' "$SUMMARY_PATH"
+  exit 0
+fi
+
 require_clean_pushed_main
 write_summary_header
 
@@ -665,6 +779,16 @@ run_required \
   "pre-release confidence gate" \
   "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/" \
   env LOG_ROOT="$PRE_RELEASE_GATE_LOG_ROOT" RUN_ID="$PRE_RELEASE_RUN_ID" PRE_RELEASE_MANAGE_EMULATOR=1 scripts/pre-release-confidence-gate.sh
+
+# Issue #2064: from here on, every stage installs the pair the gate just built
+# and validated. Before this, terminal-lab / tmux-existing-session /
+# setup-detection / visual-audit each wiped app/build and rebuilt their own
+# byte-different pair (472s in run 20260809-v0442-r3, 603s in 20260808-165533),
+# so the journey evidence the tag rests on was produced against a binary nothing
+# else in the chain validated and that publish_validated_apk does not ship. The
+# rebuild inside terminal-lab is also what OOM-killed release attempt r1, 58
+# minutes in.
+export_validated_apk_identity
 
 if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
   run_required \
@@ -734,6 +858,7 @@ run_required \
   env RUN_ID="$RUN_ID-visual-audit" scripts/capture-walkthrough-screenshots.sh
 
 publish_validated_apk
+write_stage_timings
 
 {
   printf '\n## Release Notes Checklist\n\n'

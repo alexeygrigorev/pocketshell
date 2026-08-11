@@ -18,6 +18,7 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -123,7 +124,19 @@ class SystemBackForegroundE2eTest {
         // probed session row (with the production one-retry inside
         // waitForSessionInPicker).
         tapHostUntilHostDetail(hostRowTag)
-        waitForSessionInPicker(rule = compose, sessionName = SESSION_NAME, timeoutMs = 30_000)
+        waitForSessionInPicker(
+            rule = compose,
+            sessionName = SESSION_NAME,
+            timeoutMs = 30_000,
+            onStateNote = { note -> Log.i(LOG_TAG, "ISSUE520_PICKER $note") },
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                    onStateNote = { note -> Log.i(LOG_TAG, "ISSUE520_PICKER $note") },
+                )
+            },
+        )
         compose.onNodeWithText(SESSION_NAME).performClick()
         // Wait for the terminal screen to mount (the session row is gone from
         // the picker; the terminal viewport is up).

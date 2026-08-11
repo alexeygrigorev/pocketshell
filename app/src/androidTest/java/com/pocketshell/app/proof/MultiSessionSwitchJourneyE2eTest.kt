@@ -28,8 +28,8 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.proof.signals.MainThreadResponsivenessProbe
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
@@ -1093,7 +1093,17 @@ class MultiSessionSwitchJourneyE2eTest {
         var landed = false
         while (!landed && SystemClock.elapsedRealtime() < landDeadline) {
             clickTmuxBack()
-            waitForSessionInPicker(rule = compose, sessionName = toSession, timeoutMs = pickerWaitMs)
+            waitForSessionInPicker(
+                rule = compose,
+                sessionName = toSession,
+                timeoutMs = pickerWaitMs,
+                onRepoke = {
+                    repokeSessionPickerFromHostRow(
+                        rule = compose,
+                        hostRowTag = hostRowTag,
+                    )
+                },
+            )
             compose.onNodeWithText(toSession, useUnmergedTree = true).performClick()
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             val settleDeadline = SystemClock.elapsedRealtime() + SWITCH_LAND_RETRY_MS
@@ -1760,36 +1770,13 @@ class MultiSessionSwitchJourneyE2eTest {
             rule = compose,
             sessionName = SESSION_A,
             timeoutMs = pickerWaitMs,
-            onRepoke = { repokeFolderListFromHostRow(hostRowTag) },
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
         )
-    }
-
-    /**
-     * Issue #740 test-only recovery for a first-open enumeration stall (the
-     * awaited row absent, no error panel) on the FIRST host-detail folder-list
-     * open: pop Back to the host list (via the folder-list back affordance),
-     * wait for the host row, then re-tap it to re-trigger the warm-lease
-     * acquire + `tmux list-sessions` enumeration.
-     * Re-opens the SAME host's picker so [waitForSessionInPicker]'s polls stay
-     * valid. Best-effort — guarded so a transient missing affordance never
-     * throws out of the watchdog (the helper's own deadline remains the
-     * load-bearing bound).
-     */
-    private fun repokeFolderListFromHostRow(hostRowTag: String) {
-        runCatching {
-            if (compose.onAllNodesWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            ) {
-                compose.onNodeWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true).performClick()
-            }
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        }
     }
 
     private fun forceFlatHostDetailViewMode() {
@@ -1818,6 +1805,12 @@ class MultiSessionSwitchJourneyE2eTest {
                 rule = compose,
                 sessionName = toSession,
                 timeoutMs = pickerWaitMs,
+                onRepoke = {
+                    repokeSessionPickerFromHostRow(
+                        rule = compose,
+                        hostRowTag = hostRowTag,
+                    )
+                },
             )
             compose.onNodeWithText(toSession, useUnmergedTree = true).performClick()
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()

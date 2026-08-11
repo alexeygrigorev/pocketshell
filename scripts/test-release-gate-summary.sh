@@ -50,6 +50,16 @@ die() {
   exit 1
 }
 
+step_seconds() {
+  local summary="$1"
+  local name="$2"
+  awk -v wanted="$name" '
+    $0 == "- name: " wanted { in_step = 1; next }
+    in_step && /^- name: / { exit }
+    in_step && /^  seconds: / { print $2; exit }
+  ' "$summary"
+}
+
 # Extract one shell function verbatim from the production gate.
 extract_function() {
   local name="$1"
@@ -159,26 +169,58 @@ render_summary "$OUT" "reused-ci" "$APK_DIR/apk-identity.txt"
 SUMMARY="$OUT/summary.txt"
 [[ -s "$SUMMARY" ]] || die "write_summary produced no summary"
 
-# 1. per-step timings, ranked, with a total.
-grep -q '^Total step seconds: 2$' "$SUMMARY" ||
-  die "the summary does not total the MEASURED step wall clock (expected 2s from a real run_step of \`sleep 2\`; issue #2064 criterion 1). Got: $(grep '^Total step seconds:' "$SUMMARY")"
+# 1. per-step timings, ranked, with a total. A real sleep(2) may span two or
+# three integer-second boundaries because run_step deliberately uses the gate's
+# existing whole-second wall clock. Assert the measured properties rather than
+# one scheduler-sensitive phase of that clock.
+FAST_SECONDS="$(step_seconds "$SUMMARY" "fast-step")"
+SLOW_SECONDS="$(step_seconds "$SUMMARY" "slow-step")"
+REUSE_SECONDS="$(step_seconds "$SUMMARY" "reuse-ci-unit-evidence")"
+TOTAL_SECONDS="$(awk -F': ' '$1 == "Total step seconds" { print $2; exit }' "$SUMMARY")"
+for timing in "$FAST_SECONDS" "$SLOW_SECONDS" "$REUSE_SECONDS" "$TOTAL_SECONDS"; do
+  [[ "$timing" =~ ^[0-9]+$ ]] ||
+    die "the summary contains a missing or non-numeric step duration: '$timing'"
+done
+
+# The lower bound proves the extracted production run_step really timed the
+# sleep. The deliberately generous upper bound catches a bogus clock while
+# tolerating ordinary hosted-runner scheduling noise.
+((SLOW_SECONDS >= 2 && SLOW_SECONDS <= 10)) ||
+  die "the real run_step sleep(2) duration is outside the bounded 2..10s contract: ${SLOW_SECONDS}s"
+EXPECTED_TOTAL=$((FAST_SECONDS + SLOW_SECONDS + REUSE_SECONDS))
+((TOTAL_SECONDS == EXPECTED_TOTAL)) ||
+  die "the summary total (${TOTAL_SECONDS}s) is not the sum of its measured step records (${EXPECTED_TOTAL}s)"
 ok "run_step's measured wall clock reaches the summary and is totalled"
 
 grep -q '^Step timings (slowest first, seconds):$' "$SUMMARY" ||
   die "the summary has no ranked step-timing table"
-RANKED="$(grep -E '^- +[0-9]+s +' "$SUMMARY" | awk '{print $2}')"
-[[ "$(printf '%s\n' "$RANKED" | head -1)" == "2s" ]] ||
-  die "the timing table is not sorted slowest-first (top row: $(printf '%s\n' "$RANKED" | head -1))"
-[[ "$(printf '%s\n' "$RANKED" | tail -1)" == "0s" ]] ||
-  die "the timing table is not sorted slowest-first (last row: $(printf '%s\n' "$RANKED" | tail -1))"
+EXPECTED_RANKED="$(printf '%s\n' "$FAST_SECONDS" "$SLOW_SECONDS" "$REUSE_SECONDS" | sort -rn)"
+ACTUAL_RANKED="$(awk '$1 == "-" && $2 ~ /^[0-9]+s$/ && $3 ~ /^[0-9]+%$/ {
+  seconds = $2
+  sub(/s$/, "", seconds)
+  print seconds
+}' "$SUMMARY")"
+[[ "$ACTUAL_RANKED" == "$EXPECTED_RANKED" ]] ||
+  die "the timing table is not the measured durations sorted slowest-first (expected: ${EXPECTED_RANKED//$'\n'/, }; got: ${ACTUAL_RANKED//$'\n'/, })"
 ok "the timing table is ranked slowest-first"
 
-grep -qE '^- +2s +100% +slow-step +passed' "$SUMMARY" ||
-  die "the timing table does not carry each step's share of the total"
+read -r RANKED_SLOW_SECONDS RANKED_SLOW_PERCENT RANKED_SLOW_STATUS < <(
+  awk '$1 == "-" && $4 == "slow-step" {
+    sub(/s$/, "", $2)
+    sub(/%$/, "", $3)
+    print $2, $3, $5
+    exit
+  }' "$SUMMARY"
+)
+EXPECTED_SLOW_PERCENT=$((SLOW_SECONDS * 100 / TOTAL_SECONDS))
+[[ "$RANKED_SLOW_SECONDS" == "$SLOW_SECONDS" &&
+   "$RANKED_SLOW_PERCENT" == "$EXPECTED_SLOW_PERCENT" &&
+   "$RANKED_SLOW_STATUS" == "passed" ]] ||
+  die "the ranked slow-step row does not propagate its measured duration/share/status"
 ok "each step carries its percentage of the total"
 
-grep -q '^  seconds: 2$' "$SUMMARY" ||
-  die "the per-step record does not carry its own duration"
+grep -A2 '^- name: slow-step$' "$SUMMARY" | grep -q "^  seconds: ${SLOW_SECONDS}$" ||
+  die "the slow-step record does not carry its own measured duration"
 ok "each step record carries its duration"
 
 # 2. unit-evidence provenance.

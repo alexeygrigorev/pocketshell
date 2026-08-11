@@ -34,6 +34,26 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+
+# Issue #2064: the release chain hands the shards the pair the pre-release
+# confidence gate built, validated and publishes. Resolved here, above the
+# option parser, because `--verify-apk-identity` must short-circuit before it.
+APP_APK="${APP_APK:-$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk}"
+TEST_APK="${TEST_APK:-$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
+PARALLEL_BUILD_APKS="${PARALLEL_BUILD_APKS:-1}"
+
+# Same contract and same device-free verification mode as
+# scripts/phone-walkthrough.sh; it touches no emulator, so no AVD lock.
+if [[ "${1:-}" == "--verify-apk-identity" ]]; then
+  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+  pocketshell_require_walkthrough_apk_identity "parallel setup-detection" || exit 1
+  printf 'PASS: parallel-setup-detection APK identity verified (issue #2064)\n'
+  printf '  app  %s\n' "$APP_APK"
+  printf '  test %s\n' "$TEST_APK"
+  exit 0
+fi
+pocketshell_verify_walkthrough_apks "parallel setup-detection" || exit 1
 
 # Issue #2054: the sharded setup-detection matrix builds the APKs ONCE up front
 # for every shard, so an unbounded-heap build here fails the whole fan-out. The
@@ -288,9 +308,8 @@ fi
 # shard with BUILD_APKS=0 + PHONE_WALKTHROUGH_CLEAN_GENERATED=0 so no shard
 # touches app/build — the per-emulator `pm install` step remains safe to run
 # concurrently (it targets each shard's own ANDROID_SERIAL).
-APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
-PARALLEL_BUILD_APKS="${PARALLEL_BUILD_APKS:-1}"
+# APP_APK / TEST_APK / PARALLEL_BUILD_APKS are resolved above the option parser
+# (issue #2064) so `--verify-apk-identity` can short-circuit on them.
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
 if [[ "$PARALLEL_BUILD_APKS" = "1" ]]; then
   build_log="$RUN_DIR/00-build-apks.log"
@@ -306,6 +325,10 @@ if [[ "$PARALLEL_BUILD_APKS" = "1" ]]; then
 fi
 [[ -f "$APP_APK" ]] || fail "app APK missing at $APP_APK (set PARALLEL_BUILD_APKS=1 to build)"
 [[ -f "$TEST_APK" ]] || fail "androidTest APK missing at $TEST_APK (set PARALLEL_BUILD_APKS=1 to build)"
+# Issue #2064: re-verify AFTER the optional pre-shard build, so a local rebuild
+# that diverged from the gate-validated pair is caught before any shard
+# installs it.
+pocketshell_verify_walkthrough_apks "parallel setup-detection (pre-shard)" || fail "pre-shard APK identity check failed"
 
 # --- fan out ----------------------------------------------------------------
 declare -a SHARD_PIDS=()
@@ -340,6 +363,10 @@ for ((i = 0; i < num_shards; i++)); do
     # which is shared across shards (see the pre-shard build above).
     export BUILD_APKS=0
     export PHONE_WALKTHROUGH_CLEAN_GENERATED=0
+    # Issue #2064: hand the shard the resolved pair explicitly (it may be the
+    # gate's isolated-worktree APK, outside this checkout's app/build) plus the
+    # expected digests, so each shard verifies the binary it installs.
+    export APP_APK TEST_APK
     exec "$ROOT_DIR/scripts/phone-walkthrough.sh" "${scenario_args[@]}"
   ) >"$shard_log" 2>&1 &
   SHARD_PIDS[i]="$!"

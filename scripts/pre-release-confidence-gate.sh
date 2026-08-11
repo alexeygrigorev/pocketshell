@@ -7,6 +7,10 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+# Issue #2064: the debug + androidTest APK pair is built HERE, once, and every
+# downstream release stage installs and ships THESE bytes. See
+# scripts/lib/apk-identity.sh for why "same source" was not good enough.
+source "$ROOT_DIR/scripts/lib/apk-identity.sh"
 # Issue #2054: the AVD lock is acquired further down, AFTER the execution-profile
 # assertion. Queuing behind another emulator-touching run can take an hour; an
 # under-resourced profile should be rejected in the first second, not after that
@@ -203,7 +207,12 @@ if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-
     --exclude='build/' \
     "$ROOT_DIR/" "$isolated_root/"
   export POCKETSHELL_GATE_ISOLATED_COPY=1
-  export POCKETSHELL_GATE_SOURCE_ROOT="$ROOT_DIR"
+  # Normally the outer release checkout is the exact clean/pushed source of
+  # truth. Preserve an explicit source root for pre-merge reviewer validation,
+  # where the candidate contains only gate-script changes but its JVM evidence
+  # must still be tied to the clean pushed base; the acceptor independently
+  # enforces clean HEAD == origin/main on whichever root is supplied.
+  export POCKETSHELL_GATE_SOURCE_ROOT="${POCKETSHELL_GATE_SOURCE_ROOT:-$ROOT_DIR}"
   # Issue #2054: POCKETSHELL_TEST_MEM must cross into the isolated copy too — the
   # child is what actually invokes scripts/cgroup-run.sh for every heavy step, so
   # without this the build scope silently falls back to scope-run.sh's 8G default.
@@ -242,6 +251,21 @@ STEP_NAMES=()
 STEP_STATUSES=()
 STEP_LOGS=()
 STEP_COMMANDS=()
+# Issue #2064: run_step has always MEASURED every step ("PASS: <name> (Ns)") but
+# never kept the numbers, so the gate's own cost stayed unaggregated and the
+# release chain was described as "unmeasured" for a year. Keep them and print a
+# ranked table in the summary; no new instrumentation, just not throwing the
+# existing measurement away.
+STEP_SECONDS=()
+# Issue #2064: how the unit-test evidence for this release was obtained —
+# "reused-ci" (the required `Unit tests` check on this exact SHA, independently
+# re-verified against the downloaded result XML) or "local" (the gate ran the
+# suite itself). Recorded in the summary either way; a missing/unusable CI
+# result always falls back to "local", never to "assumed green".
+UNIT_EVIDENCE_MODE="local"
+UNIT_EVIDENCE_DETAIL="local Gradle check graph (assembleDebug check -x lint -x lintDebug)"
+CI_UNIT_EVIDENCE_DIR="$RUN_DIR/ci-unit-evidence"
+APK_IDENTITY_FILE="$RUN_DIR/$POCKETSHELL_APK_IDENTITY_FILE_NAME"
 FOCUSED_SELECTORS=("${APP_WALKTHROUGH_TESTS[@]}")
 FOCUSED_STATUSES=()
 FOCUSED_LOGS=()
@@ -326,6 +350,19 @@ write_summary() {
     # runs died in the build with no artifact naming the heap/scope they used.
     printf 'Gradle flags: %s\n' "$GRADLE_FLAGS"
     printf 'Build scope MemoryMax (POCKETSHELL_TEST_MEM): %s\n' "${POCKETSHELL_TEST_MEM:-unset}"
+    # Issue #2064: WHERE the 12,362-test unit evidence for this release came
+    # from is release evidence in its own right. "reused-ci" names the run;
+    # "local" says the gate executed the suite itself.
+    printf 'Unit evidence: %s\n' "$UNIT_EVIDENCE_MODE"
+    printf 'Unit evidence detail: %s\n' "$UNIT_EVIDENCE_DETAIL"
+    # Issue #2064: the one binary this whole chain validates and ships.
+    printf 'APK identity file: %s\n' "$APK_IDENTITY_FILE"
+    if [[ -f "$APK_IDENTITY_FILE" ]]; then
+      printf 'Validated app APK sha256: %s\n' \
+        "$(pocketshell_read_apk_identity_field "$APK_IDENTITY_FILE" app_apk_sha256 2>/dev/null || printf 'unknown')"
+      printf 'Validated androidTest APK sha256: %s\n' \
+        "$(pocketshell_read_apk_identity_field "$APK_IDENTITY_FILE" test_apk_sha256 2>/dev/null || printf 'unknown')"
+    fi
     printf 'Connected core-terminal burst proof (step 12, non-fatal — issue #1314): %s\n' "$CONNECTED_TERMINAL_INPUT_STATUS"
     printf 'Focused app cold-reset APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
     printf 'Final data-preserving update install status: %s\n' "$FINAL_INSTALL_STATUS"
@@ -341,11 +378,31 @@ write_summary() {
 
     printf '\nSteps:\n'
     local i
+    local total_step_seconds=0
     for i in "${!STEP_NAMES[@]}"; do
       printf -- '- name: %s\n' "${STEP_NAMES[$i]}"
       printf '  status: %s\n' "${STEP_STATUSES[$i]}"
+      printf '  seconds: %s\n' "${STEP_SECONDS[$i]:-0}"
       printf '  log: %s\n' "${STEP_LOGS[$i]}"
       printf '  command: %s\n' "${STEP_COMMANDS[$i]}"
+      total_step_seconds=$((total_step_seconds + ${STEP_SECONDS[$i]:-0}))
+    done
+
+    # Issue #2064: the ranked cost table. The gate emitted every one of these
+    # numbers already; nobody had ever aggregated them, which is why the local
+    # release chain was "unmeasured". Cheapest possible measurement — sort what
+    # run_step already timed.
+    printf '\nStep timings (slowest first, seconds):\n'
+    printf 'Total step seconds: %s\n' "$total_step_seconds"
+    for i in "${!STEP_NAMES[@]}"; do
+      printf '%s\t%s\t%s\n' "${STEP_SECONDS[$i]:-0}" "${STEP_NAMES[$i]}" "${STEP_STATUSES[$i]}"
+    done | sort -rn | while IFS=$'\t' read -r secs name status; do
+      if [[ "$total_step_seconds" -gt 0 ]]; then
+        printf -- '- %6ss  %5s%%  %-52s %s\n' \
+          "$secs" "$((secs * 100 / total_step_seconds))" "$name" "$status"
+      else
+        printf -- '- %6ss  %5s   %-52s %s\n' "$secs" "n/a" "$name" "$status"
+      fi
     done
 
     printf '\nFocused selectors:\n'
@@ -405,6 +462,7 @@ run_step() {
   STEP_STATUSES+=("running")
   STEP_LOGS+=("$log_file")
   STEP_COMMANDS+=("$command_string")
+  STEP_SECONDS+=("0")
   local step_array_index=$((${#STEP_NAMES[@]} - 1))
 
   printf '\n[%02d] %s\n' "$STEP_INDEX" "$name"
@@ -422,6 +480,7 @@ run_step() {
   set -e
   end_seconds="$(date +%s)"
   elapsed_seconds=$((end_seconds - start_seconds))
+  STEP_SECONDS[step_array_index]="$elapsed_seconds"
 
   if [[ "$status" -eq 0 ]]; then
     STEP_STATUSES[step_array_index]="passed"
@@ -463,6 +522,28 @@ run_step() {
   fi
 
   return "$status"
+}
+
+# A CI-evidence refusal is an expected fail-closed branch, not a release-gate
+# failure: the next step runs the complete local graph. Preserve its timing/log
+# while preventing stale failure state from leaking into an otherwise-green
+# summary.
+mark_step_declined() {
+  local name="$1"
+  local index
+  for (( index=${#STEP_NAMES[@]} - 1; index >= 0; index-- )); do
+    if [[ "${STEP_NAMES[index]}" == "$name" ]]; then
+      STEP_STATUSES[index]="declined"
+      break
+    fi
+  done
+  if [[ "$FAILING_STEP" == "$name" ]]; then
+    FAILING_STEP=""
+    FAILING_LOG_PATH=""
+    FAILURE_MESSAGE=""
+    FAILURE_DIAGNOSTICS_PATH=""
+    FAILURE_LOGCAT_PATH=""
+  fi
 }
 
 run_bash_step() {
@@ -1740,8 +1821,45 @@ if ! "$EMULATOR" -list-avds | grep -Fxq "$AVD_NAME"; then
   fail "AVD '$AVD_NAME' was not listed by $EMULATOR -list-avds"
 fi
 
+# Issue #2064: SHA-matched reuse of the required `Unit tests` evidence.
+#
+# MEASURED DUPLICATION. In release run 20260809-v0442-r3 (`Commit SHA
+# 0248d0ee`) this gate's `gradle-compile-unit` step cost 1083s of a 2516s
+# chain, and 890s of that (82%) was unit-test compile + execution: 12,362 tests
+# re-run against source the required `Unit tests` check had already tested green
+# on the very same commit. Task extraction from that run's console confirmed
+# `check` wires no custom guard tasks here, so `assembleDebug check` is exactly
+# `assembleDebug` + `./gradlew test`.
+#
+# AND CI IS STRICTER. The `unit` job runs `--rerun-tasks --no-build-cache` and
+# then the #1646 executed-count floors + freshness + FROM-CACHE console scan;
+# the local `check` applies none of those. Reusing that result RAISES the bar.
+#
+# NON-FATAL BY CONSTRUCTION. This step declines — loudly — on a dirty tree, an
+# unpushed HEAD, a missing/red/foreign-SHA check run, a weakened workflow, or
+# result XML that does not independently satisfy the floors. A decline means
+# the gate runs the whole suite locally below. A missing CI result can never
+# read as a pass.
+if run_step "reuse-ci-unit-evidence" \
+  "$ROOT_DIR/scripts/reuse-ci-unit-evidence.sh" \
+    --source-root "${POCKETSHELL_GATE_SOURCE_ROOT:-$ROOT_DIR}" \
+    --tree-root "$ROOT_DIR" \
+    --out-dir "$CI_UNIT_EVIDENCE_DIR"; then
+  UNIT_EVIDENCE_MODE="reused-ci"
+  UNIT_EVIDENCE_DETAIL="$(grep -m1 '^Workflow run URL: ' "$CI_UNIT_EVIDENCE_DIR/evidence.txt" 2>/dev/null | sed 's/^Workflow run URL: //')"
+  UNIT_EVIDENCE_DETAIL="reused the required 'Unit tests' check on this exact commit (${UNIT_EVIDENCE_DETAIL:-unknown run}); downloaded result XML re-verified locally against scripts/executed-test-count-floors.txt — see $CI_UNIT_EVIDENCE_DIR/evidence.txt"
+  GATE_COMPILE_UNIT_TASKS="assembleDebug"
+  printf 'Unit evidence: REUSING the CI `Unit tests` result for this commit; this gate builds only, and does not re-run the suite.\n'
+else
+  mark_step_declined "reuse-ci-unit-evidence"
+  UNIT_EVIDENCE_MODE="local"
+  UNIT_EVIDENCE_DETAIL="local Gradle check graph (assembleDebug check -x lint -x lintDebug); CI evidence was declined — see $RUN_DIR/03-reuse-ci-unit-evidence.log"
+  GATE_COMPILE_UNIT_TASKS="assembleDebug check -x lint -x lintDebug"
+  printf 'WARN: CI unit evidence was NOT accepted for this commit; running the full unit suite locally (issue #2064 fail-closed path). See the reuse-ci-unit-evidence step log for the reason.\n' >&2
+fi
+
 run_bash_step "gradle-compile-unit" \
-  "'$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-ksp-hilt' -- ./gradlew $GRADLE_FLAGS :app:kspDebugKotlin :app:kspReleaseKotlin :app:kspDebugAndroidTestKotlin :app:kspDebugUnitTestKotlin :app:kspReleaseUnitTestKotlin :app:hiltJavaCompileDebug :app:hiltJavaCompileRelease :app:hiltJavaCompileDebugAndroidTest --stacktrace && '$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-assemble-check' -- ./gradlew $GRADLE_FLAGS assembleDebug check -x lint -x lintDebug --stacktrace"
+  "'$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-ksp-hilt' -- ./gradlew $GRADLE_FLAGS :app:kspDebugKotlin :app:kspReleaseKotlin :app:kspDebugAndroidTestKotlin :app:kspDebugUnitTestKotlin :app:kspReleaseUnitTestKotlin :app:hiltJavaCompileDebug :app:hiltJavaCompileRelease :app:hiltJavaCompileDebugAndroidTest --stacktrace && '$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-assemble-check' -- ./gradlew $GRADLE_FLAGS $GATE_COMPILE_UNIT_TASKS --stacktrace"
 
 run_step "docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
 # Issue #150: wait on the compose `healthcheck:` block via
@@ -1809,6 +1927,17 @@ run_step "build-app-test-apks" \
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 [[ -f "$TEST_APK_PATH" ]] || fail "Android test APK artifact was not created at $TEST_APK_PATH"
 
+# Issue #2064: this is the ONE build of the release pair. Record its identity so
+# every downstream stage installs THESE bytes and publish_validated_apk ships
+# THESE bytes. Before this, terminal-lab / tmux-existing-session /
+# setup-detection / visual-audit each `rm -rf app/build` and rebuilt their own
+# byte-different pair, so the journey evidence a tag rests on came from a binary
+# nothing else in the chain had validated.
+run_step "record-validated-apk-identity" \
+  pocketshell_record_apk_identity "$APK_IDENTITY_FILE" \
+  "$(cd "$(dirname "$APK_PATH")" && pwd)/$(basename "$APK_PATH")" \
+  "$(cd "$(dirname "$TEST_APK_PATH")" && pwd)/$(basename "$TEST_APK_PATH")"
+
 LEGACY_V1_DB_MIGRATION_STATUS="running"
 run_bash_step "migrate-legacy-v1-databases" "$(legacy_v1_database_migration_script)"
 
@@ -1838,10 +1967,17 @@ for app_walkthrough_index in "${!APP_WALKTHROUGH_TESTS[@]}"; do
   fi
 done
 
-run_step "build-debug-apk" \
-  "$ROOT_DIR/scripts/cgroup-run.sh" --unit "pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-build-debug-apk" -- \
-  ./gradlew "${GRADLE_ARGS[@]}" :app:assembleDebug --stacktrace
-[[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
+# Issue #2064: this step used to re-run `:app:assembleDebug` after
+# `build-app-test-apks` had already produced the APK — a fourth build of the
+# same binary inside a chain that was already building it four times. It is
+# replaced by the assertion that makes the redundancy unnecessary AND provable:
+# the APK about to be update-installed and published must still hash to the
+# value recorded at the single build. A rebuild here would have masked exactly
+# the divergence this gate now refuses to ship.
+run_step "verify-debug-apk-identity" \
+  pocketshell_assert_apk_identity "pre-release gate (update-install candidate)" \
+  "$APK_PATH" \
+  "$(pocketshell_read_apk_identity_field "$APK_IDENTITY_FILE" app_apk_sha256)"
 
 run_step "update-install-debug-apk" "$ROOT_DIR/scripts/install-update-apk.sh" "$APK_PATH"
 

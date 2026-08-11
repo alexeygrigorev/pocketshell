@@ -20,6 +20,9 @@ fi
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+# Issue #2064: when this workbench is a child of release validation it must
+# install the gate-recorded pair, not stale APKs from the root checkout.
+source "$ROOT_DIR/scripts/lib/apk-identity.sh"
 
 # Issue #2054: the optional terminal release gate (TERMINAL_RELEASE_GATE=1) runs
 # this workbench inside the release validation, and its `04-build-apks` step is
@@ -51,14 +54,16 @@ fi
 DEFAULT_LOG_ROOT="$(realpath -m "$DEFAULT_LOG_ROOT")"
 RELEASE_GATE_LOG_ROOT="$(realpath -m "$ROOT_DIR/build/release-terminal-gate")"
 LOG_ROOT="$(realpath -m "$LOG_ROOT")"
-case "$LOG_ROOT" in
-  "$DEFAULT_LOG_ROOT"|"$DEFAULT_LOG_ROOT"/*) ;;
-  "$RELEASE_GATE_LOG_ROOT"/*/workbench|"$RELEASE_GATE_LOG_ROOT"/*/workbench/*) ;;
-  *)
-    printf 'FAIL: LOG_ROOT must stay under %s or a release terminal gate workbench dir: %s\n' "$DEFAULT_LOG_ROOT" "$LOG_ROOT" >&2
-    exit 1
-    ;;
-esac
+if [[ "${1:-}" != "--verify-apk-identity" ]]; then
+  case "$LOG_ROOT" in
+    "$DEFAULT_LOG_ROOT"|"$DEFAULT_LOG_ROOT"/*) ;;
+    "$RELEASE_GATE_LOG_ROOT"/*/workbench|"$RELEASE_GATE_LOG_ROOT"/*/workbench/*) ;;
+    *)
+      printf 'FAIL: LOG_ROOT must stay under %s or a release terminal gate workbench dir: %s\n' "$DEFAULT_LOG_ROOT" "$LOG_ROOT" >&2
+      exit 1
+      ;;
+  esac
+fi
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || {
   printf 'FAIL: RUN_ID contains unsafe characters: %s\n' "$RUN_ID" >&2
@@ -119,8 +124,8 @@ if [[ "$REAL_AGENTS" == "1" && "$TEST_SELECTOR_WAS_SET" != "1" ]]; then
   TEST_SELECTOR="com.pocketshell.app.terminal.TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens"
 fi
 REAL_AGENT_TEST_SELECTOR="com.pocketshell.app.terminal.TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens"
-APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+APP_APK="${APP_APK:-$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk}"
+TEST_APK="${TEST_APK:-$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
 SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
 SSH_USER="${SSH_USER:-testuser}"
@@ -130,6 +135,22 @@ fail() {
   printf 'Artifacts: %s\n' "$RUN_DIR" >&2
   exit 1
 }
+
+# Device-free release-chain coverage. This deliberately exercises this script's
+# real path resolution + identity verifier and exits before adb/Docker use.
+if [[ "${1:-}" == "--verify-apk-identity" ]]; then
+  pocketshell_require_walkthrough_apk_identity "terminal workbench" ||
+    fail "terminal workbench rejected the release APK identity"
+  printf 'PASS: terminal-workbench APK identity verified (issue #2064)\n'
+  printf '  app  %s\n' "$APP_APK"
+  printf '  test %s\n' "$TEST_APK"
+  exit 0
+fi
+
+# Cheap early failure for a release child. Standalone workbench runs export no
+# expected hashes, so this remains a deliberate no-op for their normal build.
+pocketshell_verify_walkthrough_apks "terminal workbench (startup)" ||
+  fail "terminal workbench rejected the release APK identity before setup"
 
 extract_field() {
   local line="$1"
@@ -401,6 +422,10 @@ else
   [[ -f "$TEST_APK" ]] || fail "test APK missing at $TEST_APK"
 fi
 
+# Load-bearing install-site check: catches any rebuild/replacement after the
+# startup check and immediately before adb consumes the files.
+run_logged "04b-verify-apk-identity" \
+  pocketshell_verify_walkthrough_apks "terminal workbench (install)"
 run_logged "05-install-apks" bash -lc "'$ADB' install -r -d -t '$APP_APK' && '$ADB' install -r -d -t '$TEST_APK'"
 INSTRUMENTATION_ARGS=(
   -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR"

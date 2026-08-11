@@ -7,6 +7,18 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+
+# Issue #2064: `--verify-apk-identity` proves the release chain's APK contract
+# end to end — the exported environment, this script's own resolution of it, and
+# the hard-fail on a mismatched binary — with no emulator, no Docker and no
+# Gradle. It touches no device, so it must not queue behind the machine-wide AVD
+# lock either.
+POCKETSHELL_VERIFY_APK_IDENTITY_ONLY=0
+if [[ "${1:-}" == "--verify-apk-identity" ]]; then
+  POCKETSHELL_VERIFY_APK_IDENTITY_ONLY=1
+  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+fi
 
 # Issue #2054: this script's `08-build-apks` step is where release run
 # 20260809-v0442 died with `OutOfMemoryError: Java heap space` in
@@ -72,8 +84,26 @@ else
 fi
 TEST_PACKAGE="$PACKAGE.test"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/$PACKAGE/additional_test_output"
-APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
-TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
+# Issue #2064: the release chain points these at the pair the pre-release
+# confidence gate built and validated (and that publish_validated_apk ships), so
+# this walkthrough installs the SAME binary instead of rebuilding a
+# byte-different one. A standalone developer run leaves them unset and gets the
+# historical local paths.
+APP_APK="${APP_APK:-$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk}"
+TEST_APK="${TEST_APK:-$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
+
+# Verify BEFORE the emulator, Docker fixtures and instrumentation are touched:
+# an APK that is not the validated one must stop the stage in the first second,
+# not after a Docker bring-up. A no-op when no expectation was exported (the
+# standalone dev run); a hard failure on any mismatch or half-set pair.
+if [[ "$POCKETSHELL_VERIFY_APK_IDENTITY_ONLY" == "1" ]]; then
+  pocketshell_require_walkthrough_apk_identity "phone walkthrough" || exit 1
+  printf 'PASS: phone-walkthrough APK identity verified (issue #2064)\n'
+  printf '  app  %s\n' "$APP_APK"
+  printf '  test %s\n' "$TEST_APK"
+  exit 0
+fi
+pocketshell_verify_walkthrough_apks "phone walkthrough" || exit 1
 
 TERMINAL_LAB_TEST_CLASS="com.pocketshell.app.terminal.TerminalLabDockerTest"
 TERMINAL_LAB_DEVICE_DIR="$DEVICE_OUTPUT_DIR/terminal-lab"
@@ -715,6 +745,13 @@ build_and_install_apks() {
       printf 'Test APK: %s\n' "$TEST_APK"
     } | tee "$LOG_DIR/08-build-apks.log"
   fi
+
+  # Issue #2064: the AUTHORITATIVE check, immediately before install. The
+  # early config-time check fails fast; this one is adjacent to the `adb
+  # install` it protects, so a rebuild between the two (BUILD_APKS=1 with an
+  # expectation exported) is caught rather than installed.
+  run_logged "08b-verify-apk-identity" \
+    pocketshell_verify_walkthrough_apks "phone walkthrough (install)"
 
   run_logged "09-cold-reset-app-state-before-install" bash -lc \
     "printf 'COLD-RESET: clearing app/test package data for deterministic phone walkthrough\n'; \

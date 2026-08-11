@@ -658,6 +658,9 @@ jobs:
           chmod +x scripts/ci-journey-preserve-android-outputs.sh scripts/test-ci-journey-artifact-packaging.sh
           scripts/test-ci-journey-artifact-packaging.sh
 
+      - name: CI journey cold-boot canonical artifact guard (issue #2093)
+        run: scripts/test-ci-journey-canonical-artifacts.sh
+
       # Issue #1827: every condition that turns the journey suite RED must leave
       # evidence the classify step can read. The suite's red condition and the
       # summary's failed-BOTH-attempts section used to be two hand-maintained

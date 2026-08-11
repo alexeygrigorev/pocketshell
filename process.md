@@ -412,20 +412,37 @@ Minimum pre-push gate:
   still reject headless proof that only exercises plumbing (the assertion must be
   on the symptom-defining signal on the real transport, never on a seam/lambda
   having fired — the #1693 round-1 failure).
-- **`scripts/full-jvm-gate.sh` is a PYTHON program despite the `.sh` extension
-  (`#!/usr/bin/python3 -I`). Execute it directly — NEVER `bash
-  scripts/full-jvm-gate.sh`.** Under `bash` it mis-executes line by line and
-  line 3, `import os`, invokes **ImageMagick's `import`**, which blocks forever
-  waiting on X. The result is the nastiest artifact in this repo's catalogue: a
+- **Never run a repository program through an interpreter you inferred from its
+  FILENAME — run it directly. This is a CLASS, and it is now machine-enforced
+  by `scripts/check-script-interpreter-hygiene.sh` (issue #2066).** A file
+  whose extension names one language and whose shebang names another produces
+  the nastiest artifact in this repo's catalogue. The concrete mechanism:
+  `bash <a python program>` mis-executes it line by line, and `import os`
+  invokes **ImageMagick's `import`**, which blocks forever waiting on X — a
   process that stays "active" indefinitely, writes a ~1-line log, produces zero
-  test XML, and — if you wrapped it in the shared `flock` — holds the gate lock
-  the entire time, silently starving every sibling lane. On 2026-07-27 this
+  test XML, and, if you wrapped it in the shared `flock`, holds the gate lock
+  the entire time and silently starves every sibling lane. On 2026-07-27 that
   burned a full lane's gate run and starved four others; it is also the most
   likely explanation for an earlier #1598 gate that "stalled" at
   `:app:compileDebugKotlin` with no verdict. A ~1-line gate log is not a slow
   run and not a failure — it is a run that never happened. Discard it; do not
   read a verdict out of it.
-- **The canonical forced local gate is `scripts/full-jvm-gate.sh`, which runs
+
+  **Documenting this class by NAMING ONE FILE is what let it persist.** For
+  months this bullet said "`scripts/full-jvm-gate.sh` is a Python program" —
+  and `check-ci-unit-forced-execution.sh` and `check-full-jvm-gate-profile.sh`
+  sat beside it, also Python, unmentioned. Naming one file actively taught
+  readers the others were safe: during #2066 a reviewer who *had* been briefed
+  on the trap ran `bash scripts/check-ci-unit-forced-execution.sh` and read its
+  `rc=0` (with a parse error on stderr) as a pass. So the fix is not a longer
+  list. All three were renamed to `.py`, and the guard now enforces, with **no
+  allowlist**, that (1) a `*.sh` file has a shell shebang and a `*.py` file has
+  a python shebang, and (2) no tracked file invokes a non-shell program through
+  `bash`/`sh`/`source`. It runs per push in the `Static guards` job under the
+  required `Unit tests` check, with a self-test that plants a violation of each
+  rule and requires a RED. If you add a program in any language, give it that
+  language's extension; the guard will tell you before CI does.
+- **The canonical forced local gate is `scripts/full-jvm-gate.py`, which runs
   the complete `./gradlew test --rerun-tasks` graph inside the repository's
   8 GiB cgroup with the guarded single-worker / split-heap profile. Do not
   append filters, exclusions, or ad-hoc Gradle flags. The authenticated

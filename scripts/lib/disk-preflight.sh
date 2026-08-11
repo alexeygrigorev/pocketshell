@@ -10,7 +10,7 @@
 #   * connected lane i1963green1 — Docker BuildKit could not write
 #     ~/.docker/buildx/...: `no space left on device`; then Gradle could not
 #     create ~/.gradle/caches/8.13/... and the build failed in 7s.
-#   * scripts/full-jvm-gate.sh — `:app:kspDebugKotlin` failed at 1m12s.
+#   * scripts/full-jvm-gate.py — `:app:kspDebugKotlin` failed at 1m12s.
 #
 # Why that costs more than the disk: NONE of those is an assertion failure, but
 # every one of them LOOKS like a broken gate. An ENOSPC failure is
@@ -29,7 +29,7 @@
 # sits on the box's scarcest resources while it discovers that.
 #
 # TWO HALVES THAT MUST AGREE. `scripts/connected-test.sh` sources this file;
-# `scripts/full-jvm-gate.sh` is an isolated Python program that deliberately
+# `scripts/full-jvm-gate.py` is an isolated Python program that deliberately
 # does not source shell libraries, so it reimplements the identical arithmetic
 # and the identical thresholds in Python. Both halves measure with statvfs
 # semantics (`f_bavail * f_frsize`, i.e. space available to a non-root user) —
@@ -71,7 +71,7 @@
 # mid-job". THAT PREMISE IS FALSE, and it is recorded here so it is not
 # rediscovered as a reason to lower the floor again:
 #   * This gate's real path NEVER runs on a hosted runner. .github/workflows/
-#     tests.yml invokes scripts/full-jvm-gate.sh only as --profile-guard-self-test
+#     tests.yml invokes scripts/full-jvm-gate.py only as --profile-guard-self-test
 #     and --profile-guard-check (both exempt from this preflight, both building
 #     nothing), and the real path additionally refuses to run with CI set.
 #   * The one CI exposure is connected-test.sh in the emulator job, and that job
@@ -100,7 +100,7 @@
 # read as "the change under test is red".
 POCKETSHELL_DISK_PREFLIGHT_FAIL_RC=76
 
-# Keep byte-identical to full-jvm-gate.sh's DISK_PREFLIGHT_* constants.
+# Keep byte-identical to full-jvm-gate.py's DISK_PREFLIGHT_* constants.
 POCKETSHELL_DISK_PREFLIGHT_DEFAULT_MIN_FREE_MB=10240
 POCKETSHELL_DISK_PREFLIGHT_DEFAULT_WARN_FREE_MB=20480
 

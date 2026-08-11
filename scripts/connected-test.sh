@@ -117,7 +117,7 @@ source "$ROOT_DIR/scripts/lib/agents-pool.sh"
 # survives. Degrades to a bare invocation when user systemd is unavailable (CI).
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 # Issue #2007: the AVD lock protects the EMULATOR; nothing protected the Gradle
-# OUTPUT TREE. A connected build and scripts/full-jvm-gate.sh overlapping in one
+# OUTPUT TREE. A connected build and scripts/full-jvm-gate.py overlapping in one
 # worktree both rewrite this checkout's app/build graph, and `--rerun-tasks`
 # deletes intermediates the sibling is consuming (the #893 gate died on a
 # missing processDebugResources/R.jar). Sourcing this makes

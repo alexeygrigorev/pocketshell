@@ -16,9 +16,9 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DEFAULT_ENTRYPOINT = ROOT_DIR / "scripts" / "full-jvm-gate.sh"
+DEFAULT_ENTRYPOINT = ROOT_DIR / "scripts" / "full-jvm-gate.py"
 EXPECTED_ENTRYPOINT_SHA256 = (
-    "216068796d70b6765fc21d42e831f24f31e1f4d02515e2a5f0e672aab9e5280a"
+    "b88e7bd984bd8c13ac46876d2afefe224e3472a9bcde36d70a7550898b67409e"
 )
 EXPECTED_CGROUP_RUNNER_SHA256 = (
     "6e4ce5f99cf4a6666aa9ac0c097776fb2bd4b87b2cc01744ddd06e4fee114b20"
@@ -81,7 +81,7 @@ def validate_entrypoint(entrypoint: Path) -> None:
         )
     scripts_dir = entrypoint.parent
     validate_regular_executable(
-        scripts_dir / "check-full-jvm-gate-profile.sh",
+        scripts_dir / "check-full-jvm-gate-profile.py",
         "full-JVM profile guard",
     )
     validate_regular_executable(
@@ -276,8 +276,8 @@ def self_test(
         fixture_scripts = fixture_root / "scripts"
         fixture_scripts.mkdir(parents=True)
         (fixture_scripts / "lib").mkdir()
-        copied_entrypoint = fixture_scripts / "full-jvm-gate.sh"
-        copied_guard = fixture_scripts / "check-full-jvm-gate-profile.sh"
+        copied_entrypoint = fixture_scripts / "full-jvm-gate.py"
+        copied_guard = fixture_scripts / "check-full-jvm-gate-profile.py"
         shutil.copy2(
             entrypoint.parent / "lib" / "scope-run.sh",
             fixture_scripts / "lib" / "scope-run.sh",
@@ -1237,8 +1237,8 @@ def self_test(
                 variant_java = variant_java_home / "bin" / "java"
                 variant_java.write_text(java_script)
                 variant_java.chmod(0o755)
-            variant_entrypoint = variant_scripts / "full-jvm-gate.sh"
-            variant_guard = variant_scripts / "check-full-jvm-gate-profile.sh"
+            variant_entrypoint = variant_scripts / "full-jvm-gate.py"
+            variant_guard = variant_scripts / "check-full-jvm-gate-profile.py"
             write_paired_fixture(
                 entrypoint.read_text(),
                 Path(__file__).read_text(),
@@ -1392,7 +1392,7 @@ if arguments and arguments[0] == "--verified-preflight":
     verified_preflight = True
     arguments.pop(0)
 if len(arguments) > 1:
-    fail("usage: scripts/check-full-jvm-gate-profile.sh [--self-test] [entrypoint]")
+    fail("usage: scripts/check-full-jvm-gate-profile.py [--self-test] [entrypoint]")
 target = Path(os.path.abspath(arguments[0])) if arguments else DEFAULT_ENTRYPOINT
 if self_test_requested:
     self_test(

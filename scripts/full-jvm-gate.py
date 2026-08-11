@@ -35,7 +35,7 @@ EXPECTED_SCOPE_RUNNER_SHA256 = (
     "39406248dd3de35f3b6f5c47ba1ca4c6462b296b0a4995192160b8db5d61761d"
 )
 EXPECTED_PROFILE_GUARD_SHA256 = (
-    "1200071bec8202c00a3ffa6f59e5bcfcd4746004d5b14606452c8efcdbd1b5dc"
+    "481f47c733b8130ac1c7ddda172d41790b5316d02807960b01e828deda879db9"
 )
 GRADLE_ARGS = (
     "test",
@@ -446,7 +446,7 @@ while arguments:
     argument = arguments.pop(0)
     if argument in ("--help", "-h"):
         print(
-            "Usage: scripts/full-jvm-gate.sh [--unit <name>]\n\n"
+            "Usage: scripts/full-jvm-gate.py [--unit <name>]\n\n"
             "Runs the complete forced JVM graph under the immutable issue #1761 "
             "8 GiB/single-worker/split-heap profile."
         )
@@ -472,7 +472,7 @@ if output_lock_probe:
     probe_lock_file = gradle_output_lock_file(root_dir, "", identity.pw_dir)
     acquire_gradle_output_lock(
         probe_lock_file,
-        f"full-jvm-gate.sh --output-lock-probe ({root_dir})",
+        f"full-jvm-gate.py --output-lock-probe ({root_dir})",
     )
     sys.stdout.write(f"gradle_output_lock={probe_lock_file}\n")
     sys.stdout.flush()
@@ -481,7 +481,7 @@ if output_lock_probe:
 
 if disk_preflight_probe:
     raise SystemExit(
-        disk_preflight(root_dir, "full-jvm-gate.sh --disk-preflight-probe")
+        disk_preflight(root_dir, "full-jvm-gate.py --disk-preflight-probe")
     )
 
 # Issue #1989: refuse a full-disk run before ANY expensive or shared step — the
@@ -490,7 +490,7 @@ if disk_preflight_probe:
 # workflow modes build nothing, so holding them to a build-sized free-space floor
 # would fail hosted runners for no reason.
 if profile_guard_arguments is None:
-    disk_preflight_result = disk_preflight(root_dir, f"full-jvm-gate.sh --unit {unit}")
+    disk_preflight_result = disk_preflight(root_dir, f"full-jvm-gate.py --unit {unit}")
     if disk_preflight_result != 0:
         raise SystemExit(disk_preflight_result)
 
@@ -543,7 +543,7 @@ if profile_guard_arguments is None:
     )
 
 entrypoint = Path(__file__).resolve()
-profile_guard = root_dir / "scripts" / "check-full-jvm-gate-profile.sh"
+profile_guard = root_dir / "scripts" / "check-full-jvm-gate-profile.py"
 try:
     guard_descriptor = os.open(profile_guard, os.O_RDONLY | os.O_NOFOLLOW)
     guard_metadata = os.fstat(guard_descriptor)
@@ -704,7 +704,7 @@ for descriptor, metadata, artifact, label in validated_fds:
 # survives the execve and is held for the whole run.
 acquire_gradle_output_lock(
     gradle_output_lock_file(root_dir, "", identity.pw_dir),
-    f"full-jvm-gate.sh --unit {unit} ({root_dir})",
+    f"full-jvm-gate.py --unit {unit} ({root_dir})",
 )
 
 # The repository is the trust boundary. The descriptor/inode recheck rejects

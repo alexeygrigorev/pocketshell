@@ -286,7 +286,7 @@ def main() -> None:
         return
     if len(arguments) > 1 or (arguments and arguments[0].startswith("--")):
         raise GuardFailure(
-            "usage: scripts/check-ci-unit-forced-execution.sh "
+            "usage: scripts/check-ci-unit-forced-execution.py "
             "[--self-test | WORKFLOW]"
         )
     workflow = Path(arguments[0]) if arguments else DEFAULT_WORKFLOW

@@ -21,6 +21,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
 import com.pocketshell.app.sessions.SSH_SOURCE_SESSION_PICKER_LIST
@@ -146,7 +147,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForFolderListReady()
+        waitForFolderListReady(hostRowTag)
         compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -302,7 +303,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForFolderListReady()
+        waitForFolderListReady(hostRowTag)
         compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -315,7 +316,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val switchWindowStart = SystemClock.elapsedRealtime()
 
         clickTmuxBack()
-        waitForFolderListReady()
+        waitForFolderListReady(hostRowTag)
         recordTiming("folder_back_to_rows_ready_ms", SystemClock.elapsedRealtime() - switchWindowStart)
         val rowTapAt = SystemClock.elapsedRealtime()
         compose.onNodeWithText(SESSION_B, useUnmergedTree = true).performClick()
@@ -385,7 +386,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                     .isNotEmpty()
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-            waitForFolderListReady()
+            waitForFolderListReady(hostRowTag)
             compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             waitForTerminalViewAttached()
@@ -632,7 +633,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         }
     }
 
-    private fun waitForFolderListReady() {
+    private fun waitForFolderListReady(hostRowTag: String) {
         // Issue #470 blocker #2: wait on the shared session-picker readiness
         // gate, which surfaces the folder-list session row (here SESSION_B,
         // the last seeded session, so the whole enumeration has landed) with
@@ -645,6 +646,12 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             rule = compose,
             sessionName = SESSION_B,
             timeoutMs = pickerWaitMs,
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
         )
     }
 

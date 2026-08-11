@@ -24,12 +24,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.TerminalTestTimeouts
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.proof.signals.InheritedJourneyFocus
 import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
@@ -143,7 +143,12 @@ class Issue887TerminalFixedUnderImeE2eTest {
             rule = compose,
             sessionName = SESSION_LAB,
             timeoutMs = pickerWaitMs,
-            onRepoke = { repokeFolderListFromHostRow(hostRowTag) },
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
         )
         compose.onNodeWithText(SESSION_LAB, useUnmergedTree = true).performClick()
 
@@ -561,23 +566,6 @@ class Issue887TerminalFixedUnderImeE2eTest {
             .edit()
             .putString("host_detail_view_mode", "Flat")
             .commit()
-    }
-
-    private fun repokeFolderListFromHostRow(hostRowTag: String) {
-        runCatching {
-            if (compose.onAllNodesWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            ) {
-                compose.onNodeWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true).performClick()
-            }
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        }
     }
 
     private fun View.findTerminalView(): TerminalView? {

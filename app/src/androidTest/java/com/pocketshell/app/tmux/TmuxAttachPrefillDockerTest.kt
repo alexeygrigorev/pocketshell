@@ -25,6 +25,7 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -164,7 +165,7 @@ class TmuxAttachPrefillDockerTest {
             // Issue #468 blocker #2: deterministic session-list readiness wait
             // with retry-once, replacing the bare 20s waitUntil that flaked on
             // a cold AVD's slow tmux -CC enumeration.
-            waitForSessionInPicker(sessionName)
+            waitForAttachedSessionInPicker(sessionName = sessionName, hostRowTag = hostRowTag)
 
             // ---- Authoritative "before" capture: terminal not attached yet. ----
             recordStamp("picker_visible")
@@ -404,7 +405,7 @@ class TmuxAttachPrefillDockerTest {
             // Issue #468 blocker #2: deterministic session-list readiness wait
             // with retry-once, replacing the bare 20s waitUntil that flaked on
             // a cold AVD's slow tmux -CC enumeration.
-            waitForSessionInPicker(sessionName)
+            waitForAttachedSessionInPicker(sessionName = sessionName, hostRowTag = hostRowTag)
             compose.onNodeWithText(sessionName).performClick()
             compose.waitUntil(timeoutMillis = 20_000) {
                 compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
@@ -797,12 +798,19 @@ class TmuxAttachPrefillDockerTest {
      * production Retry instead of a bare `waitUntil` that flaked on a cold
      * AVD's slow first enumeration.
      */
-    private fun waitForSessionInPicker(sessionName: String) {
+    private fun waitForAttachedSessionInPicker(sessionName: String, hostRowTag: String) {
         waitForSessionInPicker(
             rule = compose,
             sessionName = sessionName,
             timeoutMs = SESSION_LIST_TIMEOUT_MS,
             onStateNote = ::recordStamp,
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                    onStateNote = ::recordStamp,
+                )
+            },
         )
     }
 

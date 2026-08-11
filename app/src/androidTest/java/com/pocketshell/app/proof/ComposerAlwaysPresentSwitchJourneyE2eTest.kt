@@ -19,8 +19,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
@@ -172,6 +172,7 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
                 step = index + 1,
                 fromSession = previousSession,
                 toSession = target,
+                hostRowTag = hostRowTag,
             )
             previousSession = target
         }
@@ -195,14 +196,19 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
      * -> named-row tap, wait for the target to land, then assert the composer
      * launcher is present + contained.
      */
-    private fun switchAndAssertComposer(step: Int, fromSession: String, toSession: String) {
+    private fun switchAndAssertComposer(
+        step: Int,
+        fromSession: String,
+        toSession: String,
+        hostRowTag: String,
+    ) {
         val toMarker = requireNotNull(expectedMarker[toSession]) {
             "no tracked marker for $toSession"
         }
         Log.i(LOG_TAG, "composer-switch step=$step $fromSession -> $toSession")
         val switchAt = SystemClock.elapsedRealtime()
 
-        switchToSessionViaBackTap(toSession, toMarker, "step$step")
+        switchToSessionViaBackTap(toSession, toMarker, "step$step", hostRowTag)
 
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -429,25 +435,13 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
             rule = compose,
             sessionName = SESSION_AGENT,
             timeoutMs = pickerWaitMs,
-            onRepoke = { repokeFolderListFromHostRow(hostRowTag) },
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
         )
-    }
-
-    private fun repokeFolderListFromHostRow(hostRowTag: String) {
-        runCatching {
-            if (compose.onAllNodesWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            ) {
-                compose.onNodeWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true).performClick()
-            }
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        }
     }
 
     private fun forceFlatHostDetailViewMode() {
@@ -459,13 +453,28 @@ class ComposerAlwaysPresentSwitchJourneyE2eTest {
             .commit()
     }
 
-    private fun switchToSessionViaBackTap(toSession: String, toMarker: String, label: String) {
+    private fun switchToSessionViaBackTap(
+        toSession: String,
+        toMarker: String,
+        label: String,
+        hostRowTag: String,
+    ) {
         val deadline = SystemClock.elapsedRealtime() + SWITCH_DEADLINE_MS
         var attempts = 0
         while (SystemClock.elapsedRealtime() < deadline) {
             attempts += 1
             clickTmuxBack()
-            waitForSessionInPicker(rule = compose, sessionName = toSession, timeoutMs = pickerWaitMs)
+            waitForSessionInPicker(
+                rule = compose,
+                sessionName = toSession,
+                timeoutMs = pickerWaitMs,
+                onRepoke = {
+                    repokeSessionPickerFromHostRow(
+                        rule = compose,
+                        hostRowTag = hostRowTag,
+                    )
+                },
+            )
             compose.onNodeWithText(toSession, useUnmergedTree = true).performClick()
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             val landed = runCatching {

@@ -27,6 +27,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.repokeSessionPickerFromHostRow
 import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
@@ -133,7 +134,7 @@ class TmuxSessionSwitchE2eTest {
         }
         val tapHostAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForFolderListReady()
+        waitForFolderListReady(hostRowTag)
         waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
         compose.onNodeWithText(SESSION_CLAUDE).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -255,7 +256,7 @@ class TmuxSessionSwitchE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForFolderListReady()
+        waitForFolderListReady(hostRowTag)
         waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
         compose.onNodeWithText(SESSION_CLAUDE).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -296,7 +297,7 @@ class TmuxSessionSwitchE2eTest {
         // claude-main ROW. Pre-fix, the stale unified-pager index dragged the
         // user back into codex.
         pressInSessionBack()
-        waitForFolderListReady()
+        waitForFolderListReady(hostRowTag)
         waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
         val tapClaudeRowAt = SystemClock.elapsedRealtime()
         compose.onNodeWithText(SESSION_CLAUDE).performClick()
@@ -460,17 +461,28 @@ class TmuxSessionSwitchE2eTest {
         }
     }
 
-    private fun waitForFolderListReady() {
+    private fun waitForFolderListReady(hostRowTag: String) {
         // Issue #470 blocker #2: shared session-picker readiness gate with a
         // generous bound and one production Retry, replacing the bare
         // `waitUntil` that burned its full timeout when a cold-AVD
         // `tmux list-sessions` SSH-exec probe landed on the connect-error
         // panel instead of the session row. The folder-list screen is
         // implicitly up once the SESSION_CLAUDE row is present.
+        val recordPickerState: (String) -> Unit = { note ->
+            Log.i(LOG_TAG, "ISSUE470_PICKER $note")
+        }
         waitForSessionInPicker(
             rule = compose,
             sessionName = SESSION_CLAUDE,
             timeoutMs = if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L,
+            onStateNote = recordPickerState,
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                    onStateNote = recordPickerState,
+                )
+            },
         )
     }
 

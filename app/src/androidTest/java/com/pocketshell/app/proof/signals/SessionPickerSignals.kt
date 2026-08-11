@@ -134,9 +134,10 @@ const val SESSION_PICKER_REPOKE_NAVIGATION_TIMEOUT_MS: Long = 10_000L
  * runs carried `expanded_folders=true, error_panel_visible=false`). In either
  * case the helper used to burn its FULL [timeoutMs] before asserting false,
  * and the coarse class-level retry then double-hit. To self-heal
- * deterministically, callers may pass an [onRepoke] recovery action (e.g.
+ * deterministically, every caller passes an [onRepoke] recovery action (e.g.
  * Back to the host list + re-tap the host row) that re-triggers a fresh
- * enumeration. The watchdog calls it when the awaited row has been absent —
+ * enumeration. The watchdog calls it when
+ * the awaited row has been absent —
  * with no error panel — continuously past a bounded sub-deadline
  * `min(timeoutMs / 3, `[SESSION_PICKER_STALL_REPOKE_CEILING_MS]`)`,
  * re-triggering enumeration on the SAME signals the helper already reads
@@ -144,8 +145,8 @@ const val SESSION_PICKER_REPOKE_NAVIGATION_TIMEOUT_MS: Long = 10_000L
  * [maxRepokes] re-pokes so a genuinely absent/wedged session still fails the
  * run within [timeoutMs] — the watchdog never masks a real first-open
  * failure, it only converts a recoverable enumeration stall into a recovery
- * instead of a full-bound burn. When [onRepoke] is null (or [maxRepokes] is
- * 0) the behaviour is identical to round 3.
+ * instead of a full-bound burn. When [maxRepokes] is 0 the behaviour is
+ * identical to round 3.
  *
  * @param rule the Compose test rule hosting the picker.
  * @param sessionName the tmux session name expected to list.
@@ -156,22 +157,21 @@ const val SESSION_PICKER_REPOKE_NAVIGATION_TIMEOUT_MS: Long = 10_000L
  *   `session_list_expanding_folders`, `session_list_stall_repoke`) so
  *   callers that record per-stage timing stamps can keep their artifact
  *   breadcrumbs.
- * @param onRepoke optional test-only recovery that re-triggers the host's
+ * @param onRepoke required test-only recovery that re-triggers the host's
  *   enumeration (e.g. Back to the host list + re-tap the host row). Invoked
  *   by the bounded enumeration-stall watchdog (#740) up to [maxRepokes] times.
- *   Null disables the watchdog (round-3 behaviour). The lambda must leave the
- *   picker in a state where this helper's success/error/expand polls remain
- *   valid (i.e. it re-opens the SAME host's picker).
- * @param maxRepokes upper bound on watchdog re-pokes; ignored when [onRepoke]
- *   is null. Default 2 keeps a 60 s CI bound recoverable without the
- *   sub-deadline swallowing the whole budget.
+ *   The lambda must leave the picker in a state where this helper's
+ *   success/error/expand polls remain valid (i.e. it re-opens the SAME host's
+ *   picker).
+ * @param maxRepokes upper bound on watchdog re-pokes. Default 2 keeps a 60 s
+ *   CI bound recoverable without the sub-deadline swallowing the whole budget.
  */
 fun waitForSessionInPicker(
     rule: ComposeTestRule,
     sessionName: String,
     timeoutMs: Long = SESSION_PICKER_DEFAULT_TIMEOUT_MS,
     onStateNote: (String) -> Unit = {},
-    onRepoke: (() -> Unit)? = null,
+    onRepoke: () -> Unit,
     maxRepokes: Int = 2,
 ) {
     var retried = false
@@ -252,7 +252,6 @@ fun waitForSessionInPicker(
             // genuinely absent session still exhausts the budget and fails
             // within `timeoutMs`, so a real first-open failure is never masked.
             if (
-                onRepoke != null &&
                 repokesPerformed < maxRepokes &&
                 SystemClock.elapsedRealtime() - rowAbsentSince >= stallRepokeThresholdMs
             ) {

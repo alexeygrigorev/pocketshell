@@ -173,10 +173,21 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
      * BODY + visible text tree that B (and only B) is shown.
      */
     private fun switchToBAndAssertCorrectSessionBody(step: Int) {
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         Log.i(LOG_TAG, "switch step=$step $SESSION_A -> $SESSION_B")
         val switchAt = SystemClock.elapsedRealtime()
         clickTmuxBack()
-        waitForSessionInPicker(rule = compose, sessionName = SESSION_B, timeoutMs = pickerWaitMs)
+        waitForSessionInPicker(
+            rule = compose,
+            sessionName = SESSION_B,
+            timeoutMs = pickerWaitMs,
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
+        )
         compose.onNodeWithText(SESSION_B, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -250,8 +261,19 @@ class SwitchStaleCaptureSessionBodyJourneyE2eTest {
     }
 
     private fun switchBackToA(step: Int) {
+        val hostRowTag = requireNotNull(seededHostRowTag) { "seed-before-launch host row missing" }
         clickTmuxBack()
-        waitForSessionInPicker(rule = compose, sessionName = SESSION_A, timeoutMs = pickerWaitMs)
+        waitForSessionInPicker(
+            rule = compose,
+            sessionName = SESSION_A,
+            timeoutMs = pickerWaitMs,
+            onRepoke = {
+                repokeSessionPickerFromHostRow(
+                    rule = compose,
+                    hostRowTag = hostRowTag,
+                )
+            },
+        )
         compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()

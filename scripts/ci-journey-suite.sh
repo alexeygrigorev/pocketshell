@@ -85,7 +85,15 @@ for _serial in $(adb devices | awk 'NR>1 && $2=="device"{print $1}'); do
 done
 
 ARTIFACT_DIR="$REPO_ROOT/artifacts/ci-journey"
-mkdir -p "$ARTIFACT_DIR"
+# Issue #2093: this directory is the canonical evidence for ONE whole-suite
+# invocation. A workflow cold-boot retry starts this script in the same checkout,
+# after cold boot 1 has already been preserved separately under
+# artifacts/ci-journey-attempt-1/. Reusing the directory would leave a failed
+# attempt-2 from cold boot 1 beside cold boot 2's passing attempt-1, making the
+# highest attempt number stale. Replace only the canonical invocation tree; the
+# preserved first attempt and the sibling shard-verdict directory stay intact.
+rm -rf -- "$ARTIFACT_DIR" || exit 1
+mkdir -p "$ARTIFACT_DIR" || exit 1
 SUMMARY="$ARTIFACT_DIR/summary.md"
 
 GRADLEW="$REPO_ROOT/gradlew"

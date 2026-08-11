@@ -45,6 +45,15 @@ fail() {
   exit 1
 }
 
+lifecycle_event_epoch() {
+  local lifecycle_log="$1" event="$2" timestamp
+  timestamp="$(sed -n "s/^timestamp=\([^ ]*\) event=$event\([[:space:]].*\)\{0,1\}$/\1/p" \
+    "$lifecycle_log" | tail -1)"
+  [[ -n "$timestamp" ]] || fail "lifecycle log has no timestamp for event=$event"
+  date -u --date="$timestamp" +%s 2>/dev/null \
+    || fail "lifecycle event=$event has an unparsable UTC timestamp: $timestamp"
+}
+
 wait_for_file() {
   local target="$1" timeout="${2:-10}"
   local waited=0 limit=$((timeout * 20))
@@ -376,6 +385,7 @@ start_wrapper() {
   [[ -n "$test_class" ]] && extra_args=("--tests" "$test_class")
 
   setsid env \
+    TZ="${FAKE_WRAPPER_TZ:-${TZ:-UTC0}}" \
     PATH="$sandbox/bin:$PATH" \
     ADB="$sandbox/bin/adb" \
     ANDROID_SDK="$sandbox" \
@@ -387,6 +397,8 @@ start_wrapper() {
     POCKETSHELL_AGENTS_POOL_PORTS=2243 \
     POCKETSHELL_AGENTS_WAIT_SECONDS=0 \
     POCKETSHELL_TEST_MEM=1G \
+    POCKETSHELL_CONNECTED_TEST_LIFECYCLE_DIR="$sandbox/lifecycle" \
+    FAKE_LIFECYCLE_SECRET=SuperSecretEnvironmentValue2004 \
     FAKE_DEFAULT_SERIAL="${online_serials%% *}" \
     FAKE_ONLINE_SERIALS="$online_serials" \
     FAKE_DEVICE_STATE="$sandbox/device-state" \
@@ -1010,6 +1022,133 @@ hard_killed_toxiproxy_holder_leaves_no_descendant_flock() {
   kill_group "$wrapper_pid"
 }
 
+term_after_lock_records_lifecycle_and_preserves_rc143() {
+  local sandbox="$1"
+  make_sandbox "$sandbox"
+
+  local wrapper_pid wrapper_rc=0 lifecycle_log child_pid
+  local controller_started_utc controller_before_signal_utc controller_after_exit_utc
+  local wrapper_timezone="${ISSUE2004_WRAPPER_TZ:-Europe/Berlin}"
+  controller_started_utc="$(date -u +%s)"
+  FAKE_WRAPPER_TZ="$wrapper_timezone" start_wrapper "$sandbox" legacy termdiag i2004 \
+    emulator-5554 "" emulator-5554 8 0 2222 SuperSecretRunnerArgument2004
+  wrapper_pid="$WRAPPER_PID"
+  wait_for_file "$sandbox/device-state/termdiag.started" 10 \
+    || { kill_group "$wrapper_pid"; fail "TERM provenance run never reached its locked mutation window"; }
+
+  controller_before_signal_utc="$(date -u +%s)"
+  kill -TERM "$wrapper_pid"
+  wait "$wrapper_pid" || wrapper_rc=$?
+  controller_after_exit_utc="$(date -u +%s)"
+
+  lifecycle_log="$(find "$sandbox/lifecycle" -maxdepth 1 -type f -name '*.log' -print -quit 2>/dev/null || true)"
+  if [[ "$wrapper_rc" != "143" ]]; then
+    printf '%s\n' '--- wrapper stderr ---' >&2
+    sed -n '1,240p' "$sandbox/termdiag.err" >&2 || true
+    printf '%s\n' '--- lifecycle log ---' >&2
+    [[ -n "$lifecycle_log" ]] && sed -n '1,240p' "$lifecycle_log" >&2
+    fail "externally TERM-terminated wrapper changed hard-failure semantics (rc=$wrapper_rc, want 143)"
+  fi
+  [[ -n "$lifecycle_log" ]] \
+    || fail "TERM after AVD lock acquisition left no persistent wrapper lifecycle/provenance log"
+  grep -Eq 'event=avd_lock_acquired .*wrapper_pid=[0-9]+ .*lock_file=.*avd-lock-emulator-5554 .*lock_fd=[0-9]+' "$lifecycle_log" \
+    || fail "lifecycle log does not identify the wrapper and acquired AVD lock/FD"
+  grep -Eq 'event=avd_lock_acquired .*lock_owner_pid=[0-9]+ .*lock_holder_pid=[0-9]+ .*android_serial=emulator-5554' "$lifecycle_log" \
+    || fail "lifecycle log does not identify lock owner/helper and selected serial"
+  grep -Eq 'event=mutation_started .*child_pid=[0-9]+' "$lifecycle_log" \
+    || fail "lifecycle log does not identify the active scoped child"
+  child_pid="$(sed -n 's/.*event=mutation_started .*child_pid=\([0-9][0-9]*\).*/\1/p' "$lifecycle_log" | tail -1)"
+  [[ -n "$child_pid" ]] || fail "could not recover child PID from lifecycle log"
+  grep -Eq "event=signal_received .*signal=TERM .*child_pid=$child_pid .*child_state=(running|exited)" "$lifecycle_log" \
+    || fail "lifecycle log does not capture the TERM boundary and active child PID"
+  grep -Eq "event=signal_forwarded .*signal=TERM .*child_pid=$child_pid .*forward_result=(sent|already_exited) .*child_state_before=(running|exited)" "$lifecycle_log" \
+    || fail "lifecycle log does not capture TERM forwarding outcome"
+  grep -Eq "event=mutation_finished .*child_pid=$child_pid .*child_rc=143" "$lifecycle_log" \
+    || fail "lifecycle log does not capture the TERM-terminated child's final status"
+  grep -Eq 'event=wrapper_exit .*rc=143 .*received_wrapper_signal_rc=143' "$lifecycle_log" \
+    || fail "lifecycle log does not preserve the wrapper's final rc143"
+  grep -Eq 'sender_pid=unavailable' "$lifecycle_log" \
+    || fail "diagnostics must state that bash traps cannot recover the external signal sender PID"
+  if grep -Eq 'sender_pid=[0-9]+' "$lifecycle_log"; then
+    fail "diagnostics invented a sender PID unavailable to a bash signal trap"
+  fi
+  if grep -Fq 'SuperSecretRunnerArgument2004' "$lifecycle_log"; then
+    fail "lifecycle diagnostics exposed a Gradle/runner argument instead of PID-only metadata"
+  fi
+  if grep -Fq 'SuperSecretEnvironmentValue2004' "$lifecycle_log"; then
+    fail "lifecycle diagnostics exposed an environment value instead of PID-only metadata"
+  fi
+  grep -Eq 'event=process_snapshot .*pid=[0-9]+ .*ppid=[0-9]+ .*pgid=[0-9]+ .*sid=[0-9]+ .*comm=' "$lifecycle_log" \
+    || fail "lifecycle log lacks the non-secret PID/PPID/session process snapshot"
+  grep -Eq 'event=cgroup_snapshot .*pid=[0-9]+ .*cgroup=' "$lifecycle_log" \
+    || fail "lifecycle log lacks best-effort cgroup state"
+  grep -Eq 'event=scope_snapshot .*scope=pocketshell-test-.* .*state=' "$lifecycle_log" \
+    || fail "lifecycle log lacks best-effort transient-scope state"
+  awk 'NF && $1 !~ /^timestamp=[0-9]{4}-[0-9]{2}-[0-9]{2}T/ { exit 1 }' "$lifecycle_log" \
+    || fail "a lifecycle record has no UTC timestamp"
+
+  # Load-bearing UTC proof: the wrapper is deliberately in Europe/Berlin while
+  # this harness records ordinary UTC boundaries. Every trap-time and ordinary
+  # record must still correlate with that controller window, and the mixed
+  # record stream must remain monotonic. A local-time value with a literal Z is
+  # two hours in the future here and fails this assertion.
+  local mutation_started_utc signal_received_utc signal_forwarded_utc
+  local mutation_finished_utc wrapper_exit_utc
+  mutation_started_utc="$(lifecycle_event_epoch "$lifecycle_log" mutation_started)"
+  signal_received_utc="$(lifecycle_event_epoch "$lifecycle_log" signal_received)"
+  signal_forwarded_utc="$(lifecycle_event_epoch "$lifecycle_log" signal_forwarded)"
+  mutation_finished_utc="$(lifecycle_event_epoch "$lifecycle_log" mutation_finished)"
+  wrapper_exit_utc="$(lifecycle_event_epoch "$lifecycle_log" wrapper_exit)"
+  if (( mutation_started_utc < controller_started_utc \
+        || wrapper_exit_utc > controller_after_exit_utc \
+        || signal_received_utc < controller_before_signal_utc \
+        || signal_received_utc > controller_after_exit_utc \
+        || signal_forwarded_utc < controller_before_signal_utc \
+        || signal_forwarded_utc > controller_after_exit_utc )); then
+    fail "mixed lifecycle records do not correlate with the controller's real UTC window (controller=$controller_started_utc..$controller_after_exit_utc signal_boundary=$controller_before_signal_utc events=$mutation_started_utc,$signal_received_utc,$signal_forwarded_utc,$mutation_finished_utc,$wrapper_exit_utc TZ=$wrapper_timezone)"
+  fi
+  if (( mutation_started_utc > signal_received_utc \
+        || signal_received_utc > signal_forwarded_utc \
+        || signal_forwarded_utc > mutation_finished_utc \
+        || mutation_finished_utc > wrapper_exit_utc )); then
+    fail "mixed ordinary/trap lifecycle timestamps are not monotonic UTC (events=$mutation_started_utc,$signal_received_utc,$signal_forwarded_utc,$mutation_finished_utc,$wrapper_exit_utc TZ=$wrapper_timezone)"
+  fi
+  grep -Eq "CONNECTED_TEST_SIGNAL_RECEIVED signal=TERM wrapper_pid=[0-9]+ child_pid=$child_pid child_state=(running|exited) sender_pid=unavailable lifecycle_log=" "$sandbox/termdiag.err" \
+    || fail "caller stderr does not retain the received-signal boundary when the wrapper dies"
+  grep -Eq "CONNECTED_TEST_SIGNAL_FORWARDED signal=TERM child_pid=$child_pid result=(sent|already_exited)" "$sandbox/termdiag.err" \
+    || fail "caller stderr does not retain the forwarded-signal outcome"
+  grep -Eq 'CONNECTED_TEST_SIGNAL_EXIT rc=143 lifecycle_log=' "$sandbox/termdiag.err" \
+    || fail "caller stderr does not retain final rc143 and the persistent-log location"
+  if grep -q 'CONNECTED_TEST_CHILD_SIGNAL_EXIT' "$sandbox/termdiag.err"; then
+    fail "wrapper-owned TERM was mislabeled as an unattributed child-only signal exit"
+  fi
+
+  # Adjacent attribution control: the same rc143 originating in the child (no
+  # TERM delivered to the wrapper) must not claim a wrapper signal boundary.
+  local child_only_pid child_only_rc=0 child_only_log
+  start_wrapper "$sandbox" legacy childterm i2004child \
+    emulator-5554 "" emulator-5554 8 143
+  child_only_pid="$WRAPPER_PID"
+  wait_for_file "$sandbox/device-state/childterm.started" 10 \
+    || { kill_group "$child_only_pid"; fail "child-only rc143 attribution control never started"; }
+  touch "$sandbox/device-state/childterm.release"
+  wait "$child_only_pid" || child_only_rc=$?
+  [[ "$child_only_rc" == "143" ]] \
+    || fail "child-only rc143 attribution control changed result (rc=$child_only_rc)"
+  child_only_log="$(find "$sandbox/lifecycle" -maxdepth 1 -type f -name '*i2004child*.log' -print -quit 2>/dev/null || true)"
+  [[ -n "$child_only_log" ]] || fail "child-only rc143 control left no lifecycle log"
+  grep -Eq 'event=wrapper_exit .*rc=143 .*received_wrapper_signal_rc=0' "$child_only_log" \
+    || fail "child-only rc143 was not distinguished from a wrapper-received signal"
+  if grep -q 'event=signal_received' "$child_only_log"; then
+    fail "child-only rc143 invented a wrapper signal-receipt event"
+  fi
+  grep -Eq 'CONNECTED_TEST_CHILD_SIGNAL_EXIT rc=143 received_wrapper_signal=none lifecycle_log=' "$sandbox/childterm.err" \
+    || fail "caller stderr does not distinguish child rc143 from wrapper TERM"
+  if grep -q 'CONNECTED_TEST_SIGNAL_RECEIVED' "$sandbox/childterm.err"; then
+    fail "child-only rc143 stderr invented an external wrapper TERM"
+  fi
+}
+
 run_case() {
   local name="$1" sandbox
   sandbox="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-serial-owner.XXXXXX")"
@@ -1038,6 +1177,7 @@ CASES=(
   hard_killed_agents_docker_up_leaves_no_descendant_flock
   hard_killed_agents_docker_health_leaves_no_descendant_flock
   hard_killed_toxiproxy_holder_leaves_no_descendant_flock
+  term_after_lock_records_lifecycle_and_preserves_rc143
 )
 if [[ $# -gt 0 ]]; then
   CASES=("$@")

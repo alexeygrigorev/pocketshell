@@ -86,6 +86,11 @@ cold_build_shards=()
 # Issue #1833: shards that reached their verdict unable to start a cold-boot
 # retry, i.e. shards whose result came from ONE attempt.
 one_shot_shards=()
+# #2095 external setup INFRA deliberately fails its shard job so GitHub's
+# failed-job retry re-runs only that shard. Its precise token reason explains
+# the otherwise-fail-closed upstream matrix failure.
+external_setup_infra_shards=()
+unclassified_infra=0
 fresh_tokens=0
 
 current_attempt="${GITHUB_RUN_ATTEMPT:-}"
@@ -108,6 +113,18 @@ if [[ -d "$verdict_dir" ]]; then
     # before the reason existed, which stays a plain `unspecified`.
     tok_reason="$(sed -n 's/^verdict_reason=//p' "$f" 2>/dev/null | head -n 1)"
     [[ -n "$tok_reason" ]] || tok_reason="unspecified"
+    if [[ "$token" == "INFRA" ]]; then
+      case "$tok_reason" in
+        docker_registry_http_5xx_exhausted|docker_registry_network_exhausted)
+          external_setup_infra_shards+=("shard ${tok_shard} (${tok_reason})")
+          ;;
+        foreign_framework_anr_focus|real_ime_precondition|retry_wall_exhausted|attempt_cancelled|emulator_never_booted)
+          ;;
+        *)
+          unclassified_infra=$((unclassified_infra + 1))
+          ;;
+      esac
+    fi
     if [[ -z "$tok_shard" ]]; then
       # No stamp (a token from a job that died before the pre-seed, or a foreign
       # artifact): fall back to the download-artifact per-shard subdir name.
@@ -259,10 +276,14 @@ emit_summary() {
 # tokens are missing or all CLEAN; a deterministic workflow failure cannot be
 # presented as neutral RE-RUN.
 if [[ "$upstream_matrix_result" == "failure" ]] && (( have_red == 0 && have_unknown == 0 )); then
-  echo "::error title=Emulator journey verdict — RED (upstream/classifier mismatch)::The upstream emulator-journey matrix result was failure, but no shard verdict token reported RED. A commit-bound shard/setup failure escaped the classifier; refusing to downgrade the run to environmental RE-RUN (issue #1913)."
-  emit_summary "RED" "upstream matrix failed without a RED shard token — classifier mismatch"
-  echo "AGGREGATE_VERDICT=RED"
-  exit 1
+  if (( ${#external_setup_infra_shards[@]} > 0 && unclassified_infra == 0 && missing == 0 )); then
+    echo "::warning title=Emulator journey external setup INFRA — failed shard is retryable (#2095)::${external_setup_infra_shards[*]} exhausted a bounded provider retry before zero journeys. Its shard job intentionally failed so 'Re-run failed jobs' re-runs only that shard; the typed aggregate remains RE-RUN, never product RED."
+  else
+    echo "::error title=Emulator journey verdict — RED (upstream/classifier mismatch)::The upstream emulator-journey matrix result was failure, but no shard verdict token reported RED. A commit-bound shard/setup failure escaped the classifier; refusing to downgrade the run to environmental RE-RUN (issue #1913)."
+    emit_summary "RED" "upstream matrix failed without a RED shard token — classifier mismatch"
+    echo "AGGREGATE_VERDICT=RED"
+    exit 1
+  fi
 fi
 
 # No tokens at all AND none were expected: nothing ran (e.g. the emulator job was

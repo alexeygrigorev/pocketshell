@@ -564,6 +564,25 @@ grep -q 'path: artifacts/ci-journey-shard-verdict/shard-verdict.txt' "$WORKFLOW"
 grep -q 'artifacts/ci-journey/shard-verdict.txt' "$WORKFLOW" \
   && fail "the shard token must not be written or uploaded from inside artifacts/ci-journey/ — it would land in the first-attempt snapshot"
 
+docker_upload_step="$(awk '
+  /^      - name: Upload Docker logs$/ { capture=1 }
+  capture && seen && /^      - name:/ { exit }
+  capture { print; seen=1 }
+' "$WORKFLOW")"
+[[ -n "$docker_upload_step" ]] || fail "could not find named Upload Docker logs step"
+grep -Fxq '        if: always()' <<<"$docker_upload_step" \
+  || fail "setup-log upload must be if: always() so failed setup evidence survives"
+grep -Fxq '        uses: actions/upload-artifact@v7' <<<"$docker_upload_step" \
+  || fail "setup-log upload lost actions/upload-artifact@v7"
+grep -Fxq '            artifacts/ci-journey-setup/' <<<"$docker_upload_step" \
+  || fail "setup-log upload lost artifacts/ci-journey-setup/"
+docker_upload_line="$(grep -n '^      - name: Upload Docker logs$' "$WORKFLOW" | cut -d: -f1)"
+setup_retry_line="$(grep -n 'Request failed-job retry for external setup INFRA' "$WORKFLOW" | cut -d: -f1)"
+[[ "$docker_upload_line" =~ ^[0-9]+$ && "$setup_retry_line" =~ ^[0-9]+$ \
+    && "$docker_upload_line" -lt "$setup_retry_line" ]] \
+  || fail "setup logs must upload before the intentional failed-job trigger"
+pass "#2095 failed-setup logs have a named always-run upload before shard failure"
+
 upload_step="$(sed -n \
   '/- name: Upload Android test reports/,/- name: Upload Docker logs/p' \
   "$WORKFLOW")"

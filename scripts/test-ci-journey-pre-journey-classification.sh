@@ -7,8 +7,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-WORKFLOW="$REPO_ROOT/.github/workflows/tests.yml"
+WORKFLOW="${CI_JOURNEY_WORKFLOW:-$REPO_ROOT/.github/workflows/tests.yml}"
 AGG="$SCRIPT_DIR/ci-journey-aggregate-verdict.sh"
+FIXTURE_RETRY="$SCRIPT_DIR/ci-journey-fixture-retry.sh"
 
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
@@ -102,8 +103,17 @@ JSONEOF
 CLASSIFY_OUT="" CLASSIFY_RC=0 CLASSIFY_TOKEN="" CLASSIFY_REASON=""
 run_classify() {
   local name="$1" first="$2" retry="$3"
+  local setup_source="${4:-}" journey_source="${5:-}"
   local ws="$SANDBOX/$name" body="$SANDBOX/$name-classifier.sh"
   mkdir -p "$ws/artifacts/ci-journey-shard-verdict"
+  if [[ -n "$setup_source" ]]; then
+    mkdir -p "$ws/artifacts/ci-journey-setup"
+    cp -a "$setup_source/." "$ws/artifacts/ci-journey-setup/"
+  fi
+  if [[ -n "$journey_source" ]]; then
+    mkdir -p "$ws/artifacts/ci-journey"
+    cp -a "$journey_source/." "$ws/artifacts/ci-journey/"
+  fi
   ln -s "$SCRIPT_DIR" "$ws/scripts"
   extract_step_body "Classify emulator-journey result (infra-abort vs test-failure)" \
     "$body" "$(classify_expressions "$first" "$retry")" \
@@ -127,6 +137,67 @@ run_classify() {
   CLASSIFY_FILE="$ws/artifacts/ci-journey-shard-verdict/shard-verdict.txt"
 }
 
+make_registry_stub() {
+  local path="$1"
+  cat > "$path" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+count=0
+[[ ! -f "$STUB_COUNT" ]] || count="$(cat "$STUB_COUNT")"
+count=$((count + 1))
+printf '%s\n' "$count" > "$STUB_COUNT"
+if [[ ( "$STUB_MODE" == "recover" || "$STUB_MODE" == "network-recover" ) && "$count" -ge 2 ]]; then
+  echo "fixture build succeeded"
+  exit 0
+fi
+if [[ "$STUB_MODE" == "unknown" ]]; then
+  echo "failed open: unexpected status code"
+  echo "https://product.example.test/api/build:"
+  echo "502 Bad Gateway"
+  exit 42
+fi
+if [[ "$STUB_MODE" == "mixed" ]]; then
+  cat <<'LOG'
+auth request https://auth.docker.io/token returned 200 OK
+registry-1.docker.io/v2/ authentication and manifest lookup succeeded
+pull setup completed normally
+failed open: unexpected status code
+https://product.example.test/api/build:
+502 Bad Gateway
+LOG
+  exit 43
+fi
+if [[ "$STUB_MODE" == network-* ]]; then
+  echo 'failed to do request: Head "https://registry-1.docker.io/v2/library/alpine/manifests/3.20": net/http: TLS handshake timeout'
+  exit 38
+fi
+cat <<'LOG'
+failed to copy: httpReadSeeker: failed open: unexpected status code
+https://registry-1.docker.io/v2/library/alpine/blobs/sha256:bf8527eb54c3680e728d5b4b383a8ba730d72dae7236fbc8dff97ed6b224a731:
+502 Bad Gateway
+LOG
+exit 37
+STUB
+  chmod +x "$path"
+}
+
+run_fixture_retry() {
+  local name="$1" mode="$2"
+  local root="$SANDBOX/$name-setup" count="$SANDBOX/$name-count"
+  rm -rf "$root" "$count"
+  set +e
+  CI_JOURNEY_SETUP_ARTIFACT_ROOT="$root" \
+    CI_JOURNEY_FIXTURE_RETRY_DELAY_SECONDS=0 \
+    STUB_MODE="$mode" STUB_COUNT="$count" \
+    "$FIXTURE_RETRY" packet-loss-proxy -- "$REGISTRY_STUB" \
+    > "$SANDBOX/$name-retry.log" 2>&1
+  FIXTURE_RC=$?
+  set -e
+  FIXTURE_CALLS=0
+  [[ ! -f "$count" ]] || FIXTURE_CALLS="$(cat "$count")"
+  FIXTURE_ROOT="$root"
+}
+
 write_token() {
   local dir="$1" shard="$2" token="$3"
   mkdir -p "$dir/emulator-journey-verdict-shard-$shard"
@@ -142,6 +213,26 @@ run_aggregate() {
   AGG_RC=$?
   set -e
   AGG_VERDICT="$(sed -n 's/^AGGREGATE_VERDICT=//p' <<<"$AGG_OUT" | tail -n 1)"
+}
+
+assert_setup_upload_contract() {
+  local step upload_line retry_line
+  step="$(awk '
+    /^      - name: Upload Docker logs$/ { capture=1 }
+    capture && seen && /^      - name:/ { exit }
+    capture { print; seen=1 }
+  ' "$WORKFLOW")"
+  [[ -n "$step" ]] || fail "could not find the named Upload Docker logs step"
+  grep -Fxq '        if: always()' <<<"$step" \
+    || fail "Upload Docker logs must run under if: always() after failed setup"
+  grep -Fxq '        uses: actions/upload-artifact@v7' <<<"$step" \
+    || fail "Upload Docker logs must use actions/upload-artifact@v7"
+  grep -Fxq '            artifacts/ci-journey-setup/' <<<"$step" \
+    || fail "Upload Docker logs must package artifacts/ci-journey-setup/"
+  upload_line="$(grep -n '^      - name: Upload Docker logs$' "$WORKFLOW" | cut -d: -f1)"
+  retry_line="$(grep -n 'Request failed-job retry for external setup INFRA' "$WORKFLOW" | cut -d: -f1)"
+  [[ "$upload_line" =~ ^[0-9]+$ && "$retry_line" =~ ^[0-9]+$ && "$upload_line" -lt "$retry_line" ]] \
+    || fail "setup logs must upload before the intentional failed-job trigger"
 }
 
 echo "== #1913 pre-journey phase classification =="
@@ -164,6 +255,119 @@ grep -qx 'run_attempt=4' "$CLASSIFY_FILE" || fail "classifier token lost rerun-a
 grep -qx 'verdict_reason=preseed_before_classify' "$CLASSIFY_FILE" \
   && fail "classifier left the #1809 pre-seed in place"
 pass "skipped first/retry -> RED pre_journey_setup_failure -> aggregate RED, with current provenance"
+
+echo
+echo "== #2095 Docker Hub setup retry + exact signature classification =="
+REGISTRY_STUB="$SANDBOX/registry-stub.sh"
+make_registry_stub "$REGISTRY_STUB"
+
+run_fixture_retry recovered recover
+[[ "$FIXTURE_RC" -eq 0 && "$FIXTURE_CALLS" -eq 2 ]] \
+  || { cat "$SANDBOX/recovered-retry.log"; fail "observed 502 then success must recover on exactly one retry (rc=$FIXTURE_RC calls=$FIXTURE_CALLS)"; }
+grep -qx 'status=recovered' "$FIXTURE_ROOT/packet-loss-proxy/result.env" \
+  || fail "recovered setup did not record status=recovered"
+[[ ! -e "$FIXTURE_ROOT/failure.env" ]] \
+  || fail "recovered setup left a failure manifest that could poison classification"
+pass "observed Docker Hub 502 -> one in-shard retry -> success"
+
+run_fixture_retry exhausted exhaust
+EXHAUSTED_ROOT="$FIXTURE_ROOT"
+[[ "$FIXTURE_RC" -eq 37 && "$FIXTURE_CALLS" -eq 2 ]] \
+  || { cat "$SANDBOX/exhausted-retry.log"; fail "exhausted 502 must stop after two attempts (rc=$FIXTURE_RC calls=$FIXTURE_CALLS)"; }
+run_classify exhausted-502 skipped skipped "$EXHAUSTED_ROOT"
+[[ "$CLASSIFY_TOKEN" == "INFRA" \
+    && "$CLASSIFY_REASON" == "docker_registry_http_5xx_exhausted" \
+    && "$CLASSIFY_RC" -ne 0 ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "two captured 502 attempts with zero journeys must classify INFRA precisely; got $CLASSIFY_TOKEN/$CLASSIFY_REASON/exit$CLASSIFY_RC"; }
+d="$SANDBOX/exhausted-token-plus-clean"; mkdir -p "$d"
+cp "$CLASSIFY_FILE" "$d/shard-verdict-2.txt"
+write_token "$d" 0 CLEAN; write_token "$d" 1 CLEAN
+run_aggregate "$d" failure
+[[ "$AGG_VERDICT" == "RE-RUN" && "$AGG_RC" -eq 0 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "typed external setup INFRA must not be laundered back to aggregate RED; got $AGG_VERDICT/exit$AGG_RC"; }
+pass "exhausted captured 502 + zero journeys -> precise INFRA -> aggregate RE-RUN"
+
+if [[ -z "${ISSUE2095_FOCUS:-}" || "${ISSUE2095_FOCUS:-}" == "mixed" ]]; then
+  run_fixture_retry mixed-provider-product mixed
+  MIXED_ROOT="$FIXTURE_ROOT"
+  [[ "$FIXTURE_RC" -eq 43 && "$FIXTURE_CALLS" -eq 1 ]] \
+    || { cat "$SANDBOX/mixed-provider-product-retry.log"; fail "earlier successful Docker Hub chatter must not bind a later product 502 (rc=$FIXTURE_RC calls=$FIXTURE_CALLS)"; }
+  run_classify mixed-provider-product skipped skipped "$MIXED_ROOT"
+  [[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_REASON" == "pre_journey_setup_failure" ]] \
+    || { printf '%s\n' "$CLASSIFY_OUT"; fail "mixed provider/product log must stay RED/pre_journey_setup_failure"; }
+  pass "record-local binding: successful Docker Hub chatter cannot launder a later product 502"
+fi
+
+if [[ -z "${ISSUE2095_FOCUS:-}" || "${ISSUE2095_FOCUS:-}" == "network" ]]; then
+  run_fixture_retry recovered-network network-recover
+  [[ "$FIXTURE_RC" -eq 0 && "$FIXTURE_CALLS" -eq 2 ]] \
+    || fail "captured Docker registry network failure must recover on exactly one retry"
+  grep -qx 'status=recovered' "$FIXTURE_ROOT/packet-loss-proxy/result.env" \
+    || fail "network recovery did not record status=recovered"
+
+  run_fixture_retry exhausted-network network-exhaust
+  NETWORK_ROOT="$FIXTURE_ROOT"
+  [[ "$FIXTURE_RC" -eq 38 && "$FIXTURE_CALLS" -eq 2 ]] \
+    || fail "exhausted network signature must stop after two attempts"
+  run_classify exhausted-network skipped skipped "$NETWORK_ROOT"
+  [[ "$CLASSIFY_TOKEN" == "INFRA" \
+      && "$CLASSIFY_REASON" == "docker_registry_network_exhausted" \
+      && "$CLASSIFY_RC" -ne 0 ]] \
+    || { printf '%s\n' "$CLASSIFY_OUT"; fail "two captured network failures with zero journeys must classify INFRA precisely"; }
+  d="$SANDBOX/exhausted-network-token-plus-clean"; mkdir -p "$d"
+  cp "$CLASSIFY_FILE" "$d/shard-verdict-2.txt"
+  write_token "$d" 0 CLEAN; write_token "$d" 1 CLEAN
+  run_aggregate "$d" failure
+  [[ "$AGG_VERDICT" == "RE-RUN" && "$AGG_RC" -eq 0 ]] \
+    || fail "typed network setup INFRA must aggregate RE-RUN"
+  grep -Fq "shard_verdict_reason == 'docker_registry_network_exhausted'" "$WORKFLOW" \
+    || fail "failed-job retry gate must be bound to the precise network reason"
+  pass "registry-network signature -> bounded recover/exhaust -> precise INFRA/aggregate/failed-job reason"
+fi
+
+if [[ -z "${ISSUE2095_FOCUS:-}" || "${ISSUE2095_FOCUS:-}" == "upload" ]]; then
+  assert_setup_upload_contract
+  pass "named setup-log artifact upload is always-run and precedes the failed-job trigger"
+fi
+
+if [[ -n "${ISSUE2095_FOCUS:-}" ]]; then
+  echo "PASS: focused #2095 case ${ISSUE2095_FOCUS}"
+  exit 0
+fi
+
+# Signature mutation: the same bounded failures without the provider/status
+# signature are unknown. They get one attempt and stay fail-closed RED.
+run_fixture_retry unknown-signature unknown
+UNKNOWN_ROOT="$FIXTURE_ROOT"
+[[ "$FIXTURE_RC" -eq 42 && "$FIXTURE_CALLS" -eq 1 ]] \
+  || fail "unknown setup failure must not consume the external-infra retry"
+run_classify unknown-signature skipped skipped "$UNKNOWN_ROOT"
+[[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_REASON" == "pre_journey_setup_failure" ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "signature mutation must stay RED/pre_journey_setup_failure"; }
+pass "signature mutation is selective: unknown setup failure is not retried or typed INFRA"
+
+# Zero-journey mutation: even valid setup logs cannot soften a shard once any
+# journey-owned artifact exists.
+JOURNEY_EVIDENCE="$SANDBOX/journey-evidence"
+mkdir -p "$JOURNEY_EVIDENCE/class-attempts/real-red/attempt-1"
+printf 'journey started\n' > "$JOURNEY_EVIDENCE/class-attempts/real-red/attempt-1/manifest.env"
+run_classify has-journey-evidence skipped skipped "$EXHAUSTED_ROOT" "$JOURNEY_EVIDENCE"
+[[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_REASON" == "pre_journey_setup_failure" ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "zero-journey mutation must reject INFRA and remain RED"; }
+pass "zero-journey condition is load-bearing: any journey evidence keeps the shard RED"
+
+# Real-red control: a substantive suite failure dominates adjacent setup logs.
+REAL_RED="$SANDBOX/real-red"
+mkdir -p "$REAL_RED"
+cat > "$REAL_RED/summary.md" <<'EOF'
+JOURNEY_FAILED
+Failed BOTH attempts
+- `com.pocketshell.RealJourneyAssertionTest`
+EOF
+run_classify real-journey-red failure failure "$EXHAUSTED_ROOT" "$REAL_RED"
+[[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_REASON" == "journey_failure_both_attempts" ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "real journey assertion failure must remain RED beside setup signatures"; }
+pass "real Failed-BOTH assertion remains RED; setup INFRA cannot launder product red"
 
 echo
 echo "== #1913 upstream-matrix aggregate backstop =="
@@ -200,6 +404,20 @@ grep -Fq 'UPSTREAM_MATRIX_RESULT: ${{ needs.emulator-journey.result }}' "$WORKFL
 grep -Fq 'scripts/test-ci-journey-pre-journey-classification.sh' "$WORKFLOW" \
   || fail "the #1913 regression must be wired into the Unit job"
 pass "upstream matrix result and this cheap guard are wired in tests.yml"
+
+echo
+echo "== #2095 workflow retry/artifact wiring =="
+for fixture in sshd agents packet-loss-proxy network-fault-proxy agents-old-cli agents-daemon; do
+  count="$(grep -c "ci-journey-fixture-retry.sh $fixture -- docker compose" "$WORKFLOW" || true)"
+  [[ "$count" -eq 1 ]] \
+    || fail "fixture $fixture must have exactly one bounded pre-journey wrapper, found $count"
+done
+assert_setup_upload_contract
+grep -Fq 'Request failed-job retry for external setup INFRA (issue #2095)' "$WORKFLOW" \
+  || fail "exhausted external setup INFRA must fail only its shard for failed-job retry"
+grep -Fq "shard_verdict_reason == 'docker_registry_http_5xx_exhausted'" "$WORKFLOW" \
+  || fail "failed-job retry gate must be bound to the precise HTTP-5xx reason"
+pass "all pull/build fixtures are wrapped once; setup logs + precise failed-shard retry are wired"
 
 echo
 echo "PASS: #1913 real classifier + aggregate phase-aware verdict guard"

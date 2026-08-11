@@ -1378,7 +1378,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Build SSH base image
-        run: docker compose -f tests/docker/docker-compose.yml build sshd
+        run: scripts/ci-journey-fixture-retry.sh sshd -- docker compose -f tests/docker/docker-compose.yml build sshd
 
       # The selected journeys (DeepLinkSessionSwitch, MultiSessionSwitch,
       # ColdRestoreGoneSessionNoResurrect, ReconnectRepaint,
@@ -1391,7 +1391,7 @@ jobs:
       # cannot self-skip or silently fall back to the direct route.
       - name: Start Docker fixture (agents)
         run: |
-          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents
+          scripts/ci-journey-fixture-retry.sh agents -- docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents
 
       - name: Wait for the agents fixture to report healthy
         run: |
@@ -1411,7 +1411,7 @@ jobs:
           # before the first OpenSSH readiness attempt; OpenSSH rejects it
           # otherwise and no load-bearing journey reaches the proxy.
           chmod 600 tests/docker/test_key
-          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps packet-loss-proxy
+          scripts/ci-journey-fixture-retry.sh packet-loss-proxy -- docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps packet-loss-proxy
           for attempt in $(seq 1 30); do
             if ssh -i tests/docker/test_key -p 2229 \
               -o BatchMode=yes -o ConnectTimeout=3 \
@@ -1426,7 +1426,7 @@ jobs:
 
       - name: Start Docker fixture (network-fault-proxy, issue #1733)
         run: |
-          docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy
+          scripts/ci-journey-fixture-retry.sh network-fault-proxy -- docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy
           for attempt in $(seq 1 30); do
             if curl --fail --silent --show-error http://127.0.0.1:8474/version; then
               exit 0
@@ -1458,7 +1458,7 @@ jobs:
       # connect-break class was structurally invisible to CI (the #848 gate gap).
       - name: Start Docker fixture (agents-old-cli, issue #849)
         run: |
-          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents-old-cli
+          scripts/ci-journey-fixture-retry.sh agents-old-cli -- docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents-old-cli
 
       - name: Wait for the agents-old-cli fixture to report healthy
         run: |
@@ -1491,7 +1491,7 @@ jobs:
       # the agents-old-cli (#849) precedent directly above.
       - name: Start Docker fixture (agents-daemon, issue #839)
         run: |
-          docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents-daemon
+          scripts/ci-journey-fixture-retry.sh agents-daemon -- docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents-daemon
 
       - name: Wait for the agents-daemon fixture to report healthy
         run: |
@@ -1884,12 +1884,18 @@ jobs:
           SHARD_RETRY_DENIED_REASON="${retry_reason:-missing_decision}"
           SHARD_RETRY_SHORTFALL_MS="$retry_shortfall_ms"
           export SHARD_RETRY_AFFORDABLE SHARD_RETRY_DENIED_REASON SHARD_RETRY_SHORTFALL_MS
-          # Issue #1913: `skipped` means the first journey action was NEVER
-          # attempted. An earlier workflow/setup step failed, so absence of a
-          # suite summary cannot prove #771 emulator-never-booted infra. Fail
-          # closed with the stable failed phase; the native failed setup step
-          # retains the exact step-level diagnosis in the shard job log.
+          # #2095: only captured provider failures with zero journeys are INFRA.
           if [[ "$first" == "skipped" ]]; then
+            setup_out="$(scripts/ci-journey-fixture-retry.sh --classify artifacts/ci-journey-setup artifacts/ci-journey 2>&1 || true)"
+            printf '%s\n' "$setup_out" | sed 's/^/pre-journey setup signature: /'
+            setup_reason="$(sed -n 's/^pre_journey_infra_reason=//p' <<<"$setup_out" | tail -n 1)"
+            case "$setup_reason" in
+              docker_registry_http_5xx_exhausted|docker_registry_network_exhausted)
+                echo "::warning title=Emulator journey INFRA — external Docker registry unavailable::Fixture setup exhausted its one bounded retry before any journey ran (${setup_reason}). Attempt logs are preserved; this is provider/bootstrap INFRA, not a product regression (issue #2095)."
+                write_verdict INFRA "$setup_reason"
+                exit 1
+                ;;
+            esac
             echo "::error title=Emulator journey PRE-JOURNEY SETUP FAILURE::The first emulator journey action was skipped, so an earlier workflow/setup step failed before emulator launch. This is a commit-bound workflow failure, NOT emulator_never_booted infra; refusing to downgrade it to environmental RE-RUN (issue #1913)."
             write_verdict RED pre_journey_setup_failure
             exit 1
@@ -2060,7 +2066,9 @@ jobs:
         with:
           # Issue #835: per-shard name so matrix legs don't collide on upload.
           name: emulator-journey-docker-logs-shard-${{ matrix.shard }}
-          path: artifacts/docker/
+          path: |
+            artifacts/docker/
+            artifacts/ci-journey-setup/
           # Issue #1809: same attempt-scoped re-run hygiene as the reports above.
           overwrite: true
           if-no-files-found: ignore
@@ -2087,29 +2095,7 @@ jobs:
         if: always()
         run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
 
-      # Issue #1809 (G5 clean re-run): make THIS shard's job conclusion reflect a
-      # genuine RED verdict.
-      #
-      # The defect this closes: #1458 made the classify step `continue-on-error`
-      # so an environmental shard could not fire a false red-CI email. A side
-      # effect nobody noticed is that a shard whose token is RED ALSO finishes
-      # `success` — so on a red emulator-journey run the ONLY failed job is the
-      # aggregation job, and GitHub's "Re-run failed jobs" re-runs ONLY that
-      # aggregation job. It then re-downloads the very same shard tokens and
-      # emits the very same RED: a second, identical red that proves nothing.
-      # That is the on-call's "could not produce a clean re-run" in mechanical
-      # terms (runs 30305256109 / 30314178005 / 30318408377 all show three
-      # `success` shard jobs under a `failure` aggregate).
-      #
-      # Failing the shard on RED — and ONLY on RED — makes "Re-run failed jobs"
-      # re-run the offending shard AND the aggregation job that `needs` it, so
-      # the standard button is the G5 clean-re-run path. It cannot reintroduce
-      # the #1458 false red: a RED token already turns the whole run red through
-      # the aggregation job, so the run's conclusion is unchanged. INFRA and
-      # CLEAN shards still finish green, which is the property #1458 added.
-      #
-      # Placed last so every `if: always()` artifact/teardown step above has
-      # already run; the verdict artifact is uploaded before this can fail.
+      # #1809: fail genuine RED only after artifacts for failed-job re-runs.
       - name: "Fail this shard on a genuine RED verdict (issue #1809)"
         if: always() && steps.classify.outputs.shard_verdict == 'RED'
         run: |
@@ -2117,6 +2103,11 @@ jobs:
           echo "Failing the shard job so 'Re-run failed jobs' re-runs THIS shard plus the aggregation job (issue #1809, G5)."
           echo "The per-shard annotations above carry the failing class(es); the aggregate verdict job owns the overall run verdict."
           exit 1
+
+      # #2095: make only exhausted provider-INFRA shards eligible for re-run.
+      - name: "Request failed-job retry for external setup INFRA (issue #2095)"
+        if: always() && (steps.classify.outputs.shard_verdict_reason == 'docker_registry_http_5xx_exhausted' || steps.classify.outputs.shard_verdict_reason == 'docker_registry_network_exhausted')
+        run: exit 1
 
   # ---------------------------------------------------------------------------
   # Issue #1458 (AGGREGATION): roll the per-shard emulator-journey verdict tokens

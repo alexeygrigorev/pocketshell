@@ -101,6 +101,17 @@ set -euo pipefail
 # The task defaults to :app:connectedDebugAndroidTest and is overridable per
 # --module (issue #798). The base package (no suffix) and release build are
 # never touched.
+#
+# Lifecycle diagnostics (issue #2004): each mutation run writes a mode-0600 log
+# under build/connected-test-lifecycle/ (override the directory with
+# POCKETSHELL_CONNECTED_TEST_LIFECYCLE_DIR). It records timestamps, PID/PPID/
+# process-group/session/cgroup metadata, lock ownership, scoped-child lifecycle,
+# and received/forwarded signals without command lines or environments. A Bash
+# trap does not receive Linux siginfo_t, so an external signal's sender PID is
+# fundamentally unavailable here; the log says so explicitly and must be
+# correlated with the parent orchestrator/system journal when attribution is
+# needed. SIGINT/SIGTERM remain hard failures and are never retried or translated
+# into a successful result.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -566,6 +577,141 @@ export POCKETSHELL_AVD_LOCK_FILE
 
 MUTATION_PID=""
 POCKETSHELL_AVD_OWNERSHIP_LOST=""
+POCKETSHELL_CONNECTED_TEST_SIGNAL_RC=0
+POCKETSHELL_CONNECTED_TEST_SIGNAL_SNAPSHOT_PENDING=0
+
+# Issue #2004: preserve enough wrapper-side lifecycle evidence to distinguish
+# "Gradle failed" from "the already-locked wrapper received an external
+# signal". Bash signal traps expose the signal name but NOT siginfo_t (and thus
+# not si_pid), so this deliberately records sender_pid=unavailable instead of
+# inventing attribution from PPID/session membership. The process snapshots use
+# PID metadata and comm only; command lines and environments are excluded
+# because Gradle runner arguments may contain credentials or other secrets.
+CONNECTED_TEST_LIFECYCLE_DIR="${POCKETSHELL_CONNECTED_TEST_LIFECYCLE_DIR:-$ROOT_DIR/build/connected-test-lifecycle}"
+CONNECTED_TEST_LIFECYCLE_LOG=""
+
+pocketshell_lifecycle_value() {
+  local value="${1:-unknown}"
+  value="${value//$'\n'/;}"
+  value="${value//$'\r'/;}"
+  value="${value//$'\t'/_}"
+  value="${value// /_}"
+  printf '%s' "$value"
+}
+
+pocketshell_lifecycle_log() {
+  local event="$1"
+  shift
+  [[ -n "$CONNECTED_TEST_LIFECYCLE_LOG" ]] || return 0
+  local timestamp line field
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%S.%NZ 2>/dev/null || printf 'unknown')"
+  line="timestamp=$timestamp event=$event"
+  for field in "$@"; do
+    line+=" $field"
+  done
+  printf '%s\n' "$line" >> "$CONNECTED_TEST_LIFECYCLE_LOG" 2>/dev/null || true
+}
+
+# Signal handlers can interrupt this script while Bash is suspended inside a
+# command substitution. Re-entering the general logger (which itself uses a
+# command substitution for `date`) can corrupt the interrupted parser state.
+# Keep trap-time persistence to Bash builtins only; richer /proc + systemd
+# snapshots run immediately after the child has observed the forwarded signal.
+pocketshell_lifecycle_signal_log() {
+  local event="$1"
+  shift
+  [[ -n "$CONNECTED_TEST_LIFECYCLE_LOG" ]] || return 0
+  local timestamp field
+  # Bash's %(...)T formatter otherwise obeys the caller's local timezone. The
+  # temporary TZ assignment and printf -v both stay inside the shell: no fork,
+  # command substitution, argument leakage, or pre-forwarding external work.
+  TZ=UTC0 printf -v timestamp '%(%Y-%m-%dT%H:%M:%SZ)T' -1
+  {
+    printf 'timestamp=%s event=%s' "$timestamp" "$event"
+    for field in "$@"; do
+      printf ' %s' "$field"
+    done
+    printf '\n'
+  } >> "$CONNECTED_TEST_LIFECYCLE_LOG" 2>/dev/null || true
+}
+
+pocketshell_lifecycle_process_snapshot() {
+  local pid="${1:-}" role="${2:-unknown}"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  local process_line ppid="unavailable" pgid="unavailable" sid="unavailable"
+  local state="unavailable" comm="unavailable" cgroup="unavailable"
+  process_line="$(ps -o ppid=,pgid=,sid=,stat=,comm= -p "$pid" 2>/dev/null || true)"
+  if [[ -n "$process_line" ]]; then
+    read -r ppid pgid sid state comm <<< "$process_line" || true
+  fi
+  if [[ -r "/proc/$pid/cgroup" ]]; then
+    cgroup="$(tr '\n' ';' < "/proc/$pid/cgroup" 2>/dev/null || true)"
+    [[ -n "$cgroup" ]] || cgroup="unavailable"
+  fi
+  pocketshell_lifecycle_log process_snapshot \
+    "pid=$pid" \
+    "ppid=$(pocketshell_lifecycle_value "$ppid")" \
+    "pgid=$(pocketshell_lifecycle_value "$pgid")" \
+    "sid=$(pocketshell_lifecycle_value "$sid")" \
+    "comm=$(pocketshell_lifecycle_value "$comm")" \
+    "state=$(pocketshell_lifecycle_value "$state")" \
+    "role=$(pocketshell_lifecycle_value "$role")"
+  pocketshell_lifecycle_log cgroup_snapshot \
+    "pid=$pid" \
+    "cgroup=$(pocketshell_lifecycle_value "$cgroup")" \
+    "role=$(pocketshell_lifecycle_value "$role")"
+}
+
+pocketshell_lifecycle_scope_snapshot() {
+  local state="unavailable"
+  if [[ -n "${SCOPE_UNIT:-}" ]] && command -v systemctl >/dev/null 2>&1; then
+    state="$(timeout 2s systemctl --user show "$SCOPE_UNIT.scope" \
+      --property=ActiveState,SubState,Result,MainPID,ControlGroup \
+      --value 2>/dev/null | tr '\n' ',' || true)"
+    [[ -n "$state" ]] || state="unavailable"
+  fi
+  pocketshell_lifecycle_log scope_snapshot \
+    "scope=$(pocketshell_lifecycle_value "${SCOPE_UNIT:-unassigned}")" \
+    "state=$(pocketshell_lifecycle_value "$state")"
+}
+
+pocketshell_lifecycle_snapshot_tree() {
+  pocketshell_lifecycle_process_snapshot "$$" wrapper
+  pocketshell_lifecycle_process_snapshot "$PPID" parent
+  if [[ -n "$MUTATION_PID" ]]; then
+    pocketshell_lifecycle_process_snapshot "$MUTATION_PID" mutation_child
+    local descendant
+    while IFS= read -r descendant; do
+      [[ -n "$descendant" ]] || continue
+      pocketshell_lifecycle_process_snapshot "$descendant" mutation_descendant
+    done < <(ps -o pid= --ppid "$MUTATION_PID" 2>/dev/null | awk '{ print $1 }')
+  fi
+  pocketshell_lifecycle_scope_snapshot
+}
+
+pocketshell_lifecycle_init() {
+  mkdir -p "$CONNECTED_TEST_LIFECYCLE_DIR" 2>/dev/null || return 0
+  chmod 700 "$CONNECTED_TEST_LIFECYCLE_DIR" 2>/dev/null || true
+  local started_at token
+  started_at="$(date -u +%Y%m%dT%H%M%S 2>/dev/null || printf 'unknown')"
+  token="${SUFFIX:-base}-${ANDROID_SERIAL:-unknown}-$$"
+  token="${token//[^A-Za-z0-9._-]/_}"
+  CONNECTED_TEST_LIFECYCLE_LOG="$(mktemp \
+    --tmpdir="$CONNECTED_TEST_LIFECYCLE_DIR" \
+    --suffix=.log \
+    "$started_at-$token.XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$CONNECTED_TEST_LIFECYCLE_LOG" ]]; then
+    CONNECTED_TEST_LIFECYCLE_LOG=""
+    return 0
+  fi
+  chmod 600 "$CONNECTED_TEST_LIFECYCLE_LOG" 2>/dev/null || true
+  pocketshell_lifecycle_log wrapper_started \
+    "wrapper_pid=$$" "parent_pid=$PPID" \
+    "sender_pid=unavailable" \
+    "sender_limit=bash_traps_do_not_expose_kernel_siginfo"
+  pocketshell_lifecycle_snapshot_tree
+  printf 'Connected-test lifecycle log: %s\n' "$CONNECTED_TEST_LIFECYCLE_LOG" >&2
+}
 
 pocketshell_collect_descendant_pids_postorder() {
   local pid="$1"
@@ -636,7 +782,17 @@ pocketshell_run_guarded_mutation() {
 
   pocketshell_start_without_avd_lock_fd "$@"
   local child_pid="$POCKETSHELL_AVD_CHILD_PID"
+  local mutation_lock="${POCKETSHELL_AVD_LOCK_FILE:-unavailable}"
+  mutation_lock="${mutation_lock// /_}"
   MUTATION_PID="$child_pid"
+  pocketshell_lifecycle_signal_log mutation_started \
+    "child_pid=$child_pid" \
+    "child_state=spawned" \
+    "lock_file=$mutation_lock"
+  # Do not run the multi-command /proc snapshot here: the child may publish its
+  # test-ready boundary immediately, and an external TERM can then interrupt
+  # Bash while it is expanding that snapshot. Trap-time logging stays builtin-
+  # only; the rich child/scope snapshot is taken after signal forwarding below.
   local ownership_lost=0
   while kill -0 "$child_pid" 2>/dev/null; do
     if ! pocketshell_assert_avd_lock_owned "$POCKETSHELL_AVD_LOCK_FILE"; then
@@ -655,6 +811,13 @@ pocketshell_run_guarded_mutation() {
 
   local child_rc=0
   wait "$child_pid" || child_rc=$?
+  pocketshell_lifecycle_log mutation_finished \
+    "child_pid=$child_pid" "child_rc=$child_rc" \
+    "ownership_lost=${ownership_lost:-0}"
+  if (( POCKETSHELL_CONNECTED_TEST_SIGNAL_SNAPSHOT_PENDING != 0 )); then
+    pocketshell_lifecycle_snapshot_tree
+    POCKETSHELL_CONNECTED_TEST_SIGNAL_SNAPSHOT_PENDING=0
+  fi
   MUTATION_PID=""
   if (( ownership_lost == 1 )); then
     return 70
@@ -929,8 +1092,17 @@ cleanup_suffixed_packages() {
 
 # Acquire the AVD lock for BOTH cleanup and test runs so the sweep cannot race
 # a sibling's install/test on the same device.
+pocketshell_lifecycle_init
 pocketshell_acquire_avd_lock "$ROOT_DIR"
 pocketshell_assert_avd_lock_owned "$POCKETSHELL_AVD_LOCK_FILE"
+pocketshell_lifecycle_log avd_lock_acquired \
+  "wrapper_pid=$$" \
+  "lock_file=$(pocketshell_lifecycle_value "${POCKETSHELL_AVD_LOCK_FILE:-unavailable}")" \
+  "lock_fd=$(pocketshell_lifecycle_value "${POCKETSHELL_AVD_LOCK_FD:-unavailable}")" \
+  "lock_owner_pid=$(pocketshell_lifecycle_value "${POCKETSHELL_AVD_LOCK_OWNER_PID:-unavailable}")" \
+  "lock_holder_pid=$(pocketshell_lifecycle_value "${POCKETSHELL_AVD_LOCK_HOLDER_PID:-unavailable}")" \
+  "android_serial=$(pocketshell_lifecycle_value "${ANDROID_SERIAL:-unavailable}")"
+pocketshell_lifecycle_snapshot_tree
 
 if [[ "$CLEANUP_ONLY" == "1" ]]; then
   cleanup_suffixed_packages
@@ -1038,6 +1210,20 @@ NOTIFICATION_PERMISSION_TARGET_APK="$NOTIFICATION_PERMISSION_BUILD_DIR/outputs/a
 # shellcheck disable=SC2317
 pocketshell_connected_test_exit_cleanup() {
   local original_rc=$?
+  pocketshell_lifecycle_log wrapper_exit \
+    "rc=$original_rc" \
+    "received_wrapper_signal_rc=$POCKETSHELL_CONNECTED_TEST_SIGNAL_RC" \
+    "active_child_pid=$(pocketshell_lifecycle_value "${MUTATION_PID:-none}")" \
+    "lock_file=$(pocketshell_lifecycle_value "${POCKETSHELL_AVD_LOCK_FILE:-unavailable}")" \
+    "lock_fd=$(pocketshell_lifecycle_value "${POCKETSHELL_AVD_LOCK_FD:-unavailable}")"
+  if (( POCKETSHELL_CONNECTED_TEST_SIGNAL_RC != 0 )); then
+    printf 'CONNECTED_TEST_SIGNAL_EXIT rc=%s lifecycle_log=%s\n' \
+      "$original_rc" "${CONNECTED_TEST_LIFECYCLE_LOG:-unavailable}" >&2
+  elif (( original_rc > 128 )); then
+    printf 'CONNECTED_TEST_CHILD_SIGNAL_EXIT rc=%s received_wrapper_signal=none lifecycle_log=%s\n' \
+      "$original_rc" "${CONNECTED_TEST_LIFECYCLE_LOG:-unavailable}" >&2
+  fi
+  pocketshell_lifecycle_snapshot_tree
   if [[ -n "${CONNECTED_EVIDENCE_DIR:-}" && -n "${CONNECTED_EVIDENCE_STARTED_AT:-}" ]]; then
     local evidence_port evidence_container evidence_final_identity evidence_output_root
     evidence_port="${POCKETSHELL_AGENTS_PORT:-2222}"
@@ -1114,9 +1300,42 @@ SCOPE_UNIT="pocketshell-test-${SCOPE_TOKEN//[^A-Za-z0-9._-]/_}-${SCOPE_SERIAL//[
 # shellcheck disable=SC2317
 forward_signal() {
   local sig="$1"
-  if [[ -n "$MUTATION_PID" ]]; then
-    kill -s "$sig" "$MUTATION_PID" 2>/dev/null || true
+  local child_pid="${MUTATION_PID:-}" child_state="none" forward_result="no_active_child"
+  case "$sig" in
+    INT) POCKETSHELL_CONNECTED_TEST_SIGNAL_RC=130 ;;
+    TERM) POCKETSHELL_CONNECTED_TEST_SIGNAL_RC=143 ;;
+  esac
+  if [[ -n "$child_pid" ]]; then
+    if pocketshell_process_is_running "$child_pid"; then
+      child_state="running"
+    else
+      child_state="exited"
+    fi
   fi
+  POCKETSHELL_CONNECTED_TEST_SIGNAL_SNAPSHOT_PENDING=1
+  pocketshell_lifecycle_signal_log signal_received \
+    "signal=$sig" \
+    "child_pid=${child_pid:-none}" \
+    "child_state=$child_state" \
+    "sender_pid=unavailable" \
+    "sender_limit=bash_traps_do_not_expose_kernel_siginfo"
+  printf 'CONNECTED_TEST_SIGNAL_RECEIVED signal=%s wrapper_pid=%s child_pid=%s child_state=%s sender_pid=unavailable lifecycle_log=%s\n' \
+    "$sig" "$$" "${child_pid:-none}" "$child_state" \
+    "${CONNECTED_TEST_LIFECYCLE_LOG:-unavailable}" >&2
+  if [[ -n "$MUTATION_PID" ]]; then
+    if kill -s "$sig" "$MUTATION_PID" 2>/dev/null; then
+      forward_result="sent"
+    else
+      forward_result="already_exited"
+    fi
+  fi
+  pocketshell_lifecycle_signal_log signal_forwarded \
+    "signal=$sig" \
+    "child_pid=${child_pid:-none}" \
+    "forward_result=$forward_result" \
+    "child_state_before=$child_state"
+  printf 'CONNECTED_TEST_SIGNAL_FORWARDED signal=%s child_pid=%s result=%s\n' \
+    "$sig" "${child_pid:-none}" "$forward_result" >&2
 }
 trap 'forward_signal INT' INT
 trap 'forward_signal TERM' TERM
@@ -1208,5 +1427,15 @@ fi
 # Only a claimed pool lane has a fingerprint, so single-lane / CI runs are
 # untouched (the helper returns 0 when there is nothing to compare).
 rc="$(pocketshell_agents_final_rc "$rc")"
+
+# A trapped external INT/TERM is always a hard failure even if a wrapper child
+# races to report zero while the trap is forwarding the signal. Enforce this
+# after every result classifier so nothing can translate an interrupted attempt
+# into green (or into a different wrapper verdict). No work is retried.
+if (( POCKETSHELL_CONNECTED_TEST_SIGNAL_RC != 0 )); then
+  pocketshell_lifecycle_log signal_rc_enforced \
+    "child_rc=$rc" "wrapper_rc=$POCKETSHELL_CONNECTED_TEST_SIGNAL_RC"
+  rc="$POCKETSHELL_CONNECTED_TEST_SIGNAL_RC"
+fi
 
 exit "$rc"

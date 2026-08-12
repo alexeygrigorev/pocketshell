@@ -3,38 +3,32 @@ package com.pocketshell.app.notifications
 import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.release.ReleaseInfo
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.BufferedReader
-import java.io.File
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.io.InputStreamReader
 
 /**
  * Emulator evidence for issue #502: posting the real
  * [UpdateAvailableNotifications] notification on-device, asserting it
- * lands in the system status bar, and screenshotting it so the reviewer
- * can see the "PocketShell vX.Y.Z available — Tap to update" surface a
- * user would notice from any screen.
+ * lands in the system notification manager with the title, body, and tap
+ * intent a user needs from any screen.
  *
  * The de-dupe and the ViewModel→notifier trigger are covered by the JVM
- * unit tests (`UpdateNotifierTest`, `HostListViewModelTest`), which are
- * the authoritative CI coverage of the de-dupe + trigger + post-path.
- * This connected test is *local status-bar evidence*: it proves the
- * notification actually renders once posted on a real device.
+ * unit tests (`UpdateNotifierTest`, `HostListViewModelTest`). This connected
+ * test owns the production Android boundary they cannot cover: the real
+ * [UpdateAvailableNotifications.show] call must create a live system
+ * notification carrying its production payload and content intent.
  *
  * ## Determinism (round-3 stabilization)
  *
@@ -65,12 +59,10 @@ import java.io.InputStreamReader
  * The `@Before` cancels any stale notifications so a leftover from an
  * earlier run can't satisfy the assertion.
  *
- * On CI the connected assertion is skipped (`Assume.assumeFalse(
- * isRunningOnCi())`): the swiftshader emulator under parallel
- * connected-test load intermittently crashes the instrumentation process
- * ("Process crashed") independently of this assertion, and the JVM unit
- * tests already give authoritative CI coverage of the post path. Locally
- * the test runs and asserts the real status-bar render.
+ * The load-bearing proof deliberately does not expand or screenshot the
+ * SystemUI notification shade. SwiftShader shade capture was the unstable
+ * part of the old local-only test; the live `activeNotifications` payload and
+ * intent below are the production-boundary assertions and run per push.
  */
 @RunWith(AndroidJUnit4::class)
 class UpdateAvailableNotificationE2eTest {
@@ -89,20 +81,6 @@ class UpdateAvailableNotificationE2eTest {
 
     @Before
     fun grantNotificationPermission() {
-        // The connected status-bar assertion is local-only evidence. On CI
-        // the swiftshader emulator under parallel connected-test load
-        // intermittently crashes the instrumentation process ("Process
-        // crashed") in a way that is unrelated to the production path,
-        // which is already covered authoritatively by the JVM unit tests
-        // (`UpdateNotifierTest`, `HostListViewModelTest`). Skip here so CI
-        // does not go red on an emulator-stability flake.
-        Assume.assumeFalse(
-            "Skipping the on-device status-bar assertion on CI; the post path " +
-                "is covered by the JVM unit tests and the swiftshader emulator " +
-                "is too unstable under load for this status-bar capture.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
-
         // Clear any stale notification (e.g. left over from a prior run in
         // this process) so it can't accidentally satisfy the assertion.
         notificationManager.cancelAll()
@@ -190,11 +168,18 @@ class UpdateAvailableNotificationE2eTest {
             posted,
         )
 
-        val text = posted!!.notification.extras
+        val title = posted!!.notification.extras
+            .getCharSequence("android.title")?.toString().orEmpty()
+        assertEquals(
+            "PocketShell v9.9.9 available",
+            title,
+        )
+
+        val text = posted.notification.extras
             .getCharSequence("android.text")?.toString().orEmpty()
-        assertTrue(
-            "notification body should prompt the user to tap to update: '$text'",
-            text.contains("Tap to update"),
+        assertEquals(
+            "Tap to update",
+            text,
         )
 
         // It must carry a tap action (the ACTION_VIEW PendingIntent that
@@ -203,33 +188,12 @@ class UpdateAvailableNotificationE2eTest {
             "update notification must have a tap (contentIntent) so it routes to the update",
             posted.notification.contentIntent,
         )
-
-        // Open the shade and screenshot the rendered notification so the
-        // reviewer has authoritative on-device evidence. Write to the shared
-        // external-media artifact dir (the same `additional_test_output`
-        // location every walkthrough test uses), which — unlike the app's
-        // `getExternalFilesDir` sandbox under `Android/data/` — is reachable
-        // by a plain `adb pull` from
-        // `/sdcard/Android/media/<pkg>/additional_test_output/...`.
-        instrumentation.uiAutomation.executeShellCommand("cmd statusbar expand-notifications")
-            .close()
-        Thread.sleep(1_500)
-        val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(context)
-        val artifactsDir = File(mediaRoot, "additional_test_output/update-notification")
-        assertTrue(
-            "could not create artifact dir ${artifactsDir.absolutePath}",
-            artifactsDir.exists() || artifactsDir.mkdirs(),
+        println(
+            "UPDATE_NOTIFICATION_LIVE " +
+                "title=${title.quoteForEvidence()} " +
+                "body=${text.quoteForEvidence()} " +
+                "content_intent_present=true",
         )
-        val shot = File(artifactsDir, "update-available-notification-viewport.png")
-        val bitmap: Bitmap? = instrumentation.uiAutomation.takeScreenshot()
-        assertNotNull("could not capture a screenshot of the notification shade", bitmap)
-        FileOutputStream(shot).use { bitmap!!.compress(Bitmap.CompressFormat.PNG, 100, it) }
-        assertTrue("screenshot of the notification shade was not written", shot.exists() && shot.length() > 0)
-        // Make the on-device path easy to find in instrumentation logs so the
-        // reviewer can `adb pull` it.
-        println("UPDATE_NOTIFICATION_SCREENSHOT ${shot.absolutePath}")
-
-        instrumentation.uiAutomation.executeShellCommand("cmd statusbar collapse").close()
     }
 
     /**
@@ -243,6 +207,9 @@ class UpdateAvailableNotificationE2eTest {
                 ?.toString()
                 ?.contains("PocketShell v9.9.9 available") == true
         }
+
+    private fun String.quoteForEvidence(): String =
+        "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
 
     private companion object {
         const val POLL_INTERVAL_MS: Long = 100L

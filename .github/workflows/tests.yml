@@ -188,6 +188,9 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
+      - name: Docker integration guard (#2094)
+        run: scripts/check-ci-docker-integration-execution.py --self-test && scripts/check-ci-docker-integration-execution.py
+
       # Issue #1766: render PNGs are direct test side effects, so Gradle can
       # otherwise return FROM-CACHE/UP-TO-DATE for a second, differently
       # filtered DesignRenders method without creating its PNG. This fake-Gradle
@@ -959,17 +962,22 @@ jobs:
       - name: Smoke shared tmux-wrapper fixtures
         run: scripts/test-shared-tmux-wrapper-fixtures.sh --docker
 
-      # Issue #691: core-tmux:integrationTest (Testcontainers, no emulator) is
-      # added here so the control-mode contract — `tmux -CC` spawns, structural
-      # events surface, one-command-at-a-time framing, list-sessions/new-session
-      # round-trips — is pinned on EVERY push, not only nightly. Cheap win: it
-      # runs on the same plain Docker runner as the other integration tests.
-      - name: Run integration tests
-        timeout-minutes: 45
-        run: ./gradlew :app:integrationTest :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest :shared:core-tmux:integrationTest --no-daemon --stacktrace
+      - name: Integration run marker (#2094)
+        run: touch "${RUNNER_TEMP}/integration-test-run-start"
 
-      - name: Upload integration test reports on failure
-        if: failure()
+      - name: Run integration tests
+        id: integration_tests
+        timeout-minutes: 45
+        run: |
+          set -o pipefail
+          ./gradlew :app:integrationTest :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest :shared:core-tmux:integrationTest --rerun-tasks --no-build-cache --no-daemon --stacktrace --console=plain 2>&1 | tee "${RUNNER_TEMP}/integration-test-gradle.log"
+
+      - name: Verify integration execution (#2094)
+        if: always() && steps.integration_tests.conclusion != 'skipped'
+        run: scripts/check-ci-docker-integration-execution.py --verify-results --newer-than "${RUNNER_TEMP}/integration-test-run-start" --gradle-log "${RUNNER_TEMP}/integration-test-gradle.log"
+
+      - name: Upload integration test reports
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: integration-test-reports
@@ -978,7 +986,7 @@ jobs:
             **/build/test-results/
           # Issue #1809: same re-run hygiene as the unit job's upload.
           overwrite: true
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Per-push emulator-journey job (issue #691, the #638 mandate that never

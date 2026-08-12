@@ -692,6 +692,7 @@ class TmuxSessionViewModelTerminalBackpressureTest : TmuxSessionViewModelTestBas
         )
         advanceUntilIdle()
         val originalTerminalState = vm.panes.value.single().terminalState
+        val originalPagerTerminalState = vm.unifiedPanes.value.single().terminalState
         val attemptsBeforeFailure = TMUX_CONNECT_ATTEMPTS.get()
 
         vm.reportTerminalSurfaceFailureForTest(
@@ -711,6 +712,14 @@ class TmuxSessionViewModelTerminalBackpressureTest : TmuxSessionViewModelTestBas
             "terminal surface should be recreated locally so IME/input can recover",
             originalTerminalState,
             vm.panes.value.single().terminalState,
+        )
+        val recoveredTerminalState = vm.panes.value.single().terminalState
+        val recoveredPagerTerminalState = vm.unifiedPanes.value.single().terminalState
+        assertTrue(
+            "one transparent recovery must publish the fresh TerminalSurfaceState " +
+                "to the terminal pager instead of leaving its detached state stale",
+            recoveredPagerTerminalState === recoveredTerminalState &&
+                recoveredPagerTerminalState !== originalPagerTerminalState,
         )
     }
 
@@ -804,6 +813,10 @@ class TmuxSessionViewModelTerminalBackpressureTest : TmuxSessionViewModelTestBas
             "a recovery storm must flip the pane into the actionable surface-error state",
             pane.surfaceError,
         )
+        assertTrue(
+            "the terminal pager must receive the actionable surface-error state",
+            vm.unifiedPanes.value.single().surfaceError,
+        )
         assertFalse(
             "surface recovery storm must not flip tmux disconnected",
             client.disconnectedSignal.value,
@@ -828,6 +841,10 @@ class TmuxSessionViewModelTerminalBackpressureTest : TmuxSessionViewModelTestBas
         assertFalse(
             "recreate must clear the surface-error state",
             recovered.surfaceError,
+        )
+        assertFalse(
+            "the terminal pager must receive the recreated surface",
+            vm.unifiedPanes.value.single().surfaceError,
         )
         assertNotSame(
             "recreate must build a fresh TerminalSurfaceState so IME/input can recover",

@@ -163,7 +163,6 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.proof.TmuxOrphanClientCleanupE2eTest"
   "com.pocketshell.app.proof.TmuxSessionSwitchE2eTest"
   "com.pocketshell.app.proof.TmuxSessionSwitchSameHostReusesSshE2eTest"
-  "com.pocketshell.app.proof.TmuxTerminalSurfaceFailureE2eTest"
   "com.pocketshell.app.proof.WarmLeaseReuseBatchCDockerTest"
   "com.pocketshell.app.proof.WarmLeaseReuseDockerTest"
   "com.pocketshell.app.proof.WithinGraceResumeRideThroughE2eTest"

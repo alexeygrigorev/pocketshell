@@ -8,7 +8,8 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
-import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -16,18 +17,26 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.printToString
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
-import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.waitForInputMethodVisible
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_SURFACE_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_SURFACE_RECREATE_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -56,9 +65,10 @@ import java.io.FileOutputStream
  * alive — a local terminal-surface / IME / render failure is being
  * misclassified as a connection failure.
  *
- * This connected E2E drives the production `MainActivity` host-tap → tmux
- * route to a live session on the deterministic Docker `agents` fixture
- * (port 2222, already brought up by the nightly-extensive workflow). It then:
+ * This connected E2E class drives two independently seeded production
+ * `MainActivity` host-tap → tmux journeys to a live session on the
+ * deterministic Docker `agents` fixture (port 2222, already brought up by the
+ * nightly-extensive workflow). Each journey then:
  *
  *  1. Types a large multi-line prompt into the pane (the dictation-sized
  *     input that precedes the failure in the field report).
@@ -81,11 +91,14 @@ import java.io.FileOutputStream
  *  - The recovery storm stops at an actionable terminal-surface error
  *    state with a "Recreate terminal" control instead of thrashing forever
  *    or entering an indefinite reconnect loop.
- *  - Tapping "Recreate terminal" rebuilds the surface and re-attaches to
- *    the still-live tmux pane, restoring a usable terminal — no SSH
- *    reconnect, no force-restart.
- *  - The app stays navigable throughout (the session screen is still
- *    mounted; the host list / back navigation are reachable).
+ *  - The navigation journey uses the production Back control while that
+ *    actionable error is still active, reaches the host session list, and
+ *    proves its seeded session row is fully visible and actionable. It ends
+ *    there, before any Recreate/recovery can make the navigation oracle
+ *    vacuous.
+ *  - The recovery journey separately taps "Recreate terminal", rebuilds the
+ *    surface, and re-attaches to the still-live tmux pane, restoring a usable
+ *    terminal — no SSH reconnect, no force-restart.
  *
  * # CI compatibility
  *
@@ -97,40 +110,85 @@ import java.io.FileOutputStream
 @RunWith(AndroidJUnit4::class)
 class TmuxTerminalSurfaceFailureE2eTest {
 
-    @get:Rule
-    val compose = createEmptyComposeRule()
+    // Issue #788/#848: launch-owned rule so the Compose clock and the real
+    // TerminalView interop child share one MainActivity. Seed the Docker tmux
+    // session and Room host before Compose launches that activity.
+    val compose = createAndroidComposeRule<MainActivity>()
 
-    // Issue #470 blocker #1: grant runtime permissions before the activity
-    // launches so the system GrantPermissionsActivity never steals focus
-    // from the Compose hierarchy ("No compose hierarchies found").
     @get:Rule
-    val grantPermissions = PreGrantPermissionsRule()
+    val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
+        .outerRule(PreGrantPermissionsRule())
+        .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(compose)
 
-    private var launchedActivity: ActivityScenario<MainActivity>? = null
-    private var seededKey: String? = null
+    private lateinit var fixtureKey: String
+    private lateinit var hostRowTag: String
+    private lateinit var artifactScenario: String
+
+    private suspend fun seedBeforeLaunch() {
+        fixtureKey = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(fixtureKey))
+        seedTmuxSession(fixtureKey)
+        hostRowTag = seedDockerHost(fixtureKey, "Issue423 Surface")
+        forceFlatHostDetailViewMode()
+    }
 
     @After
     fun teardown() {
-        seededKey?.let { key -> runCatching { runBlocking { cleanupSeededSession(key) } } }
-        runCatching { launchedActivity?.close() }
+        if (::fixtureKey.isInitialized) {
+            runCatching { runBlocking { cleanupSeededSession(fixtureKey) } }
+        }
     }
 
     @Test
     fun keyboardSurfaceFailureAfterLargePromptRecoversWithoutSshReconnect() { runBlocking<Unit> {
-        val key = readFixtureKey()
-        seededKey = key
-        waitForSshFixtureReady(SshKey.Pem(key))
+        artifactScenario = RECOVERY_ARTIFACT_SCENARIO
+        driveToActionableSurfaceError()
 
-        seedTmuxSession(key)
-        val hostRowTag = seedDockerHost(key, "Issue423 Surface")
+        // ===== Recovery — Recreate the terminal surface =====
+        val recreateStart = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(TMUX_TERMINAL_SURFACE_RECREATE_TAG, useUnmergedTree = true)
+            .performClick()
+        // The error state clears and a fresh TerminalView re-attaches to the
+        // still-live tmux pane.
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(TMUX_TERMINAL_SURFACE_ERROR_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        waitForTerminalViewAttached()
+        // The recreated surface replays the live pane buffer and reattaches to
+        // the still-live tmux pane. The most recent live content is the large
+        // prompt typed before the failure (the initial ISSUE423-READY marker
+        // has scrolled out of the visible viewport behind that prompt), so the
+        // proof that we reattached to the SAME live pane is that the prompt
+        // head reappears in the recreated surface.
+        waitForVisibleTerminal("recovered live pane") { it.contains(PROMPT_HEAD) }
+        recordTiming("recreate-tap->terminal-reattached", recreateStart)
+        captureViewport("issue423-05-recovered")
 
-        // Force the flat host-detail view so the seeded session renders as a
-        // tappable row (not nested under a collapsed folder group). Same setup
-        // as the passing TmuxSessionSwitchE2eTest, done before launch.
-        forceFlatHostDetailViewMode()
+        assertTrue(
+            "recreate must not reconnect SSH — transport stays Connected " +
+                "(observed ${currentConnectionStatus()})",
+            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
 
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        writeTimings()
+    } }
 
+    @Test
+    fun actionableSurfaceErrorKeepsProductionBackNavigationUsable() { runBlocking<Unit> {
+        artifactScenario = NAVIGATION_ARTIFACT_SCENARIO
+        driveToActionableSurfaceError()
+
+        // This is intentionally the terminal step: the Back action and real
+        // row assertion happen while the actionable error is still active,
+        // before any Recreate/recovery can clear the reported state.
+        navigateFromActiveSurfaceErrorToHostDetail()
+        writeTimings()
+    } }
+
+    private fun driveToActionableSurfaceError() {
         // ===== Step 1 — Attach to the seeded session =====
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
@@ -143,12 +201,13 @@ class TmuxTerminalSurfaceFailureE2eTest {
         // the session row together (same pattern as TmuxSessionSwitchE2eTest)
         // before tapping to attach.
         waitForSessionRowVisible()
+        val sessionRowTapStart = SystemClock.elapsedRealtime()
         compose.onNodeWithText(SESSION_NAME).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
-        val attachStart = SystemClock.elapsedRealtime()
+        selectTerminalTabForJourney()
         waitForTerminalViewAttached()
         waitForVisibleTerminal("initial marker") { it.contains(INITIAL_MARKER) }
-        recordTiming("attach->terminal-visible", attachStart)
+        recordTiming("session-row-tap->terminal-visible", sessionRowTapStart)
         captureViewport("issue423-01-attached")
 
         // ===== Step 2 — Type a large multi-line prompt =====
@@ -161,13 +220,20 @@ class TmuxTerminalSurfaceFailureE2eTest {
         }
         captureViewport("issue423-02-large-prompt")
 
+        // ===== Step 3 — Raise the real soft keyboard =====
+        // Hard-prove the causal field state before touching the failure seam:
+        // the IME is down, the production Show keyboard control is contained,
+        // exactly one real tap raises the system IME, and its non-zero inset
+        // stays stable long enough to rule out a transient frame.
+        showProductionKeyboardAndProveStableIme()
+
         // Sanity: transport is Connected before we fail the surface.
         assertTrue(
             "expected the transport to be Connected before forcing a surface failure",
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
 
-        // ===== Step 3 — Drive a terminal-surface recovery storm =====
+        // ===== Step 4 — Drive a terminal-surface recovery storm =====
         // Same seam the screen's `onLocalTerminalError` callback uses when
         // the embedded Termux view throws during IME/resize/render. A
         // burst past the recovery-storm threshold must trip the actionable
@@ -190,8 +256,16 @@ class TmuxTerminalSurfaceFailureE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        compose.assertNodeFullyWithinRoot(
+            TMUX_TERMINAL_SURFACE_ERROR_TAG,
+            useUnmergedTree = true,
+        )
+        compose.assertNodeFullyWithinRoot(
+            TMUX_TERMINAL_SURFACE_RECREATE_TAG,
+            useUnmergedTree = true,
+        )
         recordTiming("failure-burst->surfaceError-visible", failureBurstStart)
-        captureViewport("issue423-03-surface-error")
+        captureViewport("issue423-04-surface-error")
 
         assertFalse(
             "a local surface failure must NOT show the SSH disconnect/reconnect band",
@@ -207,39 +281,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
                 "(observed ${currentConnectionStatus()})",
             currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
-        // App stays navigable: the session screen is still mounted.
-        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
-
-        // ===== Step 4 — Recreate the terminal surface =====
-        val recreateStart = SystemClock.elapsedRealtime()
-        compose.onNodeWithTag(TMUX_TERMINAL_SURFACE_RECREATE_TAG, useUnmergedTree = true)
-            .performClick()
-        // The error state clears and a fresh TerminalView re-attaches to the
-        // still-live tmux pane.
-        compose.waitUntil(timeoutMillis = 15_000) {
-            compose.onAllNodesWithTag(TMUX_TERMINAL_SURFACE_ERROR_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isEmpty()
-        }
-        waitForTerminalViewAttached()
-        // The recreated surface replays the live pane buffer and reattaches to
-        // the still-live tmux pane. The most recent live content is the large
-        // prompt typed in Step 2 (the initial ISSUE423-READY marker has
-        // scrolled out of the visible viewport behind that prompt), so the
-        // proof that we reattached to the SAME live pane is that the prompt
-        // head reappears in the recreated surface.
-        waitForVisibleTerminal("recovered live pane") { it.contains(PROMPT_HEAD) }
-        recordTiming("recreate-tap->terminal-reattached", recreateStart)
-        captureViewport("issue423-04-recovered")
-
-        assertTrue(
-            "recreate must not reconnect SSH — transport stays Connected " +
-                "(observed ${currentConnectionStatus()})",
-            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
-        )
-
-        writeTimings()
-    } }
+    }
 
     // ----------------------------------------------------------------
     // ViewModel access (production seam used by the screen)
@@ -256,14 +298,14 @@ class TmuxTerminalSurfaceFailureE2eTest {
     }
 
     private fun invokeOnTmuxViewModel(block: (TmuxSessionViewModel) -> Unit) {
-        launchedActivity?.onActivity { activity -> block(tmuxViewModel(activity)) }
+        compose.activityRule.scenario.onActivity { activity -> block(tmuxViewModel(activity)) }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
     }
 
     private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
         var status: TmuxSessionViewModel.ConnectionStatus =
             TmuxSessionViewModel.ConnectionStatus.Idle
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             status = tmuxViewModel(activity).connectionStatus.value
         }
         return status
@@ -271,7 +313,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
 
     private fun currentPaneId(): String {
         var paneId = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             paneId = tmuxViewModel(activity).panes.value.firstOrNull()?.paneId.orEmpty()
         }
         check(paneId.isNotBlank()) { "expected at least one tmux pane to be attached" }
@@ -337,6 +379,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
                 "tmux new-session -d -s ${shellQuote(SESSION_NAME)} " +
                     shellQuote("printf '$INITIAL_MARKER\\n'; exec sh"),
             )
+            appendLine("tmux set-option -t ${shellQuote(SESSION_NAME)} @ps_agent_kind codex")
             appendLine("tmux list-sessions")
         }
         val result = SshConnection.connect(
@@ -407,12 +450,34 @@ class TmuxTerminalSurfaceFailureE2eTest {
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
-            launchedActivity?.onActivity { activity ->
+            compose.activityRule.scenario.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
                 attached = view?.currentSession != null && view.mEmulator != null
             }
             attached
         }
+    }
+
+    /**
+     * The recorded Codex kind defaults to Conversation. The surface-failure
+     * oracle and viewport must exercise the selected Terminal page itself;
+     * finding an offscreen pager node while Conversation is visible is a
+     * vacuous green.
+     */
+    private fun selectTerminalTabForJourney() {
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
     }
 
     private fun waitForVisibleTerminal(
@@ -453,7 +518,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
 
     private fun terminalInputConnection(): InputConnection {
         var connection: InputConnection? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             val view = requireNotNull(activity.window.decorView.findTerminalView()) {
                 "TerminalView was not found"
             }
@@ -464,9 +529,173 @@ class TmuxTerminalSurfaceFailureE2eTest {
         return requireNotNull(connection) { "TerminalView did not create an InputConnection" }
     }
 
+    private fun showProductionKeyboardAndProveStableIme() {
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.assertNodeFullyWithinRoot(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+
+        val visibleBeforeTap = waitForInputMethodVisible(
+            scenario = compose.activityRule.scenario,
+            expected = false,
+            timeoutMs = IME_HIDE_TIMEOUT_MS,
+        )
+        assertFalse(
+            "expected the real IME to be hidden before the one production Show keyboard " +
+                "tap; observed ime_visible=$visibleBeforeTap",
+            visibleBeforeTap,
+        )
+
+        // Exactly one production action. Retrying would hide a broken first tap.
+        val tapStart = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()
+        val visibleAfterTap = waitForInputMethodVisible(
+            scenario = compose.activityRule.scenario,
+            expected = true,
+            timeoutMs = IME_SHOW_TIMEOUT_MS,
+        )
+        assertTrue(
+            "one production Show keyboard tap must make the real IME visible",
+            visibleAfterTap,
+        )
+
+        val stableIme = waitForStableVisibleIme()
+        assertTrue(
+            "real IME must remain visible with a non-zero bottom inset for " +
+                "${IME_STABLE_DURATION_MS}ms before the surface-failure seam; " +
+                "last visible=${stableIme.visible} bottom=${stableIme.bottomPx}px " +
+                "stable=${stableIme.stableDurationMs}ms samples=${stableIme.samples}",
+            stableIme.visible &&
+                stableIme.bottomPx > 0 &&
+                stableIme.stableDurationMs >= IME_STABLE_DURATION_MS,
+        )
+        recordTiming("show-keyboard-tap->stable-real-ime", tapStart)
+        writeText(
+            "issue423-03-keyboard-up-ime.txt",
+            buildString {
+                appendLine("production_show_keyboard_taps=1")
+                appendLine("ime_visible_before_tap=$visibleBeforeTap")
+                appendLine("ime_visible_after_tap=$visibleAfterTap")
+                appendLine("ime_visible_stable=${stableIme.visible}")
+                appendLine("ime_bottom_px=${stableIme.bottomPx}")
+                appendLine("stable_duration_ms=${stableIme.stableDurationMs}")
+                appendLine("stable_samples=${stableIme.samples}")
+            },
+        )
+        captureFullDevice("issue423-03-keyboard-up")
+    }
+
+    private fun waitForStableVisibleIme(): ImeEvidence {
+        val deadline = SystemClock.elapsedRealtime() + IME_STABILITY_TIMEOUT_MS
+        var stableSince = 0L
+        var stableSamples = 0
+        var last = ImeEvidence(false, 0, 0, 0)
+
+        while (SystemClock.elapsedRealtime() < deadline) {
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            val sample = readImeEvidence()
+            val now = SystemClock.elapsedRealtime()
+            if (sample.visible && sample.bottomPx > 0) {
+                if (stableSince == 0L) {
+                    stableSince = now
+                    stableSamples = 0
+                }
+                stableSamples += 1
+                val stableDuration = now - stableSince
+                last = sample.copy(
+                    stableDurationMs = stableDuration,
+                    samples = stableSamples,
+                )
+                if (stableDuration >= IME_STABLE_DURATION_MS) return last
+            } else {
+                stableSince = 0L
+                stableSamples = 0
+                last = sample
+            }
+            SystemClock.sleep(IME_SAMPLE_INTERVAL_MS)
+        }
+        return last
+    }
+
+    private fun readImeEvidence(): ImeEvidence {
+        var evidence = ImeEvidence(false, 0, 0, 0)
+        compose.activityRule.scenario.onActivity { activity ->
+            val insets = ViewCompat.getRootWindowInsets(activity.window.decorView)
+            evidence = ImeEvidence(
+                visible = insets?.isVisible(WindowInsetsCompat.Type.ime()) == true,
+                bottomPx = insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0,
+                stableDurationMs = 0,
+                samples = 1,
+            )
+        }
+        return evidence
+    }
+
+    private fun navigateFromActiveSurfaceErrorToHostDetail() {
+        // These are the load-bearing preconditions: Back is clicked while the
+        // actionable error is visibly selected, and no recovery action has run.
+        compose.assertNodeFullyWithinRoot(
+            TMUX_TERMINAL_SURFACE_ERROR_TAG,
+            useUnmergedTree = true,
+        )
+        compose.assertNodeFullyWithinRoot(
+            TMUX_TERMINAL_SURFACE_RECREATE_TAG,
+            useUnmergedTree = true,
+        )
+        val backTag = listOf(
+            TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
+            TMUX_FULL_CHROME_BACK_BUTTON_TAG,
+        ).firstOrNull { tag ->
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        } ?: error("expected a production tmux Back control during the active surface error")
+
+        compose.assertNodeFullyWithinRoot(backTag, useUnmergedTree = true)
+        val backStart = SystemClock.elapsedRealtime()
+        compose.onNodeWithTag(backTag, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        waitForSessionRowVisible()
+        assertNamedSessionRowFullyWithinRootAndActionable()
+        recordTiming("surface-error-back-tap->host-session-list", backStart)
+        captureFullDevice("issue423-05-navigated-from-active-error")
+        assertTrue(
+            "error-state navigation must retain the connected transport " +
+                "(observed ${currentConnectionStatus()})",
+            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+    }
+
+    private fun assertNamedSessionRowFullyWithinRootAndActionable() {
+        // FolderList may render the named session as either a flat row or a
+        // revealed tree child. The user-facing contract is the merged row with
+        // this exact session name and click action — the same production node
+        // used to enter the session at the start of the journey.
+        val row = compose.onNodeWithText(SESSION_NAME)
+            .assertHasClickAction()
+            .fetchSemanticsNode()
+        val root = compose.onRoot().fetchSemanticsNode()
+        val rowBounds = row.boundsInRoot
+        val rootBounds = root.boundsInRoot
+        assertTrue(
+            "named production session row must be fully within the host-list viewport; " +
+                "rowBounds=$rowBounds rootBounds=$rootBounds",
+            rowBounds.left >= rootBounds.left &&
+                rowBounds.top >= rootBounds.top &&
+                rowBounds.right <= rootBounds.right &&
+                rowBounds.bottom <= rootBounds.bottom,
+        )
+    }
+
     private fun visibleTerminalText(): String {
         var text = ""
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             text = activity.window.decorView
                 .findTerminalView()
                 ?.currentSession
@@ -496,7 +725,7 @@ class TmuxTerminalSurfaceFailureE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
+        compose.activityRule.scenario.onActivity { activity ->
             // Prefer the embedded TerminalView so the viewport screenshot is the
             // authoritative terminal render. In the surfaceError state there is
             // no attached TerminalView (the broken surface is replaced by the
@@ -513,6 +742,17 @@ class TmuxTerminalSurfaceFailureE2eTest {
         bitmap?.let { writeBitmap("$name-viewport", it) }
         writeText("$name-visible-terminal.txt", visibleTerminalText())
         bitmap?.recycle()
+    }
+
+    private fun captureFullDevice(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot()) {
+            "system screenshot was unavailable for $name"
+        }
+        writeBitmap("$name-full-device", bitmap)
+        bitmap.recycle()
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {
@@ -543,7 +783,13 @@ class TmuxTerminalSurfaceFailureE2eTest {
     private fun artifactFile(name: String): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
-        val dir = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME")
+        check(::artifactScenario.isInitialized) {
+            "artifact scenario must be selected before writing #423 evidence"
+        }
+        val dir = File(
+            mediaRoot,
+            "additional_test_output/$DEVICE_DIR_NAME/$artifactScenario",
+        )
         check(dir.exists() || dir.mkdirs()) {
             "could not create artifact directory ${dir.absolutePath}"
         }
@@ -567,13 +813,27 @@ class TmuxTerminalSurfaceFailureE2eTest {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val LOG_TAG: String = "Issue423SurfaceFail"
         const val DEVICE_DIR_NAME: String = "issue423-terminal-surface-failure"
+        const val RECOVERY_ARTIFACT_SCENARIO: String = "recovery"
+        const val NAVIGATION_ARTIFACT_SCENARIO: String = "navigation-active-error"
         const val SESSION_NAME: String = "issue423-surface"
         const val INITIAL_MARKER: String = "ISSUE423-READY"
         const val PROMPT_HEAD: String = "ISSUE423-PROMPT-HEAD"
+        const val IME_HIDE_TIMEOUT_MS: Long = 5_000
+        const val IME_SHOW_TIMEOUT_MS: Long = 15_000
+        const val IME_STABILITY_TIMEOUT_MS: Long = 5_000
+        const val IME_STABLE_DURATION_MS: Long = 750
+        const val IME_SAMPLE_INTERVAL_MS: Long = 50
 
         // One past the in-app storm threshold so the error state trips
         // deterministically even if a stray transparent recovery is
         // absorbed first.
         const val SURFACE_FAILURE_BURST: Int = 6
     }
+
+    private data class ImeEvidence(
+        val visible: Boolean,
+        val bottomPx: Int,
+        val stableDurationMs: Long,
+        val samples: Int,
+    )
 }

@@ -37,6 +37,7 @@ export POCKETSHELL_DISK_MIN_FREE_MB=0
 export POCKETSHELL_DISK_WARN_FREE_MB=0
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REAL_FLOCK="$(command -v flock)"
 ACTIVE_CASE_SANDBOX=""
 ACTIVE_PROCESS_GROUPS=()
 
@@ -100,18 +101,24 @@ kill_group() {
     sleep 0.02
   done
   wait "$pid" 2>/dev/null || true
+  if ps -eo pgid=,stat= | awk -v pgid="$pid" \
+      '$1 == pgid && $2 !~ /^Z/ { found = 1 } END { exit !found }'; then
+    ps -eo pid=,ppid=,pgid=,stat=,comm= | awk -v pgid="$pid" '$3 == pgid' >&2
+    return 1
+  fi
 }
 
 cleanup_active_case() {
-  local pid
+  local pid cleanup_rc=0
   for pid in "${ACTIVE_PROCESS_GROUPS[@]:-}"; do
-    kill_group "$pid"
+    kill_group "$pid" || cleanup_rc=1
   done
   if [[ -n "$ACTIVE_CASE_SANDBOX" ]]; then
     rm -rf "$ACTIVE_CASE_SANDBOX"
   fi
+  return "$cleanup_rc"
 }
-trap cleanup_active_case EXIT
+trap 'cleanup_active_case || true' EXIT
 
 descendant_pids() {
   local parent="$1"
@@ -121,6 +128,35 @@ descendant_pids() {
     printf '%s\n' "$child"
     descendant_pids "$child"
   done < <(ps -o pid= --ppid "$parent" 2>/dev/null | awk '{ print $1 }')
+}
+
+serial_lock_fds_in_group() {
+  local lock_file="$1" process_group="$2"
+  local pid fd target
+  while IFS= read -r pid; do
+    pid="${pid//[[:space:]]/}"
+    [[ -n "$pid" ]] || continue
+    for fd in "/proc/$pid/fd/"*; do
+      [[ -e "$fd" ]] || continue
+      target="$(readlink -f "$fd" 2>/dev/null || true)"
+      [[ "$target" == "$lock_file" ]] || continue
+      printf 'lock-fd: resource=%s process_group=%s pid=%s fd=%s comm=%s\n' \
+        "$lock_file" "$process_group" "$pid" "${fd##*/}" \
+        "$(tr '\0' ' ' < "/proc/$pid/comm" 2>/dev/null || true)"
+    done
+  done < <(ps -eo pid=,pgid= | awk -v pgid="$process_group" '$2 == pgid { print $1 }')
+}
+
+wait_for_serial_flock_reclaim() {
+  local lock_file="$1" process_group="$2" timeout="${3:-3}"
+  local waited=0 limit=$((timeout * 100))
+  while ! "$REAL_FLOCK" -n "$lock_file" true; do
+    if (( waited++ >= limit )); then
+      serial_lock_fds_in_group "$lock_file" "$process_group" >&2
+      return 1
+    fi
+    sleep 0.01
+  done
 }
 
 make_worktree() {
@@ -244,6 +280,80 @@ DOCKER
   chmod +x "$sandbox/bin/docker"
 }
 
+make_fake_scope_tools() {
+  local sandbox="$1"
+  cat > "$sandbox/bin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'systemctl %s\n' "$*" >> "$FAKE_DEVICE_STATE/scope-tool-events"
+# An empty response makes scope-run treat user systemd as unavailable. The
+# harness explicitly opts into its bare path below, so no process or unit ever
+# enters the host's shared user systemd manager.
+exit 1
+SYSTEMCTL
+  chmod +x "$sandbox/bin/systemctl"
+
+  cat > "$sandbox/bin/systemd-run" <<'SYSTEMD_RUN'
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf 'systemd-run %s\n' "$*" >> "$FAKE_DEVICE_STATE/scope-tool-events"
+touch "$FAKE_DEVICE_STATE/unexpected-systemd-run"
+printf 'FAIL: hermetic ownership harness invoked the host scope launcher\n' >&2
+exit 97
+SYSTEMD_RUN
+  chmod +x "$sandbox/bin/systemd-run"
+}
+
+make_fake_flock() {
+  local sandbox="$1"
+  cat > "$sandbox/bin/flock" <<'FLOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+
+real_flock="${FAKE_REAL_FLOCK:?}"
+device_state="${FAKE_DEVICE_STATE:-}"
+run_id="${FAKE_RUN_ID:-}"
+paused_run_id="${FAKE_PAUSE_FLOCK_PROBE_RUN_ID:-}"
+
+# Issue #2085 controlled reproduction. The production ownership assertion
+# probes the selected serial with `flock -n 9` while the wrapper retains its
+# continuous FD. If the wrapper is SIGKILLed after this probe is forked but
+# before it runs, the probe can acquire the just-released lock and briefly look
+# exactly like an inherited-FD leak. Hold that already-real flock long enough
+# for the harness to observe the historical failure deterministically.
+if [[ -n "$paused_run_id" \
+      && "$paused_run_id" == "$run_id" \
+      && "${1:-}" == "-n" \
+      && "${2:-}" == "9" \
+      && -e "$device_state/$run_id.pre-mutation-paused" ]] \
+    && mkdir "$device_state/$run_id.flock-probe-once" 2>/dev/null; then
+  printf '%s\n' "$BASHPID" > "$device_state/$run_id.flock-probe-pid"
+  touch "$device_state/$run_id.flock-probe-ready"
+  while [[ ! -e "$device_state/$run_id.flock-probe-continue" ]]; do
+    sleep 0.01
+  done
+  lock_path="$(readlink -f "/proc/$BASHPID/fd/9")"
+  exec "$real_flock" -n "$lock_path" bash -c '
+    printf "%s\n" "$BASHPID" > "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.flock-probe-holder-pid"
+    touch "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.flock-probe-acquired"
+    while [[ ! -e "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.flock-probe-release" ]]; do
+      sleep 0.01
+    done
+    # Keep the real lock across a few scheduler turns after the release request.
+    # A retrying oracle passes; restoring the historical one-shot oracle is a
+    # deterministic selective mutation for the issue #2085 regression.
+    sleep 0.15
+    touch "$FAKE_DEVICE_STATE/$FAKE_RUN_ID.flock-probe-released"
+  '
+fi
+
+exec "$real_flock" "$@"
+FLOCK
+  chmod +x "$sandbox/bin/flock"
+}
+
 inject_agents_fork_pause() {
   local root="$1"
   # The literal shell fragment is injected into the sandbox copy and expands
@@ -353,7 +463,7 @@ GRADLEW
 
 make_sandbox() {
   local sandbox="$1" serials="${2:-emulator-5554}"
-  mkdir -p "$sandbox/bin" "$sandbox/device-state" "$sandbox/locks"
+  mkdir -p "$sandbox/bin" "$sandbox/device-state" "$sandbox/locks" "$sandbox/tmp"
   # Issue #2007: the wrapper now also owns its checkout's gradle output tree.
   # Anchor that lock inside this sandbox so a case can neither queue behind a
   # real build on the box nor leave a lock file per sandbox in the real
@@ -362,6 +472,7 @@ make_sandbox() {
   export POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR="$sandbox/gradle-output-locks"
   make_fake_adb "$sandbox"
   make_fake_docker "$sandbox"
+  make_fake_scope_tools "$sandbox"
   make_worktree "$ROOT_DIR" "$sandbox/pool-root"
   make_worktree "$ROOT_DIR" "$sandbox/legacy-root"
   make_fake_gradle "$sandbox/pool-root"
@@ -386,6 +497,7 @@ start_wrapper() {
 
   setsid env \
     TZ="${FAKE_WRAPPER_TZ:-${TZ:-UTC0}}" \
+    TMPDIR="$sandbox/tmp" \
     PATH="$sandbox/bin:$PATH" \
     ADB="$sandbox/bin/adb" \
     ANDROID_SDK="$sandbox" \
@@ -397,6 +509,7 @@ start_wrapper() {
     POCKETSHELL_AGENTS_POOL_PORTS=2243 \
     POCKETSHELL_AGENTS_WAIT_SECONDS=0 \
     POCKETSHELL_TEST_MEM=1G \
+    POCKETSHELL_SCOPE_ALLOW_BARE=1 \
     POCKETSHELL_CONNECTED_TEST_LIFECYCLE_DIR="$sandbox/lifecycle" \
     FAKE_LIFECYCLE_SECRET=SuperSecretEnvironmentValue2004 \
     FAKE_DEFAULT_SERIAL="${online_serials%% *}" \
@@ -404,6 +517,8 @@ start_wrapper() {
     FAKE_DEVICE_STATE="$sandbox/device-state" \
     FAKE_RUN_ID="$run_id" \
     FAKE_GRADLE_RC="$gradle_rc" \
+    FAKE_REAL_FLOCK="$REAL_FLOCK" \
+    FAKE_PAUSE_FLOCK_PROBE_RUN_ID="${FAKE_PAUSE_FLOCK_PROBE_RUN_ID:-}" \
     FAKE_KILL_HOLDER_RUN_ID="${FAKE_KILL_HOLDER_RUN_ID:-}" \
     FAKE_PAUSE_BEFORE_MUTATION_RUN_ID="${FAKE_PAUSE_BEFORE_MUTATION_RUN_ID:-}" \
     FAKE_PAUSE_AFTER_AGENTS_FORK_RUN_ID="${FAKE_PAUSE_AFTER_AGENTS_FORK_RUN_ID:-}" \
@@ -419,6 +534,7 @@ start_cleanup() {
   local sandbox="$1" run_id="$2" wait_seconds="${3:-8}"
   local root="$sandbox/legacy-root"
   setsid env \
+    TMPDIR="$sandbox/tmp" \
     PATH="$sandbox/bin:$PATH" \
     ADB="$sandbox/bin/adb" \
     ANDROID_SDK="$sandbox" \
@@ -427,6 +543,7 @@ start_cleanup() {
     POCKETSHELL_POOL_SERIALS="emulator-5554" \
     POCKETSHELL_POOL_WAIT_SECONDS="$wait_seconds" \
     POCKETSHELL_AGENTS_PORT=2222 \
+    POCKETSHELL_SCOPE_ALLOW_BARE=1 \
     FAKE_DEFAULT_SERIAL="emulator-5554" \
     FAKE_ONLINE_SERIALS="emulator-5554" \
     FAKE_DEVICE_STATE="$sandbox/device-state" \
@@ -845,7 +962,8 @@ hard_killed_wrapper_leaves_no_descendant_flock() {
 
   # Kill ONLY the authoritative wrapper. Its EXIT trap cannot run. The paused
   # async shell/Gradle descendants deliberately remain alive, yet none may own
-  # the wrapper's FD and the kernel flock must be immediately reclaimable.
+  # the wrapper's FD. The kernel flock must be reclaimable after any already-
+  # forked ownership probe in this invocation drains.
   kill -KILL "$wrapper_pid"
   wait "$wrapper_pid" 2>/dev/null || true
   local live_descendant=0
@@ -854,13 +972,7 @@ hard_killed_wrapper_leaves_no_descendant_flock() {
   done
   (( live_descendant == 1 )) \
     || fail "hard-crash proof lost all descendants instead of exercising orphan FD behavior"
-  if ! flock -n "$serial_lock" true; then
-    for fd in /proc/[0-9]*/fd/*; do
-      [[ "$(readlink -f "$fd" 2>/dev/null || true)" == "$serial_lock" ]] || continue
-      printf 'leaked-lock-fd: pid=%s fd=%s cmd=%s\n' \
-        "$(cut -d/ -f3 <<< "$fd")" "$fd" \
-        "$(tr '\0' ' ' < "/proc/$(cut -d/ -f3 <<< "$fd")/cmdline" 2>/dev/null || true)" >&2
-    done
+  if ! wait_for_serial_flock_reclaim "$serial_lock" "$wrapper_pid" 3; then
     fail "SIGKILLed wrapper left its serial flock inherited by an async descendant"
   fi
   [[ ! -e "$sandbox/device-state/crashed.started" ]] \
@@ -876,6 +988,63 @@ hard_killed_wrapper_leaves_no_descendant_flock() {
   [[ ! -e "$sandbox/device-state/overlap" ]] \
     || fail "post-crash contender overlapped a mutation from the killed wrapper"
 
+  kill_group "$wrapper_pid"
+}
+
+controlled_inflight_probe_does_not_masquerade_as_inherited_flock() {
+  local sandbox="$1"
+  make_sandbox "$sandbox"
+  make_fake_flock "$sandbox"
+
+  local wrapper_pid
+  FAKE_PAUSE_BEFORE_MUTATION_RUN_ID=probecrash \
+    FAKE_PAUSE_FLOCK_PROBE_RUN_ID=probecrash \
+    start_wrapper "$sandbox" pool probecrash i2085probecrash
+  wrapper_pid="$WRAPPER_PID"
+  wait_for_file "$sandbox/device-state/probecrash.pre-mutation-paused" 10 \
+    || { kill_group "$wrapper_pid"; fail "controlled probe case never reached the pre-mutation pause"; }
+  wait_for_file "$sandbox/device-state/probecrash.flock-probe-ready" 10 \
+    || { kill_group "$wrapper_pid"; fail "controlled probe case never exposed the in-flight ownership probe"; }
+
+  local probe_pid probe_pgid serial_lock
+  probe_pid="$(<"$sandbox/device-state/probecrash.flock-probe-pid")"
+  probe_pgid="$(ps -o pgid= -p "$probe_pid" | tr -d ' ')"
+  serial_lock="$sandbox/locks/avd-lock-emulator-5554"
+  [[ "$probe_pgid" == "$wrapper_pid" ]] \
+    || fail "controlled ownership probe escaped its invocation process group (wrapper_pgid=$wrapper_pid probe_pid=$probe_pid probe_pgid=$probe_pgid)"
+
+  # Kill only the authoritative wrapper, exactly like the historical #1737
+  # regression. The already-forked ownership probe is a known descendant: once
+  # the wrapper releases its continuous FD, the probe legitimately acquires the
+  # same per-invocation lock for a few scheduler turns. A one-shot reclaim oracle
+  # misclassifies that short-lived probe as an inherited continuous FD.
+  kill -KILL "$wrapper_pid"
+  wait "$wrapper_pid" 2>/dev/null || true
+  touch "$sandbox/device-state/probecrash.flock-probe-continue"
+  wait_for_file "$sandbox/device-state/probecrash.flock-probe-acquired" 10 \
+    || fail "controlled ownership probe did not acquire the just-released serial flock"
+  local lane_init_files=()
+  mapfile -t lane_init_files < <(
+    find "$sandbox/tmp" -maxdepth 1 -type f \
+      -name 'pocketshell-lane-init-i2085probecrash.*.gradle' -print
+  )
+  (( ${#lane_init_files[@]} == 1 )) \
+    || fail "controlled hard-killed wrapper did not contain its lane-init artifact in the invocation sandbox (found ${#lane_init_files[@]})"
+  local holder_pid
+  holder_pid="$(<"$sandbox/device-state/probecrash.flock-probe-holder-pid")"
+  printf 'CONTROLLED_FLOCK_CONFLICT resource=%s descendant_pid=%s holder_pid=%s process_group=%s\n' \
+    "$serial_lock" "$probe_pid" "$holder_pid" "$wrapper_pid" >&2
+
+  ! "$REAL_FLOCK" -n "$serial_lock" true \
+    || fail "controlled ownership probe did not hold the exact serial resource"
+
+  touch "$sandbox/device-state/probecrash.flock-probe-release"
+  wait_for_serial_flock_reclaim "$serial_lock" "$wrapper_pid" 3 \
+    || fail "in-flight ownership probe did not release its per-invocation serial flock"
+  wait_for_file "$sandbox/device-state/probecrash.flock-probe-released" 3 \
+    || fail "controlled ownership probe did not report its release"
+  [[ ! -e "$sandbox/device-state/probecrash.started" ]] \
+    || fail "controlled hard-killed wrapper mutated before ownership reclamation"
   kill_group "$wrapper_pid"
 }
 
@@ -1155,7 +1324,12 @@ run_case() {
   ACTIVE_CASE_SANDBOX="$sandbox"
   ACTIVE_PROCESS_GROUPS=()
   "$name" "$sandbox"
-  cleanup_active_case
+  [[ ! -e "$sandbox/device-state/unexpected-systemd-run" ]] \
+    || fail "$name escaped its sandbox through the host user systemd manager"
+  cleanup_active_case \
+    || fail "$name left a live process in an invocation-owned process group"
+  [[ ! -e "$sandbox" ]] \
+    || fail "$name left its invocation sandbox behind"
   ACTIVE_CASE_SANDBOX=""
   ACTIVE_PROCESS_GROUPS=()
   printf '  ok: %s\n' "$name"
@@ -1173,6 +1347,7 @@ CASES=(
   holder_loss_at_cleanup_boundary_fails_before_uninstall
   holder_loss_at_cleanup_boundary_escalates_term_ignoring_uninstall
   hard_killed_wrapper_leaves_no_descendant_flock
+  controlled_inflight_probe_does_not_masquerade_as_inherited_flock
   hard_killed_pool_setup_leaves_no_descendant_flock
   hard_killed_agents_docker_up_leaves_no_descendant_flock
   hard_killed_agents_docker_health_leaves_no_descendant_flock

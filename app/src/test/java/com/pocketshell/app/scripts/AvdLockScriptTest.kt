@@ -6,6 +6,8 @@ import org.junit.Test
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
@@ -75,11 +77,54 @@ class AvdLockScriptTest {
         )
     }
 
+    /**
+     * #2085: parallel JVM lanes must not share the user-systemd manager, temp
+     * state, lock paths, or a SIGKILLed wrapper's short-lived ownership probe.
+     * Keep both real-wrapper ordering directions in this concurrent check.
+     */
+    @Test
+    fun sigkillDescendantHarnessIsHermeticAcrossConcurrentJvmInvocations() {
+        val lanes = 4
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(lanes)
+        val futures = (1..lanes).map {
+            executor.submit<String> {
+                start.await()
+                runShellHarness(
+                    "tests/scripts/connected-test-serial-ownership-test.sh",
+                    timeoutSeconds = 120,
+                    arguments = listOf(
+                        "pool_then_legacy_serialises",
+                        "legacy_then_pool_serialises",
+                        "hard_killed_wrapper_leaves_no_descendant_flock",
+                        "controlled_inflight_probe_does_not_masquerade_as_inherited_flock",
+                    ),
+                )
+            }
+        }
+
+        try {
+            start.countDown()
+            futures.forEachIndexed { index, future ->
+                val output = future.get(150, TimeUnit.SECONDS)
+                assertTrue(
+                    "lane ${index + 1} did not exercise the controlled descendant conflict:\n$output",
+                    output.contains("CONTROLLED_FLOCK_CONFLICT"),
+                )
+            }
+        } finally {
+            futures.forEach { it.cancel(true) }
+            executor.shutdownNow()
+            assertTrue("concurrent harness executor did not stop", executor.awaitTermination(10, TimeUnit.SECONDS))
+        }
+    }
+
     private fun runShellHarness(
         relativePath: String,
         timeoutSeconds: Long,
         environmentOverrides: Map<String, String> = emptyMap(),
-    ) {
+        arguments: List<String> = emptyList(),
+    ): String {
         val script = projectRoot.resolve(relativePath)
         assertTrue("harness is missing: $relativePath", script.toFile().exists())
 
@@ -94,28 +139,95 @@ class AvdLockScriptTest {
         // (The harness scripts scrub the same state themselves too; this makes the
         // JVM boundary hermetic regardless of caller.)
         val lockSandbox = Files.createTempDirectory("pocketshell-avd-lock-test").toFile()
-        lockSandbox.deleteOnExit()
+        val tempDir = lockSandbox.resolve("tmp").apply { mkdirs() }
+        val outputFile = lockSandbox.resolve("harness-output.log")
 
-        val builder = ProcessBuilder("bash", script.toString())
+        val builder = ProcessBuilder(listOf("bash", script.toString()) + arguments)
             .directory(projectRoot.toFile())
             .redirectErrorStream(true)
+            .redirectOutput(outputFile)
         builder.environment().apply {
-            keys.removeAll { it.startsWith("POCKETSHELL_AVD_LOCK") }
-            keys.removeAll { it.startsWith("POCKETSHELL_POOL") }
-            keys.removeAll { it.startsWith("POCKETSHELL_TOXIPROXY") }
+            keys.removeAll { it.startsWith("POCKETSHELL_") }
+            remove("ANDROID_SERIAL")
+            remove("ADB_SERIAL")
             put("POCKETSHELL_AVD_LOCK_DIR", lockSandbox.resolve("locks").toString())
-            put("TMPDIR", lockSandbox.toString())
+            put("POCKETSHELL_GRADLE_OUTPUT_LOCK_DIR", lockSandbox.resolve("gradle-output-locks").toString())
+            put("POCKETSHELL_CONNECTED_TEST_LIFECYCLE_DIR", lockSandbox.resolve("lifecycle").toString())
+            put("TMPDIR", tempDir.toString())
             putAll(environmentOverrides)
         }
         val process = builder.start()
 
-        val output = process.inputStream.bufferedReader().use { it.readText() }
-        val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-        if (!completed) {
-            process.destroyForcibly()
+        try {
+            val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            if (!completed) {
+                terminateProcessTree(process)
+            }
+            val output = outputFile.takeIf { it.exists() }?.readText().orEmpty()
+            assertTrue("harness timed out after ${timeoutSeconds}s: $relativePath\n$output", completed)
+            assertEquals("harness failed: $relativePath\n$output", 0, process.exitValue())
+            return output
+        } finally {
+            if (process.isAlive) {
+                terminateProcessTree(process)
+            }
+            check(lockSandbox.deleteRecursively()) {
+                "harness left its invocation temp directory behind: $lockSandbox"
+            }
         }
-        assertTrue("harness timed out after ${timeoutSeconds}s: $relativePath\n$output", completed)
-        assertEquals("harness failed: $relativePath\n$output", 0, process.exitValue())
+    }
+
+    private fun terminateProcessTree(process: Process) {
+        val rootPid = processPid(process)
+        val descendants = descendantPids(rootPid).asReversed()
+        signalProcesses(descendants, "TERM")
+        process.destroy()
+        process.waitFor(2, TimeUnit.SECONDS)
+        val survivors = (descendants + descendantPids(rootPid)).distinct().filter(::isRunningProcess)
+        signalProcesses(survivors, "KILL")
+        if (process.isAlive) process.destroyForcibly()
+        process.waitFor(5, TimeUnit.SECONDS)
+        val remaining = survivors.filter(::isRunningProcess)
+        check(remaining.isEmpty() && !process.isAlive) {
+            "harness process tree survived forced teardown: root=$rootPid descendants=$remaining"
+        }
+    }
+
+    private fun processPid(process: Process): Long =
+        (Process::class.java.getMethod("pid").invoke(process) as Number).toLong()
+
+    private fun descendantPids(rootPid: Long): List<Long> {
+        val ps = ProcessBuilder("ps", "-eo", "pid=,ppid=").start()
+        val childrenByParent = ps.inputStream.bufferedReader().useLines { lines ->
+            lines.mapNotNull { line ->
+                val fields = line.trim().split(Regex("\\s+"))
+                if (fields.size == 2) fields[0].toLongOrNull()?.let { it to fields[1].toLongOrNull() } else null
+            }.filter { it.second != null }.groupBy({ it.second!! }, { it.first })
+        }
+        check(ps.waitFor(5, TimeUnit.SECONDS) && ps.exitValue() == 0) { "could not inventory harness descendants" }
+        val descendants = mutableListOf<Long>()
+        fun collect(parent: Long) {
+            childrenByParent[parent].orEmpty().forEach { child ->
+                descendants += child
+                collect(child)
+            }
+        }
+        collect(rootPid)
+        return descendants
+    }
+
+    private fun signalProcesses(pids: List<Long>, signal: String) {
+        if (pids.isEmpty()) return
+        ProcessBuilder(listOf("kill", "-$signal") + pids.map(Long::toString))
+            .start()
+            .waitFor(5, TimeUnit.SECONDS)
+    }
+
+    private fun isRunningProcess(pid: Long): Boolean {
+        val stat = Paths.get("/proc", pid.toString(), "stat").toFile()
+        if (!stat.exists()) return false
+        val fields = stat.readText().substringAfterLast(") ").split(' ')
+        return fields.firstOrNull() != "Z"
     }
 
     private fun findProjectRoot(): Path {

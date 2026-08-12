@@ -16,6 +16,7 @@ mkdir -p \
   "$SANDBOX/scripts" \
   "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/composer" \
   "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/costs" \
+  "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications" \
   "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof"
 
 cat > "$SANDBOX/scripts/nightly-extensive-suite.sh" <<'SH'
@@ -46,6 +47,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.ExemptManualHarnessE2eTest"
   "com.pocketshell.app.proof.DirectProofEntryE2eTest#singleMethod"
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable"
   "com.pocketshell.app.tmux.NotAProofEntryE2eTest"
 )
 SH
@@ -58,6 +60,16 @@ KT
 cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/costs/CostsScreenE2eTest.kt" <<'KT'
 package com.pocketshell.app.costs
 class CostsScreenE2eTest
+KT
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    @Test
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(true)
+    }
+}
 KT
 
 cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/BadManualHarnessE2eTest.kt" <<'KT'
@@ -211,6 +223,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.ExemptManualHarnessE2eTest"
   "com.pocketshell.app.proof.DirectProofEntryE2eTest#singleMethod"
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable"
 )
 SH
 
@@ -245,6 +258,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.ExemptManualHarnessE2eTest"
   "com.pocketshell.app.proof.DirectProofEntryE2eTest#singleMethod"
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable"
 )
 SH
 sed -i '/OutboundAttachmentOffsetResumeJourneyE2eTest/d' "$SANDBOX/scripts/nightly-extensive-suite.sh"
@@ -274,6 +288,7 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 JOURNEY_CLASSES=(
   "$FQCN_PREFIX.DeepLinkSessionSwitchE2eTest"
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable"
 )
 SH
 cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/DeepLinkSessionSwitchE2eTest.kt" <<'KT'
@@ -293,6 +308,7 @@ if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'KNOWN_MANUAL_HARNESS:DeepL
 else
   note_fail "stale known manual-harness baseline should fail (got exit $rc)"
 fi
+rm -f "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/proof/DeepLinkSessionSwitchE2eTest.kt"
 
 cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
 #!/usr/bin/env bash
@@ -300,6 +316,7 @@ FQCN_PREFIX="com.pocketshell.app.proof"
 JOURNEY_CLASSES=(
   "com.pocketshell.app.tmux.NotAProofEntryE2eTest"
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable"
 )
 SH
 
@@ -309,6 +326,189 @@ if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'NO_PROOF_CLASSES_PARSED'; 
   note_pass "empty parsed proof class allowlist is a hard failure"
 else
   note_fail "empty parsed proof class allowlist should fail (got exit $rc)"
+fi
+
+cat > "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
+#!/usr/bin/env bash
+FQCN_PREFIX="com.pocketshell.app.proof"
+JOURNEY_CLASSES=(
+  "$FQCN_PREFIX.GoodLaunchOwnedE2eTest"
+  "$FQCN_PREFIX.ExemptManualHarnessE2eTest"
+  "com.pocketshell.app.proof.DirectProofEntryE2eTest#singleMethod"
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable"
+)
+SH
+
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  note_pass "the exact update-notification method is accepted as the required per-push selector"
+else
+  note_fail "the exact update-notification selector should satisfy the required per-push contract (got exit $rc)"
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    // @Test
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(true)
+    }
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'missing @Test method.*UpdateAvailableNotificationE2eTest'; then
+  note_pass "a line-commented @Test cannot make the required method executable"
+else
+  note_fail "a line-commented @Test should fail the exact-method guard specifically (got exit $rc)"
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    /*
+     * @Test
+     */
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(true)
+    }
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'missing @Test method.*UpdateAvailableNotificationE2eTest'; then
+  note_pass "a block-commented @Test cannot make the required method executable"
+else
+  note_fail "a block-commented @Test should fail the exact-method guard specifically (got exit $rc)"
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    private val decoration = """
+        @Test
+    """
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(decoration.isNotEmpty())
+    }
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'missing @Test method.*UpdateAvailableNotificationE2eTest'; then
+  note_pass "an @Test string literal cannot make the required method executable"
+else
+  note_fail "an @Test string literal should fail the exact-method guard specifically (got exit $rc)"
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    @Test
+    fun helper() = Unit
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(true)
+    }
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'missing @Test method.*UpdateAvailableNotificationE2eTest'; then
+  note_pass "an active @Test on another method cannot annotate the required method"
+else
+  note_fail "an @Test on another method should fail the exact-method guard specifically (got exit $rc)"
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    @Test
+    // fun updateNotification_postsToStatusBar_andIsTappable() = Unit
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'missing @Test method.*UpdateAvailableNotificationE2eTest'; then
+  note_pass "a commented required method cannot satisfy the selector"
+else
+  note_fail "a commented required method should fail the exact-method guard specifically (got exit $rc)"
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    @org.junit.Test
+    /* A real block comment and blank line may separate annotation and method. */
+
+    public fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(true)
+    }
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  note_pass "an active fully-qualified @Test remains related across whitespace and block comments"
+else
+  note_fail "a real @Test separated by whitespace/comments should remain executable (got exit $rc)"
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    @Test
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(true)
+    }
+}
+KT
+
+sed -i \
+  's/^  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#/  # "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#/' \
+  "$SANDBOX/scripts/ci-journey-suite.sh"
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable'; then
+  note_pass "a commented-out update selector cannot satisfy the required per-push wiring"
+else
+  note_fail "commenting out the required update selector should fail specifically (got exit $rc)"
+fi
+sed -i \
+  's/^  # "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#/  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#/' \
+  "$SANDBOX/scripts/ci-journey-suite.sh"
+
+sed -i \
+  's/UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable/UpdateAvailableNotificationE2eTest/' \
+  "$SANDBOX/scripts/ci-journey-suite.sh"
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable'; then
+  note_pass "a bare-class update selector cannot stand in for the required exact method"
+else
+  note_fail "replacing the required update method with a bare-class selector should fail specifically (got exit $rc)"
+fi
+
+sed -i \
+  's/UpdateAvailableNotificationE2eTest/UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable/' \
+  "$SANDBOX/scripts/ci-journey-suite.sh"
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    @Test
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        Assume.assumeFalse(TerminalTestTimeouts.isRunningOnCi())
+        check(true)
+    }
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'CI self-skip'; then
+  note_pass "a required update-notification method cannot retain its CI self-skip"
+else
+  note_fail "a required update-notification method with a CI self-skip should fail specifically (got exit $rc)"
 fi
 
 echo

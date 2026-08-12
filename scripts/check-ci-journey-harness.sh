@@ -73,6 +73,14 @@ REQUIRED_PER_PUSH_ANDROID_TEST_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"
 )
 
+# Exact selectors whose method-level attendance is part of the acceptance
+# contract. A bare class selector is not equivalent: it can silently broaden or
+# stop naming the one method whose JUnit XML must prove attendance. The source
+# method must exist as a JUnit test and must not self-skip on CI.
+REQUIRED_PER_PUSH_ANDROID_TEST_SELECTORS=(
+  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest#updateNotification_postsToStatusBar_andIsTappable"
+)
+
 # Current-main androidTest E2e/Docker backlog that is intentionally not in the
 # per-push journey allowlist. New *E2eTest/*DockerTest classes must either be
 # wired into scripts/ci-journey-suite.sh or added here with an intentional
@@ -88,7 +96,6 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.hosts.DefaultHostLaunchE2eTest"
   "com.pocketshell.app.hosts.HostAndFolderListScrollE2eTest"
   "com.pocketshell.app.hosts.HostEditFromKebabE2eTest"
-  "com.pocketshell.app.notifications.UpdateAvailableNotificationE2eTest"
   "com.pocketshell.app.portfwd.ForwardingIndicatorE2eTest"
   "com.pocketshell.app.projects.AgentLaunchCommandDockerTest"
   "com.pocketshell.app.projects.FolderListGatewayDockerTest"
@@ -251,8 +258,8 @@ while IFS= read -r class_name; do
   fi
 done < <(
   sed -nE \
-    -e 's/.*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/\1/p' \
-    -e 's/.*"com\.pocketshell\.app\.proof\.([A-Za-z0-9_]+)(#[^"]*)?".*/\1/p' \
+    -e 's/^[[:space:]]*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/\1/p' \
+    -e 's/^[[:space:]]*"com\.pocketshell\.app\.proof\.([A-Za-z0-9_]+)(#[^"]*)?".*/\1/p' \
     "$SUITE"
 )
 
@@ -266,8 +273,23 @@ while IFS= read -r fqcn; do
   fi
 done < <(
   sed -nE \
-    -e 's/.*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/com.pocketshell.app.proof.\1/p' \
-    -e 's/.*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[^"]*)?".*/\1/p' \
+    -e 's/^[[:space:]]*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[^"]*)?".*/com.pocketshell.app.proof.\1/p' \
+    -e 's/^[[:space:]]*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[^"]*)?".*/\1/p' \
+    "$SUITE"
+)
+
+declare -a WIRED_ANDROID_TEST_SELECTORS=()
+declare -A WIRED_ANDROID_TEST_SELECTOR_SEEN=()
+while IFS= read -r selector; do
+  [[ -z "${selector:-}" ]] && continue
+  if [[ -z "${WIRED_ANDROID_TEST_SELECTOR_SEEN[$selector]:-}" ]]; then
+    WIRED_ANDROID_TEST_SELECTORS+=("$selector")
+    WIRED_ANDROID_TEST_SELECTOR_SEEN[$selector]=1
+  fi
+done < <(
+  sed -nE \
+    -e 's/^[[:space:]]*"\$FQCN_PREFIX\.([A-Za-z0-9_]+)(#[A-Za-z0-9_]+)?".*/com.pocketshell.app.proof.\1\2/p' \
+    -e 's/^[[:space:]]*"(com\.pocketshell\.app\.[A-Za-z0-9_.]+)(#[A-Za-z0-9_]+)?".*/\1\2/p' \
     "$SUITE"
 )
 
@@ -284,6 +306,10 @@ declare -a STALE_BASELINE=()
 declare -a PARSER_FAILURE=()
 declare -a REQUIRED_PER_PUSH_WIRED=()
 declare -a MISSING_REQUIRED_PER_PUSH=()
+declare -a REQUIRED_PER_PUSH_SELECTOR_WIRED=()
+declare -a MISSING_REQUIRED_PER_PUSH_SELECTOR=()
+declare -a INVALID_REQUIRED_PER_PUSH_SELECTOR_SOURCE=()
+declare -a REQUIRED_PER_PUSH_SELECTOR_CI_SELF_SKIP=()
 declare -a UNWIRED_ANDROID_E2E_DOCKER_NEW=()
 declare -a UNWIRED_ANDROID_E2E_DOCKER_KNOWN=()
 declare -a STALE_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=()
@@ -304,6 +330,166 @@ for fqcn in "${REQUIRED_PER_PUSH_ANDROID_TEST_CLASSES[@]}"; do
   else
     REQUIRED_PER_PUSH_WIRED+=("$fqcn")
   fi
+done
+
+
+required_selector_has_ci_self_skip() {
+  local file="$1"
+  local lineno text joined
+  while IFS= read -r lineno; do
+    [[ -z "$lineno" ]] && continue
+    text="$(sed -n "${lineno}p" "$file")"
+    is_code_line "$text" || continue
+    joined="$(sed -n "${lineno},$((lineno + 12))p" "$file" | tr '\n' ' ')"
+    printf '%s' "$joined" | grep -q 'isRunningOnCi' && return 0
+  done < <(
+    grep -nE '(^|[^.[:alnum:]])(assumeTrue|assumeFalse|Assume\.assumeTrue|Assume\.assumeFalse)[[:space:]]*\(' \
+      "$file" 2>/dev/null | cut -d: -f1
+  )
+  return 1
+}
+
+required_selector_is_test_method() {
+  local file="$1"
+  local method="$2"
+  awk -v wanted="$method" '
+    function code_only(line,    out, i, one, two, three) {
+      out = ""
+      i = 1
+      while (i <= length(line)) {
+        one = substr(line, i, 1)
+        two = substr(line, i, 2)
+        three = substr(line, i, 3)
+
+        if (block_depth > 0) {
+          if (two == "/*") {
+            block_depth++
+            i += 2
+          } else if (two == "*/") {
+            block_depth--
+            i += 2
+          } else {
+            i++
+          }
+          continue
+        }
+
+        if (raw_string) {
+          if (three == "\"\"\"") {
+            raw_string = 0
+            i += 3
+          } else {
+            i++
+          }
+          continue
+        }
+
+        if (string_literal) {
+          if (one == "\\") {
+            i += (i < length(line)) ? 2 : 1
+          } else {
+            if (one == "\"") string_literal = 0
+            i++
+          }
+          continue
+        }
+
+        if (char_literal) {
+          if (one == "\\") {
+            i += (i < length(line)) ? 2 : 1
+          } else {
+            if (one == single_quote) char_literal = 0
+            i++
+          }
+          continue
+        }
+
+        if (two == "//") {
+          break
+        } else if (two == "/*") {
+          block_depth = 1
+          out = out " "
+          i += 2
+        } else if (three == "\"\"\"") {
+          raw_string = 1
+          out = out " "
+          i += 3
+        } else if (one == "\"") {
+          string_literal = 1
+          out = out " "
+          i++
+        } else if (one == single_quote) {
+          char_literal = 1
+          out = out " "
+          i++
+        } else {
+          out = out one
+          i++
+        }
+      }
+
+      # Ordinary Kotlin strings and chars cannot cross a physical line.
+      string_literal = 0
+      char_literal = 0
+      return out
+    }
+
+    BEGIN {
+      single_quote = sprintf("%c", 39)
+      modifier = "(public|private|protected|internal|open|final|override|abstract|suspend|operator|infix|inline|tailrec|external)"
+      target_method = "^(" modifier "[[:space:]]+)*fun[[:space:]]+" wanted "[[:space:]]*\\("
+      test_annotation = "^@(org[.]junit[.])?Test([[:space:]]*\\([^)]*\\))?[[:space:]]*$"
+      other_annotation = "^@[A-Za-z_][A-Za-z0-9_.:]*([[:space:]]*\\([^)]*\\))?[[:space:]]*$"
+    }
+
+    {
+      code = code_only($0)
+      sub(/^[[:space:]]+/, "", code)
+      sub(/[[:space:]]+$/, "", code)
+      if (code == "") next
+
+      if (code ~ test_annotation) {
+        pending_test = 1
+        next
+      }
+      if (pending_test && code ~ other_annotation) next
+
+      if (code ~ target_method) {
+        if (pending_test) found = 1
+        exit
+      }
+      pending_test = 0
+    }
+
+    END { exit(found ? 0 : 1) }
+  ' "$file"
+}
+
+for selector in "${REQUIRED_PER_PUSH_ANDROID_TEST_SELECTORS[@]}"; do
+  if ! in_list "$selector" "${WIRED_ANDROID_TEST_SELECTORS[@]}"; then
+    MISSING_REQUIRED_PER_PUSH_SELECTOR+=("$selector")
+    continue
+  fi
+
+  fqcn="${selector%%#*}"
+  method="${selector#*#}"
+  file="$(android_class_file_for "$fqcn")"
+  if [[ ! -f "$file" ]]; then
+    INVALID_REQUIRED_PER_PUSH_SELECTOR_SOURCE+=("$selector -> $file")
+    continue
+  fi
+
+  if ! required_selector_is_test_method "$file" "$method"; then
+    INVALID_REQUIRED_PER_PUSH_SELECTOR_SOURCE+=("$selector -> missing @Test method in $file")
+    continue
+  fi
+
+  if required_selector_has_ci_self_skip "$file"; then
+    REQUIRED_PER_PUSH_SELECTOR_CI_SELF_SKIP+=("$selector -> CI self-skip in $file")
+    continue
+  fi
+
+  REQUIRED_PER_PUSH_SELECTOR_WIRED+=("$selector")
 done
 
 # Issue #1866: this class has a deliberate hard precondition on the Toxiproxy
@@ -467,6 +653,7 @@ echo " Android test classes wired: ${#WIRED_ANDROID_TEST_CLASSES[@]}"
 echo "=============================================================="
 
 print_list "PASS - required #848 per-push androidTest classes wired" "${REQUIRED_PER_PUSH_WIRED[@]:-}"
+print_list "PASS - required exact per-push androidTest selectors are executable" "${REQUIRED_PER_PUSH_SELECTOR_WIRED[@]:-}"
 print_list "PASS - launch-owned MainActivity harness with SeedBeforeLaunchRule" "${COMPLIANT[@]:-}"
 print_list "KNOWN - manual old harness baseline" "${MANUAL_KNOWN[@]:-}"
 print_list "KNOWN - launch-owned but missing shared SeedBeforeLaunchRule baseline" "${MISSING_SHARED_SEED_KNOWN[@]:-}"
@@ -478,6 +665,9 @@ print_list "STALE BASELINE - unwired androidTest E2e/Docker class is now wired" 
 print_list "PARSER FAIL - proof allowlist parser" "${PARSER_FAILURE[@]:-}"
 print_list "MISSING FILE - listed proof class has no source file" "${MISSING_FILES[@]:-}"
 print_list "MISSING REQUIRED - #848 per-push androidTest class not wired" "${MISSING_REQUIRED_PER_PUSH[@]:-}"
+print_list "MISSING REQUIRED SELECTOR - exact per-push androidTest method not wired" "${MISSING_REQUIRED_PER_PUSH_SELECTOR[@]:-}"
+print_list "INVALID REQUIRED SELECTOR - exact method source is not a JUnit test" "${INVALID_REQUIRED_PER_PUSH_SELECTOR_SOURCE[@]:-}"
+print_list "INVALID REQUIRED SELECTOR - exact method retains a CI self-skip" "${REQUIRED_PER_PUSH_SELECTOR_CI_SELF_SKIP[@]:-}"
 print_list "NEW FAIL - manual ActivityScenario/createEmptyComposeRule harness" "${MANUAL_NEW[@]:-}"
 print_list "NEW FAIL - createAndroidComposeRule without SeedBeforeLaunchRule" "${MISSING_SHARED_SEED_NEW[@]:-}"
 print_list "NEW FAIL - androidTest E2e/Docker class not wired into ci-journey-suite.sh" "${UNWIRED_ANDROID_E2E_DOCKER_NEW[@]:-}"
@@ -488,6 +678,9 @@ for item in \
   "${PARSER_FAILURE[@]:-}" \
   "${MISSING_FILES[@]:-}" \
   "${MISSING_REQUIRED_PER_PUSH[@]:-}" \
+  "${MISSING_REQUIRED_PER_PUSH_SELECTOR[@]:-}" \
+  "${INVALID_REQUIRED_PER_PUSH_SELECTOR_SOURCE[@]:-}" \
+  "${REQUIRED_PER_PUSH_SELECTOR_CI_SELF_SKIP[@]:-}" \
   "${MANUAL_NEW[@]:-}" \
   "${MISSING_SHARED_SEED_NEW[@]:-}" \
   "${UNWIRED_ANDROID_E2E_DOCKER_NEW[@]:-}" \

@@ -52,9 +52,10 @@ more than one termination path):
     4  superseded  — the run was cancelled because a NEWER run for the same
                      workflow+branch replaced it (the `main` concurrency group).
                      Nothing is broken; re-watch the newest head.
-    5  no_verdict  — the run was cancelled (user/API, or we could not tell why),
-                     so it produced NO trustworthy verdict. Not a pass, not a
-                     failure — unknown. Re-run to get a verdict.
+    5  no_verdict  — GitHub produced no trustworthy verdict: the run was
+                     cancelled (user/API, or we could not tell why), OR a
+                     completed/success workflow retained a nonterminal required
+                     check. Not a pass, not a failure — unknown.
     6  failed_fast — a required check failed while the RUN IS STILL IN FLIGHT.
                      Artifacts are not final; confirm the completed run.
     7  wall_timeout — the watcher reached --max-wall-clock while the run was
@@ -495,6 +496,39 @@ def classify_run(
             failing_jobs=[],
             reason=f"run was cancelled, so it produced no verdict ({detail})",
             cancelled=True,
+        )
+
+    # Issue #2086: GitHub Actions can finalize the workflow as
+    # `completed/success` while a finished required check remains permanently
+    # `in_progress` with no conclusion. That contradictory snapshot is not
+    # green (the required check never concluded), but it is also not evidence
+    # that any test or product lane failed. Fail closed as the existing
+    # infrastructure/no-verdict class. Do this only when no job genuinely
+    # failed; real red CI must keep the precedence established above (G6).
+    nonterminal_required = [
+        rc
+        for rc in required.values()
+        if rc.status in {"queued", "in_progress"} and rc.conclusion is None
+    ]
+    if (
+        (run_conclusion or "") == "success"
+        and not failed_jobs
+        and nonterminal_required
+    ):
+        detail = ", ".join(
+            f"{rc.name} ({rc.status}/{rc.conclusion or '-'})"
+            for rc in nonterminal_required
+        )
+        return Classification(
+            result=RESULT_NO_VERDICT,
+            required=required,
+            failing_jobs=[],
+            reason=(
+                "inconsistent GitHub Actions metadata (infrastructure): the "
+                "workflow completed/success but required check(s) remained "
+                f"nonterminal: {detail}. No test-failure conclusion exists, so "
+                "this is neither green nor an executed test failure"
+            ),
         )
 
     # Run reports success. Validate the required checks individually.
@@ -1070,8 +1104,8 @@ def render_human_summary(outcome: WatchOutcome) -> str:
             "concurrency-cancel; NOT a failure). Re-watch the newest head."
         ),
         RESULT_NO_VERDICT: (
-            "NO VERDICT — the run was cancelled, so it never reached a verdict "
-            "(NOT a failure, NOT a pass). Re-run to get one."
+            "NO VERDICT — GitHub Actions produced no trustworthy verdict "
+            "(NOT a failure, NOT a pass)."
         ),
     }[outcome.result]
     lines.append(f"watch-ci: {headline}")
@@ -1127,8 +1161,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "semantic outcome; exit_code and exit_reason identify why watching "
             "stopped. Exit: 0 green / 1 real-fail / "
             "2 hang / 3 unresolved / 4 superseded (a newer run replaced this one — "
-            "routine on main, NOT a failure) / 5 no-verdict (cancelled, so nothing "
-            "was decided) / 6 required-check failed-fast (run still in flight) / "
+            "routine on main, NOT a failure) / 5 no-verdict (cancelled or "
+            "inconsistent required-check metadata, so nothing was decided) / "
+            "6 required-check failed-fast (run still in flight) / "
             "7 wall-clock timeout."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

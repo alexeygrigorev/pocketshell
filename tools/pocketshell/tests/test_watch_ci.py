@@ -13,7 +13,8 @@ Exit-code contract under test:
     2  hang         — no progress past --no-progress-timeout
     3  unresolved  — run / inputs couldn't be resolved (or gh stayed broken)
     4  superseded  — a newer run replaced this one (routine concurrency-cancel)
-    5  no_verdict  — cancelled, so no verdict was reached (issue #1650)
+    5  no_verdict  — cancelled or inconsistent Actions metadata, so no verdict
+                     was reached (issues #1650, #2086)
     6  failed_fast  — required check failed while the run is still in flight
     7  wall_timeout — max wall-clock reached while the run is still in flight
 
@@ -145,6 +146,51 @@ def _all_required_jobs(status="completed", conclusion="success"):
     return [_job(n, status, conclusion, db_id=i) for i, n in enumerate(REQUIRED)]
 
 
+def _completed_success_run_with_stuck_unit_check() -> dict:
+    """Exact #2086 API shape from Tests run 31502735919.
+
+    GitHub finalized the workflow as completed/success, and every visible Unit
+    aggregator step also finished successfully, but the required Unit check
+    itself never received terminal metadata. `completedAt` is the `gh --json`
+    spelling of the API's null `completed_at` field.
+    """
+    jobs = _all_required_jobs()
+    jobs[0] = {
+        "name": "Unit tests",
+        "status": "in_progress",
+        "conclusion": None,
+        "completedAt": None,
+        "databaseId": 93820051658,
+        "steps": [
+            {
+                "name": "Set up job",
+                "status": "completed",
+                "conclusion": "success",
+            },
+            {
+                "name": "Require every unit-lane job to have succeeded",
+                "status": "completed",
+                "conclusion": "success",
+            },
+            {
+                "name": "Complete job",
+                "status": "completed",
+                "conclusion": "success",
+            },
+        ],
+    }
+    return {
+        "status": "completed",
+        "conclusion": "success",
+        "databaseId": 31502735919,
+        "headSha": "46f74308a6c93862701370f94c7621bba12cde44",
+        "headBranch": "main",
+        "workflowName": "Tests",
+        "createdAt": "2026-08-11T00:00:00Z",
+        "jobs": jobs,
+    }
+
+
 def _make_watcher(gh, **kw):
     clock = kw.pop("clock", None) or FakeClock()
     return wci.Watcher(
@@ -177,6 +223,64 @@ def test_all_green_exits_0():
     assert j["result"] == "green"
     assert j["failing_job"] is None
     assert set(j["required"]) == set(REQUIRED)
+
+
+def test_completed_success_with_stuck_required_check_is_infra_no_verdict():
+    """Issue #2086: impossible Actions metadata is neither green nor test-red.
+
+    This is the load-bearing fail-closed assertion for the exact captured run.
+    A completed/success workflow cannot make a nonterminal required check green,
+    but the missing check conclusion is also not evidence that tests failed.
+    """
+    gh = FakeGh()
+    snapshot = _completed_success_run_with_stuck_unit_check()
+    stuck = snapshot["jobs"][0]
+    assert stuck["status"] == "in_progress"
+    assert stuck["conclusion"] is None
+    assert stuck["completedAt"] is None
+    assert all(
+        step["status"] == "completed" and step["conclusion"] == "success"
+        for step in stuck["steps"]
+    )
+    gh.queue_run_state(**snapshot)
+    watcher, _ = _make_watcher(gh)
+
+    outcome = watcher.watch(run_id="31502735919")
+
+    assert outcome.result not in {wci.RESULT_GREEN, wci.RESULT_FAILED}
+    assert outcome.result == wci.RESULT_NO_VERDICT
+    assert outcome.exit_code == 5
+    assert outcome.exit_reason == wci.EXIT_REASON_RUN_COMPLETED
+    assert outcome.run_completed is True
+    assert outcome.failing_jobs == []
+    assert outcome.signature is None
+    assert outcome.likely_infra is False
+    assert "inconsistent GitHub Actions metadata" in outcome.reason
+    assert "Unit tests" in outcome.reason
+    assert not any("--log" in call or "--log-failed" in call for call in gh.calls)
+    summary = wci.render_human_summary(outcome)
+    assert "NO VERDICT" in summary
+    assert "infrastructure" in summary.lower()
+
+
+def test_genuine_failure_wins_over_stuck_required_check_metadata():
+    """The #2086 classifier must not launder real red CI into no-verdict."""
+    gh = FakeGh()
+    snapshot = _completed_success_run_with_stuck_unit_check()
+    snapshot["jobs"].append(_job("Static guards", "completed", "failure", 99))
+    gh.queue_run_state(**snapshot)
+    gh.log_text = (
+        "Static guards\tRun checks\t2026-08-11T10:00:00Z "
+        "error: script hygiene guard failed\n"
+    )
+    watcher, _ = _make_watcher(gh)
+
+    outcome = watcher.watch(run_id="31502735919")
+
+    assert outcome.result == wci.RESULT_FAILED
+    assert outcome.exit_code == 1
+    assert outcome.failing_jobs == ["Static guards"]
+    assert outcome.signature == "error: script hygiene guard failed"
 
 
 # ── 1 real failure ───────────────────────────────────────────────────────────
@@ -778,6 +882,21 @@ def test_oncall_recipe_preserves_verdict_and_requires_completed_confirmation():
     assert "Always confirm\n`status=completed`" in prompt
     assert "required_check_failed_fast" in prompt
     assert "artifacts are not final" in prompt
+
+
+def test_oncall_exit5_contract_covers_inconsistent_required_check_metadata():
+    """Issue #2086: the on-call must not debug an absent test failure."""
+    prompt = _ONCALL_PROMPT_PATH.read_text(encoding="utf-8")
+    exit_five_row = next(
+        line for line in prompt.splitlines() if line.startswith("| **5** no-verdict")
+    )
+
+    assert "completed/success" in exit_five_row
+    assert "queued`/`in_progress` with no conclusion" in exit_five_row
+    assert "GitHub Actions metadata infrastructure (#2086)" in exit_five_row
+    assert "never as a test/product failure" in exit_five_row
+    assert "re-run the whole workflow once and re-watch" in exit_five_row
+    assert "instead of entering a rerun loop" in exit_five_row
 
 
 def test_oncall_systemd_recipe_does_not_bind_watcher_output_to_launcher_pipe():

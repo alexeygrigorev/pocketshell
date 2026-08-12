@@ -16,6 +16,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.InetAddress
+import java.net.ServerSocket
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -37,13 +39,60 @@ import java.util.concurrent.TimeUnit
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class AutoForwarderTest {
+    private val allLocalPortsAvailable = LocalPortAvailability { true }
+
+    @Test
+    fun `injected availability isolates allocation from a real occupied port`() = runTest {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        ServerSocket(0, 1, loopback).use { holder ->
+            val occupiedPort = holder.localPort
+            val session = FakeSession()
+            session.setListening("0.0.0.0:$occupiedPort users:((\"app\",pid=1,fd=4))")
+            val availabilityQueries = mutableListOf<Int>()
+
+            val forwarder = AutoForwarder(
+                session,
+                smallConfig().copy(maxAutoPort = 65_535),
+                localPortAvailability = LocalPortAvailability { port ->
+                    availabilityQueries += port
+                    true
+                },
+            )
+            val job = forwarder.start(this)
+            runCurrent()
+
+            val tunnel = forwarder.flowOfTunnels().first().single()
+            assertEquals(occupiedPort, tunnel.remotePort)
+            assertEquals(occupiedPort, tunnel.localPort)
+            assertEquals(listOf(occupiedPort), availabilityQueries)
+
+            forwarder.stop()
+            job.cancel()
+            runCurrent()
+        }
+    }
+
+    @Test
+    fun `default availability rejects a controlled occupied ephemeral port`() {
+        val loopback = InetAddress.getByName("127.0.0.1")
+        ServerSocket(0, 1, loopback).use { holder ->
+            assertFalse(
+                "production availability probe must reject the held port ${holder.localPort}",
+                DefaultLocalPortAvailability.isAvailable(holder.localPort),
+            )
+        }
+    }
 
     @Test
     fun `first scan opens a forward for an in-window remote port`() = runTest {
         val session = FakeSession()
         session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            localPortAvailability = allLocalPortsAvailable,
+        )
         val job = forwarder.start(this)
         runCurrent()
 
@@ -656,7 +705,11 @@ class AutoForwarderTest {
         val session = FakeSession()
         session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
 
-        val forwarder = AutoForwarder(session, smallConfig())
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            localPortAvailability = allLocalPortsAvailable,
+        )
         val job = forwarder.start(this)
         runCurrent()
 

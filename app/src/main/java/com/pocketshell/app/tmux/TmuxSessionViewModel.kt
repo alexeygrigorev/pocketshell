@@ -10518,6 +10518,7 @@ public class TmuxSessionViewModel @Inject constructor(
             _panes.update { rows ->
                 rows.map { row -> if (row.paneId == paneId) errored else row }
             }
+            rebuildUnifiedPanes()
             return
         }
 
@@ -10535,6 +10536,7 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == paneId) recovered else row }
         }
+        rebuildUnifiedPanes()
         reseedRecoveredSurface(recovered, client)
     }
 
@@ -10593,6 +10595,7 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == paneId) recovered else row }
         }
+        rebuildUnifiedPanes()
         reseedRecoveredSurface(recovered, client)
     }
 

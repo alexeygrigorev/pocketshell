@@ -195,23 +195,37 @@ class PcmCapturePumpTest {
         // before start() returns.
         val firstReadEntered = CountDownLatch(1)
 
+        // The recurrence happened after firstReadEntered fired but before this
+        // fake decided whether to deliver its one live frame. Holding that exact
+        // boundary lets the test order stop causally instead of asking the host
+        // scheduler to happen to preempt the reader in a one-statement window.
+        val releaseFirstReadDelivery = CountDownLatch(1)
+        val firstReadResolved = CountDownLatch(1)
+        val stopRequested = CountDownLatch(1)
+
         @Volatile
         var stopped = false
         private val firstRead = AtomicInteger(0)
+
+        fun requestStop() {
+            stopped = true
+            stopRequested.countDown()
+        }
 
         override fun read(buffer: ByteArray, offsetBytes: Int, sizeBytes: Int): Int {
             if (firstRead.compareAndSet(0, 1)) {
                 // The reader thread reached its first blocking read: it passed
                 // `while (capturing)` and is committed.
                 firstReadEntered.countDown()
-                if (!stopped) {
-                    // Deliver exactly one live frame. There is NO backing buffer:
-                    // a frame produced here exists only because this blocking read
-                    // ran. If the read never runs, the frame never exists and the
-                    // drain (readNonBlocking) cannot recover it.
-                    loudFrame(frameBytes).copyInto(buffer, destinationOffset = offsetBytes)
-                    return sizeBytes
-                }
+                releaseFirstReadDelivery.await(5, TimeUnit.SECONDS)
+                // Entry commits this blocking read to its one live frame. A stop
+                // requested after entry prevents subsequent reads; it cannot
+                // retroactively cancel data already owned by this in-flight read.
+                // That matches production: AudioRecorder does not stop/release
+                // AudioRecord until PcmCapturePump.stop() has joined the reader.
+                loudFrame(frameBytes).copyInto(buffer, destinationOffset = offsetBytes)
+                firstReadResolved.countDown()
+                return sizeBytes
             }
             // Idle mic: park until stop, then report end-of-stream.
             while (!stopped) {
@@ -313,14 +327,26 @@ class PcmCapturePumpTest {
         )
         startThread.join(2_000)
 
-        // Data-loss consequence end to end: with the read committed, the live
-        // frame survives a stop; the drain alone could never have recovered it.
+        // Reproduce the hosted line-328 race without relying on a lucky reader
+        // preemption. The source holds the first read after entry but before its
+        // delivery decision. The stop thread first commits the source stop and
+        // exposes that fact through a latch; only then may the read resolve.
+        // The live frame is recoverable nowhere else, so it must still survive.
         val stopResult = arrayOfNulls<ByteArray>(1)
-        val stopThread = Thread { stopResult[0] = pump.stop() }
+        val stopThread = Thread {
+            source.requestStop()
+            stopResult[0] = pump.stop()
+        }
         stopThread.start()
-        // Tell the source to stop; the in-flight first read has already delivered
-        // its frame, so stop() joins and returns the captured byte(s).
-        source.stopped = true
+        assertTrue(
+            "source stop must be committed before the held first read resolves",
+            source.stopRequested.await(2, TimeUnit.SECONDS),
+        )
+        source.releaseFirstReadDelivery.countDown()
+        assertTrue(
+            "held first read must resolve after the explicit delivery barrier",
+            source.firstReadResolved.await(2, TimeUnit.SECONDS),
+        )
         stopThread.join(2_000)
 
         val pcm = stopResult[0]

@@ -1068,9 +1068,11 @@ It will delete, and nothing else is reachable from it:
    image disappeared;
 3. `/tmp/pocketshell-*` scratch older than `--tmp-age-days` (default 1), so a
    live sibling lane's fresh scratch is never taken;
-4. `build/pre-release-confidence-gate/` and `build/phone-walkthrough/` (named
+4. exact generated `<run>/worktree` copies plus the private `gradle-home` under
+   `build/pre-release-confidence-gate/`, and `build/phone-walkthrough/` (named
    explicitly, not globbed under `build/`, because `build/test-results/` holds
-   the only artifact identifying a failing assertion — the #1969 lesson);
+   the only artifact identifying a failing assertion — the #1969 lesson). The
+   pre-release run directories and their small summaries/logs/test XML survive;
 5. with `--worktrees` only: `.claude/worktrees/agent-*` worktrees that are
    unlocked, report an empty `git status --porcelain`, and have no commits
    ahead of `origin/main`.
@@ -1086,6 +1088,78 @@ only as **untracked** files, which `git diff` reports as clean. The sweep checks
 
 A machine-wide per-user `flock` makes the sweep single-writer, so two agent
 lanes cannot race on one worktree list and one Docker daemon.
+
+### Release-validation disk budget and retention (issue #2055)
+
+The release chain has a larger fail-closed floor than the generic one-run gate.
+Both `scripts/release-emulator-validation.sh` and
+`scripts/pre-release-confidence-gate.sh` run this check before the AVD lock,
+isolated source copy, Docker, or Gradle:
+
+| Free space on the release-validation filesystem | Behaviour |
+|---|---|
+| below 24 GiB | refuse the release validation, exit **76**, and print the safe cleanup command |
+| 24 GiB or more | reclaim stale copied worktrees, then start normally |
+
+The fixed 24 GiB budget does not replace or lower the canonical 10 GiB floor.
+It budgets two 10 GiB clean-run envelopes plus 4 GiB for the private Gradle
+home, copied APKs, emulator evidence, and filesystem churn. The incident behind
+#2055 retained 4.5 GiB in two failed isolated worktrees plus 1.9 GiB in the
+private Gradle home, so starting the release at the generic floor was not safe.
+There is deliberately no environment variable that lowers or skips the release
+floor. For an isolated pre-release run, the parent performs this admission once
+before copying. The child re-authenticates its exact generated location but does
+not subtract the copied bytes and demand a second 24 GiB floor; therefore exactly
+24 GiB is a real admitted boundary, not a promise invalidated immediately after
+`rsync`. Retention is armed before every child recheck and restored after the
+real AVD-lock acquisition installs its cleanup trap. Thus a later refusal—or a
+partially successful `rsync`—releases the lock, keeps an actionable summary,
+reports the copied size and retained diagnostics, and removes the copy and owner
+marker.
+
+The manual `ubuntu-latest` workflow satisfies that same floor rather than
+weakening it. Before `android-emulator-runner` allocates the AVD, the workflow
+removes only unused image-provided .NET, NDK, GHC, boost, CodeQL, Docker-image,
+and inactive tool-cache payloads while preserving the `setup-java` JDK. This is
+the same bounded reclaim used by the emulator journey job, which measured
+110134 MiB available afterwards in Tests run 31040932815. It then runs
+`scripts/release-emulator-validation.sh --check-storage`; that mode drives the
+real 24 GiB preflight and exits before the AVD lock, Gradle, Docker, or emulator.
+If a future hosted image cannot establish the full budget, the workflow fails
+there as an explicit runner-capacity problem instead of entering an impossible
+release run.
+
+Every isolated run records its owner PID and `/proc` start time. On failure the
+gate first keeps `summary.txt`, step logs, and small `TEST-*.xml` diagnostics,
+prints the generated worktree's size and `scripts/disk-cleanup.sh --apply`, then
+removes only the exact `<log-root>/<run-id>/worktree`. The outer release wrapper
+does the same after all downstream APK consumers finish on a successful run.
+The next preflight reclaims abandoned copies whose owner is no longer alive.
+If the filesystem is still below 24 GiB, it also removes the private release
+`gradle-home` while every release owner is idle and then re-measures. Live
+copies and their shared Gradle home are always skipped.
+
+Automatic deletion additionally requires a root provenance marker owned by the
+current user. The entry scripts may create that marker only at the exact
+`<repository>/build/pre-release-confidence-gate` path. A source-root `LOG_ROOT`,
+`/var`, an arbitrary `PRE_RELEASE_GATE_LOG_ROOT`, a symlink/non-canonical path,
+or even a correctly shaped but unmarked directory is rejected before `chmod`,
+`find`, or `rm` runs. The isolated child re-authenticates the marker and proves
+it is executing from the marked `<run-id>/worktree`; it cannot re-anchor cleanup
+to its copied checkout. Run IDs also occupy a namespace disjoint from cleanup
+controls: `gradle-home`, the storage-root marker, its temporary-marker names, and
+the owner-marker name are reserved. Standalone entry points and the manual
+workflow reject them before an AVD lock or isolated copy. Cleanup also preserves
+a live `gradle-home` owner marker left by an older run rather than treating that
+collision as an idle cache.
+
+The manual cleanup path follows the same selector. It can make owner-owned
+`0555` directories and `0444` files writable inside those exact generated
+targets (the #1714 evidence recurrence), but it never broad-matches
+`*worktree*`, never follows symlinks or crosses filesystems, and never removes
+the adjacent summaries/logs, a `source-worktree` sibling, a real
+`.worktrees/issue-*`, or user files. The private release `gradle-home` is removed
+only when no live release validation is recorded.
 
 ---
 

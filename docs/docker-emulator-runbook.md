@@ -453,6 +453,37 @@ The gate uses the explicit SDK paths documented in [AGENTS.md](../AGENTS.md):
 - `emulator`: `/home/alexey/Android/Sdk/emulator/emulator`
 - AVD: `test`
 
+Before it takes the AVD lock or creates the isolated copy, the release path
+requires **24 GiB free** on the filesystem holding the checkout (issue #2055).
+Below that floor it exits 76 without starting Gradle and prints the bounded
+cleanup commands. Use `scripts/disk-cleanup.sh` first to inspect the exact
+safe-listed targets, then `scripts/disk-cleanup.sh --apply` to remove generated
+release copies/caches while preserving run summaries and logs. The ordinary
+10 GiB JVM/connected-gate floor remains unchanged; a full release needs the
+larger budget.
+
+The manual `ubuntu-latest` workflow establishes the same budget before it
+creates the AVD: it reclaims only unused hosted-image toolchains (preserving the
+active `setup-java` JDK), then runs
+`scripts/release-emulator-validation.sh --check-storage`. The storage-only mode
+executes the real 24 GiB check and exits before the AVD lock or any build/device
+work. The reclaim recipe is shared with the emulator journey workflow shape
+that measured 110134 MiB free in Tests run 31040932815; there is no smaller
+hosted floor or skip.
+
+Destructive retention is authenticated separately from the free-space number.
+Only the current checkout's exact
+`build/pre-release-confidence-gate` may receive the release-owned provenance
+marker. `LOG_ROOT` / `PRE_RELEASE_GATE_LOG_ROOT` substitutions to the source
+root, `/var`, arbitrary paths, symlinks, or unmarked lookalikes fail before any
+generated output is removed. Cleanup-control names (including `gradle-home`) are
+reserved and cannot be selected as run IDs by either standalone entry scripts or
+the manual workflow. The parent checks the 24 GiB admission floor once before
+copying; the isolated child re-authenticates its location without imposing a
+second post-copy floor. Its cleanup/diagnostic trap is restored after the real
+AVD lock is taken, so an interrupted partial copy releases that lock, retains a
+failure summary, and removes its generated worktree plus owner marker.
+
 It writes timestamped output under
 `build/pre-release-confidence-gate/<run-id>/`. Each step gets its own log file
 and the script exits at the first failed step with the log directory printed.

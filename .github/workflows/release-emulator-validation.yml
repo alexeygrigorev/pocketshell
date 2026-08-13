@@ -89,6 +89,50 @@ jobs:
       - name: Install ripgrep
         run: sudo apt-get update && sudo apt-get install -y ripgrep
 
+      # Issue #2055: a local release needs 24 GiB of headroom, while the standard
+      # hosted image advertises a much smaller initial free-space envelope. The
+      # emulator journey job has used this exact bounded reclaim since #760 and
+      # measured 110134 MiB available afterwards (Tests run 31040932815). Remove
+      # only preinstalled toolchains this workflow never consumes, preserve the
+      # setup-java JDK, then drive the release entry point's REAL 24 GiB storage
+      # preflight before android-emulator-runner allocates its ~7.3 GiB userdata
+      # image. A runner image that can no longer satisfy the floor fails here as
+      # explicit infra capacity, never as a later product/Gradle failure.
+      - name: Establish hosted release storage contract
+        run: |
+          set -uo pipefail
+          echo "::group::Disk before hosted release reclaim"
+          df -h /
+          echo "::endgroup::"
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /usr/local/lib/android/sdk/ndk || true
+          sudo rm -rf /opt/ghc /usr/local/.ghcup || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          if [[ -n "${AGENT_TOOLSDIRECTORY:-}" && -d "${AGENT_TOOLSDIRECTORY:-}" ]]; then
+            keep_dir=""
+            if [[ -n "${JAVA_HOME:-}" && "$JAVA_HOME" == "$AGENT_TOOLSDIRECTORY"/* ]]; then
+              rel="${JAVA_HOME#"$AGENT_TOOLSDIRECTORY"/}"
+              keep_dir="${rel%%/*}"
+            fi
+            echo "Pruning $AGENT_TOOLSDIRECTORY, keeping active JDK dir: '${keep_dir:-<none>}'"
+            if [[ -n "$keep_dir" ]]; then
+              sudo find "$AGENT_TOOLSDIRECTORY" -mindepth 1 -maxdepth 1 \
+                ! -name "$keep_dir" -exec rm -rf {} + || true
+            else
+              echo "JAVA_HOME not under \$AGENT_TOOLSDIRECTORY; leaving tool cache intact."
+            fi
+          fi
+          sudo docker image prune -af || true
+          echo "::group::Disk after hosted release reclaim"
+          df -h /
+          echo "::endgroup::"
+          if [[ -n "${JAVA_HOME:-}" && ! -x "$JAVA_HOME/bin/java" ]]; then
+            echo "::error title=RELEASE INFRA UNAVAILABLE::JAVA_HOME=$JAVA_HOME has no bin/java after hosted storage reclaim."
+            exit 1
+          fi
+          scripts/release-emulator-validation.sh --check-storage
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -109,6 +153,11 @@ jobs:
           fi
           if [[ -z "$RUN_ID" ]]; then
             RUN_ID="gha-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-$(date +'%Y%m%d-%H%M%S')"
+          fi
+          source scripts/lib/release-validation-storage.sh
+          if ! pocketshell_release_validation_require_run_id "$RUN_ID"; then
+            echo "::error title=INVALID RELEASE RUN ID::The sanitized run id collides with release-storage control state."
+            exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
           fi
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 

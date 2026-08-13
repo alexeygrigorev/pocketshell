@@ -7,6 +7,8 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+source "$ROOT_DIR/scripts/lib/disk-preflight.sh"
+source "$ROOT_DIR/scripts/lib/release-validation-storage.sh"
 # Issue #2064: the debug + androidTest APK pair is built HERE, once, and every
 # downstream release stage installs and ships THESE bytes. See
 # scripts/lib/apk-identity.sh for why "same source" was not good enough.
@@ -179,6 +181,53 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
+pocketshell_release_validation_require_run_id "$RUN_ID" ||
+  exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
+
+# Arm retention before an isolated child rechecks its authenticated location or
+# execution profile. The pre-copy parent is the only disk-budget admission
+# authority, but every later child exit must still retain a diagnostic and
+# remove the generated copy + owner marker. This early trap is replaced by the
+# full summary trap once the child has initialized its detailed gate state.
+EARLY_RETENTION_ARMED=0
+if [[ -n "${POCKETSHELL_GATE_ISOLATED_COPY:-}" ]]; then
+  EARLY_RETENTION_ARMED=1
+fi
+write_early_release_failure_summary() {
+  local exit_status="$1"
+  local summary_path="$RUN_DIR/summary.txt"
+  local failing_step="isolated-worktree-copy"
+  local failure_message="release gate exited while preparing its isolated generated worktree"
+  if [[ -n "${POCKETSHELL_GATE_ISOLATED_COPY:-}" ]]; then
+    failing_step="isolated-child-initialization"
+    failure_message="isolated child exited before the detailed summary was initialized"
+  fi
+  [[ -s "$summary_path" ]] && return 0
+  mkdir -p "$RUN_DIR" || return 1
+  {
+    printf 'PocketShell pre-release confidence gate summary\n'
+    printf 'Generated: %s\n' "$(date -Is)"
+    printf 'Result: FAIL\n'
+    printf 'Exit status: %s\n' "$exit_status"
+    printf 'Run ID: %s\n' "$RUN_ID"
+    printf 'Run directory: %s\n' "$RUN_DIR"
+    printf 'Failing step: %s\n' "$failing_step"
+    printf 'Failure message: %s\n' "$failure_message"
+    printf 'Safe cleanup command: scripts/disk-cleanup.sh --apply\n'
+  } > "$summary_path"
+}
+early_release_exit() {
+  local exit_status="$?"
+  set +e
+  pocketshell_release_all
+  if [[ "$exit_status" -ne 0 && "$EARLY_RETENTION_ARMED" == "1" ]]; then
+    cd "$RUN_DIR" 2>/dev/null || cd "$LOG_ROOT" 2>/dev/null || true
+    write_early_release_failure_summary "$exit_status" || true
+    pocketshell_release_validation_finish_run "$LOG_ROOT" "$RUN_ID" failure || true
+  fi
+}
+trap early_release_exit EXIT
+
 # Issue #2054: fail on an under-resourced execution profile in the first second,
 # not 40 minutes into a compile. Runs before the isolated-worktree rsync (so a
 # bad profile does not even pay for the copy) and again in the re-exec'd child,
@@ -194,12 +243,62 @@ if [[ "${1:-}" == "--check-profile" ]]; then
   exit 0
 fi
 
+# Issue #2055: the generic 10 GiB one-run floor is not large enough for this
+# chain's isolated source copy, two variant families, private Gradle home, and
+# APK/emulator evidence. Authenticate the exact checkout-owned generated root
+# before any retention helper can delete, reclaim only stale generated copies,
+# then require the fixed 24 GiB release envelope BEFORE the AVD lock, rsync,
+# Docker, or Gradle. LOG_ROOT remains useful for non-release scripts, but it may
+# not redirect this destructive release path into source or arbitrary storage.
+if [[ -n "${POCKETSHELL_GATE_ISOLATED_COPY:-}" ]]; then
+  # The outer checkout already created the release-owned root marker before it
+  # copied this child. Re-authenticate that marker and prove this script is
+  # executing from exactly <root>/<run>/worktree; never re-anchor the root to
+  # the copied checkout (which would incorrectly expect worktree/build/...).
+  _pocketshell_release_storage_root "$LOG_ROOT" >/dev/null ||
+    exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
+  expected_isolated_root="$LOG_ROOT/$RUN_ID/worktree"
+  if [[ "$ROOT_DIR" != "$expected_isolated_root" ]]; then
+    printf 'REFUSING: isolated release child is outside its authenticated generated worktree: %s (expected %s)\n' \
+      "$ROOT_DIR" "$expected_isolated_root" >&2
+    exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
+  fi
+  if ! pocketshell_release_validation_run_is_active "$LOG_ROOT/$RUN_ID"; then
+    printf 'REFUSING: isolated release child lacks the live owner recorded by its admitted parent: %s\n' \
+      "$LOG_ROOT/$RUN_ID" >&2
+    exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
+  fi
+else
+  pocketshell_release_validation_prepare_root "$ROOT_DIR" "$LOG_ROOT" ||
+    exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
+  # This is the one authoritative admission check. The isolated copy consumes
+  # part of the already-budgeted 24 GiB envelope, so rechecking the same floor
+  # from inside that copy would silently raise the real start threshold.
+  pocketshell_release_disk_preflight \
+    "$ROOT_DIR" "$LOG_ROOT" "pre-release confidence gate"
+fi
+
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+# pocketshell_acquire_avd_lock installs its own EXIT handler. Restore this
+# gate's release-aware handler after the real acquisition so both obligations
+# survive: early copy failures release the AVD lock first, then retain the
+# summary/diagnostics and remove only the authenticated generated worktree.
+# Without this composition, a partially successful rsync strands both its copy
+# and owner marker because the lock helper has clobbered early_release_exit.
+trap early_release_exit EXIT
 
 mkdir -p "$RUN_DIR"
 
 if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-}" ]]; then
   isolated_root="$RUN_DIR/worktree"
+  # A release wrapper owns the copy until every downstream APK consumer has
+  # finished. A standalone pre-release run owns it itself. The pid start time
+  # closes the stale-marker/PID-reuse hole for later cleanup passes.
+  POCKETSHELL_RELEASE_RETENTION_OWNER_PID="${POCKETSHELL_RELEASE_RETENTION_OWNER_PID:-$$}"
+  export POCKETSHELL_RELEASE_RETENTION_OWNER_PID
+  pocketshell_release_validation_mark_active \
+    "$LOG_ROOT" "$RUN_ID" "$POCKETSHELL_RELEASE_RETENTION_OWNER_PID"
+  EARLY_RETENTION_ARMED=1
   printf 'Preparing isolated worktree copy: %s\n' "$isolated_root"
   rsync -a --delete \
     --exclude='.git/' \
@@ -420,7 +519,15 @@ on_exit() {
   local exit_status="$?"
   set +e
   write_summary "$exit_status"
-  pocketshell_release_avd_lock
+  pocketshell_release_all
+  # A failed isolated run has no shippable APK consumer. Keep the summary,
+  # step logs, and small test XML outside the copy, report its size, then remove
+  # only the exact generated <run>/worktree. The outer release wrapper performs
+  # the same finish after downstream stages on a successful chain.
+  if [[ "$exit_status" -ne 0 && -n "${POCKETSHELL_GATE_ISOLATED_COPY:-}" ]]; then
+    cd "$RUN_DIR" 2>/dev/null || cd "$LOG_ROOT" 2>/dev/null || true
+    pocketshell_release_validation_finish_run "$LOG_ROOT" "$RUN_ID" failure || true
+  fi
 }
 
 trap on_exit EXIT

@@ -270,7 +270,9 @@ class PromptComposerSheetSourceGuardTest {
             "retryRawBoundsBeforeExactScroll",
             "rowRawBoundsBeforeExactScroll",
             "retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(",
-            "offlineRetryNode.assertIsNotDisplayed()",
+            // #2123: replaces the deleted scroll-offset-dependent invisibility
+            // precondition with the device-independent blocked-reason copy.
+            "hasText(\"Offline\") and",
             "postcondition: exact offline Retry must be displayed after its own scroll",
             "retryBoundsAfterExactScroll",
             "statusViewportBoundsAfterExactScroll",
@@ -504,13 +506,20 @@ class PromptComposerSheetSourceGuardTest {
             "retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(",
             startIndex = rawRetryBoundsIndex.coerceAtLeast(0),
         )
-        val notDisplayedPreconditionIndex = method.indexOf(
-            "offlineRetryNode.assertIsNotDisplayed()",
+        // Issue #2123 deleted the `offlineRetryNode.assertIsNotDisplayed()`
+        // precondition that used to separate the row-level scroll from the exact
+        // action scroll: it pinned a viewport-size accident ("this control happens
+        // to be off-screen at this offset"), which was false on every device. The
+        // separator is now the exact trailing-action RECEIVER — the scroll proving
+        // reachability must be performed on the Retry control itself, not merely on
+        // its potentially taller row.
+        val exactActionNodeIndex = method.indexOf(
+            "offlineRetryNode",
             startIndex = rawRetryWithinRowIndex.coerceAtLeast(0),
         )
         val exactActionScrollIndex = method.indexOf(
             ".performScrollTo()",
-            startIndex = notDisplayedPreconditionIndex.coerceAtLeast(0),
+            startIndex = exactActionNodeIndex.coerceAtLeast(0),
         )
         val namedDisplayedPostconditionIndex = method.indexOf(
             "postcondition: exact offline Retry must be displayed after its own scroll",
@@ -520,9 +529,16 @@ class PromptComposerSheetSourceGuardTest {
             "offlineRetryNode.assertIsNotEnabled()",
             startIndex = namedDisplayedPostconditionIndex.coerceAtLeast(0),
         )
+        // The device-independent property #2123 put in the accident's place: the
+        // blocked reason travels ON the control, so a reachable action never reads
+        // as a bare, silently-inert "Retry" regardless of viewport height.
+        val blockedReasonCopyIndex = method.indexOf(
+            "hasText(\"Offline\") and",
+            startIndex = disabledPostconditionIndex.coerceAtLeast(0),
+        )
         val postBoundsIndex = method.indexOf(
             "val retryBoundsAfterExactScroll",
-            startIndex = disabledPostconditionIndex.coerceAtLeast(0),
+            startIndex = blockedReasonCopyIndex.coerceAtLeast(0),
         )
         val containedPostconditionIndex = method.indexOf(
             "retryBoundsAfterExactScroll.isNonEmptyAndFullyContainedBy(",
@@ -533,8 +549,9 @@ class PromptComposerSheetSourceGuardTest {
             startIndex = containedPostconditionIndex.coerceAtLeast(0),
         )
         assertTrue(
-            "#1602 component must seed the real FIFO capture position, prove a laid-out Retry not displayed " +
-                "after row scroll, then exact-scroll it into the viewport before disabled/tap proof",
+            "#1602 component must seed the real FIFO capture position, prove the laid-out Retry contained by " +
+                "its own row after the row scroll, then exact-scroll the trailing action itself into the " +
+                "bounded viewport before the disabled/blocked-reason/containment/tap proof",
             seedIndex >= 0 &&
                 seedRowIndex > seedIndex &&
                 seedScrollIndex > seedRowIndex &&
@@ -543,13 +560,23 @@ class PromptComposerSheetSourceGuardTest {
                 rowLevelScrollIndex > rowMarkerIndex &&
                 rawRetryBoundsIndex > rowLevelScrollIndex &&
                 rawRetryWithinRowIndex > rawRetryBoundsIndex &&
-                notDisplayedPreconditionIndex > rawRetryWithinRowIndex &&
-                exactActionScrollIndex > notDisplayedPreconditionIndex &&
+                exactActionNodeIndex > rawRetryWithinRowIndex &&
+                exactActionScrollIndex > exactActionNodeIndex &&
                 namedDisplayedPostconditionIndex > exactActionScrollIndex &&
                 disabledPostconditionIndex > namedDisplayedPostconditionIndex &&
-                postBoundsIndex > disabledPostconditionIndex &&
+                blockedReasonCopyIndex > disabledPostconditionIndex &&
+                postBoundsIndex > blockedReasonCopyIndex &&
                 containedPostconditionIndex > postBoundsIndex &&
                 physicalTapIndex > containedPostconditionIndex,
+        )
+        // Issue #2123: keep the deleted accident deleted. A scroll-offset-dependent
+        // invisibility assertion inside THIS proof is the exact defect that made the
+        // reopened #1602 evidence red on every device; the comment that records the
+        // deletion carries no leading dot, so it is not matched here.
+        assertFalse(
+            "#1602 component must not reinstate a scroll-offset-dependent invisibility assertion " +
+                "on a control it also proves reachable",
+            method.contains(".assertIsNotDisplayed()"),
         )
     }
 

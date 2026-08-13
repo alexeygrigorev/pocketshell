@@ -12,10 +12,10 @@ package com.pocketshell.app.portfwd.service
  *
  * ## Issue #2006 — a close is fenceable too
  *
- * [close] takes an optional `observerGeneration`. A lifecycle command from the
- * service thread (`ACTION_STOP`, `onDestroy`, a rejected foreground promotion)
- * passes `null` and always closes: the user (or the service itself) asked for
- * the teardown, so it happens.
+ * [close] takes an optional `observerGeneration`. Lifecycle teardown
+ * (`ACTION_STOP` after its durable write succeeds, `onDestroy`, or a rejected
+ * foreground promotion) passes `null` and always closes: the user (or the
+ * service itself) asked for the teardown, so it happens.
  *
  * The notification OBSERVER passes the generation it was launched for, and its
  * teardown request is re-validated against BOTH authorities under this monitor:

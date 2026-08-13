@@ -172,6 +172,11 @@ public class ForwardingResumeScheduler @Inject constructor(
      */
     internal suspend fun resumeEnabledHosts(trigger: String = TRIGGER_MANUAL) {
         mutex.withLock {
+            // Capture before Room is read. Notification Stop advances this
+            // generation synchronously, before its durable UPDATE begins, so a
+            // slow SSH connect from this sweep cannot resurrect forwarding
+            // after the tap.
+            val resumePermit = forwardingController.captureResumePermit() ?: return@withLock
             val enabled = runCatching { hostDao.getEnabled().first() }.getOrElse { emptyList() }
             StartupTiming.markOnce(
                 "forwarding-resume-sweep",
@@ -189,11 +194,14 @@ public class ForwardingResumeScheduler @Inject constructor(
             // over interleaving connects; a host that finishes adopting is
             // skipped by the isHostActive check on the next sweep.
             candidates.forEach { host -> resuming.add(host.id) }
-            candidates.forEach { host -> resumeHost(host) }
+            candidates.forEach { host -> resumeHost(host, resumePermit) }
         }
     }
 
-    private suspend fun resumeHost(host: HostEntity) {
+    private suspend fun resumeHost(
+        host: HostEntity,
+        resumePermit: ForwardingNotificationStopAuthority.ResumePermit,
+    ) {
         try {
             val key = sshKeyDao.getById(host.keyId)
             if (key == null) {
@@ -236,13 +244,17 @@ public class ForwardingResumeScheduler @Inject constructor(
                 portRemappingDao.getByHostId(host.id).first()
                     .associate { it.remotePort to it.localPort }
             }.getOrElse { emptyMap() }
-            forwardingController.adoptForwardingSession(
+            val adopted = forwardingController.tryAdoptResumedForwardingSession(
+                permit = resumePermit,
                 host = host,
                 keyPath = key.privateKeyPath,
-                passphrase = null,
                 firstSession = session,
                 initialRemappings = remappings,
             )
+            if (!adopted) {
+                session.close()
+                return
+            }
             _resumedHostCount.incrementAndGet()
             DiagnosticEvents.record(
                 "action",

@@ -6,6 +6,7 @@ import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.CommandTemplateDao
+import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
@@ -53,6 +54,10 @@ object StorageModule {
 
     @Provides
     fun provideHostDao(db: AppDatabase): HostDao = db.hostDao()
+
+    @Provides
+    fun provideForwardingIntentDao(db: AppDatabase): ForwardingIntentDao =
+        db.forwardingIntentDao()
 
     @Provides
     fun provideProjectRootDao(db: AppDatabase): ProjectRootDao = db.projectRootDao()

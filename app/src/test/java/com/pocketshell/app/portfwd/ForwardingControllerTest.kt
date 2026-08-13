@@ -12,6 +12,10 @@ import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.connectivity.TerminalNetworkChangeKind
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.portfwd.service.ForwardingService
+import com.pocketshell.core.storage.dao.ForwardingIntentDao
+import java.io.File
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -107,7 +111,7 @@ class ForwardingControllerTest {
 
         val stopped = shadow.nextStartedService
         assertNotNull("last unregister must request service stop", stopped)
-        assertEquals(ForwardingService.ACTION_STOP, stopped.action)
+        assertEquals(ForwardingService.ACTION_STOP_RUNTIME, stopped.action)
         assertEquals(0, controller.flowOfActiveHostCount().value)
         assertEquals(0, controller.flowOfTotalTunnelCount().value)
         assertEquals("", controller.flowOfPrimaryHostName().value)
@@ -146,6 +150,185 @@ class ForwardingControllerTest {
         )
         assertEquals(0, controller.flowOfTotalTunnelCount().value)
         service.onDestroy()
+    }
+
+    @Test
+    fun `durable Stop journey keeps its post-bootstrap preservation and artifact contract`() {
+        assertEquals(
+            emptyList<String>(),
+            durableStopJourneyContractViolations(durableStopJourneySource()),
+        )
+    }
+
+    @Test
+    fun `durable Stop journey guard selectively rejects unstable baseline and bypassed export`() {
+        val source = durableStopJourneySource()
+        val snapshotBeforeSecondHostStable = source.replace(
+            "val rowsImmediatelyBeforeStop = awaitStablePreStopRows(db, expectedIdsInOrder)",
+            "val rowsImmediatelyBeforeStop = runBlocking { db.hostDao().getAll().first() }",
+        )
+        assertEquals(
+            listOf("pre-Stop snapshot bypasses stable two-row bootstrap observation"),
+            durableStopJourneyContractViolations(snapshotBeforeSecondHostStable),
+        )
+
+        val bypassedExport = source.replace(
+            "val artifact = exportDurableStateArtifact(artifactContents)",
+            "val artifact = File(\"\")",
+        )
+        assertEquals(
+            listOf("artifact export invocation missing"),
+            durableStopJourneyContractViolations(bypassedExport),
+        )
+    }
+
+    @Test
+    fun `repeated notification Stop coalesces one durable write and one runtime teardown`() {
+        val intentDao = HeldForwardingIntentDao()
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = kotlinx.coroutines.flow.emptyFlow(),
+            forwardingIntentDao = intentDao,
+        )
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.registerActiveHost(hostId = 2, hostName = "beta")
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancelAll()
+        val service = Robolectric.buildService(ForwardingService::class.java).get().apply {
+            this.controller = controller
+            observeDispatcher = Dispatchers.Unconfined
+            createNotificationChannel()
+        }
+        service.onStartCommand(
+            Intent(context, ForwardingService::class.java)
+                .setAction(ForwardingService.ACTION_START),
+            0,
+            1,
+        )
+        assertNotNull(
+            "test setup must publish the real ongoing forwarding notification",
+            manager.activeNotifications.singleOrNull(),
+        )
+        val stop = Intent(context, ForwardingService::class.java)
+            .setAction(ForwardingService.ACTION_STOP)
+
+        service.onStartCommand(stop, 0, 2)
+        idleMainLooper()
+        assertEquals(1, intentDao.calls)
+        assertEquals(
+            "runtime and notification must stay live until durable disable succeeds",
+            2,
+            controller.flowOfActiveHostCount().value,
+        )
+        assertNotNull(
+            "Stop must not hide the notification while its durable write is pending",
+            manager.activeNotifications.singleOrNull(),
+        )
+        assertFalse(
+            "Stop must not stop its foreground owner while persistence is pending",
+            Shadows.shadowOf(service).isStoppedBySelf,
+        )
+
+        service.onStartCommand(stop, 0, 3)
+        idleMainLooper()
+        assertEquals("repeated Stop must coalesce", 1, intentDao.calls)
+        assertEquals(2, controller.flowOfActiveHostCount().value)
+        assertNotNull(manager.activeNotifications.singleOrNull())
+
+        intentDao.release.complete(Unit)
+        idleMainLooper()
+        assertEquals(0, controller.flowOfActiveHostCount().value)
+        assertTrue(Shadows.shadowOf(service).isStoppedBySelf)
+        assertTrue(manager.activeNotifications.isEmpty())
+        service.onDestroy()
+        manager.cancelAll()
+    }
+
+    @Test
+    fun `runtime and per-host teardown never disable persisted forwarding`() {
+        val intentDao = CountingForwardingIntentDao()
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = kotlinx.coroutines.flow.emptyFlow(),
+            forwardingIntentDao = intentDao,
+        )
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.registerActiveHost(hostId = 2, hostName = "beta")
+        drainStartedServices()
+
+        controller.stopForwarding(hostId = 1)
+        controller.stopAllForwarding(requestServiceStop = true)
+
+        assertEquals(
+            "only the user-visible aggregate notification action owns durable disable",
+            0,
+            intentDao.calls,
+        )
+        assertEquals(ForwardingService.ACTION_STOP_RUNTIME, shadow.nextStartedService?.action)
+    }
+
+    @Test
+    fun `persistence failure keeps runtime and notification truthful`() {
+        val intentDao = CountingForwardingIntentDao(
+            failure = IllegalStateException("test injected Room write failure"),
+        )
+        val controller = ForwardingController(
+            appContext = context,
+            connector = TestUnavailableConnector,
+            portRemappingDao = TestEmptyRemappingDao,
+            validatedNetworkChanges = kotlinx.coroutines.flow.emptyFlow(),
+            forwardingIntentDao = intentDao,
+        )
+        controller.registerActiveHost(hostId = 1, hostName = "truthful-host")
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancelAll()
+        val service = Robolectric.buildService(ForwardingService::class.java).get().apply {
+            this.controller = controller
+            observeDispatcher = Dispatchers.Unconfined
+            createNotificationChannel()
+        }
+        service.onStartCommand(
+            Intent(context, ForwardingService::class.java)
+                .setAction(ForwardingService.ACTION_START),
+            0,
+            1,
+        )
+
+        service.onStartCommand(
+            Intent(context, ForwardingService::class.java)
+                .setAction(ForwardingService.ACTION_STOP),
+            0,
+            2,
+        )
+        idleMainLooper()
+
+        assertEquals(1, intentDao.calls)
+        assertEquals(
+            "a failed durable write must not tear down the live transport owner",
+            1,
+            controller.flowOfActiveHostCount().value,
+        )
+        val notification = manager.activeNotifications.singleOrNull()?.notification
+        assertNotNull("the actionable forwarding notification must remain visible", notification)
+        assertTrue(
+            "the rebuilt notification must explain that forwarding is still live",
+            notification!!.extras.getCharSequence("android.text")
+                .toString().contains("Couldn’t stop · forwarding still running"),
+        )
+        assertTrue(
+            "the truthful failure notification must keep Stop available for retry",
+            notification.actions.orEmpty().any { it.title?.toString() == "Stop" },
+        )
+        assertFalse(
+            "persistence failure must not falsely stop the service",
+            Shadows.shadowOf(service).isStoppedBySelf,
+        )
+        service.onDestroy()
+        manager.cancelAll()
     }
 
     @Test
@@ -908,6 +1091,82 @@ class ForwardingControllerTest {
         Shadows.shadowOf(Looper.getMainLooper()).idle()
     }
 
+    /**
+     * Cheap both-variant guard for the connected #1202 evidence contract. The
+     * emulator journey remains the behavioral proof; this makes its two
+     * false-NO-VERDICT corrections load-bearing in every Unit gate.
+     */
+    private fun durableStopJourneyContractViolations(source: String): List<String> = buildList {
+        val baseline =
+            "val rowsImmediatelyBeforeStop = awaitStablePreStopRows(db, expectedIdsInOrder)"
+        val realStop = "stopAction.actionIntent.send()"
+        val baselineIndex = source.indexOf(baseline)
+        val realStopIndex = source.indexOf(realStop)
+        if (baselineIndex !in 0 until realStopIndex) {
+            add("pre-Stop snapshot bypasses stable two-row bootstrap observation")
+        }
+        val secondInsert = "runBlocking { db.hostDao().insert(secondSeededBeforeBootstrap) }"
+        val bootstrapRelaunch = "relaunchHostListForBootstrap()"
+        val bootstrapRelaunchIndex = source.indexOf(bootstrapRelaunch)
+        if (source.indexOf(secondInsert) !in 0 until bootstrapRelaunchIndex ||
+            bootstrapRelaunchIndex !in 0 until realStopIndex ||
+            (baselineIndex >= 0 && bootstrapRelaunchIndex >= baselineIndex) ||
+            !source.contains("rows.map { it.id } == expectedIdsInOrder") ||
+            !source.contains("rows.all { row ->") ||
+            !source.contains("row.lastBootstrapAt != null") ||
+            !source.contains("row.pocketshellLastDetectedAt != null") ||
+            !source.contains("!row.pocketshellCliVersion.isNullOrBlank()") ||
+            !source.contains("!row.pocketshellExpectedCliVersion.isNullOrBlank()") ||
+            !source.contains("row.pocketshellVersionCompatible != null") ||
+            !source.contains("row.pocketshellDaemonRunning != null") ||
+            !source.contains("row.pocketshellDaemonEnabled != null") ||
+            !source.contains("previousEligible == rows") ||
+            !source.contains("compose.waitForIdle()") ||
+            !source.contains("SystemClock.sleep(PRE_STOP_STABILITY_INTERVAL_MS)")
+        ) {
+            add("stable two-row bootstrap observation contract incomplete")
+        }
+        if (!source.contains(
+                "val expectedRowsAfterStop = rowsImmediatelyBeforeStop.map { it.copy(enabled = false) }",
+            )
+        ) {
+            add("pre-Stop snapshot no longer drives final expectation")
+        }
+        if (!source.contains("persistedAfterStop.first.isEmpty()") ||
+            !source.contains("listOf(false, false)") ||
+            !source.contains("expectedIdsInOrder = expectedIdsInOrder") ||
+            !source.contains("durable host names") ||
+            !source.contains("durable maxAutoPort values") ||
+            !source.contains("durable skipPortsBelow values")
+        ) {
+            add("exact two-row disabled and identity contract incomplete")
+        }
+        if (!source.contains("val artifact = exportDurableStateArtifact(artifactContents)")) {
+            add("artifact export invocation missing")
+        }
+        if (!source.contains("check(!file.exists() || file.delete())") ||
+            !source.contains("file.writeText(contents)") ||
+            !source.contains("artifact.isFile") ||
+            !source.contains("artifact.length()") ||
+            !source.contains("artifact.readText()")
+        ) {
+            add("artifact fresh-write and exact readback contract incomplete")
+        }
+    }
+
+    private fun durableStopJourneySource(): String {
+        val relative =
+            "app/src/androidTest/java/com/pocketshell/app/portfwd/" +
+                "ForwardingNotificationDurableStopE2eTest.kt"
+        var cursor = File(System.getProperty("user.dir")).absoluteFile
+        repeat(8) {
+            val candidate = File(cursor, relative)
+            if (candidate.isFile) return candidate.readText()
+            cursor = cursor.parentFile ?: return@repeat
+        }
+        error("Cannot locate $relative from ${System.getProperty("user.dir")}")
+    }
+
     // --- Issue #1058: real TerminalNetworkChange builders for the policy tests.
 
     private fun handoffChange(seq: Long): TerminalNetworkChange {
@@ -975,6 +1234,29 @@ class ForwardingControllerTest {
         override suspend fun deleteByRemotePort(hostId: Long, remotePort: Int) = Unit
 
         override suspend fun deleteByHostId(hostId: Long) = Unit
+    }
+
+    private open class CountingForwardingIntentDao(
+        private val failure: Throwable? = null,
+    ) : ForwardingIntentDao {
+        var calls: Int = 0
+            protected set
+
+        override suspend fun disableAll(): Int {
+            calls += 1
+            failure?.let { throw it }
+            return 2
+        }
+    }
+
+    private class HeldForwardingIntentDao : CountingForwardingIntentDao() {
+        val release = CompletableDeferred<Unit>()
+
+        override suspend fun disableAll(): Int {
+            super.disableAll()
+            release.await()
+            return 2
+        }
     }
 
     private class RejectingServiceContext(base: Context) : ContextWrapper(base) {

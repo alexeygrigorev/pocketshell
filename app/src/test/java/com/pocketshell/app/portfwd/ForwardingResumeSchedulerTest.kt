@@ -1,6 +1,8 @@
 package com.pocketshell.app.portfwd
 
 import android.content.Context
+import android.content.Intent
+import android.os.Looper
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -13,14 +15,16 @@ import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.app.portfwd.service.ForwardingService
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
-import android.os.Looper
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -28,6 +32,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows
 import org.robolectric.annotation.Config
@@ -210,6 +215,59 @@ class ForwardingResumeSchedulerTest {
         assertEquals(2, connector.connectCount.get())
     }
 
+    /**
+     * Issue #1202 recurrence race: a second persisted host may already be in
+     * the slow SSH-connect part of foreground resume when the user taps Stop
+     * on the aggregate forwarding notification for an existing active host.
+     * The Stop generation must invalidate that in-flight resume before it can
+     * adopt its transport; otherwise Stop briefly reaches zero and the late
+     * connect resurrects forwarding in the same process.
+     *
+     * This drives the production service ACTION_STOP entry, not a direct
+     * scheduler cleanup hook. Base behavior is RED: after ACTION_STOP empties
+     * the current controller, releasing the held connect lets resume adopt it.
+     */
+    @Test
+    fun notificationStopWhileForegroundResumeConnectIsHeld_closesLateTransportWithoutAdopting() =
+        runBlocking {
+            val connector = HeldConnector()
+            val controller = newController(connector)
+            val resumedHostId = insertEnabledHost()
+            controller.registerActiveHost(ACTIVE_NOTIFICATION_HOST_ID, "already-forwarding")
+
+            val scheduler = newScheduler(connector, controller)
+            val resume = async(Dispatchers.Default) { scheduler.resumeEnabledHosts() }
+            connector.started.await()
+
+            val service = Robolectric.buildService(ForwardingService::class.java).get().apply {
+                this.controller = controller
+            }
+            service.onStartCommand(
+                Intent(context, ForwardingService::class.java)
+                    .setAction(ForwardingService.ACTION_STOP),
+                0,
+                1,
+            )
+            assertTrue(
+                "notification Stop must first clear the already-active forwarding owner",
+                controller.activeHostIdsSnapshot().isEmpty(),
+            )
+
+            val lateSession = FakeSshSession()
+            connector.release.complete(Result.success(lateSession))
+            resume.await()
+
+            assertFalse(
+                "the held foreground resume must lose to the notification Stop generation",
+                controller.isHostActive(resumedHostId),
+            )
+            assertTrue(
+                "a resume invalidated by notification Stop must close its late SSH transport",
+                lateSession.wasClosed,
+            )
+            service.onDestroy()
+        }
+
     private fun idleMainLooper() {
         Shadows.shadowOf(Looper.getMainLooper()).idle()
     }
@@ -305,8 +363,25 @@ class ForwardingResumeSchedulerTest {
         }
     }
 
+    private class HeldConnector : PortForwardConnector {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Result<SshSession>>()
+
+        override suspend fun connect(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+        ): Result<SshSession> {
+            started.complete(Unit)
+            return release.await()
+        }
+    }
+
     private class FakeSshSession : SshSession {
         private var closed = false
+
+        val wasClosed: Boolean
+            get() = closed
 
         override val isConnected: Boolean
             get() = !closed
@@ -357,5 +432,9 @@ class ForwardingResumeSchedulerTest {
         override fun close() {
             isActive = false
         }
+    }
+
+    private companion object {
+        const val ACTIVE_NOTIFICATION_HOST_ID = 1_202_900L
     }
 }

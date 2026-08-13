@@ -597,7 +597,7 @@ SET = (
 FIRST = 'cli.add_command(usage_command, name="usage")'
 
 # (e) ALIAS — the reviewer's exact reproduction. This one must be READ, not
-#     merely refused: the vocabulary stays 17 and the seam does not move.
+#     merely refused: the vocabulary stays 18 and the seam does not move.
 e = src.replace(FIRST, "_g = cli\n" + FIRST, 1)
 for sub, obj in SET:
     old = 'cli.add_command(%s, name="%s")' % (obj, sub)
@@ -720,7 +720,7 @@ then
   out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/alias.py" bash "$SELECT" --verify-manifest 2>&1)"
   if [[ "$alias_probe" == "$real_probe" ]] && [[ "$alias_probe" == ON-SEAM\ * ]] &&
      grep -q '^PASS: manifest verified' <<<"$out" &&
-     grep -q 'over 17 subcommands read from the 17 top-level registration sites this reader could see' <<<"$out"; then
+     grep -q 'over 18 subcommands read from the 18 top-level registration sites this reader could see' <<<"$out"; then
     ok "16g-h a registration through an ALIAS of the root group is READ correctly, and is a NO-OP for the seam ($alias_probe, unchanged) — receiver-keyed detection dropped 4 subcommands here and stayed green"
   else
     bad "16g-h the aliased registration moves the seam or is not read: real=[$real_probe] alias=[$alias_probe]\n$out"
@@ -900,8 +900,8 @@ PY
   # 16g-k (ROUND 5) — the paired proof that 16g-h is load-bearing. Revert the
   # receiver resolution to round 4's receiver-keyed form (only the literal name
   # `cli` is the root; anything else is treated as some other object) and run it
-  # against the SAME aliased cli.py. It must under-read: 17 subcommands become
-  # 13 while the guard still says PASS. That is precisely the silent failure the
+  # against the SAME aliased cli.py. It must under-read: 18 subcommands become
+  # 14 while the guard still says PASS. That is precisely the silent failure the
   # equality check cannot see, and 16g-h is the assertion that catches it — so
   # if someone reverts the resolver, 16g-h goes red and this case explains why.
   R5DIR="$(mut_copy mut-r5-receiver-keyed)"
@@ -935,8 +935,8 @@ PY
          POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/alias.py" \
          bash "$R5DIR/select-test-areas.sh" --verify-manifest 2>&1)"
   if grep -q '^PASS: manifest verified' <<<"$out" &&
-     grep -q 'over 13 subcommands read from the 13 top-level registration sites this reader could see' <<<"$out"; then
-    ok "16g-k receiver-keyed detection silently under-reads the SAME aliased cli.py (17 -> 13 subcommands, still PASS) — so 16g-h's no-op assertion is the thing standing between us and the sixth spelling"
+     grep -q 'over 14 subcommands read from the 14 top-level registration sites this reader could see' <<<"$out"; then
+    ok "16g-k receiver-keyed detection silently under-reads the SAME aliased cli.py (18 -> 14 subcommands, still PASS) — so 16g-h's no-op assertion is the thing standing between us and the sixth spelling"
   else
     bad "16g-k could not reproduce the receiver-keyed under-read, so 16g-h's no-op assertion is unproven:\n$out"
   fi

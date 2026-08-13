@@ -869,13 +869,7 @@ jobs:
       - name: Install uv
         run: pip install --upgrade uv
 
-      # Issue #2122: `tests/test_send.py` drives a REAL tmux server (on an
-      # isolated socket) because `pocketshell send` is an injection primitive
-      # and a mocked tmux would prove nothing about bytes reaching a pane. The
-      # tests HARD-FAIL rather than skip when tmux is missing (a skip would
-      # make this job green while asserting nothing — G3), so the binary must
-      # be present. `command -v` first keeps this free when the runner image
-      # already ships it.
+      # test_send.py drives a real tmux and hard-fails (never skips) without it (#2122).
       - name: Ensure tmux is available (issue #2122)
         run: |
           command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }

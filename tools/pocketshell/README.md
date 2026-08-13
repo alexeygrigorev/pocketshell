@@ -96,11 +96,32 @@ table the code exits with, so they cannot drift):
 | 0 | `pruned <n>` | `--prune-older-than` removed `n` records. |
 | 2 | `bad-usage` | Invalid/missing arguments. Nothing injected or journaled. |
 | 3 | `pane-not-found` | Pane missing or dead. Not journaled; stays retryable. |
-| 4 | `tmux-failed` | tmux missing / no server / definitive failure before the pane was touched. Not journaled; stays retryable. |
+| 4 | `tmux-failed` | tmux missing / no server / a definitive tmux failure. This call never recorded a delivery. Usually the pane was never touched and the token is left unclaimed, but not always — see the note below before auto-retrying. |
 | 5 | `send-interrupted` or `journal-corrupt` | A previous attempt for this token died without an answer (its process is gone). Delivery is genuinely UNKNOWN and nothing was injected now. |
 | 6 | `timeout` | A tmux call exceeded `--timeout`. |
 | 7 | `journal-failed` | The journal could not be read/written. Nothing injected. |
 | 8 | `send-in-progress` | Another send for this token is STILL RUNNING. Nothing injected, nothing unknown — retry shortly to read that call's answer. |
+
+**Exit 4 in detail** — a client that branches on this table to decide whether
+to auto-retry (#2124) must not read `tmux-failed` as "clean slate". It
+guarantees only that this call never recorded a *delivery*. It does **not**
+guarantee the token is unjournaled, and in one narrow case it does not
+guarantee the pane is untouched:
+
+- Failure at the pane lookup, or while filling the paste buffer — both happen
+  before the journal is written at all: nothing injected, token unclaimed,
+  cleanly retryable. This is the ordinary case.
+- A definitive `paste-buffer` failure rolls this call's claim back. For a plain
+  call that returns the token to absent (cleanly retryable). Under
+  `--resend-interrupted` the *pre-existing* unresolved record is restored
+  byte-for-byte rather than erased, so the token stays journaled-unresolved and
+  the next plain call answers exit 5, not a fresh injection.
+- tmux disappearing between a successful paste and the `Enter`: the payload
+  **is** in the pane, the pending record is deliberately kept, and the next
+  plain call answers exit 5.
+
+A plain retry after exit 4 is therefore always *safe* — it re-reads the journal
+and answers exit 5 rather than duplicating — but it is not guaranteed to inject.
 
 stdout is machine-readable: the first whitespace-delimited token is one of
 the reasons above; human detail goes to stderr. Every retry path drains stdin
@@ -131,8 +152,17 @@ resolve, and forcing one would simply duplicate the payload.
 
 The invariant's honest edges: a definitive non-zero from `paste-buffer` is
 taken as proof nothing reached the pane; the journal directory must survive
-(delete it and the memory is gone); and `--prune-older-than` is an operator
-action that *can* clear unresolved records.
+(delete it and the memory is gone); `--prune-older-than` is an operator
+action that *can* clear unresolved records; and exit 8 is bounded by the owner
+process's **liveness**, not by the owner's `--timeout`. A suspended owner
+(reproduced with `SIGSTOP`) holds its token in `send-in-progress` for as long
+as it stays stopped, because the liveness probe asks whether the process still
+exists, not whether it is making progress, and `--timeout` bounds the tmux
+calls of the process that passed it rather than some other process's lifetime.
+This fails safe — the payload is never duplicated and the token never becomes
+absorbing once the owner dies — and a client cannot reach it through its own
+use, since it would have to suspend its own in-flight send. Nothing reaps a
+suspended owner.
 
 Records carry a timestamp and are pruned two ways: explicitly with
 `--prune-older-than <30d|12h|90m|3600s>`, and automatically on delivery at a

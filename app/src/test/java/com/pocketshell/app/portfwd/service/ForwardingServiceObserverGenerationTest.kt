@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.testsupport.drainMainLooperUntil
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -16,6 +17,7 @@ import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -327,6 +329,66 @@ class ForwardingServiceObserverGenerationTest {
         )
     }
 
+    /**
+     * Issue #2026 regression-first proof: the observer can be healthy but not
+     * scheduled until after the legacy local settle window. The condition is
+     * deliberately delayed on the REAL observe executor; an isolated happy
+     * pass is not evidence for the contention failure that filed this issue.
+     */
+    @Test
+    fun notificationPumpAbsorbsARealObserverSchedulingStall() {
+        startServiceWithSettledForward()
+
+        val stallStarted = CountDownLatch(1)
+        val stalledOnce = AtomicBoolean(false)
+        service.beforeNotificationPublishForTest = {
+            if (stalledOnce.compareAndSet(false, true)) {
+                stallStarted.countDown()
+                Thread.sleep(TimeUnit.SECONDS.toMillis(6L))
+            }
+        }
+
+        controller.updateActiveTunnels(HOST_A, MORE_TUNNELS)
+        assertTrue(
+            "the real observer must enter the injected scheduling stall",
+            stallStarted.await(BOUNDARY_TIMEOUT_MS, TimeUnit.MILLISECONDS),
+        )
+
+        assertEquals(
+            "a healthy observer delayed by contention must still reach the expected body",
+            GREW_TEXT,
+            awaitForwardingNotificationText(GREW_TEXT),
+        )
+    }
+
+    /**
+     * Issue #2026 hard-timeout contract. The injected pump models the audited
+     * helper exhausting its deadline while the real condition never holds.
+     * This must throw here; returning the stale body would silently move the
+     * failure onto whichever outer assertion happens to consume it.
+     */
+    @Test
+    fun notificationPumpHardFailsWhenTheConditionNeverSettles() {
+        val failure = assertThrows(AssertionError::class.java) {
+            awaitForwardingNotificationText(
+                expected = "a notification body that can never exist",
+                settle = { onTick, condition ->
+                    onTick()
+                    assertTrue(
+                        "the timeout fixture must leave the exit condition unsatisfied",
+                        !condition(),
+                    )
+                    false
+                },
+            )
+        }
+
+        assertTrue(
+            "the wrapper must identify its own hard timeout",
+            failure.message.orEmpty().contains("timed out"),
+        )
+    }
+
     // ---------------------------------------------------------------- helpers
 
     private fun startServiceWithSettledForward() {
@@ -431,12 +493,33 @@ class ForwardingServiceObserverGenerationTest {
      * observer runs on a REAL executor, so the load-bearing assertion is this
      * pump's exit condition, never the loop body.
      */
-    private fun awaitForwardingNotificationText(expected: String): String? {
-        val deadline = System.currentTimeMillis() + SETTLE_TIMEOUT_MS
+    private fun awaitForwardingNotificationText(
+        expected: String,
+        settle: (onTick: () -> Unit, condition: () -> Boolean) -> Boolean =
+            { onTick, condition ->
+                drainMainLooperUntil(
+                    sleepMs = 0L,
+                    onTick = onTick,
+                    condition = condition,
+                )
+            },
+    ): String? {
         var text = forwardingNotificationText()
-        while (text != expected && System.currentTimeMillis() < deadline) {
-            Thread.sleep(POLL_INTERVAL_MS)
-            text = forwardingNotificationText()
+        val settled = settle(
+            {
+                // Issue #2026: preserve the predecessor's per-tick drain
+                // verbatim. Only the deadline/loop ownership moves to the
+                // audited shared helper.
+                Thread.sleep(POLL_INTERVAL_MS)
+                text = forwardingNotificationText()
+            },
+            { text == expected },
+        )
+        if (!settled) {
+            throw AssertionError(
+                "awaitForwardingNotificationText timed out waiting for: $expected; " +
+                    "last body=$text",
+            )
         }
         return text
     }
@@ -452,7 +535,6 @@ class ForwardingServiceObserverGenerationTest {
         const val GREW_TEXT = "Running in the background · Race Host · 3 ports forwarded"
         const val BOOTSTRAP_TEXT = "Running in the background · Connecting…"
         const val BOUNDARY_TIMEOUT_MS = 10_000L
-        const val SETTLE_TIMEOUT_MS = 5_000L
         const val POLL_INTERVAL_MS = 20L
     }
 }

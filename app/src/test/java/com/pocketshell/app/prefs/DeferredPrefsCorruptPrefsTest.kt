@@ -4,10 +4,12 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.SharedPreferences
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.testsupport.drainMainLooperUntil
 import kotlinx.coroutines.asCoroutineDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -172,6 +174,71 @@ class DeferredPrefsCorruptPrefsTest {
         }
     }
 
+    /**
+     * Issue #2026 regression-first proof: the cold get is healthy but remains
+     * unscheduled until after the legacy local settle window, then reaches the
+     * BLOCKED state that the race arbiter is waiting for. This is a real-thread
+     * scheduling stall, not an isolated immediate-success proxy.
+     */
+    @Test
+    fun raceArbitrationPumpAbsorbsARealThreadSchedulingStall() {
+        val corruptContext = RacingCorruptScreenPrefsContext(realContext)
+        val blockingMonitor = Any()
+        val coldGetThread = Thread(
+            {
+                Thread.sleep(TimeUnit.SECONDS.toMillis(6L))
+                synchronized(blockingMonitor) {
+                    // The test thread deliberately holds this monitor until the
+                    // race arbiter observes this worker in BLOCKED state.
+                }
+            },
+            "deferred-prefs-delayed-cold-get-test",
+        )
+
+        try {
+            synchronized(blockingMonitor) {
+                coldGetThread.start()
+                assertEquals(
+                    "the delayed cold get must eventually be observed behind the in-flight warm open",
+                    false,
+                    corruptContext.awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread),
+                )
+            }
+        } finally {
+            coldGetThread.joinOrFail()
+        }
+    }
+
+    /**
+     * Issue #2026 hard-timeout contract. The injected pump returns the audited
+     * helper's false-on-timeout result while neither race outcome is present.
+     * The arbiter must throw rather than returning a made-up branch decision.
+     */
+    @Test
+    fun raceArbitrationPumpHardFailsWhenNeitherConditionEverSettles() {
+        val corruptContext = RacingCorruptScreenPrefsContext(realContext)
+        val neverStartedColdGet = Thread({}, "deferred-prefs-never-started-cold-get-test")
+
+        val failure = assertThrows(AssertionError::class.java) {
+            corruptContext.awaitSecondThrowingOpenOrColdGetBlocked(
+                coldGetThread = neverStartedColdGet,
+                settle = { onTick, condition ->
+                    onTick()
+                    assertTrue(
+                        "the timeout fixture must leave both race outcomes unsatisfied",
+                        !condition(),
+                    )
+                    false
+                },
+            )
+        }
+
+        assertTrue(
+            "the race arbiter must identify its own hard timeout",
+            failure.message.orEmpty().contains("neither raced"),
+        )
+    }
+
     private fun clearPrefs() {
         realContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit().clear().commit()
@@ -255,16 +322,38 @@ class DeferredPrefsCorruptPrefsTest {
             )
         }
 
-        fun awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread: Thread): Boolean {
-            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
-            while (System.nanoTime() < deadline) {
-                if (secondThrowingOpenStarted.await(10, TimeUnit.MILLISECONDS)) return true
-                if (coldGetThread.state == Thread.State.BLOCKED) return false
-            }
-            throw AssertionError(
-                "cold get neither raced into a second corrupt open nor blocked " +
-                    "behind the in-flight warm open",
+        fun awaitSecondThrowingOpenOrColdGetBlocked(
+            coldGetThread: Thread,
+            settle: (onTick: () -> Unit, condition: () -> Boolean) -> Boolean =
+                { onTick, condition ->
+                    drainMainLooperUntil(
+                        sleepMs = 0L,
+                        onTick = onTick,
+                        condition = condition,
+                    )
+                },
+        ): Boolean {
+            var result: Boolean? = null
+            val settled = settle(
+                {
+                    // Issue #2026: preserve both predecessor observation
+                    // points verbatim through onTick. Their ordering decides
+                    // which real race branch won.
+                    if (secondThrowingOpenStarted.await(10, TimeUnit.MILLISECONDS)) {
+                        result = true
+                    } else if (coldGetThread.state == Thread.State.BLOCKED) {
+                        result = false
+                    }
+                },
+                { result != null },
             )
+            if (!settled) {
+                throw AssertionError(
+                    "cold get neither raced into a second corrupt open nor blocked " +
+                        "behind the in-flight warm open",
+                )
+            }
+            return checkNotNull(result) { "settle pump reported success without a race outcome" }
         }
 
         fun allowFirstCorruptOpenToRecover() {

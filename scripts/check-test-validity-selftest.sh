@@ -2,7 +2,7 @@
 # Self-test for scripts/check-test-validity.sh (issue #850).
 #
 # For each detector added for #848/#850 (C1, FAKE1, AWAIT1, J1), the
-# pre-existing A5, and #1857 A5L, this driver plants a BAD fixture (the smell)
+# pre-existing A5, #1048/#2026 TIMING1, and #1857 A5L, this driver plants a BAD fixture (the smell)
 # and a GOOD fixture (the corrective shape), runs the guard, and asserts the bad
 # fixture is reported as a finding while the good fixture is NOT — the
 # red->green proof for the detector itself. It also asserts the guard HARD-FAILS
@@ -15,7 +15,9 @@
 # Usage: scripts/check-test-validity-selftest.sh
 # Runs alongside the guard in the Unit job; exits non-zero on any self-test miss.
 
-set -uo pipefail
+# This harness judges another fail-closed script. Its own unhandled runtime
+# errors must likewise stop the run instead of reaching a green summary.
+set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
@@ -31,24 +33,37 @@ FIX_TAG="selftest_$$"
 TEST_FIX_DIR="app/src/test/java/com/pocketshell/app/$FIX_TAG"
 ANDROID_FIX_DIR="app/src/androidTest/java/com/pocketshell/app/$FIX_TAG"
 SRC_FIX_DIR="app/src/main/java/com/pocketshell/app/$FIX_TAG"
-# TIMING1 is scoped to the connection/terminal roots, so its fixtures must live
-# under one of those dirs (here: the app tmux JVM test root).
+# TIMING1's original runTest fixture lives under app/tmux. Its #2026
+# plain-JUnit deadline-pump fixtures live under the two exact new roots so the
+# self-test proves real scan reachability rather than merely branch presence.
 TIMING_FIX_DIR="app/src/test/java/com/pocketshell/app/tmux/$FIX_TAG"
+TIMING_PORTFWD_FIX_DIR="app/src/test/java/com/pocketshell/app/portfwd/$FIX_TAG"
+TIMING_PREFS_FIX_DIR="app/src/test/java/com/pocketshell/app/prefs/$FIX_TAG"
 TMP_REG=""
 CLEANUP_SIBLING_TAG=""
+MUTATED_GUARD=""
 
 # Remove ONLY this invocation's own (PID-suffixed) fixture dirs, so a concurrent
 # sibling self-test (different PID) is never disturbed. Also remove this
 # invocation's unique temporary registry if an interrupt arrives mid-check.
 cleanup() {
-  rm -rf "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR"
+  rm -rf \
+    "$TEST_FIX_DIR" \
+    "$ANDROID_FIX_DIR" \
+    "$SRC_FIX_DIR" \
+    "$TIMING_FIX_DIR" \
+    "$TIMING_PORTFWD_FIX_DIR" \
+    "$TIMING_PREFS_FIX_DIR"
   [[ -z "${TMP_REG:-}" ]] || rm -f -- "$TMP_REG"
+  [[ -z "${MUTATED_GUARD:-}" ]] || rm -f -- "$MUTATED_GUARD"
   if [[ -n "${CLEANUP_SIBLING_TAG:-}" ]]; then
     rm -rf \
       "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
       "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
       "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-      "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG"
+      "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" \
+      "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" \
+      "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG"
   fi
 }
 exit_from_signal() {
@@ -61,7 +76,13 @@ trap cleanup EXIT
 trap 'exit_from_signal 130' INT
 trap 'exit_from_signal 143' TERM
 cleanup
-mkdir -p "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR"
+mkdir -p \
+  "$TEST_FIX_DIR" \
+  "$ANDROID_FIX_DIR" \
+  "$SRC_FIX_DIR" \
+  "$TIMING_FIX_DIR" \
+  "$TIMING_PORTFWD_FIX_DIR" \
+  "$TIMING_PREFS_FIX_DIR"
 
 # Internal child mode for the deterministic SIGTERM cleanup regression below.
 # It creates only its normal PID-scoped fixtures, then waits to be terminated.
@@ -88,7 +109,9 @@ run_sigterm_cleanup_regression() {
     "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
     "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
     "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG"
+    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" \
+    "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" \
+    "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG"
 
   "$REPO_ROOT/scripts/check-test-validity-selftest.sh" --sigterm-cleanup-probe &
   probe_pid=$!
@@ -98,7 +121,9 @@ run_sigterm_cleanup_regression() {
     if [[ -d "app/src/test/java/com/pocketshell/app/$probe_tag" &&
           -d "app/src/androidTest/java/com/pocketshell/app/$probe_tag" &&
           -d "app/src/main/java/com/pocketshell/app/$probe_tag" &&
-          -d "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" ]]; then
+          -d "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" &&
+          -d "app/src/test/java/com/pocketshell/app/portfwd/$probe_tag" &&
+          -d "app/src/test/java/com/pocketshell/app/prefs/$probe_tag" ]]; then
       probe_ready=1
       break
     fi
@@ -114,13 +139,17 @@ run_sigterm_cleanup_regression() {
         ! -e "app/src/test/java/com/pocketshell/app/$probe_tag" &&
         ! -e "app/src/androidTest/java/com/pocketshell/app/$probe_tag" &&
         ! -e "app/src/main/java/com/pocketshell/app/$probe_tag" &&
-        ! -e "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" ]]; then
+        ! -e "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" &&
+        ! -e "app/src/test/java/com/pocketshell/app/portfwd/$probe_tag" &&
+        ! -e "app/src/test/java/com/pocketshell/app/prefs/$probe_tag" ]]; then
     own_removed=1
   fi
   if [[ -d "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
-        -d "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
-        -d "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
-        -d "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" ]]; then
+      -d "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
+      -d "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" &&
+      -d "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" &&
+      -d "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" &&
+      -d "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG" ]]; then
     sibling_preserved=1
   fi
 
@@ -140,10 +169,14 @@ run_sigterm_cleanup_regression() {
     "app/src/androidTest/java/com/pocketshell/app/$probe_tag" \
     "app/src/main/java/com/pocketshell/app/$probe_tag" \
     "app/src/test/java/com/pocketshell/app/tmux/$probe_tag" \
+    "app/src/test/java/com/pocketshell/app/portfwd/$probe_tag" \
+    "app/src/test/java/com/pocketshell/app/prefs/$probe_tag" \
     "app/src/test/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
     "app/src/androidTest/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
     "app/src/main/java/com/pocketshell/app/$CLEANUP_SIBLING_TAG" \
-    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG"
+    "app/src/test/java/com/pocketshell/app/tmux/$CLEANUP_SIBLING_TAG" \
+    "app/src/test/java/com/pocketshell/app/portfwd/$CLEANUP_SIBLING_TAG" \
+    "app/src/test/java/com/pocketshell/app/prefs/$CLEANUP_SIBLING_TAG"
   CLEANUP_SIBLING_TAG=""
 }
 
@@ -175,20 +208,37 @@ _CACHE_OUT=""
 _CACHE_RC=""
 _fixture_signature() {
   {
-    find "$TEST_FIX_DIR" "$ANDROID_FIX_DIR" "$SRC_FIX_DIR" "$TIMING_FIX_DIR" \
+    find \
+      "$TEST_FIX_DIR" \
+      "$ANDROID_FIX_DIR" \
+      "$SRC_FIX_DIR" \
+      "$TIMING_FIX_DIR" \
+      "$TIMING_PORTFWD_FIX_DIR" \
+      "$TIMING_PREFS_FIX_DIR" \
       -type f -printf '%p|%s|%T@\n' 2>/dev/null | sort
     printf 'REG:%s\n' "${VETTED_SEAM_REGISTRY:-<default>}"
     [[ -n "${VETTED_SEAM_REGISTRY:-}" && -f "${VETTED_SEAM_REGISTRY}" ]] \
       && printf 'REGSIG:%s\n' "$(cksum "$VETTED_SEAM_REGISTRY")"
   } | cksum
+  return 0
 }
 ensure_guard_cache() {
   local sig
   sig="$(_fixture_signature)"
   if [[ "$sig" != "$_CACHE_SIG" ]]; then
     _CACHE_SIG="$sig"
-    _CACHE_OUT="$("$GUARD" 2>&1)"
-    _CACHE_RC=$?
+    if _CACHE_OUT="$("$GUARD" 2>&1)"; then
+      _CACHE_RC=0
+    else
+      _CACHE_RC=$?
+    fi
+    if printf '%s\n' "$_CACHE_OUT" \
+        | grep -Eq '(^|: )[[:alnum:]_./-]+: command not found($|[[:space:]])|unbound variable|syntax error near unexpected token'; then
+      note_fail "guard cache state emitted an internal shell/runtime diagnostic"
+      # Never let an expected detector rc=1 launder an unrelated runtime error
+      # into a successful red proof.
+      _CACHE_RC=125
+    fi
   fi
 }
 
@@ -211,6 +261,113 @@ assert_exit() {
   local got="$_CACHE_RC"
   if [[ "$got" -eq "$want" ]]; then note_pass "$desc (exit $got)"; else note_fail "$desc (want exit $want, got $got)"; fi
 }
+
+# A shell/runtime diagnostic in the guard output invalidates every cached
+# detector verdict. In particular, a later expected exit=1 must not launder an
+# unrelated `command not found` into a successful red proof.
+assert_guard_runtime_clean() {
+  local desc="$1"
+  ensure_guard_cache
+  if printf '%s\n' "$_CACHE_OUT" \
+      | grep -Eq '(^|: )[[:alnum:]_./-]+: command not found($|[[:space:]])|unbound variable|syntax error near unexpected token'; then
+    note_fail "$desc (guard emitted an internal shell/runtime diagnostic)"
+  else
+    note_pass "$desc"
+  fi
+}
+
+# Mutate the actual TIMING1 conditional-helper call in a private executable copy
+# beside the real guard (so its repo-root discovery is unchanged). Bash disables
+# errexit for commands used as an `if` condition, including all commands inside
+# a condition-invoked function. The mutant must therefore return non-zero by the
+# guard's explicit predicate-error contract, not by top-level `set -e` luck.
+run_guard_runtime_error_regression() {
+  local out rc inserted pass_footers
+  MUTATED_GUARD="$(mktemp "scripts/.check-test-validity-runtime-error.$$.XXXXXX.sh")"
+  awk '
+    {
+      if (index($0, "timing1_checked_predicate timing1_uses_shared_pump_only_scope \"$file\"") > 0) {
+        sub(/timing1_uses_shared_pump_only_scope/, "test_validity_selftest_missing_conditional_helper")
+        inserted++
+      }
+      print
+    }
+    END {
+      if (inserted != 1) exit 90
+    }
+  ' "$GUARD" > "$MUTATED_GUARD"
+  chmod +x "$MUTATED_GUARD"
+  inserted="$(grep -c 'timing1_checked_predicate test_validity_selftest_missing_conditional_helper "\$file"' "$MUTATED_GUARD")"
+  if [[ "$inserted" -eq 1 ]]; then
+    note_pass "conditional-helper mutant is live exactly once at the TIMING1 call site"
+  else
+    note_fail "conditional-helper mutant insertion count (want 1, got $inserted)"
+  fi
+  if out="$("$MUTATED_GUARD" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if printf '%s\n' "$out" | grep -q 'test_validity_selftest_missing_conditional_helper: command not found'; then
+    note_pass "conditional-helper mutant executed the missing command"
+  else
+    note_fail "conditional-helper mutant did not emit its command-not-found diagnostic"
+  fi
+  pass_footers="$(printf '%s\n' "$out" | grep -c '^PASS: no new unjustified' || true)"
+  if [[ "$pass_footers" -eq 0 ]]; then
+    note_pass "conditional command-not-found cannot reach the normal PASS footer"
+  else
+    note_fail "conditional command-not-found reached $pass_footers normal PASS footer(s)"
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    note_pass "conditional command-not-found cannot be reported as a passing guard (exit $rc)"
+  else
+    note_fail "conditional command-not-found false-greened the guard (exit 0)"
+  fi
+  rm -f -- "$MUTATED_GUARD"
+  MUTATED_GUARD=""
+}
+
+# Keep this awk-shaped historical fragment out of the runtime mutant above:
+# the round-3 top-level mutation was insufficient because `set -e` made it red
+# without exercising the conditional-command exception.
+: <<'REMOVED_TOP_LEVEL_MUTANT'
+  awk '
+    { print }
+    /^scan_void1$/ {
+      print "test_validity_selftest_missing_command"
+      inserted++
+    }
+    END {
+      if (inserted != 1) exit 90
+    }
+  ' "$GUARD" > "$MUTATED_GUARD"
+  chmod +x "$MUTATED_GUARD"
+  inserted="$(grep -c '^test_validity_selftest_missing_command$' "$MUTATED_GUARD")"
+  if [[ "$inserted" -eq 1 ]]; then
+    note_pass "internal-error mutant is live exactly once"
+  else
+    note_fail "internal-error mutant insertion count (want 1, got $inserted)"
+  fi
+  if out="$("$MUTATED_GUARD" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if printf '%s\n' "$out" | grep -q 'test_validity_selftest_missing_command: command not found'; then
+    note_pass "internal-error mutant executed the missing command"
+  else
+    note_fail "internal-error mutant did not emit its command-not-found diagnostic"
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    note_pass "internal command-not-found cannot be reported as a passing guard (exit $rc)"
+  else
+    note_fail "internal command-not-found false-greened the guard (exit 0)"
+  fi
+  rm -f -- "$MUTATED_GUARD"
+  MUTATED_GUARD=""
+}
+REMOVED_TOP_LEVEL_MUTANT
 
 echo "=============================================================="
 echo " Self-test: scripts/check-test-validity.sh (#850 detectors)"
@@ -596,6 +753,254 @@ class Timing1AdvisoryRealScopeTest {
 }
 KT
 
+# BAD-PLAIN-PORTFWD (#2026): the exact predecessor shape from
+# ForwardingServiceObserverGenerationTest. It is deliberately ordinary JUnit
+# (no runTest), computes a local 5 s currentTimeMillis deadline, then sleeps and
+# rereads the notification inside the while pump.
+cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdLegacyPumpTest.kt" <<'KT'
+package com.pocketshell.app.portfwd.validityselftest
+class Timing1BadPortfwdLegacyPumpTest {
+    private fun awaitForwardingNotificationText(expected: String): String? {
+        val deadline = System.currentTimeMillis() + SETTLE_TIMEOUT_MS
+        var text = forwardingNotificationText()
+        while (text != expected && System.currentTimeMillis() < deadline) {
+            Thread.sleep(POLL_INTERVAL_MS)
+            text = forwardingNotificationText()
+        }
+        return text
+    }
+    private fun forwardingNotificationText(): String? = null
+    private companion object {
+        const val SETTLE_TIMEOUT_MS = 5_000L
+        const val POLL_INTERVAL_MS = 20L
+    }
+}
+KT
+
+# BAD-PLAIN-PREFS (#2026): the exact predecessor shape from
+# DeferredPrefsCorruptPrefsTest. It uses nanoTime plus the ordered latch/BLOCKED
+# observations and likewise has no runTest branch for the detector to lean on.
+cat > "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsLegacyPumpTest.kt" <<'KT'
+package com.pocketshell.app.prefs.validityselftest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+class Timing1BadPrefsLegacyPumpTest {
+    private val secondThrowingOpenStarted = CountDownLatch(1)
+    fun awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread: Thread): Boolean {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (System.nanoTime() < deadline) {
+            if (secondThrowingOpenStarted.await(10, TimeUnit.MILLISECONDS)) return true
+            if (coldGetThread.state == Thread.State.BLOCKED) return false
+        }
+        throw AssertionError("cold get neither raced nor blocked")
+    }
+}
+KT
+
+# BAD-PLAIN-PORTFWD-MULTILINE (#2026 round 3): the same predecessor semantics
+# with an ordinary wrapped deadline declaration and while condition. Formatting
+# cannot turn local wall-clock loop ownership into a clean result.
+cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdMultilinePumpTest.kt" <<'KT'
+package com.pocketshell.app.portfwd.validityselftest
+class Timing1BadPortfwdMultilinePumpTest {
+    private fun awaitForwardingNotificationText(expected: String): String? {
+        val deadline =
+            System.currentTimeMillis() + 5_000L
+        var text = forwardingNotificationText()
+        while (
+            text != expected &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Thread.sleep(20L)
+            text = forwardingNotificationText()
+        }
+        return text
+    }
+    private fun forwardingNotificationText(): String? = null
+}
+KT
+
+# BAD-PLAIN-PREFS-MULTILINE (#2026 round 3): the nanoTime predecessor keeps its
+# ordered latch/BLOCKED observations while both its typed deadline declaration
+# and loop comparison use normal multiline Kotlin formatting.
+cat > "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsMultilinePumpTest.kt" <<'KT'
+package com.pocketshell.app.prefs.validityselftest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+class Timing1BadPrefsMultilinePumpTest {
+    private val secondThrowingOpenStarted = CountDownLatch(1)
+    fun awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread: Thread): Boolean {
+        val deadline: Long =
+            System.nanoTime() +
+                TimeUnit.SECONDS.toNanos(5)
+        while (
+            System.nanoTime() <
+                deadline
+        ) {
+            if (secondThrowingOpenStarted.await(10, TimeUnit.MILLISECONDS)) return true
+            if (coldGetThread.state == Thread.State.BLOCKED) return false
+        }
+        throw AssertionError("cold get neither raced nor blocked")
+    }
+}
+KT
+
+# BAD lexical control: comments are allowed between executable tokens. The
+# sanitizer must erase them without erasing the real multiline deadline pump.
+cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadCommentInterleavedPumpTest.kt" <<'KT'
+package com.pocketshell.app.portfwd.validityselftest
+class Timing1BadCommentInterleavedPumpTest {
+    fun awaitCondition(): Boolean {
+        val deadline =
+            System.currentTimeMillis() /* still executable */ + 5_000L
+        while (System.currentTimeMillis() < /* compare */ deadline) {
+            Thread.sleep(20L)
+        }
+        return false
+    }
+}
+KT
+
+# BAD lexical control (#2026 round 4): executable block-comment trivia may
+# legally separate a clock method name from its call parentheses. Both the
+# declaration and while comparison use that spelling, so normal sanitizing
+# leaves whitespace exactly where a contiguous `currentTimeMillis()` matcher
+# used to false-green the forbidden portfwd pump.
+cat > "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdInsideCallTriviaPumpTest.kt" <<'KT'
+package com.pocketshell.app.portfwd.validityselftest
+class Timing1BadPortfwdInsideCallTriviaPumpTest {
+    fun awaitCondition(): Boolean {
+        val deadline =
+            System.currentTimeMillis /* declaration clock trivia */ () + 5_000L
+        while (
+            System.currentTimeMillis /* comparison clock trivia */ () < deadline
+        ) {
+            Thread.sleep(20L)
+            rereadNotification()
+        }
+        return false
+    }
+    private fun rereadNotification() = Unit
+}
+KT
+
+# BAD lexical control (#2026 round 4): nanoTime has the same legal inside-call
+# trivia in the prefs predecessor, including its ordered latch/BLOCKED drain.
+cat > "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsInsideCallTriviaPumpTest.kt" <<'KT'
+package com.pocketshell.app.prefs.validityselftest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+class Timing1BadPrefsInsideCallTriviaPumpTest {
+    private val secondThrowingOpenStarted = CountDownLatch(1)
+    fun awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread: Thread): Boolean {
+        val deadline =
+            System.nanoTime /* declaration clock trivia */ () +
+                TimeUnit.SECONDS.toNanos(5)
+        while (
+            System.nanoTime /* comparison clock trivia */ () < deadline
+        ) {
+            if (secondThrowingOpenStarted.await(10, TimeUnit.MILLISECONDS)) return true
+            if (coldGetThread.state == Thread.State.BLOCKED) return false
+        }
+        throw AssertionError("cold get neither raced nor blocked")
+    }
+}
+KT
+
+# GOOD lexical control: semantically complete pump text that exists only in
+# ordinary/raw strings and comments must not manufacture a TIMING1 finding.
+cat > "$TIMING_PREFS_FIX_DIR/Timing1GoodDeadlinePumpTextTest.kt" <<'KT'
+package com.pocketshell.app.prefs.validityselftest
+class Timing1GoodDeadlinePumpTextTest {
+    val ordinary = "val deadline = System.nanoTime() + 5_000L; while (System.nanoTime() < deadline)"
+    val raw = """
+        val deadline =
+            System.currentTimeMillis() + 5_000L
+        while (System.currentTimeMillis() < deadline) { Thread.sleep(20L) }
+    """.trimIndent()
+    /*
+     * val deadline =
+     *     System.nanoTime() + 5_000L
+     * while (System.nanoTime() < deadline) { Thread.sleep(20L) }
+     */
+}
+KT
+
+# GOOD-PLAIN-PORTFWD: candidate shape. The same sleep + notification reread is
+# injected verbatim through onTick, while only drainMainLooperUntil owns the
+# deadline and loop.
+cat > "$TIMING_PORTFWD_FIX_DIR/Timing1GoodPortfwdSharedPumpTest.kt" <<'KT'
+package com.pocketshell.app.portfwd.validityselftest
+class Timing1GoodPortfwdSharedPumpTest {
+    private fun awaitForwardingNotificationText(expected: String): String? {
+        var text = forwardingNotificationText()
+        val settled = drainMainLooperUntil(
+            sleepMs = 0L,
+            onTick = {
+                Thread.sleep(POLL_INTERVAL_MS)
+                text = forwardingNotificationText()
+            },
+            condition = { text == expected },
+        )
+        if (!settled) throw AssertionError("timed out")
+        return text
+    }
+    private fun forwardingNotificationText(): String? = null
+    private fun drainMainLooperUntil(
+        sleepMs: Long,
+        onTick: () -> Unit,
+        condition: () -> Boolean,
+    ): Boolean = condition()
+    private companion object { const val POLL_INTERVAL_MS = 20L }
+}
+KT
+
+# GOOD-PLAIN-PREFS: candidate shape. The ordered latch/BLOCKED observations are
+# preserved through onTick and the shared helper remains the sole loop owner.
+cat > "$TIMING_PREFS_FIX_DIR/Timing1GoodPrefsSharedPumpTest.kt" <<'KT'
+package com.pocketshell.app.prefs.validityselftest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+class Timing1GoodPrefsSharedPumpTest {
+    private val secondThrowingOpenStarted = CountDownLatch(1)
+    fun awaitSecondThrowingOpenOrColdGetBlocked(coldGetThread: Thread): Boolean {
+        var result: Boolean? = null
+        val settled = drainMainLooperUntil(
+            sleepMs = 0L,
+            onTick = {
+                if (secondThrowingOpenStarted.await(10, TimeUnit.MILLISECONDS)) {
+                    result = true
+                } else if (coldGetThread.state == Thread.State.BLOCKED) {
+                    result = false
+                }
+            },
+            condition = { result != null },
+        )
+        if (!settled) throw AssertionError("cold get neither raced nor blocked")
+        return checkNotNull(result)
+    }
+    private fun drainMainLooperUntil(
+        sleepMs: Long,
+        onTick: () -> Unit,
+        condition: () -> Boolean,
+    ): Boolean = condition()
+}
+KT
+
+# GOOD-PLAIN-BOUNDARY: a bounded one-shot coordination helper is sound and is
+# not a hand-rolled polling loop. This protects TIMING1 from broadening into a
+# ban on every legitimate timeout under the two roots.
+cat > "$TIMING_PORTFWD_FIX_DIR/Timing1GoodBoundedLatchTest.kt" <<'KT'
+package com.pocketshell.app.portfwd.validityselftest
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+class Timing1GoodBoundedLatchTest {
+    fun waitForBoundary(latch: CountDownLatch) {
+        check(latch.await(5, TimeUnit.SECONDS))
+    }
+}
+KT
+
 assert_report present "Timing1BadSleepBeforeAssertTest.kt" "TIMING1 — NEW bare Thread.sleep" "TIMING1 hard-fails a bare sleep-before-assert with no bounded loop"
 assert_report absent  "Timing1GoodSeamTest.kt" "TIMING1 — NEW bare Thread.sleep" "TIMING1 spares a StandardTestDispatcher seam (Shape A) from hard-fail"
 assert_report absent  "Timing1GoodSeamTest.kt" "TIMING1 — NEW runTest over a real dispatcher" "TIMING1 spares a StandardTestDispatcher seam (Shape A) advisory"
@@ -603,11 +1008,63 @@ assert_report absent  "Timing1GoodBoundedPumpTest.kt" "TIMING1 — NEW runTest o
 assert_report present "Timing1GoodJustifiedTest.kt" "TIMING1 — JUSTIFIED" "TIMING1 lists a // JUSTIFIED: opt-out as justified"
 assert_report present "Timing1AdvisoryRealScopeTest.kt" "TIMING1 — NEW runTest over a real dispatcher" "TIMING1 advisory-flags a real-IO owned scope with no seam"
 assert_report absent  "Timing1AdvisoryRealScopeTest.kt" "TIMING1 — NEW bare Thread.sleep" "TIMING1 advisory real-IO scope is NOT a hard-fail"
+assert_report present "Timing1BadPortfwdLegacyPumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 catches the exact plain-JUnit portfwd predecessor without runTest"
+assert_report present "Timing1BadPrefsLegacyPumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 catches the exact plain-JUnit prefs predecessor without runTest"
+assert_report present "Timing1BadPortfwdMultilinePumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 catches a semantically equivalent multiline portfwd pump"
+assert_report present "Timing1BadPrefsMultilinePumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 catches a semantically equivalent multiline prefs pump"
+assert_report present "Timing1BadCommentInterleavedPumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 catches a real multiline pump with block comments between tokens"
+assert_report present "Timing1BadPortfwdInsideCallTriviaPumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 catches portfwd executable trivia inside both clock calls"
+assert_report present "Timing1BadPrefsInsideCallTriviaPumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 catches prefs executable trivia inside both clock calls"
+assert_report absent  "Timing1GoodDeadlinePumpTextTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 ignores multiline pump text in strings and comments"
+assert_report absent  "Timing1GoodPortfwdSharedPumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 spares the migrated portfwd shared-pump shape"
+assert_report absent  "Timing1GoodPrefsSharedPumpTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 spares the migrated prefs shared-pump shape"
+assert_report absent  "Timing1GoodBoundedLatchTest.kt" "TIMING1 — hand-rolled wall-clock deadline pump" "TIMING1 spares a sound one-shot bounded coordination helper"
 assert_exit 1 "TIMING1 bare sleep-before-assert hard-fails the guard"
 
-# Remove the BAD TIMING1 so the final clean-state assertion (exit 0 with only
-# advisory/justified findings) holds.
+# Prove every #2026 deadline-pump fixture bears the guard exit independently.
+# Park all offenders outside TIMING1's scoped roots, restore exactly one at a
+# time, and require both one named finding and no sibling finding. This makes a
+# broad/confounded red distinguishable from a selective detector kill.
 rm -f "$TIMING_FIX_DIR/Timing1BadSleepBeforeAssertTest.kt"
+TIMING1_BAD_PATHS=(
+  "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdLegacyPumpTest.kt"
+  "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsLegacyPumpTest.kt"
+  "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdMultilinePumpTest.kt"
+  "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsMultilinePumpTest.kt"
+  "$TIMING_PORTFWD_FIX_DIR/Timing1BadCommentInterleavedPumpTest.kt"
+  "$TIMING_PORTFWD_FIX_DIR/Timing1BadPortfwdInsideCallTriviaPumpTest.kt"
+  "$TIMING_PREFS_FIX_DIR/Timing1BadPrefsInsideCallTriviaPumpTest.kt"
+)
+for timing_bad_path in "${TIMING1_BAD_PATHS[@]}"; do
+  timing_bad_name="${timing_bad_path##*/}"
+  mv "$timing_bad_path" "$TEST_FIX_DIR/$timing_bad_name.held"
+done
+
+for timing_bad_path in "${TIMING1_BAD_PATHS[@]}"; do
+  timing_bad_name="${timing_bad_path##*/}"
+  mv "$TEST_FIX_DIR/$timing_bad_name.held" "$timing_bad_path"
+  assert_report \
+    present \
+    "$timing_bad_name" \
+    "TIMING1 — hand-rolled wall-clock deadline pump" \
+    "TIMING1 $timing_bad_name is the sole restored deadline-pump finding"
+  for timing_sibling_path in "${TIMING1_BAD_PATHS[@]}"; do
+    timing_sibling_name="${timing_sibling_path##*/}"
+    [[ "$timing_sibling_name" == "$timing_bad_name" ]] && continue
+    assert_report \
+      absent \
+      "$timing_sibling_name" \
+      "TIMING1 — hand-rolled wall-clock deadline pump" \
+      "TIMING1 $timing_bad_name does not launder a sibling $timing_sibling_name finding"
+  done
+  assert_exit 1 "TIMING1 $timing_bad_name independently hard-fails the guard"
+  mv "$timing_bad_path" "$TEST_FIX_DIR/$timing_bad_name.held"
+done
+
+# Remove every held BAD TIMING1. The end-of-script clean-state assertion now
+# proves the shared-pump and lexical text controls remain green without an
+# offender supplying their result.
+rm -f "$TEST_FIX_DIR"/Timing1Bad*.held
 
 # --------------------------------------------------------------------------
 # SEAM1 — connected test driving an assertion from an UNVETTED production
@@ -1020,6 +1477,8 @@ TMP_REG=""
 echo
 echo "[clean] only corrective shapes + advisory findings remain"
 assert_exit 0 "guard passes (exit 0) with no hard-fail smells, only advisory findings"
+assert_guard_runtime_clean "guard clean state emits no internal shell/runtime diagnostic"
+run_guard_runtime_error_regression
 
 echo
 echo "=============================================================="

@@ -6,6 +6,8 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+source "$ROOT_DIR/scripts/lib/disk-preflight.sh"
+source "$ROOT_DIR/scripts/lib/release-validation-storage.sh"
 # Issue #2064: one binary for the whole chain — the pre-release gate builds it,
 # every downstream stage installs it, publish_validated_apk ships it, and each
 # hop re-checks the sha256.
@@ -36,8 +38,6 @@ pocketshell_assert_gradle_execution_profile \
 if [[ "${1:-}" == "--verify-apk-identity" ]]; then
   export POCKETSHELL_AVD_LOCK_ACQUIRED=1
 fi
-
-pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/release-emulator-validation}"
 if [[ "$LOG_ROOT" != /* ]]; then
@@ -78,7 +78,12 @@ ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/release-emulator-validation.sh
+Usage: scripts/release-emulator-validation.sh [--check-storage]
+
+  --check-storage  Authenticate the generated release root, reclaim only its
+                   stale safe-listed output, prove the 24 GiB capacity floor,
+                   and exit before AVD lock, Gradle, Docker, or emulator work.
+                   The hosted workflow runs this after its explicit reclaim.
 
 Runs the required emulator-only pre-tag release validation from clean, pushed
 main and writes a summary for scripts/push-release-tag.sh.
@@ -142,7 +147,53 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
+pocketshell_release_validation_require_run_id "$RUN_ID" ||
+  exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
+
 pocketshell_apply_release_gate_scope_memory "release emulator validation"
+
+# Issue #2055: fail closed before taking the one AVD lock or launching the
+# isolated pre-release copy. The device-free APK identity proof builds nothing
+# and remains exempt, like --help and the profile-only probe.
+RELEASE_STORAGE_RETENTION_ENABLED=1
+if [[ "${1:-}" == "--verify-apk-identity" ]]; then
+  RELEASE_STORAGE_RETENTION_ENABLED=0
+else
+  pocketshell_release_validation_prepare_root \
+    "$ROOT_DIR" "$PRE_RELEASE_GATE_LOG_ROOT" ||
+    exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
+  pocketshell_release_disk_preflight \
+    "$ROOT_DIR" "$PRE_RELEASE_GATE_LOG_ROOT" "release emulator validation"
+  if [[ "${1:-}" == "--check-storage" ]]; then
+    printf 'Release storage contract satisfied: canonical generated root authenticated; 24 GiB floor available.\n'
+    exit 0
+  fi
+fi
+
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
+
+release_validation_on_exit() {
+  local exit_status="$?"
+  local cleanup_status=0
+  trap - EXIT
+  set +e
+  if [[ "$RELEASE_STORAGE_RETENTION_ENABLED" == "1" ]]; then
+    if [[ "$exit_status" -eq 0 ]]; then
+      pocketshell_release_validation_finish_run \
+        "$PRE_RELEASE_GATE_LOG_ROOT" "$PRE_RELEASE_RUN_ID" success || cleanup_status=$?
+    else
+      pocketshell_release_validation_finish_run \
+        "$PRE_RELEASE_GATE_LOG_ROOT" "$PRE_RELEASE_RUN_ID" failure || cleanup_status=$?
+    fi
+  fi
+  pocketshell_release_all
+  if [[ "$exit_status" -eq 0 && "$cleanup_status" -ne 0 ]]; then
+    printf 'FAIL: release validation passed but generated-output retention cleanup failed.\n' >&2
+    exit_status="$cleanup_status"
+  fi
+  exit "$exit_status"
+}
+trap release_validation_on_exit EXIT
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -775,6 +826,10 @@ check_nightly_fault_run() {
 
 check_nightly_fault_run
 
+# The pre-release child records the wrapper as its retention owner because the
+# wrapper still consumes both APKs during every downstream stage after the
+# child exits successfully.
+export POCKETSHELL_RELEASE_RETENTION_OWNER_PID="$$"
 run_required \
   "pre-release confidence gate" \
   "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/" \

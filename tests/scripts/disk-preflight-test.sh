@@ -590,9 +590,12 @@ cleanup_apply_reclaims_only_the_safe_list() {
   output="$(run_cleanup "$sandbox" --apply --worktrees)" || rc=$?
   (( rc == 0 )) || fail "apply run failed (rc=$rc): $output"
 
+  # Issue #2055: small pre-release diagnostics survive; only exact generated
+  # <run>/worktree copies and the private gradle-home are reclaimable. This
+  # fixture has only a log, so retaining it is the safe-list behavior.
+  [[ -f "$sandbox/main/build/pre-release-confidence-gate/log.txt" ]] \
+    || fail "apply removed retained pre-release diagnostics"
   # Reclaimed.
-  [[ ! -e "$sandbox/main/build/pre-release-confidence-gate" ]] \
-    || fail "apply did not remove build/pre-release-confidence-gate"
   [[ ! -e "$sandbox/main/build/phone-walkthrough" ]] \
     || fail "apply did not remove build/phone-walkthrough"
   [[ ! -e "$sandbox/tmp/pocketshell-old" ]] \

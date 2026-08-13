@@ -42,11 +42,31 @@ class DiskPreflightScriptTest {
      */
     @Test
     fun canonicalWrappersRefuseAFullDiskAndTheCleanupPathRefusesUnsavedWork() {
-        runShellHarness("tests/scripts/disk-preflight-test.sh", timeoutSeconds = 300)
+        runShellHarness(
+            relativePath = "tests/scripts/disk-preflight-test.sh",
+            expectedPassLine = "PASS: disk preflight + safe-list cleanup harness (17 cases)",
+            timeoutSeconds = 300,
+        )
+    }
+
+    /**
+     * The release chain has a larger storage envelope than one canonical JVM
+     * run: it creates an isolated source copy, two variant families, a private
+     * Gradle home, and emulator/APK evidence. Issue #2055 reproduced ENOSPC
+     * after the generic one-run floor had already let the release start.
+     */
+    @Test
+    fun releaseValidationRefusesLowDiskAndBoundsGeneratedOutputRetention() {
+        runShellHarness(
+            relativePath = "tests/scripts/release-validation-storage-test.sh",
+            expectedPassLine = "PASS: release-validation storage harness (16 cases)",
+            timeoutSeconds = 120,
+        )
     }
 
     private fun runShellHarness(
         relativePath: String,
+        expectedPassLine: String,
         timeoutSeconds: Long,
     ) {
         val script = projectRoot.resolve(relativePath)
@@ -98,7 +118,7 @@ class DiskPreflightScriptTest {
         // about behaviour rather than about bash's exit status.
         assertTrue(
             "harness did not report its case count: $relativePath\n$output",
-            output.contains("PASS: disk preflight + safe-list cleanup harness (17 cases)"),
+            output.contains(expectedPassLine),
         )
     }
 

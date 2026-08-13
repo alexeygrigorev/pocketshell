@@ -308,11 +308,7 @@ jobs:
           chmod +x scripts/check-design-tokens.sh
           scripts/check-design-tokens.sh
 
-      # Repo-wide oversized-file hygiene guard. This fast git-ls-files ratchet
-      # pins the current oversized first-party files by byte count and fails if
-      # one grows, or if a new non-exempt tracked file exceeds 128 KiB. Vendor,
-      # generated, worktree output, and shared/core-terminal are exempted. Lower
-      # sizes are welcome; re-baseline with --update only after shrinkage.
+      # Downward-only 128 KiB ratchet; shrink files instead of raising its baseline.
       - name: Oversized-file hygiene guard
         run: |
           chmod +x scripts/check-file-size-hygiene.sh
@@ -393,17 +389,14 @@ jobs:
           scripts/check-script-interpreter-hygiene.sh --self-test
           scripts/check-script-interpreter-hygiene.sh
 
-      # Issue #2067: `unit-gate` holds THREE lists nothing forced to agree —
-      # `needs:`, the `env:` result mapping, and the result-checking loop. A job
-      # in the first but not the third RUNS, can go RED, and the required check
-      # stays GREEN: the silent-gate failure #2060 exists to prevent. #2060 left
-      # that pairing to a comment; this makes it mechanical. Eleven self-test
-      # cases, own-count-asserted. Detail in the script header. ~1 s, no Gradle.
+      # #2067 keeps unit-gate's needs/result lists aligned; the final grep keeps
+      # #1956's executable lifecycle harness wired into guards-harness.
       - name: "Unit-gate wiring guard (issue #2067)"
         run: |
           chmod +x scripts/check-unit-gate-wiring.sh
           scripts/check-unit-gate-wiring.sh --self-test
           scripts/check-unit-gate-wiring.sh
+          grep -Fqx '      - run: scripts/test-full-jvm-gate-detached.sh' .github/workflows/tests.yml
 
   # ---------------------------------------------------------------------------
   # Issue #2060 (CI Phase A): CI/harness fixture guards, split out of the `unit`
@@ -522,6 +515,8 @@ jobs:
         run: |
           chmod +x scripts/test-gradle-output-lock.sh
           scripts/test-gradle-output-lock.sh
+
+      - run: scripts/test-full-jvm-gate-detached.sh
 
       # Issue #1937 recurrence: ubuntu-latest does not guarantee ripgrep. Run
       # the real guard under a minimal no-rg PATH and prove it still discovers

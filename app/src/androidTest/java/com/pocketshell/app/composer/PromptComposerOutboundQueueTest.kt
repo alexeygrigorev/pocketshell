@@ -9,9 +9,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.test.SemanticsNodeInteraction
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
@@ -37,6 +37,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+
+/**
+ * Reopened #1602 copy, verbatim from [outboundRetryActionState]: the LABEL the
+ * blocked control carries, and the longer per-row explanation. The label is the
+ * device-independent half of the anti-"tappable silent" contract — it travels
+ * with the control, so it is readable wherever the control itself is reachable.
+ */
+private const val WAITING_BEHIND_OWNER_LABEL = "Waiting…"
+private const val WAITING_BEHIND_OWNER_STATUS = "Waiting — another prompt is still sending"
 
 /**
  * Issue #900: connected proof for the foreground outbound queue surface.
@@ -149,6 +158,13 @@ class PromptComposerOutboundQueueTest {
             // row A and then row B, leaving the bounded status viewport at B.
             // Reproduce that production history through the same row semantics;
             // no synthetic offset or test-only layout seam is involved.
+            //
+            // Issue #2123: this seed is history, NOT a precondition. It exists so
+            // the per-row assertions below run from an ARBITRARY prior scroll
+            // offset (each row must still be reachable afterwards). Nothing below
+            // may assert that a particular node is on/off screen AT this offset —
+            // that is a viewport-size accident, not a product property, and it is
+            // what made this proof red on CI.
             val seededViewportRowIds = buildList {
                 rows.forEach { seedRow ->
                     compose.onNodeWithTag(
@@ -223,13 +239,16 @@ class PromptComposerOutboundQueueTest {
                             rowRawBoundsBeforeExactScroll,
                         ),
                     )
-                    if (row.id == rows.first().id) {
-                        // Count==1 plus raw containment above proves this is a real,
-                        // laid-out control, not assertIsNotDisplayed laundering an
-                        // absent node. This is the same Compose visibility predicate
-                        // that caught the full MainActivity Retry boundary.
-                        offlineRetryNode.assertIsNotDisplayed()
-                    }
+                    // Issue #2123: an `assertIsNotDisplayed()` on the first row's
+                    // Retry used to stand here. It asserted a VIEWPORT-SIZE
+                    // ACCIDENT — "this control happens to be off-screen at this
+                    // scroll offset" — which is true only while a row is taller
+                    // than the bounded status region. It is not a product property,
+                    // it was already false on CI, and reproducing it locally showed
+                    // it is false on the dev-box AVD too. Deleted, not relaxed: the
+                    // control's reality is proven by assertCountEquals(1) plus the
+                    // raw-bounds containment above, and its REACHABILITY by the
+                    // scroll + bounded-viewport containment below.
                     offlineRetryNode
                         // The 96dp status viewport is intentionally bounded. Scroll
                         // the exact trailing action, not only its potentially taller
@@ -246,6 +265,17 @@ class PromptComposerOutboundQueueTest {
                         )
                     }
                     offlineRetryNode.assertIsNotEnabled()
+                    // Issue #2123: the anti-"tappable silent" property that does
+                    // NOT depend on any geometry — the blocked reason travels ON
+                    // the control. Whatever the viewport height or scroll offset,
+                    // a user who reaches this action reads "Offline", never a bare
+                    // "Retry" that silently does nothing.
+                    compose.onAllNodes(
+                        hasText("Offline") and
+                            hasAnyAncestor(hasTestTag(retryTag)) and
+                            withinExactRow,
+                        useUnmergedTree = true,
+                    ).assertCountEquals(1)
                     val retryBoundsAfterExactScroll = offlineRetryNode.fetchSemanticsNode().boundsInRoot
                     val statusViewportBoundsAfterExactScroll = compose.onNodeWithTag(
                         COMPOSER_STATUS_VIEWPORT_TAG,
@@ -568,6 +598,12 @@ class PromptComposerOutboundQueueTest {
             createdAtMs = 2L,
         )
         val retried = mutableListOf<String>()
+        // Issue #2123: both queue states are exercised from ONE composition — the
+        // collapsed banner the user actually lands on, and the expanded row list.
+        // The test owns the flag directly (rather than tapping the toggle) so the
+        // state transition is deterministic and independent of whether a tap on a
+        // disabled child bubbles to the header's clickable.
+        var expanded by mutableStateOf(false)
         compose.setContent {
             PocketShellTheme {
                 SheetContent(
@@ -575,22 +611,108 @@ class PromptComposerOutboundQueueTest {
                     onClose = {}, onDraftChange = {}, onMicTap = {}, onSend = {},
                     outboundQueueItems = listOf(active, waiting),
                     outboundRetryBlockedByHealthyOwner = true,
-                    outboundQueueExpanded = true,
+                    outboundQueueExpanded = expanded,
                     onRetryOutboundItem = { retried += it },
                 )
             }
         }
 
-        compose.onNodeWithText("Waiting — another prompt is still sending").assertIsDisplayed()
-        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(waiting.id))
-            .performScrollTo()
-            .assertIsDisplayed()
-            .assertIsNotEnabled()
-            // A real pointer tap (not a semantics action, which disabled nodes do not
-            // expose) proves the apparently present control cannot silently dispatch.
-            .performTouchInput { click() }
+        val retryTag = composerOutboundQueueRetryTestTag(waiting.id)
+        val rowTag = composerOutboundQueueItemRowTestTag(waiting.id)
+        val statusTag = composerOutboundQueueStatusTestTag(waiting.id)
+
+        // (1) COLLAPSED — the state the user lands in, and the only one that needs
+        // no scrolling at all. The blocked reason travels ON the control: the
+        // header action reads "Waiting…" instead of a bare "Retry", it is
+        // disabled, and it is contained inside the bounded status viewport as-is.
+        compose.onAllNodes(
+            hasText(WAITING_BEHIND_OWNER_LABEL) and hasAnyAncestor(hasTestTag(retryTag)),
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
+        compose.onNodeWithTag(retryTag).assertIsNotEnabled()
+        assertFullyWithinBoundedStatusViewport(
+            compose.onNodeWithTag(retryTag),
+            "collapsed blocked Retry",
+        )
+        // A real pointer tap (not a semantics action, which disabled nodes do not
+        // expose) proves the apparently present control cannot silently dispatch.
+        compose.onNodeWithTag(retryTag).performTouchInput { click() }
         compose.waitForIdle()
-        assertTrue("disabled Waiting must not invoke a silent retry callback", retried.isEmpty())
+        assertTrue(
+            "collapsed blocked Retry pointer taps must not invoke a silent retry callback",
+            retried.isEmpty(),
+        )
+
+        // (2) EXPANDED — the per-row control plus its longer explanation.
+        //
+        // Issue #2123: this used to assert the explanation was `assertIsDisplayed()`
+        // with no scroll. The composer's status region is a deliberately BOUNDED
+        // 96dp strip above the editor (#1613/#1619/#1622), so a second queue row is
+        // fully clipped at rest — measured on a Pixel 7 AVD, the row's clipped
+        // bounds are Rect.Zero until it is scrolled to. That assertion was false on
+        // every device, not only CI's. The user reaches this row by scrolling, so
+        // the proof does too, and then asserts CONTAINMENT inside that bounded
+        // viewport (F3) rather than absolute device-viewport visibility.
+        compose.runOnUiThread { expanded = true }
+        compose.waitForIdle()
+
+        val explanation = hasText(WAITING_BEHIND_OWNER_STATUS) and
+            hasAnyAncestor(hasTestTag(statusTag)) and
+            hasAnyAncestor(hasTestTag(rowTag))
+        compose.onAllNodes(explanation, useUnmergedTree = true).assertCountEquals(1)
+        compose.onNode(explanation, useUnmergedTree = true).performScrollTo()
+        compose.waitForIdle()
+        assertFullyWithinBoundedStatusViewport(
+            compose.onNode(explanation, useUnmergedTree = true),
+            "blocked-row explanation",
+        )
+
+        val rowRetry = hasTestTag(retryTag) and hasAnyAncestor(hasTestTag(rowTag))
+        compose.onAllNodes(rowRetry, useUnmergedTree = true).assertCountEquals(1)
+        compose.onNode(rowRetry, useUnmergedTree = true).performScrollTo()
+        compose.waitForIdle()
+        assertFullyWithinBoundedStatusViewport(
+            compose.onNode(rowRetry, useUnmergedTree = true),
+            "expanded blocked Retry",
+        )
+        compose.onNode(rowRetry, useUnmergedTree = true).assertIsNotEnabled()
+        compose.onAllNodes(
+            hasText(WAITING_BEHIND_OWNER_LABEL) and
+                hasAnyAncestor(hasTestTag(retryTag)) and
+                hasAnyAncestor(hasTestTag(rowTag)),
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
+        compose.onNode(rowRetry, useUnmergedTree = true).performTouchInput { click() }
+        compose.waitForIdle()
+        assertTrue(
+            "expanded blocked Retry pointer taps must not invoke a silent retry callback",
+            retried.isEmpty(),
+        )
+    }
+
+    /**
+     * Containment inside the composer's BOUNDED status viewport at the CURRENT
+     * scroll offset (issue #657 F3, issue #2123).
+     *
+     * `boundsInRoot` is clipped by ancestors, so a node scrolled out of the bounded
+     * status region collapses to `Rect.Zero` and fails the non-empty half of this
+     * check. That makes it a real "the user can see and reach this" assertion,
+     * unlike `assertIsDisplayed()` (satisfied by mere layout participation) — and,
+     * unlike an absolute device-viewport check, it does not encode how tall the
+     * viewport happens to be or how many rows happen to fit in it.
+     */
+    private fun assertFullyWithinBoundedStatusViewport(
+        node: SemanticsNodeInteraction,
+        label: String,
+    ) {
+        val bounds = node.fetchSemanticsNode().boundsInRoot
+        val viewport = compose.onNodeWithTag(COMPOSER_STATUS_VIEWPORT_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "$label must be non-empty and fully inside the bounded composer status " +
+                "viewport at the current scroll offset: node=$bounds viewport=$viewport",
+            bounds.isNonEmptyAndFullyContainedBy(viewport),
+        )
     }
 
     // ---------------------------------------------------------------------

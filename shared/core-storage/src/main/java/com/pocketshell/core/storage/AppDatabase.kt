@@ -6,6 +6,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.CommandTemplateDao
+import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
@@ -60,6 +61,7 @@ const val APP_DATABASE_SCHEMA_VERSION = 17
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun hostDao(): HostDao
+    abstract fun forwardingIntentDao(): ForwardingIntentDao
     abstract fun sshKeyDao(): SshKeyDao
     abstract fun portRemappingDao(): PortRemappingDao
     abstract fun portUsageDao(): PortUsageDao

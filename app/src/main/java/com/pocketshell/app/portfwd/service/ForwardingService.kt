@@ -234,6 +234,8 @@ class ForwardingService : Service() {
 
         const val ACTION_START = "com.pocketshell.app.portfwd.action.START_FORWARDING"
         const val ACTION_STOP = "com.pocketshell.app.portfwd.action.STOP_FORWARDING"
+        internal const val ACTION_STOP_RUNTIME =
+            "com.pocketshell.app.portfwd.action.STOP_FORWARDING_RUNTIME_ONLY"
 
         /**
          * Start the service in foreground mode. Idempotent — Android
@@ -266,7 +268,10 @@ class ForwardingService : Service() {
          */
         fun stop(context: Context) {
             val intent = Intent(context, ForwardingService::class.java).apply {
-                action = ACTION_STOP
+                // Controller/per-host teardown has already changed runtime
+                // ownership. It must never impersonate the user's aggregate
+                // notification action and clear every persisted host intent.
+                action = ACTION_STOP_RUNTIME
             }
             runCatching {
                 context.startService(intent)
@@ -284,8 +289,28 @@ class ForwardingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                controller.stopAllForwarding(requestServiceStop = false)
-                stopForwarding(reason = "action_stop")
+                // User-visible aggregate Stop is durable-first. Do not remove
+                // the ongoing notification or service until Room confirms that
+                // every enabled host was disabled; otherwise the UI claims
+                // success while foreground resume can resurrect forwarding.
+                controller.requestNotificationStop { result ->
+                    when (result) {
+                        is ForwardingController.NotificationStopResult.Success -> {
+                            stopForwarding(reason = "action_stop")
+                        }
+                        is ForwardingController.NotificationStopResult.Failure -> {
+                            // Runtime was deliberately preserved. Re-publish
+                            // its live snapshot so even a concurrent platform
+                            // redraw remains truthful and actionable.
+                            republishLiveNotificationAfterStopFailure(result.error)
+                        }
+                        ForwardingController.NotificationStopResult.Coalesced -> Unit
+                    }
+                }
+                return START_NOT_STICKY
+            }
+            ACTION_STOP_RUNTIME -> {
+                stopForwarding(reason = "runtime_zero")
                 return START_NOT_STICKY
             }
             else -> {
@@ -527,8 +552,8 @@ class ForwardingService : Service() {
      *   whole teardown inside the close monitor: the observer neither removes
      *   the notification nor stops the service, and it does not clear the
      *   observer either — it simply goes back to collecting and publishes the
-     *   live state. Lifecycle commands from the service thread pass null and
-     *   always tear down.
+     *   live state. Lifecycle teardown (including ACTION_STOP's durable-success
+     *   callback) passes null and always tears down.
      */
     private fun stopForwarding(reason: String, observerGeneration: Long? = null) {
         ForwardingNotificationCloseBarrier.await(ForwardingNotificationCloseBarrier.Phase.BEFORE_CLOSE)
@@ -616,9 +641,16 @@ class ForwardingService : Service() {
         tunnelCount: Int,
         restoringHostCount: Int = 0,
         activePorts: Set<Int> = emptySet(),
+        contentTextOverride: String? = null,
     ) {
-        val notification =
-            buildNotification(hostName, hostCount, tunnelCount, restoringHostCount, activePorts)
+        val notification = buildNotification(
+            hostName = hostName,
+            hostCount = hostCount,
+            tunnelCount = tunnelCount,
+            restoringHostCount = restoringHostCount,
+            activePorts = activePorts,
+            contentTextOverride = contentTextOverride,
+        )
         beforeNotificationPublishForTest?.invoke()
         notificationMutations.publish(
             expectedGeneration = generation,
@@ -631,6 +663,31 @@ class ForwardingService : Service() {
             val manager = getSystemService(NotificationManager::class.java)
             manager.notify(NOTIFICATION_ID, notification)
         }
+    }
+
+    /** Keep the foreground surface truthful when durable Stop fails. */
+    private fun republishLiveNotificationAfterStopFailure(error: Throwable) {
+        val activeHosts = controller.flowOfActiveHostCount().value
+        Log.e(
+            TAG,
+            "notification Stop persistence failed; keeping $activeHosts runtime host(s) live",
+            error,
+        )
+        if (activeHosts == 0 || notificationGeneration == NO_GENERATION) return
+        val snapshots = controller.flowOfHostSnapshots().value
+        updateNotification(
+            generation = notificationGeneration,
+            hostName = controller.flowOfPrimaryHostName().value,
+            hostCount = activeHosts,
+            tunnelCount = controller.flowOfTotalTunnelCount().value,
+            restoringHostCount = controller.flowOfRestoringHostCount().value,
+            activePorts = snapshots.values
+                .asSequence()
+                .filter { it.active }
+                .flatMap { it.activeRemotePorts.asSequence() }
+                .toSortedSet(),
+            contentTextOverride = "Couldn’t stop · forwarding still running",
+        )
     }
 
     private fun recordNotificationOperation(operation: ForwardingNotificationOperation) {

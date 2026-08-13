@@ -12,6 +12,7 @@ import com.pocketshell.core.portfwd.AutoForwardConfig
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
@@ -69,6 +70,7 @@ class ForwardingController(
     private val connector: PortForwardConnector,
     private val portRemappingDao: PortRemappingDao,
     private val scope: CoroutineScope,
+    private val forwardingIntentDao: ForwardingIntentDao = EmptyForwardingIntentDao,
     /**
      * Validated-default-network change signal (issue #329 / #439 / #1058).
      * The SAME [com.pocketshell.app.connectivity.TerminalNetworkObserver.changes]
@@ -87,12 +89,14 @@ class ForwardingController(
         @ApplicationContext appContext: Context,
         connector: PortForwardConnector,
         portRemappingDao: PortRemappingDao,
+        forwardingIntentDao: ForwardingIntentDao,
         terminalNetworkObserver: TerminalNetworkObserver,
     ) : this(
         appContext = appContext,
         connector = connector,
         portRemappingDao = portRemappingDao,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        forwardingIntentDao = forwardingIntentDao,
         validatedNetworkChanges = terminalNetworkObserver.changes,
     )
 
@@ -102,6 +106,7 @@ class ForwardingController(
         connector = UnavailablePortForwardConnector,
         portRemappingDao = EmptyPortRemappingDao,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+        forwardingIntentDao = EmptyForwardingIntentDao,
         validatedNetworkChanges = emptyFlow(),
     )
 
@@ -111,11 +116,13 @@ class ForwardingController(
         connector: PortForwardConnector,
         portRemappingDao: PortRemappingDao,
         validatedNetworkChanges: Flow<TerminalNetworkChange>,
+        forwardingIntentDao: ForwardingIntentDao = EmptyForwardingIntentDao,
     ) : this(
         appContext = appContext,
         connector = connector,
         portRemappingDao = portRemappingDao,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+        forwardingIntentDao = forwardingIntentDao,
         validatedNetworkChanges = validatedNetworkChanges,
     )
 
@@ -126,6 +133,15 @@ class ForwardingController(
      * [unregisterActiveHost].
      */
     private val activeHosts: CopyOnWriteArrayList<ActiveHost> = CopyOnWriteArrayList()
+
+    /**
+     * One ordering boundary for notification Stop and foreground resume.
+     * Both the permit check and the active-host mutation happen while this
+     * monitor is held, so either resume adoption wins first and Stop tears it
+     * down, or Stop wins first and the late transport is rejected.
+     */
+    private val notificationStopLock = Any()
+    private val notificationStopAuthority = ForwardingNotificationStopAuthority()
 
     private val activeHostCount = MutableStateFlow(0)
     private val totalTunnelCount = MutableStateFlow(0)
@@ -316,6 +332,39 @@ class ForwardingController(
         )
     }
 
+    /** Capture the generation a foreground resume is acting on. */
+    internal fun captureResumePermit(): ForwardingNotificationStopAuthority.ResumePermit? =
+        synchronized(notificationStopLock) {
+            notificationStopAuthority.captureResumePermit()
+        }
+
+    /**
+     * Final, atomic hand-off for a foreground-resumed transport.
+     *
+     * The caller still owns [firstSession] when this returns false and must
+     * close it. Direct panel/user starts intentionally use
+     * [adoptForwardingSession]; this fence is for persisted foreground resume.
+     */
+    internal fun tryAdoptResumedForwardingSession(
+        permit: ForwardingNotificationStopAuthority.ResumePermit,
+        host: HostEntity,
+        keyPath: String,
+        firstSession: SshSession,
+        initialRemappings: Map<Int, Int>,
+    ): Boolean = synchronized(notificationStopLock) {
+        if (!notificationStopAuthority.permitsAdoption(permit) || isHostActive(host.id)) {
+            return@synchronized false
+        }
+        startForwardingWithSession(
+            host = host,
+            keyPath = keyPath,
+            passphrase = null,
+            firstSession = firstSession,
+            initialRemappings = initialRemappings,
+        )
+        true
+    }
+
     fun isHostActive(hostId: Long): Boolean = activeHosts.any { it.hostId == hostId }
 
     fun togglePort(hostId: Long, remotePort: Int) {
@@ -327,21 +376,91 @@ class ForwardingController(
         unregisterActiveHost(hostId)
     }
 
+    /** Outcome of the aggregate notification's durable Stop request. */
+    sealed interface NotificationStopResult {
+        data class Success(val disabledHostCount: Int) : NotificationStopResult
+        data class Failure(val error: Throwable) : NotificationStopResult
+        data object Coalesced : NotificationStopResult
+    }
+
+    /**
+     * Stop initiated by the aggregate ongoing notification.
+     *
+     * Beginning the generation is synchronous so an already-running foreground
+     * resume cannot adopt after the tap. Room persistence runs on this
+     * controller's IO scope. Runtime transports are detached only after the
+     * single atomic durable disable succeeds; on failure they and the truthful
+     * foreground notification remain live.
+     */
+    fun requestNotificationStop(
+        onResult: (NotificationStopResult) -> Unit,
+    ) {
+        val started = synchronized(notificationStopLock) {
+            notificationStopAuthority.beginStop()
+        }
+        if (started is ForwardingNotificationStopAuthority.BeginResult.Coalesced) {
+            onResult(NotificationStopResult.Coalesced)
+            return
+        }
+        val stopGeneration =
+            (started as ForwardingNotificationStopAuthority.BeginResult.Started).generation
+        scope.launch {
+            val persisted = runCatching { forwardingIntentDao.disableAll() }
+            val error = persisted.exceptionOrNull()
+            if (error != null) {
+                synchronized(notificationStopLock) {
+                    notificationStopAuthority.finishStop(stopGeneration)
+                }
+                Log.e(TAG, "notification Stop could not disable persisted forwarding", error)
+                DiagnosticEvents.record(
+                    "action",
+                    "port_forward_notification_stop_result",
+                    "status" to "failure",
+                    "cause" to error.javaClass.simpleName,
+                )
+                onResult(NotificationStopResult.Failure(error))
+                return@launch
+            }
+
+            val disabledHostCount = persisted.getOrThrow()
+            val entries = synchronized(notificationStopLock) {
+                if (!notificationStopAuthority.isCurrentStop(stopGeneration)) {
+                    return@synchronized null
+                }
+                val detached = detachAllActiveHosts()
+                check(notificationStopAuthority.finishStop(stopGeneration))
+                detached
+            }
+            if (entries == null) return@launch
+            entries.forEach { it.stopOwnedSupervisor() }
+            DiagnosticEvents.record(
+                "action",
+                "port_forward_notification_stop_result",
+                "status" to "success",
+                "disabledHostCount" to disabledHostCount,
+            )
+            onResult(NotificationStopResult.Success(disabledHostCount))
+        }
+    }
+
     @JvmOverloads
     fun stopAllForwarding(requestServiceStop: Boolean = true) {
-        val entries = synchronized(this) {
-            val snapshot = activeHosts.toList()
-            activeHosts.clear()
-            hostTunnels.value = emptyMap()
-            hostConnectionStates.value = emptyMap()
-            hostErrors.value = emptyMap()
-            recomputeSnapshot()
-            snapshot
-        }
+        val entries = detachAllActiveHosts()
         entries.forEach { it.stopOwnedSupervisor() }
         if (requestServiceStop) {
             ForwardingService.stop(appContext)
         }
+    }
+
+    /** Runtime-only teardown; deliberately does not mutate durable intent. */
+    private fun detachAllActiveHosts(): List<ActiveHost> = synchronized(this) {
+        val snapshot = activeHosts.toList()
+        activeHosts.clear()
+        hostTunnels.value = emptyMap()
+        hostConnectionStates.value = emptyMap()
+        hostErrors.value = emptyMap()
+        recomputeSnapshot()
+        snapshot
     }
 
     /**
@@ -688,4 +807,8 @@ private object EmptyPortRemappingDao : PortRemappingDao {
     override suspend fun deleteByRemotePort(hostId: Long, remotePort: Int) = Unit
 
     override suspend fun deleteByHostId(hostId: Long) = Unit
+}
+
+private object EmptyForwardingIntentDao : ForwardingIntentDao {
+    override suspend fun disableAll(): Int = 0
 }

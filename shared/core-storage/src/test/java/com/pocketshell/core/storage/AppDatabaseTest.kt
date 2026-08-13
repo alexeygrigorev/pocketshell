@@ -77,6 +77,72 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun forwardingIntent_disableAll_isAtomicAndChangesOnlyEnabledBits() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(
+                name = "notification-stop-key",
+                privateKeyPath = "/tmp/notification-stop-key",
+                fingerprint = "sha256:notification-stop",
+            ),
+        )
+        val enabledA = HostEntity(
+            name = "enabled-a",
+            hostname = "a.example",
+            port = 2_202,
+            username = "alice",
+            keyId = keyId,
+            maxAutoPort = 4_321,
+            skipPortsBelow = 1_234,
+            scanIntervalSec = 17,
+            enabled = true,
+            usageCommandOverride = "custom-a",
+        )
+        val enabledB = HostEntity(
+            name = "enabled-b",
+            hostname = "b.example",
+            port = 2_203,
+            username = "bob",
+            keyId = keyId,
+            maxAutoPort = 9_876,
+            skipPortsBelow = 2_345,
+            scanIntervalSec = 29,
+            enabled = true,
+            pocketshellCliVersion = "unchanged-b",
+        )
+        val alreadyDisabled = HostEntity(
+            name = "already-disabled",
+            hostname = "c.example",
+            username = "carol",
+            keyId = keyId,
+            enabled = false,
+            pocketshellDaemonEnabled = true,
+        )
+        val before = listOf(enabledA, enabledB, alreadyDisabled).map { host ->
+            val id = db.hostDao().insert(host)
+            requireNotNull(db.hostDao().getById(id))
+        }
+
+        assertEquals(2, db.forwardingIntentDao().disableAll())
+
+        val after = before.map { host -> requireNotNull(db.hostDao().getById(host.id)) }
+        assertTrue(db.hostDao().getEnabled().first().isEmpty())
+        assertEquals(
+            before,
+            after.map { host ->
+                host.copy(enabled = before.first { it.id == host.id }.enabled)
+            },
+        )
+        assertEquals(false, after[0].enabled)
+        assertEquals(false, after[1].enabled)
+        assertEquals(alreadyDisabled.enabled, after[2].enabled)
+        assertEquals(
+            "the atomic durable disable is idempotent",
+            0,
+            db.forwardingIntentDao().disableAll(),
+        )
+    }
+
+    @Test
     fun host_insert_with_fk_to_sshKey_then_read() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),

@@ -298,13 +298,13 @@ class ForwardingNotificationObserverGenerationE2eTest {
             // observer reaches it on its own dispatcher when the last host goes
             // away.
             //
-            // `stopAllForwarding(requestServiceStop = false)` is the exact
-            // production call ForwardingService itself makes on ACTION_STOP, and
-            // it is also the on-device shape whenever the separate
-            // `ForwardingService.stop()` intent does not reach the service (a
-            // background-start restriction, a stop that races the next start):
+            // `stopAllForwarding(requestServiceStop = false)` drives the
+            // production runtime-zero shape without injecting ACTION_START:
             // the controller reaches zero and the OBSERVER's zero snapshot is
-            // the only teardown path. That is the path this bug lives in.
+            // the only teardown path. The aggregate notification ACTION_STOP
+            // now persists its global disable before reaching this same runtime
+            // transition (#1202); this #2006 journey deliberately isolates the
+            // later notification-generation race.
             val reachedWindow = holdFirstOffMainThreadClose(heldPhase)
             invalidateOpsAtRaceStart = serviceOperationCount(INVALIDATE_OP)
             controller().stopAllForwarding(requestServiceStop = false)

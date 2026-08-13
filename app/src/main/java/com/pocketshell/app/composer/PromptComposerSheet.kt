@@ -484,6 +484,8 @@ public fun PromptComposerSheet(
             onSavePendingAsAudio = viewModel::savePendingAsAudioFile,
             onAcknowledgeSavedAudio = viewModel::clearSavedAudioConfirmation,
             outboundQueueItems = outboundQueueItems,
+            outboundRetryBlockedByHealthyOwner = viewModel.outboundRetryBlockedByHealthyOwner(),
+            outboundWireWritable = viewModel.isSendTransportWritable(),
             outboundQueueExpanded = outboundQueueExpanded,
             onToggleOutboundQueue = { outboundQueueExpanded = !outboundQueueExpanded },
             onDeleteOutboundItem = viewModel::discardOutboundItem,
@@ -756,6 +758,8 @@ internal fun SheetContent(
     // Issue #900: visible committed-send queue for the current composer target.
     // Defaults keep previews and older render tests source-compatible.
     outboundQueueItems: List<OutboundItem> = emptyList(),
+    outboundRetryBlockedByHealthyOwner: Boolean = false,
+    outboundWireWritable: Boolean = true,
     outboundQueueExpanded: Boolean = false,
     onToggleOutboundQueue: () -> Unit = {},
     onDeleteOutboundItem: (String) -> Unit = {},
@@ -1234,6 +1238,9 @@ internal fun SheetContent(
                 onDiscardPending = onDiscardPending,
                 onSavePendingAsAudio = onSavePendingAsAudio,
                 outboundQueueItems = outboundQueueItems,
+                outboundRetryingIds = state.outboundRetryingIds,
+                outboundRetryBlockedByHealthyOwner = outboundRetryBlockedByHealthyOwner,
+                outboundWireWritable = outboundWireWritable,
                 connectionDegraded = state.connectionDegraded,
                 outboundQueueExpanded = outboundQueueExpanded,
                 onToggleOutboundQueue = onToggleOutboundQueue,

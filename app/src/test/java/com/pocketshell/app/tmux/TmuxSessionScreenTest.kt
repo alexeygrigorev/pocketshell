@@ -2517,6 +2517,7 @@ class TmuxSessionScreenTest {
                 outboundQueueItems = quietQueue,
                 controller = controller,
                 retryNext = { excludingIds -> retryEligibleRow(excludingIds)?.also { dispatched += it } },
+                transportWritable = { true },
             )
         }
 
@@ -2582,6 +2583,7 @@ class TmuxSessionScreenTest {
                 retryNext = { _ ->
                     if (recovered) "row-1".also { dispatched += it } else null
                 },
+                transportWritable = { true },
                 sweepStaleInFlight = { staleAfterMs ->
                     // Issue #1542 (D7): the poll now supplies the SHORT orphan bound.
                     assertEquals(OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS, staleAfterMs)

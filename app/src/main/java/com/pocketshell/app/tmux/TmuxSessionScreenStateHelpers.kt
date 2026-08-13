@@ -123,6 +123,11 @@ internal const val OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS: Long = 3_000L
  */
 internal const val OUTBOUND_ORPHANED_INFLIGHT_SWEEP_MS: Long = 15_000L
 
+/** Reopened #1602: stale coarse liveness can never authorize physical send IO. */
+@Suppress("UNUSED_PARAMETER")
+internal fun outboundDrainGateOpen(sessionLive: Boolean, transportWritable: Boolean): Boolean =
+    transportWritable
+
 /**
  * Issue #1531 (audit RC1): the current session's undelivered-outbound summary for
  * the DOCKED composer launcher badge (null when nothing pending). Extracted here
@@ -157,9 +162,9 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
     promptComposerViewModel: PromptComposerViewModel,
     controller: OutboundQueueAutoFlushController,
     // Issue #1686: the wire-oracle drain gate — the transport-writable probe wired to
-    // `TmuxSessionViewModel.isSendTransportWritable()`. Defaulted so callers/tests that
-    // only exercise the enum gate compile unchanged.
-    transportWritable: () -> Boolean = { false },
+    // `TmuxSessionViewModel.isSendTransportWritable()`. Required so a caller cannot
+    // accidentally fall back to the stale coarse connection enum.
+    transportWritable: () -> Boolean,
 ) {
     LaunchedEffect(sessionLive, targetSessionKey, promptComposerViewModel, controller) {
         runOutboundQueueAutoFlush(
@@ -214,7 +219,7 @@ internal fun TmuxOutboundQueueAutoFlushEffect(
  *    already outlasted the backoff (a slow connect-wait takes tens of seconds)
  *    re-dispatches on that emission.
  *  - **Poll lane** — re-attempt one eligible row on the
- *    [OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS] cadence while the session is live.
+ *    [OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS] cadence while the wire is writable.
  *    This is the ONLY thing that un-parks a row deferred inside an UNCHANGED live
  *    window (the #928/#822 silent-heal shape emits NO further snapshot once the
  *    row parks, so the snapshot lane alone would leave it stuck "Will send when
@@ -231,6 +236,18 @@ internal suspend fun runOutboundQueueAutoFlush(
     outboundQueueItems: Flow<*>,
     controller: OutboundQueueAutoFlushController,
     retryNext: (excludingIds: Set<String>) -> String?,
+    // Issue #1686 / reopened #1602 (make the WIRE the oracle): the
+    // transport-writable probe. The wire is the hard drain gate: a stale Connected
+    // enum must never dispatch into a dead transport, while a live writable handle
+    // still drains even if the enum is falsely not-Connected (#1680). The poll lane runs
+    // UNCONDITIONALLY and re-evaluates this gate each tick, so a transport that heals
+    // WITHOUT an enum window flip (a silent false-disconnect recovery) is still drained
+    // within one backoff. A tick with the gate shut is a cheap diagnostic no-op — no
+    // dispatch, no reconnect kick (a genuinely-dead wire keeps the gate closed, so
+    // there is no new reconnect pressure). Required at every call site: falling
+    // back to the coarse enum would reopen
+    // the exact stale-live drain bug this gate exists to prevent.
+    transportWritable: () -> Boolean,
     // Issue #1531 (audit RC3) / #1542 (finding D7): re-arm a stranded
     // `Uploading`/`InFlight` row whose CLAIM age exceeds [staleAfterMs] back to
     // `Queued` so the retry lane can claim it WITHOUT a connection-window flip. A
@@ -245,17 +262,6 @@ internal suspend fun runOutboundQueueAutoFlush(
     // controller's `not_live` drain diagnostic (see [OutboundQueueAutoFlushController.onQueueSnapshotChanged]).
     // Defaulted so existing unit call sites compile.
     hasPendingWork: () -> Boolean = { false },
-    // Issue #1686 (make the WIRE the oracle): the transport-writable probe. The drain
-    // gate is OPEN whenever the enum says Connected ([sessionLive]) OR a live, writable
-    // transport handle exists — so a FALSE/flapping not-Connected label (the #1680
-    // storm) no longer shuts the drain (the composer clog). The poll lane now runs
-    // UNCONDITIONALLY and re-evaluates this gate each tick, so a transport that heals
-    // WITHOUT an enum window flip (a silent false-disconnect recovery) is still drained
-    // within one backoff. A tick with the gate shut is a cheap diagnostic no-op — no
-    // dispatch, no reconnect kick (a genuinely-dead wire keeps the gate closed, so
-    // there is no new reconnect pressure). Defaulted to `{ false }` so existing unit
-    // call sites keep the pure-`sessionLive` gate and compile unchanged.
-    transportWritable: () -> Boolean = { false },
     // Issue #2042: a transport can recover while the coarse connection enum stays
     // unchanged. Re-arm only on the wire oracle's false→true edge; a sustained true
     // wire must not repeatedly reset a poison row's bounded retry budget.
@@ -271,7 +277,7 @@ internal suspend fun runOutboundQueueAutoFlush(
             unparkTransportFailedRows()
         }
         previousTransportWritable = transportWritableNow
-        return sessionLive || transportWritableNow
+        return outboundDrainGateOpen(sessionLive, transportWritableNow)
     }
     launch {
         outboundQueueItems.collect {

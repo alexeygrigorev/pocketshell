@@ -281,9 +281,14 @@ public class PromptComposerViewModel @Inject constructor(
         null
     internal var outboundSidecarDispatchInFlight: Boolean = false
     internal val outboundDrainOwnership = OutboundDrainOwnership()
-    internal val outboundSendConsumers = OutboundSendConsumerRegistry()
+    internal val outboundSendConsumers = OutboundSendConsumerRegistry {
+        // Re-render Retry truth when switch-away/back replaces its IO consumer.
+        _uiState.update { current ->
+            current.copy(outboundConsumerEpoch = current.outboundConsumerEpoch + 1L)
+        }
+    }
     internal var outboundQueueDispatcher: CoroutineDispatcher = Dispatchers.IO
-    private val draftPersistence = ComposerDraftPersistence(
+    internal val draftPersistence = ComposerDraftPersistence(
         store = composerDraftStore,
         scope = viewModelScope,
         dispatcher = { outboundQueueDispatcher },
@@ -500,7 +505,7 @@ public class PromptComposerViewModel @Inject constructor(
         _uiState.update { it.copy(draft = newText, error = null) }
     }
 
-    private fun loadComposerDraft(sessionKey: String): String? {
+    internal fun loadComposerDraft(sessionKey: String): String? {
         return draftPersistence.load(sessionKey)
     }
 
@@ -715,43 +720,6 @@ public class PromptComposerViewModel @Inject constructor(
         composerDraftStore.saveAttachments(target, _uiState.value.attachments.toDurableRefs())
         recordComposerMutation(target)
         return retainedTiles
-    }
-
-    /**
-     * Issue #1569 (U1): after a process-death restore or a session switch back, the
-     * persisted tiles carry no live preview Uri ([ComposerDraftStore] intentionally
-     * drops it). For a retained-on-failure tile (a provisional `pending-upload-…`
-     * path) the durable BYTES still exist in the draft sidecar store, so reconnect
-     * the tile to them (`previewUri` = the local sidecar file) — otherwise the next
-     * Send would fall to the non-sidecar path and try to deliver the broken
-     * provisional path. Best-effort + async: matches the retained (pending-upload,
-     * previewUri-less) tiles to the ordered draft sidecars.
-     */
-    private fun rehydrateDraftAttachmentBytes(target: String) {
-        val sidecarStore = outboundAttachmentSidecarStore ?: return
-        if (target.isBlank()) return
-        val hasRetainedTiles = _uiState.value.attachments.any {
-            it.previewUri == null && it.transferState == AttachmentTransferState.PendingLocal
-        }
-        if (!hasRetainedTiles) return
-        viewModelScope.launch(outboundQueueDispatcher) {
-            val refs = sidecarStore.refsFor(draftAttachmentSidecarScope(target))
-            if (refs.isEmpty()) return@launch
-            withContext(Dispatchers.Main.immediate) {
-                if (composerTarget != target) return@withContext
-                _uiState.update { current ->
-                    val refsByIndex = refs.associateBy { it.attachmentIndex }
-                    val rehydrated = current.attachments.map { tile ->
-                        if (tile.previewUri != null || tile.transferState != AttachmentTransferState.PendingLocal) {
-                            return@map tile
-                        }
-                        val ref = pendingAttachmentIndex(tile.remotePath)?.let(refsByIndex::get) ?: return@map tile
-                        tile.copy(previewUri = android.net.Uri.fromFile(java.io.File(ref.localPath)))
-                    }
-                    if (rehydrated == current.attachments) current else current.copy(attachments = rehydrated)
-                }
-            }
-        }
     }
 
     /**
@@ -1022,8 +990,24 @@ public class PromptComposerViewModel @Inject constructor(
         emitSendRequest(withEnter, sendTarget)
     }
 
+    /**
+     * Claim one terminal reduction for the exact durable delivery attempt.
+     * Production durable requests always carry a lease token. A callback whose
+     * token no longer owns the row is a late result from a retired attempt and
+     * must not disarm, clear, requeue, deliver, or restore anything owned by its
+     * replacement. Token-less requests are the legacy/no-row path (plus older
+     * direct JVM fixtures) and retain their existing behavior.
+     */
+    private fun claimOutboundTerminalCallback(request: SendRequest): Boolean {
+        val rowId = request.outboundQueueItemId ?: return true
+        val token = request.outboundDrainLeaseToken ?: return true
+        return outboundDrainOwnership.release(rowId, token)
+    }
+
     /** Finalize delivery without touching post-handoff editor input (#1616). */
     public fun markSendDelivered(request: SendRequest? = null): Boolean {
+        if (request != null && !claimOutboundTerminalCallback(request)) return false
+        clearOutboundRetrying(request?.outboundQueueItemId)
         // Issue #891: the send resolved successfully — disarm the overall-send
         // watchdog so it cannot fire a spurious "Send failed" afterwards.
         watchdogs.disarmSend()
@@ -1037,7 +1021,6 @@ public class PromptComposerViewModel @Inject constructor(
             it.outboundQueueItemId != null && closeEpoch != composerInteractionEpoch
         }
         request?.outboundQueueItemId?.let(outboundAutoCloseEpochs::remove)
-        outboundDrainOwnership.release(request?.outboundQueueItemId, request?.outboundDrainLeaseToken)
         inFlightSendRequest = null
         _uiState.update { it.copy(sendInFlight = false) }
         markOutboundSendDelivered(request)
@@ -1068,7 +1051,16 @@ public class PromptComposerViewModel @Inject constructor(
         request: SendRequest,
         message: String = "Not sent. Reconnect, then send again or discard the draft.",
     ) {
-        outboundDrainOwnership.release(request.outboundQueueItemId, request.outboundDrainLeaseToken)
+        if (!claimOutboundTerminalCallback(request)) return
+        restoreFailedSendAfterOwnershipClaimed(request, message)
+    }
+
+    /** Body shared by direct failure and deferred-row fallback after the lease was claimed once. */
+    private fun restoreFailedSendAfterOwnershipClaimed(
+        request: SendRequest,
+        message: String,
+    ) {
+        clearOutboundRetrying(request.outboundQueueItemId)
         if (request.text.isEmpty()) {
             watchdogs.disarmSend()
             inFlightSendRequest = null
@@ -1176,11 +1168,12 @@ public class PromptComposerViewModel @Inject constructor(
         // re-dispatching it and the UI stops claiming it is "sending next".
         deliveryOutcomeUnknown: Boolean = false,
     ) {
+        if (!claimOutboundTerminalCallback(request)) return
+        clearOutboundRetrying(request.outboundQueueItemId)
         // #891: disarm the watchdog (no stale "Send failed"); #971: drop the captured request.
         watchdogs.disarmSend()
         inFlightSendRequest = null
         val id = request.outboundQueueItemId
-        outboundDrainOwnership.release(id, request.outboundDrainLeaseToken)
         // Preserve the epoch for a possible late authoritative ack.
         val requeued = outboundQueueStore.requeueDeferredSend(
             id, request.sendTarget.sessionKey, request, outboundAttemptBudget, resetAttemptBudget,
@@ -1188,7 +1181,7 @@ public class PromptComposerViewModel @Inject constructor(
         if (requeued == null) {
             id?.let(outboundAutoCloseEpochs::remove)
             // No durable row to keep queued — restore to the composer so it is not lost.
-            restoreFailedSend(request, message = noRowFallbackMessage)
+            restoreFailedSendAfterOwnershipClaimed(request, message = noRowFallbackMessage)
             return
         }
         if (deliveryOutcomeUnknown) outboundQueueStore.markDeliveryOutcomeUnknown(requeued.id)
@@ -1471,6 +1464,7 @@ public class PromptComposerViewModel @Inject constructor(
         val item = outboundQueueStore.item(id) ?: return
         if (!item.isComposerQueueRetryable()) return
         outboundQueueStore.remove(id)
+        clearOutboundRetrying(id)
         launchSidecarRemoval(id)
         refreshOutboundQueueItems()
     }
@@ -1486,6 +1480,24 @@ public class PromptComposerViewModel @Inject constructor(
      * may not disturb a healthy in-flight send (issue #1621).
      */
     public fun retryOutboundItem(id: String): Unit = retryOutboundItemThroughGate(id)
+
+    internal fun outboundRetryBlockedByHealthyOwner(): Boolean =
+        _uiState.value.sendInFlight && !activeSendIsWedged()
+
+    internal fun markOutboundRetrying(id: String) {
+        _uiState.update { current ->
+            current.copy(outboundRetryingIds = current.outboundRetryingIds + id, error = null)
+        }
+    }
+
+    internal fun clearOutboundRetrying(id: String?) {
+        if (id == null) return
+        _uiState.update { current ->
+            if (id !in current.outboundRetryingIds) current else {
+                current.copy(outboundRetryingIds = current.outboundRetryingIds - id)
+            }
+        }
+    }
 
     /**
      * Issue #900: foreground/reconnect queue flush. Claim one retryable row for
@@ -1709,6 +1721,7 @@ public class PromptComposerViewModel @Inject constructor(
             return false
         }
         active.recordQueueRowState("Queued", "InFlight", "claimed") // #1682
+        clearOutboundRetrying(id)
         outboundAttemptBudget.onClaim(id) // #1635-A
         val attachments = active.attachments.toStagedAttachments()
         val text = appendAttachmentPaths(active.cleanText, attachments.map { it.remotePath })
@@ -1743,6 +1756,7 @@ public class PromptComposerViewModel @Inject constructor(
         // recovery paths (watchdog / strand-clear) so they restore the exact
         // payload rather than the cleared composer.
         inFlightSendRequest = request
+        PromptComposerOutboundDrainTestSeams.beforeEmit?.invoke(active)
         if (_sendRequests.trySend(request).isFailure) {
             // Issue #971/#987: transient dispatch failure on a queue-flush — keep
             // the row queued for the next auto-retry (Option A), don't return it
@@ -1847,7 +1861,7 @@ public class PromptComposerViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal var onDurableDraftClearedForHandoffTest: (() -> Unit)? = null
 
-    private fun refreshOutboundQueueItems() {
+    internal fun refreshOutboundQueueItems() {
         _outboundQueueItems.value = composerTarget
             ?.takeIf { it.isNotBlank() }
             ?.let { outboundQueueStore.itemsFor(it) }
@@ -3111,6 +3125,10 @@ public class PromptComposerViewModel @Inject constructor(
          * retry resolves (success, failure, or drop).
          */
         val retryingIds: Set<String> = emptySet(),
+        /** Reopened #1602: durable outbound rows whose explicit Retry was accepted by the drain. */
+        val outboundRetryingIds: Set<String> = emptySet(),
+        /** Recomposition epoch for physical send-consumer replacement; not user-visible by itself. */
+        val outboundConsumerEpoch: Long = 0L,
         /**
          * Issue #745: true from the instant the user taps Send until the
          * host confirms delivery ([markSendDelivered]) or reports failure

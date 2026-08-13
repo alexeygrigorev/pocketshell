@@ -1,5 +1,7 @@
 package com.pocketshell.app.composer
 
+import kotlinx.coroutines.flow.update
+
 /**
  * Issue #1621: the manual-Retry eligibility gate of [PromptComposerViewModel],
  * split out of the god-object VM (D28 / file-size hygiene ratchet) into cohesive
@@ -45,6 +47,16 @@ package com.pocketshell.app.composer
 internal fun PromptComposerViewModel.activeSendIsWedged(nowMs: Long = clock()): Boolean {
     if (!_uiState.value.sendInFlight) return false
     if (outboundSidecarDispatchInFlight) return false
+    // Reopened #1602: screen A can leave a freshly-claimed row behind while
+    // switch-away/back has already installed screen consumer B. The row age is
+    // irrelevant in that state: its request is stamped for a generation that
+    // can no longer perform host IO, so waiting for the ~160s stale bound makes
+    // a visible Retry a no-op on a demonstrably recovered wire.
+    val requestGeneration = inFlightSendRequest?.outboundConsumerGeneration
+    val activeGeneration = outboundSendConsumers.activeGenerationForDispatch()
+    if (requestGeneration != null && activeGeneration != null && requestGeneration != activeGeneration) {
+        return true
+    }
     val target = composerTarget?.takeIf { it.isNotBlank() }
     val owning = target
         ?.let { outboundQueueStore.itemsFor(it) }
@@ -70,6 +82,16 @@ internal fun PromptComposerViewModel.activeSendIsWedged(nowMs: Long = clock()): 
  * tap re-arms the row and lets the existing FIFO drain claim it after A resolves.
  */
 internal fun PromptComposerViewModel.retryOutboundItemThroughGate(id: String) {
+    val item = outboundQueueStore.item(id) ?: return
+    if (!item.isComposerQueueRetryable()) return
+    if (!isSendTransportWritable()) {
+        rearmOutboundItemForDrain(id)
+        clearOutboundRetrying(id)
+        _uiState.update { current ->
+            current.copy(error = "Waiting for connection — Retry when the session is online.")
+        }
+        return
+    }
     val inFlight = _uiState.value.sendInFlight
     val wedged = inFlight && activeSendIsWedged()
     if (inFlight) {
@@ -87,6 +109,9 @@ internal fun PromptComposerViewModel.retryOutboundItemThroughGate(id: String) {
     }
     if (inFlight && !wedged) {
         rearmOutboundItemForDrain(id)
+        _uiState.update { current ->
+            current.copy(error = "Waiting — another prompt is still sending. This prompt will follow it.")
+        }
         return
     }
     // Issue #1602: an explicit Retry must re-drive THIS row. A genuinely CLOGGED
@@ -97,7 +122,20 @@ internal fun PromptComposerViewModel.retryOutboundItemThroughGate(id: String) {
     if (_uiState.value.sendInFlight) {
         clearStrandedSendInFlight()
     }
-    dispatchOutboundItem(id)
+    markOutboundRetrying(id)
+    val accepted = dispatchOutboundItem(id)
+    if (!accepted) {
+        clearOutboundRetrying(id)
+        _uiState.update { current ->
+            current.copy(
+                error = if (current.connectionDegraded || !isSendTransportWritable()) {
+                    "Waiting for connection — Retry when the session is online."
+                } else {
+                    "Retry is waiting for the session send path. Try again in a moment."
+                },
+            )
+        }
+    }
 }
 
 /**
@@ -117,8 +155,9 @@ private fun PromptComposerViewModel.rearmOutboundItemForDrain(id: String) {
     if (!item.isComposerQueueRetryable()) return
     outboundQueueStore.requeueForRetry(id, resetAttempts = true)
     // Issue #1682: a user's manual Retry un-parks a row (esp. a budget-parked
-    // Failed one) — the trace shows whether a stuck row recovered by hand vs the
-    // connected edge (which does NOT auto-un-park it, the Track C clog signal).
+    // Failed one) — the trace records that this re-arm came from the explicit
+    // action. The #1686/#2042 recovery edge separately auto-unparks only rows
+    // bearing OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE.
     item.recordQueueRowState(item.state.name, "Queued", "manual_retry")
     refreshOutboundQueueItemsFor(item.sessionKey)
 }

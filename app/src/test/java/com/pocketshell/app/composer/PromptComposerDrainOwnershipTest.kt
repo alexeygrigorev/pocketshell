@@ -10,6 +10,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
@@ -45,7 +46,11 @@ class PromptComposerDrainOwnershipTest {
         viewModels.clear()
     }
 
-    private fun newVm(dispatcher: TestDispatcher, queue: OutboundQueueStore): PromptComposerViewModel =
+    private fun newVm(
+        dispatcher: TestDispatcher,
+        queue: OutboundQueueStore,
+        draftStore: ComposerDraftStore = DisabledComposerDraftStore,
+    ): PromptComposerViewModel =
         PromptComposerViewModel(
             audioRecorder = object : PromptComposerViewModel.MicCapture {
                 override fun start() = Unit
@@ -64,6 +69,7 @@ class PromptComposerDrainOwnershipTest {
                 override fun transcriptionProvider(): VoiceTranscriptionProvider =
                     VoiceTranscriptionProvider.OpenAiWhisper
             },
+            composerDraftStore = draftStore,
             outboundQueueStore = queue,
             savedStateHandle = SavedStateHandle(),
         ).also {
@@ -72,6 +78,243 @@ class PromptComposerDrainOwnershipTest {
             it.setSendWatchdogTimeoutForTest(null)
             viewModels += it
         }
+
+    /**
+     * Reopened #1602: a screen replacement installs a new physical-send consumer
+     * before the retiring generation's buffered request is reduced. The row still
+     * says InFlight and is younger than the wall-clock stale bound, but its stamped
+     * consumer generation can no longer perform IO. Retry must use that exact
+     * ownership fact instead of waiting ~160 seconds and appearing tappable-silent.
+     *
+     * RED on current main: [activeSendIsWedged] only checks row age, so the Retry
+     * merely re-arms the tail and produces no request on the recovered consumer.
+     */
+    @Test
+    fun issue1602_retryReDrivesOnRecoveredReplacementConsumerWithoutWallClockWait() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(dispatcher, queue)
+        vm.setTransportWritableProbe { true }
+        val target = "1/session-a"
+        vm.onComposerTargetChanged(target)
+        val head = queue.enqueue(target, "old owner", createdAtMs = 1L)
+        val retry = queue.enqueue(target, "retry on recovered wire", createdAtMs = 2L)
+        vm.refreshOutboundQueueItemsFor(target)
+
+        val retiredGeneration = vm.outboundSendConsumers.register()
+        assertTrue(vm.dispatchOutboundItem(head.id))
+        advanceUntilIdle()
+        // The retiring screen already took its request from the one-consumer
+        // channel, then disappeared before reducing a terminal result.
+        val retiredRequest = vm.sendRequests.first()
+        assertEquals(retiredGeneration, retiredRequest.outboundConsumerGeneration)
+        assertEquals(OutboundState.InFlight, requireNotNull(queue.item(head.id)).state)
+
+        val physicalAttempts = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val physicalAttemptStarted = CompletableDeferred<Unit>()
+        val physicalAttemptNeverReturns = CompletableDeferred<ComposerSendResult>()
+        val recoveredConsumer = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            collectPromptComposerSendRequests(vm, onSend = { request ->
+                physicalAttempts += request
+                physicalAttemptStarted.complete(Unit)
+                physicalAttemptNeverReturns.await()
+            })
+        }
+        runCurrent()
+        val recoveredGeneration = requireNotNull(vm.outboundSendConsumers.activeGenerationForDispatch())
+        assertTrue(recoveredGeneration != retiredGeneration)
+        assertTrue(
+            "the exact request is owned by a retired consumer on a writable recovered wire",
+            vm.activeSendIsWedged(),
+        )
+
+        vm.retryOutboundItem(retry.id)
+        assertEquals(
+            "the tap must become observable before the async drain gets a turn",
+            setOf(retry.id),
+            vm.uiState.value.outboundRetryingIds,
+        )
+        runCurrent()
+        physicalAttemptStarted.await()
+
+        assertEquals(
+            "Retry must invoke recovered screen B's physical host-send callback exactly once",
+            1,
+            physicalAttempts.count { it.outboundQueueItemId == retry.id },
+        )
+        val physicalRequest = physicalAttempts.single()
+        assertEquals("payload bytes must remain exact", "retry on recovered wire", physicalRequest.cleanDraft)
+        assertEquals("the physical write owns exactly one Enter", true, physicalRequest.withEnter)
+        assertEquals(recoveredGeneration, physicalRequest.outboundConsumerGeneration)
+        assertEquals(OutboundState.Queued, requireNotNull(queue.item(head.id)).state)
+        assertEquals(OutboundState.InFlight, requireNotNull(queue.item(retry.id)).state)
+        assertTrue(vm.uiState.value.outboundRetryingIds.isEmpty())
+        assertEquals(listOf(head.id, retry.id), queue.itemsFor(target).map { it.id })
+        recoveredConsumer.cancelAndJoin()
+    }
+
+    /** A programmatic/manual Retry is fail-closed even if stale UI invokes it offline. */
+    @Test
+    fun issue1602_manualRetryOnDeadWireWaitsVisiblyWithoutAnyPhysicalAttempt() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newVm(dispatcher, queue)
+        vm.setTransportWritableProbe { false }
+        val target = "1/session-a"
+        vm.onComposerTargetChanged(target)
+        val failed = queue.enqueue(target, "must remain byte exact", createdAtMs = 1L)
+        requireNotNull(queue.markFailed(failed.id, "connection lost"))
+        vm.refreshOutboundQueueItemsFor(target)
+        val physicalAttempts = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val consumer = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            collectPromptComposerSendRequests(vm, onSend = { request ->
+                physicalAttempts += request
+                ComposerSendResult.Delivered
+            })
+        }
+        runCurrent()
+
+        vm.retryOutboundItem(failed.id)
+        runCurrent()
+
+        assertTrue("dead wire cannot enter the physical callback", physicalAttempts.isEmpty())
+        assertFalse(vm.uiState.value.sendInFlight)
+        assertTrue(vm.uiState.value.outboundRetryingIds.isEmpty())
+        assertEquals(
+            "Waiting for connection — Retry when the session is online.",
+            vm.uiState.value.error,
+        )
+        assertEquals("must remain byte exact", requireNotNull(queue.item(failed.id)).cleanText)
+        assertEquals(OutboundState.Queued, requireNotNull(queue.item(failed.id)).state)
+        assertEquals(listOf(failed.id), queue.itemsFor(target).map { it.id })
+        consumer.cancelAndJoin()
+    }
+
+    /**
+     * Reopened #1602/#2034 stale-callback/ABA guard. Once a row has acquired a
+     * second drain token, a late failure from token A must not clear token B's
+     * global gate or requeue B's InFlight row. It also must not touch the user's
+     * newer live draft or any unrelated row identity.
+     *
+     * RED on current main: terminal callbacks ignore the failed token release and
+     * unconditionally clear [PromptComposerViewModel.inFlightSendRequest].
+     */
+    @Test
+    fun issue1602_staleFailureCallbackCannotClearReplacementAttemptOrNewDraft() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val draftStore = InMemoryComposerDraftStore()
+        val vm = newVm(dispatcher, queue, draftStore)
+        val target = "1/session-a"
+        vm.onComposerTargetChanged(target)
+        val sent = collectSendRequests(vm)
+        val head = queue.enqueue(target, "same row, new token", createdAtMs = 1L)
+        val unrelated = queue.enqueue(target, "unrelated queued row", createdAtMs = 2L)
+        vm.refreshOutboundQueueItemsFor(target)
+
+        assertTrue(vm.dispatchOutboundItem(head.id))
+        advanceUntilIdle()
+        val retiredRequest = sent.single()
+        vm.markOutboundSendDeferred(retiredRequest, resetAttemptBudget = true)
+        assertTrue(vm.dispatchOutboundItem(head.id))
+        advanceUntilIdle()
+        val replacementRequest = requireNotNull(vm.inFlightSendRequest)
+        assertTrue(retiredRequest.outboundDrainLeaseToken != replacementRequest.outboundDrainLeaseToken)
+        vm.onDraftChange("new replacement prompt\nwith exact bytes: αβγ")
+
+        vm.markOutboundSendDeferred(retiredRequest, resetAttemptBudget = true)
+
+        assertEquals(replacementRequest, vm.inFlightSendRequest)
+        assertTrue(vm.uiState.value.sendInFlight)
+        assertEquals(OutboundState.InFlight, requireNotNull(queue.item(head.id)).state)
+        assertEquals(OutboundState.Queued, requireNotNull(queue.item(unrelated.id)).state)
+        assertEquals(listOf(head.id, unrelated.id), queue.itemsFor(target).map { it.id })
+        assertEquals("new replacement prompt\nwith exact bytes: αβγ", vm.uiState.value.draft)
+        assertEquals(vm.uiState.value.draft, draftStore.load(target))
+    }
+
+    @Test
+    fun issue1602_staleDeliveredCallbackCannotPruneReplacementAttemptOrNewDraft() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val draftStore = InMemoryComposerDraftStore()
+        val vm = newVm(dispatcher, queue, draftStore)
+        val target = "1/session-a"
+        vm.onComposerTargetChanged(target)
+        val sent = collectSendRequests(vm)
+        val row = queue.enqueue(target, "same row, new token", createdAtMs = 1L)
+        val unrelated = queue.enqueue(target, "unrelated queued row", createdAtMs = 2L)
+        vm.refreshOutboundQueueItemsFor(target)
+
+        assertTrue(vm.dispatchOutboundItem(row.id))
+        advanceUntilIdle()
+        val retiredRequest = sent.single()
+        vm.markOutboundSendDeferred(retiredRequest, resetAttemptBudget = true)
+        assertTrue(vm.dispatchOutboundItem(row.id))
+        advanceUntilIdle()
+        val replacementRequest = requireNotNull(vm.inFlightSendRequest)
+        vm.onDraftChange("new draft survives stale delivered ack")
+
+        assertFalse("retired token cannot claim delivery", vm.markSendDelivered(retiredRequest))
+
+        assertEquals(replacementRequest, vm.inFlightSendRequest)
+        assertTrue(vm.uiState.value.sendInFlight)
+        assertEquals(OutboundState.InFlight, requireNotNull(queue.item(row.id)).state)
+        assertEquals(OutboundState.Queued, requireNotNull(queue.item(unrelated.id)).state)
+        assertEquals(listOf(row.id, unrelated.id), queue.itemsFor(target).map { it.id })
+        assertEquals("new draft survives stale delivered ack", vm.uiState.value.draft)
+        assertEquals(vm.uiState.value.draft, draftStore.load(target))
+    }
+
+    /**
+     * Reopened #1602/#2034 identity-promotion regression. The screen first binds
+     * the fallback host/name key, then exact pane-generation proof promotes it to
+     * the durable tmux key. That is a re-key of ONE session, not a user switch:
+     * live draft bytes and every unrelated queue id must remain visible.
+     *
+     * RED on current main: queue rows are promoted, then
+     * `onComposerTargetChanged(durable)` loads the empty durable draft slot and
+     * visibly erases the still-live fallback draft.
+     */
+    @Test
+    fun issue1602_exactIdentityPromotionPreservesDraftBytesAndAllQueueRowIds() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val queue = InMemoryOutboundQueueStore()
+        val draftStore = InMemoryComposerDraftStore()
+        val vm = newVm(dispatcher, queue, draftStore)
+        val fallback = "1/session-a"
+        val durable = "tmux:1:\$0:1944"
+        vm.onComposerTargetChanged(fallback)
+        val draft = "replacement prompt\n  preserves spaces + 🌍"
+        vm.onDraftChange(draft)
+        val failed = queue.enqueue(
+            sessionKey = fallback,
+            cleanText = "failed head",
+            createdAtMs = 1L,
+            paneId = "%0",
+            tmuxSessionId = "\$0",
+            tmuxSessionCreated = 1944L,
+        )
+        requireNotNull(queue.markFailed(failed.id, "connection lost"))
+        val younger = queue.enqueue(
+            sessionKey = fallback,
+            cleanText = "younger row",
+            createdAtMs = 2L,
+            paneId = "%0",
+            tmuxSessionId = "\$0",
+            tmuxSessionCreated = 1944L,
+        )
+        vm.refreshOutboundQueueItemsFor(fallback)
+
+        vm.promoteFallbackOutboundIdentity(fallback, durable, setOf("%0"), "\$0", 1944L)
+        vm.onComposerTargetChanged(durable)
+
+        assertEquals("visible draft bytes must not change during exact re-key", draft, vm.uiState.value.draft)
+        assertEquals("durable draft owner receives the exact bytes", draft, draftStore.load(durable))
+        assertEquals(listOf(failed.id, younger.id), vm.outboundQueueItems.value.map { it.id })
+        assertEquals(listOf(failed.id, younger.id), queue.itemsFor(durable).map { it.id })
+        assertTrue(queue.itemsFor(fallback).isEmpty())
+    }
 
     private fun TestScope.collectSendRequests(
         vm: PromptComposerViewModel,

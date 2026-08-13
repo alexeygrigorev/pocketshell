@@ -11,14 +11,21 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
@@ -30,6 +37,9 @@ import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 @Composable
 internal fun PromptComposerQueueBanners(
@@ -41,6 +51,9 @@ internal fun PromptComposerQueueBanners(
     onDiscardPending: (String) -> Unit,
     onSavePendingAsAudio: (String) -> Unit,
     outboundQueueItems: List<OutboundItem>,
+    outboundRetryingIds: Set<String>,
+    outboundRetryBlockedByHealthyOwner: Boolean,
+    outboundWireWritable: Boolean,
     connectionDegraded: Boolean,
     outboundQueueExpanded: Boolean,
     onToggleOutboundQueue: () -> Unit,
@@ -64,6 +77,9 @@ internal fun PromptComposerQueueBanners(
     if (outboundQueueItems.isNotEmpty()) {
         OutboundQueueBanner(
             items = outboundQueueItems,
+            retryingIds = outboundRetryingIds,
+            retryBlockedByHealthyOwner = outboundRetryBlockedByHealthyOwner,
+            wireWritable = outboundWireWritable,
             connectionDegraded = connectionDegraded,
             expanded = outboundQueueExpanded,
             onToggle = onToggleOutboundQueue,
@@ -83,6 +99,9 @@ internal fun PromptComposerQueueBanners(
 @Composable
 private fun OutboundQueueBanner(
     items: List<OutboundItem>,
+    retryingIds: Set<String>,
+    retryBlockedByHealthyOwner: Boolean,
+    wireWritable: Boolean,
     connectionDegraded: Boolean,
     expanded: Boolean,
     onToggle: () -> Unit,
@@ -161,10 +180,17 @@ private fun OutboundQueueBanner(
                 }
             }
             if (collapsedRetryItem != null) {
+                val retryAction = outboundRetryActionState(
+                    collapsedRetryItem,
+                    retryingIds,
+                    retryBlockedByHealthyOwner,
+                    wireWritable,
+                )
                 Spacer(modifier = Modifier.width(8.dp))
                 PendingActionButton(
-                    label = "Retry",
+                    label = retryAction.label,
                     primary = true,
+                    enabled = retryAction.enabled,
                     onClick = { onRetry(collapsedRetryItem.id) },
                     modifier = Modifier.testTag(
                         composerOutboundQueueRetryTestTag(collapsedRetryItem.id),
@@ -190,6 +216,7 @@ private fun OutboundQueueBanner(
                 it.state == OutboundState.Queued || it.state == OutboundState.Failed
             }
             if (resendableCount >= 2) {
+                val resendEnabled = wireWritable && !retryBlockedByHealthyOwner && retryingIds.isEmpty()
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -197,6 +224,7 @@ private fun OutboundQueueBanner(
                         .clip(ComposerQueueButtonShape)
                         .background(PocketShellColors.Accent, ComposerQueueButtonShape)
                         .clickable(
+                            enabled = resendEnabled,
                             role = Role.Button,
                             onClick = onResendAll,
                         )
@@ -205,7 +233,11 @@ private fun OutboundQueueBanner(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "Resend all ($resendableCount)",
+                        text = when {
+                            resendEnabled -> "Resend all ($resendableCount)"
+                            !wireWritable -> "Waiting for connection"
+                            else -> "Waiting for current send"
+                        },
                         color = PocketShellColors.OnAccent,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -222,6 +254,12 @@ private fun OutboundQueueBanner(
             items.forEach { item ->
                 OutboundQueueRow(
                     item = item,
+                    retryAction = outboundRetryActionState(
+                        item,
+                        retryingIds,
+                        retryBlockedByHealthyOwner,
+                        wireWritable,
+                    ),
                     onDelete = { onDelete(item.id) },
                     onRetry = { onRetry(item.id) },
                 )
@@ -233,14 +271,31 @@ private fun OutboundQueueBanner(
 @Composable
 private fun OutboundQueueRow(
     item: OutboundItem,
+    retryAction: OutboundRetryActionState,
     onDelete: () -> Unit,
     onRetry: () -> Unit,
 ) {
+    val statusLayoutRegistration = PromptComposerQueueStatusLayoutTestObserver.observerForComposition()
+    val statusLayoutBinding = remember(statusLayoutRegistration, item.id) {
+        statusLayoutRegistration?.bind(item.id)
+    }
+    DisposableEffect(statusLayoutBinding) {
+        onDispose { statusLayoutBinding?.close() }
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 8.dp)
-            .testTag(composerOutboundQueueItemRowTestTag(item.id)),
+            .testTag(composerOutboundQueueItemRowTestTag(item.id))
+            .then(
+                if (statusLayoutBinding == null) {
+                    Modifier
+                } else {
+                    Modifier.onGloballyPositioned { coordinates ->
+                        statusLayoutBinding.recordRow(coordinates)
+                    }
+                },
+            ),
     ) {
         Text(
             text = formatRelativeTimestamp(item.createdAtMs, System.currentTimeMillis()),
@@ -249,15 +304,31 @@ private fun OutboundQueueRow(
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(2.dp))
-        Text(
-            text = outboundQueueStateLabel(item),
-            color = if (item.state == OutboundState.Failed) {
-                PocketShellColors.Amber
-            } else {
-                PocketShellColors.TextSecondary
-            },
-            style = PocketShellType.bodyDense,
-        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .wrapContentHeight()
+                .testTag(composerOutboundQueueStatusTestTag(item.id))
+                .then(
+                    if (statusLayoutBinding == null) {
+                        Modifier
+                    } else {
+                        Modifier.onGloballyPositioned { coordinates ->
+                            statusLayoutBinding.recordStatus(coordinates)
+                        }
+                    },
+                ),
+        ) {
+            Text(
+                text = retryAction.status ?: outboundQueueStateLabel(item),
+                color = if (item.state == OutboundState.Failed) {
+                    PocketShellColors.Amber
+                } else {
+                    PocketShellColors.TextSecondary
+                },
+                style = PocketShellType.bodyDense,
+            )
+        }
         if (item.cleanText.isNotBlank()) {
             Spacer(modifier = Modifier.height(4.dp))
             Text(
@@ -289,8 +360,9 @@ private fun OutboundQueueRow(
                     modifier = Modifier.testTag(composerOutboundQueueDeleteTestTag(item.id)),
                 )
                 PendingActionButton(
-                    label = "Retry",
+                    label = retryAction.label,
                     primary = true,
+                    enabled = retryAction.enabled,
                     onClick = onRetry,
                     modifier = Modifier.testTag(composerOutboundQueueRetryTestTag(item.id)),
                 )
@@ -594,6 +666,38 @@ internal fun outboundQueueStateLabel(item: OutboundItem): String = if (
     OutboundState.Failed -> item.lastError?.takeIf { it.isNotBlank() }?.let { "Failed — $it" } ?: "Failed"
 }
 
+internal data class OutboundRetryActionState(
+    val label: String,
+    val enabled: Boolean,
+    val status: String? = null,
+)
+
+/** Reopened #1602: a rendered Retry must state whether it can act right now. */
+internal fun outboundRetryActionState(
+    item: OutboundItem,
+    retryingIds: Set<String>,
+    blockedByHealthyOwner: Boolean,
+    wireWritable: Boolean,
+): OutboundRetryActionState = when {
+    !item.isComposerQueueRetryable() -> OutboundRetryActionState(label = "Retry", enabled = false)
+    !wireWritable -> OutboundRetryActionState(
+        label = "Offline",
+        enabled = false,
+        status = "Waiting — connection is offline",
+    )
+    item.id in retryingIds -> OutboundRetryActionState(
+        label = "Retrying…",
+        enabled = false,
+        status = "Retrying — starting delivery",
+    )
+    blockedByHealthyOwner -> OutboundRetryActionState(
+        label = "Waiting…",
+        enabled = false,
+        status = "Waiting — another prompt is still sending",
+    )
+    else -> OutboundRetryActionState(label = "Retry", enabled = true)
+}
+
 internal fun outboundAttachmentCountLabel(count: Int): String =
     "$count attachment${if (count == 1) "" else "s"}"
 
@@ -671,3 +775,287 @@ internal fun composerOutboundQueueDeleteTestTag(id: String): String =
 
 internal fun composerOutboundQueueRetryTestTag(id: String): String =
     "prompt-composer-outbound-queue-retry:$id"
+
+internal fun composerOutboundQueueStatusTestTag(id: String): String =
+    "prompt-composer-outbound-queue-status:$id"
+
+/**
+ * Default-inert layout probe for connected/component tests of the queue status row.
+ *
+ * A registration owns row bindings captured by one composition. Each binding retains
+ * the independently replaceable, latest exact row and status [LayoutCoordinates], so
+ * tests read both handles in one window coordinate space only after scrolling and
+ * settling instead of retaining callback-time snapshots. Registration and row-binding
+ * identity checks reject late callbacks, stale closes, and mixed-generation pairs.
+ */
+internal object PromptComposerQueueStatusLayoutTestObserver {
+    private val nextGeneration = AtomicLong(0L)
+    private val active = AtomicReference<Registration?>(null)
+
+    /**
+     * Deliberately does not use boundsInWindow(): that API intersects a node with
+     * ancestor clipping and can collapse a still-attached, visible descendant to
+     * Rect.Zero inside the full composer sheet. Both handles are measured from
+     * their raw origin in the same window space plus their own measured size.
+     */
+    private fun rawWindowBounds(coordinates: LayoutCoordinates): Rect? = runCatching {
+        val position = coordinates.positionInWindow()
+        val measuredSize = coordinates.size
+        val left = position.x
+        val top = position.y
+        val right = left + measuredSize.width.toFloat()
+        val bottom = top + measuredSize.height.toFloat()
+        if (
+            left.isFinite() &&
+            top.isFinite() &&
+            right.isFinite() &&
+            bottom.isFinite()
+        ) {
+            Rect(left = left, top = top, right = right, bottom = bottom)
+        } else {
+            null
+        }
+    }.getOrNull()
+
+    private fun isAttachedSafely(coordinates: LayoutCoordinates?): Boolean =
+        coordinates != null && runCatching { coordinates.isAttached }.getOrDefault(false)
+
+    internal fun install(): Registration {
+        val registration = Registration(nextGeneration.incrementAndGet())
+        check(active.compareAndSet(null, registration)) {
+            "queue status layout observer already installed"
+        }
+        return registration
+    }
+
+    internal fun observerForComposition(): Registration? = active.get()
+
+    internal class Registration internal constructor(
+        internal val generation: Long,
+    ) : AutoCloseable {
+        private val nextBindingToken = AtomicLong(0L)
+        private val bindings = ConcurrentHashMap<String, RowBinding>()
+
+        internal fun bind(rowId: String): RowBinding? {
+            if (active.get() !== this) return null
+            val binding = RowBinding(
+                rowId = rowId,
+                token = nextBindingToken.incrementAndGet(),
+            )
+            bindings[rowId] = binding
+            if (active.get() !== this) {
+                bindings.remove(rowId, binding)
+                return null
+            }
+            return binding
+        }
+
+        internal fun observedRowIds(): Set<String> =
+            if (active.get() === this) {
+                bindings.entries
+                    .asSequence()
+                    .filter { (rowId, binding) ->
+                        binding.hasRecordedCoordinatePair() && bindings[rowId] === binding
+                    }
+                    .map { it.key }
+                    .toSet()
+            } else {
+                emptySet()
+            }
+
+        internal fun currentCoordinates(rowId: String): CoordinatePair? =
+            if (active.get() === this) bindings[rowId]?.currentCoordinates() else null
+
+        internal fun currentWindowGeometry(rowId: String): WindowGeometrySnapshot =
+            bindings[rowId]?.currentWindowGeometry()
+                ?: WindowGeometrySnapshot.missingBinding(
+                    rowId = rowId,
+                    generation = generation,
+                    ownerCurrent = active.get() === this,
+                )
+
+        private fun isCurrent(binding: RowBinding): Boolean =
+            active.get() === this && bindings[binding.rowId] === binding
+
+        private fun release(binding: RowBinding) {
+            bindings.remove(binding.rowId, binding)
+        }
+
+        override fun close() {
+            if (active.compareAndSet(this, null)) {
+                bindings.values.forEach(RowBinding::detach)
+                bindings.clear()
+            }
+        }
+
+        internal inner class RowBinding internal constructor(
+            internal val rowId: String,
+            internal val token: Long,
+        ) : AutoCloseable {
+            private val rowCoordinates = AtomicReference<LayoutCoordinates?>(null)
+            private val statusCoordinates = AtomicReference<LayoutCoordinates?>(null)
+
+            internal fun recordRow(current: LayoutCoordinates) {
+                if (isCurrent(this)) {
+                    rowCoordinates.set(current)
+                }
+            }
+
+            internal fun recordStatus(current: LayoutCoordinates) {
+                if (isCurrent(this)) {
+                    statusCoordinates.set(current)
+                }
+            }
+
+            internal fun hasRecordedCoordinatePair(): Boolean =
+                isCurrent(this) && rowCoordinates.get() != null && statusCoordinates.get() != null
+
+            internal fun currentCoordinates(): CoordinatePair? {
+                if (!isCurrent(this)) return null
+                val row = rowCoordinates.get() ?: return null
+                val status = statusCoordinates.get() ?: return null
+                if (!row.isAttached || !status.isAttached) return null
+                return CoordinatePair(row = row, status = status).takeIf {
+                    isCurrent(this) &&
+                        rowCoordinates.get() === row &&
+                        statusCoordinates.get() === status &&
+                        row.isAttached &&
+                        status.isAttached
+                }
+            }
+
+            internal fun currentWindowGeometry(): WindowGeometrySnapshot {
+                val ownerCurrentAtStart = active.get() === this@Registration
+                val bindingCurrentAtStart = isCurrent(this)
+                val row = rowCoordinates.get()
+                val status = statusCoordinates.get()
+                val handlesCurrentAtStart =
+                    rowCoordinates.get() === row && statusCoordinates.get() === status
+                val rowAttachedAtStart = isAttachedSafely(row)
+                val statusAttachedAtStart = isAttachedSafely(status)
+                val pairReadableAtStart =
+                    ownerCurrentAtStart &&
+                        bindingCurrentAtStart &&
+                        handlesCurrentAtStart &&
+                        rowAttachedAtStart &&
+                        statusAttachedAtStart
+                val rowBounds = if (pairReadableAtStart && row != null) {
+                    rawWindowBounds(row)
+                } else {
+                    null
+                }
+                val statusBounds = if (pairReadableAtStart && status != null) {
+                    rawWindowBounds(status)
+                } else {
+                    null
+                }
+                val ownerCurrentAtEnd = active.get() === this@Registration
+                val bindingCurrentAtEnd = isCurrent(this)
+                val handlesCurrentAtEnd =
+                    rowCoordinates.get() === row && statusCoordinates.get() === status
+                val rowAttachedAtEnd = isAttachedSafely(row)
+                val statusAttachedAtEnd = isAttachedSafely(status)
+                return WindowGeometrySnapshot(
+                    rowId = rowId,
+                    generation = generation,
+                    bindingToken = token,
+                    ownerCurrent = ownerCurrentAtStart && ownerCurrentAtEnd,
+                    bindingCurrent = bindingCurrentAtStart && bindingCurrentAtEnd,
+                    rowHandlePresent = row != null,
+                    statusHandlePresent = status != null,
+                    rowAttached = rowAttachedAtStart && rowAttachedAtEnd,
+                    statusAttached = statusAttachedAtStart && statusAttachedAtEnd,
+                    handlesStillCurrent = handlesCurrentAtStart && handlesCurrentAtEnd,
+                    rowBounds = rowBounds,
+                    statusBounds = statusBounds,
+                )
+            }
+
+            internal fun detach() {
+                rowCoordinates.set(null)
+                statusCoordinates.set(null)
+            }
+
+            override fun close() {
+                release(this)
+                detach()
+            }
+        }
+    }
+
+    internal data class CoordinatePair(
+        val row: LayoutCoordinates,
+        val status: LayoutCoordinates,
+    )
+
+    internal data class WindowGeometrySnapshot(
+        val rowId: String,
+        val generation: Long,
+        val bindingToken: Long?,
+        val ownerCurrent: Boolean,
+        val bindingCurrent: Boolean,
+        val rowHandlePresent: Boolean,
+        val statusHandlePresent: Boolean,
+        val rowAttached: Boolean,
+        val statusAttached: Boolean,
+        val handlesStillCurrent: Boolean,
+        val rowBounds: Rect?,
+        val statusBounds: Rect?,
+    ) {
+        internal fun failureTerms(): List<String> = buildList {
+            if (!ownerCurrent) add("owner_not_current")
+            if (!bindingCurrent) add("binding_not_current")
+            if (!rowHandlePresent) add("row_handle_missing")
+            if (!statusHandlePresent) add("status_handle_missing")
+            if (rowHandlePresent && !rowAttached) add("row_detached")
+            if (statusHandlePresent && !statusAttached) add("status_detached")
+            if (!handlesStillCurrent) add("handle_pair_replaced_during_read")
+            val row = rowBounds
+            val status = statusBounds
+            if (rowAttached && row == null) add("row_bounds_unavailable")
+            if (statusAttached && status == null) add("status_bounds_unavailable")
+            if (row != null && (row.width <= 0f || row.height <= 0f)) add("row_bounds_empty")
+            if (status != null && (status.width <= 0f || status.height <= 0f)) add("status_bounds_empty")
+            if (row != null && status != null) {
+                if (status.left != row.left) add("status_left_not_full_width")
+                if (status.right != row.right) add("status_right_not_full_width")
+                if (status.left < row.left) add("status_left_outside_row")
+                if (status.top < row.top) add("status_top_outside_row")
+                if (status.right > row.right) add("status_right_outside_row")
+                if (status.bottom > row.bottom) add("status_bottom_outside_row")
+            }
+        }
+
+        internal fun isCurrentAttachedNonEmptyContainedFullWidthPair(): Boolean =
+            failureTerms().isEmpty()
+
+        internal fun diagnosticSummary(): String =
+            "rowId=$rowId generation=$generation bindingToken=$bindingToken " +
+                "failures=${failureTerms()} ownerCurrent=$ownerCurrent " +
+                "bindingCurrent=$bindingCurrent handlesStillCurrent=$handlesStillCurrent " +
+                "rowPresent=$rowHandlePresent rowAttached=$rowAttached rowBounds=$rowBounds " +
+                "statusPresent=$statusHandlePresent statusAttached=$statusAttached " +
+                "statusBounds=$statusBounds"
+
+        internal companion object {
+            fun missingBinding(
+                rowId: String,
+                generation: Long,
+                ownerCurrent: Boolean,
+            ): WindowGeometrySnapshot = WindowGeometrySnapshot(
+                rowId = rowId,
+                generation = generation,
+                bindingToken = null,
+                ownerCurrent = ownerCurrent,
+                bindingCurrent = false,
+                rowHandlePresent = false,
+                statusHandlePresent = false,
+                rowAttached = false,
+                statusAttached = false,
+                handlesStillCurrent = false,
+                rowBounds = null,
+                statusBounds = null,
+            )
+        }
+    }
+}

@@ -935,6 +935,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
                     clock = { testScheduler.currentTime },
                 ),
                 retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
+                transportWritable = { true },
                 sweepStaleInFlight = { staleAfterMs ->
                     vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
                 },
@@ -1026,6 +1027,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
                     clock = { testScheduler.currentTime },
                 ),
                 retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
+                transportWritable = { true },
                 sweepStaleInFlight = { staleAfterMs ->
                     sweptIds += vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
                         .map { it.id }
@@ -1091,6 +1093,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
                     clock = { testScheduler.currentTime },
                 ),
                 retryNext = { excludingIds -> vm.retryNextOutboundItem(excludingIds = excludingIds) },
+                transportWritable = { true },
                 sweepStaleInFlight = { staleAfterMs ->
                     vm.requeueStaleOutboundInFlight(staleAfterMs = staleAfterMs)
                 },
@@ -1793,6 +1796,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
         )
+        vm.setTransportWritableProbe { true }
         val sent = collectSendRequests(vm)
         vm.onComposerTargetChanged("1/session-a")
 
@@ -1867,6 +1871,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
         )
+        vm.setTransportWritableProbe { true }
         val sent = collectSendRequests(vm)
         vm.onComposerTargetChanged("1/session-a")
 

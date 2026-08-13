@@ -36,14 +36,12 @@ import com.pocketshell.app.composer.COMPOSER_CLOSE_TAG
 import com.pocketshell.app.composer.COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.composer.OutboundItem
-import com.pocketshell.app.composer.composerOutboundQueueItemRowTestTag
 import com.pocketshell.app.composer.composerOutboundQueueRetryTestTag
 import com.pocketshell.app.composer.OutboundState
 import com.pocketshell.app.composer.isComposerQueueRetryable
-import com.pocketshell.app.composer.OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE
-import com.pocketshell.app.composer.OUTBOUND_MAX_AUTO_ATTEMPTS
 import com.pocketshell.app.composer.OutboundQueueStore
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.PromptComposerOutboundDrainTestSeams
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.diagnostics.DiagnosticPrivacy
 import com.pocketshell.app.tmux.AgentSubmitCaptureSeams
@@ -111,7 +109,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
     private lateinit var hostRowTag: String
     private var diagnostics: RecordingDiagnosticSink? = null
     private var issue1739CaptureCleanupGate: CompletableDeferred<Unit>? = null
-
+    private var issue1602QueueJourney: Issue1602RecoveredQueueJourney? = null
     /** Issue #1819: the last sidecar SSH read error, so a blank frame can name its cause. */
     private var lastSidecarFailure: String? = null
     private val artifacts = OutboundAcceptanceArtifacts(DEVICE_DIR_NAME) { testName.methodName }
@@ -134,6 +132,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         OutboundDeliverySeams.failInputSendResultLostOnce = false
         PasteChunkSeams.reset()
         AgentSubmitCaptureSeams.reset()
+        PromptComposerOutboundDrainTestSeams.beforeEmit = null
     }
 
     @After
@@ -143,8 +142,11 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         OutboundDeliverySeams.failInputSendResultLostOnce = false
         PasteChunkSeams.reset()
         AgentSubmitCaptureSeams.reset()
+        PromptComposerOutboundDrainTestSeams.beforeEmit = null
         issue1739CaptureCleanupGate?.complete(Unit)
         issue1739CaptureCleanupGate = null
+        issue1602QueueJourney?.close()
+        issue1602QueueJourney = null
         diagnostics?.close()
         diagnostics = null
         clearLastSessionPrefs()
@@ -574,6 +576,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val nonce = SystemClock.elapsedRealtime().toString().takeLast(6)
         val firstPayload = "issue1944-first-$nonce"
         val secondPayload = "issue1944-second-$nonce"
+        val replacementDraft = "issue1602 replacement draft $nonce  + αβγ"
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
             .performClick()
         waitForComposerReady(expectQueue = false)
@@ -772,6 +775,23 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         waitForComposerReady(expectQueue = true)
         compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG, useUnmergedTree = true).performClick()
         queueViewport.capture("issue1944-a-returned-queued", store.itemsFor(fallbackA))
+        // Reopened #1602/#2034 field sequence: while A is still offline after
+        // switch-away/back, begin a new replacement prompt but do not Send it.
+        // The later fallback→durable identity refinement and old queue callbacks
+        // must not blank or submit these bytes.
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
+            .performTextInput(replacementDraft)
+        waitForIssue1739Boundary(UI_TIMEOUT_MS, "replacement draft visible before heal", {
+            "draft=${draftText()} expected=$replacementDraft"
+        }) {
+            draftText() == replacementDraft
+        }
+        assertEquals(replacementDraft, currentPromptComposerViewModel().uiState.value.draft)
+        waitForIssue1739Boundary(UI_TIMEOUT_MS, "replacement draft persisted before heal", {
+            "fallback=${currentPromptComposerViewModel().composerDraftStore.load(fallbackA)}"
+        }) {
+            currentPromptComposerViewModel().composerDraftStore.load(fallbackA) == replacementDraft
+        }
         val returnedOfflineRows = store.itemsFor(fallbackA)
         assertEquals(
             "offline retry may advance only attempt time; payload, identity, route, and wire fields must survive",
@@ -781,6 +801,29 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             },
         )
         assertEquals(listOf(0, 0), returnedOfflineRows.map { it.attemptCount })
+
+        val offlineComposer = currentPromptComposerViewModel()
+        val issue1602Journey = Issue1602RecoveredQueueJourney(
+            compose = compose,
+            composer = offlineComposer,
+            waitForComposerReady = { waitForComposerReady(it) },
+            draftText = ::draftText,
+            readSubmitLedger = { runBlocking { readFakeAgentSubmitLedger() } },
+            claimCount = { rowId -> diagnostics!!.eventsNamed("row_state").count {
+                it.fields["itemId"] == rowId && it.fields["reason"] == "claimed"
+            } },
+            captureViewport = ::captureViewportArtifacts,
+            captureQueue = queueViewport::capture,
+            uiTimeoutMs = UI_TIMEOUT_MS,
+            connectedTimeoutMs = CONNECTED_TIMEOUT_MS,
+        ).also { issue1602QueueJourney = it }
+        issue1602Journey.parkHeadAndProveOffline(
+            fallbackA,
+            queuedIds,
+            firstPayload,
+            secondPayload,
+            replacementDraft,
+        )
         recordTiming("a_rows_visible_before_heal_ms", SystemClock.elapsedRealtime() - aReturnStartedAt)
         pressSystemBack()
 
@@ -788,6 +831,9 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val activeAVm = currentViewModel()
         assertTrue("the Activity must still route connectivity to its active host VM", activeAVm === bVm)
         assertAuthoritativeLeaseOutageHeld(activeAVm, outageB, outageBStartedAt, "B")
+
+        issue1602Journey.blockReconnectDrain()
+
         leaseConnector.endSustainedOutageForTest(outageB)
         SystemClock.sleep(250)
         assertEquals("restoring connector authority alone must not deliver", queuedIds, store.itemsFor(fallbackA).map { it.id })
@@ -798,8 +844,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         waitForConnected("heal returned A")
         waitForVisibleTerminal("return to A") { it.contains(FAKE_AGENT_READY) }
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
-            store.itemsFor(fallbackA).isEmpty() &&
-                (store.itemsFor(durableA).map { it.id } == queuedIds || store.itemsFor(durableA).isEmpty())
+            store.itemsFor(fallbackA).isEmpty() && store.itemsFor(durableA).map { it.id } == queuedIds
         }
         assertTrue("promoted rows must leave no orphan fallback owner", store.itemsFor(fallbackA).isEmpty())
         val promotion = diagnostics!!.eventsNamed("identity_promotion").single { event ->
@@ -810,27 +855,42 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertEquals(queuedIds, promotion.fields["rowIds"])
         assertEquals(true, promotion.fields["preservedExceptOwner"])
         assertEquals(promotion.fields["expectedRowFingerprints"], promotion.fields["rowFingerprints"])
-        waitForIssue1739Boundary(
-            timeoutMs = CONNECTED_TIMEOUT_MS,
-            label = "promoted durable rows drained after heal",
-            timeoutDetails = {
-                "durable=${store.itemsFor(durableA)} fallback=${store.itemsFor(fallbackA)} " +
-                    "sendInFlight=${currentPromptComposerViewModel().uiState.value.sendInFlight} " +
-                    "wire=${currentViewModel().isSendTransportWritable()} " +
-                    "status=${currentConnectionStatus()} " +
-                    "ledger=${runBlocking { readFakeAgentSubmitLedger() }} " +
-                    "queueEvents=${diagnostics!!.events.filter { event ->
-                        event.name == "row_state" || event.name == "drain_attempt" ||
-                            event.name == "dispatch_rejected" ||
-                            event.name == "composer_tmux_send_route" ||
-                            event.name == "agent_submit_turnover" ||
-                            event.name == "identity_promotion"
-                    }.map { it.name to it.fields }}"
-            },
-        ) {
-            store.itemsFor(durableA).isEmpty()
-        }
+
+        issue1602Journey.provePromotionThenRetry(
+            durableA,
+            fallbackA,
+            queuedIds,
+            firstPayload,
+            secondPayload,
+            replacementDraft,
+        )
+
         assertTrue("both stable rows must be delivered+pruned", store.itemsFor(durableA).isEmpty())
+        pressSystemBack()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
+        waitForComposerReady(expectQueue = false)
+        waitForIssue1739Boundary(UI_TIMEOUT_MS, "replacement draft survives identity promotion", {
+            "visible=${draftText()} durable=${currentPromptComposerViewModel().composerDraftStore.load(durableA)} " +
+                "fallback=${currentPromptComposerViewModel().composerDraftStore.load(fallbackA)}"
+        }) {
+            draftText() == replacementDraft &&
+                currentPromptComposerViewModel().composerDraftStore.load(durableA) == replacementDraft &&
+                currentPromptComposerViewModel().composerDraftStore.load(fallbackA) == null
+        }
+        assertEquals(
+            "identity promotion must persist the exact unsent replacement bytes",
+            replacementDraft,
+            currentPromptComposerViewModel().composerDraftStore.load(durableA),
+        )
+        assertEquals(
+            "fallback draft slot must be retired only after the durable copy exists",
+            null,
+            currentPromptComposerViewModel().composerDraftStore.load(fallbackA),
+        )
+        captureViewportArtifacts("issue1602-replacement-draft-preserved-after-heal")
+        pressSystemBack()
+        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
         val clientAfterHeal = currentViewModel().currentClientIdentityForTest()
         val generationAfterHeal = currentViewModel().currentConnectGenerationForTest()
         assertTrue("A heal must use a fresh client", clientAfterHeal != null && clientAfterHeal != clientAtB)
@@ -890,8 +950,8 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
         assertEquals("server ledger must contain two submit Enters", listOf(1, 2), submitLedger.map { it.first })
         assertEquals(
-            "server ledger is the authoritative exactly-once FIFO oracle",
-            listOf(firstPayload, secondPayload),
+            "the parked head must not block the younger row, and real Retry must submit the head once",
+            listOf(secondPayload, firstPayload),
             submitLedger.map { it.second },
         )
         writeText(
@@ -913,19 +973,23 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             },
         )
         val secondSubmittedStripped = secondSubmitted.filterNot { it.isWhitespace() }
-        val secondStripped = secondPayload.filterNot { it.isWhitespace() }
+        val firstStripped = firstPayload.filterNot { it.isWhitespace() }
         assertEquals(
-            "final visible frame must retain the latest submitted row and clean input; capture=$secondSubmitted",
+            "final visible frame must retain the real-Retry submission and clean input; capture=$secondSubmitted",
             1,
             countOccurrences(
                 secondSubmittedStripped,
-                FAKE_AGENT_SUBMITTED_STRIPPED + secondStripped,
+                FAKE_AGENT_SUBMITTED_STRIPPED + firstStripped,
             ),
         )
         val deliveredIds = diagnostics!!.eventsNamed("row_state")
             .filter { it.fields["toState"] == "Sent" && it.fields["itemId"] in queuedIds }
             .map { it.fields["itemId"] }
-        assertEquals("automatic drain must deliver FIFO exactly once", queuedIds, deliveredIds)
+        assertEquals(
+            "younger auto-drain then explicit head Retry must each deliver exactly once",
+            listOf(queuedIds[1], queuedIds[0]),
+            deliveredIds,
+        )
         captureViewportArtifacts("issue1944-returned-and-drained")
         writeText("issue1944-queue.txt", "queuedIds=$queuedIds\ndeliveredIds=$deliveredIds\n")
         writeTimings()

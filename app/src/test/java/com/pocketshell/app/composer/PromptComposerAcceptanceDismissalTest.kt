@@ -394,6 +394,7 @@ class PromptComposerAcceptanceDismissalTest {
     fun pendingAckRefundsBudgetButManualRetryAdvancesDurableWireGeneration() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(StandardTestDispatcher(testScheduler), queue)
+        vm.setTransportWritableProbe { true }
         val target = target()
         val row = queue.enqueue(sessionKey = target.sessionKey, cleanText = "generation", createdAtMs = 1L)
         var sendCalls = 0

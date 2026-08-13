@@ -2,11 +2,19 @@ package com.pocketshell.app.composer
 
 import android.graphics.Color as AndroidColor
 import androidx.activity.ComponentActivity
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
@@ -16,11 +24,12 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinOwningRoot
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellColors
 import org.junit.Assert.assertEquals
@@ -69,7 +78,208 @@ class PromptComposerOutboundQueueTest {
             hasText(payload, substring = true) and hasAnyAncestor(hasTestTag(rowTag)),
             useUnmergedTree = true,
         ).assertIsDisplayed()
+        val statusTag = composerOutboundQueueStatusTestTag(item.id)
+        compose.onNode(
+            hasTestTag(statusTag) and hasAnyAncestor(hasTestTag(rowTag)),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        compose.onAllNodes(
+            hasText(outboundQueueStateLabel(item)) and
+                hasAnyAncestor(hasTestTag(statusTag)) and
+                hasAnyAncestor(hasTestTag(rowTag)),
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
     }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Test
+    fun offlineModalRowsOwnGeometryCopyAndScrollableDisabledRetryControls() {
+        val rows = listOf(
+            failedItem("offline-row-a", "first offline prompt", 1L),
+            failedItem("offline-row-b", "second offline prompt", 2L),
+        )
+        val retried = mutableListOf<String>()
+        val statusLayoutRegistration = PromptComposerQueueStatusLayoutTestObserver.install()
+        try {
+            compose.setContent {
+                PocketShellTheme {
+                    ComposerModalBottomSheet(
+                        onDismissRequest = {},
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
+                    ) {
+                        SheetContent(
+                            state = PromptComposerViewModel.UiState(),
+                            onClose = {},
+                            onDraftChange = {},
+                            onMicTap = {},
+                            onSend = {},
+                            outboundQueueItems = rows,
+                            outboundWireWritable = false,
+                            outboundQueueExpanded = true,
+                            onRetryOutboundItem = { retried += it },
+                        )
+                    }
+                }
+            }
+            compose.waitUntil(timeoutMillis = 5_000L) {
+                statusLayoutRegistration.observedRowIds().containsAll(rows.map { it.id })
+            }
+            assertEquals(
+                "layout observer must bind exactly both modal row identities",
+                rows.map { it.id }.toSet(),
+                statusLayoutRegistration.observedRowIds(),
+            )
+            val retainedCoordinatePairsBeforeScrollByRowId = rows.associate { row ->
+                row.id to requireNotNull(statusLayoutRegistration.currentCoordinates(row.id)) {
+                    "missing retained pre-scroll row/status LayoutCoordinates pair for exact modal row ${row.id}"
+                }
+            }
+            assertEquals(
+                "delayed geometry proof must retain both exact row/status pairs before either row is scrolled",
+                rows.map { it.id }.toSet(),
+                retainedCoordinatePairsBeforeScrollByRowId.keys,
+            )
+            assertTrue(
+                "each row/status pair must retain two independently-owned handles",
+                retainedCoordinatePairsBeforeScrollByRowId.values.all { it.row !== it.status },
+            )
+
+            // The full MainActivity journey takes its reviewer screenshots in
+            // FIFO order immediately before this proof. That real capture scrolls
+            // row A and then row B, leaving the bounded status viewport at B.
+            // Reproduce that production history through the same row semantics;
+            // no synthetic offset or test-only layout seam is involved.
+            val seededViewportRowIds = buildList {
+                rows.forEach { seedRow ->
+                    compose.onNodeWithTag(
+                        composerOutboundQueueItemRowTestTag(seedRow.id),
+                        useUnmergedTree = true,
+                    ).performScrollTo().assertIsDisplayed()
+                    add(seedRow.id)
+                }
+            }
+            assertEquals(
+                "FIFO viewport seed must finish on the lower exact queue row",
+                rows.map { it.id },
+                seededViewportRowIds,
+            )
+
+            val provenRowIds = buildList {
+                rows.forEach { row ->
+                    val rowTag = composerOutboundQueueItemRowTestTag(row.id)
+                    val statusTag = composerOutboundQueueStatusTestTag(row.id)
+                    val retryTag = composerOutboundQueueRetryTestTag(row.id)
+                    val withinExactRow = hasAnyAncestor(hasTestTag(rowTag))
+                    val statusWrapper = hasTestTag(statusTag) and withinExactRow
+                    val statusLabel = hasText("Waiting — connection is offline") and
+                        hasAnyAncestor(hasTestTag(statusTag)) and
+                        withinExactRow
+                    val offlineRetryControl = hasTestTag(retryTag) and withinExactRow
+
+                    compose.onAllNodes(statusLabel, useUnmergedTree = true).assertCountEquals(1)
+                    compose.onAllNodes(statusWrapper, useUnmergedTree = true).assertCountEquals(1)
+                    // Return from the lower-row capture position through the exact
+                    // row-level action used by the MainActivity journey. A row can
+                    // participate in the viewport while its trailing Retry remains
+                    // clipped; only scrolling the physical action proves reachability.
+                    compose.onNodeWithTag(rowTag, useUnmergedTree = true)
+                        .performScrollTo()
+                        .assertIsDisplayed()
+                    compose.assertNodeFullyWithinOwningRoot(rowTag, useUnmergedTree = true)
+                    compose.waitForIdle()
+                    var latestGeometry = statusLayoutRegistration.currentWindowGeometry(row.id)
+                    val geometryWait = runCatching {
+                        compose.waitUntil(timeoutMillis = 5_000L) {
+                            statusLayoutRegistration.currentWindowGeometry(row.id).also {
+                                latestGeometry = it
+                            }.isCurrentAttachedNonEmptyContainedFullWidthPair()
+                        }
+                    }
+                    if (geometryWait.isFailure) {
+                        throw AssertionError(
+                            "exact modal row/status raw-window LayoutCoordinates did not settle: " +
+                                latestGeometry.diagnosticSummary(),
+                            geometryWait.exceptionOrNull(),
+                        )
+                    }
+                    assertTrue(
+                        "status wrapper must have current attached, non-empty, fully-contained full-width " +
+                            "raw-window LayoutCoordinates in exact modal row: ${latestGeometry.diagnosticSummary()}",
+                        latestGeometry.isCurrentAttachedNonEmptyContainedFullWidthPair(),
+                    )
+                    compose.onAllNodes(offlineRetryControl, useUnmergedTree = true).assertCountEquals(1)
+                    val offlineRetryNode = compose.onNode(offlineRetryControl, useUnmergedTree = true)
+                    val retryNodeBeforeExactScroll = offlineRetryNode.fetchSemanticsNode()
+                    val retryRawBoundsBeforeExactScroll = retryNodeBeforeExactScroll.boundsInRoot
+                    val rowRawBoundsBeforeExactScroll = compose.onNodeWithTag(
+                        rowTag,
+                        useUnmergedTree = true,
+                    ).fetchSemanticsNode().boundsInRoot
+                    assertTrue(
+                        "precondition: exact offline Retry must be laid out inside its exact row before " +
+                            "visibility scroll: control=$retryRawBoundsBeforeExactScroll " +
+                            "row=$rowRawBoundsBeforeExactScroll",
+                        retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(
+                            rowRawBoundsBeforeExactScroll,
+                        ),
+                    )
+                    if (row.id == rows.first().id) {
+                        // Count==1 plus raw containment above proves this is a real,
+                        // laid-out control, not assertIsNotDisplayed laundering an
+                        // absent node. This is the same Compose visibility predicate
+                        // that caught the full MainActivity Retry boundary.
+                        offlineRetryNode.assertIsNotDisplayed()
+                    }
+                    offlineRetryNode
+                        // The 96dp status viewport is intentionally bounded. Scroll
+                        // the exact trailing action, not only its potentially taller
+                        // row, to reproduce the full MainActivity sheet semantics.
+                        .performScrollTo()
+                    compose.waitForIdle()
+                    val displayedAfterExactScroll = runCatching {
+                        offlineRetryNode.assertIsDisplayed()
+                    }
+                    if (displayedAfterExactScroll.isFailure) {
+                        throw AssertionError(
+                            "postcondition: exact offline Retry must be displayed after its own scroll",
+                            displayedAfterExactScroll.exceptionOrNull(),
+                        )
+                    }
+                    offlineRetryNode.assertIsNotEnabled()
+                    val retryBoundsAfterExactScroll = offlineRetryNode.fetchSemanticsNode().boundsInRoot
+                    val statusViewportBoundsAfterExactScroll = compose.onNodeWithTag(
+                        COMPOSER_STATUS_VIEWPORT_TAG,
+                        useUnmergedTree = true,
+                    ).fetchSemanticsNode().boundsInRoot
+                    assertTrue(
+                        "exact offline Retry must be fully inside the bounded status viewport after scroll: " +
+                            "control=$retryBoundsAfterExactScroll " +
+                            "viewport=$statusViewportBoundsAfterExactScroll",
+                        retryBoundsAfterExactScroll.isNonEmptyAndFullyContainedBy(
+                            statusViewportBoundsAfterExactScroll,
+                        ),
+                    )
+                    compose.assertNodeFullyWithinOwningRoot(retryTag, useUnmergedTree = true)
+                    offlineRetryNode.performTouchInput { click() }
+                    compose.waitForIdle()
+                    add(row.id)
+                }
+            }
+            assertEquals(rows.map { it.id }, provenRowIds)
+            assertTrue("disabled offline Retry pointer taps must remain no-ops", retried.isEmpty())
+        } finally {
+            statusLayoutRegistration.close()
+        }
+    }
+
+    private fun Rect.isNonEmptyAndFullyContainedBy(
+        outer: Rect,
+    ): Boolean = width > 0f &&
+        height > 0f &&
+        left >= outer.left &&
+        top >= outer.top &&
+        right <= outer.right &&
+        bottom <= outer.bottom
 
     @Test
     fun statusLedSingleRowsOwnCopyProgressAndResendPresentation() {
@@ -340,6 +550,49 @@ class PromptComposerOutboundQueueTest {
         compose.onNodeWithTag(composerOutboundQueueRetryTestTag(uploading.id)).assertDoesNotExist()
     }
 
+    @Test
+    fun retryBehindHealthyOwnerIsDisabledAndExplainsWaitingInsteadOfTappableSilent() {
+        val active = OutboundItem(
+            id = "active-owner",
+            sessionKey = "1/a",
+            cleanText = "currently sending",
+            state = OutboundState.InFlight,
+            createdAtMs = 1L,
+        )
+        val waiting = OutboundItem(
+            id = "waiting-retry",
+            sessionKey = "1/a",
+            cleanText = "must remain queued",
+            state = OutboundState.Failed,
+            lastError = "connection lost",
+            createdAtMs = 2L,
+        )
+        val retried = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(sendInFlight = true),
+                    onClose = {}, onDraftChange = {}, onMicTap = {}, onSend = {},
+                    outboundQueueItems = listOf(active, waiting),
+                    outboundRetryBlockedByHealthyOwner = true,
+                    outboundQueueExpanded = true,
+                    onRetryOutboundItem = { retried += it },
+                )
+            }
+        }
+
+        compose.onNodeWithText("Waiting — another prompt is still sending").assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueRetryTestTag(waiting.id))
+            .performScrollTo()
+            .assertIsDisplayed()
+            .assertIsNotEnabled()
+            // A real pointer tap (not a semantics action, which disabled nodes do not
+            // expose) proves the apparently present control cannot silently dispatch.
+            .performTouchInput { click() }
+        compose.waitForIdle()
+        assertTrue("disabled Waiting must not invoke a silent retry callback", retried.isEmpty())
+    }
+
     // ---------------------------------------------------------------------
     // Issue #1308: batch "Resend all"
     // ---------------------------------------------------------------------
@@ -481,4 +734,5 @@ class PromptComposerOutboundQueueTest {
         compose.waitForIdle()
         assertEquals(1, resendAllCount)
     }
+
 }

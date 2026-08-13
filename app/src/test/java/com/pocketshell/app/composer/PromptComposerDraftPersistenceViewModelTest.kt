@@ -6,6 +6,8 @@ import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.settings.VoiceTranscriptionProvider
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
@@ -26,6 +28,16 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
 class PromptComposerDraftPersistenceViewModelTest {
+
+    private class HoldingDispatcher : CoroutineDispatcher() {
+        private val queued = mutableListOf<Runnable>()
+        val queuedCount: Int
+            get() = queued.size
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            queued += block
+        }
+    }
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
@@ -301,6 +313,70 @@ class PromptComposerDraftPersistenceViewModelTest {
         advanceUntilIdle()
 
         assertEquals("second", store.load(target))
+    }
+
+    @Test
+    fun sharedPrefsIdentityPromotionIsImmediatelyVisibleAndEventuallyDurable() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val store = SharedPrefsComposerDraftStore(ApplicationProvider.getApplicationContext())
+        val suffix = System.nanoTime()
+        val fallback = "test/promotion-fallback-$suffix"
+        val durable = "test/promotion-durable-$suffix"
+        val draft = "replacement prompt\n  preserves spaces + 🌍"
+        val vm = newVm(
+            samplerDispatcher = dispatcher,
+            composerDraftStore = store,
+        )
+        vm.onComposerTargetChanged(fallback)
+        vm.onDraftChange(draft)
+
+        vm.promoteFallbackComposerIdentity(fallback, durable)
+
+        assertEquals(
+            "ordered persistence view must expose the promoted draft before disk dispatch runs",
+            draft,
+            vm.loadComposerDraft(durable),
+        )
+        assertNull("ordered persistence view must hide the obsolete fallback slot", vm.loadComposerDraft(fallback))
+        assertNull("raw durable slot must demonstrate the write is still pending", store.load(durable))
+
+        advanceUntilIdle()
+
+        assertEquals("background promotion must eventually persist exact bytes", draft, store.load(durable))
+        assertNull("background promotion must eventually remove fallback bytes", store.load(fallback))
+        store.clear(durable)
+        store.clear(fallback)
+    }
+
+    @Test
+    fun blockedQueueDispatcherDoesNotStarveDraftIdentityPromotion() = runTest {
+        val persistenceDispatcher = StandardTestDispatcher(testScheduler)
+        val blockedQueueDispatcher = HoldingDispatcher()
+        val store = SharedPrefsComposerDraftStore(ApplicationProvider.getApplicationContext())
+        val suffix = System.nanoTime()
+        val fallback = "test/blocked-queue-fallback-$suffix"
+        val durable = "test/blocked-queue-durable-$suffix"
+        val draft = "draft persistence has its own runnable lane"
+        val vm = newVm(composerDraftStore = store)
+        vm.outboundQueueDispatcher = blockedQueueDispatcher
+        vm.draftPersistence.dispatcherOverrideForTest = persistenceDispatcher
+        vm.onComposerTargetChanged(fallback)
+        vm.onDraftChange(draft)
+
+        vm.promoteFallbackComposerIdentity(fallback, durable)
+
+        assertEquals(draft, vm.loadComposerDraft(durable))
+        assertNull(vm.loadComposerDraft(fallback))
+        assertEquals(
+            "draft persistence must not enqueue behind the blocked queue dispatcher",
+            0,
+            blockedQueueDispatcher.queuedCount,
+        )
+        advanceUntilIdle()
+        assertEquals(draft, store.load(durable))
+        assertNull(store.load(fallback))
+        store.clear(durable)
+        store.clear(fallback)
     }
 
     @Test

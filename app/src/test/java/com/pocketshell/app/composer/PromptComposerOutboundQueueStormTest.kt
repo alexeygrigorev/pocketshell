@@ -12,10 +12,12 @@ import com.pocketshell.core.ssh.SshException
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
@@ -239,7 +241,24 @@ class PromptComposerOutboundQueueStormTest {
         val queue = InMemoryOutboundQueueStore()
         val window = FakeDeliveryWindow()
         val vm = newVm(dispatcher, queue, window = window)
-        val sent = collectSendRequests(vm)
+        // Keep the wire probe true even when the budget window flips: this test
+        // load-bears the epoch refund, not the stronger dead-wire reset.
+        vm.setTransportWritableProbe { true }
+        val physicalAttempts = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val consumer = backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            collectPromptComposerSendRequests(vm, onSend = { request ->
+                physicalAttempts += request
+                if (physicalAttempts.size <= stormCycles) {
+                    // Tear down inside the physical callback so the production
+                    // terminal reducer observes a different delivery-window epoch.
+                    window.teardown()
+                    ComposerSendResult.Failed
+                } else {
+                    ComposerSendResult.Delivered
+                }
+            })
+        }
+        runCurrent()
         val session = "1/session-a"
         vm.onComposerTargetChanged(session)
 
@@ -248,25 +267,20 @@ class PromptComposerOutboundQueueStormTest {
 
         // ---- the storm: N cycles of "live window opens -> dispatch -> teardown" ----
         repeat(stormCycles) { cycle ->
+            val attemptsBefore = physicalAttempts.size
             val dispatched = vm.retryNextOutboundItem()
-            advanceUntilIdle()
             assertEquals(
                 "cycle $cycle: the live window must re-arm the queued row (this is what " +
                     "burns the budget on base)",
                 row.id,
                 dispatched,
             )
-            val request = requireNotNull(vm.inFlightSendRequest) {
-                "cycle $cycle: the dispatch must have produced an in-flight request"
+            settleUntil {
+                physicalAttempts.size == attemptsBefore + 1 &&
+                    !vm.uiState.value.sendInFlight &&
+                    queue.item(row.id)?.state == OutboundState.Queued
             }
-            // The transport dies mid-send — the delivery window closes UNDER the
-            // attempt. This is the storm's signature failure, and it is not the row's
-            // fault in any sense.
-            window.teardown()
-            vm.markOutboundSendDeferred(request)
-            advanceUntilIdle()
             window.restore()
-            advanceUntilIdle()
         }
 
         // LOAD-BEARING (GREEN): the storm charged NOTHING. (BASE: attemptCount == 8,
@@ -285,9 +299,13 @@ class PromptComposerOutboundQueueStormTest {
         )
 
         // ---- the storm ends: a stable, healthy window ----
-        val sentBefore = sent.size
+        val attemptsBefore = physicalAttempts.size
         val delivered = vm.retryNextOutboundItem()
-        settleUntil { sent.size > sentBefore }
+        settleUntil {
+            physicalAttempts.size == attemptsBefore + 1 &&
+                queue.item(row.id) == null &&
+                !vm.uiState.value.sendInFlight
+        }
 
         // LOAD-BEARING (GREEN): the recovered link auto-sends the row. On BASE this
         // is null — the whole point of the bug.
@@ -298,11 +316,9 @@ class PromptComposerOutboundQueueStormTest {
             row.id,
             delivered,
         )
-        val request = requireNotNull(sent.lastOrNull { it.outboundQueueItemId == row.id })
-
-        // The host acks: delivered exactly once, the row is pruned, no duplicate left.
-        vm.markSendDelivered(request)
-        settleUntil { queue.item(row.id) == null }
+        val request = requireNotNull(physicalAttempts.lastOrNull { it.outboundQueueItemId == row.id })
+        assertEquals("ship the storm fix", request.cleanDraft)
+        assertTrue(request.withEnter)
         assertNull(
             "the delivered row must be pruned exactly once — no duplicate survives (#1529 ledger intact)",
             queue.item(row.id),
@@ -312,6 +328,8 @@ class PromptComposerOutboundQueueStormTest {
             0,
             queue.itemsFor(session).size,
         )
+        assertEquals(stormCycles + 1, physicalAttempts.count { it.outboundQueueItemId == row.id })
+        consumer.cancelAndJoin()
     }
 
     /**

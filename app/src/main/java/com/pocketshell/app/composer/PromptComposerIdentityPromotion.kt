@@ -8,6 +8,10 @@ internal fun PromptComposerViewModel.promoteFallbackOutboundIdentity(
     tmuxSessionId: String,
     tmuxSessionCreated: Long,
 ): List<OutboundItem> {
+    // Reopened #1602/#2034: this exact pane-generation proof says the fallback
+    // and durable keys name ONE live composer. Re-key the live draft before the
+    // ordinary target-switch reducer can load an empty destination slot.
+    promoteFallbackComposerIdentity(fallbackSessionKey, durableSessionKey)
     val sourceRows = outboundQueueStore.itemsFor(fallbackSessionKey)
     val promoted = outboundQueueStore.promoteSessionIdentity(
         fromSessionKey = fallbackSessionKey,

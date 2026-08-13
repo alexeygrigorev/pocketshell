@@ -34,6 +34,13 @@ internal class ComposerRevisionTracker {
         val key = target?.takeIf { it.isNotBlank() } ?: return
         revisions[key] = revision(key) + 1L
     }
+
+    fun promoteIdentity(fromTarget: String, toTarget: String) {
+        if (fromTarget == toTarget) return
+        val promoted = maxOf(revision(fromTarget), revision(toTarget))
+        revisions[toTarget] = promoted
+        revisions.remove(fromTarget)
+    }
 }
 
 internal data class ComposerHandoffAcceptance(

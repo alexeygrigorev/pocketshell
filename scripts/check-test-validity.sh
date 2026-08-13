@@ -115,9 +115,10 @@
 #
 #   --- #1048 addition (the runTest virtual-clock-vs-real-dispatcher flake class) ---
 #
-#   TIMING1 (ADVISORY warning, with ONE narrow HARD-FAIL) — scoped to the
+#   TIMING1 (ADVISORY warning, with TWO narrow HARD-FAILS) — scoped to the
 #       connection/terminal test roots (core-ssh, core-tmux, core-connection, and
-#       the app tmux/connectivity test dirs). The recurring "passes-locally /
+#       the app tmux/connectivity test dirs) plus app portfwd/prefs, where #2026
+#       found two more hand-rolled 5 s Shape-B pumps. The recurring "passes-locally /
 #       flakes-on-CI" JVM failure is ONE class: a `runTest` virtual clock drives
 #       code whose owned background work runs on a REAL dispatcher / Android
 #       Handler/Looper / raw Thread not pinned to the test scheduler, so
@@ -133,10 +134,17 @@
 #       Shape B (wall-clock-bounded pump — the audited drainMainLooperUntil in
 #       :shared:test-support / the codex pump; #2017 migrated the hand-rolled
 #       copies onto it). Current matches are baselined (advisory; the baseline only
-#       shrinks as tests adopt a seam). The lone HARD-FAIL is the narrow,
-#       high-signal NEW case: a `runTest` test with a bare small `Thread.sleep(<N>)`
-#       immediately preceding its load-bearing assert and NO bounded-deadline loop
-#       (the banned "fixed sleep as the only sync" shape).
+#       shrinks as tests adopt a seam). The two HARD-FAILS are narrow,
+#       high-signal cases: (1) a `runTest` test with a bare small
+#       `Thread.sleep(<N>)` immediately preceding its load-bearing assert and NO
+#       bounded-deadline loop (the banned "fixed sleep as the only sync" shape),
+#       and (2) under the portfwd/prefs roots, any plain-JUnit or Robolectric file
+#       that locally computes a wall-clock deadline and polls that same clock in
+#       a `while` condition. The second check deliberately runs before the
+#       `runTest` filter and before the old bounded-pump exemption: #2026's two
+#       exact 5 s predecessors had neither `runTest` nor an unbounded loop. Calls
+#       to `drainMainLooperUntil` and one-shot bounded helpers such as
+#       `CountDownLatch.await` remain clean because they do not own that loop.
 #
 # A BASELINE allowlist records the offenders the audits catalogued but that are
 # intentionally NOT rewritten here (the rewrites are per-issue follow-up work).
@@ -161,7 +169,10 @@
 # (it runs in the cheap Unit job in .github/workflows/tests.yml before the
 # Gradle test step, adding < 1 s).
 
-set -uo pipefail
+# Internal detector/runtime errors must never fall through to the normal PASS
+# footer. `-e` makes an unhandled command failure authoritative; `-E` carries
+# that fail-closed behavior through scan functions and cleanup helpers.
+set -Eeuo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
@@ -382,7 +393,8 @@ TIMING1_BASELINE=(
   "app/src/test/java/com/pocketshell/app/hosts/HostListViewModelTest.kt"                        # CountDownLatch off-main close await (#1110 Shape-B)
 )
 
-# Connection/terminal test roots TIMING1 is scoped to (path-prefix match).
+# Connection/terminal plus #2026 portfwd/prefs test roots TIMING1 is scoped to
+# (path-prefix match).
 timing1_in_scope() {
   case "$1" in
     shared/core-ssh/src/test/*) return 0 ;;
@@ -392,6 +404,10 @@ timing1_in_scope() {
     app/src/androidTest/java/com/pocketshell/app/tmux/*) return 0 ;;
     app/src/test/java/com/pocketshell/app/connectivity/*) return 0 ;;
     app/src/androidTest/java/com/pocketshell/app/connectivity/*) return 0 ;;
+    # Issue #2026: two hand-rolled 5 s Shape-B pumps survived in these JVM
+    # roots because the original connection/terminal sweep could not see them.
+    app/src/test/java/com/pocketshell/app/portfwd/*) return 0 ;;
+    app/src/test/java/com/pocketshell/app/prefs/*) return 0 ;;
     # Issue #1048: widened to the areas that actually flaked this class —
     # composer (#1102, sidecar-store real-IO drain) and hosts (#1110, real
     # off-main close) — plus projects, the sibling source-binding area, so a
@@ -404,6 +420,19 @@ timing1_in_scope() {
     app/src/androidTest/java/com/pocketshell/app/projects/*) return 0 ;;
   esac
   return 1
+}
+
+# Load-bearing scope contract (#2026). The guard runs this every time, so
+# deleting either newly-required branch cannot read as a clean scan merely
+# because today's two offending pumps have already been migrated.
+declare -a TIMING1_SCOPE_ERRORS=()
+validate_timing1_scope_contract() {
+  local probe
+  for probe in \
+    "app/src/test/java/com/pocketshell/app/portfwd/Timing1ScopeProbeTest.kt" \
+    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt"; do
+    timing1_in_scope "$probe" || TIMING1_SCOPE_ERRORS+=("$probe -> required root is not scanned")
+  done
 }
 
 in_list() {
@@ -965,17 +994,20 @@ scan_j1() {
 }
 
 # --------------------------------------------------------------------------
-# TIMING1 scan (#1048) — connection/terminal `runTest` tests whose owned
+# TIMING1 scan (#1048/#2026) — connection/terminal `runTest` tests whose owned
 # background work runs on a real dispatcher/thread not pinned to the test
 # scheduler, with neither a TestDispatcher seam nor a bounded pump. Advisory,
-# with ONE narrow hard-fail: a bare small `Thread.sleep(<N>)` immediately before
+# with TWO narrow hard-fails: a bare small `Thread.sleep(<N>)` immediately before
 # a load-bearing assert and no bounded-deadline loop (the banned "fixed sleep as
-# the only sync" shape).
+# the only sync" shape), plus a locally hand-rolled wall-clock deadline loop in
+# the #2026 portfwd/prefs plain-JUnit roots.
 # --------------------------------------------------------------------------
 declare -a TIMING1_NEW_HARD=()
+declare -a TIMING1_HAND_ROLLED_PUMPS=()
 declare -a TIMING1_FINDINGS=()
 declare -a TIMING1_KNOWN=()
 declare -a TIMING1_JUSTIFIED=()
+TIMING1_LEX_DIR=""
 
 # The real-dispatcher/thread tokens that signal an owned background hop is not
 # pinned to the virtual scheduler.
@@ -1013,6 +1045,135 @@ timing1_has_code_smell() {
     is_code_line "$text" && return 0
   done < <(grep -nE "$timing1_dispatcher_smell" "$file" | cut -d: -f1)
   return 1
+}
+
+# #2026's offenders are ordinary JUnit/Robolectric tests, not runTest tests.
+# Keep this hard rule deliberately limited to the two newly-added roots whose
+# contract is "use the one audited settle helper; do not own another wall-clock
+# pump". Other TIMING1 roots retain their existing Shape-A/Shape-B semantics,
+# including the documented advanceSchedulerUntil exception.
+timing1_uses_shared_pump_only_scope() {
+  case "$1" in
+    app/src/test/java/com/pocketshell/app/portfwd/*) return 0 ;;
+    app/src/test/java/com/pocketshell/app/prefs/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Run a boolean TIMING1 predicate without letting Bash conflate its deliberate
+# "no match" status (1) with a missing command or other runtime failure. Every
+# scan call consumes TIMING1_PREDICATE_MATCH only after this wrapper returns 0;
+# any other status is propagated out of scan_timing1 before the PASS footer.
+TIMING1_PREDICATE_MATCH=0
+timing1_checked_predicate() {
+  local predicate="$1"
+  shift
+  local rc
+  if "$predicate" "$@"; then
+    TIMING1_PREDICATE_MATCH=1
+    return 0
+  else
+    rc=$?
+  fi
+  if [[ "$rc" -eq 1 ]]; then
+    TIMING1_PREDICATE_MATCH=0
+    return 0
+  fi
+  echo "ERROR: TIMING1 predicate '$predicate' failed at runtime (exit $rc)" >&2
+  return "$rc"
+}
+
+# Detect the mechanical Shape-B loop itself: a local deadline computed from a
+# wall clock, followed by a while condition that compares the SAME clock with
+# that deadline variable. The source passed here has strings and comments
+# removed, so KDoc examples cannot trip the guard. We intentionally do not key
+# this to a literal "5 seconds": changing 5 to 10 must not launder the local
+# pump into a clean result; the shared helper owns the one generous deadline.
+timing1_has_hand_rolled_deadline_pump() {
+  local code_file="$1"
+  awk '
+    function declaration_name(line, rest, name) {
+      rest = line
+      sub(/^[[:space:]]*(private[[:space:]]+|internal[[:space:]]+|public[[:space:]]+)?(val|var)[[:space:]]+/, "", rest)
+      if (rest == line) return ""
+      name = rest
+      sub(/[[:space:]:=].*$/, "", name)
+      if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/) return name
+      return ""
+    }
+    function starts_new_statement(line) {
+      if (declaration_name(line) != "") return 1
+      return line ~ /^[[:space:]]*(while|do|for|if|when|return|throw|fun|class|object)([^A-Za-z0-9_]|$)/ ||
+             line ~ /^[[:space:]]*}/
+    }
+    function remember_deadline(start, name, statement, i) {
+      name = declaration_name(lines[start])
+      if (name == "") return
+      statement = lines[start]
+      # Kotlin routinely wraps the initializer after `=` / `+`. Join only this
+      # declaration (bounded for guard cost), stopping before another statement
+      # so a later clock expression cannot be attributed to the wrong variable.
+      for (i = start + 1; i <= total && i < start + 12; i++) {
+        if (starts_new_statement(lines[i])) break
+        statement = statement " " lines[i]
+      }
+      if (statement ~ /System\.currentTimeMillis[[:space:]]*\([[:space:]]*\)[[:space:]]*\+/) {
+        deadlines[name] = "currentTimeMillis"
+      } else if (statement ~ /System\.nanoTime[[:space:]]*\([[:space:]]*\)[[:space:]]*\+/) {
+        deadlines[name] = "nanoTime"
+      }
+    }
+    function while_condition(start, joined, i, ch, depth, opened, condition, while_pos) {
+      joined = lines[start]
+      for (i = start + 1; i <= total && i < start + 12; i++) joined = joined "\n" lines[i]
+      while_pos = match(joined, /while[[:space:]]*\(/)
+      if (!while_pos) return ""
+      joined = substr(joined, while_pos)
+      sub(/^while[[:space:]]*/, "", joined)
+      depth = 0
+      opened = 0
+      condition = ""
+      for (i = 1; i <= length(joined); i++) {
+        ch = substr(joined, i, 1)
+        if (ch == "(") {
+          depth++
+          opened = 1
+        }
+        if (opened) condition = condition ch
+        if (ch == ")") {
+          depth--
+          if (opened && depth == 0) return condition
+        }
+      }
+      return ""
+    }
+    function mentions_identifier(text, name, pattern) {
+      pattern = "(^|[^A-Za-z0-9_])" name "([^A-Za-z0-9_]|$)"
+      return text ~ pattern
+    }
+    {
+      lines[NR] = $0
+      total = NR
+    }
+    END {
+      for (line_no = 1; line_no <= total; line_no++) {
+        remember_deadline(line_no)
+      }
+      for (line_no = 1; line_no <= total; line_no++) {
+        if (lines[line_no] !~ /while[[:space:]]*\(/) continue
+        loop_condition = while_condition(line_no)
+        if (loop_condition == "") continue
+        for (deadline in deadlines) {
+          clock_pattern = "System\\." deadlines[deadline] "[[:space:]]*\\([[:space:]]*\\)"
+          if (loop_condition ~ clock_pattern &&
+              mentions_identifier(loop_condition, deadline)) {
+            found = 1
+          }
+        }
+      }
+      exit(found ? 0 : 1)
+    }
+  ' "$code_file"
 }
 
 # The narrow hard-fail: a bare numeric `Thread.sleep(<N>)` on a code line whose
@@ -1053,23 +1214,56 @@ timing1_has_bare_sleep_before_assert() {
 }
 
 scan_timing1() {
-  local file
+  local file code_file comment_file file_index=0
   for file in "${ALL_TEST_FILES[@]}"; do
     [[ -z "$file" ]] && continue
-    timing1_in_scope "$file" || continue
-    timing1_has_run_test "$file" || continue
-    timing1_has_code_smell "$file" || continue
+    timing1_checked_predicate timing1_in_scope "$file" || return $?
+    [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]] || continue
+
+    # This check must precede timing1_has_run_test and the bounded-pump
+    # exemption: both exact #2026 predecessors were plain JUnit/Robolectric,
+    # and the old exemption is precisely what incorrectly spared them.
+    timing1_checked_predicate timing1_uses_shared_pump_only_scope "$file" || return $?
+    if [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]]; then
+      if [[ -z "$TIMING1_LEX_DIR" ]]; then
+        TIMING1_LEX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-timing1-lex.XXXXXX")" || {
+          TIMING1_SCOPE_ERRORS+=("could not create TIMING1 lexical scratch directory")
+          return
+        }
+      fi
+      file_index=$((file_index + 1))
+      code_file="$TIMING1_LEX_DIR/file-$file_index.code"
+      comment_file="$TIMING1_LEX_DIR/file-$file_index.comments"
+      sanitize_kotlin_source "$file" "$code_file" "$comment_file"
+      timing1_checked_predicate timing1_has_hand_rolled_deadline_pump "$code_file" || return $?
+      if [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]]; then
+        TIMING1_HAND_ROLLED_PUMPS+=("$file")
+        continue
+      fi
+    fi
+
+    timing1_checked_predicate timing1_has_run_test "$file" || return $?
+    [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]] || continue
+    timing1_checked_predicate timing1_has_code_smell "$file" || return $?
+    [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]] || continue
 
     # The narrow NEW hard-fail (never baselined): a bare sleep-before-assert with
     # no bounded loop.
-    if ! in_list "$file" "${TIMING1_BASELINE[@]}" \
-       && timing1_has_bare_sleep_before_assert "$file"; then
-      TIMING1_NEW_HARD+=("$file")
-      continue
+    if ! in_list "$file" "${TIMING1_BASELINE[@]}"; then
+      timing1_checked_predicate timing1_has_bare_sleep_before_assert "$file" || return $?
+      if [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]]; then
+        TIMING1_NEW_HARD+=("$file")
+        continue
+      fi
     fi
 
     # Spared (advisory clean): a TestDispatcher seam or a bounded pump.
-    if timing1_has_test_dispatcher "$file" || timing1_has_bounded_pump "$file"; then
+    timing1_checked_predicate timing1_has_test_dispatcher "$file" || return $?
+    if [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]]; then
+      continue
+    fi
+    timing1_checked_predicate timing1_has_bounded_pump "$file" || return $?
+    if [[ "$TIMING1_PREDICATE_MATCH" -eq 1 ]]; then
       continue
     fi
     # Opted out via an inline // JUSTIFIED: comment.
@@ -1119,10 +1313,11 @@ declare -A PROD_CALL_SEAM_DEFINED=()
 declare -A PROD_PROPERTY_SEAM_DEFINED=()
 SEAM1_LEX_DIR=""
 
-cleanup_seam1_lex_dir() {
+cleanup_test_validity_lex_dirs() {
+  [[ -z "${TIMING1_LEX_DIR:-}" ]] || rm -rf -- "$TIMING1_LEX_DIR"
   [[ -z "${SEAM1_LEX_DIR:-}" ]] || rm -rf -- "$SEAM1_LEX_DIR"
 }
-trap cleanup_seam1_lex_dir EXIT
+trap cleanup_test_validity_lex_dirs EXIT
 
 # The high-signal state-injection name shape (the alt-buffer cheat's shape).
 SEAM1_INJECTION_SHAPE='(force[A-Za-z]*ForTest|[a-z][A-Za-z]*Override[A-Za-z]*ForTest|set[A-Za-z]*ActiveForTest)'
@@ -1520,10 +1715,10 @@ scan_seam1() {
           SEAM1_NEW+=("$file:$lineno ($seam; $kind)")
         fi
       done < <(
-        grep -oE "$SEAM1_CALL_PATTERN" <<< "$text" \
+        { grep -oE "$SEAM1_CALL_PATTERN" <<< "$text" || true; } \
           | sed -E 's/[[:space:]]*\($//' \
           | sed 's/^/call:/'
-        grep -oE "$SEAM1_ASSIGNMENT_PATTERN" <<< "$text" \
+        { grep -oE "$SEAM1_ASSIGNMENT_PATTERN" <<< "$text" || true; } \
           | sed -E 's/[[:space:]]*=.*$//' \
           | sed 's/^/assignment:/'
       )
@@ -1539,7 +1734,8 @@ scan_seam1() {
     [[ -n "${PROD_SEAM_DEFINED[$v]:-}" ]] || SEAM1_STALE_REGISTRY+=("$v -> not defined in any src/main")
   done
 
-  cleanup_seam1_lex_dir
+  cleanup_test_validity_lex_dirs
+  TIMING1_LEX_DIR=""
   SEAM1_LEX_DIR=""
 }
 
@@ -1636,6 +1832,7 @@ scan_c1
 scan_fake1
 scan_await1
 scan_j1
+validate_timing1_scope_contract
 scan_timing1
 scan_seam1
 scan_void1
@@ -1690,6 +1887,8 @@ print_list "J1 — JUSTIFIED local CI_JOURNEY_SUITE_JUSTIFIED exemption [advisor
 print_list "J1 — STALE unwired baseline entry [HARD FAIL]" "${J1_STALE_BASELINE[@]:-}"
 print_list "J1 — PARSER failure reading ci-journey-suite.sh [HARD FAIL]" "${J1_PARSER_FAILURE[@]:-}"
 print_list "TIMING1 — NEW bare Thread.sleep(N) before a load-bearing assert, no bounded loop [HARD FAIL]" "${TIMING1_NEW_HARD[@]:-}"
+print_list "TIMING1 — hand-rolled wall-clock deadline pump in portfwd/prefs [HARD FAIL]" "${TIMING1_HAND_ROLLED_PUMPS[@]:-}"
+print_list "TIMING1 — REQUIRED scan root missing [HARD FAIL]" "${TIMING1_SCOPE_ERRORS[@]:-}"
 print_list "TIMING1 — NEW runTest over a real dispatcher/thread without a pinned seam or bounded pump [advisory]" "${TIMING1_FINDINGS[@]:-}"
 print_list "TIMING1 — KNOWN baseline (real-dispatcher/thread runTest catalogued; seam adoption is per-test follow-up) [advisory]" "${TIMING1_KNOWN[@]:-}"
 print_list "TIMING1 — JUSTIFIED (opted out via // JUSTIFIED:) [advisory]" "${TIMING1_JUSTIFIED[@]:-}"
@@ -1757,6 +1956,8 @@ for x in \
   "${J1_STALE_BASELINE[@]:-}" \
   "${J1_PARSER_FAILURE[@]:-}" \
   "${TIMING1_NEW_HARD[@]:-}" \
+  "${TIMING1_HAND_ROLLED_PUMPS[@]:-}" \
+  "${TIMING1_SCOPE_ERRORS[@]:-}" \
   "${SEAM1_NEW[@]:-}" \
   "${SEAM1_REGISTRY_ERRORS[@]:-}" \
   "${V1_NEW[@]:-}"; do
@@ -1771,12 +1972,12 @@ fi
 
 if [[ "${#real_hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758/#1857)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An unconditional assumeTrue(..., false) / assumeFalse(..., true) makes the remainder of a test unreachable and must be removed; an exact survivor baseline requires a tracking issue (#1857). An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or a bounded advanceUntilIdle()+idleFor() deadline pump per #1048). Remove stale J1/A5L baselines when a class or exact occurrence is promoted, moved, or deleted."
+  echo "::error title=Test-validity guard (issue #657/#848/#1048/#1154/#1430/#1758/#1857/#2026)::A NEW load-bearing self-skip, ungated androidTest journey, fixed-sleep-before-assert, hand-rolled portfwd/prefs wall-clock deadline pump, unvetted connected-test state-injection seam (a production-defined force*/Override*/set*Active*ForTest call or property assignment driving an assertion that is not vetted in scripts/vetted-test-state-setters.txt with a real-path-reachability reason — the #1158 alt-buffer cheat class), or non-void androidTest @Test method was found. An unconditional assumeTrue(..., false) / assumeFalse(..., true) makes the remainder of a test unreachable and must be removed; an exact survivor baseline requires a tracking issue (#1857). An androidTest @Test/@Before/@After must use a VOID BLOCK body (fun x() { … }), never an expression body (fun x() = …) — a non-Unit expression body makes the method non-void and JUnit rejects the ENTIRE class at load (InvalidTestClassError), so it never runs (#1154). An IME/keyboard/geometry test must not gate its assertion behind assumeTrue(...) (convert to the synthetic-inset model, #780), a connect/journey test must not gate behind assumeFalse(isRunningOnCi()) outside a genuine opt-in fault/Docker fixture (inject the state and HARD-assert, or add an inline // JUSTIFIED: comment naming the opt-in fixture), a new androidTest *E2eTest/*DockerTest class must be wired into scripts/ci-journey-suite.sh or carry a local // CI_JOURNEY_SUITE_JUSTIFIED: reason, and a connection/terminal runTest test must not use a bare Thread.sleep(N) as the only sync before a load-bearing assert (use a StandardTestDispatcher seam or the audited drainMainLooperUntil helper per #1048/#2026). Remove stale J1/A5L baselines when a class or exact occurrence is promoted, moved, or deleted."
   echo
   echo "FAIL: ${#real_hard_fail[@]} unjustified hard-fail occurrence(s) (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
   exit 1
 fi
 
 echo
-echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep-before-assert flakes, unvetted state-injection seams, or non-void androidTest @Test methods (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
+echo "PASS: no new unjustified load-bearing self-skips, ungated androidTest journeys, fixed-sleep or hand-rolled deadline-pump flakes, unvetted state-injection seams, or non-void androidTest @Test methods (A5 + A5L + C1 + J1 + TIMING1 + SEAM1 + V1)."
 exit 0

@@ -2,6 +2,12 @@ package com.pocketshell.app.composer
 
 import kotlinx.coroutines.CancellationException
 
+/** Connected-test hold after durable claim but before the real screen consumer. */
+internal object PromptComposerOutboundDrainTestSeams {
+    @Volatile
+    var beforeEmit: ((OutboundItem) -> Unit)? = null
+}
+
 /**
  * Acquires and transfers the single physical composer-drain lease.
  *
@@ -52,7 +58,10 @@ internal fun PromptComposerViewModel.dispatchOutboundItemThroughDrain(id: String
             )
         } finally {
             outboundSidecarDispatchInFlight = false
-            if (!handedOff) outboundDrainOwnership.release(lease)
+            if (!handedOff) {
+                outboundDrainOwnership.release(lease)
+                clearOutboundRetrying(id)
+            }
         }
     }
     return true

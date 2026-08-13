@@ -1,6 +1,11 @@
 package com.pocketshell.app.composer
 
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 internal fun mergeStagedAttachmentPaths(
     currentAttachments: List<PromptComposerViewModel.StagedAttachment>,
@@ -44,6 +49,39 @@ internal fun attachmentRetainedMessage(error: Throwable): String {
     val raw = error.message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
     val detail = raw.ifBlank { error.javaClass.simpleName }
     return "Attachment upload failed: $detail. Saved — it will upload when you Send (or reconnect)."
+}
+
+/**
+ * Issue #1569 (U1): reconnect persisted pending-upload tiles to their durable
+ * local sidecar bytes after process recreation, session switch, or identity
+ * refinement. Best-effort and target-checked again on Main before publication.
+ */
+internal fun PromptComposerViewModel.rehydrateDraftAttachmentBytes(target: String) {
+    val sidecarStore = outboundAttachmentSidecarStore ?: return
+    if (target.isBlank()) return
+    val hasRetainedTiles = _uiState.value.attachments.any {
+        it.previewUri == null && it.transferState == AttachmentTransferState.PendingLocal
+    }
+    if (!hasRetainedTiles) return
+    viewModelScope.launch(outboundQueueDispatcher) {
+        val refs = sidecarStore.refsFor(draftAttachmentSidecarScope(target))
+        if (refs.isEmpty()) return@launch
+        withContext(Dispatchers.Main.immediate) {
+            if (composerTarget != target) return@withContext
+            _uiState.update { current ->
+                val refsByIndex = refs.associateBy { it.attachmentIndex }
+                val rehydrated = current.attachments.map { tile ->
+                    if (tile.previewUri != null ||
+                        tile.transferState != AttachmentTransferState.PendingLocal
+                    ) return@map tile
+                    val ref = pendingAttachmentIndex(tile.remotePath)?.let(refsByIndex::get)
+                        ?: return@map tile
+                    tile.copy(previewUri = android.net.Uri.fromFile(java.io.File(ref.localPath)))
+                }
+                if (rehydrated == current.attachments) current else current.copy(attachments = rehydrated)
+            }
+        }
+    }
 }
 
 /**

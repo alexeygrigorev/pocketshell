@@ -189,6 +189,7 @@ class PromptComposerOutboundQueueClogTest {
         // GREEN: the manual Retry breaks the strand and produces a delivery attempt.
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(outboundQueueStore = queue)
+        vm.setTransportWritableProbe { true }
         val sent = collectSendRequests(vm)
         val session = "1/session-a"
         vm.onComposerTargetChanged(session)
@@ -253,6 +254,7 @@ class PromptComposerOutboundQueueClogTest {
     fun manualRetryReDrivesAStrandedGateWithNoActiveRow() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(outboundQueueStore = queue)
+        vm.setTransportWritableProbe { true }
         val sent = collectSendRequests(vm)
         val session = "1/session-a"
         vm.onComposerTargetChanged(session)

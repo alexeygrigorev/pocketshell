@@ -59,18 +59,25 @@ internal class OutboundDrainOwnership {
  * into physical host IO. A generation is stamped onto every request so an old
  * screen collector cannot steal work emitted for its replacement.
  */
-internal class OutboundSendConsumerRegistry {
+internal class OutboundSendConsumerRegistry(
+    private val onGenerationChanged: () -> Unit = {},
+) {
     private val nextGeneration = AtomicLong(0L)
     private val activeGeneration = AtomicReference<Long?>(null)
     @Volatile private var registrationRequired: Boolean = false
 
     fun register(): Long {
         registrationRequired = true
-        return nextGeneration.incrementAndGet().also(activeGeneration::set)
+        return nextGeneration.incrementAndGet().also {
+            activeGeneration.set(it)
+            onGenerationChanged()
+        }
     }
 
     fun unregister(generation: Long): Boolean =
-        activeGeneration.compareAndSet(generation, null)
+        activeGeneration.compareAndSet(generation, null).also { changed ->
+            if (changed) onGenerationChanged()
+        }
 
     fun activeGenerationForDispatch(): Long? = activeGeneration.get()
 

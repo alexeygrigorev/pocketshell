@@ -349,6 +349,7 @@ class PromptComposerSidecarReuploadSkipTest {
         val queue = InMemoryOutboundQueueStore()
         val sidecars = newSidecarStore(dispatcher)
         val vm = newVm(dispatcher, queue, sidecars)
+        vm.setTransportWritableProbe { true }
         val sent = collectSendRequests(vm)
         vm.onComposerTargetChanged("1/session-a")
 

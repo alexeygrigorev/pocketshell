@@ -94,6 +94,23 @@ public interface ComposerDraftStore {
 
     /** Issue #872: drop the stored attachment refs for [sessionKey]. */
     public fun clearAttachments(sessionKey: String)
+
+    /**
+     * Re-key a draft after exact runtime-identity proof. This is one semantic
+     * move, not a discard: [draft] and [attachments] must exist under
+     * [toSessionKey] before the obsolete fallback slot is removed.
+     */
+    public fun promoteIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        draft: String,
+        attachments: List<DurableAttachmentRef>,
+    ) {
+        save(toSessionKey, draft)
+        saveAttachments(toSessionKey, attachments)
+        clear(fromSessionKey)
+        clearAttachments(fromSessionKey)
+    }
 }
 
 /**
@@ -131,6 +148,12 @@ public object DisabledComposerDraftStore : ComposerDraftStore {
     override fun loadAttachments(sessionKey: String): List<DurableAttachmentRef> = emptyList()
     override fun saveAttachments(sessionKey: String, attachments: List<DurableAttachmentRef>) = Unit
     override fun clearAttachments(sessionKey: String) = Unit
+    override fun promoteIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        draft: String,
+        attachments: List<DurableAttachmentRef>,
+    ) = Unit
 }
 
 /**
@@ -172,6 +195,18 @@ public class InMemoryComposerDraftStore : ComposerDraftStore {
 
     override fun clearAttachments(sessionKey: String) {
         attachments.remove(sessionKey)
+    }
+
+    override fun promoteIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        draft: String,
+        attachments: List<DurableAttachmentRef>,
+    ) {
+        save(toSessionKey, draft)
+        saveAttachments(toSessionKey, attachments)
+        clear(fromSessionKey)
+        clearAttachments(fromSessionKey)
     }
 }
 
@@ -236,6 +271,25 @@ public class SharedPrefsComposerDraftStore @Inject constructor(
     override fun clearAttachments(sessionKey: String) {
         if (sessionKey.isEmpty()) return
         prefs.edit().remove(attachmentKey(sessionKey)).apply()
+    }
+
+    override fun promoteIdentity(
+        fromSessionKey: String,
+        toSessionKey: String,
+        draft: String,
+        attachments: List<DurableAttachmentRef>,
+    ) {
+        if (fromSessionKey.isEmpty() || toSessionKey.isEmpty() || fromSessionKey == toSessionKey) return
+        prefs.edit().apply {
+            if (draft.isEmpty()) remove(toSessionKey) else putString(toSessionKey, draft)
+            if (attachments.isEmpty()) {
+                remove(attachmentKey(toSessionKey))
+            } else {
+                putString(attachmentKey(toSessionKey), encodeAttachments(attachments))
+            }
+            remove(fromSessionKey)
+            remove(attachmentKey(fromSessionKey))
+        }.apply()
     }
 
     private companion object {

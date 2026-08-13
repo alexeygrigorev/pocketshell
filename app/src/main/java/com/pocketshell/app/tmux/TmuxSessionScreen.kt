@@ -670,7 +670,13 @@ private fun TmuxSessionScreenEffects(
         promptComposerViewModel.onComposerTargetChanged(durableKey)
         requestOutboundDrainAfterPromotion(
             promotedRows = promotedRows,
-            drainGateOpen = sessionLive || viewModel.isSendTransportWritable(),
+            // Reopened #1602: ConnectionStatus can stay falsely Connected after the
+            // physical wire dies. Promotion must obey the same hard wire gate as the
+            // canonical poll/snapshot drain or it can start a sidecar/send into EOF.
+            drainGateOpen = outboundDrainGateOpen(
+                sessionLive = sessionLive,
+                transportWritable = viewModel.isSendTransportWritable(),
+            ),
             controller = outboundQueueAutoFlushController,
             hasPendingWork = {
                 promptComposerViewModel.outboundQueueItems.value

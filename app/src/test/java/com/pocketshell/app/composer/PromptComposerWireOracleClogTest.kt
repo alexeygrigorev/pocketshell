@@ -9,6 +9,7 @@ import com.pocketshell.app.tmux.DurableOutboundRowIdentity
 import com.pocketshell.app.tmux.OutboundQueueAutoFlushController
 import com.pocketshell.app.tmux.durableAgentQueueSendMustDefer
 import com.pocketshell.app.tmux.outboundBudgetTestComposer
+import com.pocketshell.app.tmux.outboundDrainGateOpen
 import com.pocketshell.app.tmux.runOutboundQueueAutoFlush
 import com.pocketshell.core.voice.WhisperClient
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -182,6 +183,49 @@ class PromptComposerWireOracleClogTest {
     }
 
     @Test
+    fun issue1602_staleLiveEnumCannotRetryOrStartSidecarWhenWireIsNotWritable() = runTest {
+        // The field incident's inverse truth-table cell: the screen still reported
+        // Connected after the wire died. Restoring `sessionLive || wireWritable`
+        // makes both counters non-zero, so this is load-bearing for the hard gate.
+        val controller = OutboundQueueAutoFlushController.boundTo(
+            outboundBudgetTestComposer(),
+            clock = { testScheduler.currentTime },
+        )
+        controller.onConnectionWindowChanged(sessionLive = true, targetSessionId = "1/issue1602") {}
+        var retryNextCalls = 0
+        var sidecarDispatches = 0
+        val quietQueue = flow<Any?> { emit(Unit); awaitCancellation() }
+
+        assertEquals(
+            "the shared snapshot/poll/promotion gate rejects a stale live enum",
+            false,
+            outboundDrainGateOpen(sessionLive = true, transportWritable = false),
+        )
+
+        val job = launch {
+            runOutboundQueueAutoFlush(
+                sessionLive = true, // stale coarse state
+                outboundQueueItems = quietQueue,
+                controller = controller,
+                retryNext = {
+                    retryNextCalls++
+                    // A sidecar upload is entered only after retryNext claims its row.
+                    sidecarDispatches++
+                    "sidecar-row"
+                },
+                transportWritable = { false }, // authoritative physical truth
+            )
+        }
+        runCurrent()
+        advanceTimeBy(OUTBOUND_DEFERRED_REDISPATCH_BACKOFF_MS + 1L)
+        runCurrent()
+
+        assertEquals("dead wire must not even enter retryNext", 0, retryNextCalls)
+        assertEquals("dead wire must not start sidecar dispatch", 0, sidecarDispatches)
+        job.cancelAndJoin()
+    }
+
+    @Test
     fun wireDropsAfterDrainReadinessBeforeDurableAgentDispatch() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val vm = newVm(queue)
@@ -336,7 +380,7 @@ class PromptComposerWireOracleClogTest {
     }
 
     @Test
-    fun connectedEdgeLeavesGenuineNonTransportParksAlone() = runTest {
+    fun connectedEdgeLeavesExhaustedGenuineFailureParkedAndAutoFlushesTail() = runTest {
         // Class coverage (G2): a genuine non-budget park (e.g. an empty "Nothing to send"
         // row) is NOT auto-unparked — re-arming it would not help. Only the bounded-budget
         // auto-park (which a storm produces) self-heals.
@@ -346,11 +390,31 @@ class PromptComposerWireOracleClogTest {
         vm.onComposerTargetChanged(session)
 
         val poison = queue.enqueue(sessionKey = session, cleanText = "poison", createdAtMs = 1)
-        queue.markFailed(poison.id, lastError = "Nothing to send")
+        val tail = queue.enqueue(sessionKey = session, cleanText = "healthy tail", createdAtMs = 2)
+        requireNotNull(
+            queue.requeueForRetry(
+                poison.id,
+                attemptDelta = OUTBOUND_MAX_AUTO_ATTEMPTS,
+            ),
+        )
+        val genuineFailure = "Send failed on a writable transport."
+        queue.markFailed(poison.id, lastError = genuineFailure)
         vm.refreshOutboundQueueItemsFor(session)
 
         assertEquals(emptyList<String>(), vm.unparkTransportFailedRows())
+        val parked = requireNotNull(queue.item(poison.id))
+        assertEquals(OutboundState.Failed, parked.state)
+        assertEquals(OUTBOUND_MAX_AUTO_ATTEMPTS, parked.attemptCount)
+        assertEquals(genuineFailure, parked.lastError)
+
+        assertEquals(
+            "the recovered auto-flush must skip the exhausted genuine failure and claim its healthy tail",
+            tail.id,
+            vm.retryNextOutboundItem(),
+        )
+        advanceUntilIdle()
         assertEquals(OutboundState.Failed, requireNotNull(queue.item(poison.id)).state)
+        assertEquals(OutboundState.InFlight, requireNotNull(queue.item(tail.id)).state)
     }
 
     @Test

@@ -237,11 +237,29 @@ pocketshell hooks uninstall [--engine ...]
 - **OpenCode** — drops a `pocketshell-idle-signal.js` plugin into
   `~/.config/opencode/plugin/` without disturbing other plugins.
 
-`install` is idempotent (running twice adds nothing new). Handler scripts
-and the event bus live under `~/.cache/pocketshell/hooks/` (override with
-`$POCKETSHELL_HOOKS_DIR`); each handler appends a normalized record
-`{ts, engine, state, source, session_id, cwd, ...}` to
-`events.jsonl`.
+`install` is idempotent (running twice adds nothing new). Generated handler
+scripts and `.installed` ownership metadata are durable data under
+`$XDG_DATA_HOME/pocketshell/hooks/` (default
+`~/.local/share/pocketshell/hooks/`). The volatile event bus stays at
+`$XDG_CACHE_HOME/pocketshell/hooks/events.jsonl` (default
+`~/.cache/pocketshell/hooks/events.jsonl`). A routine cache cleanup therefore
+starts a fresh bus without breaking the absolute commands retained by Claude or
+Codex; the next event recreates the cache directory and bus.
+
+Path overrides are intentionally separate:
+
+- `$POCKETSHELL_HOOKS_HANDLER_DIR` overrides the durable generated-handler dir.
+- `$POCKETSHELL_HOOKS_EVENTS_FILE` overrides the event bus file.
+- The historical `$POCKETSHELL_HOOKS_DIR` remains an alias for the **handler
+  directory only** when the new handler variable is unset. It no longer moves
+  the bus. Use both new variables and rerun `hooks install` when both paths need
+  customization.
+
+Each generated handler embeds the resolved bus path and appends a normalized
+record `{ts, engine, state, source, session_id, cwd, ...}` there. `install`
+also migrates PocketShell-owned Claude/Codex commands from the old cache path to
+the durable path even when cache cleanup already removed the old scripts;
+foreign hooks and foreign Codex `notify` programs remain untouched.
 
 **Per-engine uninstall** (`pocketshell hooks uninstall`) removes only what
 we added and is idempotent:
@@ -257,9 +275,9 @@ we added and is idempotent:
 - **OpenCode** — deletes our plugin file; other plugins and the dir
   itself are left in place.
 
-The event bus (`events.jsonl`) is preserved on uninstall so
-already-emitted records stay readable; only the generated handler
-scripts are cleaned up.
+The event bus (`events.jsonl`) is preserved on uninstall so already-emitted
+records stay readable; only PocketShell-owned current/legacy config entries,
+generated executables, and durable ownership metadata are cleaned up.
 
 ## Development
 

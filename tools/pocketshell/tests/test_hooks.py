@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -52,6 +54,45 @@ from pocketshell.hooks import (
 def make_paths(home: Path) -> HooksPaths:
     """Resolve HooksPaths under a throwaway ``home`` (no env override)."""
     return resolve_paths(home=home, env={})
+
+
+def test_paths_separate_durable_handlers_from_volatile_bus(tmp_path):
+    paths = make_paths(tmp_path)
+    assert paths.handler_dir == tmp_path / ".local" / "share" / "pocketshell" / "hooks"
+    assert paths.install_marker == paths.handler_dir / ".installed"
+    assert paths.events_file == tmp_path / ".cache" / "pocketshell" / "hooks" / "events.jsonl"
+
+
+def test_paths_honor_xdg_and_independent_overrides(tmp_path):
+    paths = resolve_paths(
+        home=tmp_path,
+        env={
+            "XDG_DATA_HOME": str(tmp_path / "data"),
+            "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        },
+    )
+    assert paths.handler_dir == tmp_path / "data" / "pocketshell" / "hooks"
+    assert paths.events_file == tmp_path / "cache" / "pocketshell" / "hooks" / "events.jsonl"
+
+    overridden = resolve_paths(
+        home=tmp_path,
+        env={
+            "POCKETSHELL_HOOKS_HANDLER_DIR": str(tmp_path / "handlers"),
+            "POCKETSHELL_HOOKS_EVENTS_FILE": str(tmp_path / "bus" / "custom.jsonl"),
+        },
+    )
+    assert overridden.handler_dir == tmp_path / "handlers"
+    assert overridden.events_file == tmp_path / "bus" / "custom.jsonl"
+
+
+def test_legacy_hooks_dir_is_handler_alias_not_bus_override(tmp_path):
+    paths = resolve_paths(
+        home=tmp_path,
+        env={"POCKETSHELL_HOOKS_DIR": str(tmp_path / "legacy-explicit")},
+    )
+    assert paths.handler_dir == tmp_path / "legacy-explicit"
+    assert paths.legacy_handler_dir == tmp_path / "legacy-explicit"
+    assert paths.events_file == tmp_path / ".cache" / "pocketshell" / "hooks" / "events.jsonl"
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +196,29 @@ def test_claude_uninstall_idempotent():
     once = claude_uninstall(merged, command)
     twice = claude_uninstall(once, command)
     assert once == twice
+
+
+def test_claude_uninstall_preserves_foreign_hook_in_same_group():
+    command = "python3 /h/claude_hook.py"
+    settings = {
+        "hooks": {
+            "Stop": [{
+                "matcher": "always",
+                "hooks": [
+                    {"type": "command", "command": command},
+                    {"type": "command", "command": "echo user-owned"},
+                ],
+            }],
+        },
+    }
+    assert claude_uninstall(settings, command) == {
+        "hooks": {
+            "Stop": [{
+                "matcher": "always",
+                "hooks": [{"type": "command", "command": "echo user-owned"}],
+            }],
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +373,95 @@ def test_install_opencode_plugin_can_record_tmux_state(tmp_path):
     assert "recordTmuxAgentState" in source
     assert "@ps_agent_state" in source
     assert '"waiting_for_input"' in source
+
+
+def test_opencode_plugin_embeds_volatile_bus_not_durable_handler_dir(tmp_path):
+    paths = make_paths(tmp_path)
+    install_engines(["opencode"], paths)
+
+    source = paths.opencode_plugin.read_text()
+    assert str(paths.events_file) in source
+    assert str(paths.handler_dir) not in source
+    assert paths.install_marker.is_file()
+
+
+def test_install_migrates_owned_legacy_cache_commands_without_old_scripts(tmp_path):
+    paths = make_paths(tmp_path)
+    foreign_group = {
+        "hooks": [{"type": "command", "command": "echo user-owned-stop"}],
+    }
+    legacy_settings = claude_install({}, f"python3 {paths.legacy_claude_handler}")
+    legacy_settings["hooks"]["Stop"].insert(0, foreign_group)
+    paths.claude_settings.parent.mkdir(parents=True)
+    paths.claude_settings.write_text(json.dumps(legacy_settings, indent=2) + "\n")
+    paths.codex_config.parent.mkdir(parents=True)
+    legacy_notify = ["python3", str(paths.legacy_codex_handler)]
+    legacy_codex, _ = codex_install('model = "gpt-5"\n', legacy_notify)
+    paths.codex_config.write_text(legacy_codex)
+    paths.events_file.parent.mkdir(parents=True)
+    paths.events_file.write_text('{"preserved":"bus"}\n')
+    # Exact recurrence: cache-owned commands survive even when their scripts do not.
+    assert not paths.legacy_claude_handler.exists()
+    assert not paths.legacy_codex_handler.exists()
+
+    results = install_engines(["claude", "codex"], paths)
+    assert {result.engine: result.status for result in results} == {
+        "claude": "migrated",
+        "codex": "migrated",
+    }
+
+    settings = json.loads(paths.claude_settings.read_text())
+    stop_commands = [
+        hook["command"]
+        for group in settings["hooks"]["Stop"]
+        for hook in group["hooks"]
+    ]
+    assert "echo user-owned-stop" in stop_commands
+    assert f"python3 {paths.claude_handler}" in stop_commands
+    assert f"python3 {paths.legacy_claude_handler}" not in stop_commands
+    parsed_codex = tomllib.loads(paths.codex_config.read_text())
+    assert parsed_codex["model"] == "gpt-5"
+    assert parsed_codex["notify"] == ["python3", str(paths.codex_handler)]
+    assert paths.events_file.read_text() == '{"preserved":"bus"}\n'
+
+    first_claude = paths.claude_settings.read_text()
+    first_codex = paths.codex_config.read_text()
+    second = install_engines(["claude", "codex"], paths)
+    assert {result.engine: result.status for result in second} == {
+        "claude": "present",
+        "codex": "present",
+    }
+    assert paths.claude_settings.read_text() == first_claude
+    assert paths.codex_config.read_text() == first_codex
+
+
+def test_uninstall_removes_owned_legacy_entries_without_old_scripts(tmp_path):
+    paths = make_paths(tmp_path)
+    foreign_group = {
+        "hooks": [{"type": "command", "command": "echo user-owned-stop"}],
+    }
+    settings = claude_install({}, f"python3 {paths.legacy_claude_handler}")
+    settings["hooks"]["Stop"].insert(0, foreign_group)
+    paths.claude_settings.parent.mkdir(parents=True)
+    paths.claude_settings.write_text(json.dumps(settings, indent=2) + "\n")
+    paths.codex_config.parent.mkdir(parents=True)
+    legacy_codex, _ = codex_install(
+        'model = "gpt-5"\n',
+        ["python3", str(paths.legacy_codex_handler)],
+    )
+    paths.codex_config.write_text(legacy_codex)
+    paths.events_file.parent.mkdir(parents=True)
+    paths.events_file.write_text('{"preserved":"bus"}\n')
+
+    results = uninstall_engines(["claude", "codex"], paths)
+    assert {result.engine: result.status for result in results} == {
+        "claude": "removed",
+        "codex": "removed",
+    }
+    restored = json.loads(paths.claude_settings.read_text())
+    assert restored == {"hooks": {"Stop": [foreign_group]}}
+    assert tomllib.loads(paths.codex_config.read_text()) == {"model": "gpt-5"}
+    assert paths.events_file.read_text() == '{"preserved":"bus"}\n'
 
 
 def test_full_roundtrip_restores_prepopulated_claude(tmp_path):
@@ -521,6 +674,44 @@ def test_codex_handler_appends_normalized_record(tmp_path):
     assert rec["last_assistant_message"] == "ok"
 
 
+def test_cache_cleanup_preserves_handlers_and_recreates_bus(tmp_path):
+    """Delete cache, then execute the exact commands persisted by production."""
+    paths = make_paths(tmp_path)
+    install_engines(["claude", "codex"], paths)
+
+    settings = json.loads(paths.claude_settings.read_text())
+    claude_command = settings["hooks"]["Stop"][-1]["hooks"][0]["command"]
+    codex_notify = tomllib.loads(paths.codex_config.read_text())["notify"]
+    assert str(tmp_path / ".local" / "share") in claude_command
+    assert str(tmp_path / ".local" / "share") in codex_notify[1]
+    assert str(tmp_path / ".cache") not in claude_command
+    assert str(tmp_path / ".cache") not in codex_notify[1]
+
+    paths.events_file.parent.mkdir(parents=True, exist_ok=True)
+    paths.events_file.write_text('{"stale":"cache"}\n')
+    shutil.rmtree(tmp_path / ".cache")
+
+    subprocess.run(
+        shlex.split(claude_command),
+        input=json.dumps(
+            {"hook_event_name": "Stop", "session_id": "after-cache-clean"},
+        ),
+        text=True,
+        check=True,
+    )
+    subprocess.run(
+        [*codex_notify, json.dumps(
+            {"type": "agent-turn-complete", "thread-id": "after-cache-clean"},
+        )],
+        text=True,
+        check=True,
+    )
+
+    assert paths.events_file.is_file(), "handlers must recreate the deleted cache bus"
+    events = read_events(paths)
+    assert [event["engine"] for event in events] == ["claude-code", "codex"]
+
+
 def test_codex_handler_records_tmux_idle_state(tmp_path):
     paths = make_paths(tmp_path)
     install_engines(["codex"], paths)
@@ -546,7 +737,7 @@ def test_codex_handler_non_turn_notify_does_not_record_option(tmp_path):
 
 def test_read_events_limit_and_since(tmp_path):
     paths = make_paths(tmp_path)
-    paths.hooks_dir.mkdir(parents=True)
+    paths.events_file.parent.mkdir(parents=True)
     lines = [
         {"ts": "2026-05-29T00:00:01Z", "engine": "codex", "state": "FINISHED"},
         {"ts": "2026-05-29T00:00:02Z", "engine": "codex", "state": "FINISHED"},
@@ -562,7 +753,7 @@ def test_read_events_limit_and_since(tmp_path):
 
 def test_read_events_skips_malformed_lines(tmp_path):
     paths = make_paths(tmp_path)
-    paths.hooks_dir.mkdir(parents=True)
+    paths.events_file.parent.mkdir(parents=True)
     paths.events_file.write_text(
         "not json\n"
         + json.dumps({"ts": "2026-05-29T00:00:01Z", "engine": "codex", "state": "FINISHED"})
@@ -591,6 +782,37 @@ def test_engine_status_reports_install_state(tmp_path):
     assert after["claude"]["installed"] is True
     assert after["codex"]["installed"] is True
     assert after["opencode"]["installed"] is True
+
+
+def test_engine_status_reports_legacy_and_broken_cache_installations(tmp_path):
+    paths = make_paths(tmp_path)
+    settings = claude_install({}, f"python3 {paths.legacy_claude_handler}")
+    paths.claude_settings.parent.mkdir(parents=True)
+    paths.claude_settings.write_text(json.dumps(settings))
+    paths.codex_config.parent.mkdir(parents=True)
+    legacy_codex, _ = codex_install(
+        "",
+        ["python3", str(paths.legacy_codex_handler)],
+    )
+    paths.codex_config.write_text(legacy_codex)
+    paths.legacy_handler_dir.mkdir(parents=True)
+    paths.legacy_claude_handler.write_text("# legacy\n")
+    paths.legacy_codex_handler.write_text("# legacy\n")
+
+    claude = engine_status("claude", paths)
+    codex = engine_status("codex", paths)
+    assert claude["installed"] is True and claude["legacy"] is True
+    assert codex["installed"] is True and codex["legacy"] is True
+
+    shutil.rmtree(tmp_path / ".cache")
+    broken_claude = engine_status("claude", paths)
+    broken_codex = engine_status("codex", paths)
+    assert broken_claude["configured"] is True
+    assert broken_codex["configured"] is True
+    assert broken_claude["handler_exists"] is False
+    assert broken_codex["handler_exists"] is False
+    assert broken_claude["installed"] is False
+    assert broken_codex["installed"] is False
 
 
 def test_status_json_command_reports_state(tmp_path, monkeypatch):

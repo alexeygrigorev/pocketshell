@@ -88,7 +88,7 @@ JSON
     chown testuser:testuser /home/testuser/.pocketshell-fixture-hooks-enabled
     # Ensure hooks start UNINSTALLED so the app surfaces the "enable
     # notifications" nudge before the install.
-    rm -rf /home/testuser/.cache/pocketshell/hooks/.installed
+    rm -f /home/testuser/.local/share/pocketshell/hooks/.installed
     ;;
   *)
     printf 'unknown PocketShell bootstrap scenario: %s\n' "$scenario" >&2

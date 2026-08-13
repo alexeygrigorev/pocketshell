@@ -55,11 +55,20 @@ Per-engine uninstall procedure
 - **OpenCode** — our plugin file is deleted from the plugin dir. Other
   plugins, and the dir itself, are left in place.
 
-The handler scripts and the event bus live under a stable
-pocketshell-owned cache dir (``~/.cache/pocketshell/hooks/`` by default,
-overridable with ``$POCKETSHELL_HOOKS_DIR``). The handlers resolve the
-bus path relative to their own location so they keep working regardless
-of the engine's cwd.
+Generated executable handlers and their ownership marker are durable data:
+``$XDG_DATA_HOME/pocketshell/hooks`` (default
+``~/.local/share/pocketshell/hooks``). The volatile event bus remains cache:
+``$XDG_CACHE_HOME/pocketshell/hooks/events.jsonl`` (default
+``~/.cache/pocketshell/hooks/events.jsonl``). The handlers embed that separate
+bus path, so deleting the cache recreates an empty bus without deleting the
+programs referenced by Claude and Codex.
+
+``$POCKETSHELL_HOOKS_HANDLER_DIR`` overrides the durable handler directory and
+``$POCKETSHELL_HOOKS_EVENTS_FILE`` overrides the bus file. The historical
+``$POCKETSHELL_HOOKS_DIR`` name remains a handler-directory alias when the new
+handler override is unset; it no longer silently relocates the bus. Set the two
+new variables explicitly when both locations need overriding, then reinstall so
+the generated handlers embed the selected bus file.
 """
 
 from __future__ import annotations
@@ -90,8 +99,13 @@ OPENCODE_PLUGIN_FILENAME = "pocketshell-idle-signal.js"
 CLAUDE_HANDLER_NAME = "claude_hook.py"
 CODEX_HANDLER_NAME = "codex_notify.py"
 
-# The bus filename inside the hooks dir.
+# The bus filename inside the volatile hooks cache dir.
 EVENTS_FILENAME = "events.jsonl"
+
+# Durable ownership/install marker. Engine config remains the authority for
+# status; this marker identifies the generated data directory for operators and
+# bootstrap fixtures without placing durable metadata in cache.
+INSTALL_MARKER_NAME = ".installed"
 
 # A stable marker string embedded in every generated handler + the
 # OpenCode plugin so we can recognise our own entries even if the user's
@@ -109,27 +123,42 @@ POCKETSHELL_MARKER = "pocketshell"
 class HooksPaths:
     """Resolved filesystem locations for the hooks feature.
 
-    All engine config roots and the pocketshell-owned cache dir are
-    fields so the unit suite can point them at a tmp dir. Nothing in
-    this module reads ``~`` directly — everything flows through here.
+    All engine config roots, the durable generated-data directory, and the
+    volatile event file are fields so tests can point them at a tmp dir.
+    Nothing in this module reads ``~`` directly — everything flows through
+    here.
     """
 
-    hooks_dir: Path
+    handler_dir: Path
+    events_file: Path
+    legacy_handler_dir: Path
     claude_settings: Path
     codex_config: Path
     opencode_plugin_dir: Path
 
     @property
-    def events_file(self) -> Path:
-        return self.hooks_dir / EVENTS_FILENAME
+    def install_marker(self) -> Path:
+        return self.handler_dir / INSTALL_MARKER_NAME
 
     @property
     def claude_handler(self) -> Path:
-        return self.hooks_dir / CLAUDE_HANDLER_NAME
+        return self.handler_dir / CLAUDE_HANDLER_NAME
 
     @property
     def codex_handler(self) -> Path:
-        return self.hooks_dir / CODEX_HANDLER_NAME
+        return self.handler_dir / CODEX_HANDLER_NAME
+
+    @property
+    def legacy_claude_handler(self) -> Path:
+        return self.legacy_handler_dir / CLAUDE_HANDLER_NAME
+
+    @property
+    def legacy_codex_handler(self) -> Path:
+        return self.legacy_handler_dir / CODEX_HANDLER_NAME
+
+    @property
+    def legacy_install_marker(self) -> Path:
+        return self.legacy_handler_dir / INSTALL_MARKER_NAME
 
     @property
     def opencode_plugin(self) -> Path:
@@ -143,10 +172,18 @@ def resolve_paths(
 ) -> HooksPaths:
     """Return the :class:`HooksPaths` for ``home`` (default ``~``).
 
-    Precedence for the hooks dir:
+    Durable handler-dir precedence:
 
-    1. ``$POCKETSHELL_HOOKS_DIR`` (env), expanded.
-    2. ``<home>/.cache/pocketshell/hooks``.
+    1. ``$POCKETSHELL_HOOKS_HANDLER_DIR`` (preferred explicit override).
+    2. ``$POCKETSHELL_HOOKS_DIR`` (historical handler-dir alias).
+    3. ``$XDG_DATA_HOME/pocketshell/hooks``.
+    4. ``<home>/.local/share/pocketshell/hooks``.
+
+    Volatile bus-file precedence is independent:
+
+    1. ``$POCKETSHELL_HOOKS_EVENTS_FILE``.
+    2. ``$XDG_CACHE_HOME/pocketshell/hooks/events.jsonl``.
+    3. ``<home>/.cache/pocketshell/hooks/events.jsonl``.
 
     Engine config roots always hang off ``home`` so a test can pass a
     throwaway home and be sure the real ``~/.claude`` etc. are never
@@ -155,14 +192,46 @@ def resolve_paths(
     env_map = env if env is not None else os.environ
     base_home = home if home is not None else Path(os.path.expanduser("~"))
 
-    hooks_env = env_map.get("POCKETSHELL_HOOKS_DIR")
-    if hooks_env:
-        hooks_dir = Path(os.path.expanduser(hooks_env))
+    handler_env = env_map.get("POCKETSHELL_HOOKS_HANDLER_DIR")
+    legacy_hooks_env = env_map.get("POCKETSHELL_HOOKS_DIR")
+    if handler_env:
+        handler_dir = Path(os.path.expanduser(handler_env))
+    elif legacy_hooks_env:
+        handler_dir = Path(os.path.expanduser(legacy_hooks_env))
     else:
-        hooks_dir = base_home / ".cache" / "pocketshell" / "hooks"
+        data_root_env = env_map.get("XDG_DATA_HOME")
+        data_root = (
+            Path(os.path.expanduser(data_root_env))
+            if data_root_env
+            else base_home / ".local" / "share"
+        )
+        handler_dir = data_root / "pocketshell" / "hooks"
+
+    events_env = env_map.get("POCKETSHELL_HOOKS_EVENTS_FILE")
+    if events_env:
+        events_file = Path(os.path.expanduser(events_env))
+    else:
+        cache_root_env = env_map.get("XDG_CACHE_HOME")
+        cache_root = (
+            Path(os.path.expanduser(cache_root_env))
+            if cache_root_env
+            else base_home / ".cache"
+        )
+        events_file = cache_root / "pocketshell" / "hooks" / EVENTS_FILENAME
+
+    # The pre-#267-durability default co-located handlers and bus in cache. When
+    # the old override is set it names that old executable location too, so an
+    # install with the new override can migrate those owned config references.
+    legacy_handler_dir = (
+        Path(os.path.expanduser(legacy_hooks_env))
+        if legacy_hooks_env
+        else base_home / ".cache" / "pocketshell" / "hooks"
+    )
 
     return HooksPaths(
-        hooks_dir=hooks_dir,
+        handler_dir=handler_dir,
+        events_file=events_file,
+        legacy_handler_dir=legacy_handler_dir,
         claude_settings=base_home / ".claude" / "settings.json",
         codex_config=base_home / ".codex" / "config.toml",
         opencode_plugin_dir=base_home / ".config" / "opencode" / "plugin",
@@ -177,11 +246,11 @@ def _now_iso() -> str:
 # Handler script bodies (written at install time)
 # ---------------------------------------------------------------------------
 #
-# The handlers are tiny and self-contained: they resolve the bus path
-# relative to their own location (``__file__``) so they keep working no
-# matter what cwd the engine spawns them in. They MUST stay
-# dependency-free (stdlib only) because they run under whatever Python
-# the engine finds on PATH, not under pocketshell's venv.
+# The handlers are tiny and self-contained. Their generated source embeds the
+# independently resolved bus file; it MUST NOT infer cache state from
+# ``__file__`` now that executables are durable XDG data. They stay
+# dependency-free (stdlib only) because they run under whatever Python the
+# engine finds on PATH, not under pocketshell's venv.
 
 
 _CLAUDE_HANDLER_SOURCE = '''\
@@ -190,7 +259,7 @@ _CLAUDE_HANDLER_SOURCE = '''\
 
 Registered for Stop / SubagentStop / Notification. Reads the hook
 payload on stdin and appends a normalized record to the pocketshell
-event bus next to this script. Side-effect only: it never blocks the
+event bus configured at install time. Side-effect only: it never blocks the
 stop and never injects a follow-up (integration only; see D26).
 """
 import json
@@ -199,8 +268,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-EVENTS_FILE = os.path.join(HERE, "events.jsonl")
+EVENTS_FILE = __POCKETSHELL_EVENTS_FILE__
 
 
 def record_tmux_agent_state(state):
@@ -276,7 +344,7 @@ _CODEX_HANDLER_SOURCE = '''\
 Codex invokes ``notify`` with ONE argv: a JSON string describing the
 event (notably ``agent-turn-complete`` after every ``codex exec`` turn).
 Fire-and-forget; we just append a normalized record to the pocketshell
-event bus next to this script.
+event bus configured at install time.
 """
 import json
 import os
@@ -284,8 +352,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-EVENTS_FILE = os.path.join(HERE, "events.jsonl")
+EVENTS_FILE = __POCKETSHELL_EVENTS_FILE__
 
 
 def record_tmux_agent_state(state):
@@ -357,16 +424,9 @@ _OPENCODE_PLUGIN_SOURCE = '''\
 // continue/stop decision (see D26).
 import fs from "node:fs";
 import child_process from "node:child_process";
-import os from "node:os";
 import path from "node:path";
 
-function busPath() {
-  const override = process.env.POCKETSHELL_HOOKS_DIR;
-  const dir = override
-    ? override.replace(/^~(?=$|\\/)/, os.homedir())
-    : path.join(os.homedir(), ".cache", "pocketshell", "hooks");
-  return path.join(dir, "events.jsonl");
-}
+const EVENTS_FILE = __POCKETSHELL_EVENTS_FILE__;
 
 function recordTmuxAgentState(state) {
   if (!process.env.TMUX) return;
@@ -390,7 +450,6 @@ function recordTmuxAgentState(state) {
 }
 
 export const PocketShellIdleSignal = async () => {
-  const EVENTS_FILE = busPath();
   function emit(state, event) {
     const rec = {
       ts: new Date().toISOString(),
@@ -428,13 +487,45 @@ export const PocketShellIdleSignal = async () => {
 # ---------------------------------------------------------------------------
 
 
-def _write_handlers(paths: HooksPaths) -> None:
-    """Write the handler scripts into the hooks dir (idempotent)."""
-    paths.hooks_dir.mkdir(parents=True, exist_ok=True)
-    paths.claude_handler.write_text(_CLAUDE_HANDLER_SOURCE)
-    paths.claude_handler.chmod(0o755)
-    paths.codex_handler.write_text(_CODEX_HANDLER_SOURCE)
-    paths.codex_handler.chmod(0o755)
+def _handler_source(template: str, events_file: Path) -> str:
+    """Render a generated handler with its independent absolute bus path."""
+    return template.replace("__POCKETSHELL_EVENTS_FILE__", repr(str(events_file)))
+
+
+def _opencode_plugin_source(paths: HooksPaths) -> str:
+    """Render the OpenCode plugin with the same separately resolved bus."""
+    return _OPENCODE_PLUGIN_SOURCE.replace(
+        "__POCKETSHELL_EVENTS_FILE__",
+        json.dumps(str(paths.events_file)),
+    )
+
+
+def _write_handlers(paths: HooksPaths, engines: Sequence[str]) -> None:
+    """Write selected generated handlers and metadata into durable XDG data."""
+    paths.handler_dir.mkdir(parents=True, exist_ok=True)
+    if "claude" in engines:
+        _atomic_write_text(
+            paths.claude_handler,
+            _handler_source(_CLAUDE_HANDLER_SOURCE, paths.events_file),
+        )
+        paths.claude_handler.chmod(0o755)
+    if "codex" in engines:
+        _atomic_write_text(
+            paths.codex_handler,
+            _handler_source(_CODEX_HANDLER_SOURCE, paths.events_file),
+        )
+        paths.codex_handler.chmod(0o755)
+    _atomic_write_text(
+        paths.install_marker,
+        json.dumps(
+            {
+                "schema": 1,
+                "handler_dir": str(paths.handler_dir),
+                "events_file": str(paths.events_file),
+            },
+            sort_keys=True,
+        ) + "\n",
+    )
 
 
 def _claude_command(paths: HooksPaths) -> str:
@@ -445,6 +536,33 @@ def _claude_command(paths: HooksPaths) -> str:
 def _codex_notify_value(paths: HooksPaths) -> list[str]:
     """The exact ``notify`` array we set in Codex config.toml."""
     return ["python3", str(paths.codex_handler)]
+
+
+def _legacy_claude_command(paths: HooksPaths) -> str:
+    """The pre-durability command whose executable lived in cache."""
+    return f"python3 {paths.legacy_claude_handler}"
+
+
+def _legacy_codex_notify_value(paths: HooksPaths) -> list[str]:
+    """The pre-durability Codex notify value whose executable lived in cache."""
+    return ["python3", str(paths.legacy_codex_handler)]
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically replace ``path`` without exposing a half-written config."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    temp = path.parent / f".{path.name}.pocketshell-{os.getpid()}"
+    try:
+        with temp.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.chmod(mode)
+        os.replace(temp, path)
+    finally:
+        if temp.exists():
+            temp.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -518,10 +636,10 @@ def claude_install(settings: dict[str, Any], command: str) -> dict[str, Any]:
 def claude_uninstall(settings: dict[str, Any], command: str) -> dict[str, Any]:
     """Return ``settings`` with our hook command removed (pure function).
 
-    Removes any group carrying ``command`` from each Claude event. When
-    an event list becomes empty it is dropped; when the top-level
-    ``hooks`` object becomes empty it is dropped too — but only if those
-    containers no longer hold any user data. Idempotent.
+    Removes only matching command entries from each Claude event. If a user has
+    placed another hook in the same group, that hook and all group metadata are
+    preserved. Empty groups/events are dropped; the top-level ``hooks`` object
+    is dropped only when it no longer holds user data. Idempotent.
     """
     result = json.loads(json.dumps(settings))  # deep copy
     hooks_obj = result.get("hooks")
@@ -532,14 +650,44 @@ def claude_uninstall(settings: dict[str, Any], command: str) -> dict[str, Any]:
         groups = hooks_obj.get(event)
         if not isinstance(groups, list):
             continue
-        kept = [group for group in groups if not _group_is_ours(group, command)]
-        if kept:
-            hooks_obj[event] = kept
+        kept_groups: list[Any] = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept_groups.append(group)
+                continue
+            kept_hooks = [
+                hook
+                for hook in group["hooks"]
+                if not (
+                    isinstance(hook, dict)
+                    and hook.get("type") == "command"
+                    and hook.get("command") == command
+                )
+            ]
+            if len(kept_hooks) == len(group["hooks"]):
+                kept_groups.append(group)
+            elif kept_hooks:
+                kept_group = dict(group)
+                kept_group["hooks"] = kept_hooks
+                kept_groups.append(kept_group)
+        if kept_groups:
+            hooks_obj[event] = kept_groups
         else:
             del hooks_obj[event]
 
     if not hooks_obj:
         del result["hooks"]
+    return result
+
+
+def _claude_uninstall_commands(
+    settings: dict[str, Any],
+    commands: Sequence[str],
+) -> dict[str, Any]:
+    """Remove every exact PocketShell-owned command in ``commands``."""
+    result = settings
+    for command in dict.fromkeys(commands):
+        result = claude_uninstall(result, command)
     return result
 
 
@@ -552,6 +700,18 @@ def _claude_is_installed(settings: dict[str, Any], command: str) -> bool:
         if isinstance(groups, list) and any(_group_is_ours(g, command) for g in groups):
             return True
     return False
+
+
+def _claude_is_fully_installed(settings: dict[str, Any], command: str) -> bool:
+    """True only when every configured Claude event carries ``command``."""
+    hooks_obj = settings.get("hooks")
+    if not isinstance(hooks_obj, dict):
+        return False
+    return all(
+        isinstance(hooks_obj.get(event), list)
+        and any(_group_is_ours(group, command) for group in hooks_obj[event])
+        for event in CLAUDE_HOOK_EVENTS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -614,7 +774,12 @@ def _extract_notify_command(line: str) -> Optional[list[str]]:
     return None
 
 
-def codex_install(text: str, notify_value: Sequence[str]) -> tuple[str, str]:
+def codex_install(
+    text: str,
+    notify_value: Sequence[str],
+    *,
+    replace_values: Sequence[Sequence[str]] = (),
+) -> tuple[str, str]:
     """Merge our ``notify`` into Codex config ``text``.
 
     Returns ``(new_text, status)`` where ``status`` is one of:
@@ -622,6 +787,8 @@ def codex_install(text: str, notify_value: Sequence[str]) -> tuple[str, str]:
     - ``"added"`` — no ``notify`` existed; we added ours.
     - ``"present"`` — ``notify`` already points at our handler (idempotent
       no-op).
+    - ``"migrated"`` — an explicitly listed old PocketShell value was
+      replaced.
     - ``"skipped"`` — ``notify`` is set to *something else*; we warn and
       leave it alone (never clobber the user's program).
 
@@ -641,6 +808,8 @@ def codex_install(text: str, notify_value: Sequence[str]) -> tuple[str, str]:
     existing = _extract_notify_command(existing_line)
     if existing == list(notify_value):
         return text, "present"
+    if any(existing == list(old_value) for old_value in replace_values):
+        return text[:start] + notify_line + text[end:], "migrated"
     return text, "skipped"
 
 
@@ -680,30 +849,37 @@ class EngineResult:
 
 def _install_claude(paths: HooksPaths) -> EngineResult:
     command = _claude_command(paths)
+    legacy_command = _legacy_claude_command(paths)
     settings = _load_claude_settings(paths.claude_settings)
-    if _claude_is_installed(settings, command):
+    legacy_present = _claude_is_installed(settings, legacy_command) and legacy_command != command
+    if _claude_is_fully_installed(settings, command) and not legacy_present:
         return EngineResult("claude", "present", "hook already installed")
-    merged = claude_install(settings, command)
-    paths.claude_settings.parent.mkdir(parents=True, exist_ok=True)
-    paths.claude_settings.write_text(json.dumps(merged, indent=2) + "\n")
-    return EngineResult("claude", "installed", f"merged hook into {paths.claude_settings}")
+    cleaned = _claude_uninstall_commands(settings, [legacy_command])
+    merged = claude_install(cleaned, command)
+    _atomic_write_text(paths.claude_settings, json.dumps(merged, indent=2) + "\n")
+    status = "migrated" if legacy_present else "installed"
+    return EngineResult("claude", status, f"merged hook into {paths.claude_settings}")
 
 
 def _uninstall_claude(paths: HooksPaths) -> EngineResult:
-    command = _claude_command(paths)
+    commands = [_claude_command(paths), _legacy_claude_command(paths)]
     if not paths.claude_settings.exists():
         return EngineResult("claude", "absent", "no settings file")
     settings = _load_claude_settings(paths.claude_settings)
-    if not _claude_is_installed(settings, command):
+    if not any(_claude_is_installed(settings, command) for command in commands):
         return EngineResult("claude", "absent", "hook not present")
-    cleaned = claude_uninstall(settings, command)
-    paths.claude_settings.write_text(json.dumps(cleaned, indent=2) + "\n")
+    cleaned = _claude_uninstall_commands(settings, commands)
+    _atomic_write_text(paths.claude_settings, json.dumps(cleaned, indent=2) + "\n")
     return EngineResult("claude", "removed", f"removed hook from {paths.claude_settings}")
 
 
 def _install_codex(paths: HooksPaths) -> EngineResult:
     text = paths.codex_config.read_text() if paths.codex_config.exists() else ""
-    new_text, status = codex_install(text, _codex_notify_value(paths))
+    new_text, status = codex_install(
+        text,
+        _codex_notify_value(paths),
+        replace_values=[_legacy_codex_notify_value(paths)],
+    )
     if status == "skipped":
         return EngineResult(
             "codex",
@@ -712,32 +888,37 @@ def _install_codex(paths: HooksPaths) -> EngineResult:
         )
     if status == "present":
         return EngineResult("codex", "present", "notify already installed")
-    paths.codex_config.parent.mkdir(parents=True, exist_ok=True)
-    paths.codex_config.write_text(new_text)
-    return EngineResult("codex", "installed", f"set notify in {paths.codex_config}")
+    _atomic_write_text(paths.codex_config, new_text)
+    result_status = "migrated" if status == "migrated" else "installed"
+    return EngineResult("codex", result_status, f"set notify in {paths.codex_config}")
 
 
 def _uninstall_codex(paths: HooksPaths) -> EngineResult:
     if not paths.codex_config.exists():
         return EngineResult("codex", "absent", "no config file")
     text = paths.codex_config.read_text()
-    new_text, status = codex_uninstall(text, _codex_notify_value(paths))
-    if status == "absent":
+    values = [_codex_notify_value(paths), _legacy_codex_notify_value(paths)]
+    span = _find_top_level_notify(text)
+    if span is None:
         return EngineResult("codex", "absent", "no notify entry")
-    if status == "skipped":
+    existing = _extract_notify_command(text[span[0]:span[1]])
+    owned = next((value for value in values if existing == value), None)
+    if owned is None:
         return EngineResult("codex", "skipped", "notify points elsewhere; left untouched")
-    paths.codex_config.write_text(new_text)
+    new_text, _ = codex_uninstall(text, owned)
+    _atomic_write_text(paths.codex_config, new_text)
     return EngineResult("codex", "removed", f"removed notify from {paths.codex_config}")
 
 
 def _install_opencode(paths: HooksPaths) -> EngineResult:
     paths.opencode_plugin_dir.mkdir(parents=True, exist_ok=True)
+    source = _opencode_plugin_source(paths)
     if paths.opencode_plugin.exists():
         # Rewrite to keep the source current; idempotent for status.
         existing = paths.opencode_plugin.read_text()
-        if existing == _OPENCODE_PLUGIN_SOURCE:
+        if existing == source:
             return EngineResult("opencode", "present", "plugin already installed")
-    paths.opencode_plugin.write_text(_OPENCODE_PLUGIN_SOURCE)
+    _atomic_write_text(paths.opencode_plugin, source)
     return EngineResult("opencode", "installed", f"wrote plugin {paths.opencode_plugin}")
 
 
@@ -763,17 +944,18 @@ _UNINSTALLERS = {
 
 def install_engines(engines: Sequence[str], paths: HooksPaths) -> list[EngineResult]:
     """Install hooks for ``engines`` and return one result per engine."""
-    _write_handlers(paths)
-    return [_INSTALLERS[engine](paths) for engine in engines]
+    _write_handlers(paths, engines)
+    results = [_INSTALLERS[engine](paths) for engine in engines]
+    _cleanup_migrated_legacy_artifacts(paths, results)
+    return results
 
 
 def uninstall_engines(engines: Sequence[str], paths: HooksPaths) -> list[EngineResult]:
     """Uninstall hooks for ``engines`` and return one result per engine.
 
-    When *all* engines are uninstalled and the hooks dir holds nothing
-    but our generated handlers + an (optionally empty) bus, the handler
-    scripts are removed. The bus file is preserved so already-emitted
-    events stay readable.
+    Generated executable/metadata files are removed from durable data once no
+    PocketShell engine config references them. The volatile bus is preserved so
+    already-emitted events stay readable.
     """
     results = [_UNINSTALLERS[engine](paths) for engine in engines]
     _maybe_cleanup_handlers(set(engines), paths)
@@ -781,11 +963,77 @@ def uninstall_engines(engines: Sequence[str], paths: HooksPaths) -> list[EngineR
 
 
 def _maybe_cleanup_handlers(engines: set[str], paths: HooksPaths) -> None:
-    """Remove generated handler scripts for fully-uninstalled engines."""
+    """Remove current + legacy generated artifacts, never the event bus."""
     if "claude" in engines and paths.claude_handler.exists():
         paths.claude_handler.unlink()
+    if (
+        "claude" in engines
+        and paths.legacy_claude_handler != paths.claude_handler
+        and paths.legacy_claude_handler.exists()
+    ):
+        paths.legacy_claude_handler.unlink()
     if "codex" in engines and paths.codex_handler.exists():
         paths.codex_handler.unlink()
+    if (
+        "codex" in engines
+        and paths.legacy_codex_handler != paths.codex_handler
+        and paths.legacy_codex_handler.exists()
+    ):
+        paths.legacy_codex_handler.unlink()
+    if not _any_current_install_reference(paths) and paths.install_marker.exists():
+        paths.install_marker.unlink()
+    if not _any_legacy_install_reference(paths) and paths.legacy_install_marker.exists():
+        paths.legacy_install_marker.unlink()
+
+
+def _cleanup_migrated_legacy_artifacts(
+    paths: HooksPaths,
+    results: Sequence[EngineResult],
+) -> None:
+    """Delete obsolete executables only after their config migration landed."""
+    migrated = {result.engine for result in results if result.status == "migrated"}
+    if "claude" in migrated and paths.legacy_claude_handler.exists():
+        if paths.legacy_claude_handler != paths.claude_handler:
+            paths.legacy_claude_handler.unlink()
+    if "codex" in migrated and paths.legacy_codex_handler.exists():
+        if paths.legacy_codex_handler != paths.codex_handler:
+            paths.legacy_codex_handler.unlink()
+    if not _any_legacy_install_reference(paths) and paths.legacy_install_marker.exists():
+        if paths.legacy_install_marker != paths.install_marker:
+            paths.legacy_install_marker.unlink()
+
+
+def _codex_configured_value(paths: HooksPaths) -> Optional[list[str]]:
+    if not paths.codex_config.exists():
+        return None
+    text = paths.codex_config.read_text()
+    span = _find_top_level_notify(text)
+    if span is None:
+        return None
+    return _extract_notify_command(text[span[0]:span[1]])
+
+
+def _any_current_install_reference(paths: HooksPaths) -> bool:
+    try:
+        settings = _load_claude_settings(paths.claude_settings)
+    except (ValueError, json.JSONDecodeError):
+        settings = {}
+    return (
+        _claude_is_installed(settings, _claude_command(paths))
+        or _codex_configured_value(paths) == _codex_notify_value(paths)
+        or paths.opencode_plugin.exists()
+    )
+
+
+def _any_legacy_install_reference(paths: HooksPaths) -> bool:
+    try:
+        settings = _load_claude_settings(paths.claude_settings)
+    except (ValueError, json.JSONDecodeError):
+        settings = {}
+    return (
+        _claude_is_installed(settings, _legacy_claude_command(paths))
+        or _codex_configured_value(paths) == _legacy_codex_notify_value(paths)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -797,37 +1045,47 @@ def engine_status(engine: str, paths: HooksPaths) -> dict[str, Any]:
     """Return a status dict for one ``engine``."""
     if engine == "claude":
         command = _claude_command(paths)
+        legacy_command = _legacy_claude_command(paths)
         try:
             settings = _load_claude_settings(paths.claude_settings)
         except ValueError:
             settings = {}
+        current_configured = _claude_is_fully_installed(settings, command)
+        legacy_configured = _claude_is_fully_installed(settings, legacy_command)
+        legacy = legacy_configured and not current_configured
+        handler = paths.legacy_claude_handler if legacy else paths.claude_handler
         return {
             "engine": "claude",
-            "installed": _claude_is_installed(settings, command),
+            "installed": (current_configured or legacy_configured) and handler.exists(),
+            "configured": current_configured or legacy_configured,
+            "legacy": legacy,
             "config_path": str(paths.claude_settings),
             "config_exists": paths.claude_settings.exists(),
-            "handler_path": str(paths.claude_handler),
-            "handler_exists": paths.claude_handler.exists(),
+            "handler_path": str(handler),
+            "handler_exists": handler.exists(),
         }
     if engine == "codex":
-        installed = False
-        if paths.codex_config.exists():
-            span = _find_top_level_notify(paths.codex_config.read_text())
-            if span is not None:
-                line = paths.codex_config.read_text()[span[0]:span[1]]
-                installed = _extract_notify_command(line) == _codex_notify_value(paths)
+        configured_value = _codex_configured_value(paths)
+        current_configured = configured_value == _codex_notify_value(paths)
+        legacy_configured = configured_value == _legacy_codex_notify_value(paths)
+        legacy = legacy_configured and not current_configured
+        handler = paths.legacy_codex_handler if legacy else paths.codex_handler
         return {
             "engine": "codex",
-            "installed": installed,
+            "installed": (current_configured or legacy_configured) and handler.exists(),
+            "configured": current_configured or legacy_configured,
+            "legacy": legacy,
             "config_path": str(paths.codex_config),
             "config_exists": paths.codex_config.exists(),
-            "handler_path": str(paths.codex_handler),
-            "handler_exists": paths.codex_handler.exists(),
+            "handler_path": str(handler),
+            "handler_exists": handler.exists(),
         }
     # opencode
     return {
         "engine": "opencode",
         "installed": paths.opencode_plugin.exists(),
+        "configured": paths.opencode_plugin.exists(),
+        "legacy": False,
         "config_path": str(paths.opencode_plugin),
         "config_exists": paths.opencode_plugin.exists(),
         "handler_path": str(paths.opencode_plugin),

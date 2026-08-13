@@ -337,7 +337,7 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("hooks install must merge non-destructively into the existing Claude config") {
             "/bin/sh -lc 'grep -q claude_stop.py ~/.claude/settings.json && " +
                 "grep -q my-preexisting-stop-hook ~/.claude/settings.json && " +
-                "test -f ~/.cache/pocketshell/hooks/.installed'"
+                "test -f ~/.local/share/pocketshell/hooks/.installed'"
         }
     } }
 
@@ -713,11 +713,11 @@ class HostBootstrapScenarioSuiteTest {
                 label = "notifications",
                 port = 2241,
                 resetCommand = { targetAppVersion ->
-                    "mkdir -p ~/.claude ~/.cache/pocketshell/hooks; " +
+                    "mkdir -p ~/.claude ~/.local/share/pocketshell/hooks; " +
                         "printf '%s' " +
                         shellQuote(PREEXISTING_CLAUDE_SETTINGS) +
                         " > ~/.claude/settings.json; " +
-                        "rm -f ~/.cache/pocketshell/hooks/.installed; " +
+                        "rm -f ~/.local/share/pocketshell/hooks/.installed; " +
                         "touch ~/.pocketshell-fixture-hooks-enabled; " +
                         versionReset(targetAppVersion) +
                         "printf 'active enabled\\n' > $STATE_FILE"

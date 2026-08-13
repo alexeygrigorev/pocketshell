@@ -47,6 +47,26 @@ def make_paths(tmp_path: Path) -> LogsPaths:
     return resolve_paths(home=tmp_path, env={})
 
 
+def test_hooks_bus_resolution_matches_xdg_cache_contract(tmp_path: Path) -> None:
+    xdg_cache = tmp_path / "cache"
+    paths = resolve_paths(
+        home=tmp_path,
+        env={
+            "XDG_CACHE_HOME": str(xdg_cache),
+            # Historical handler alias must not relocate the volatile bus.
+            "POCKETSHELL_HOOKS_DIR": str(tmp_path / "durable-handlers"),
+        },
+    )
+    assert paths.hooks_events_file == xdg_cache / "pocketshell" / "hooks" / "events.jsonl"
+
+    explicit = tmp_path / "bus" / "events.jsonl"
+    overridden = resolve_paths(
+        home=tmp_path,
+        env={"POCKETSHELL_HOOKS_EVENTS_FILE": str(explicit)},
+    )
+    assert overridden.hooks_events_file == explicit
+
+
 def read_agent_bytes(paths: LogsPaths) -> bytes:
     """Concatenate raw bytes of every agent-* file (for secret scans)."""
     return b"".join(p.read_bytes() for p in paths.files_for_family("agent"))

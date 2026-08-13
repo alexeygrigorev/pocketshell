@@ -157,10 +157,14 @@ def resolve_paths(
     1. ``$XDG_STATE_HOME/pocketshell/logs`` when ``$XDG_STATE_HOME`` is set.
     2. ``<home>/.local/state/pocketshell/logs``.
 
-    The hooks bus path mirrors :func:`pocketshell.hooks.resolve_paths`:
+    The volatile hooks bus path mirrors :func:`pocketshell.hooks.resolve_paths`:
 
-    1. ``$POCKETSHELL_HOOKS_DIR/events.jsonl`` when set.
-    2. ``<home>/.cache/pocketshell/hooks/events.jsonl``.
+    1. ``$POCKETSHELL_HOOKS_EVENTS_FILE`` when set.
+    2. ``$XDG_CACHE_HOME/pocketshell/hooks/events.jsonl`` when set.
+    3. ``<home>/.cache/pocketshell/hooks/events.jsonl``.
+
+    ``$POCKETSHELL_HOOKS_DIR`` is now only the historical handler-directory
+    alias; it deliberately does not relocate this cache bus.
     """
     env_map = env if env is not None else os.environ
     base_home = home if home is not None else Path(os.path.expanduser("~"))
@@ -172,12 +176,17 @@ def resolve_paths(
         state_root = base_home / ".local" / "state"
     logs_dir = state_root / "pocketshell" / "logs"
 
-    hooks_env = env_map.get("POCKETSHELL_HOOKS_DIR")
-    if hooks_env:
-        hooks_dir = Path(os.path.expanduser(hooks_env))
+    hooks_events_env = env_map.get("POCKETSHELL_HOOKS_EVENTS_FILE")
+    if hooks_events_env:
+        hooks_events_file = Path(os.path.expanduser(hooks_events_env))
     else:
-        hooks_dir = base_home / ".cache" / "pocketshell" / "hooks"
-    hooks_events_file = hooks_dir / "events.jsonl"
+        cache_root_env = env_map.get("XDG_CACHE_HOME")
+        cache_root = (
+            Path(os.path.expanduser(cache_root_env))
+            if cache_root_env
+            else base_home / ".cache"
+        )
+        hooks_events_file = cache_root / "pocketshell" / "hooks" / "events.jsonl"
 
     return LogsPaths(logs_dir=logs_dir, hooks_events_file=hooks_events_file)
 

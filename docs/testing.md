@@ -987,6 +987,56 @@ scripts/check-file-size-hygiene.sh
 scripts/check-file-size-hygiene.sh --update   # only after files shrink
 ```
 
+### Detached local full-JVM gate (issue #1956)
+
+The canonical forced local gate normally takes longer than a bounded agent or
+remote shell caller is guaranteed to stay alive. Launch it through the detached
+entrypoint when the verdict must outlive that caller:
+
+```bash
+scripts/full-jvm-gate-detached.py start --run-id issue-1956-review
+scripts/full-jvm-gate-detached.py status --run-id issue-1956-review
+scripts/full-jvm-gate-detached.py tail --run-id issue-1956-review --follow
+```
+
+`start` returns after a transient user service is observed running. That service
+invokes the unchanged `scripts/full-jvm-gate.py` entrypoint; the canonical gate
+still owns its immutable Gradle command, authenticated profile, cgroup, and
+output-tree lock. The detached layer does not reproduce or override any of that
+logic.
+
+Each run writes combined stdout/stderr plus atomic `metadata.json` and
+`result.json` files under
+`$XDG_STATE_HOME/pocketshell/full-jvm-gate/<checkout-key>/<run-id>/` (or
+`~/.local/state/...` when `XDG_STATE_HOME` is unset). The status output reports
+the launch/end times, checkout SHA, real exit code, service and scope identities,
+and whether either exact unit remains. A non-zero canonical verdict is `FAIL`;
+a signal exit or a vanished observed service with no durable result is
+`INTERRUPTED`, so caller termination cannot be mistaken for a test failure.
+Successful `systemctl show` output must positively establish each exact unit as
+inactive (including an explicit post-result `LoadState=not-found`). Inspection,
+control, empty-output, and malformed-output failures are reported nonzero and
+can never certify `PASS`, `orphan_units=none`, or completed cleanup. Service
+inspection additionally requires a numeric `MainPID`; scope units use their
+real systemd schema (`LoadState`, `ActiveState`, and `SubState`) because
+`MainPID` is not a scope property.
+
+To interrupt a run deliberately:
+
+```bash
+scripts/full-jvm-gate-detached.py stop --run-id issue-1956-review
+```
+
+`stop` targets only the service and scope identities recorded for that run. It
+never scans for Gradle/Kotlin processes or cleans another checkout's runner.
+The lifecycle guard is JVM-free, runs per push, and carries live mutations for
+canonical delegation, verdict classification, fail-closed inspection, and the
+service/scope property boundary:
+
+```bash
+scripts/test-full-jvm-gate-detached.sh
+```
+
 ### Free-disk preflight and safe-list cleanup (issue #1989)
 
 **An ENOSPC failure is indistinguishable from a real gate failure until someone

@@ -29,11 +29,15 @@ fail() {
   exit 1
 }
 
+CASE_COUNT=0
+
 with_tmpdir() {
   local tmpdir
   tmpdir="$(mktemp -d)"
   "$@" "$tmpdir"
   rm -rf "$tmpdir"
+  CASE_COUNT=$((CASE_COUNT + 1))
+  printf '  ok: %s\n' "$1"
 }
 
 child_processes_do_not_hold_lock() {
@@ -123,4 +127,8 @@ with_tmpdir nested_gates_do_not_reacquire_or_release
 with_tmpdir help_mode_does_not_wait_for_lock
 with_tmpdir phone_walkthrough_late_help_releases_lock
 
-printf 'PASS: avd-lock helper\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASE_COUNT == 4 )) || fail "expected 4 cases to run, saw $CASE_COUNT"
+printf 'PASS: avd-lock helper (%s cases)\n' "$CASE_COUNT"

@@ -40,19 +40,25 @@ class NavigationChevronTest {
             .assertHeightIsEqualTo(NavigationChevronDefaultSize)
     }
 
+    /**
+     * Issue #2113 trimmed this test. It used to also assert that the test's OWN
+     * `Box(Modifier.size(48.dp))` measures 48dp — the test's constant compared with
+     * itself, which no production change can redden: making the chevron ignore its
+     * declared size (`Canvas(modifier.size(size * 2))`) failed this method at the
+     * `nav-chevron` assertion below, i.e. the two touch-target lines had already
+     * passed. The 48dp wrapper stays because it is the SCENARIO (a row's touch
+     * target); only the assertions that read it back are gone.
+     */
     @Test
     fun callerCanWrapInRowTouchTargetWithoutChangingIconSize() {
         composeRule.setContent {
             PocketShellTheme {
-                Box(modifier = Modifier.size(48.dp).testTag("touch-target")) {
+                Box(modifier = Modifier.size(48.dp)) {
                     NavigationChevron(modifier = Modifier.testTag("nav-chevron"))
                 }
             }
         }
 
-        composeRule.onNodeWithTag("touch-target")
-            .assertWidthIsEqualTo(48.dp)
-            .assertHeightIsEqualTo(48.dp)
         composeRule.onNodeWithTag("nav-chevron")
             .assertWidthIsEqualTo(NavigationChevronDefaultSize)
             .assertHeightIsEqualTo(NavigationChevronDefaultSize)

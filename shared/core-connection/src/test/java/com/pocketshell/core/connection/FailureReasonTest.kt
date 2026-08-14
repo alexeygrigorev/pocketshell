@@ -86,7 +86,15 @@ class FailureReasonTest {
         assertFalse(FailureReason.ServerRestarted.retryable)
         assertFalse(FailureReason.SessionEnded.retryable)
         assertFalse(FailureReason.KeyMissing.retryable)
-        assertFalse(FailureReason.Unreachable(retryable = false).retryable)
-        assertTrue(FailureReason.Unreachable(retryable = true).retryable)
+        // Issue #2113: the two `FailureReason.Unreachable(retryable = X).retryable`
+        // lines that used to sit here are DELETED. On an `Unreachable`-typed
+        // receiver Kotlin resolves the constructor MEMBER property, not the
+        // `FailureReason.retryable` extension under test — so they read the
+        // argument the test itself passed straight back and no production change
+        // could redden them (proven: rewriting the extension's Unreachable branch
+        // to a constant `false` reddened `closedTransportClassifiesToRetryableUnreachable`
+        // — which calls `.retryable` on a `FailureReason`-typed value — while this
+        // test stayed green). The extension's Unreachable behaviour is covered by
+        // that test and by `nullCauseIsRetryableUnreachable`.
     }
 }

@@ -8,6 +8,12 @@ fail() {
   exit 1
 }
 
+CASES=0
+pass_case() {
+  CASES=$((CASES + 1))
+  printf '  ok: %s\n' "$1"
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -248,64 +254,90 @@ expect_long_running_failure() {
 
 run_long_running_with_mode "delayed_success" ||
   fail "delayed detached polling did not recover final success"
+pass_case "delayed detached polling did not recover final success"
 attempts="$(cat "$tmpdir/delayed_success/adb-state")"
 [[ "$attempts" == "1" ]] ||
   fail "expected delayed success to complete in one run, got $attempts runs"
+pass_case "expected delayed success to complete in one run, got $attempts runs"
 polls="$(cat "$tmpdir/delayed_success/device-log-polls")"
 [[ "$polls" -ge 3 ]] ||
   fail "expected delayed success to require at least three log polls, got $polls"
+pass_case "expected delayed success to require at least three log polls, got $polls"
 grep -q 'LONG_RUNNING_HEARTBEAT elapsed_ms=15000' "$tmpdir/delayed_success/instrumentation.log" ||
   fail "delayed success did not stream heartbeat output"
+pass_case "delayed success did not stream heartbeat output"
 grep -q 'INSTRUMENTATION_CODE: -1' "$tmpdir/delayed_success/instrumentation.log" ||
   fail "delayed success canonical log did not contain final success"
+pass_case "delayed success canonical log did not contain final success"
 
 run_long_running_with_mode "transport_then_success" ||
   fail "transport-only interruption did not recover"
+pass_case "transport-only interruption did not recover"
 
 attempts="$(cat "$tmpdir/transport_then_success/adb-state")"
 [[ "$attempts" == "2" ]] ||
   fail "expected success on second instrumentation run, got $attempts runs"
+pass_case "expected success on second instrumentation run, got $attempts runs"
 grep -q '^instrumentation_attempts=2$' "$tmpdir/transport_then_success/instrumentation-status.txt" ||
   fail "status file did not record two instrumentation attempts"
+pass_case "status file did not record two instrumentation attempts"
 grep -q 'INSTRUMENTATION_CODE: -1' "$tmpdir/transport_then_success/instrumentation.log" ||
   fail "canonical instrumentation log did not contain final success"
+pass_case "canonical instrumentation log did not contain final success"
 [[ -s "$tmpdir/transport_then_success/instrumentation-attempt-1.log" ]] ||
   fail "first attempt instrumentation log was not preserved"
+pass_case "first attempt instrumentation log was not preserved"
 [[ -s "$tmpdir/transport_then_success/logcat-attempt-1.txt" ]] ||
   fail "first attempt logcat was not preserved"
+pass_case "first attempt logcat was not preserved"
 
 if run_long_running_with_mode "assertion_failure"; then
   fail "instrumentation assertion failure was treated as retryable"
 fi
+pass_case "instrumentation assertion failure was treated as retryable"
 
 attempts="$(cat "$tmpdir/assertion_failure/adb-state")"
 [[ "$attempts" == "1" ]] ||
   fail "expected assertion failure to stop after one run, got $attempts runs"
+pass_case "expected assertion failure to stop after one run, got $attempts runs"
 grep -q '^instrumentation_attempts=1$' "$tmpdir/assertion_failure/instrumentation-status.txt" ||
   fail "status file did not record immediate assertion failure"
+pass_case "status file did not record immediate assertion failure"
 
 expect_long_running_failure "timeout" "124"
 grep -q 'detached instrumentation timed out' "$tmpdir/timeout/instrumentation-attempt-1.log" ||
   fail "timeout path did not record a specific timeout diagnostic"
+pass_case "timeout path did not record a specific timeout diagnostic"
 grep -q '^instrumentation_exit_code=124$' "$tmpdir/timeout/instrumentation-status.txt" ||
   fail "timeout status file did not preserve exit 124"
+pass_case "timeout status file did not preserve exit 124"
 
 expect_long_running_failure "missing_status" "1"
 grep -q 'result status was missing, empty, or corrupt' "$tmpdir/missing_status/instrumentation-attempt-1.log" ||
   fail "missing status path did not record the specific status diagnostic"
+pass_case "missing status path did not record the specific status diagnostic"
 grep -q 'device_status_path=/data/local/tmp/pocketshell-long-running-' "$tmpdir/missing_status/instrumentation-attempt-1.log" ||
   fail "missing status diagnostic did not name the device status path"
+pass_case "missing status diagnostic did not name the device status path"
 grep -q 'final_instrumentation_log_tail:' "$tmpdir/missing_status/instrumentation-attempt-1.log" ||
   fail "missing status diagnostic did not preserve final log tail"
+pass_case "missing status diagnostic did not preserve final log tail"
 
 expect_long_running_failure "corrupt_status" "1"
 grep -q 'status_contents=not-a-number' "$tmpdir/corrupt_status/instrumentation-attempt-1.log" ||
   fail "corrupt status diagnostic did not preserve corrupt status contents"
+pass_case "corrupt status diagnostic did not preserve corrupt status contents"
 
 expect_long_running_failure "generic_nonzero" "42"
 grep -q '^instrumentation_exit_code=42$' "$tmpdir/generic_nonzero/instrumentation-status.txt" ||
   fail "generic nonzero status was not preserved"
+pass_case "generic nonzero status was not preserved"
 grep -q 'generic nonzero fixture finished' "$tmpdir/generic_nonzero/instrumentation.log" ||
   fail "generic nonzero final log was not preserved"
+pass_case "generic nonzero final log was not preserved"
 
-printf 'PASS: long-running release gate retry helper\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASES == 22 )) || fail "expected 22 cases to run, saw $CASES"
+printf 'PASS: long-running release gate retry helper (%s cases)\n' "$CASES"

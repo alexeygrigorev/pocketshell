@@ -1,7 +1,6 @@
 package com.pocketshell.core.voice
 
 import android.media.AudioRecord
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -58,21 +57,11 @@ class AudioRecorderExceptionTest {
         )
     }
 
-    @Test
-    fun exception_hierarchy_is_sealed_on_audio_recorder_exception() {
-        // Compile-time guarantee that the variants compose under the sealed
-        // type — if anyone added a new public variant outside the file this
-        // test will still pass, but a removed variant would break us.
-        val variants: List<AudioRecorderException> = listOf(
-            AudioRecorderException.PermissionDenied("p"),
-            AudioRecorderException.NoDevice("n"),
-            AudioRecorderException.Underrun("u"),
-            AudioRecorderException.Initialization("i"),
-            AudioRecorderException.Other("o"),
-        )
-        assertEquals(
-            listOf("PermissionDenied", "NoDevice", "Underrun", "Initialization", "Other"),
-            variants.map { it.javaClass.simpleName },
-        )
-    }
+    // Issue #2113: the former `exception_hierarchy_is_sealed_on_audio_recorder_exception`
+    // is DELETED. It constructed all five variants and asserted their
+    // `javaClass.simpleName`s equalled a hardcoded list — a tautology the compiler
+    // already enforces (renaming or removing a variant is a compile error in this
+    // same file). Proven vacuous: swapping the DEAD_OBJECT/BAD_VALUE mappings in
+    // [mapAudioReadErrorCode] reddens `dead_object_maps_to_no_device` and
+    // `bad_value_maps_to_initialization` above while that test stayed green.
 }

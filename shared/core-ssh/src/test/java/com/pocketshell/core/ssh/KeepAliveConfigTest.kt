@@ -1,7 +1,6 @@
 package com.pocketshell.core.ssh
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Test
 
 /**
@@ -76,22 +75,18 @@ class KeepAliveConfigTest {
         }
     }
 
-    @Test
-    fun `no live sshj-KeepAliveRunner thread exists after building the client`() {
-        // The corruption-source is a LIVE `sshj-KeepAliveRunner-*` thread.
-        // Building the client must not bring one to life (the old #548 config
-        // set the provider so the thread type was a KeepAliveRunner; the #847
-        // removal means no keepalive thread runs at all).
-        val client = SshConnection.createClient()
-        client.use {
-            val keepAliveThreadAlive = Thread.getAllStackTraces().keys.any { t ->
-                t.isAlive && t.name.contains("KeepAlive")
-            }
-            assertFalse(
-                "no sshj-KeepAliveRunner background writer thread should be live " +
-                    "after building the client (#847)",
-                keepAliveThreadAlive,
-            )
-        }
-    }
+    // Issue #2113: the former `no live sshj-KeepAliveRunner thread exists after
+    // building the client` is DELETED. sshj only `start()`s the runner from
+    // `SSHClient.onConnect()`, and only when `keepAliveInterval > 0` — which the
+    // first test above already pins to 0 on the same `createClient()`. So no
+    // build-time mutation could redden it alone (arming the interval inside
+    // `createClient()` reddens test 1 while it stayed green), and the mutation
+    // that DOES bring the #847 corrupting writer back — `KeepAliveProvider.KEEP_ALIVE`
+    // plus arming the interval inside `RealSshConnector.connect()` — left ALL of
+    // this class green because nothing here ever connects. That case is covered
+    // where it belongs, against a real transport, by
+    // `SshIntegrationTest.noKeepAliveBackgroundWriterThreadAfterConnect` (verified
+    // RED under exactly that mutation). The deleted test also scanned
+    // `Thread.getAllStackTraces()` JVM-wide, so a sibling class's thread in a
+    // shared Gradle fork could false-positive it.
 }

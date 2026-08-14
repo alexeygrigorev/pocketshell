@@ -8,6 +8,12 @@ fail() {
   exit 1
 }
 
+CASES=0
+pass_case() {
+  CASES=$((CASES + 1))
+  printf '  ok: %s\n' "$1"
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -125,37 +131,55 @@ run_readiness_script() {
 
 run_readiness_script managed ||
   fail "managed readiness did not start the fake emulator and pass"
+pass_case "managed readiness did not start the fake emulator and pass"
 [[ -f "$tmpdir/emulator-started" ]] ||
   fail "managed readiness did not invoke the emulator"
+pass_case "managed readiness did not invoke the emulator"
 grep -q 'Emulator readiness confirmed' "$tmpdir/managed/stdout.log" ||
   fail "managed readiness did not report readiness"
+pass_case "managed readiness did not report readiness"
 grep -q 'fake emulator invoked' "$tmpdir/managed/emulator-readiness-managed-emulator.log" ||
   fail "managed emulator log did not capture the emulator invocation"
+pass_case "managed emulator log did not capture the emulator invocation"
 
 run_readiness_script self-match-managed ||
   fail "managed readiness treated the generated shell command as an emulator process"
+pass_case "managed readiness treated the generated shell command as an emulator process"
 [[ -f "$tmpdir/emulator-started" ]] ||
   fail "managed readiness self-match case did not invoke the emulator"
+pass_case "managed readiness self-match case did not invoke the emulator"
 grep -q 'Emulator readiness confirmed' "$tmpdir/self-match-managed/stdout.log" ||
   fail "managed readiness self-match case did not report readiness"
+pass_case "managed readiness self-match case did not report readiness"
 
 if run_readiness_script diagnostic; then
   fail "diagnostic readiness passed without an adb device or emulator process"
 fi
+pass_case "diagnostic readiness passed without an adb device or emulator process"
 grep -q 'Infrastructure readiness failure: no ADB devices and no emulator process' "$tmpdir/diagnostic/stderr.log" ||
   fail "diagnostic readiness did not explain the missing emulator"
+pass_case "diagnostic readiness did not explain the missing emulator"
 grep -q '== adb devices ==' "$tmpdir/diagnostic/emulator-readiness-diagnostics.log" ||
   fail "diagnostic readiness did not write adb diagnostics"
+pass_case "diagnostic readiness did not write adb diagnostics"
 grep -q '== emulator processes ==' "$tmpdir/diagnostic/emulator-readiness-diagnostics.log" ||
   fail "diagnostic readiness did not write process diagnostics"
+pass_case "diagnostic readiness did not write process diagnostics"
 
 if run_readiness_script self-match-diagnostic; then
   fail "diagnostic readiness passed by treating the generated shell command as an emulator process"
 fi
+pass_case "diagnostic readiness passed by treating the generated shell command as an emulator process"
 grep -q 'Infrastructure readiness failure: no ADB devices and no emulator process' "$tmpdir/self-match-diagnostic/stderr.log" ||
   fail "diagnostic readiness self-match case did not explain the missing emulator"
+pass_case "diagnostic readiness self-match case did not explain the missing emulator"
 if grep -q 'emulator_process_pattern' "$tmpdir/self-match-diagnostic/emulator-readiness-diagnostics.log"; then
   fail "diagnostic readiness listed the generated shell command as an emulator process"
 fi
+pass_case "diagnostic readiness listed the generated shell command as an emulator process"
 
-printf 'PASS: pre-release emulator readiness helper\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASES == 14 )) || fail "expected 14 cases to run, saw $CASES"
+printf 'PASS: pre-release emulator readiness helper (%s cases)\n' "$CASES"

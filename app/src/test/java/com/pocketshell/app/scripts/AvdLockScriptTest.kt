@@ -43,19 +43,31 @@ class AvdLockScriptTest {
      */
     @Test
     fun avdLockIsSharedAcrossWorktreesAndStillLetsDistinctEmulatorsRunConcurrently() {
-        runShellHarness("tests/scripts/avd-lock-sharing-test.sh", timeoutSeconds = 180)
+        runShellHarness(
+            "tests/scripts/avd-lock-sharing-test.sh",
+            expectedPassLine = "PASS: avd-lock cross-worktree sharing (issue #1657) (6 cases)",
+            timeoutSeconds = 180,
+        )
     }
 
     /** Lock acquire/release ownership: no leak to children, nested gates, `--help` fast path. */
     @Test
     fun avdLockHelperOwnershipHarnessPasses() {
-        runShellHarness("tests/scripts/avd-lock-test.sh", timeoutSeconds = 120)
+        runShellHarness(
+            "tests/scripts/avd-lock-test.sh",
+            expectedPassLine = "PASS: avd-lock helper (4 cases)",
+            timeoutSeconds = 120,
+        )
     }
 
     /** #724 pool claim/release through the REAL `connected-test.sh --pool` wrapper. */
     @Test
     fun avdPoolClaimReleaseHarnessPasses() {
-        runShellHarness("tests/scripts/avd-pool-test.sh", timeoutSeconds = 180)
+        runShellHarness(
+            "tests/scripts/avd-pool-test.sh",
+            expectedPassLine = "PASS: avd-pool claim/release (4 cases)",
+            timeoutSeconds = 180,
+        )
     }
 
     /** Hosted emulator jobs pin a real device; the fake pool harness must ignore that caller state. */
@@ -63,6 +75,7 @@ class AvdLockScriptTest {
     fun avdPoolHarnessIgnoresCallerAndroidSerial() {
         runShellHarness(
             "tests/scripts/avd-pool-test.sh",
+            expectedPassLine = "PASS: avd-pool claim/release (4 cases)",
             timeoutSeconds = 180,
             environmentOverrides = mapOf("ANDROID_SERIAL" to "emulator-5554"),
         )
@@ -73,6 +86,7 @@ class AvdLockScriptTest {
     fun connectedTestPoolAndLegacyWrappersCannotMutateOneSerialConcurrently() {
         runShellHarness(
             "tests/scripts/connected-test-serial-ownership-test.sh",
+            expectedPassLine = "PASS: connected-test per-serial ownership (issue #1737) (17 cases)",
             timeoutSeconds = 180,
         )
     }
@@ -92,6 +106,9 @@ class AvdLockScriptTest {
                 start.await()
                 runShellHarness(
                     "tests/scripts/connected-test-serial-ownership-test.sh",
+                    // The four-case filter below, so the count pins THIS argument set.
+                    expectedPassLine =
+                        "PASS: connected-test per-serial ownership (issue #1737) (4 cases)",
                     timeoutSeconds = 120,
                     arguments = listOf(
                         "pool_then_legacy_serialises",
@@ -121,6 +138,7 @@ class AvdLockScriptTest {
 
     private fun runShellHarness(
         relativePath: String,
+        expectedPassLine: String,
         timeoutSeconds: Long,
         environmentOverrides: Map<String, String> = emptyMap(),
         arguments: List<String> = emptyList(),
@@ -166,6 +184,17 @@ class AvdLockScriptTest {
             val output = outputFile.takeIf { it.exists() }?.readText().orEmpty()
             assertTrue("harness timed out after ${timeoutSeconds}s: $relativePath\n$output", completed)
             assertEquals("harness failed: $relativePath\n$output", 0, process.exitValue())
+            // Issue #2113: `exit == 0` alone is the vacuous green process.md
+            // catalogues — an early `exit 0` after the first case reads exactly
+            // like a full pass. Each harness counts its cases and prints the
+            // total; asserting the exact count line is what makes this assertion
+            // about behaviour rather than about bash's exit status. Carried over
+            // from the sibling `DiskPreflightScriptTest`.
+            assertTrue(
+                "harness did not report its case count: $relativePath\n" +
+                    "expected line: $expectedPassLine\n$output",
+                output.contains(expectedPassLine),
+            )
             return output
         } finally {
             if (process.isAlive) {

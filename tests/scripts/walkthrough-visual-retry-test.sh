@@ -8,6 +8,12 @@ fail() {
   exit 1
 }
 
+CASES=0
+pass_case() {
+  CASES=$((CASES + 1))
+  printf '  ok: %s\n' "$1"
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -37,49 +43,58 @@ printf 'INSTRUMENTATION_STATUS: numtests=1\n' > "$classification_log"
 printf '05-30 10:00:00.000  123  456 I adbd    : host-123: read failed\n' > "$classification_logcat"
 visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat" ||
   fail "adb transport-drop exit 255 without failure markers was not retryable"
+pass_case "adb transport-drop exit 255 without failure markers was not retryable"
 
 printf 'INSTRUMENTATION_STATUS: numtests=1\nerror: closed\n' > "$classification_log"
 : > "$classification_logcat"
 visual_audit_should_retry_interrupted_instrumentation 1 "$classification_log" "$classification_logcat" ||
   fail "nonzero adb transport interruption from instrumentation output was not retryable"
+pass_case "nonzero adb transport interruption from instrumentation output was not retryable"
 
 printf 'INSTRUMENTATION_STATUS: numtests=1\n' > "$classification_log"
 printf '05-30 10:00:00.000  123  456 I system  : UiAutomation service owner died\n' > "$classification_logcat"
 visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat" ||
   fail "UiAutomation owner death was not retryable"
+pass_case "UiAutomation owner death was not retryable"
 
 printf 'java.lang.IllegalStateException: UiAutomation not connected\n' > "$classification_log"
 : > "$classification_logcat"
 visual_audit_should_retry_interrupted_instrumentation 1 "$classification_log" "$classification_logcat" ||
   fail "UiAutomation not connected instrumentation output was not retryable"
+pass_case "UiAutomation not connected instrumentation output was not retryable"
 
 printf 'FAILURES!!!\n' >> "$classification_log"
 if visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "instrumentation failure marker was treated as retryable"
 fi
+pass_case "instrumentation failure marker was treated as retryable"
 
 printf 'INSTRUMENTATION_RESULT: shortMsg=Process crashed.\n' > "$classification_log"
 if visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "instrumentation crash result marker was treated as retryable"
 fi
+pass_case "instrumentation crash result marker was treated as retryable"
 
 printf 'INSTRUMENTATION_STATUS: numtests=1\n' > "$classification_log"
 printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.app\n' > "$classification_logcat"
 if visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "app crash marker was treated as retryable"
 fi
+pass_case "app crash marker was treated as retryable"
 
 printf 'INSTRUMENTATION_CODE: -1\nOK (1 test)\n' > "$classification_log"
 printf '05-30 10:00:00.000  123  456 I adbd    : offline\n' > "$classification_logcat"
 if visual_audit_should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "successful instrumentation output was treated as retryable"
 fi
+pass_case "successful instrumentation output was treated as retryable"
 
 printf 'INSTRUMENTATION_STATUS: numtests=1\n' > "$classification_log"
 printf '05-30 10:00:00.000  123  456 I adbd    : host-123: read failed\n' > "$classification_logcat"
 if visual_audit_should_retry_interrupted_instrumentation 0 "$classification_log" "$classification_logcat"; then
   fail "zero status was treated as retryable"
 fi
+pass_case "zero status was treated as retryable"
 
 fake_adb="$tmpdir/adb"
 cat > "$fake_adb" <<'EOF'
@@ -128,12 +143,19 @@ mkdir -p "$RUN_DIR"
 
 run_instrumentation_class "strict-mode-instrumentation" "com.pocketshell.app.FakeVisualTest" ||
   fail "run_instrumentation_class did not retry a nonzero transport interruption"
+pass_case "run_instrumentation_class did not retry a nonzero transport interruption"
 
 attempts="$(cat "$FAKE_ADB_STATE")"
 [[ "$attempts" == "2" ]] ||
   fail "expected two instrumentation attempts after retry, got $attempts"
+pass_case "expected two instrumentation attempts after retry, got $attempts"
 
 grep -q 'INSTRUMENTATION_CODE: -1' "$RUN_DIR/strict-mode-instrumentation.log" ||
   fail "canonical instrumentation log did not contain final success"
+pass_case "canonical instrumentation log did not contain final success"
 
-printf 'PASS: walkthrough visual retry helper\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASES == 12 )) || fail "expected 12 cases to run, saw $CASES"
+printf 'PASS: walkthrough visual retry helper (%s cases)\n' "$CASES"

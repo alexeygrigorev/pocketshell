@@ -1133,6 +1133,11 @@ finalize_class_attempt_manifest() {
     printf 'cleanup_status=%s\n' "$cleanup_status"
     printf 'gradle_cleanup_exit_code=%s\n' "$LAST_RUN_CLASS_GRADLE_CLEANUP_RC"
     printf 'device_cleanup_exit_code=%s\n' "$LAST_RUN_CLASS_DEVICE_CLEANUP_RC"
+    # Issue #2143: the shared-fixture state OBSERVED for this attempt, so a
+    # future triage can tell a setup failure from an assertion failure straight
+    # from the attempt artifact instead of re-deriving it from the job log.
+    printf 'shared_fixture_health=%s\n' "${LAST_RUN_CLASS_FIXTURE_HEALTH:-not_run}"
+    printf 'shared_fixture_probe_ms=%s\n' "${LAST_RUN_CLASS_FIXTURE_PROBE_MS:-unknown}"
     printf 'status=%s\n' "$final_status"
     printf 'finished_at_utc=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   } >> "$manifest" || return 1
@@ -1226,6 +1231,8 @@ run_class() {
   LAST_RUN_CLASS_DEVICE_CLEANUP_RC="not_run"
   LAST_RUN_CLASS_OUTER_TIMEOUT_PHASE=""
   LAST_RUN_CLASS_ATTEMPT_FAILURE_PHASE=""
+  LAST_RUN_CLASS_FIXTURE_HEALTH="not_run"
+  LAST_RUN_CLASS_FIXTURE_PROBE_MS="unknown"
   if [[ -n "$app_id_suffix" ]]; then
     [[ "$app_id_suffix" =~ ^[A-Za-z0-9._]+$ ]] || {
       echo "JOURNEY_INVOCATION_IDENTITY_FAILED: invalid application id suffix '$app_id_suffix'" >&2
@@ -1296,6 +1303,18 @@ run_class() {
   record_build_phase_timeout_attempt "$fqcn"
   # Issue #1840: and name a build-level failure for what it is.
   record_build_phase_failure_attempt "$fqcn"
+  # Issue #2143: probe (and repair) the SHARED SSH/tmux fixture after EVERY
+  # attempt, pass or fail. After a FAIL it decides whether this was an assertion
+  # failure or the fixture being frozen underneath it, and it hands the retry a
+  # working fixture instead of the frozen one that made the retry meaningless on
+  # 23ed1b10. After a PASS it is a ~150ms probe that keeps the bring-up timing
+  # series continuous, so a degrading fixture is visible BEFORE it wedges — and
+  # so a class that wedges the fixture and still passes cannot hide.
+  if declare -F journey_fixture_health_gate >/dev/null 2>&1; then
+    journey_fixture_health_gate post_attempt "$fqcn"
+    LAST_RUN_CLASS_FIXTURE_HEALTH="$JOURNEY_FIXTURE_HEALTH_STATUS"
+    LAST_RUN_CLASS_FIXTURE_PROBE_MS="$JOURNEY_FIXTURE_HEALTH_PROBE_MS"
+  fi
   cleanup_status="not_required"
   if needs_gradle_cleanup_after_class_abort "$rc"; then
     cleanup_status="failed"

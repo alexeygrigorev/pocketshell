@@ -207,12 +207,14 @@ suspend fun execRemoteSetupUntilReady(
     isReady: (ExecResult) -> Boolean = { it.exitCode == 0 },
 ): ExecResult {
     var attempt = 0
-    var lastFailure = "remote setup never ran"
+    val failures = mutableListOf<String>()
     var lastResult: ExecResult? = null
+    val startedAt = SystemClock.elapsedRealtime()
     val satisfied = runCatching {
         withTimeout(timeoutMs) {
             while (true) {
                 attempt += 1
+                val attemptStart = SystemClock.elapsedRealtime()
                 val outcome = SshConnection.connect(
                     host = host,
                     port = port,
@@ -228,9 +230,28 @@ suspend fun execRemoteSetupUntilReady(
                     lastResult = result
                     return@withTimeout result
                 }
-                lastFailure = "attempt $attempt: " +
-                    (outcome.exceptionOrNull()?.toString()
-                        ?: "exit=${result?.exitCode} stdout='${result?.stdout}' stderr='${result?.stderr}'")
+                val cause = outcome.exceptionOrNull()
+                // Issue #2143 — DO NOT let the deadline erase the real reason.
+                //
+                // `SshConnection.connect` captures throwables into its Result, and the
+                // final in-flight attempt is cancelled by the `withTimeout` above, so its
+                // captured cause is the deadline's own `TimeoutCancellationException`.
+                // The previous code kept only the LAST failure, so every wedged-fixture
+                // report read `last failure after 3 attempts: attempt 3:
+                // TimeoutCancellationException: Timed out waiting for 90000 ms` — the
+                // deadline restating itself, with the actual cause (each attempt's exec
+                // making no read progress against a frozen tmux server) discarded. That
+                // is what made shard 0's cascade on `main` @ 23ed1b10 unreadable and
+                // sent triage looking for an app regression. Keep EVERY attempt, with its
+                // elapsed time, and label the cancellation artifact as what it is.
+                val label = if (cause is kotlinx.coroutines.CancellationException) {
+                    "cut by the ${timeoutMs}ms deadline while in flight (not itself the " +
+                        "cause — see the earlier attempts): $cause"
+                } else {
+                    cause?.toString()
+                        ?: "exit=${result?.exitCode} stdout='${result?.stdout}' stderr='${result?.stderr}'"
+                }
+                failures += "attempt $attempt (+${SystemClock.elapsedRealtime() - attemptStart}ms): $label"
                 result?.let { lastResult = it }
                 delay(pollIntervalMs)
             }
@@ -239,8 +260,14 @@ suspend fun execRemoteSetupUntilReady(
         }
     }.getOrNull()
     return satisfied ?: error(
-        "expected $description to become ready within ${timeoutMs}ms; " +
-            "last failure after $attempt attempts: $lastFailure",
+        "expected $description to become ready within ${timeoutMs}ms " +
+            "(gave up after ${SystemClock.elapsedRealtime() - startedAt}ms, $attempt attempts) " +
+            "against $host:$port. Every attempt: \n" +
+            (failures.takeIf { it.isNotEmpty() } ?: listOf("remote setup never ran"))
+                .joinToString("\n") +
+            "\nIf these are exec/no-progress timeouts while a plain SSH probe still " +
+            "succeeds, the SHARED tmux server on this fixture is wedged (issue #2143) — " +
+            "a setup failure of the fixture, not a failure of the code under test.",
     )
 }
 

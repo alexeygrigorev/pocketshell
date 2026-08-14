@@ -29,6 +29,15 @@ run_journey_classes_with_retry() {
   RECOVERED_CLASSES=()  # classes that failed first then PASSED on retry
   FAILED_CLASSES=()     # classes that failed BOTH attempts (real failures)
   PASSED_FIRST_TRY=()   # classes that passed on the first attempt
+  FIXTURE_WEDGED_CLASSES=()  # issue #2143: classes whose failure was observed while
+                             # the SHARED SSH/tmux fixture was not answering. That is
+                             # a SETUP failure of the fixture, not an assertion failure
+                             # of the code under test, and the two must not read alike
+                             # in the verdict — on 23ed1b10 three storm-test setup
+                             # timeouts and one ProfileChipRelaunch timeout were
+                             # reported as a "genuine test failure (app-code
+                             # regression)" on a commit whose whole diff was three
+                             # version strings.
   BUDGET_TIMEOUT_CLASSES=()  # issue #835: classes not run / cut short because the
                              # suite-level budget was exhausted (the #470 stall
                              # ate the time). A DISTINCT bucket from a real failure
@@ -49,7 +58,14 @@ run_journey_classes_with_retry() {
   # note): a failed warm build leaves the class loop exactly as it was.
   warm_journey_build
 
-  local fqcn class_start rc retry_start
+  # Issue #2143: one baseline probe of the shared SSH/tmux fixture BEFORE any
+  # class runs. It is the reference point for the per-attempt series that
+  # follows — without a known-good first row there is nothing to compare a later
+  # slow/absent probe against, which is why the previous occurrences had to be
+  # re-derived from scratch each time.
+  journey_fixture_health_gate preflight suite_start
+
+  local fqcn class_start rc retry_start class_wedged
   for fqcn in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
     # Issue #835: stop launching new classes once the suite-level budget is spent.
     # A #470 enumeration stall earlier in the run can eat the budget; rather than
@@ -68,9 +84,11 @@ run_journey_classes_with_retry() {
     echo ">>> JOURNEY CLASS: $fqcn (attempt 1) [budget remaining: $(budget_remaining)s]"
     echo "=========================================================="
     class_start=$SECONDS
+    class_wedged=0
 
     run_class "$fqcn"
     rc=$?
+    [[ "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "ok" || "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "skipped" ]] || class_wedged=1
     if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
       echo "JOURNEY_ISOLATION_FAILURE: $fqcn primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every retry/next class because isolation is unproven"
       FAILED_CLASSES+=("$fqcn")
@@ -108,6 +126,7 @@ run_journey_classes_with_retry() {
 
     run_class "$fqcn"
     rc=$?
+    [[ "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "ok" || "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "skipped" ]] || class_wedged=1
     if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
       echo "JOURNEY_ISOLATION_FAILURE: $fqcn retry primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every next class because isolation is unproven"
       FAILED_CLASSES+=("$fqcn")
@@ -133,6 +152,15 @@ run_journey_classes_with_retry() {
     else
       echo "JOURNEY_FAILED: $fqcn failed twice"
       FAILED_CLASSES+=("$fqcn")
+    fi
+
+    # Issue #2143: a class that failed while the SHARED fixture was not answering
+    # is recorded in a SECOND, additive bucket. It stays in FAILED_CLASSES — the
+    # job is still red, nothing is masked — but the verdict now says WHICH kind
+    # of failure it was, so the next occurrence is not read as an app regression.
+    if [[ $class_wedged -eq 1 ]]; then
+      echo "JOURNEY_FIXTURE_SETUP_FAILURE: $fqcn failed while the shared SSH/tmux fixture was ${LAST_RUN_CLASS_FIXTURE_HEALTH:-unknown} — classified as a fixture SETUP failure, not an assertion failure (issue #2143)"
+      FIXTURE_WEDGED_CLASSES+=("$fqcn")
     fi
   done
 }

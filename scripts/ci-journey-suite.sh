@@ -257,7 +257,22 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.portfwd.ForwardingNotificationObserverGenerationE2eTest"  # #2006 D33/G10: a real Docker-backed forward started inside EITHER side of the notification-generation close (before the close / before the torn-down observer is cleared, no injected follow-up start) must leave the ongoing notification describing host + forwarded port — never removed, never stranded on 'Connecting…' — with the tunnel still carrying bytes and Stop still tearing socket+notification down
   "$FQCN_PREFIX.SilentDropSyntheticSeamJourneyE2eTest"  # #792 #822 #823 #964 epic Slice D, /V7a + — D31 durable-fix gate
   "$FQCN_PREFIX.CleanOutageReattachResilienceE2eTest"  # #833 a CLEAN sustained outage (clean FIN/connection-refused for t…
-  "$FQCN_PREFIX.ReconnectStormLivelockE2eTest"  # #1652 #1610 #1539 #1632 #1633 the LIVELOCK proof: N>=5 consecutive passive-grace cycles on the real path with a stalled tail + healthy dial; no handshaken transport killed, the counter walks, the machine terminates. Also in the pre-release confidence gate (red blocks a tag).
+  # Issue #2143 — the three LIVELOCK-proof methods run as SEPARATE entries, and
+  # this is a fit-the-cap change, not cosmetics. As ONE class they cost 326s of
+  # the 420s per-class cap (measured on the green rerun of 31764246653 shard 0:
+  # 210s + 90s + 3s), i.e. 78% consumed with three multi-minute OBSERVATION
+  # windows still free to vary. On the red first attempt of that same run the
+  # 90s method ran past 188s and the cap fired MID-method — killing the process
+  # while it held the shared tmux server SIGSTOPped, which stranded the fixture
+  # and took down this class's own retry plus ProfileChipRelaunchDockerTest.
+  # Per entry the worst method is 210s = 50% of its own cap, so the variance
+  # that was fatal is now a non-event. Cost: two extra Gradle invocations
+  # (~25s each) against 2452s of remaining shard budget at that point.
+  # NOTE the coupling: these are the same per-method selectors the pre-release
+  # confidence gate already uses (scripts/pre-release-confidence-gate.sh:120).
+  "$FQCN_PREFIX.ReconnectStormLivelockE2eTest#slowTailOnAProvenLinkNeitherKillsHandshakenTransportsNorSpinsForever"  # #1652 #1610 #1539 #1632 #1633 the LIVELOCK proof: N>=5 consecutive passive-grace cycles on the real path with a stalled tail + healthy dial; no handshaken transport killed, the counter walks, the machine terminates. Also in the pre-release confidence gate (red blocks a tag).
+  "$FQCN_PREFIX.ReconnectStormLivelockE2eTest#slowTailThatClearsHealsTheSameSessionWithoutKillingTheHandshakenTransport"  # #1652 the heal side: a tail that clears must bring the SAME session back without ever having killed the handshaken transport. Also in the pre-release confidence gate.
+  "$FQCN_PREFIX.ReconnectStormLivelockE2eTest#missingControlClientAfterServerStopIsResumedBeforeSiblingSetup"  # #1940 #2143 the fixture-hygiene guard: a REJECTED post-STOP fixture must not strand the shared tmux server for the classes that follow.
   "$FQCN_PREFIX.SlowClassifyKeepsSharedLeaseJourneyDockerTest"  # #1641 #1670 #1610 the storm-ENTRY-edge: a foreign-pane agents-kind classify slower than its 3.5s bound (real >3.5s host delay, #847/G10 non-happy fixture) must NOT close the shared `-CC` lease — status stays Connected, marker round-trips, cause-trail breadcrumb transportClosed=false
   "$FQCN_PREFIX.BackgroundResumeSocketDeathE2eTest"  # #1098 #173 item 3): the genuinely-UNRECOVERABLE-host counterpart of the…
   "$FQCN_PREFIX.Issue895SwitchWhileBlackBandJourneyE2eTest"  # #895 switch-while-black freeze): the R1 trigger — a transport dro…
@@ -470,6 +485,21 @@ if [[ ! -f "$CI_JOURNEY_BUDGET_HELPER" && -f "$INVOCATION_DIR/scripts/ci-journey
   CI_JOURNEY_BUDGET_HELPER="$INVOCATION_DIR/scripts/ci-journey-budget-functions.sh"
 fi
 source "$CI_JOURNEY_BUDGET_HELPER"
+
+# Issue #2143: shared SSH/tmux fixture health gate. A journey class killed at the
+# per-class cap while holding the shared `agents` tmux server SIGSTOPped leaves
+# it frozen for every later class, and that presents as those classes' own SETUP
+# timeouts — indistinguishable from a product regression. This helper probes,
+# repairs, and records so a wedged fixture is contained and named.
+# shellcheck source=scripts/ci-journey-fixture-health.sh
+CI_JOURNEY_FIXTURE_HEALTH_HELPER="$REPO_ROOT/scripts/ci-journey-fixture-health.sh"
+if [[ ! -f "$CI_JOURNEY_FIXTURE_HEALTH_HELPER" && -f "$INVOCATION_DIR/scripts/ci-journey-fixture-health.sh" ]]; then
+  CI_JOURNEY_FIXTURE_HEALTH_HELPER="$INVOCATION_DIR/scripts/ci-journey-fixture-health.sh"
+fi
+source "$CI_JOURNEY_FIXTURE_HEALTH_HELPER"
+# Declared here as well as in the class loop so the summary can read it under
+# `set -u` on every path that reaches summary generation.
+FIXTURE_WEDGED_CLASSES=()
 
 if [[ "${POCKETSHELL_JOURNEY_SHARD:-0}" == "1" ]]; then
   if shard_run; then

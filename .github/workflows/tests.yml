@@ -486,6 +486,11 @@ jobs:
           chmod +x scripts/test-agents-pool-isolation.sh
           scripts/test-agents-pool-isolation.sh
 
+      # Issue #2143 (rationale + case list in the script header). Fast, stubbed:
+      # no JVM, no Docker, no emulator.
+      - name: "Shared SSH/tmux fixture health guard (issue #2143)"
+        run: chmod +x scripts/test-ci-journey-fixture-health.sh && scripts/test-ci-journey-fixture-health.sh
+
       # Issue #2007: connected-test.sh and full-jvm-gate.py are both canonical
       # wrappers around ./gradlew and both rewrite the SAME app/build graph of
       # the checkout they run from. Nothing stopped them overlapping, so during
@@ -963,6 +968,12 @@ jobs:
       - name: Smoke shared tmux-wrapper fixtures
         run: scripts/test-shared-tmux-wrapper-fixtures.sh --docker
 
+      # Issue #2143: same guard with its REAL-Docker case on, so the fix rests on
+      # the fixture and not a model of it. The script brings the fixture up.
+      # Quoted: an unquoted ` #2143)` is a YAML comment and truncates the name.
+      - name: "Shared SSH/tmux fixture health on a REAL fixture (issue #2143)"
+        run: POCKETSHELL_FIXTURE_HEALTH_REAL_DOCKER=1 scripts/test-ci-journey-fixture-health.sh
+
       - name: Integration run marker (#2094)
         run: touch "${RUNNER_TEMP}/integration-test-run-start"
 
@@ -996,48 +1007,15 @@ jobs:
   # never-black / wrong-session / EOF-on-switch regressions are caught at PR
   # time, not the next morning by nightly or at release by the gate.
   #
-  # Issue #710 (RE-ADDED): MultiSessionSwitchJourneyE2eTest is back in this
-  # per-push subset. It was quarantined under #691 because it WEDGED on the
-  # GitHub android-emulator-runner AVD (rapid A->B->C->A backgrounded a
-  # just-switched runtime whose VM-clear park stalled the main thread on an
-  # UNBOUNDED `cancelAndJoin()`). #710 bounds that teardown at
-  # SYNC_DETACH_TIMEOUT_MS so the main thread is guaranteed to return. The
-  # per-push subset is therefore the full A->B->C->A switch journey plus
-  # DeepLinkSessionSwitchE2eTest, ColdRestoreGoneSessionNoResurrectE2eTest,
-  # ReconnectRepaintE2eTest, and BackgroundGraceReconnectE2eTest (see
-  # scripts/ci-journey-suite.sh for the inline note). The suite also passes
-  # AndroidJUnitRunner's per-test `timeout_msec` so any future wedge fails fast
-  # instead of hanging, and the job `timeout-minutes` below is a 45-min backstop.
-  #
-  # Issue #795 (ADDED): the #794 ~90s STEADY-HOLD no-flap proof
-  # (LongRunningSessionStabilityTest#steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds)
-  # joins this subset. #794 fixed the ~11s app-initiated SSH transport flap on a
-  # quiet foreground hold (the maintainer's black-screen / "conversations don't
-  # work" report), but its regression proof ran ONLY in the opt-in release gate,
-  # so the flap could silently come back at PR time. Per the #638/#691 "load-
-  # bearing connection-lifecycle journeys run in regular per-PR CI" mandate it is
-  # now in scripts/ci-journey-suite.sh, targeted by FQCN#method so the sibling
-  # opt-in 10-minute hold (which self-skips without `pocketshellLongRunningTest=1`)
-  # stays release-gate-only. It uses the SAME deterministic agents:2222 fixture as
-  # the classes above — no new Docker service/port.
-  #
-  # This is intentionally the FAST subset (scripts/ci-journey-suite.sh), not the
-  # full connected suite — the heavy/long-running network-fault matrix and
-  # bootstrap matrix stay in nightly-extensive.yml. Issue #1733 is the one
-  # selected proof that also needs the existing deterministic Toxiproxy route
-  # (2228/API 8474) to hold a genuine app-transport outage; all other selected
-  # proofs remain on plain `agents` (2222), `agents-old-cli` (2238), or their
-  # documented fixture. This explicit fixture is not a self-skipping nightly
-  # lane.
-  #
-  # Issue #849 (epic #848, ADDED): the v0.4.10 connect-break regression tests
-  # (FolderListOldCliHydrateDockerTest + FolderListBootstrapSkipTreeLoadsDockerTest)
-  # + the #759 agent-launch version-mismatch guard
-  # (AgentLaunchVersionMismatchHintE2eTest) are now in scripts/ci-journey-suite.sh.
-  # The two old-CLI Docker tests need a host whose `pocketshell` CLI is OLDER than
-  # the client, so this job now ALSO starts the `agents-old-cli` fixture on host
-  # port 2238 (below). Before this, those tests self-skipped on CI and the whole
-  # connect-break class was structurally invisible to CI — the exact #848 gate gap.
+  # WHICH classes are selected, and WHY each was added or re-added (#710
+  # MultiSessionSwitchJourney, #795 the ~90s steady-hold no-flap proof, #849 the
+  # old-CLI connect-break pair, #1733's Toxiproxy route), is recorded per entry
+  # in scripts/ci-journey-suite.sh — the single list CI actually runs. This is
+  # intentionally the FAST subset; the heavy network-fault and bootstrap
+  # matrices stay in nightly-extensive.yml, and the fixtures those entries need
+  # (agents 2222, agents-old-cli 2238, agents-daemon 2239, Toxiproxy 2228/8474)
+  # are started explicitly below rather than self-skipped.
+
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
     if: github.event_name != 'pull_request'
@@ -1852,11 +1830,15 @@ jobs:
           # failure is checked FIRST because it explains why the shard has no
           # journey verdict at all, which subsumes a cold-build timeout earlier
           # in the same class.
+          # Issue #2143: a failure seen while the shared fixture was wedged is a
+          # SETUP failure. Verdict stays RED; only the attribution changes.
           verdict_reason_for() {
             if (( build_fail_attempts > 0 )); then
               printf 'build_level_failure\n'
             elif (( build_phase_attempts > 0 )); then
               printf 'cold_build_timeout\n'
+            elif [[ -f "$summary" ]] && grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$summary"; then
+              printf 'shared_fixture_setup_failure\n'
             else
               printf '%s\n' "$1"
             fi
@@ -2078,6 +2060,7 @@ jobs:
           path: |
             artifacts/docker/
             artifacts/ci-journey-setup/
+            artifacts/ci-journey/fixture-health.tsv
           # Issue #1809: same attempt-scoped re-run hygiene as the reports above.
           overwrite: true
           if-no-files-found: ignore

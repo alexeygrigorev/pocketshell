@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # Result classification and markdown summary helpers for scripts/ci-journey-suite.sh.
 
+# Issue #2143: this file is sourced standalone by guards that set only the
+# buckets they exercise, so the fixture-wedge bucket declares its own empty
+# default here. Under `set -u` an undeclared array would abort summary
+# generation — i.e. a change meant to make a red MORE readable would instead
+# destroy the summary the classifier depends on.
+declare -p FIXTURE_WEDGED_CLASSES >/dev/null 2>&1 || FIXTURE_WEDGED_CLASSES=()
+
 # ---------------------------------------------------------------------------
 # Issue #1827: every reader of the core-terminal proof set derives from the ONE
 # registry declared in scripts/ci-journey-core-terminal-functions.sh
@@ -143,6 +150,7 @@ finish_ci_journey_suite() {
   echo "  recovered on retry: ${#RECOVERED_CLASSES[@]}"
   echo "  failed twice: ${#FAILED_CLASSES[@]}"
   echo "  budget-timeout (issue #835 / #470 stall): ${#BUDGET_TIMEOUT_CLASSES[@]}"
+  echo "  of which the shared SSH/tmux fixture was wedged (issue #2143 SETUP failure): ${#FIXTURE_WEDGED_CLASSES[@]}"
   echo "=========================================================="
 
   # Build the markdown summary. Quote arrays defensively — an empty array under
@@ -264,6 +272,23 @@ finish_ci_journey_suite() {
         echo "- \`$c\`"
       done
       ci_journey_core_terminal_failed_bullets
+    fi
+    # Issue #2143: name a SETUP failure for what it is. This section is ADDITIVE
+    # — every class above stays in the red list and the job stays red — but it
+    # tells the reader that the shared `agents` SSH/tmux fixture was not
+    # answering when these classes ran, so the failure is not evidence about the
+    # code under test. On 23ed1b10 the absence of exactly this line sent a
+    # release chasing an app regression on a three-line version-bump commit.
+    if [[ "${#FIXTURE_WEDGED_CLASSES[@]}" -gt 0 ]]; then
+      echo
+      echo "Shared SSH/tmux fixture was WEDGED during these classes (\`JOURNEY_FIXTURE_SETUP_FAILURE\` — setup failure, NOT an assertion failure — issue #2143):"
+      for c in "${FIXTURE_WEDGED_CLASSES[@]}"; do
+        echo "- \`$c\`"
+      done
+      echo
+      echo "A wedged shared fixture makes every later tmux-touching class time out in its own"
+      echo "setup, which reads exactly like a product regression. See \`fixture-health.tsv\` in"
+      echo "this shard's artifacts for the per-attempt probe latencies and the repair actions."
     fi
   } > "$SUMMARY"
 

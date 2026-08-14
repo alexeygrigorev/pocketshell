@@ -9,11 +9,13 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Reproduce-first (issue #937 / D33 / G10) for the transport-freeze root
@@ -164,25 +166,70 @@ class TransportDispatcherWedgeBoundTest {
      * sets `closed=true` before it runs the final disconnect. If the caller's
      * outer close budget expires while disconnect is still wedged, closeNow()
      * must still interrupt/shutdown the worker even though the dispatcher is
-     * already marked closed.
+     * already marked closed. That is the #937 symptom: without it the wedged
+     * disconnect's worker thread is never interrupted, the half-open transport's
+     * dispatch thread leaks, and the NEXT teardown wedges behind it.
+     *
+     * ## Why this test is shaped the way it is (issue #2109)
+     *
+     * The previous version of this test proved nothing about `closeNow()`. It
+     * ran `closing.await()` BEFORE calling `closeNow()` — but
+     * `closeAndAwaitDrain` runs the disconnect inside `runInterruptible`, whose
+     * `withContext` cannot resume until the block RETURNS, and the block only
+     * returns on a SECOND interrupt. So `closing.await()` could not return until
+     * something delivered interrupt #2, and with `closeNow()` not yet called the
+     * only remaining source was the per-op wall-clock watchdog at
+     * `perOpTimeoutMs = 30_000`. The signature was in the CI data: that one test
+     * measured **30.01s**, exactly its ceiling. `fun closeNow() {}` (empty body)
+     * left it green.
+     *
+     * Two changes make `closeNow()` the load-bearing cause here:
+     *
+     * 1. The per-op ceiling is pinned [WATCHDOG_MUST_NOT_FIRE_MS] out — orders of
+     *    magnitude past this test's own budget — so the watchdog CANNOT stand in
+     *    for the call. Nothing observed within seconds can have come from it.
+     * 2. `closeNow()` is invoked while `closing` is still IN FLIGHT (after
+     *    interrupt #1, which the caller-side `withTimeout` cancellation
+     *    delivers), and the second interrupt is asserted to arrive only after
+     *    that call — with an explicit negative check first that it had NOT
+     *    already arrived.
      */
     @Test
     fun `closeNow interrupts after closeAndAwaitDrain times out during disconnect`() =
         runBlocking<Unit> {
-            val dispatcher = TransportDispatcher(perOpTimeoutMs = 30_000L)
+            val dispatcher = TransportDispatcher(perOpTimeoutMs = WATCHDOG_MUST_NOT_FIRE_MS)
             val disconnectEntered = CountDownLatch(1)
             val firstInterrupt = CountDownLatch(1)
             val forcedInterrupt = CountDownLatch(1)
+            // Unconditional teardown escape hatch. Once the disconnect is wedged
+            // NOTHING else can release it: runInterruptible's cancellation handler
+            // fires at most once (it already spent that interrupt on #1), so a
+            // FAILING run would otherwise leave the dispatch thread parked for the
+            // whole ceiling while the enclosing runBlocking waits on its child —
+            // a 10-minute "hang" masquerading as a slow test. The `finally` below
+            // always trips it. It can never substitute for closeNow(): it is only
+            // released after the load-bearing assertion has been evaluated.
+            val teardownEscape = CountDownLatch(1)
 
             val closing = async(Dispatchers.IO) {
                 runCatching {
-                    withTimeout(250L) {
+                    withTimeout(CALLER_CLOSE_BUDGET_MS) {
                         dispatcher.closeAndAwaitDrain disconnect@{
                             disconnectEntered.countDown()
                             var interrupts = 0
                             while (true) {
                                 try {
-                                    Thread.sleep(30_000L)
+                                    // A half-open-link `disconnect()` socket write
+                                    // that never returns on its own: an interruptible
+                                    // park that no elapsed time inside this test can
+                                    // end.
+                                    if (teardownEscape.await(
+                                            WATCHDOG_MUST_NOT_FIRE_MS,
+                                            TimeUnit.MILLISECONDS,
+                                        )
+                                    ) {
+                                        return@disconnect
+                                    }
                                 } catch (e: InterruptedException) {
                                     interrupts += 1
                                     if (interrupts == 1) {
@@ -199,28 +246,121 @@ class TransportDispatcherWedgeBoundTest {
                 }
             }
 
-            assertTrue(
-                "disconnect must enter before the caller-side timeout",
-                disconnectEntered.await(5, TimeUnit.SECONDS),
-            )
+            try {
+                assertTrue(
+                    "disconnect must enter before the caller-side timeout",
+                    disconnectEntered.await(5, TimeUnit.SECONDS),
+                )
+                assertTrue(
+                    "the caller-side close budget expiring must interrupt the wedged " +
+                        "disconnect exactly once (interrupt #1, from runInterruptible's " +
+                        "cancellation handler)",
+                    firstInterrupt.await(5, TimeUnit.SECONDS),
+                )
+                assertTrue(
+                    "closeAndAwaitDrain marks the dispatcher closed BEFORE running the " +
+                        "final disconnect — that is what makes closeNow()'s job non-trivial",
+                    dispatcher.isClosed,
+                )
+
+                // The disconnect is still wedged, and `closeAndAwaitDrain` therefore
+                // cannot have returned: runInterruptible's withContext does not resume
+                // until its block does. If this ever stopped holding, the assertion
+                // after closeNow() would no longer be measuring closeNow().
+                assertTrue(
+                    "closeAndAwaitDrain must still be in flight — the wedge is unresolved",
+                    closing.isActive,
+                )
+
+                // SELECTIVITY GUARD (the whole point of #2109): before the call, NO
+                // second interrupt exists. With the ceiling pinned 10 minutes out the
+                // watchdog cannot supply one, so the only possible source is the
+                // closeNow() below.
+                assertFalse(
+                    "no second interrupt may exist before closeNow() is called — if one " +
+                        "does, something other than closeNow() is driving the assertion " +
+                        "below (this is exactly how the pre-#2109 test went vacuous)",
+                    forcedInterrupt.await(NO_SECOND_INTERRUPT_WINDOW_MS, TimeUnit.MILLISECONDS),
+                )
+
+                dispatcher.closeNow()
+
+                assertTrue(
+                    "closeNow() must interrupt/shut down the wedged disconnect worker even " +
+                        "though closed was already set — otherwise the dispatch thread of a " +
+                        "half-open transport leaks and the next teardown wedges behind it " +
+                        "(#937). RED with `fun closeNow() {}`.",
+                    forcedInterrupt.await(5, TimeUnit.SECONDS),
+                )
+            } finally {
+                teardownEscape.countDown()
+            }
 
             val closeResult = closing.await()
             assertTrue(
-                "caller-side timeout must cancel closeAndAwaitDrain while disconnect is active",
+                "caller-side timeout must surface once the forced interrupt lets " +
+                    "closeAndAwaitDrain unwind",
                 closeResult.exceptionOrNull() is TimeoutCancellationException,
             )
-            assertTrue(
-                "timeout cancellation should interrupt the disconnect once",
-                firstInterrupt.await(5, TimeUnit.SECONDS),
-            )
-            assertTrue("dispatcher must already be marked closed", dispatcher.isClosed)
+            assertTrue("dispatcher must remain closed after the forced close", dispatcher.isClosed)
+        }
 
-            dispatcher.closeNow()
+    /**
+     * `runBlockingDispatch`'s documented precondition — "MUST NOT be called from
+     * the dispatch thread itself (would deadlock on the mutex)" — is ENFORCED,
+     * not merely commented (issue #2109).
+     *
+     * A future caller that nests a blocking write inside a `run { }` block parks
+     * the ONE dispatch thread inside `runBlocking`, waiting on the mutex that
+     * this very thread's outer op still holds. Nothing can ever unpark it: the
+     * connection wedges permanently and silently, and the per-op watchdog only
+     * launders it into a bewildering `TransportOpTimeoutException` on an op that
+     * never touched the wire. That is the hardest failure shape in this
+     * subsystem, so the guard must fail LOUDLY at the offending call site.
+     *
+     * RED on the unguarded base: the nested call parks until the (deliberately
+     * tight) per-op ceiling interrupts the thread, so the observed failure is an
+     * `InterruptedException` — the silent wedge — instead of the
+     * `IllegalStateException` asserted here.
+     */
+    @Test
+    fun `runBlockingDispatch from the dispatch thread throws instead of wedging`() =
+        runBlocking<Unit> {
+            // Tight ceiling ON PURPOSE: on the unguarded base it is the only thing
+            // that ever unparks the self-deadlocked thread, so the RED is bounded
+            // at ~1s instead of hanging the whole Unit gate.
+            val dispatcher = TransportDispatcher(perOpTimeoutMs = 1_000L)
+            val nested = AtomicReference<Throwable?>(null)
 
-            assertTrue(
-                "forced close must still interrupt/shutdown after closed was already set",
-                forcedInterrupt.await(5, TimeUnit.SECONDS),
+            val outer = runCatching {
+                dispatcher.run {
+                    nested.set(
+                        runCatching { dispatcher.runBlockingDispatch { Unit } }.exceptionOrNull(),
+                    )
+                }
+            }
+
+            assertNull(
+                "the outer op must complete normally — the guard rejects the nested " +
+                    "call at its own call site, it does not abort the op that was " +
+                    "legitimately running (got ${outer.exceptionOrNull()})",
+                outer.exceptionOrNull(),
             )
+            val thrown = nested.get()
+            assertTrue(
+                "a runBlockingDispatch re-entered from the dispatch thread must fail " +
+                    "loudly with IllegalStateException instead of parking the single " +
+                    "dispatch thread forever — got $thrown",
+                thrown is IllegalStateException,
+            )
+
+            // And the dispatcher is still healthy: the rejected nested call must not
+            // have consumed the op slot or left the mutex/thread in a bad state.
+            val stillRuns = AtomicBoolean(false)
+            dispatcher.run { stillRuns.set(true) }
+            assertTrue("the dispatcher must still accept ops after a rejected re-entry", stillRuns.get())
+
+            dispatcher.closeAndAwaitDrain { }
         }
 
     /**
@@ -330,5 +470,27 @@ class TransportDispatcherWedgeBoundTest {
 
         latch.countDown()
         dispatcher.closeAndAwaitDrain { }
+    }
+
+    private companion object {
+        /**
+         * Per-op ceiling for the forced-close test (issue #2109). Deliberately
+         * enormous relative to the test's own budget so the wall-clock watchdog
+         * CANNOT deliver the second interrupt that `closeNow()` is supposed to
+         * deliver. The pre-#2109 value was 30_000 — and the watchdog firing at
+         * exactly that mark was what made the assertion pass with an empty
+         * `closeNow()` body (and made the single test cost 30.01s).
+         */
+        const val WATCHDOG_MUST_NOT_FIRE_MS = 10 * 60 * 1_000L
+
+        /** The caller's own close budget (TmuxSessionViewModel / lease release). */
+        const val CALLER_CLOSE_BUDGET_MS = 250L
+
+        /**
+         * How long to prove NO second interrupt has arrived before `closeNow()`
+         * is called. Generous enough to be a real observation, short enough that
+         * the whole class stays ~1s instead of ~31s.
+         */
+        const val NO_SECOND_INTERRUPT_WINDOW_MS = 500L
     }
 }

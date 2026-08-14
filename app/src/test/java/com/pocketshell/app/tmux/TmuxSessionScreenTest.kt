@@ -2104,7 +2104,7 @@ class TmuxSessionScreenTest {
         assertEquals(com.pocketshell.uikit.model.ConnectionStatus.Connecting, state.toUiStatus())
         // Both top banners suppressed while the surface owns the primary indicator.
         val ownsPrimary = state.surfaceOwnsPrimary(panesEmpty = false)
-        assertFalse(shouldShowReconnectingProgressRow(state, ownsPrimary))
+        assertFalse(shouldShowReconnectingProgressRow(ownsPrimary, reconnectingStatus))
         assertFalse(shouldShowConnectingProgressOverlay(state, ownsPrimary))
     }
 
@@ -2130,7 +2130,9 @@ class TmuxSessionScreenTest {
             )
             val ownsPrimary = state.surfaceOwnsPrimary(panesEmpty = false)
             assertFalse("$label: top Connecting overlay suppressed", shouldShowConnectingProgressOverlay(state, ownsPrimary))
-            assertFalse("$label: top Reconnecting band suppressed", shouldShowReconnectingProgressRow(state, ownsPrimary))
+            // #822: even a Reconnecting CONNECTION cannot raise the band while the
+            // surface owns the centered hold — the #750 single-indicator half.
+            assertFalse("$label: top Reconnecting band suppressed", shouldShowReconnectingProgressRow(ownsPrimary, reconnectingStatus))
             // No settled failure surface for an in-progress hold.
             assertFalse("$label: not a calm failure", state.showsCalmFailure)
         }
@@ -2138,11 +2140,15 @@ class TmuxSessionScreenTest {
 
     @Test
     fun fusion_liveReveal_dominates_regardlessOfPhase_withinGraceSuppression() {
-        // AC-4 (#685/#1098): a LIVE reveal is the surface authority — even if the
-        // connection phase is still Reconnecting (a within-grace silent heal), the
-        // fused state stays Live: terminal shown, GREEN pill, NO overlay/band. The
-        // load-bearing green is the SUPPRESSION (G6). Red if a phase read leaked
-        // through and flipped the surface/pill during the heal.
+        // AC-4 (#685/#1098): a LIVE reveal is the SURFACE authority — even if the
+        // connection phase is still Reconnecting (a within-grace heal), the fused
+        // state stays Live: the retained terminal frame is shown, no centered
+        // "Attaching…" hold. Red if a phase read leaked through and replaced the
+        // user's last frame with a loader during the heal.
+        //
+        // The pill/band half of this contract moved to Issue822HonestReconnectChromeTest:
+        // #822 made a live reveal authority over the PIXELS only, never over transport
+        // truth, so a retained frame no longer implies a green Connected pill.
         listOf(
             reconnectingStatus,
             connectingStatus,
@@ -2151,8 +2157,8 @@ class TmuxSessionScreenTest {
             val state = fuse(RevealState.Live(sid, "work", panes = emptyList()), phaseStatus)
             assertTrue("live reveal dominates phase=$phaseStatus", state is SessionSurfaceState.Live)
             assertFalse("terminal shown (no hold)", state.terminalHeld)
-            assertEquals("green Connected pill", com.pocketshell.uikit.model.ConnectionStatus.Connected, state.toUiStatus())
             assertEquals("no loading surface over a live frame", PrimaryLoadingSurface.None, primaryLoadingSurface(state, panesEmpty = false))
+            assertFalse("live frame never owns the primary indicator", state.surfaceOwnsPrimary(panesEmpty = false))
         }
     }
 
@@ -2201,11 +2207,29 @@ class TmuxSessionScreenTest {
                     val ownsPrimary = state.surfaceOwnsPrimary(panesEmpty)
                     // The two top banners are mutually exclusive AND suppressed while
                     // the surface owns the primary indicator.
-                    assertFalse(
-                        "reveal=$reveal phase=$phase: both top banners at once",
-                        shouldShowConnectingProgressOverlay(state, ownsPrimary) &&
-                            shouldShowReconnectingProgressRow(state, ownsPrimary),
-                    )
+                    listOf(
+                        connectingStatus,
+                        reconnectingStatus,
+                        TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u"),
+                        TmuxSessionViewModel.ConnectionStatus.Idle,
+                    ).forEach { bannerStatus ->
+                        assertFalse(
+                            "reveal=$reveal phase=$phase status=$bannerStatus: " +
+                                "both top banners at once",
+                            shouldShowConnectingProgressOverlay(state, ownsPrimary) &&
+                                shouldShowReconnectingProgressRow(ownsPrimary, bannerStatus),
+                        )
+                        // #822: the band is a CONNECTION affordance, but the #750
+                        // single-indicator half still binds — a surface that owns the
+                        // primary indicator suppresses it for every status.
+                        if (ownsPrimary) {
+                            assertFalse(
+                                "reveal=$reveal phase=$phase status=$bannerStatus: " +
+                                    "band raised over a surface-owned indicator",
+                                shouldShowReconnectingProgressRow(ownsPrimary, bannerStatus),
+                            )
+                        }
+                    }
                     // Pill agrees with the surface: a calm-failure surface ALWAYS reads
                     // Error; a live surface NEVER reads Error.
                     if (state.showsCalmFailure) {

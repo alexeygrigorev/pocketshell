@@ -1091,7 +1091,7 @@ private fun TmuxSessionHeaderRegion(
                             )
                         }
                     },
-                    connectionStatus = surfaceState.toUiStatus(),
+                    connectionStatus = conn.pillStatus,
                     forwardingState = sessionForwardingState,
                     modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                 )
@@ -1114,7 +1114,7 @@ private fun TmuxSessionHeaderRegion(
                     onBack = onBack,
                     onMore = { overlay.moreExpanded = true },
                     moreMenu = { AnchoredTmuxMoreMenu() },
-                    connectionStatus = surfaceState.toUiStatus(),
+                    connectionStatus = conn.pillStatus,
                     forwardingState = sessionForwardingState,
                     modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                 )
@@ -1222,6 +1222,7 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
     TmuxTopConnectingBanner(
         surfaceState = surfaceState,
         surfaceOwnsPrimary = surfaceOwnsPrimary,
+        status = status,
         sessionName = sessionName,
         onCancelConnect = { viewModel.cancelConnect() },
         onRetryNow = { viewModel.reconnect() },
@@ -1333,8 +1334,16 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
             }
         }
     }
-    // Issue #823: pull-to-reconnect, scoped to non-Connected states only.
-    val pullToReconnectActive = !sessionLive && canReconnect
+    // Issue #823/#822: pull-to-reconnect, scoped to non-Connected states AND only
+    // while the surface shows a placeholder it owns. See [shouldMountPullToReconnect]
+    // for the full rationale (mounting the box over a live retained frame collapses
+    // the `TerminalView` to 0x0) — it is a pure function there so the guard is pinned
+    // by a per-PR JVM test rather than only by the batched emulator journey.
+    val pullToReconnectActive = shouldMountPullToReconnect(
+        sessionLive = sessionLive,
+        canReconnect = canReconnect,
+        surfaceOwnsPrimary = surfaceOwnsPrimary,
+    )
     val surfaceContent: @Composable () -> Unit = {
         val keepTerminalMounted = !terminalHeld &&
             !deferTerminalAttachForSwap &&

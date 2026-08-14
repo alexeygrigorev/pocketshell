@@ -2,6 +2,7 @@ package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -11,6 +12,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
@@ -23,11 +25,16 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
+import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
+import com.pocketshell.app.tmux.TMUX_RECONNECTING_RETRY_NOW_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
+import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -38,6 +45,8 @@ import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -47,10 +56,10 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #635 (epic #687 Phase 0, J1) — DEVICE-TRUTH journey: a background→
- * foreground WITHIN grace must NOT reconnect, EVEN WHEN THE SOCKET DROPPED while
- * backgrounded. The pane must be re-seeded (the prior content restored), and
- * NO "Reconnecting"/"Disconnected"/"Attaching…" surface may appear.
+ * Issue #635/#822 (epic #687 Phase 0, J1) — DEVICE-TRUTH journey: after a socket
+ * drops while backgrounded, a foreground return WITHIN grace keeps the last pane
+ * viewport visible but must truthfully show `Reconnecting` with an in-place action.
+ * Tapping that action recovers the SAME session; no A→B→A switch workaround.
  *
  * ## Why the existing within-grace CI tests miss the maintainer's bug
  *
@@ -90,23 +99,23 @@ import java.io.FileOutputStream
  *
  * ## Contract (DEVICE TRUTH — asserts the user's pixels)
  *
- *  1. After foregrounding within grace following the socket drop, the pane
- *     VIEWPORT is RE-SEEDED: the visible terminal is non-blank AND shows the
- *     prior [READY_MARKER] content (the user does not return to a blank pane).
- *  2. NO "Reconnecting"/"Disconnected"/"Tap Reconnect"/"Connecting"/
- *     "Attaching…" surface appears at any point across the within-grace
- *     foreground window — neither the band ([TMUX_SESSION_ERROR_TAG]) nor the
- *     overlays.
+ *  1. During the confirmed-dead interval the prior [READY_MARKER] viewport remains
+ *     visible — proven on the RENDERED `TerminalView` (measured, shown, on-screen and
+ *     actually painted; see [assertRetainedFrameIsRendered]) as well as in the terminal
+ *     buffer, because the buffer survives a view collapsed to 0x0 — while raw status is
+ *     Reconnecting, send is unwritable, and the top `Retry now` action is visible. No
+ *     destructive centered "Attaching…" overlay, collapsed pull-to-refresh wrapper, or
+ *     terminal `Disconnected` failure surface may replace it.
+ *  2. Tapping `Retry now` recovers through a different control client, remains on
+ *     [SESSION_NAME], and round-trips [AFTER_MARKER] without a session switch.
  *
  * ## Fail-first
  *
- * On base `origin/main` the dropped socket makes
- * `canReseedWithinGraceForeground()` false, so the within-grace foreground
- * falls into the reconnect ladder: a Reconnecting/Disconnected surface appears
- * (assertion 2 RED) and/or the pane is left blank until the reconnect re-seeds
- * (assertion 1 RED). That RED is the proof this reproduces #635. The Phase-2
- * single-grace-owner fix (the controller heals the dropped channel within grace
- * with no scary band, then re-seeds) flips it GREEN.
+ * On the reopened-#822 base, the dropped socket makes the reseed gate decline, but
+ * `launchForegroundHealWithinGrace` sends a synthetic preserved-channel seed and the
+ * status projector rewrites Reconnecting to Connected. The first wait therefore REDs:
+ * raw status stays false Connected and no Retry-now action exists over the dead wire.
+ * A genuine typed drop plus reveal-only hold flips it GREEN.
  */
 @RunWith(AndroidJUnit4::class)
 class WithinGraceSocketDropForegroundJourneyE2eTest {
@@ -130,6 +139,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
 
     @After
     fun tearDown() {
+        runCatching { currentViewModel().forceCleanOutageForTest = false }
         runCatching { launchedActivity?.close() }
         launchedActivity = null
         BackgroundGraceTestOverride.setForTest(null)
@@ -139,7 +149,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
     }
 
     @Test
-    fun withinGraceForegroundAfterSocketDropReseedsWithoutReconnect() { runBlocking {
+    fun withinGraceForegroundAfterSocketDropRetainsViewportAndRetryRecoversSameSession() { runBlocking {
         val key = readFixtureKey()
         seededKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -153,10 +163,17 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
         attachSeededTmuxSession(hostRowTag)
 
+        // #818 defaults an agent-kinded session to Conversation; this journey is about the
+        // TERMINAL viewport the user was looking at, so put the real Terminal tab on screen
+        // before the drop. Otherwise the retained frame under test is not the visible
+        // surface and the chrome screenshot cannot evidence the reported state.
+        selectTerminalTabForJourney()
         // Baseline: the seeded content is on screen. This is the content that
         // must survive the within-grace socket drop and be re-seeded on return.
         waitForVisibleTerminal("initial attach") { it.contains(READY_MARKER) }
         waitForConnected("initial attach")
+        val vm = currentViewModel()
+        val clientBeforeDrop = vm.currentClientIdentityForTest()
         captureViewport("issue635-01-attached")
         diagnostics!!.clear()
 
@@ -172,6 +189,10 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
 
         // Use a short grace override so the resume lands well within grace.
         BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
+        // Hold the passive replacement primitives down after the real socket death so the
+        // UI has a deterministic confirmed-dead interval to render. The real `Retry now`
+        // action uses the production manual reconnect entrypoint and remains available.
+        vm.forceCleanOutageForTest = true
 
         val cycleStart = SystemClock.elapsedRealtime()
         // (1) Background within grace.
@@ -197,57 +218,51 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         }
         recordTiming("within_grace_cycle_ms", SystemClock.elapsedRealtime() - cycleStart)
 
-        // DEVICE-TRUTH assertion (2): NO reconnect surface across the foreground
-        // window. On base `main` the dropped socket sends the within-grace
-        // foreground into the reconnect ladder, which paints a
-        // Reconnecting/Disconnected surface — this watch goes RED there.
-        watchNoVisibleReconnect("within-grace after socket drop", OVERLAY_WATCH_MS)
-        // Issue #1954: authoritative in-app proof at the actual no-overlay watch point,
-        // before waiting for recovery completion. This is a direct TerminalView draw plus
-        // same-view visible text; the generic harness failure screenshot is not evidence.
-        captureViewport("issue1954-02-post-resume-no-overlay")
-
-        // DEVICE-TRUTH assertion (1): the pane VIEWPORT is RE-SEEDED — non-blank
-        // AND shows the prior content. The user must not be left on a blank
-        // pane. On base `main` the dropped socket either shows a reconnect band
-        // (assertion 2) or the pane stays blank until a reconnect re-seeds it.
-        waitForVisibleTerminal("within-grace re-seeded pane") { it.contains(READY_MARKER) }
-        val visibleAfter = visibleTerminalText()
+        // #822 DEVICE TRUTH: the dead wire is honestly Reconnecting and actionable, while
+        // the reveal hold preserves the exact prior viewport instead of painting Attaching.
+        waitForHonestReconnectWithRetainedViewport(vm)
+        captureViewport("issue822-02-post-resume-reconnecting-retained")
+        // The whole window too: the reviewer must SEE the honest chrome the user gets —
+        // the amber "Reconnecting" breadcrumb pill and the in-place `Retry now` band over
+        // the retained pane frame. The TerminalView-only capture cannot show either.
+        captureScreen("issue822-02b-post-resume-reconnecting-chrome")
+        val visibleDuringOutage = visibleTerminalText()
         assertTrue(
-            "within-grace foreground after a socket drop must RE-SEED the pane " +
-                "(non-blank), but the visible terminal was blank",
-            visibleAfter.isNotBlank(),
+            "within-grace foreground after a socket drop must retain a non-blank viewport",
+            visibleDuringOutage.isNotBlank(),
         )
         assertTrue(
-            "within-grace foreground after a socket drop must restore the prior " +
-                "pane content ('$READY_MARKER'); visible terminal was:\n$visibleAfter",
-            visibleAfter.contains(READY_MARKER),
+            "the held viewport must retain '$READY_MARKER' during the real outage; visible:\n" +
+                visibleDuringOutage,
+            visibleDuringOutage.contains(READY_MARKER),
         )
-        val deadLeaseRecovery = diagnostics!!.eventsNamed("dead_lease_recovery")
-        assertEquals(
-            "the within-grace owner must invalidate/acquire the dead lease exactly once",
-            1,
-            deadLeaseRecovery.size,
-        )
-        assertEquals(true, deadLeaseRecovery.single().fields["invalidatedLease"])
-        assertEquals(true, deadLeaseRecovery.single().fields["freshTransport"])
         assertEquals(
             "liveness must stay deferred while the within-grace owner heals the dead client",
             0,
             diagnostics!!.eventsNamed("liveness_probe_silent_drop").size,
         )
 
-        // The recovered channel must accept real input, not merely repaint an old marker.
-        val recoveredClient = requireNotNull(currentViewModel().liveTmuxClientForSendOrNullForTest())
-        val send = recoveredClient.sendKeysViaExec(
-            "send-keys -t ${shellQuote(SESSION_NAME)} ${shellQuote("printf '$AFTER_MARKER\\n'")} Enter",
+        // The in-place action must work. This is the exact user journey that previously
+        // required switching to another session and back: tap Retry now on this session.
+        compose.onNodeWithTag(TMUX_RECONNECTING_RETRY_NOW_TAG, useUnmergedTree = true).performClick()
+        waitForDiagnostic("reconnect_tapped", "in-place Retry now action")
+        vm.forceCleanOutageForTest = false
+        waitForConnected("same-session Retry now recovery")
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            vm.currentClientIdentityForTest()?.let { it != clientBeforeDrop } == true &&
+                vm.isSendTransportWritable()
+        }
+        val clientAfterRecovery = vm.currentClientIdentityForTest()
+        assertNotEquals(
+            "Retry now must install a replacement control client without a session switch",
+            clientBeforeDrop,
+            clientAfterRecovery,
         )
-        assertTrue("post-recovery input failed: ${send.output}", !send.isError)
-        waitForVisibleTerminal("within-grace post-recovery input") { it.contains(AFTER_MARKER) }
-        // And the band stays absent through the settle (a late reconnect band
-        // would still be the #635 regression).
-        watchNoVisibleReconnect("within-grace settle after re-seed", POST_RESTORE_SETTLE_MS)
-        captureViewport("issue1954-03-within-grace-reseeded")
+
+        // The recovered channel must accept real input, not merely repaint the old marker.
+        assertPostRecoveryInputReachesTheVisibleViewport()
+        assertNoReconnectSurface("same-session settle after Retry now")
+        captureViewport("issue822-03-same-session-recovered")
 
         // The session screen is still up (a cleared pane that also lost the
         // screen would be a teardown/reconnect, not a within-grace ride-through).
@@ -348,13 +363,239 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
     }
 
     /**
-     * The within-grace foreground after a socket drop must paint NONE of the
-     * reconnect surfaces (the maintainer's exact "scary band" complaint). This
-     * asserts on the USER-VISIBLE bands/overlays/text, not an internal flag.
+     * The load-bearing writability proof: real input over the RECOVERED same-session wire
+     * must reach the user's visible viewport.
+     *
+     * It is a bounded re-send loop rather than a single send because a `-CC` client streams
+     * only the output produced AFTER it subscribes — tmux does not replay what landed during
+     * the attach window. A marker sent into that window is therefore never painted, which
+     * made a single-send assertion fail ~1 run in 3 on the dev box for a reason that has
+     * nothing to do with writability. The loop's EXIT CONDITION is the load-bearing
+     * assertion (the marker is visible), each send is still hard-checked for a transport
+     * error, and the whole thing hard-fails at the deadline — so a genuinely unwritable wire
+     * can never pass by retrying.
      */
-    private fun assertNoVisibleReconnect(label: String) {
+    private suspend fun assertPostRecoveryInputReachesTheVisibleViewport() {
+        val deadline = SystemClock.elapsedRealtime() + TerminalTestTimeouts.terminalVisibilityTimeoutMs()
+        var sends = 0
+        var visible = false
+        while (!visible && SystemClock.elapsedRealtime() < deadline) {
+            val client = requireNotNull(currentViewModel().liveTmuxClientForSendOrNullForTest()) {
+                "the recovered same-session wire must expose a live client for send"
+            }
+            val send = client.sendKeysViaExec(
+                "send-keys -t ${shellQuote(SESSION_NAME)} ${shellQuote("printf '$AFTER_MARKER\\n'")} Enter",
+            )
+            sends += 1
+            assertTrue("post-recovery input failed: ${send.output}", !send.isError)
+            visible = runCatching {
+                compose.waitUntil(timeoutMillis = POST_RECOVERY_INPUT_PAINT_MS) {
+                    visibleTerminalText().contains(AFTER_MARKER)
+                }
+                true
+            }.getOrDefault(false)
+        }
+        recordTiming("post_recovery_input_sends", sends.toLong())
+        if (!visible) writeText("failure-post-recovery-visible-terminal.txt", visibleTerminalText())
+        assertTrue(
+            "the recovered same-session wire must carry input through to the visible " +
+                "viewport after $sends send(s); visible terminal was:\n${visibleTerminalText()}",
+            visible,
+        )
+    }
+
+    private fun selectTerminalTabForJourney() {
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
+    private fun waitForHonestReconnectWithRetainedViewport(vm: TmuxSessionViewModel) {
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting &&
+                compose.onAllNodesWithTag(
+                    TMUX_RECONNECTING_RETRY_NOW_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty() &&
+                visibleTerminalText().contains(READY_MARKER)
+        }
+        assertTrue(
+            "#822: confirmed-dead foreground must report Reconnecting; " +
+                "status=${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertFalse(
+            "#822: confirmed-dead foreground must be transport-unwritable before Retry now",
+            vm.isSendTransportWritable(),
+        )
+        // ...and the retained viewport must actually be ON SCREEN. See
+        // [assertRetainedFrameIsRendered]: the transcript checks below read the terminal
+        // EMULATOR BUFFER, which survives a collapsed view, so they cannot see the
+        // reported destruction on their own.
+        assertRetainedFrameIsRendered("post-resume confirmed-dead interval")
+        // The user must SEE the drop (the maintainer's "nothing tells me it dropped"
+        // report): the breadcrumb pill/dot reads the amber "Reconnecting", not the
+        // green Connected the retained frame used to imply.
+        compose.onNodeWithTag(TMUX_CONNECTION_STATUS_PILL_TAG, useUnmergedTree = true)
+            .assertTextEquals("Reconnecting")
+        compose.onNodeWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true).assertExists()
+        // ...and must be able to ACT on it. Containment, not `assertIsDisplayed`
+        // (#657/F3): an off-edge control still reports displayed, and this tap target
+        // is the whole point of the issue.
+        compose.assertNodeFullyWithinRoot(TMUX_RECONNECTING_RETRY_NOW_TAG, useUnmergedTree = true)
         assertEquals(
-            "expected no Connecting overlay for $label",
+            "the retained viewport must not be replaced by the centered Attaching overlay",
+            0,
+            compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().size,
+        )
+        assertEquals(
+            "a recoverable within-grace outage must not show the terminal failure band",
+            0,
+            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().size,
+        )
+        assertEquals(
+            "a recoverable within-grace outage must not show the terminal Tap Reconnect action",
+            0,
+            compose.onAllNodesWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().size,
+        )
+    }
+
+    /**
+     * Issue #822 (round 2): the load-bearing "the user still SEES their pane" assertion.
+     *
+     * ## Why the buffer is not enough
+     *
+     * Every other "retained viewport" check in this journey goes through
+     * [visibleTerminalText], which reads `TerminalView.currentSession.emulator.screen
+     * .transcriptText` — the terminal emulator's BUFFER. That buffer is completely
+     * independent of whether the view is measured, laid out, or drawn, so it stays intact
+     * while the user is looking at nothing. On the emulator, removing the one-line
+     * `surfaceOwnsPrimary` guard on `pullToReconnectActive` mounts the #823
+     * `PullToRefreshBox` over the live `TerminalView`; its `verticalScroll` gives the
+     * terminal an unbounded height constraint, the terminal measures to 0x0, and the
+     * user's frame is replaced by an empty pull area with a spinner — while every
+     * buffer-based assertion in this file stayed green.
+     *
+     * ## What this asserts instead
+     *
+     * The RENDERED view: a `TerminalView` exists, is attached and shown, has non-zero
+     * measured size, occupies a non-empty rectangle on screen, and — drawn through the
+     * same `view.draw(Canvas)` path the authoritative viewport artifact uses — is not a
+     * single uniform colour (i.e. the retained pane content is actually painted, not a
+     * blank surface of the right size).
+     *
+     * The bounded wait exists only so a transient layout pass cannot flake it; the HARD
+     * assertion is the loop's exit condition, never the loop body.
+     */
+    private fun assertRetainedFrameIsRendered(label: String) {
+        var last = "never sampled"
+        val satisfied = runCatching {
+            compose.waitUntil(timeoutMillis = RENDERED_FRAME_TIMEOUT_MS) {
+                val probe = probeRenderedTerminalFrame()
+                last = probe.describe()
+                probe.isRendered
+            }
+            true
+        }.getOrDefault(false)
+        if (!satisfied) {
+            writeText("failure-rendered-frame.txt", "$label\n$last\n")
+            runCatching { captureScreen("issue822-failure-rendered-frame") }
+        }
+        assertTrue(
+            "#822: during $label the retained terminal frame must still be RENDERED for " +
+                "the user, not merely present in the terminal buffer. A collapsed " +
+                "(0x0 / unshown / blank) TerminalView is the reported destruction of the " +
+                "retained viewport. Observed: $last",
+            satisfied,
+        )
+    }
+
+    private fun probeRenderedTerminalFrame(): RenderedTerminalProbe {
+        var probe = RenderedTerminalProbe(found = false)
+        launchedActivity?.onActivity { activity ->
+            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
+            val onScreen = Rect()
+            val hasVisibleRect = view.getGlobalVisibleRect(onScreen)
+            val width = view.width
+            val height = view.height
+            var uniform = true
+            if (width > 0 && height > 0) {
+                val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+                view.draw(Canvas(bitmap))
+                uniform = bitmapIsUniform(bitmap)
+                bitmap.recycle()
+            }
+            probe = RenderedTerminalProbe(
+                found = true,
+                shown = view.isShown,
+                width = width,
+                height = height,
+                visibleWidth = if (hasVisibleRect) onScreen.width() else 0,
+                visibleHeight = if (hasVisibleRect) onScreen.height() else 0,
+                uniformPixels = uniform,
+            )
+        }
+        return probe
+    }
+
+    /**
+     * True when every pixel of the drawn frame is the same colour — a surface that is the
+     * right SIZE but paints nothing (the other way a retained frame can be lost). The
+     * seeded pane always carries at least the [READY_MARKER] line and a prompt, so a
+     * genuinely retained frame is never uniform.
+     */
+    private fun bitmapIsUniform(bitmap: Bitmap): Boolean {
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+        val first = pixels[0]
+        for (pixel in pixels) {
+            if (pixel != first) return false
+        }
+        return true
+    }
+
+    private class RenderedTerminalProbe(
+        val found: Boolean,
+        val shown: Boolean = false,
+        val width: Int = 0,
+        val height: Int = 0,
+        val visibleWidth: Int = 0,
+        val visibleHeight: Int = 0,
+        val uniformPixels: Boolean = true,
+    ) {
+        val isRendered: Boolean
+            get() = found && shown && width > 0 && height > 0 &&
+                visibleWidth > 0 && visibleHeight > 0 && !uniformPixels
+
+        fun describe(): String =
+            "terminalViewFound=$found attachedAndShown=$shown measured=${width}x$height " +
+                "onScreenRect=${visibleWidth}x$visibleHeight drawnFrameIsUniformBlank=$uniformPixels"
+    }
+
+    private fun assertNoReconnectSurface(label: String) {
+        compose.waitUntil(timeoutMillis = CONNECTED_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty() &&
+                compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isEmpty()
+        }
+        assertEquals(
+            "expected no connecting/reconnecting band for $label",
             0,
             compose.onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes().size,
@@ -385,15 +626,6 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
                     .fetchSemanticsNodes().size,
             )
         }
-    }
-
-    private fun watchNoVisibleReconnect(label: String, durationMs: Long) {
-        val deadline = SystemClock.elapsedRealtime() + durationMs
-        while (SystemClock.elapsedRealtime() < deadline) {
-            assertNoVisibleReconnect(label)
-            SystemClock.sleep(100)
-        }
-        recordTiming("${label.replace(' ', '_')}_no_reconnect_ms", durationMs)
     }
 
     private fun waitForDiagnostic(
@@ -525,22 +757,78 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         }
     }
 
+    /**
+     * Issue #822 (round 2): captures the AUTHORITATIVE `*-viewport.png` terminal artifact
+     * and HARD-FAILS when it cannot.
+     *
+     * It used to `return@onActivity` silently when the `TerminalView` was missing or
+     * measured 0x0 — so a run whose terminal had been collapsed produced no authoritative
+     * viewport artifact at all and nothing noticed. That is the worst artifact shape in
+     * this repo: "I could not check" reading exactly like "I checked and it is fine". The
+     * missing PNG was in fact the strongest available evidence that the retained frame had
+     * been destroyed, and it was thrown away. Every state this journey captures in
+     * (attached, confirmed-dead-with-retained-frame, recovered) must have a measurable
+     * terminal, so an unmeasurable one is a failure of the journey, never a skipped
+     * screenshot.
+     */
     private fun captureViewport(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
+        var problem: String? = "MainActivity was not available"
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
+            val view = activity.window.decorView.findTerminalView()
+            if (view == null) {
+                problem = "no TerminalView in the decor view"
+                return@onActivity
+            }
+            if (view.width <= 0 || view.height <= 0) {
+                problem = "TerminalView measured ${view.width}x${view.height} " +
+                    "(shown=${view.isShown}) — the retained frame is not rendered"
+                return@onActivity
+            }
+            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(b))
+            bitmap = b
+            problem = null
+        }
+        // Always write the buffer text first, so the failure below carries context.
+        writeText("$name-visible-terminal.txt", visibleTerminalText())
+        val captured = bitmap
+        if (captured == null) {
+            runCatching { captureScreen("$name-failure-no-viewport") }
+            error(
+                "#822: the authoritative viewport artifact '$name-viewport.png' could not " +
+                    "be captured: $problem. A missing terminal viewport capture is a hard " +
+                    "failure, never a silent skip.",
+            )
+        }
+        writeBitmap("$name-viewport", captured)
+        captured.recycle()
+    }
+
+    /**
+     * Whole-window capture (advisory per the terminal-artifact rules, but the ONLY way to
+     * evidence the chrome): draws the activity decor view, so the breadcrumb pill and the
+     * under-header reconnect band appear alongside the retained terminal frame.
+     */
+    private fun captureScreen(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+        var bitmap: Bitmap? = null
+        launchedActivity?.onActivity { activity ->
+            val view = activity.window.decorView
             if (view.width <= 0 || view.height <= 0) return@onActivity
             val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
             view.draw(Canvas(b))
             bitmap = b
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
-        writeText("$name-visible-terminal.txt", visibleTerminalText())
-        bitmap?.recycle()
+        val captured = requireNotNull(bitmap) { "decor view was not measurable for $name" }
+        writeBitmap("$name-screen", captured)
+        captured.recycle()
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {
@@ -569,7 +857,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
             "summary.txt",
             buildString {
                 appendLine("test=WithinGraceSocketDropForegroundJourneyE2eTest")
-                appendLine("issue=1954")
+                appendLine("issue=822")
                 appendLine("fixture=tests/docker agents ($DEFAULT_HOST:$DEFAULT_PORT)")
                 appendLine("running_on_ci=${TerminalTestTimeouts.isRunningOnCi()}")
                 appendLine("session=$SESSION_NAME")
@@ -579,8 +867,8 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
                         "(socket drop), foreground within grace",
                 )
                 appendLine(
-                    "expectation=pane re-seeded (non-blank, prior content), " +
-                        "no Reconnecting/Disconnected/Attaching surface",
+                    "expectation=retained prior viewport + honest Reconnecting + working Retry now, " +
+                        "then same-session fresh-client recovery without A→B→A",
                 )
                 appendLine(
                     "liveness_recovery_starts=" +
@@ -633,9 +921,16 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
 
         const val WITHIN_GRACE_MS: Long = 8_000L
         const val BACKGROUND_HOLD_MS: Long = 1_500L
-        const val OVERLAY_WATCH_MS: Long = 2_500L
-        const val POST_RESTORE_SETTLE_MS: Long = 2_000L
         const val DIAGNOSTIC_TIMEOUT_MS: Long = 8_000L
+        const val POST_RECOVERY_INPUT_PAINT_MS: Long = 6_000L
+
+        /**
+         * Generous bound for the rendered-frame probe. The retained frame is a settled
+         * state, not a transient one, so this only absorbs a layout pass on a contended
+         * emulator; the destroyed-frame case never becomes rendered and burns the whole
+         * budget before hard-failing.
+         */
+        const val RENDERED_FRAME_TIMEOUT_MS: Long = 10_000L
 
         val CONNECTED_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 15_000L

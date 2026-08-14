@@ -40,6 +40,18 @@ leaves the token cleanly retryable — this is what makes ``pane-not-found`` /
 record this call created is removed, and a pre-existing unresolved record this
 call overwrote is RESTORED byte-for-byte, never erased (#2122 F1).
 
+**The paste is the point of no return, and that is exactly the scope of exit 4**
+(#2136). Exit 4 is reported only where this call put nothing into the pane —
+which is what makes the rollback sound and what lets a client that branches on
+the table (#2124) retry without risking a duplicate. Once tmux has accepted the
+paste the payload is in the pane, so no failure of the following ``send-keys
+Enter`` may roll back and none may report exit 4. The two ways that Enter can
+fail — tmux answered "no", or tmux stopped being executable between the two
+commands — leave byte-identical state (payload in the pane, unsubmitted, claim
+kept), so they report one outcome: the unknown, exit 5. Note that exit 4 means
+the journal is UNCHANGED, not that it is empty: under ``--resend-interrupted``
+the restored pre-existing record keeps the token journaled-unresolved.
+
 An unresolved record therefore has exactly two readings, and they are reported
 as different outcomes because they are different facts:
 
@@ -68,6 +80,12 @@ The invariant's honest edges, stated rather than glossed:
   deliberate operator action and does clear them.
 * Liveness is proven from ``/proc``; anything unprovable reads as "not alive",
   i.e. the conservative unknown, never as "inject".
+* Exit 5 is reported for two different facts — a previous attempt's unknown, and
+  this call's own unsubmitted payload — and the invariant holds for both because
+  it is a property of the RECORD, not of who wrote it: the token is
+  journaled-unresolved either way, so no plain call injects. The reading matters
+  to a human deciding whether to opt in, which is why both are spelled out in
+  the exit-code table rather than collapsed into one sentence.
 
 Payload fidelity
 ----------------
@@ -166,24 +184,34 @@ EXIT_CODE_TABLE: tuple[tuple[int, str, str], ...] = (
         EXIT_TMUX_FAILED,
         REASON_TMUX_FAILED,
         "tmux is missing, no server is running, or a tmux command returned a "
-        "definitive failure before anything could reach the pane. Nothing was "
-        "injected; the token is NOT journaled and stays retryable.",
+        "definitive failure. This call put NOTHING into the pane and recorded "
+        "no delivery, and it left the journal exactly as it found it: a claim "
+        "this call took is released, and a pre-existing unresolved record it "
+        "overwrote under --resend-interrupted is restored byte-for-byte. A "
+        "retry therefore cannot duplicate — but 'unchanged' is not 'absent': "
+        "if the token was already journaled-unresolved it still is, and the "
+        "next plain call answers 'send-interrupted' rather than injecting.",
     ),
     (
         EXIT_SEND_INTERRUPTED,
         f"{REASON_SEND_INTERRUPTED} | {REASON_JOURNAL_CORRUPT}",
-        "A PREVIOUS attempt with this token died without an answer (or left an "
-        "unreadable record) and its owning process is gone, so its delivery is "
-        "genuinely UNKNOWN. Nothing was injected by this call: the token is "
-        "never injected twice implicitly. Re-run with --resend-interrupted to "
-        "accept a possible duplicate and deliver again.",
+        "Delivery is genuinely UNKNOWN and the token is left "
+        "journaled-unresolved, so no plain call will ever inject it again. Two "
+        "ways in. Either a PREVIOUS attempt died without an answer (or left an "
+        "unreadable record) and its owning process is gone, in which case this "
+        "call injected nothing; or THIS call got past the point of no return — "
+        "tmux accepted the paste and then the Enter failed, or the delivery "
+        "could not be journaled — in which case the payload may ALREADY be in "
+        "the pane. Never auto-retry either reading. Re-run with "
+        "--resend-interrupted only to accept a possible duplicate.",
     ),
     (
         EXIT_TIMEOUT,
         REASON_TIMEOUT,
-        "A tmux invocation exceeded --timeout. If the timeout hit during the "
-        "commit the token is left in the unknown state above; a retry then "
-        "reports 'send-interrupted' rather than injecting again.",
+        "A tmux invocation exceeded --timeout. If the timeout hit at or after "
+        "the commit the token is left in the unknown state above and the "
+        "payload may ALREADY be in the pane; a retry then reports "
+        "'send-interrupted' rather than injecting again.",
     ),
     (
         EXIT_JOURNAL_FAILED,
@@ -932,6 +960,28 @@ def _report_in_progress(ctx: click.Context, record: JournalRecord) -> None:
     ctx.exit(EXIT_SEND_IN_PROGRESS)
 
 
+def _report_unsubmitted_payload(ctx: click.Context, pane: str, detail: str) -> None:
+    """Report a payload that reached the pane but was never submitted.
+
+    The ONE outcome for every way the ``send-keys Enter`` can fail after tmux
+    accepted the paste. Deliberately not exit 4: the pane is not untouched, the
+    claim is deliberately kept, and a client that branches on the table to
+    auto-retry (#2124) would read ``tmux-failed`` as "clean slate" and inject
+    the payload a second time (#2136).
+
+    The record stays ``pending``, so the next plain call answers this same
+    ``send-interrupted`` rather than injecting, and only an explicit
+    ``--resend-interrupted`` can deliver again.
+    """
+    click.echo(REASON_SEND_INTERRUPTED)
+    click.echo(
+        detail
+        or f"payload landed in {pane} but Enter was not delivered; delivery is partial",
+        err=True,
+    )
+    ctx.exit(EXIT_SEND_INTERRUPTED)
+
+
 def _report_lost_claim(ctx: click.Context, record_path: Path, token: str) -> None:
     """Report the outcome of losing the exclusive claim to a racing sibling.
 
@@ -1270,25 +1320,30 @@ def send_command(
             return
 
     if enter:
+        # PAST THE POINT OF NO RETURN. tmux accepted the paste above, so the
+        # payload is in the pane and this call's claim must stand: rolling back
+        # would let a plain retry paste it a SECOND time. Every way the Enter
+        # can fail therefore reports the unknown, and none reports exit 4
+        # (#2136) — exit 4 is reserved for "this call put nothing in the pane",
+        # which is the property that makes it safe for a client to auto-retry.
+        #
+        # The two failure shapes below are physically indistinguishable — tmux
+        # answered "no", or tmux stopped being executable between the two
+        # commands — and they leave byte-identical state, so they report one
+        # outcome. They used to differ (exit 4 vs exit 5) for no reason a
+        # caller could act on, and exit 4's row then told #2124 the pane was
+        # untouched while the payload sat in it.
         try:
             submitted = runner.run(["send-keys", "-t", pane, "Enter"])
         except TmuxTimeout as exc:
             _fail(ctx, EXIT_TIMEOUT, REASON_TIMEOUT, str(exc))
             return
         except TmuxUnavailable as exc:
-            _fail(ctx, EXIT_TMUX_FAILED, REASON_TMUX_FAILED, str(exc))
+            _report_unsubmitted_payload(ctx, pane, str(exc))
             return
         if submitted.returncode != 0:
-            # The payload IS in the pane but was not submitted. Rolling back
-            # here would let a retry paste it a second time, so this stays the
-            # unknown state and the caller must decide.
-            click.echo(REASON_SEND_INTERRUPTED)
-            click.echo(
-                _decode(submitted.stderr)
-                or f"payload landed in {pane} but Enter was rejected; delivery is partial",
-                err=True,
-            )
-            ctx.exit(EXIT_SEND_INTERRUPTED)
+            _report_unsubmitted_payload(ctx, pane, _decode(submitted.stderr))
+            return
 
     delivered_at = time.time()
     try:

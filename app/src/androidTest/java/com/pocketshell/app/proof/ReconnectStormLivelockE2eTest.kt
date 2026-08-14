@@ -161,6 +161,9 @@ class ReconnectStormLivelockE2eTest {
     private var seededHostRowTag: String? = null
     private var tmuxServerPid: String? = null
     private var serverStalled: Boolean = false
+
+    /** Issue #2143: pid of the detached remote sleeper that un-stalls the server. */
+    private var stallDeadManPid: String? = null
     private var decoySshSession: SshSession? = null
     private var decoyShell: SshShell? = null
     private var decoyControlClientPid: String? = null
@@ -582,6 +585,7 @@ class ReconnectStormLivelockE2eTest {
         key: String,
         targetControlClientLookup: String =
             "tmux list-clients -t ${shellQuote(SESSION_NAME)} -F '#{client_pid}' 2>/dev/null",
+        deadManSecs: Long = STALL_DEAD_MAN_SECS,
     ) {
         val script = buildString {
             appendLine("set -u")
@@ -599,6 +603,33 @@ class ReconnectStormLivelockE2eTest {
             // that SHELL exits — not merely when tmux does. Kill both.
             appendLine("SH=\$(ps -o ppid= -p \"\$CC\" 2>/dev/null | tr -d ' ')")
             appendLine("echo \"cc_shell_pid=\$SH\"")
+            // Issue #2143 — ARM THE DEAD-MAN BEFORE THE STALL.
+            //
+            // Every restore path this test owns runs IN THIS PROCESS: the catch below and
+            // @After's resumeTmuxServer(). Neither exists when the process is not unwound
+            // but KILLED — and the journey harness kills a class attempt at its 420s cap
+            // (`JOURNEY_CLASS_TIMEOUT_SECS`). On `main` at 23ed1b10 that cap fired inside
+            // this very method, and the shared `agents` tmux server stayed SIGSTOPped for
+            // the rest of the shard: this class's own retry then failed all three methods
+            // in setup at the full 90s deadline, and ProfileChipRelaunchDockerTest failed
+            // twice at its 30s `createSession`, while every class targeting a DIFFERENT
+            // container passed. That is #1940 recurring, because #1940's fix hardened the
+            // in-process assertion-throw path only, which a SIGKILL cannot reach.
+            //
+            // So the resume is owned by the HOST that holds the frozen process, not by the
+            // client that can die: a detached sleeper SIGCONTs the server unconditionally
+            // after `deadManSecs`. It is set to strictly outlast the longest stall this
+            // method can legitimately need (see STALL_DEAD_MAN_SECS), so it can never end a
+            // real observation early and turn the proof green for the wrong reason; it only
+            // bounds a stall whose owner is already gone. Detached from the exec channel's
+            // fds so the SSH session can close without taking the sleeper with it.
+            appendLine(
+                "nohup sh -c \"sleep $deadManSecs; kill -CONT \$PID 2>/dev/null || true\" " +
+                    "</dev/null >/dev/null 2>&1 &",
+            )
+            appendLine("DEADMAN=\$!")
+            appendLine("echo \"dead_man_pid=\$DEADMAN\"")
+            appendLine("echo \"dead_man_secs=$deadManSecs\"")
             // Stall FIRST, drop SECOND: reversed, the grace loop can heal in the gap and
             // the tail would never be slow.
             appendLine("kill -STOP \"\$PID\"")
@@ -607,6 +638,7 @@ class ReconnectStormLivelockE2eTest {
         }
         val result = execRemote(key, script)
         tmuxServerPid = Regex("tmux_server_pid=(\\d+)").find(result.stdout)?.groupValues?.get(1)
+        stallDeadManPid = Regex("dead_man_pid=(\\d+)").find(result.stdout)?.groupValues?.get(1)
         val controlClientCount =
             Regex("cc_client_count=(\\d+)").find(result.stdout)?.groupValues?.get(1)?.toIntOrNull()
         val controlClientPid =
@@ -650,12 +682,22 @@ class ReconnectStormLivelockE2eTest {
         recordTiming("fixture_tmux_server_pid", tmuxServerPid!!.toLong())
     }
 
-    /** `kill -CONT` the stalled tmux server. Idempotent; safe from `tearDown`. */
+    /**
+     * `kill -CONT` the stalled tmux server. Idempotent; safe from `tearDown`.
+     *
+     * Also cancels the #2143 dead-man in the same round-trip. Leaving it running would
+     * be harmless today (SIGCONT on a running process is a no-op) but the container's
+     * pids are small and recycled, so an orphaned sleeper is a signal aimed at whatever
+     * holds that pid minutes later.
+     */
     private suspend fun resumeTmuxServer() {
         val pid = tmuxServerPid ?: return
         if (!serverStalled) return
         val key = seededKey ?: return
-        execRemote(key, "kill -CONT $pid 2>/dev/null || true; echo resumed")
+        val deadMan = stallDeadManPid
+        val cancelDeadMan = if (deadMan != null) "kill -9 $deadMan 2>/dev/null || true; " else ""
+        execRemote(key, "${cancelDeadMan}kill -CONT $pid 2>/dev/null || true; echo resumed")
+        stallDeadManPid = null
         serverStalled = false
     }
 
@@ -1080,7 +1122,44 @@ class ReconnectStormLivelockE2eTest {
                     "test's knob expired rather than because the counter walked to give-up.",
                 WIDE_GRACE_MS > OBSERVE_WINDOW_MS + TERMINATION_WINDOW_MS,
             )
+            // Issue #2143: the same self-consistency discipline for the dead-man. If it
+            // could expire inside the observation, this test's stall would clear on its
+            // own and the storm assertions would be measuring a fixture that healed
+            // itself rather than the machine under test.
+            assertTrue(
+                "STALL_DEAD_MAN_SECS ($STALL_DEAD_MAN_SECS) must strictly outlast the " +
+                    "longest stall this class holds — OBSERVE_WINDOW_MS ($OBSERVE_WINDOW_MS) " +
+                    "+ TERMINATION_WINDOW_MS ($TERMINATION_WINDOW_MS) — or the fixture would " +
+                    "un-stall itself mid-observation and the proof would go green for the " +
+                    "wrong reason.",
+                STALL_DEAD_MAN_SECS * 1000L > OBSERVE_WINDOW_MS + TERMINATION_WINDOW_MS,
+            )
         }
+        /**
+         * Issue #2143 — the wall-clock bound on a stall whose owner has died.
+         *
+         * The stall is destructive SHARED state: while the `agents` tmux server is
+         * SIGSTOPped, every other journey class on the shard that touches it hangs. This
+         * class's in-process restores cannot run when the harness SIGKILLs the attempt at
+         * its 420s cap, so the remote arms a detached sleeper that SIGCONTs the server
+         * unconditionally after this many seconds.
+         *
+         * DERIVED, not picked: it must strictly outlast the longest stall any method here
+         * can legitimately hold, or it would end a real observation early and the proof
+         * could go green for the wrong reason (G6). The longest is the storm test's
+         * [OBSERVE_WINDOW_MS] + [TERMINATION_WINDOW_MS], so it is derived from those and
+         * retunes with them — the same discipline [assertWindowsAreSelfConsistent]
+         * enforces for the other derived windows. It is deliberately LONGER than the
+         * harness's per-class cap: shortening the stall to fit the cap would change what
+         * the test observes, and the harness's own post-attempt fixture health gate
+         * (`scripts/ci-journey-fixture-health.sh`) already restores the fixture within
+         * seconds of a killed attempt. This bound is the belt-and-braces that turns
+         * "stranded until the runner is torn down" into "stranded for a known interval"
+         * even where that gate does not run.
+         */
+        val STALL_DEAD_MAN_SECS: Long =
+            ((OBSERVE_WINDOW_MS + TERMINATION_WINDOW_MS) / 1000L) + 120L
+
         val HEAL_RECOVER_WINDOW_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 90_000L else 60_000L
         val ROUND_TRIP_WINDOW_MS: Long =

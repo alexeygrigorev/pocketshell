@@ -100,6 +100,16 @@ internal class TransportDispatcher(
 ) {
 
     /**
+     * `true` only on THIS dispatcher's own dedicated dispatch thread (issue
+     * #2109). Set once by the thread factory below, so it survives a
+     * `ThreadPoolExecutor` replacing a dead worker and it is scoped per
+     * dispatcher instance — dispatcher A's thread is not dispatcher B's, and
+     * only a call re-entering the SAME dispatcher can deadlock on ITS [mutex].
+     * Read by [runBlockingDispatch] to enforce its documented precondition.
+     */
+    private val onDispatchThread = ThreadLocal.withInitial { false }
+
+    /**
      * One dedicated daemon thread per connection. A dedicated single thread
      * (not a shared `Dispatchers.IO` view) is required so blocking sshj calls
      * — `startSession`, `OutputStream.write/flush`, `changeWindowDimensions`,
@@ -110,7 +120,13 @@ internal class TransportDispatcher(
         object : ThreadFactory {
             private val n = AtomicLong(0)
             override fun newThread(r: Runnable): Thread =
-                Thread(r, "ps-ssh-dispatch-${SEQ.incrementAndGet()}-${n.incrementAndGet()}").apply {
+                Thread(
+                    {
+                        onDispatchThread.set(true)
+                        r.run()
+                    },
+                    "ps-ssh-dispatch-${SEQ.incrementAndGet()}-${n.incrementAndGet()}",
+                ).apply {
                     isDaemon = true
                 }
         },
@@ -191,11 +207,28 @@ internal class TransportDispatcher(
      * dispatch thread — same FIFO mutual-exclusion and same teardown rejection
      * as [run], just bridged for callers that cannot suspend.
      *
-     * MUST NOT be called from the dispatch thread itself (would deadlock on the
-     * mutex); all current callers invoke it from an IO/UI coroutine, never from
-     * inside another [run] block.
+     * MUST NOT be called from the dispatch thread itself, and that precondition
+     * is now ENFORCED (issue #2109) rather than merely documented. A nested call
+     * from inside a [run] body would `runBlocking`-park the ONE dispatch thread
+     * waiting on a [mutex] that the very same thread's outer op still holds — a
+     * permanent, silent wedge of the whole connection (nothing ever unparks it;
+     * the per-op watchdog only converts it into a bewildering
+     * [TransportOpTimeoutException] on an op that never touched the wire). Every
+     * current caller invokes this from an IO/UI coroutine, so the check is free
+     * on the real path; it exists so a FUTURE caller that nests a blocking write
+     * inside a `run { }` block fails loudly at its own call site instead of
+     * hanging the transport.
      */
-    fun <T> runBlockingDispatch(block: () -> T): T = runBlocking { run(block) }
+    fun <T> runBlockingDispatch(block: () -> T): T {
+        check(!onDispatchThread.get()) {
+            "TransportDispatcher.runBlockingDispatch must not be called from the " +
+                "dispatch thread itself (issue #2109): runBlocking would park the " +
+                "single dispatch thread on a mutex its own in-flight op still holds, " +
+                "wedging every write on this connection permanently. Call the " +
+                "suspending run { } directly from inside another op instead."
+        }
+        return runBlocking { run(block) }
+    }
 
     /**
      * Drain all pending/in-flight operations, then run [disconnect] as the

@@ -869,6 +869,12 @@ jobs:
       - name: Install uv
         run: pip install --upgrade uv
 
+      # test_send.py drives a real tmux and hard-fails (never skips) without it (#2122).
+      - name: Ensure tmux is available (issue #2122)
+        run: |
+          command -v tmux || { sudo apt-get update && sudo apt-get install -y tmux; }
+          tmux -V
+
       - name: Install pocketshell + dev deps
         working-directory: tools/pocketshell
         run: |

@@ -36,6 +36,7 @@ from pocketshell.prune_attachments import prune_attachments_command
 from pocketshell.push import push_group
 from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
+from pocketshell.send import send_command
 from pocketshell.sessions import sessions_group
 from pocketshell.tree import tree_group
 from pocketshell.usage import usage_command
@@ -62,6 +63,10 @@ cli.add_command(agents_group, name="agents")
 cli.add_command(profiles_group, name="profiles")
 cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")
+# Issue #2122 (epic #2121): the acknowledged outbound delivery primitive. The
+# exec's exit status IS the delivery acknowledgement, replacing the client's
+# bounded terminal-observation guess.
+cli.add_command(send_command, name="send")
 cli.add_command(tree_group, name="tree")
 cli.add_command(agent_log_command, name="agent-log")
 cli.add_command(repos_group, name="repos")

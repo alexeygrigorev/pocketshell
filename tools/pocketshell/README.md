@@ -49,6 +49,7 @@ Top-level commands in the current helper:
 
 ```text
 pocketshell usage [provider] [--json]       # provider quota / usage
+pocketshell send --pane %3 --token <id>     # acknowledged pane delivery
 pocketshell sessions list [--by activity]   # tmux session summaries
 pocketshell jobs ...                        # tmux recurring jobs
 pocketshell agent-log ...                   # agent conversation logs
@@ -65,6 +66,110 @@ Run `pocketshell --help` or `pocketshell <command> --help` for the live
 flag set. Some parity subcommands still proxy through the existing host
 tools internally so their output remains byte-identical to what the app
 already parses.
+
+### `pocketshell send`
+
+Deliver a payload into an exact tmux pane, **exactly once per token**. The
+exit status IS the acknowledgement — the client no longer has to read the
+terminal screen and guess whether its prompt landed (issue #2122, epic
+#2121).
+
+```bash
+printf 'summarise the diff' | pocketshell send --pane %3 --token <row-id> --enter
+pocketshell send --prune-older-than 30d
+```
+
+The payload is read from **stdin as raw bytes** and delivered byte-exact
+(`load-buffer -` → `paste-buffer -d -r`, never argv). This command does not
+add bracketed-paste markers: the client already frames its payload, and
+framing twice put the inner markers into the receiving program as literal
+text (issue #1854). Callers that want bracketed paste write the framed bytes
+to stdin.
+
+Exit codes are stable, and `--help` documents them (rendered from the same
+table the code exits with, so they cannot drift):
+
+| Exit | stdout reason | Meaning |
+| ---- | ------------- | ------- |
+| 0 | `delivered` | Injected by this call and journaled. |
+| 0 | `already-delivered` | The token was already journaled; nothing injected. |
+| 0 | `pruned <n>` | `--prune-older-than` removed `n` records. |
+| 2 | `bad-usage` | Invalid/missing arguments. Nothing injected or journaled. |
+| 3 | `pane-not-found` | Pane missing or dead. Not journaled; stays retryable. |
+| 4 | `tmux-failed` | tmux missing / no server / a definitive tmux failure. This call never recorded a delivery. Usually the pane was never touched and the token is left unclaimed, but not always — see the note below before auto-retrying. |
+| 5 | `send-interrupted` or `journal-corrupt` | A previous attempt for this token died without an answer (its process is gone). Delivery is genuinely UNKNOWN and nothing was injected now. |
+| 6 | `timeout` | A tmux call exceeded `--timeout`. |
+| 7 | `journal-failed` | The journal could not be read/written. Nothing injected. |
+| 8 | `send-in-progress` | Another send for this token is STILL RUNNING. Nothing injected, nothing unknown — retry shortly to read that call's answer. |
+
+**Exit 4 in detail** — a client that branches on this table to decide whether
+to auto-retry (#2124) must not read `tmux-failed` as "clean slate". It
+guarantees only that this call never recorded a *delivery*. It does **not**
+guarantee the token is unjournaled, and in one narrow case it does not
+guarantee the pane is untouched:
+
+- Failure at the pane lookup, or while filling the paste buffer — both happen
+  before the journal is written at all: nothing injected, token unclaimed,
+  cleanly retryable. This is the ordinary case.
+- A definitive `paste-buffer` failure rolls this call's claim back. For a plain
+  call that returns the token to absent (cleanly retryable). Under
+  `--resend-interrupted` the *pre-existing* unresolved record is restored
+  byte-for-byte rather than erased, so the token stays journaled-unresolved and
+  the next plain call answers exit 5, not a fresh injection.
+- tmux disappearing between a successful paste and the `Enter`: the payload
+  **is** in the pane, the pending record is deliberately kept, and the next
+  plain call answers exit 5.
+
+A plain retry after exit 4 is therefore always *safe* — it re-reads the journal
+and answers exit 5 rather than duplicating — but it is not guaranteed to inject.
+
+stdout is machine-readable: the first whitespace-delimited token is one of
+the reasons above; human detail goes to stderr. Every retry path drains stdin
+before exiting, so a caller piping a payload never takes SIGPIPE on a
+successful acknowledgement. (Argument validation runs *before* stdin is read,
+deliberately: a caller with an open-but-idle stdin gets `bad-usage`
+immediately instead of blocking on a payload that will never arrive.)
+
+**Durability invariant: at-most-once, except on an explicit opt-in.** A token
+is never injected a second time unless the caller passes
+`--resend-interrupted` on the injecting call itself; no sequence of failures,
+kills, races or automatic housekeeping can turn an injected token back into a
+state a plain call will inject. The journal under
+`${XDG_STATE_HOME:-~/.local/state}/pocketshell/sends/` is two-phase — a
+`pending` record is written (atomically, fsync'd) immediately before the one
+command that can put bytes into the pane, then promoted to `delivered` once
+tmux answers. A definitive tmux failure rolls that claim back, so ordinary
+errors stay cleanly retryable; rolling back means undoing *this* call, so a
+record this call created is removed and a pre-existing unresolved record it
+overwrote is restored byte-for-byte rather than erased.
+
+An unresolved record is then read against its owner process: gone ⇒ a previous
+attempt died and delivery is genuinely unknown (exit 5, resolvable with
+`--resend-interrupted`, so the state is never absorbing); still running ⇒
+nothing is unknown and the outcome belongs to that call (exit 8, retryable).
+`--resend-interrupted` does not override a live owner — there is no unknown to
+resolve, and forcing one would simply duplicate the payload.
+
+The invariant's honest edges: a definitive non-zero from `paste-buffer` is
+taken as proof nothing reached the pane; the journal directory must survive
+(delete it and the memory is gone); `--prune-older-than` is an operator
+action that *can* clear unresolved records; and exit 8 is bounded by the owner
+process's **liveness**, not by the owner's `--timeout`. A suspended owner
+(reproduced with `SIGSTOP`) holds its token in `send-in-progress` for as long
+as it stays stopped, because the liveness probe asks whether the process still
+exists, not whether it is making progress, and `--timeout` bounds the tmux
+calls of the process that passed it rather than some other process's lifetime.
+This fails safe — the payload is never duplicated and the token never becomes
+absorbing once the owner dies — and a client cannot reach it through its own
+use, since it would have to suspend its own in-flight send. Nothing reaps a
+suspended owner.
+
+Records carry a timestamp and are pruned two ways: explicitly with
+`--prune-older-than <30d|12h|90m|3600s>`, and automatically on delivery at a
+**30-day default retention** (throttled to at most once every 6 h), so the
+directory cannot grow without bound even if pruning is never invoked. The
+automatic sweep only removes **resolved** records — ageing an unknown out of
+the journal would silently make the token injectable again.
 
 ### `pocketshell usage`
 

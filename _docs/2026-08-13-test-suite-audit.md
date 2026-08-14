@@ -48,9 +48,11 @@ window.
    by the function under test — so `closeNow()` has no effective coverage at all.
 2. Four tests/scenarios that self-skip on **every** lane and read as coverage while
    protecting nothing.
-3. A live instance of the maintainer's worst historical bug class (#685 "disagreeing
-   clocks"): the controller's background grace is 90s, the lease TTL is 60s, and
-   nothing relates them.
+3. ~~A live instance of the maintainer's worst historical bug class (#685 "disagreeing
+   clocks")~~ — **corrected 2026-08-14: there is no dead zone.** The coverage gap was
+   real (nothing related the 90s background grace to the 60s lease TTL, and it could
+   have drifted into a defect unnoticed), but the user-visible bug I inferred from it
+   does not exist. See §3 for why, and for the reasoning error that produced it.
 
 ### A correction to my own working assumption
 
@@ -228,26 +230,52 @@ ratio in the repo).
 
 ## 3. Tests that are MISSING
 
-### Highest priority — a live recurrence of the #685 class
+### Highest priority — an untested relation (NOT the dead zone this section first claimed)
 
-**Nothing relates the controller's 90s background grace to the lease's 60s idle TTL.**
-`ConnectionController.kt:909` sets `DEFAULT_GRACE_MS = 90_000L` (moved from 60s by #1159);
-`SshLeaseManager.kt:791` still sets `DEFAULT_IDLE_TTL_MILLIS = 60_000L`. The #685
-"collapse to one clock" invariant *is* pinned for the passive pair
-(`TmuxSessionViewModelPassiveReconnectTest.kt:848-861`), but nothing covers the background
-grace after #1159 moved it.
+> **CORRECTED 2026-08-14 — the original version of this section was wrong, and the
+> correction is more instructive than the finding.** It asserted a live user-visible 30s
+> dead zone. There is no dead zone. Established independently by the #2112 implementer and
+> reviewer, merged as #2148. The coverage gap was real; the bug I inferred from it was not.
+>
+> **Why it was wrong:** nothing releases the lease at background time. `ON_STOP` starts
+> only the grace timer; the `-CC` client keeps its lease, and `SshLeaseManager.release()`
+> returns early while `refCount > 0`, so the 60s TTL clock never starts. The controller's
+> `Background` is reached only from inside `onGraceElapsed`, and that teardown closes the
+> transport immediately rather than parking it warm.
+>
+> **The reductio that settles it without reading any of that:** `MAX_BACKGROUND_GRACE_MILLIS`
+> is **10 minutes** and already user-selectable against the unchanged 60s TTL. If the claim
+> held, a user choosing the maximum would be exposing a *nine-minute* dead zone that shipped
+> long ago and nobody has ever reported.
+>
+> **Two further errors in the original:** the divergence came from **#1123** (60s→300s), not
+> #1159 — `git log -L` gives `#687 60s → #1123 300s → #1159 90s`. And the citation of
+> `ConnectionManagerEquivalenceTest.kt:226-238` was a misreading: that test injects
+> `warm = { false }` at t=10s, so it says nothing about lease state at t=60-90s.
+>
+> **The generalisable lesson:** I reasoned from two disagreeing constants plus a documented
+> historical failure mode (#685's "three disagreeing clocks") straight to a user-visible
+> symptom, without walking the lifecycle path that connects them. Two constants differing is
+> evidence of an *untested relation*, not of a bug — the audit's own standard is to name the
+> mutation that would redden, and "the constants differ" is not one.
 
-User-visible failure: background the app, foreground at t = 60-90s. The controller says
-"within grace", but the released lease has passed its TTL and gone cold — so the user gets
-a reconnect instead of the documented zero-reconnect reattach. The equivalence suite itself
-documents that cold-lease-within-grace yields `Reconnecting`
-(`ConnectionManagerEquivalenceTest.kt:226-238`).
+**What was actually true:** nothing related `ConnectionController.kt:909`'s
+`DEFAULT_GRACE_MS = 90_000L` to `SshLeaseManager.kt:791`'s `DEFAULT_IDLE_TTL_MILLIS =
+60_000L`. The #685 "collapse to one clock" invariant *is* pinned for the passive pair
+(`TmuxSessionViewModelPassiveReconnectTest.kt:848-861`), but nothing covered the background
+grace. So the relation could have drifted into a real defect with no test to catch it.
 
-This is the exact shape of the bug class AGENTS.md calls the grace root cause. Test: a
-virtual-clock journey — Live → background → advance 75s → foreground → assert zero
-reconnect (or, if #1159 deliberately decoupled them by holding the lease, a test proving
-the lease is held for the full 90s), plus a one-line cross-module relation guard beside
-`ControllerGraceDefaultTest`.
+Fixed in #2112 / PR #2148: the 75s case, the boundary class (59999 / 60000 / 60001 / 75000 /
+89999 / 90000 / 90001, warm and cold arms), the two pool mechanisms against a real
+`SshLeaseManager`, and a cross-module relation guard that fails if the constants drift apart.
+Zero production changes — the contract was already correct. Notably **M4 (delete the
+`!processStarted` disjunct) kills the teardown guard**, and M4 is precisely the change that
+*would* create the dead zone this section originally claimed: the guard now exists.
+
+Follow-up **#2116**: the controller's 90s window never yields `Reattaching` on the background
+path — at the moment `Background` is submitted the lease has just closed, so `consultWarm` is
+false for the whole window it counts. An inert second decision layer in the connection core is
+a D28 smell, and a maintainer call.
 
 ### Phase-2 gap list — verified against code, not the doc
 

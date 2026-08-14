@@ -59,6 +59,11 @@ internal class TmuxSessionConnectionRuntime(
     val surfaceCalmFailure: Boolean,
     val surfaceCenteredLoader: Boolean,
     val surfaceOwnsPrimary: Boolean,
+    // Issue #822: the breadcrumb pill/dot payload. Derived from the connection, not
+    // only from the retained frame, so a confirmed-dead `-CC` wire under the
+    // within-grace reveal hold reads amber "Reconnecting" instead of a green
+    // "Connected" lie.
+    val pillStatus: com.pocketshell.uikit.model.ConnectionStatus,
     val sessionLive: Boolean,
 )
 
@@ -125,6 +130,7 @@ internal fun rememberTmuxSessionConnectionRuntime(
         surfaceCalmFailure = surfaceState.showsCalmFailure,
         surfaceCenteredLoader = surfaceState.showsCenteredLoader(panesEmpty),
         surfaceOwnsPrimary = surfaceState.surfaceOwnsPrimary(panesEmpty),
+        pillStatus = connectionPillStatus(surfaceState, status),
         sessionLive = sessionLive,
     )
 }

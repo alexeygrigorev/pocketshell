@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux.connection
 
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.tmux.TmuxClient
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -61,9 +62,42 @@ class GraceEffects(private val io: GraceIo) {
     var recoveryOwnership: GraceRecoveryOwnership = GraceRecoveryOwnership.Idle
         private set
 
+    /**
+     * The coroutines the CURRENT bounded owner runs (its hold-release timer and its heal
+     * retry loop), so a superseding owner can retire them instead of racing them. Reset by
+     * [beginWithinGraceRecovery] so a fresh claim never inherits the previous claim's jobs.
+     */
+    private var recoveryJobs: List<Job> = emptyList()
+
     /** Claim the bounded recovery window before either the reseed or dead-socket arm starts. */
     fun beginWithinGraceRecovery(claim: WithinGraceRecoveryClaim) {
         recoveryOwnership = GraceRecoveryOwnership.WithinGrace(claim)
+        recoveryJobs = emptyList()
+    }
+
+    /** Register a coroutine owned by the current bounded claim. */
+    fun trackRecoveryJob(job: Job) {
+        recoveryJobs = recoveryJobs + job
+    }
+
+    /**
+     * Issue #822: hand the channel over to a USER-initiated in-place reconnect.
+     *
+     * The bounded within-grace owner and the manual reconnect were two writers on the same
+     * transport, and that is why tapping the in-place action did NOT recover while a
+     * switch-away-and-back did — a switch retires this owner, a Retry did not. On device the
+     * manual reconnect acquired a healthy fresh lease and the still-running grace loop then
+     * failed its own re-dial with `proven-dead SSH lease was no longer current` every 250 ms,
+     * tearing the successor down until the session settled on `Unreachable`. Retiring the
+     * claim AND cancelling its coroutines makes the manual reconnect the single owner (D28);
+     * the hold-release job's own guarded completion handler restores the reveal projection,
+     * so the honest "Attaching…" for the user's explicit retry is not suppressed.
+     */
+    fun retireForSupersedingOwner() {
+        recoveryOwnership = GraceRecoveryOwnership.Idle
+        val jobs = recoveryJobs
+        recoveryJobs = emptyList()
+        jobs.forEach { it.cancel() }
     }
 
     /** Release only the claim whose bounded owner timer completed; stale timers are inert. */

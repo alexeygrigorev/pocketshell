@@ -23,7 +23,9 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExecutorCoroutineDispatcher
@@ -302,11 +304,12 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
     }
 
     /**
-     * Issue #1954 D34 proof: kill the real authenticated sshd worker while the app is in its
-     * bounded background grace, then foreground through the production grace-heal entrypoint.
-     * The symptom-defining assertions are on the real reader death, the absence of a competing
-     * liveness owner, the lease-authority invalidation record, object identities, connect count,
-     * and the real same-session transcript.
+     * Issue #1954/#822 D34 proof: kill the real authenticated sshd worker while the app is in
+     * bounded background grace, keep the authoritative replacement connector unavailable for
+     * one foreground attempt, then restore it. The dead interval must be typed Reattaching /
+     * displayed Reconnecting and unwritable while the retained viewport remains available;
+     * recovery must happen in place over a distinct SSH/client and real seed, with no manual
+     * reconnect or session-switch workaround.
      */
     @Test
     fun realReaderDropWithinGraceHasOneOwnerAndOneFreshHandshake() = runBlocking {
@@ -319,7 +322,8 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
         startDockerOrFail()
         val fixture = requireNotNull(container)
         val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        val connector = CountingLeaseConnector(DefaultSshLeaseConnector())
+        val outageConnector = OneHeldOutageLeaseConnector(DefaultSshLeaseConnector())
+        val connector = CountingLeaseConnector(outageConnector)
         val leaseManager = SshLeaseManager(
             connector = connector,
             scope = ioScope,
@@ -374,6 +378,10 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                 "precondition: process background must close the liveness probe gate",
                 vm.shouldRunLivenessProbeForTest(),
             )
+            // #822: the replacement transport stays unavailable for exactly the first
+            // foreground attempt. This exposes the interval that used to remain falsely
+            // Live/Connected until an eventual recovery outcome happened.
+            outageConnector.armOneAttemptOutage()
             val killedPeerPids = killAuthenticatedSshdProcessesFromServer()
             val readerExit = awaitReaderExit(tmuxDiagnostics, firstClientHash)
             assertTrue(
@@ -412,6 +420,38 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
             vm.setProcessForegroundForClearedForTest(true)
             vm.onAppForegrounded(resumedWithinGrace = true)
 
+            awaitCondition(RECOVERY_TIMEOUT_MS, "first within-grace replacement attempt blocked") {
+                outageConnector.blockedAttemptInFlight
+            }
+            assertEquals(
+                "the peer must remain unavailable for exactly one replacement attempt",
+                1,
+                outageConnector.blockedConnectCount,
+            )
+            assertTrue(
+                "#822: confirmed-dead foreground must be typed Reattaching before a replacement " +
+                    "transport or seed exists; state=${vm.connectionControllerStateForTest()}",
+                vm.connectionControllerStateForTest() is ConnectionState.Reattaching,
+            )
+            assertTrue(
+                "#822: raw/display status must truthfully be Reconnecting during the real outage; " +
+                    "status=${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+            )
+            assertFalse(
+                "#822: the dead transport must not be writable before replacement seed",
+                vm.isSendTransportWritable(),
+            )
+            assertTrue(
+                "the original within-grace owner must remain active during the blocked attempt",
+                vm.withinGraceRecoveryActiveForTest(),
+            )
+            assertTrue(
+                "the in-place grace owner must not require the normal reconnect entrypoint",
+                diagnostics.eventsNamed("reconnect_start").isEmpty(),
+            )
+
+            outageConnector.releaseBlockedAttemptWithFailure()
             awaitCondition(RECOVERY_TIMEOUT_MS, "within-grace fresh-client recovery completion") {
                 val currentClient = vm.liveTmuxClientForSendOrNullForTest()
                 val currentHash = currentClient?.let(System::identityHashCode)
@@ -431,9 +471,19 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
             assertEquals(true, leaseRecovery.single().fields["invalidatedLease"])
             assertEquals(true, leaseRecovery.single().fields["freshTransport"])
             assertEquals(
-                "one initial + exactly one recovery handshake",
-                2,
+                "one initial acquire + one blocked replacement + one recovered acquire",
+                3,
                 connector.connectCount,
+            )
+            assertEquals(
+                "only the initial and recovered transports may handshake successfully",
+                2,
+                outageConnector.successfulConnectCount,
+            )
+            assertEquals(
+                "the recovery must survive one unavailable replacement attempt in place",
+                1,
+                outageConnector.blockedConnectCount,
             )
             assertTrue(
                 "the competing liveness owner must stay deferred for the owned dead client: " +
@@ -454,7 +504,8 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
 
             println(
                 "ISSUE1954_REAL_TRANSPORT owner=within_grace livenessStarts=0 " +
-                    "connectCount=${connector.connectCount} leaseRecovery=${leaseRecovery.single().fields} " +
+                    "connectCount=${connector.connectCount} blocked=${outageConnector.blockedConnectCount} " +
+                    "leaseRecovery=${leaseRecovery.single().fields} " +
                     "firstClient=$firstClientHash recoveredClient=${System.identityHashCode(recoveredClient)} " +
                     "firstSsh=$firstSshIdentity recoveredSsh=$recoveredSshIdentity " +
                     "peerKilledPids=$killedPeerPids reader=$readerExit",
@@ -471,6 +522,7 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
                         "${event.category}/${event.name} ${event.fields}"
                     },
             )
+            outageConnector.releaseBlockedAttemptWithFailure()
             LivenessProbeTestOverride.clear()
             vm?.setProcessForegroundForClearedForTest(null)
             vm?.cancelOwnScopesForTest()
@@ -846,6 +898,50 @@ class Issue1952TypedPassiveDropRealTransportIntegrationTest {
             if (outageActive) {
                 blockedAttempts.incrementAndGet()
                 return Result.failure(IOException("synthetic sustained outage at connector attempt $attempt"))
+            }
+            return delegate.connect(target).also { result ->
+                if (result.isSuccess) successfulAttempts.incrementAndGet()
+            }
+        }
+    }
+
+    /**
+     * Holds exactly one manager-new acquisition before returning a failure. The test can
+     * inspect controller/status/send truth while no replacement IO outcome exists, then
+     * release that one failed attempt and let the same grace owner recover on its next tick.
+     */
+    private class OneHeldOutageLeaseConnector(
+        private val delegate: SshLeaseConnector,
+    ) : SshLeaseConnector {
+        private val armed = AtomicBoolean(false)
+        private val blockedAttempts = AtomicInteger(0)
+        private val successfulAttempts = AtomicInteger(0)
+        private val blockedAttemptStarted = CompletableDeferred<Unit>()
+        private val releaseBlockedAttempt = CompletableDeferred<Unit>()
+
+        val blockedConnectCount: Int
+            get() = blockedAttempts.get()
+
+        val blockedAttemptInFlight: Boolean
+            get() = blockedAttemptStarted.isCompleted && !releaseBlockedAttempt.isCompleted
+
+        val successfulConnectCount: Int
+            get() = successfulAttempts.get()
+
+        fun armOneAttemptOutage() {
+            check(armed.compareAndSet(false, true)) { "one-attempt outage already armed" }
+        }
+
+        fun releaseBlockedAttemptWithFailure() {
+            releaseBlockedAttempt.complete(Unit)
+        }
+
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+            if (armed.compareAndSet(true, false)) {
+                blockedAttempts.incrementAndGet()
+                blockedAttemptStarted.complete(Unit)
+                releaseBlockedAttempt.await()
+                return Result.failure(IOException("held one-attempt replacement outage"))
             }
             return delegate.connect(target).also { result ->
                 if (result.isSuccess) successfulAttempts.incrementAndGet()

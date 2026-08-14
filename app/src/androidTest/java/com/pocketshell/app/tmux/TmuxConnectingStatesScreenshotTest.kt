@@ -382,6 +382,7 @@ class TmuxConnectingStatesScreenshotTest {
                     TmuxTopConnectingBanner(
                         surfaceState = surfaceOf(RevealState.Seeding(sid, "git-pocketshell"), connecting),
                         surfaceOwnsPrimary = true,
+                        status = connecting,
                         sessionName = "git-pocketshell",
                         onCancelConnect = {},
                         onRetryNow = {},
@@ -746,6 +747,7 @@ class TmuxConnectingStatesScreenshotTest {
                     TmuxTopConnectingBanner(
                         surfaceState = waitingState,
                         surfaceOwnsPrimary = ownsPrimary,
+                        status = reconnecting,
                         sessionName = "claude-main",
                         onCancelConnect = {},
                         onRetryNow = {},

@@ -2,6 +2,8 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.tmux.connection.ReconnectRungFailureSource
+import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseTarget
@@ -12,6 +14,7 @@ import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxDisconnectEvent
 import com.pocketshell.core.tmux.TmuxDisconnectReason
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.advanceTimeBy
@@ -307,12 +310,9 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
             val registry = ActiveTmuxClients()
             val deadSession = FakeSshSession()
             val freshSession = FakeSshSession()
-            val connector = ScriptedLeaseConnector(
-                listOf(
-                    Result.success(deadSession),
-                    Result.failure(IOException("first recovery dial is still inside the outage")),
-                    Result.success(freshSession),
-                ),
+            val connector = HeldFirstRecoveryLeaseConnector(
+                initialSession = deadSession,
+                freshSession = freshSession,
             )
             val vm = newVm(
                 registry = registry,
@@ -330,7 +330,13 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
             vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
             vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
 
-            val replacementClient = FakeTmuxClient().withSinglePane("work", "%1")
+            val replacementSeedGate = CompletableDeferred<Unit>()
+            val replacementClient = FakeTmuxClient().withSinglePane("work", "%1").apply {
+                captureWithCursorGate = replacementSeedGate
+                gatedCaptureResponse =
+                    CommandResponse(number = 4L, output = listOf("work ready"), isError = false)
+                gatedCursorReply = "0,0"
+            }
             vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
                 assertSame(freshSession, session)
                 assertEquals("work", sessionName)
@@ -370,11 +376,40 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
                 vm.onAppForegrounded(resumedWithinGrace = true)
                 runCurrent()
 
-                assertEquals("setup + failed first recovery dial", 2, connector.connectCount)
                 assertTrue(
-                    "the bounded grace owner must keep the projected status calm after the " +
-                        "first dial fails",
-                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                    "the first replacement dial must be held in flight before any IO outcome",
+                    connector.firstRecoveryStarted.isCompleted,
+                )
+                assertEquals("setup + in-flight first recovery dial", 2, connector.connectCount)
+                assertTrue(
+                    "#822: confirmed-dead foreground must synchronously transition the controller " +
+                        "Live -> Reattaching before replacement IO can finish; " +
+                        "got ${vm.connectionControllerStateForTest()}",
+                    vm.connectionControllerStateForTest() is CoreConnectionState.Reattaching,
+                )
+                assertTrue(
+                    "#822: the raw/display-driving status must be Reconnecting after the first " +
+                        "failed in-place recovery, never false Connected over the dead wire; " +
+                        "got ${vm.connectionStatus.value}",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+                )
+                assertFalse(
+                    "#822: the dropped control client must remain transport-unwritable while the " +
+                        "replacement is unavailable",
+                    vm.isSendTransportWritable(),
+                )
+
+                connector.releaseFirstRecoveryWithFailure()
+                runCurrent()
+                assertTrue(
+                    "the same typed within-grace owner must retain authority after the failed dial",
+                    vm.withinGraceRecoveryActiveForTest(),
+                )
+                assertEquals(
+                    "the within-grace owner retries in place and must not enter the numbered " +
+                        "passive/auto reconnect ladder",
+                    0,
+                    vm.reconnectRungFailedCountForTest(ReconnectRungFailureSource.PassiveGraceLoop),
                 )
                 assertTrue(
                     "the first failed dial must not hand off to the visible auto-reconnect ladder",
@@ -384,14 +419,51 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
                 advanceTimeBy(1_000L)
                 runCurrent()
                 assertEquals("the same owner must perform the paced fresh retry", 3, connector.connectCount)
-                awaitCondition {
-                    registry.clients.value[7L]?.client === replacementClient &&
-                        vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected
-                }
+                assertTrue(
+                    "the replacement must reach its authoritative capture before the seed gate is released",
+                    replacementClient.lastCaptureTimeoutMs != null,
+                )
+                assertTrue(
+                    "a fresh replacement transport without its real target-tagged seed must remain " +
+                        "non-Live (Attaching); got ${vm.connectionControllerStateForTest()}",
+                    vm.connectionControllerStateForTest() is CoreConnectionState.Attaching,
+                )
+                assertTrue(
+                    "the display must remain Reconnecting until the replacement seed lands; " +
+                        "got ${vm.connectionStatus.value}",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+                )
+
+                replacementSeedGate.complete(Unit)
+                runCurrent()
+                assertTrue(
+                    "the released reserved capture must submit real SeedLanded and make the " +
+                        "controller Live; got ${vm.connectionControllerStateForTest()}",
+                    vm.connectionControllerStateForTest() is CoreConnectionState.Live,
+                )
+                assertTrue(
+                    "the real seed must project Connected; got ${vm.connectionStatus.value}",
+                    vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                )
+                assertSame(
+                    "the seeded replacement must become the registered host client",
+                    replacementClient,
+                    registry.clients.value[7L]?.client,
+                )
+                assertTrue("the seeded replacement must reopen the wire", vm.isSendTransportWritable())
 
                 assertEquals("one setup + two paced recovery dials", 3, connector.connectCount)
                 assertTrue("the exact dead manager-owned lease must be closed", deadSession.closed)
                 assertFalse("the fresh replacement transport must stay live", freshSession.closed)
+                assertTrue(
+                    "only the replacement client plus its real target-tagged capture seed may " +
+                        "return the controller to Live",
+                    vm.connectionControllerStateForTest() is CoreConnectionState.Live,
+                )
+                assertTrue(
+                    "the same-session replacement must reopen the real send wire",
+                    vm.isSendTransportWritable(),
+                )
                 assertEquals(
                     "the hidden foreground owner must never enter connect()/the user-visible ladder",
                     1,
@@ -406,6 +478,91 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
                 diagnostics.close()
             }
         }
+
+    /**
+     * Issue #822 VM wiring: the user's in-place reconnect must RETIRE the bounded
+     * within-grace owner before it re-dials.
+     *
+     * This is the reported "only a switch-away-and-back recovers" mechanism: a switch
+     * supersedes the claim, a Retry did not, so the grace loop kept re-dialling the corpse
+     * and tore down the successor the manual reconnect had just acquired. Red without
+     * `graceEffects.retireForSupersedingOwner()` in `startReconnectForSendBody`.
+     */
+    @Test
+    fun manualReconnectRetiresTheWithinGraceOwner() =
+        runTest(scheduler) {
+            TMUX_CONNECT_ATTEMPTS.set(1)
+            val registry = ActiveTmuxClients()
+            val initialSession = FakeSshSession()
+            val replacementSession = FakeSshSession()
+            val connector = QueueLeaseConnector(initialSession, replacementSession)
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(
+                    connector = connector,
+                    scope = this,
+                    idleTtlMillis = 60_000L,
+                ),
+            )
+            vm.setPassiveDisconnectRecoveryForTest(
+                graceMs = 60_000L,
+                silentReattachTimeoutMs = 100L,
+            )
+            vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
+            vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+            vm.setTmuxClientFactoryForTest { _, _, _ -> FakeTmuxClient().withSinglePane("work", "%1") }
+
+            val droppedCcClient = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = droppedCcClient,
+                session = initialSession,
+            )
+            vm.setActiveLeaseRefWarmForTest()
+            runCurrent()
+
+            vm.setProcessForegroundForClearedForTest(false)
+            initialSession.markDisconnected()
+            droppedCcClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "device_background",
+                    intent = "unknown",
+                ),
+            )
+            runCurrent()
+            vm.setProcessForegroundForClearedForTest(true)
+            vm.onAppForegrounded(resumedWithinGrace = true)
+            runCurrent()
+
+            assertTrue(
+                "precondition: the confirmed-dead within-grace foreground owns the bounded recovery",
+                vm.withinGraceRecoveryActiveForTest(),
+            )
+
+            assertTrue("the in-place action must reach the manual reconnect entrypoint", vm.reconnect())
+            runCurrent()
+
+            assertFalse(
+                "#822: the user's in-place reconnect must retire the bounded within-grace owner " +
+                    "— leaving it running is why only a switch-away-and-back recovered",
+                vm.withinGraceRecoveryActiveForTest(),
+            )
+        }
+
+    @Test
+    fun warmRecoveryWithoutAuthoritativeSeedMustNotPromoteLive() =
+        assertUnseededRecoveryStaysReattaching(freshTransport = false)
+
+    @Test
+    fun freshRecoveryWithoutAuthoritativeSeedMustNotPromoteLive() =
+        assertUnseededRecoveryStaysReattaching(freshTransport = true)
 
     /**
      * Issue #1954 / #1653 interop: once the exact corpse has been invalidated and a fresh,
@@ -602,17 +759,35 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
         }
     }
 
-    private class ScriptedLeaseConnector(
-        private val results: List<Result<SshSession>>,
+    /**
+     * Holds the first replacement dial before it can report success/failure. This makes the
+     * foreground edge itself observable independently of all later recovery outcomes: without
+     * #822's typed drop, the controller is still falsely Live while this dial is suspended.
+     */
+    private class HeldFirstRecoveryLeaseConnector(
+        private val initialSession: SshSession,
+        private val freshSession: SshSession,
     ) : SshLeaseConnector {
+        val firstRecoveryStarted = CompletableDeferred<Unit>()
+        private val releaseFirstRecovery = CompletableDeferred<Unit>()
+
         var connectCount: Int = 0
             private set
 
-        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
-            val next = results.getOrNull(connectCount)
-                ?: error("unexpected lease connect $connectCount for ${target.leaseKey}")
-            connectCount += 1
-            return next
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> =
+            when (val attempt = connectCount++) {
+                0 -> Result.success(initialSession)
+                1 -> {
+                    firstRecoveryStarted.complete(Unit)
+                    releaseFirstRecovery.await()
+                    Result.failure(IOException("first recovery dial is still inside the outage"))
+                }
+                2 -> Result.success(freshSession)
+                else -> error("unexpected lease connect $attempt for ${target.leaseKey}")
+            }
+
+        fun releaseFirstRecoveryWithFailure() {
+            releaseFirstRecovery.complete(Unit)
         }
     }
 
@@ -665,5 +840,126 @@ class Issue1538ForegroundHealWithinGraceRideThroughTest : TmuxSessionViewModelTe
         override fun close() {
             closed = true
         }
+    }
+
+    /**
+     * #822 selective behavior proof for the two passive-success arms. A replacement may be
+     * attached and healthy while every bounded capture is still empty; that is not a seed.
+     * The last viewport remains held, but the controller/status cannot become live until a
+     * later watchdog capture actually feeds target-tagged SeedLanded. The replacement wire
+     * itself is already healthy and therefore writable under #1686's transport-truth rule.
+     */
+    private fun assertUnseededRecoveryStaysReattaching(freshTransport: Boolean) =
+        runTest(scheduler) {
+            TMUX_CONNECT_ATTEMPTS.set(1)
+            val registry = ActiveTmuxClients()
+            val initialSession = FakeSshSession()
+            val replacementSession = FakeSshSession()
+            val connector =
+                if (freshTransport) {
+                    QueueLeaseConnector(initialSession, replacementSession)
+                } else {
+                    QueueLeaseConnector(initialSession)
+                }
+            val vm = newVm(
+                registry = registry,
+                sshLeaseManager = testLeaseManager(
+                    connector = connector,
+                    scope = this,
+                    idleTtlMillis = 60_000L,
+                ),
+            )
+            vm.setPassiveDisconnectRecoveryForTest(
+                graceMs = 10_000L,
+                silentReattachTimeoutMs = 100L,
+            )
+            vm.setStaleRenderWatchdogAutoArmEnabledForTest(false)
+            vm.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
+
+            val replacementClient = FakeTmuxClient().withSinglePaneButNoSeed("work", "%1")
+            var factorySession: SshSession? = null
+            vm.setTmuxClientFactoryForTest { session, sessionName, _ ->
+                assertEquals("work", sessionName)
+                factorySession = session
+                replacementClient
+            }
+            val droppedCcClient = FakeTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 7L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = droppedCcClient,
+                session = initialSession,
+            )
+            vm.setActiveLeaseRefWarmForTest()
+            runCurrent()
+            assertEquals("one setup lease", 1, connector.connectCount)
+            if (freshTransport) initialSession.markDisconnected()
+
+            vm.setProcessForegroundForClearedForTest(false)
+            droppedCcClient.markDisconnectedForTest(
+                TmuxDisconnectEvent(
+                    reason = TmuxDisconnectReason.ReaderEof,
+                    source = "device_background",
+                    intent = "unknown",
+                ),
+            )
+            runCurrent()
+            vm.setProcessForegroundForClearedForTest(true)
+            vm.onAppForegrounded(resumedWithinGrace = true)
+            runCurrent()
+            advanceTimeBy(6_000L)
+            runCurrent()
+            awaitCondition { registry.clients.value[7L]?.client === replacementClient }
+
+            assertSame(
+                if (freshTransport) replacementSession else initialSession,
+                factorySession,
+            )
+            assertEquals(
+                if (freshTransport) 2 else 1,
+                connector.connectCount,
+            )
+            assertTrue(
+                "${if (freshTransport) "fresh" else "warm"} recovery without a real seed " +
+                    "must remain in its exact typed non-Live stage; " +
+                    "got ${vm.connectionControllerStateForTest()}",
+                if (freshTransport) {
+                    // A fresh lease emits TransportLive: carrier up, pane still unseeded.
+                    vm.connectionControllerStateForTest() is CoreConnectionState.Attaching
+                } else {
+                    // Reusing the already-up transport emits no new TransportLive edge.
+                    vm.connectionControllerStateForTest() is CoreConnectionState.Reattaching
+                },
+            )
+            assertTrue(
+                "an unseeded replacement must remain visibly Reconnecting; " +
+                    "got ${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+            )
+            assertTrue(
+                "the healthy replacement wire remains physically writable even while its " +
+                    "controller reveal awaits the first real seed",
+                vm.isSendTransportWritable(),
+            )
+        }
+
+    private fun FakeTmuxClient.withSinglePaneButNoSeed(
+        sessionName: String,
+        paneId: String,
+    ): FakeTmuxClient = apply {
+        responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("$paneId\t@0\t\$0\t$sessionName\t$sessionName\t0"),
+                isError = false,
+            ),
+        )
+        defaultCaptureResponse =
+            CommandResponse(number = 2L, output = emptyList(), isError = false)
     }
 }

@@ -1610,30 +1610,28 @@ public class TmuxSessionViewModel @Inject constructor(
      * transition (the controller's core state carries opaque HostKey/SessionId, not
      * the host/port/user the view renders).
      *
-     * The two approved #685 behavior changes fall out of the controller's state for
-     * free: a recoverable drop leaves the controller in `Reattaching`/`Reconnecting`
-     * (calm) rather than the inline `Unreachable`, so the user sees a calm
-     * `Reconnecting` band, NOT the scary `Failed`/"Tap Reconnect" control-channel
-     * band; and a within-grace foreground keeps the controller `Live`, so the user
-     * sees `Connected` with no probe band. #720: a true `Unreachable` projects to a
-     * [ConnectionStatus.Failed] whose curated message + calm tappable "Tap to
-     * reconnect" band ([FailedConnectionRow]) replace the scary error text.
+     * The approved #685 behavior falls out of the controller's state for free: a
+     * recoverable drop leaves the controller in `Reattaching`/`Reconnecting` (calm)
+     * rather than the inline `Unreachable`, so the user sees a calm `Reconnecting`
+     * band, NOT the scary `Failed`/"Tap Reconnect" control-channel band. A healthy
+     * within-grace foreground whose control channel survived remains `Live`; #822
+     * requires a confirmed-dead one to stay truthfully `Reattaching` until a real
+     * replacement seed lands. #720: a true `Unreachable` projects to a
+     * [ConnectionStatus.Failed] whose curated message + calm tappable "Tap to reconnect"
+     * band ([FailedConnectionRow]) replace the scary error text.
      */
     private fun projectStatusFromController(inlineState: ConnectionState) {
-        val projected = connectionStatusForController(connectionManager.state, inlineState)
-        _connectionStatus.value =
-            if (graceEffects.isWithinGraceRecoveryActive() && projected is ConnectionStatus.Reconnecting) {
-                // Issue #1098 (item 4 / #635): the within-grace SILENT heal re-opens the
-                // dropped `-CC` (controller `Reattaching`/`Reconnecting`), but a brief
-                // background→foreground ride-through must read the CALM `Connected` — never
-                // a Reconnecting bar / Connecting overlay. Hold `Connected` (the same
-                // host/port/user payload) for the bounded heal; the heal job's completion
-                // handler clears the flag, after which the live `Live` re-projects naturally
-                // (success) or the normal calm-Reconnecting ladder shows (genuine failure).
-                ConnectionStatus.Connected(projected.host, projected.port, projected.user)
+        // #822: the reveal hold preserves the viewport, not false transport truth. A fresh
+        // carrier advances the core to Attaching; this recovery still displays Reconnecting
+        // until a real replacement seed makes the core Live. Healthy foregrounds stay Live.
+        val controllerState = connectionManager.state
+        val displayState =
+            if (graceEffects.isWithinGraceRecoveryActive() && controllerState is CoreConnectionState.Attaching) {
+                CoreConnectionState.Reattaching(controllerState.host, controllerState.targetId)
             } else {
-                projected
+                controllerState
             }
+        _connectionStatus.value = connectionStatusForController(displayState, inlineState)
     }
 
     /**
@@ -3211,6 +3209,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * re-enters `connect(Reconnect)`, returns the connect [Job] (or null, no target).
      */
     private fun startReconnectForSendBody(): Job? {
+        // Issue #822: a user reconnect supersedes the bounded within-grace owner (two
+        // writers on one transport is why an in-place Retry failed and a switch did not).
+        graceEffects.retireForSupersedingOwner()
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
@@ -3680,14 +3681,13 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
         // EPIC #687 P2 (J1/#635): SINGLE GRACE OWNER. The App-level background-grace window (#450)
-        // is the SOLE grace authority — a within-grace foreground must stay CALM even when the
-        // `-CC` socket dropped while backgrounded (WiFi→cellular / Doze). The reseed-only fast path
-        // above declines then (the dropped socket killed the warm lease), so without this branch
-        // the foreground would fall into the reconnect ladder and paint the #635 scary band.
-        // Instead we SILENTLY heal the dropped channel within grace: re-open a fresh
-        // `-CC` control client over a freshly-acquired lease and reseed, with NO band
-        // and NO overlay. The inline passive-disconnect grace clock that fired while
-        // backgrounded is disabled (see [handlePassiveClientDisconnect]), so
+        // is the SOLE grace authority. When the `-CC` socket dropped while backgrounded
+        // (WiFi→cellular / Doze), the reseed-only fast path above declines. #822 requires
+        // this single owner to report that confirmed death truthfully as Reconnecting while
+        // the reveal hold keeps the last viewport (no destructive Attaching overlay), then
+        // re-open a fresh `-CC` client over a freshly-acquired lease and reseed. The inline
+        // passive-disconnect grace clock that fired while backgrounded is disabled (see
+        // [handlePassiveClientDisconnect]), so
         // there is no competing second clock — this within-grace foreground heal is the
         // single owner of the within-grace recovery decision.
         if (resumedWithinGrace) {
@@ -3905,6 +3905,7 @@ public class TmuxSessionViewModel @Inject constructor(
             delay(passiveDisconnectGraceMs.coerceAtLeast(1L))
         }
         withinGraceSilentHealReleaseJob = job
+        graceEffects.trackRecoveryJob(job)
         job.invokeOnCompletion {
             if (withinGraceSilentHealReleaseJob === job) {
                 withinGraceSilentHealReleaseJob = null
@@ -4169,14 +4170,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * EPIC #687 P2 (J1/#635): the within-grace foreground SILENT heal of a `-CC` socket
      * that DROPPED while backgrounded (WiFi→cellular handoff / Doze). This is the
      * NEW-path single-grace-owner recovery: the App-level grace window (#450) reported
-     * `resumedWithinGrace=true`, so the user must NOT see a reconnect band — but the
-     * reseed-only fast path declined because the dropped socket killed the warm lease
-     * (and the inline passive disconnect that fired while backgrounded paused the
-     * auto-reconnect + set [ConnectionStatus.Unreachable]). So there is nothing live to
-     * reseed: we re-open a fresh `-CC` control client over a freshly-acquired lease and
-     * reseed the panes, SILENTLY — NO band, NO "Attaching…"/"Connecting" overlay. The
-     * controller is moved Reattaching → Live, so the displayed status stays the calm
-     * `Connected` throughout.
+     * `resumedWithinGrace=true`, but the reseed-only fast path declined because the dropped
+     * socket killed the warm lease. There is nothing live to reseed: we report the genuine
+     * typed drop, retain the last viewport through the reveal hold, expose the actionable
+     * `Reconnecting` status, then re-open a fresh `-CC` client over a freshly-acquired lease.
+     * Only the real replacement pane seed moves the controller Reattaching → Live.
      *
      * This NEVER calls [connect] (which would raise the Connecting overlay / scary
      * band); it reuses the existing [silentlyReconnectTransportAfterPassiveDisconnect]
@@ -4244,13 +4242,13 @@ public class TmuxSessionViewModel @Inject constructor(
             "session" to target.sessionName,
             *originationDiagnosticFields,
         )
-        // Keep the displayed status CALM while we heal: the within-grace foreground is a
-        // ride-through, not a reconnect. Promote the controller back toward Live so the
-        // header indicator never shows Reconnecting/Disconnected during the heal.
-        connectionManager.observeForegroundReattachLive()
-        // Issue #1098 (item 4 / #635): the within-grace silent heal re-opens the dropped `-CC`
-        // transport (controller `Live -> Reattaching -> Live`); a hold keeps [RevealStateMachine]
-        // from projecting that Reattaching as [RevealState.Seeding] (the "Attaching…" overlay).
+        // Issue #822: entered only after the runtime is CONFIRMED DEAD. Submit that typed
+        // fact BEFORE replacement IO so the controller walks Live -> Reattaching at once;
+        // never synthesize a preserved-channel seed for a channel that did not survive. The
+        // reveal hold keeps the last viewport; status/session-live/send stay honest.
+        connectionManager.reportRemoteDrop(originationCause)
+        // Issue #1098 (item 4 / #635): a hold keeps [RevealStateMachine] from projecting the
+        // honest Reattaching state as [RevealState.Seeding] (the "Attaching…" overlay).
         // Issue #754 (re-fix): the hold is armed at the foreground DECISION POINT
         // ([armWithinGraceSilentHealHold], SINGLE OWNER) and released after the whole grace window
         // — NOT on this heal job — so the confirmed-dead ride-through survives the single-shot
@@ -4309,7 +4307,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #754 (re-fix): the hold is NOT released here — that premature release (on a failed
         // single-shot heal that hands off to the loud ladder) was the reopened bug. The SINGLE
         // OWNER [armWithinGraceSilentHealHold] releases it after the whole grace window; we only
-        // re-project the status on completion so a success settles on the live `Connected`.
+        // re-project the status on completion so a real seeded success settles on `Connected`.
+        graceEffects.trackRecoveryJob(healJob)
         healJob.invokeOnCompletion {
             projectStatusFromController()
         }
@@ -8361,7 +8360,8 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             connectingTarget = null
             refreshReconnectAvailability()
-            revealControllerLive()
+            // #822: reseedVisiblePanesForPassiveReattach feeds the real target-tagged
+            // SeedLanded edge. Never synthesize Live here if no authoritative seed landed.
             setConnectionState(
                 ConnectionState.Live(
                     target.host,
@@ -8611,7 +8611,8 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             connectingTarget = null
             refreshReconnectAvailability()
-            revealControllerLive()
+            // #822: only the real target-tagged capture seed above may promote the
+            // confirmed-dead recovery from Reattaching back to Live.
             setConnectionState(
                 ConnectionState.Live(
                     target.host,

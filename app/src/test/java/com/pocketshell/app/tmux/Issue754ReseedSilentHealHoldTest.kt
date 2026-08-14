@@ -46,10 +46,11 @@ import java.io.InputStream
  *
  * ## The fix these tests pin
  *
- * The reseed path now arms the silent-heal reveal/status hold for the bounded grace window
+ * The reseed path now arms the silent-heal reveal hold for the bounded grace window
  * (mirroring the heal path). While armed, a Reattaching projection HOLDS the current live
- * frame (no overlay) and the status stays the calm `Connected`. The hold is released after
- * the grace window so a genuine BEYOND-grace drop still surfaces its reconnect band.
+ * frame (no overlay), while the status truthfully reports `Reconnecting` over a confirmed-dead
+ * transport. The hold is released after the grace window so a genuine BEYOND-grace drop also
+ * surfaces the reconnect/loading reveal.
  *
  * ## Deterministic red→green (the #780 synthetic-injection model, per-PR gated JVM proof)
  *
@@ -175,8 +176,8 @@ class Issue754ReseedSilentHealHoldTest : TmuxSessionViewModelTestBase() {
 
     // -----------------------------------------------------------------------
     // (1) LOAD-BEARING red→green: a drop DURING the within-grace reseed window must be
-    //     ridden through silently — NO RevealState.Seeding (the "Attaching…" overlay), and
-    //     the status stays the calm Connected. RED on base (Seeding + Reconnecting).
+    //     ridden through without replacing the last viewport — NO RevealState.Seeding (the
+    //     "Attaching…" overlay), while status honestly reports Reconnecting.
     // -----------------------------------------------------------------------
 
     @Test
@@ -231,11 +232,12 @@ class Issue754ReseedSilentHealHoldTest : TmuxSessionViewModelTestBase() {
                     "${vm.revealState.value}",
                 vm.revealState.value is RevealState.Live,
             )
-            // The status hold keeps the calm Connected (no Reconnecting bar) during the ride-through.
+            // #822: reveal continuity must not falsify transport state. The held frame remains
+            // visible above, while the confirmed-dead wire reports Reconnecting.
             assertTrue(
-                "the within-grace ride-through keeps the calm Connected status (no Reconnecting " +
-                    "band); got ${vm.connectionStatus.value}",
-                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                "the within-grace ride-through must report Reconnecting over the confirmed-dead " +
+                    "wire while retaining the last live reveal; got ${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
             )
         } finally {
             diagnostics.close()
@@ -397,11 +399,12 @@ class Issue754ReseedSilentHealHoldTest : TmuxSessionViewModelTestBase() {
                     "${vm.revealState.value}",
                 vm.revealState.value is RevealState.Live,
             )
-            // The status hold keeps the calm Connected (no Reconnecting bar) across the window.
+            // #822: the reveal hold is visual continuity only; a confirmed-dead foreground wire
+            // must report Reconnecting throughout the bounded in-place recovery.
             assertTrue(
-                "the confirmed-dead within-grace ride-through keeps the calm Connected status (no " +
-                    "Reconnecting band); got ${vm.connectionStatus.value}",
-                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+                "the confirmed-dead within-grace ride-through must truthfully report Reconnecting " +
+                    "while retaining the last live reveal; got ${vm.connectionStatus.value}",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
             )
         } finally {
             diagnostics.close()

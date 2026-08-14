@@ -207,17 +207,85 @@ internal fun shouldShowConnectingProgressOverlay(
     !surfaceOwnsPrimary && surfaceState is SessionSurfaceState.Connecting
 
 /**
- * Issue #750/#1326: the single-indicator gate for the top under-header
- * [ReconnectingProgressRow] progress line. Same rule as
- * [shouldShowConnectingProgressOverlay] — derived from the ONE state; the centered
- * "Attaching…" hold is the sole reattach affordance for every real reconnect (the
- * terminal is held), so this top bar is the unreachable live-frame fallback.
+ * Issue #750/#1326/#822: the single-indicator gate for the top under-header
+ * [ReconnectingProgressRow] band.
+ *
+ * The #750 half is unchanged: while the surface owns the primary indicator (the
+ * centered "Attaching…" hold or the calm-failure placeholder) this band stays
+ * suppressed, so a reconnect can never paint two loaders at once.
+ *
+ * The #822 half fixes the OTHER half of the gate. It used to read
+ * `surfaceState is SessionSurfaceState.Reconnecting`, which is a contradiction
+ * with `!surfaceOwnsPrimary`: a [SessionSurfaceState.Reconnecting] is by
+ * construction a HELD surface, so the band was structurally unreachable and the
+ * live-frame reconnect the KDoc promised to cover had ZERO indicator and ZERO
+ * action. That is exactly the reported #822 state — the reveal hold keeps the
+ * last pane frame while the `-CC` wire is confirmed dead — and the user was left
+ * with a frozen screen, a green pill and nothing to tap. The band is therefore
+ * driven by the CONNECTION being [ConnectionStatus.Reconnecting] (the debounced
+ * display status, #876), which is the only signal that knows the wire is down
+ * while the surface is still painting a retained frame.
  */
 internal fun shouldShowReconnectingProgressRow(
-    surfaceState: SessionSurfaceState,
+    surfaceOwnsPrimary: Boolean,
+    status: ConnectionStatus,
+): Boolean =
+    !surfaceOwnsPrimary && status is ConnectionStatus.Reconnecting
+
+/**
+ * Issue #823/#822: the gate that decides whether the session surface is WRAPPED in
+ * the pull-to-reconnect [SessionSurfaceReconnectWrapper].
+ *
+ * #823 introduced the wrapper for every non-Connected state. #822 found the missing
+ * third term the hard way, on the emulator: the wrapper's own contract is "the
+ * surface shows only a STATIC placeholder — never a live terminal", because
+ * [androidx.compose.material3.pulltorefresh.PullToRefreshBox] puts its content under
+ * an unbounded-height scroll constraint. #822 makes `sessionLive` FALSE while the
+ * reveal hold still paints the user's last pane frame, so without this gate the box
+ * mounts OVER a live `TerminalView`, that view measures to ZERO, and the retained
+ * frame the entire fix exists to preserve is destroyed — a blank pull area with a
+ * spinner where the user's session used to be.
+ *
+ * [surfaceOwnsPrimary] is exactly "the surface is showing a placeholder it owns"
+ * (the centered "Attaching…" hold, the waiting-for-panes ring, the calm-failure
+ * placeholder), so it is the precise complement of "a live frame is painted". When
+ * it is false the pull gesture is withheld, and the honest
+ * [shouldShowReconnectingProgressRow] band owns the in-place `Retry now` action
+ * instead — the two gates are complementary, so no state is ever left with neither.
+ *
+ * Extracted as a pure function (rather than inlined in the screen body) so this
+ * one-line guard is pinned by a per-PR JVM test: on-device it is reachable only
+ * through the batched within-grace socket-drop journey, and a green journey that
+ * reads the terminal EMULATOR BUFFER cannot see the collapsed view at all.
+ */
+internal fun shouldMountPullToReconnect(
+    sessionLive: Boolean,
+    canReconnect: Boolean,
     surfaceOwnsPrimary: Boolean,
 ): Boolean =
-    !surfaceOwnsPrimary && surfaceState is SessionSurfaceState.Reconnecting
+    !sessionLive && canReconnect && surfaceOwnsPrimary
+
+/**
+ * Issue #822: the breadcrumb connection pill/dot must report the CONNECTION, not
+ * the retained frame. [SessionSurfaceState.Live] maps to a green `Connected` pill
+ * ([toUiStatus]) — correct while the wire is up, a lie during the within-grace
+ * reveal hold over a confirmed-dead `-CC` channel, which is the maintainer's
+ * "nothing foretells trouble, it suddenly drops and nothing tells me" report.
+ *
+ * The override is monotone: it only ever downgrades a pill to the amber
+ * "Reconnecting" while the connection genuinely IS reconnecting, so no healthy
+ * state can be made to look dead by it. Everything else keeps the fused
+ * surface-derived pill verbatim.
+ */
+internal fun connectionPillStatus(
+    surfaceState: SessionSurfaceState,
+    status: ConnectionStatus,
+): com.pocketshell.uikit.model.ConnectionStatus =
+    if (status is ConnectionStatus.Reconnecting) {
+        com.pocketshell.uikit.model.ConnectionStatus.Connecting
+    } else {
+        surfaceState.toUiStatus()
+    }
 
 /**
  * Issue #145: stable test tags for the mid-session SSH disconnect band
@@ -453,6 +521,10 @@ internal fun TmuxTopConnectingBanner(
     // panes…" ring, AND the calm failure placeholder — so the top banner is
     // suppressed in ALL of them (never stacked over a surface loader/failure).
     surfaceOwnsPrimary: Boolean,
+    // Issue #822: the debounced display status. The reconnect band is a CONNECTION
+    // affordance, so it is gated on this rather than on the retained frame's
+    // surface state (see [shouldShowReconnectingProgressRow]).
+    status: ConnectionStatus,
     sessionName: String,
     onCancelConnect: () -> Unit,
     onRetryNow: () -> Unit,
@@ -473,14 +545,18 @@ internal fun TmuxTopConnectingBanner(
             )
         }
     }
-    // Issue #750/#1326: the recovery band. Every reconnect/reattach holds the
-    // terminal and paints the centered "Attaching…" [SwitchingLoadingPlaceholder]
-    // (the SOLE attach affordance), so the band is suppressed while held. It renders
-    // ONLY for a [SessionSurfaceState.Reconnecting] that keeps a live frame painted
-    // (surface owns nothing) — the fallback so a reconnect is never left with zero
-    // indicators. (Reconnect behaviour is untouched — this is presentation-only.)
-    if (shouldShowReconnectingProgressRow(surfaceState, surfaceOwnsPrimary)) {
-        (surfaceState as SessionSurfaceState.Reconnecting).let {
+    // Issue #750/#1326: the recovery band. Every reconnect/reattach that HOLDS the
+    // terminal paints the centered "Attaching…" [SwitchingLoadingPlaceholder] (the
+    // SOLE attach affordance), so the band stays suppressed while held.
+    //
+    // Issue #822: it renders for the live-frame reconnect — the reveal hold keeps the
+    // last pane frame painted (the surface owns nothing) while the `-CC` wire is
+    // confirmed dead. That state previously showed NOTHING at all; now it carries the
+    // honest "Reconnecting to …" line plus the in-place `Retry now` / `Cancel`
+    // actions. Both actions route to the pre-existing entrypoints — no new connection
+    // logic and no second writer on the reconnect path (D28).
+    if (shouldShowReconnectingProgressRow(surfaceOwnsPrimary, status)) {
+        (status as ConnectionStatus.Reconnecting).let {
             ReconnectingProgressRow(
                 user = it.user,
                 host = it.host,

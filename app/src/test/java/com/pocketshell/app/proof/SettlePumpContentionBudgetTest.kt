@@ -26,9 +26,10 @@ import org.junit.Test
  * that make it safe to depend on: the pump keeps polling for the whole budget,
  * and it still reports a HARD failure when the condition genuinely never holds.
  *
- * Kept deliberately cheap (~5 s, one real stall) — the scaled contract below
- * proves the fail/pass boundary in fractions of a second, and the constant
- * assertion carries the "5 s was too tight" regression itself.
+ * Kept deliberately cheap (sub-second, no real multi-second stall — issue #2113
+ * removed the last one) — the scaled contract below proves the fail/pass boundary
+ * in fractions of a second, and the constant assertion carries the "5 s was too
+ * tight" regression itself.
  */
 class SettlePumpContentionBudgetTest {
 
@@ -59,6 +60,18 @@ class SettlePumpContentionBudgetTest {
      * and a stall SHORTER than it must report success without waiting out the
      * budget. Combined with the constant above, this is exactly "a multi-second
      * contention stall is absorbed" — without spending multi-second wall clock.
+     *
+     * Issue #2113 folded the intent of a third test in here. That test slept a
+     * real 5.1 s (94% of this class's whole runtime) to show the audited default
+     * absorbs a stall the old hand-rolled 5 s budget could not. It caught nothing
+     * these two do not: setting [GENEROUS_SETTLE_DEADLINE_MS] to 5_000 reddened it
+     * AND the constant assertion above, and setting it to 20_000 — the exact lower
+     * bound that assertion permits — left both green. The only mutation it could
+     * have caught alone is a pump whose behaviour depends on the MAGNITUDE of
+     * `deadlineMs`, and [drainMainLooperUntil] has no such branch: its body is one
+     * `while (System.currentTimeMillis() < deadline)` loop plus a `require(> 0)`.
+     * So "≥20 s of headroom" (above) × "a stall inside the budget is absorbed and
+     * one beyond it hard-fails" (here) already implies it, for free.
      */
     @Test
     fun aStallBeyondTheBudgetFailsAndAStallWithinItSucceeds() {
@@ -80,28 +93,6 @@ class SettlePumpContentionBudgetTest {
             "the pump must return as soon as the condition holds, never wait out the whole " +
                 "budget (a healthy run must not be slowed), took ${elapsed}ms",
             elapsed < 5_000L,
-        )
-    }
-
-    /**
-     * The one real-time arm: a stall PAST the old 5 s budget. On the pre-#2017
-     * pump this exact wait was a red `pumpUntil timed out after 5000ms`; on the
-     * audited default it is absorbed. This is the red→green of the reported
-     * defect, pinned so a future budget reduction reintroduces it as a
-     * deterministic failure rather than a load-only flake.
-     */
-    @Test
-    fun theAuditedDefaultAbsorbsAStallThatTheOldFiveSecondBudgetCouldNot() {
-        val oldBudgetMs = 5_000L
-        val stallMs = oldBudgetMs + 100L
-        val flipAt = System.currentTimeMillis() + stallMs
-
-        val settled = drainMainLooperUntil(sleepMs = 2L) { System.currentTimeMillis() >= flipAt }
-
-        assertTrue(
-            "the audited default (${GENEROUS_SETTLE_DEADLINE_MS}ms) must absorb a ${stallMs}ms " +
-                "contention stall that the old hand-rolled ${oldBudgetMs}ms budget could not",
-            settled,
         )
     }
 }

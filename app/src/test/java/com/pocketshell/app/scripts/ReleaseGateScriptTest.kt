@@ -41,31 +41,51 @@ class ReleaseGateScriptTest {
     /** `scripts/lib/app-version.sh` reads `versionName` out of the Gradle DSL. */
     @Test
     fun appVersionHelperParsesVersionNameFromGradle() {
-        runShellHarness("tests/scripts/app-version-test.sh", timeoutSeconds = 60)
+        runShellHarness(
+            relativePath = "tests/scripts/app-version-test.sh",
+            expectedPassLine = "PASS: app version helper and pocketshell fixture version (6 cases)",
+            timeoutSeconds = 60,
+        )
     }
 
     /** Every `scripts/phone-walkthrough.sh` scenario must dispatch to a real target. */
     @Test
     fun phoneWalkthroughDispatchesEveryScenario() {
-        runShellHarness("tests/scripts/phone-walkthrough-dispatch-test.sh", timeoutSeconds = 60)
+        runShellHarness(
+            relativePath = "tests/scripts/phone-walkthrough-dispatch-test.sh",
+            expectedPassLine = "PASS: phone walkthrough dispatch handlers (6 cases)",
+            timeoutSeconds = 60,
+        )
     }
 
     /** The pre-release gate pins the host-CLI/APK version lockstep (release lockstep). */
     @Test
     fun preReleaseGatePinsDockerAgentsPocketshellVersion() {
-        runShellHarness("tests/scripts/pre-release-version-test.sh", timeoutSeconds = 60)
+        runShellHarness(
+            relativePath = "tests/scripts/pre-release-version-test.sh",
+            expectedPassLine = "PASS: pre-release Docker fixture version exact check (2 cases)",
+            timeoutSeconds = 60,
+        )
     }
 
     /** #548 grace proof: the reconnect script must keep selecting the load-bearing test. */
     @Test
     fun reconnectAppSwitchScriptKeepsItsLoadBearingSelector() {
-        runShellHarness("tests/scripts/reconnect-app-switch-test.sh", timeoutSeconds = 60)
+        runShellHarness(
+            relativePath = "tests/scripts/reconnect-app-switch-test.sh",
+            expectedPassLine = "PASS: reconnect app-switch harness (4 cases)",
+            timeoutSeconds = 60,
+        )
     }
 
     /** `scripts/update-install-helper.sh` argument construction against a fake `adb`. */
     @Test
     fun updateInstallHelperBuildsTheRightAdbInvocation() {
-        runShellHarness("tests/scripts/update-install-helper-test.sh", timeoutSeconds = 60)
+        runShellHarness(
+            relativePath = "tests/scripts/update-install-helper-test.sh",
+            expectedPassLine = "PASS: update install helper (3 cases)",
+            timeoutSeconds = 60,
+        )
     }
 
     /**
@@ -75,43 +95,71 @@ class ReleaseGateScriptTest {
      */
     @Test
     fun preReleaseEmulatorReadinessStartsManagedAndRejectsSelfMatch() {
-        runShellHarness("tests/scripts/pre-release-emulator-readiness-test.sh", timeoutSeconds = 180)
+        runShellHarness(
+            relativePath = "tests/scripts/pre-release-emulator-readiness-test.sh",
+            expectedPassLine = "PASS: pre-release emulator readiness helper (14 cases)",
+            timeoutSeconds = 180,
+        )
     }
 
     /** App-walkthrough instrumentation retry / transport recovery in the pre-release gate. */
     @Test
     fun preReleaseGateRetriesInstrumentationAndRecoversTransport() {
-        runShellHarness("tests/scripts/pre-release-gate-retry-test.sh", timeoutSeconds = 300)
+        runShellHarness(
+            relativePath = "tests/scripts/pre-release-gate-retry-test.sh",
+            expectedPassLine = "PASS: pre-release gate retry helper (4 cases)",
+            timeoutSeconds = 300,
+        )
     }
 
     /** Real-agent release-gate retry: success-after-retry and exhausted-retry both. */
     @Test
     fun realAgentReleaseGateRetryHandlesSuccessAndExhaustion() {
-        runShellHarness("tests/scripts/release-gate-retry-test.sh", timeoutSeconds = 120)
+        runShellHarness(
+            relativePath = "tests/scripts/release-gate-retry-test.sh",
+            expectedPassLine = "PASS: release gate retry helper (6 cases)",
+            timeoutSeconds = 120,
+        )
     }
 
     /** The long-running release-gate hold's retry + evidence handling. */
     @Test
     fun longRunningReleaseGateRetryHandlesSuccessAndExhaustion() {
-        runShellHarness("tests/scripts/long-running-release-gate-retry-test.sh", timeoutSeconds = 180)
+        runShellHarness(
+            relativePath = "tests/scripts/long-running-release-gate-retry-test.sh",
+            expectedPassLine = "PASS: long-running release gate retry helper (22 cases)",
+            timeoutSeconds = 180,
+        )
     }
 
     /** `scripts/start-local-avd.sh` boot flags, PASS summary, and accel diagnostics. */
     @Test
     fun startLocalAvdStartsTheEmulatorAndRecordsPass() {
-        runShellHarness("tests/scripts/start-local-avd-test.sh", timeoutSeconds = 120)
+        runShellHarness(
+            relativePath = "tests/scripts/start-local-avd-test.sh",
+            expectedPassLine = "PASS: start-local-avd helper (6 cases)",
+            timeoutSeconds = 120,
+        )
     }
 
     /** #1c4ab315: the terminal workbench must FAIL on exhausted instrumentation retries. */
     @Test
     fun terminalWorkbenchFailsOnExhaustedRetriesAndPassesOnRecovery() {
-        runShellHarness("tests/scripts/terminal-workbench-retry-test.sh", timeoutSeconds = 120)
+        runShellHarness(
+            relativePath = "tests/scripts/terminal-workbench-retry-test.sh",
+            expectedPassLine = "PASS: terminal workbench retry helper (19 cases)",
+            timeoutSeconds = 120,
+        )
     }
 
     /** Visual-audit screenshot capture retry in `scripts/capture-walkthrough-screenshots.sh`. */
     @Test
     fun walkthroughVisualCaptureRetryHandlesSuccessAndExhaustion() {
-        runShellHarness("tests/scripts/walkthrough-visual-retry-test.sh", timeoutSeconds = 300)
+        runShellHarness(
+            relativePath = "tests/scripts/walkthrough-visual-retry-test.sh",
+            expectedPassLine = "PASS: walkthrough visual retry helper (12 cases)",
+            timeoutSeconds = 300,
+        )
     }
 
     /**
@@ -123,7 +171,11 @@ class ReleaseGateScriptTest {
      * sandbox the lock dir + TMPDIR per run so no case can reach the real
      * `$HOME/.cache/pocketshell/avd-locks/`.
      */
-    private fun runShellHarness(relativePath: String, timeoutSeconds: Long) {
+    private fun runShellHarness(
+        relativePath: String,
+        expectedPassLine: String,
+        timeoutSeconds: Long,
+    ) {
         val script = projectRoot.resolve(relativePath)
         assertTrue("harness is missing: $relativePath", script.toFile().exists())
 
@@ -149,6 +201,18 @@ class ReleaseGateScriptTest {
         }
         assertTrue("harness timed out after ${timeoutSeconds}s: $relativePath\n$output", completed)
         assertEquals("harness failed: $relativePath\n$output", 0, process.exitValue())
+        // Issue #2113: `exit == 0` alone is the vacuous green process.md catalogues —
+        // an early `exit 0` after the harness's FIRST case left every one of these
+        // twelve tests passing, having verified nothing (measured: the
+        // walkthrough-visual harness dropped from 18.1s to 0.029s and stayed green).
+        // Each harness now counts its cases and prints the total; asserting the exact
+        // count line is what makes this assertion about behaviour rather than about
+        // bash's exit status. Carried over from the sibling `DiskPreflightScriptTest`.
+        assertTrue(
+            "harness did not report its case count: $relativePath\n" +
+                "expected line: $expectedPassLine\n$output",
+            output.contains(expectedPassLine),
+        )
     }
 
     private fun findProjectRoot(): Path {

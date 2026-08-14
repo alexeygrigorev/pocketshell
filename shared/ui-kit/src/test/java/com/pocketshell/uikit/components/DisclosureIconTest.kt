@@ -5,11 +5,14 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.github.takahirom.roborazzi.ExperimentalRoborazziApi
 import com.github.takahirom.roborazzi.RoborazziOptions
 import com.github.takahirom.roborazzi.RoborazziTaskType
 import com.github.takahirom.roborazzi.captureRoboImage
+import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -35,16 +38,50 @@ import java.io.File
  * `›` is not a `v`. This is JVM/Robolectric (NATIVE graphics), so it runs in the
  * plain Unit CI job (`testDebugUnitTest`), not only the emulator and not only
  * under recordRoborazzi.
+ *
+ * Issue #2113 folded the former `DisclosureIconSlice2Test` in as two extra
+ * [Styling] rows — see that class's KDoc below for why it was a duplicate.
  */
 @RunWith(RobolectricTestRunner::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class DisclosureIconTest {
 
-    private val iconSize = 48.dp // larger than default so rotation pixels are crisp
+    /**
+     * One styling the icon is used at. Issue #2113 folded `DisclosureIconSlice2Test`
+     * in here as the two extra rows: it re-asserted this exact rotation property on
+     * the SAME bare composable with ~90 lines of copy-pasted bitmap-diff helpers.
+     * Its KDoc claimed it tested the icon "as composed inside each row", but its
+     * bodies only varied `tint`/`size` — and rotation invariance does not depend on
+     * tint. Proven vacuous: reverting the folder-tree row to a bespoke two-Paths
+     * triangle (the #840 bug itself) left both of its tests green. Row-level
+     * protection is `app`'s `DisclosureIconAdoptionTest`, which goes RED under that
+     * same mutation.
+     *
+     * @param coverageFloor minimum painted-pixel fraction; smaller icons paint a
+     *   smaller share of their bitmap, so this is per-case rather than shared.
+     * @param agreementFloor minimum rotated-ink agreement; likewise coarser at
+     *   16dp than at 48dp.
+     */
+    private data class Styling(
+        val label: String,
+        val tint: Color,
+        val size: Dp,
+        val coverageFloor: Double,
+        val agreementFloor: Double,
+    )
+
+    private val stylings = listOf(
+        // The canonical case: larger than default so rotation pixels are crisp.
+        Styling("default-48dp", PocketShellColors.TextSecondary, 48.dp, 0.02, 0.80),
+        // Folder/session tree row styling (was DisclosureIconSlice2Test).
+        Styling("folder-tree-16dp", PocketShellColors.TextSecondary, 16.dp, 0.01, 0.78),
+        // Conversation system-note row styling (was DisclosureIconSlice2Test).
+        Styling("system-note-16dp", PocketShellColors.TextMuted, 16.dp, 0.01, 0.78),
+    )
 
     @OptIn(ExperimentalRoborazziApi::class)
-    private fun renderIconBitmap(expanded: Boolean, name: String): Bitmap {
+    private fun renderIconBitmap(expanded: Boolean, name: String, styling: Styling): Bitmap {
         val path = "build/test-renders/$name.png"
         File(path).delete()
         // Force Record so the PNG is written even in the plain `testDebugUnitTest`
@@ -58,8 +95,9 @@ class DisclosureIconTest {
             PocketShellTheme {
                 DisclosureIcon(
                     expanded = expanded,
-                    modifier = Modifier.size(iconSize),
-                    size = iconSize,
+                    modifier = Modifier.size(styling.size),
+                    tint = styling.tint,
+                    size = styling.size,
                 )
             }
         }
@@ -129,33 +167,49 @@ class DisclosureIconTest {
 
     @Test
     fun expandedIsCollapsedRotated90() {
-        val collapsed = renderIconBitmap(expanded = false, name = "disclosure-collapsed")
-        val expanded = renderIconBitmap(expanded = true, name = "disclosure-expanded")
+        stylings.forEach { styling ->
+            val collapsed = renderIconBitmap(
+                expanded = false,
+                name = "disclosure-collapsed-${styling.label}",
+                styling = styling,
+            )
+            val expanded = renderIconBitmap(
+                expanded = true,
+                name = "disclosure-expanded-${styling.label}",
+                styling = styling,
+            )
 
-        // Sanity: both states actually paint a triangle (non-empty coverage).
-        assertTrue("Collapsed disclosure icon painted nothing", coverage(collapsed) > 0.02)
-        assertTrue("Expanded disclosure icon painted nothing", coverage(expanded) > 0.02)
+            // Sanity: both states actually paint a triangle (non-empty coverage).
+            assertTrue(
+                "[${styling.label}] Collapsed disclosure icon painted nothing",
+                coverage(collapsed) > styling.coverageFloor,
+            )
+            assertTrue(
+                "[${styling.label}] Expanded disclosure icon painted nothing",
+                coverage(expanded) > styling.coverageFloor,
+            )
 
-        // Core property: rotating the expanded triangle back by -90° must
-        // recover the collapsed triangle. A glyph swap ('›' -> 'v') would NOT
-        // satisfy this — a rotated '›' is not a 'v'.
-        val expandedRotatedBack = rotate(expanded, -90f)
-        val agreement = inkAgreement(collapsed, expandedRotatedBack)
-        assertTrue(
-            "Expanded icon is not the collapsed icon rotated 90° " +
-                "(ink agreement=$agreement); the two states are different shapes, " +
-                "which is the #840 bug.",
-            agreement > 0.80,
-        )
+            // Core property: rotating the expanded triangle back by -90° must
+            // recover the collapsed triangle. A glyph swap ('›' -> 'v') would NOT
+            // satisfy this — a rotated '›' is not a 'v'.
+            val expandedRotatedBack = rotate(expanded, -90f)
+            val agreement = inkAgreement(collapsed, expandedRotatedBack)
+            assertTrue(
+                "[${styling.label}] Expanded icon is not the collapsed icon rotated 90° " +
+                    "(ink agreement=$agreement); the two states are different shapes, " +
+                    "which is the #840 bug.",
+                agreement > styling.agreementFloor,
+            )
 
-        // Guard against a vacuous pass: the UNrotated expanded bitmap must
-        // clearly DISAGREE with the collapsed one (they point different
-        // directions), otherwise the rotation comparison proves nothing.
-        val agreementUnrotated = inkAgreement(collapsed, expanded)
-        assertTrue(
-            "Collapsed and expanded look identical without rotation " +
-                "(agreement=$agreementUnrotated); the icon isn't actually rotating.",
-            agreementUnrotated < 0.80,
-        )
+            // Guard against a vacuous pass: the UNrotated expanded bitmap must
+            // clearly DISAGREE with the collapsed one (they point different
+            // directions), otherwise the rotation comparison proves nothing.
+            val agreementUnrotated = inkAgreement(collapsed, expanded)
+            assertTrue(
+                "[${styling.label}] Collapsed and expanded look identical without rotation " +
+                    "(agreement=$agreementUnrotated); the icon isn't actually rotating.",
+                agreementUnrotated < 0.80,
+            )
+        }
     }
 }

@@ -2,7 +2,6 @@ package com.pocketshell.core.voice
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -71,16 +70,15 @@ class PriceCatalogueTest {
         assertEquals(15L, catalogue.unitCost("openai", "gpt4o-mini"))
     }
 
-    @Test
-    fun snapshotIntegerArithmeticIsExact() {
-        // Demonstrate the precision argument: a 47-second recording priced
-        // at 10 millicents/second is exactly 470 millicents = 4.70 cents =
-        // $0.0470. Integer arithmetic — no float drift.
-        val catalogue = PriceCatalogue.fromBundledResource()
-        val unitCost = catalogue.unitCost("openai", "whisper")
-        val audioSeconds = 47L
-        val computed = audioSeconds * unitCost
-        assertEquals(470L, computed)
-        assertTrue(computed > 0)
-    }
+    // Issue #2113: the former `snapshotIntegerArithmeticIsExact` is DELETED. It
+    // multiplied `47L * unitCost` IN THE TEST BODY and asserted 470, so no change
+    // to the production cost computation could redden it — proven by rewriting
+    // `WhisperClient.recordCostSafely`'s `audioSeconds * unitCost` as
+    // off-by-1000 float arithmetic: that reddened
+    // `OkHttpWhisperClientTest.successful_call_records_cost_with_snapshot_price`
+    // and left every test in this class green. Its only production-touching
+    // assertion (`unitCost("openai","whisper") == 10L`) already lives verbatim in
+    // `bundledResource_returnsWhisperPrice` above, and the integer-exactness
+    // property is asserted against the REAL call site there
+    // (`assertEquals(50L, row.computedCostUsdMillicents)` for a 5-second clip).
 }

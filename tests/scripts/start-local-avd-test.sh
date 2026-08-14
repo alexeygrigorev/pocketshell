@@ -8,6 +8,12 @@ fail() {
   exit 1
 }
 
+CASES=0
+pass_case() {
+  CASES=$((CASES + 1))
+  printf '  ok: %s\n' "$1"
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -126,15 +132,25 @@ BOOT_TIMEOUT_SECONDS=10 \
 PATH="$tmpdir:$PATH" \
   "$ROOT_DIR/scripts/start-local-avd.sh" > "$tmpdir/stdout.log" 2> "$tmpdir/stderr.log" ||
   fail "start-local-avd did not pass with fake emulator"
+pass_case "start-local-avd did not pass with fake emulator"
 
 [[ -f "$state_file" ]] || fail "fake emulator was not started"
+pass_case "fake emulator was not started"
 grep -q -- '-no-snapshot-load' "$run_dir/managed/emulator.log" ||
   fail "default start flags did not include -no-snapshot-load"
+pass_case "default start flags did not include -no-snapshot-load"
 grep -q -- '-no-snapshot-save' "$run_dir/managed/emulator.log" ||
   fail "default start flags did not include -no-snapshot-save"
+pass_case "default start flags did not include -no-snapshot-save"
 grep -q 'Status: PASS' "$run_dir/managed/summary.txt" ||
   fail "summary did not record PASS"
+pass_case "summary did not record PASS"
 grep -q '== emulator -accel-check ==' "$run_dir/managed/diagnostics.txt" ||
   fail "diagnostics did not include accelerator check"
+pass_case "diagnostics did not include accelerator check"
 
-printf 'PASS: start-local-avd helper\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASES == 6 )) || fail "expected 6 cases to run, saw $CASES"
+printf 'PASS: start-local-avd helper (%s cases)\n' "$CASES"

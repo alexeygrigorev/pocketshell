@@ -2,6 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
+fail() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
+
+CASES=0
+pass_case() {
+  CASES=$((CASES + 1))
+  printf '  ok: %s\n' "$1"
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -35,10 +47,14 @@ touch "$SSH_KEY"
 check_script="$(docker_agents_pocketshell_version_script 0.3.10)"
 
 FAKE_SSH_OUTPUT="pocketshell fixture 0.3.10" PATH="$fakebin:$PATH" bash -lc "$check_script"
+pass_case "accepts the exact pinned fixture version"
 
 if FAKE_SSH_OUTPUT="pocketshell fixture 0.3.100" PATH="$fakebin:$PATH" bash -lc "$check_script"; then
-  printf 'expected exact pre-release fixture version check to reject 0.3.100 for 0.3.10\n' >&2
-  exit 1
+  fail "expected exact pre-release fixture version check to reject 0.3.100 for 0.3.10"
 fi
+pass_case "rejects a prefix-extended fixture version (0.3.100 for 0.3.10)"
 
-printf 'PASS: pre-release Docker fixture version exact check\n'
+# Issue #2113: the count line is what makes the JVM assertion about behaviour
+# rather than about bash's exit status.
+(( CASES == 2 )) || fail "expected 2 cases to run, saw $CASES"
+printf 'PASS: pre-release Docker fixture version exact check (%s cases)\n' "$CASES"

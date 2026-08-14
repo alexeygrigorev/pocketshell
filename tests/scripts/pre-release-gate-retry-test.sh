@@ -8,6 +8,12 @@ fail() {
   exit 1
 }
 
+CASES=0
+pass_case() {
+  CASES=$((CASES + 1))
+  printf '  ok: %s\n' "$1"
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -97,17 +103,25 @@ run_generated_walkthrough() {
 
 run_generated_walkthrough "transport_then_success" ||
   fail "transport-only interruptions did not recover using the separate recovery budget"
+pass_case "transport-only interruptions did not recover using the separate recovery budget"
 
 attempts="$(cat "$tmpdir/transport_then_success/adb-state")"
 [[ "$attempts" == "4" ]] ||
   fail "expected success on fourth instrumentation run, got $attempts runs"
+pass_case "expected success on fourth instrumentation run, got $attempts runs"
 
 if run_generated_walkthrough "assertion_failure"; then
   fail "instrumentation assertion failure was treated as retryable"
 fi
+pass_case "instrumentation assertion failure was treated as retryable"
 
 attempts="$(cat "$tmpdir/assertion_failure/adb-state")"
 [[ "$attempts" == "1" ]] ||
   fail "expected assertion failure to stop after one run, got $attempts runs"
+pass_case "expected assertion failure to stop after one run, got $attempts runs"
 
-printf 'PASS: pre-release gate retry helper\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASES == 4 )) || fail "expected 4 cases to run, saw $CASES"
+printf 'PASS: pre-release gate retry helper (%s cases)\n' "$CASES"

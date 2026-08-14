@@ -336,12 +336,29 @@ CASES=(
 # Optional case filter, so a single scenario's red/green can be captured on
 # demand (`avd-lock-sharing-test.sh two_worktrees_share_the_default_lock`).
 # No arguments = run everything, which is what the gate does.
+# Issue #2113: the full-suite size, hardcoded so that DELETING an entry from the
+# CASES array above reddens this harness on its own — comparing the loop counter
+# with `${#CASES[@]}` would only ever compare the loop with itself.
+EXPECTED_FULL_CASES=6
+FILTERED=0
 if [[ $# -gt 0 ]]; then
   CASES=("$@")
+  FILTERED=1
 fi
+(( FILTERED == 1 || ${#CASES[@]} == EXPECTED_FULL_CASES )) ||
+  fail "expected $EXPECTED_FULL_CASES cases in the full suite, the array declares ${#CASES[@]}"
 
+
+CASE_COUNT=0
 for case_name in "${CASES[@]}"; do
   with_tmpdir "$case_name"
+  CASE_COUNT=$((CASE_COUNT + 1))
 done
 
-printf 'PASS: avd-lock cross-worktree sharing (issue #1657)\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status; the gate runs it with no
+# arguments, so the JVM side pins the full-suite count.
+(( CASE_COUNT == ${#CASES[@]} && CASE_COUNT > 0 )) ||
+  fail "expected ${#CASES[@]} cases to run, saw $CASE_COUNT"
+printf 'PASS: avd-lock cross-worktree sharing (issue #1657) (%s cases)\n' "$CASE_COUNT"

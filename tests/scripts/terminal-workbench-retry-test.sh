@@ -8,6 +8,12 @@ fail() {
   exit 1
 }
 
+CASES=0
+pass_case() {
+  CASES=$((CASES + 1))
+  printf '  ok: %s\n' "$1"
+}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
@@ -41,12 +47,14 @@ printf '05-30 10:00:00.000  123  456 I adbd    : host-123: read failed\n' > "$cl
 if should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "instrumentation failure marker was treated as retryable"
 fi
+pass_case "instrumentation failure marker was treated as retryable"
 
 printf 'INSTRUMENTATION_STATUS: numtests=1\n' > "$classification_log"
 printf '05-30 10:00:00.000  123  456 E AndroidRuntime: Process: com.pocketshell.app\n' > "$classification_logcat"
 if should_retry_interrupted_instrumentation 255 "$classification_log" "$classification_logcat"; then
   fail "app crash marker was treated as retryable"
 fi
+pass_case "app crash marker was treated as retryable"
 
 fake_adb="$tmpdir/adb"
 cat > "$fake_adb" <<'EOF'
@@ -107,28 +115,39 @@ run_terminal_workbench_instrumentation
 
 [[ "$instrumentation_retry_exhausted" == "1" ]] ||
   fail "retry budget exhaustion was not recorded"
+pass_case "retry budget exhaustion was not recorded"
 [[ "$instrumentation_attempt" == "2" ]] ||
   fail "expected exhausted attempt count 2, got $instrumentation_attempt"
+pass_case "expected exhausted attempt count 2, got $instrumentation_attempt"
 [[ "$instrumentation_status" == "255" ]] ||
   fail "expected exhausted instrumentation status 255, got $instrumentation_status"
+pass_case "expected exhausted instrumentation status 255, got $instrumentation_status"
 [[ -s "$RUN_DIR/07-run-workbench-attempt-1.log" ]] ||
   fail "first attempt log was not preserved"
+pass_case "first attempt log was not preserved"
 [[ -s "$RUN_DIR/07-run-workbench-attempt-2.log" ]] ||
   fail "final exhausted attempt log was not preserved"
+pass_case "final exhausted attempt log was not preserved"
 [[ -s "$RUN_DIR/logcat-workbench-attempt-1.txt" ]] ||
   fail "first attempt logcat was not preserved"
+pass_case "first attempt logcat was not preserved"
 [[ -s "$RUN_DIR/logcat-workbench-attempt-2.txt" ]] ||
   fail "final exhausted attempt logcat was not preserved"
+pass_case "final exhausted attempt logcat was not preserved"
 grep -q 'attempt=2' "$RUN_DIR/07-run-workbench.log" ||
   fail "canonical instrumentation log did not contain the final attempt"
+pass_case "canonical instrumentation log did not contain the final attempt"
 
 if ( fail_if_terminal_workbench_retry_exhausted ); then
   fail "exhausted retry budget did not fail before artifact pull"
 fi
+pass_case "exhausted retry budget did not fail before artifact pull"
 grep -q '^artifact_pull_exit_code=not_run$' "$RUN_DIR/instrumentation-status.txt" ||
   fail "exhausted status file did not record skipped artifact pull"
+pass_case "exhausted status file did not record skipped artifact pull"
 [[ ! -e "$RUN_DIR/08-pull-artifacts.log" ]] ||
   fail "artifact pull log exists after exhausted retry budget"
+pass_case "artifact pull log exists after exhausted retry budget"
 
 RUN_DIR="$tmpdir/success-after-retry"
 FAKE_ADB_STATE="$tmpdir/success-state"
@@ -144,15 +163,25 @@ fail_if_terminal_workbench_retry_exhausted
 
 [[ "$instrumentation_retry_exhausted" == "0" ]] ||
   fail "successful retry was marked exhausted"
+pass_case "successful retry was marked exhausted"
 [[ "$instrumentation_attempt" == "2" ]] ||
   fail "expected success attempt count 2, got $instrumentation_attempt"
+pass_case "expected success attempt count 2, got $instrumentation_attempt"
 [[ "$instrumentation_status" == "0" ]] ||
   fail "expected successful instrumentation status 0, got $instrumentation_status"
+pass_case "expected successful instrumentation status 0, got $instrumentation_status"
 grep -q 'INSTRUMENTATION_CODE: -1' "$RUN_DIR/07-run-workbench.log" ||
   fail "canonical instrumentation log did not contain final success"
+pass_case "canonical instrumentation log did not contain final success"
 [[ -s "$RUN_DIR/07-run-workbench-attempt-1.log" ]] ||
   fail "success-after-retry first attempt log was not preserved"
+pass_case "success-after-retry first attempt log was not preserved"
 [[ -s "$RUN_DIR/07-run-workbench-attempt-2.log" ]] ||
   fail "success-after-retry final attempt log was not preserved"
+pass_case "success-after-retry final attempt log was not preserved"
 
-printf 'PASS: terminal workbench retry helper\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASES == 19 )) || fail "expected 19 cases to run, saw $CASES"
+printf 'PASS: terminal workbench retry helper (%s cases)\n' "$CASES"

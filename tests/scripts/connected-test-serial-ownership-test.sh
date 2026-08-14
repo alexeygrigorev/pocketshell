@@ -1354,11 +1354,29 @@ CASES=(
   hard_killed_toxiproxy_holder_leaves_no_descendant_flock
   term_after_lock_records_lifecycle_and_preserves_rc143
 )
+# Issue #2113: the full-suite size, hardcoded so that DELETING an entry from the
+# CASES array above reddens this harness on its own — comparing the loop counter
+# with `${#CASES[@]}` would only ever compare the loop with itself.
+EXPECTED_FULL_CASES=17
+FILTERED=0
 if [[ $# -gt 0 ]]; then
   CASES=("$@")
+  FILTERED=1
 fi
+(( FILTERED == 1 || ${#CASES[@]} == EXPECTED_FULL_CASES )) ||
+  fail "expected $EXPECTED_FULL_CASES cases in the full suite, the array declares ${#CASES[@]}"
+
+CASE_COUNT=0
 for case_name in "${CASES[@]}"; do
   run_case "$case_name"
+  CASE_COUNT=$((CASE_COUNT + 1))
 done
 
-printf 'PASS: connected-test per-serial ownership (issue #1737)\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status. This harness accepts a case
+# filter, so the count is the number ACTUALLY run and each JVM caller pins the
+# count for the argument set it passes.
+(( CASE_COUNT == ${#CASES[@]} && CASE_COUNT > 0 )) ||
+  fail "expected ${#CASES[@]} cases to run, saw $CASE_COUNT"
+printf 'PASS: connected-test per-serial ownership (issue #1737) (%s cases)\n' "$CASE_COUNT"

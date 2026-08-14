@@ -47,6 +47,27 @@ class TerminalParserRenderBenchmarkTest {
         override fun onColorsChanged() = Unit
     }
 
+    /**
+     * The LOAD-BEARING half of this fixture sweep is the marker + validator
+     * assertions inside [runFixture] / [fixtures]: every fixture's transcript must
+     * still end with its final marker, the spinner rewrite must not leak stale
+     * suffix text, the wrapped fixture must keep its late content, the unicode
+     * fixture must keep CJK + emoji, and the alt-screen fixture must finish on the
+     * alternate buffer. Those are real, and they do not need a 10 MiB fixture.
+     *
+     * The throughput / p95 budgets below are RECORDING-ONLY: [enforceBudgets] runs
+     * only under the `pocketshell.terminalBenchmark.enforceBudgets` system property,
+     * which no lane sets. Issue #2113 measured that directly — making
+     * `TerminalEmulator.append` ~100x slower dropped the recorded
+     * `plain_*_stream` throughput from 13.6 MB/s to 0.157 MB/s and p95 from 10.7 ms
+     * to 939 ms, and this test still PASSED; only the unread JSON report changed.
+     * (On base the recorded 13.6 MB/s is ALREADY under the 20.0 MB/s budget the
+     * report prints, and it is still green — same point, no mutation needed.)
+     *
+     * So #2113 cut `PLAIN_STREAM_BYTES` from 10 MiB to 1 MiB. Nothing that is
+     * actually asserted depends on the fixture's size, and the report keeps being
+     * emitted for whoever opts the budgets in.
+     */
     @Test
     fun parserRenderFixturesEmitBaselineArtifactsAndPreserveFinalMarkers() {
         val results = fixtures().map { fixture -> runFixture(fixture) }
@@ -252,9 +273,9 @@ class TerminalParserRenderBenchmarkTest {
 
     private fun fixtures(): List<Fixture> = listOf(
         Fixture(
-            name = "plain_10mb_stream",
-            bytes = plain10MbStream(),
-            finalMarker = "PS_BENCH_FINAL_plain_10mb_stream",
+            name = "plain_1mb_stream",
+            bytes = plain1MbStream(),
+            finalMarker = "PS_BENCH_FINAL_plain_1mb_stream",
         ),
         Fixture(
             name = "ansi_spinner_rewrite_heavy",
@@ -296,8 +317,8 @@ class TerminalParserRenderBenchmarkTest {
         ),
     )
 
-    private fun plain10MbStream(): ByteArray {
-        val marker = "PS_BENCH_FINAL_plain_10mb_stream"
+    private fun plain1MbStream(): ByteArray {
+        val marker = "PS_BENCH_FINAL_plain_1mb_stream"
         val out = ByteArrayOutputStream(PLAIN_STREAM_BYTES + 1024)
         var i = 0
         while (out.size() < PLAIN_STREAM_BYTES - marker.length - 1) {
@@ -377,13 +398,13 @@ class TerminalParserRenderBenchmarkTest {
         appendLine("  \"local_enforcement_property\": \"$ENFORCE_BUDGETS_PROPERTY\",")
         appendLine("  \"ci_ramp_up_plan\": \"Keep CI recording-only until issue #339 lands production throughput changes; then collect five CI baselines, set enforced budgets to the slower of the current suggested budgets and 75% of observed p50 throughput with p95/max batch budgets at 150% of observed p95/max, and enable $ENFORCE_BUDGETS_PROPERTY in CI once two consecutive main runs pass.\",")
         appendLine("  \"issue_suggested_budgets\": {")
-        appendLine("    \"plain_10mb_stream_min_throughput_mb_per_sec\": 25.0,")
+        appendLine("    \"plain_1mb_stream_min_throughput_mb_per_sec\": 25.0,")
         appendLine("    \"ansi_spinner_rewrite_heavy_min_throughput_mb_per_sec\": 8.0,")
         appendLine("    \"p95_batch_max_ms\": 16.0,")
         appendLine("    \"max_batch_max_ms\": 50.0")
         appendLine("  },")
         appendLine("  \"adjusted_local_budgets\": {")
-        appendLine("    \"plain_10mb_stream_min_throughput_mb_per_sec\": $PLAIN_MIN_MB_PER_SEC,")
+        appendLine("    \"plain_1mb_stream_min_throughput_mb_per_sec\": $PLAIN_MIN_MB_PER_SEC,")
         appendLine("    \"ansi_spinner_rewrite_heavy_min_throughput_mb_per_sec\": $ANSI_MIN_MB_PER_SEC,")
         appendLine("    \"p95_batch_max_ms\": $P95_BATCH_BUDGET_MS,")
         appendLine("    \"max_batch_max_ms\": $MAX_BATCH_BUDGET_MS")
@@ -409,8 +430,8 @@ class TerminalParserRenderBenchmarkTest {
     private fun enforceBudgets(results: List<BenchmarkResult>) {
         val byName = results.associateBy { it.name }
         assertTrue(
-            "plain 10MB throughput ${byName.getValue("plain_10mb_stream").throughputMbPerSec} MB/s < $PLAIN_MIN_MB_PER_SEC MB/s",
-            byName.getValue("plain_10mb_stream").throughputMbPerSec >= PLAIN_MIN_MB_PER_SEC,
+            "plain 1MB throughput ${byName.getValue("plain_1mb_stream").throughputMbPerSec} MB/s < $PLAIN_MIN_MB_PER_SEC MB/s",
+            byName.getValue("plain_1mb_stream").throughputMbPerSec >= PLAIN_MIN_MB_PER_SEC,
         )
         assertTrue(
             "ANSI-heavy throughput ${byName.getValue("ansi_spinner_rewrite_heavy").throughputMbPerSec} MB/s < $ANSI_MIN_MB_PER_SEC MB/s",
@@ -463,7 +484,7 @@ class TerminalParserRenderBenchmarkTest {
         const val CELL_HEIGHT_PX = 15
         const val TEXT_SIZE_PX = 28
         const val BATCH_SIZE_BYTES = 64 * 1024
-        const val PLAIN_STREAM_BYTES = 10 * 1024 * 1024
+        const val PLAIN_STREAM_BYTES = 1024 * 1024
         const val BYTES_PER_MIB = 1024.0 * 1024.0
         const val NANOS_PER_SECOND = 1_000_000_000.0
         const val NANOS_PER_MILLI = 1_000_000.0

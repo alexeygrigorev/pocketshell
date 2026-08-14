@@ -350,12 +350,15 @@ non_pool_suffix_run_acquires_and_releases_serial_lock() {
     || fail "non-pool run regressed to the split global lock domain"
 }
 
+CASE_COUNT=0
+
 run_case() {
   local name="$1"
   local sandbox
   sandbox="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-avd-pool-test.XXXXXX")"
   "$name" "$sandbox"
   rm -rf "$sandbox"
+  CASE_COUNT=$((CASE_COUNT + 1))
   printf '  ok: %s\n' "$name"
 }
 
@@ -364,4 +367,8 @@ run_case failed_run_still_releases_and_propagates_rc
 run_case same_run_evidence_is_captured_under_lock_for_success_and_failure
 run_case non_pool_suffix_run_acquires_and_releases_serial_lock
 
-printf 'PASS: avd-pool claim/release\n'
+# Issue #2113: a harness that exits 0 having run nothing is the vacuous green
+# process.md catalogues. The count line is what makes the JVM assertion about
+# behaviour rather than about bash's exit status.
+(( CASE_COUNT == 4 )) || fail "expected 4 cases to run, saw $CASE_COUNT"
+printf 'PASS: avd-pool claim/release (%s cases)\n' "$CASE_COUNT"

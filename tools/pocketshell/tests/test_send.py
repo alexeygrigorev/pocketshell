@@ -130,11 +130,21 @@ class TmuxFixture:
         *args: str,
         payload: bytes = b"",
         path_prefix: Optional[Path] = None,
+        path_override: Optional[Path] = None,
         timeout: float = 120.0,
     ) -> subprocess.CompletedProcess:
-        """Run the REAL `pocketshell send` CLI as its own process."""
+        """Run the REAL `pocketshell send` CLI as its own process.
+
+        ``path_prefix`` shadows the real tmux with a shim while leaving the
+        real one reachable. ``path_override`` REPLACES `PATH` outright, which
+        is what makes "tmux became unexecutable mid-sequence" reproducible: a
+        shim that deletes itself is only unfindable when no other directory on
+        `PATH` still holds a tmux (#2136).
+        """
         env = dict(self.env)
-        if path_prefix is not None:
+        if path_override is not None:
+            env["PATH"] = str(path_override)
+        elif path_prefix is not None:
             env["PATH"] = f"{path_prefix}{os.pathsep}{env['PATH']}"
         return subprocess.run(
             [sys.executable, "-m", "pocketshell", "send", "--socket-name", self.socket_name, *args],
@@ -770,6 +780,279 @@ def test_enter_failure_after_a_landed_payload_reports_the_unknown_state(
     assert tmux_fixture.settle().count(b"MARKER-2122-ENTERFAIL") == 1
 
 
+# --------------------------------------------------------------------------
+# Issue #2136: exit 4 must mean "this call put nothing in the pane", and the
+# two Enter-step failure sites must report the SAME outcome.
+#
+# `send-keys` can fail in two physically identical ways once the paste has
+# already succeeded: tmux answers non-zero, or tmux becomes unexecutable
+# between the two commands. In both the payload is in the pane, unsubmitted,
+# and this call's claim is deliberately kept. They used to report different
+# exit codes (5 and 4), and exit 4's documented row promised a clean slate —
+# which is precisely what #2124 will branch on to auto-retry.
+# --------------------------------------------------------------------------
+
+
+def _vanish_after(command: str) -> str:
+    """Shim body: forward ``command`` to the real tmux, then DELETE the shim.
+
+    Combined with a `PATH` holding only the shim directory, the NEXT tmux
+    invocation raises `FileNotFoundError` inside `pocketshell send` — the real
+    `TmuxUnavailable` branch, and the only failure mode that can strike
+    between a successful `paste-buffer` and the `send-keys Enter`.
+    """
+    return (
+        # The caller runs `pocketshell send` with PATH set to the shim
+        # directory ALONE, so the shim cannot find `rm` on the inherited PATH.
+        # Give the shim its own; it is not inherited by the parent, whose PATH
+        # must stay tmux-free for the scenario to happen at all.
+        "PATH=/usr/bin:/bin:/usr/sbin:/sbin\n"
+        "export PATH\n"
+        'for a in "$@"; do\n'
+        f'  if [ "$a" = "{command}" ]; then\n'
+        '    "$REAL" "$@"\n'
+        "    rc=$?\n"
+        '    rm -f "$0"\n'
+        "    exit $rc\n"
+        "  fi\n"
+        "done"
+    )
+
+
+@dataclass(frozen=True)
+class _FailurePoint:
+    """One way the injection sequence can fail, and what it must report."""
+
+    label: str
+    body: str
+    #: Replace PATH with the shim dir only, so a self-deleted shim is gone.
+    isolate_path: bool
+    expected_code: int
+    #: Whether this call is required to have put nothing into the pane.
+    pane_untouched: bool
+
+
+_FAILURE_POINTS = [
+    _FailurePoint(
+        label="load-buffer-rejected",
+        body=_match_first_arg("load-buffer", '    echo "simulated" >&2\n    exit 1'),
+        isolate_path=False,
+        expected_code=send_mod.EXIT_TMUX_FAILED,
+        pane_untouched=True,
+    ),
+    _FailurePoint(
+        label="tmux-vanishes-before-the-paste",
+        body=_vanish_after("load-buffer"),
+        isolate_path=True,
+        expected_code=send_mod.EXIT_TMUX_FAILED,
+        pane_untouched=True,
+    ),
+    _FailurePoint(
+        label="paste-buffer-rejected",
+        body=_match_first_arg("paste-buffer", '    echo "simulated" >&2\n    exit 1'),
+        isolate_path=False,
+        expected_code=send_mod.EXIT_TMUX_FAILED,
+        pane_untouched=True,
+    ),
+    # The two Enter-step siblings. Same physical state, therefore same code.
+    _FailurePoint(
+        label="tmux-vanishes-after-the-paste",
+        body=_vanish_after("paste-buffer"),
+        isolate_path=True,
+        expected_code=send_mod.EXIT_SEND_INTERRUPTED,
+        pane_untouched=False,
+    ),
+    _FailurePoint(
+        label="send-keys-rejected",
+        body=_match_first_arg("send-keys", '    echo "simulated" >&2\n    exit 1'),
+        isolate_path=False,
+        expected_code=send_mod.EXIT_SEND_INTERRUPTED,
+        pane_untouched=False,
+    ),
+]
+
+
+def _run_failure_point(
+    tmux_fixture: TmuxFixture, point: _FailurePoint, token: str, payload: bytes
+) -> subprocess.CompletedProcess:
+    shim = _shim_dir(
+        tmux_fixture.capture_file.parent,
+        tmux_fixture.real_tmux,
+        point.body,
+        f"p2136-{point.label}",
+    )
+    result = tmux_fixture.send(
+        "--pane", tmux_fixture.pane_id, "--token", token, "--enter",
+        payload=payload,
+        path_prefix=None if point.isolate_path else shim,
+        path_override=shim if point.isolate_path else None,
+    )
+    if point.isolate_path:
+        # The mechanism itself is load-bearing: if the shim were still there,
+        # tmux never became unexecutable and the scenario did not happen.
+        assert not (shim / "tmux").exists(), (
+            f"{point.label}: the shim did not delete itself, so tmux never "
+            "became unavailable and this scenario proved nothing"
+        )
+    return result
+
+
+@pytest.mark.parametrize("point", _FAILURE_POINTS, ids=lambda p: p.label)
+def test_exit_four_always_means_this_call_put_nothing_in_the_pane(
+    tmux_fixture: TmuxFixture, point: _FailurePoint
+) -> None:
+    """The property #2124 branches on, checked at every failure point.
+
+    Exit 4 is reserved for failures where tmux never accepted the paste, which
+    is what makes the claim rollback sound and a retry non-duplicating. The
+    paste is the point of no return: after it, a failed Enter is the unknown
+    (exit 5), never a clean failure.
+    """
+    marker = f"MARKER-2136-{point.label}".encode()
+    payload = marker + b"\n"
+    token = f"row-2136-{point.label}"
+
+    result = _run_failure_point(tmux_fixture, point, token, payload)
+    landed = tmux_fixture.settle(quiet=0.75)
+
+    assert result.returncode == point.expected_code, (
+        f"{point.label}: expected exit {point.expected_code}, got "
+        f"{result.returncode} ({result.stdout.decode(errors='replace').strip()!r} / "
+        f"{result.stderr.decode(errors='replace').strip()!r})"
+    )
+    if point.pane_untouched:
+        assert landed == b"", f"{point.label}: the pane was expected to be untouched"
+    else:
+        assert marker in landed, (
+            f"{point.label}: the scenario requires the payload to have landed, "
+            "otherwise it is not testing the after-the-paste state at all"
+        )
+
+    # Stated as an implication so it reads as the contract, not the fixture:
+    # whatever the code turns out to be, exit 4 must never coexist with bytes
+    # this call put into the pane, nor with a claim it left behind.
+    if result.returncode == send_mod.EXIT_TMUX_FAILED:
+        assert landed == b"", (
+            f"{point.label}: exit 4 is documented as 'this call put nothing in "
+            "the pane', but the payload is in the pane. A client that "
+            "auto-retries on exit 4 (#2124) would re-inject it."
+        )
+        assert not tmux_fixture.record_for(token).exists(), (
+            f"{point.label}: exit 4 left a claim behind, so the token is not "
+            "in the state this call found it in"
+        )
+
+
+def _retry_the_way_the_exit_four_row_licenses(
+    tmux_fixture: TmuxFixture, code: int, *, token: str, payload: bytes
+) -> None:
+    """Drive the retry a client that BELIEVES the exit-code table would drive.
+
+    This is the #2124 decision, taken strictly from `EXIT_CODE_TABLE`:
+
+    * exit 4 promised "nothing was injected; the token is NOT journaled and
+      stays retryable", so a client that believes it treats the send as never
+      having happened and drives it to completion — including past a journal
+      record, because the row says no injection occurred, so any record it
+      meets cannot be a real delivery.
+    * exit 5 promises the opposite (delivery UNKNOWN, opt-in required), so the
+      same client stops and escalates instead of resending.
+    """
+    if code == send_mod.EXIT_SEND_INTERRUPTED:
+        return
+    assert code == send_mod.EXIT_TMUX_FAILED, f"unexpected exit code {code}"
+    retry = tmux_fixture.send(
+        "--pane", tmux_fixture.pane_id, "--token", token, "--enter", payload=payload
+    )
+    if retry.returncode != send_mod.EXIT_SEND_INTERRUPTED:
+        return
+    tmux_fixture.send(
+        "--pane", tmux_fixture.pane_id, "--token", token, "--enter",
+        "--resend-interrupted", payload=payload,
+    )
+
+
+def test_a_client_that_trusts_the_exit_code_table_never_double_injects(
+    tmux_fixture: TmuxFixture,
+) -> None:
+    """#2136 reproduction: the reported hazard, driven end to end.
+
+    tmux disappears between a successful paste and the Enter. The payload is
+    in the pane. A client then does exactly what this call's documented exit
+    row licenses it to do — and the pane must still hold ONE copy of the
+    payload.
+
+    The load-bearing assertion is the occurrence COUNT in the pane, not the
+    exit code: an exit-code-only check would stay green with the double
+    injection present, which is the wrong-cost shape (G6).
+    """
+    point = next(p for p in _FAILURE_POINTS if p.label == "tmux-vanishes-after-the-paste")
+    marker = b"MARKER-2136-CONTRACT"
+    payload = marker + b"\n"
+    token = "row-2136-contract"
+
+    result = _run_failure_point(tmux_fixture, point, token, payload)
+
+    landed = tmux_fixture.wait_for_capture(len(payload))
+    assert marker in landed, "precondition: the paste must have reached the pane"
+    record = json.loads(tmux_fixture.record_for(token).read_text(encoding="utf-8"))
+    assert record["state"] == "pending", (
+        "the claim must be kept: rolling it back here is what would let a "
+        "plain retry paste the payload a second time"
+    )
+
+    _retry_the_way_the_exit_four_row_licenses(
+        tmux_fixture, result.returncode, token=token, payload=payload
+    )
+
+    assert tmux_fixture.settle().count(marker) == 1, (
+        "the payload was injected twice: this call reported an exit code whose "
+        "documented row licensed the client to re-inject a payload that was "
+        "already in the pane (#2136)"
+    )
+
+
+def test_the_two_enter_step_failures_report_the_same_outcome(
+    tmux_fixture: TmuxFixture,
+) -> None:
+    """`:1279` and `:1281` describe one state and must not disagree.
+
+    tmux answering "no" to `send-keys` and tmux becoming unexecutable before
+    `send-keys` leave byte-identical state: payload pasted, Enter not sent,
+    claim kept, owner about to exit. Nothing distinguishes them to a caller,
+    so nothing may distinguish their reported outcome.
+    """
+    enter_step = [
+        p
+        for p in _FAILURE_POINTS
+        if p.label in {"tmux-vanishes-after-the-paste", "send-keys-rejected"}
+    ]
+    assert len(enter_step) == 2
+
+    outcomes = {}
+    for index, point in enumerate(enter_step):
+        marker = f"MARKER-2136-AGREE-{index}".encode()
+        token = f"row-2136-agree-{index}"
+        result = _run_failure_point(tmux_fixture, point, token, marker + b"\n")
+        landed = tmux_fixture.wait_for_capture(len(marker) + 1)
+        assert marker in landed, f"{point.label}: the payload never reached the pane"
+        record = json.loads(tmux_fixture.record_for(token).read_text(encoding="utf-8"))
+        outcomes[point.label] = (
+            result.returncode,
+            result.stdout.decode(errors="replace").split()[0],
+            record["state"],
+        )
+
+    codes = set(outcomes.values())
+    assert len(codes) == 1, f"the two Enter-step failures disagree: {outcomes}"
+    (code, reason, state), = codes
+    assert (code, reason, state) == (
+        send_mod.EXIT_SEND_INTERRUPTED,
+        "send-interrupted",
+        "pending",
+    ), outcomes
+
+
 def test_timeout_exits_six_without_journaling(tmux_fixture: TmuxFixture) -> None:
     shim = _shim_dir(
         tmux_fixture.capture_file.parent,
@@ -1108,6 +1391,71 @@ def test_every_reason_constant_appears_in_the_documented_table() -> None:
     for name, value in vars(send_mod).items():
         if name.startswith("REASON_"):
             assert value in documented, f"{name} = {value!r} is missing from EXIT_CODE_TABLE"
+
+
+def _row(code: int) -> str:
+    """The `EXIT_CODE_TABLE` description `--help` renders for one exit code."""
+    for entry_code, _reasons, description in send_mod.EXIT_CODE_TABLE:
+        if entry_code == code:
+            return description
+    raise AssertionError(f"exit code {code} is not in EXIT_CODE_TABLE")
+
+
+def _normalised_help() -> str:
+    """`send --help` with its wrapping collapsed, so a phrase can be pinned.
+
+    The epilog re-wraps every description at 66 columns, so an exact substring
+    check against the raw output would pass or fail on the wrap point rather
+    than on the wording.
+    """
+    runner = CliRunner()
+    result = runner.invoke(cli, ["send", "--help"])
+    assert result.exit_code == 0
+    return " ".join(result.output.split())
+
+
+def test_the_exit_four_row_no_longer_promises_a_clean_slate() -> None:
+    """#2136: `--help` carried the wording the README had already corrected.
+
+    "Nothing was injected; the token is NOT journaled and stays retryable" was
+    false on the Enter-step path, and it is the exact sentence a client that
+    auto-retries (#2124) would have believed before re-injecting a payload
+    that was already in the pane.
+    """
+    row = _row(send_mod.EXIT_TMUX_FAILED)
+    assert "the token is NOT journaled and stays retryable" not in row
+    assert "put NOTHING into the pane" in row
+    assert "left the journal exactly as it found it" in row
+    # "unchanged" is not "absent" — the row must say so, or a client reads it
+    # as "the token is free" and forces a resend past a real unresolved record.
+    assert "send-interrupted" in row
+
+
+def test_the_exit_five_row_states_that_this_call_may_have_injected() -> None:
+    """Exit 5 is reachable from THIS call, not only from a previous one.
+
+    Both Enter-step failures and a post-delivery journal-write failure report
+    it, and in all three the payload may already be in the pane. A row that
+    only described the previous-attempt reading would understate the state a
+    client is in.
+    """
+    row = _row(send_mod.EXIT_SEND_INTERRUPTED)
+    assert "PREVIOUS" in row
+    assert "THIS call" in row
+    assert "ALREADY be in the pane" in row
+    assert "--resend-interrupted" in row
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "put NOTHING into the pane",
+        "left the journal exactly as it found it",
+        "the payload may ALREADY be in the pane",
+    ],
+)
+def test_help_renders_the_corrected_exit_code_semantics(phrase: str) -> None:
+    assert phrase in _normalised_help()
 
 
 def test_send_is_registered_on_the_top_level_cli() -> None:
@@ -1468,9 +1816,51 @@ def test_at_most_once_survives_interleaved_kills_failures_and_retries(
     )
     assert retry.stdout.decode().split()[0] == "send-interrupted"
 
+    # And the THIRD window, the one #2136 changed: tmux vanishes between a
+    # successful paste and the Enter. It now reports the same unknown as an
+    # Enter rejection, so the invariant must still hold across it — a plain
+    # retry refuses, and only the explicit opt-in delivers again (which is what
+    # keeps the state non-absorbing, the property #2121 says the client lacks).
+    third_token = "row-interleaved-enter"
+    third_marker = b"MARKER-2136-THIRD-WINDOW"
+    third_payload = third_marker + b"\n"
+    vanished = _run_failure_point(
+        tmux_fixture,
+        next(p for p in _FAILURE_POINTS if p.label == "tmux-vanishes-after-the-paste"),
+        third_token,
+        third_payload,
+    )
+    assert vanished.returncode == send_mod.EXIT_SEND_INTERRUPTED
+    assert vanished.stdout.decode().split()[0] == "send-interrupted"
+    tmux_fixture.wait_for_capture(
+        len(payload) + len(second_payload) + len(third_payload)
+    )
+    assert tmux_fixture.settle(quiet=0.5).count(third_marker) == 1
+
+    refused = tmux_fixture.send(
+        "--pane", tmux_fixture.pane_id, "--token", third_token, "--enter",
+        payload=third_payload,
+    )
+    assert refused.returncode == send_mod.EXIT_SEND_INTERRUPTED
+    assert refused.stdout.decode().split()[0] == "send-interrupted"
+    assert tmux_fixture.settle(quiet=0.5).count(third_marker) == 1, (
+        "a plain retry after the Enter-step unknown must never re-inject"
+    )
+
+    opted_in = tmux_fixture.send(
+        "--pane", tmux_fixture.pane_id, "--token", third_token, "--enter",
+        "--resend-interrupted", payload=third_payload,
+    )
+    assert opted_in.returncode == 0
+    assert opted_in.stdout.decode().split()[0] == "delivered"
+
     final = tmux_fixture.settle()
     assert final.count(marker) == 1
     assert final.count(second_marker) == 1
+    assert final.count(third_marker) == 2, (
+        "the explicit opt-in is the ONLY way a second copy appears, and it must "
+        "still work after the Enter-step unknown or the state would be absorbing"
+    )
 
 
 # --------------------------------------------------------------------------

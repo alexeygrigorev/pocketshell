@@ -96,32 +96,52 @@ table the code exits with, so they cannot drift):
 | 0 | `pruned <n>` | `--prune-older-than` removed `n` records. |
 | 2 | `bad-usage` | Invalid/missing arguments. Nothing injected or journaled. |
 | 3 | `pane-not-found` | Pane missing or dead. Not journaled; stays retryable. |
-| 4 | `tmux-failed` | tmux missing / no server / a definitive tmux failure. This call never recorded a delivery. Usually the pane was never touched and the token is left unclaimed, but not always — see the note below before auto-retrying. |
-| 5 | `send-interrupted` or `journal-corrupt` | A previous attempt for this token died without an answer (its process is gone). Delivery is genuinely UNKNOWN and nothing was injected now. |
-| 6 | `timeout` | A tmux call exceeded `--timeout`. |
+| 4 | `tmux-failed` | tmux missing / no server / a definitive tmux failure. This call put **nothing** into the pane and left the journal exactly as it found it — see the note below for what that does and does not promise. |
+| 5 | `send-interrupted` or `journal-corrupt` | Delivery is genuinely UNKNOWN and the token is left journaled-unresolved. Either a previous attempt died without an answer, or this call got past the paste and the payload may already be in the pane. Never auto-retry — see below. |
+| 6 | `timeout` | A tmux call exceeded `--timeout`. If it hit at or after the commit, the payload may already be in the pane and the token is left in the exit-5 unknown. |
 | 7 | `journal-failed` | The journal could not be read/written. Nothing injected. |
 | 8 | `send-in-progress` | Another send for this token is STILL RUNNING. Nothing injected, nothing unknown — retry shortly to read that call's answer. |
 
-**Exit 4 in detail** — a client that branches on this table to decide whether
-to auto-retry (#2124) must not read `tmux-failed` as "clean slate". It
-guarantees only that this call never recorded a *delivery*. It does **not**
-guarantee the token is unjournaled, and in one narrow case it does not
-guarantee the pane is untouched:
+**The paste is the point of no return, and that is the boundary between exit 4
+and exit 5** (issue #2136). A client that branches on this table to decide
+whether to auto-retry (#2124) needs one property, and it is exactly what exit 4
+now means:
 
-- Failure at the pane lookup, or while filling the paste buffer — both happen
-  before the journal is written at all: nothing injected, token unclaimed,
-  cleanly retryable. This is the ordinary case.
-- A definitive `paste-buffer` failure rolls this call's claim back. For a plain
-  call that returns the token to absent (cleanly retryable). Under
-  `--resend-interrupted` the *pre-existing* unresolved record is restored
-  byte-for-byte rather than erased, so the token stays journaled-unresolved and
-  the next plain call answers exit 5, not a fresh injection.
-- tmux disappearing between a successful paste and the `Enter`: the payload
-  **is** in the pane, the pending record is deliberately kept, and the next
-  plain call answers exit 5.
+> **Exit 4 ⇒ this call put nothing into the pane, and left the journal exactly
+> as it found it.**
 
-A plain retry after exit 4 is therefore always *safe* — it re-reads the journal
-and answers exit 5 rather than duplicating — but it is not guaranteed to inject.
+Every exit-4 site satisfies it. Failures at the pane lookup or while filling
+the paste buffer happen before the journal is written at all — nothing injected,
+token unclaimed, cleanly retryable; this is the ordinary case. A definitive
+`paste-buffer` failure (tmux answered "no", or tmux became unexecutable before
+the paste) rolls this call's claim back: for a plain call that returns the token
+to absent, and under `--resend-interrupted` the *pre-existing* unresolved record
+is restored byte-for-byte rather than erased.
+
+Note what "unchanged" does **not** mean. It does not mean "absent": a token that
+was already journaled-unresolved still is, so the next plain call answers exit 5
+rather than injecting. A retry after exit 4 can therefore never duplicate, but
+it is not guaranteed to inject.
+
+**Exit 5 in detail** — it carries two different facts, and a client must treat
+both the same way (do not auto-retry; surface the choice):
+
+- A **previous** attempt for this token died without an answer, or left an
+  unreadable record, and its owning process is gone. This call injected nothing.
+- **This** call got past the paste. tmux accepted the payload, so it **is** in
+  the pane, and then either the `send-keys Enter` failed or the delivery could
+  not be journaled. The claim is deliberately kept — rolling it back is what
+  would let a plain retry paste the payload a second time.
+
+Both readings leave the token journaled-unresolved, so the invariant is the same
+for both: no plain call will ever inject it again, and `--resend-interrupted` is
+the explicit opt-in that accepts a possible duplicate.
+
+The `Enter` step has two failure shapes — tmux answers non-zero, or tmux stops
+being executable between the paste and the `send-keys` — and they leave
+byte-identical state. They report one outcome (exit 5). Until #2136 the second
+reported exit 4, which told a client the pane was untouched while the payload
+was sitting in it.
 
 stdout is machine-readable: the first whitespace-delimited token is one of
 the reasons above; human detail goes to stderr. Every retry path drains stdin

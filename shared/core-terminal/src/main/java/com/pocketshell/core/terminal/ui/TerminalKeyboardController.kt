@@ -69,7 +69,8 @@ fun showTerminalSoftKeyboard(
  *
  * Returns `true` when a [TerminalView] descendant was found and its
  * scroll position was reset, `false` when no terminal view is mounted
- * yet (e.g. the screen has not finished its first composition). The
+ * yet (e.g. the screen has not finished its first composition) or when
+ * the pin was REFUSED because the user is mid-selection (see below). The
  * caller treats `false` as a no-op rather than an error — the same
  * defensive contract as [showTerminalSoftKeyboard].
  *
@@ -79,6 +80,25 @@ fun showTerminalSoftKeyboard(
  * `TerminalView.updateSize` → `mTopRow = 0`); this helper handles the
  * orthogonal "user scrolled then tapped IME" case where the size has
  * not changed but the visible viewport no longer covers the cursor row.
+ *
+ * ## Issue #2154 — a live text selection OWNS the viewport
+ *
+ * The vendored view already refuses to move the transcript for OUTPUT
+ * while a selection is live (`TerminalView.onScreenUpdated` takes the
+ * `isSelectingText()` branch and sets `skipScrolling`). This helper used
+ * to blow straight past that guard: it called `setTopRow(0)` FIRST, so by
+ * the time `onScreenUpdated()` decided to skip scrolling the viewport had
+ * already jumped to the bottom — the transcript snapping out from under a
+ * user's in-progress selection drag, which is exactly the reported symptom
+ * ("I select a part … and then my terminal starts jumping"). Starting a
+ * selection calls `TerminalView.requestFocus()`, which can raise the soft
+ * IME, which is what fires the #184 pin in the first place — so this path
+ * is reached by the very gesture it destroys.
+ *
+ * The pin is therefore REFUSED (returns `false`, viewport untouched) while
+ * [TerminalView.isSelectingText] is true. The invariant lives here, next to
+ * the mutation, so it holds for EVERY caller of this module function rather
+ * than only for the one screen that remembers to ask.
  */
 fun pinTerminalToBottom(
     rootView: View,
@@ -86,12 +106,61 @@ fun pinTerminalToBottom(
 ): Boolean {
     return runCatching {
         val terminalView = rootView.findTerminalViewDescendant() ?: return@runCatching false
+        if (terminalView.isSelectingText) return@runCatching false
         terminalView.setTopRow(0)
         terminalView.onScreenUpdated()
         true
     }.getOrElse { cause ->
         onLocalTerminalError?.invoke(cause)
         false
+    }
+}
+
+/**
+ * Issue #2154 / #184 — the app-layer decision "should the soft keyboard
+ * becoming visible pin this pane's transcript to the bottom right now?".
+ *
+ * Two rules, both of which the previous inline
+ * `LaunchedEffect(isImeVisible, paneId) { if (isImeVisible) pin() }` broke:
+ *
+ * 1. **Show EDGE only.** #184's contract is "when the user asks for the
+ *    keyboard they have committed to typing at the prompt, so put the cursor
+ *    row back on screen". That is a transition, not a level. Keying the effect
+ *    on `(isImeVisible, paneId)` re-fired the pin on EVERY key-tuple change
+ *    while the IME merely happened to be up — notably on a pane/page settle
+ *    (the unified pager hands the screen a different `surfacePane`), which
+ *    yanked a scrolled-back transcript to the bottom for a keyboard the user
+ *    raised minutes ago. Only a `false → true` transition pins.
+ * 2. **Never over a live selection.** While the user is dragging a selection
+ *    the viewport belongs to them. Starting a selection calls
+ *    `TerminalView.requestFocus()`, which can raise the IME — so the rising
+ *    edge and the selection routinely arrive together, and honouring the pin
+ *    would destroy the selection the user is still making.
+ *
+ * Deliberately a tiny stateful policy object rather than inline Compose state:
+ * the edge is a property of the *sequence* of IME observations, and keeping it
+ * here makes it directly unit-testable on the JVM (no Compose, no device).
+ * Remember one instance per screen; it is not thread-safe and is only ever
+ * touched from the composition/main thread.
+ */
+class ImeViewportPinPolicy {
+
+    private var imeVisible: Boolean = false
+
+    /**
+     * Record an IME-visibility observation and return `true` iff this
+     * observation is the rising `false → true` edge AND no text selection is
+     * live. Always updates the remembered visibility, so a refused rising edge
+     * is CONSUMED (the pin does not fire later when some unrelated key changes
+     * while the IME stays up).
+     */
+    fun shouldPinOnImeVisibility(
+        imeVisible: Boolean,
+        textSelectionActive: Boolean,
+    ): Boolean {
+        val rising = imeVisible && !this.imeVisible
+        this.imeVisible = imeVisible
+        return rising && !textSelectionActive
     }
 }
 

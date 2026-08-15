@@ -339,6 +339,9 @@ fun TerminalSurface(
     viewClient.terminalKeyboardMode = terminalKeyboardMode
     viewClient.onTerminalSizeChanged = onTerminalSizeChanged
     viewClient.onTerminalSurfaceError = onLocalTerminalError
+    // Issue #2154: publish the vendored view's selection lifecycle onto the state
+    // so app-layer viewport work can defer to a live selection.
+    viewClient.onCopyModeChanged = { selecting -> state.setTextSelectionActive(selecting) }
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
     var viewportTick by remember { mutableStateOf(0L) }
     val publishedTapAffordances = remember { PublishedTapAffordances() }
@@ -1012,6 +1015,16 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     var onViewportChanged: (() -> Unit)? = null
 
     /**
+     * Issue #2154 — sink for the vendored view's text-selection lifecycle.
+     * [TerminalSurface] points this at [TerminalSurfaceState.setTextSelectionActive]
+     * so app-layer code can read [TerminalSurfaceState.textSelectionActive] and
+     * stop moving the viewport under a user's in-progress selection drag.
+     * `null` only for the bare-client unit/instrumented harnesses that construct
+     * this client without a surface.
+     */
+    var onCopyModeChanged: ((Boolean) -> Unit)? = null
+
+    /**
      * Hook installed by [TerminalSurface] when URL detection is enabled.
      * Called from [onSingleTapUp] for every confirmed single tap; given the
      * tap coordinates in view-local pixels, the host returns `true` if the
@@ -1071,7 +1084,14 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun shouldUseSmartTextInput(): Boolean = terminalKeyboardMode == TerminalKeyboardMode.SmartText
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
     override fun isTerminalViewSelected(): Boolean = true
-    override fun copyModeChanged(copyMode: Boolean) = Unit
+    // Issue #2154: NO LONGER INERT. The vendored TerminalView fires this on both
+    // selection edges (startTextSelectionMode / stopTextSelectionMode). Publishing
+    // it is what lets app-layer code know a selection is live and stop moving the
+    // viewport under the user's finger.
+    override fun copyModeChanged(copyMode: Boolean) {
+        runCatching { onCopyModeChanged?.invoke(copyMode) }
+            .onFailure { onTerminalSurfaceError?.invoke(it) }
+    }
     override fun onKeyDown(keyCode: Int, e: KeyEvent?, session: TerminalSession?): Boolean = false
     override fun onKeyUp(keyCode: Int, e: KeyEvent?): Boolean = false
     override fun onLongPress(event: MotionEvent?): Boolean = false

@@ -294,6 +294,49 @@ class TerminalSurfaceState(
     private var surfaceRepaintRequestCount: Int = 0
 
     /**
+     * Issue #2154 — backing state for [textSelectionActive].
+     *
+     * Fed from the vendored [TerminalView]'s selection lifecycle
+     * (`startTextSelectionMode` / `stopTextSelectionMode` →
+     * [com.termux.view.TerminalViewClient.copyModeChanged]) by
+     * [PocketShellTerminalViewClient]. Before #2154 that client override was
+     * `= Unit`, so NOTHING outside the vendored view could know a selection was
+     * live — and every PocketShell-owned viewport reset (the #184 IME pin) ran
+     * straight through a user's in-progress drag, snapping the transcript to the
+     * bottom and destroying the selection.
+     */
+    private val _textSelectionActive = MutableStateFlow(false)
+
+    /**
+     * Issue #2154 — `true` while the user has a LIVE text selection in this
+     * pane's terminal (long-press → drag handles → Copy).
+     *
+     * A live selection makes the USER the viewport owner: PocketShell must not
+     * move the transcript under their finger. App-layer code reads this to skip
+     * viewport work it would otherwise schedule (see
+     * [ImeViewportPinPolicy]); the module-level enforcement that travels with
+     * the mutation itself lives in [pinTerminalToBottom] and
+     * [com.termux.view.TerminalView.updateSize], which consult the View directly.
+     *
+     * Emits `false` until the first selection starts. Distinct-until-changed by
+     * construction ([MutableStateFlow]).
+     */
+    val textSelectionActive: StateFlow<Boolean> get() = _textSelectionActive.asStateFlow()
+
+    /** Issue #2154 — current value of [textSelectionActive], for non-Flow callers. */
+    fun isTextSelectionActive(): Boolean = _textSelectionActive.value
+
+    /**
+     * Issue #2154 — publish the vendored view's selection lifecycle onto
+     * [textSelectionActive]. Called by [PocketShellTerminalViewClient.copyModeChanged],
+     * which the vendored [TerminalView] fires on BOTH edges
+     * (`startTextSelectionMode` and `stopTextSelectionMode`).
+     */
+    internal fun setTextSelectionActive(active: Boolean) {
+        _textSelectionActive.value = active
+    }
+
+    /**
      * Issue #1203 — request a SURFACE force-repaint of the bound [TerminalView]
      * (re-bind emulator + full-clip invalidate) to recover a surface-only-black
      * pane (model intact, surface black). Called by the tmux ViewModel from the

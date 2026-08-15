@@ -86,6 +86,7 @@ import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.terminal.selection.LocalhostUrl
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.terminal.ui.ImeViewportPinPolicy
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -778,8 +779,18 @@ private fun TmuxSessionScreenEffects(
     )
 
     // Issue #184 Layer 1: snap the active pane to the bottom when the IME shows.
+    //
+    // Issue #2154: the pin is a SHOW-EDGE event gated on "no live selection", not
+    // "the IME happens to be up". The old `if (isImeVisible)` body re-fired on every
+    // change of the key tuple — most importantly a pane/page settle — so a scrolled-
+    // back transcript was yanked to the bottom long after the user raised the
+    // keyboard, and a selection drag (which raises the IME via the vendored view's
+    // requestFocus()) was destroyed mid-gesture. [ImeViewportPinPolicy] owns both
+    // rules and is remembered across recompositions so the edge is real.
+    val imeViewportPinPolicy = remember { ImeViewportPinPolicy() }
     LaunchedEffect(isImeVisible, surfacePane?.paneId) {
-        if (isImeVisible) {
+        val textSelectionActive = surfacePane?.terminalState?.isTextSelectionActive() == true
+        if (imeViewportPinPolicy.shouldPinOnImeVisibility(isImeVisible, textSelectionActive)) {
             com.pocketshell.core.terminal.ui.pinTerminalToBottom(
                 composeRootView,
                 onLocalTerminalError = { cause ->

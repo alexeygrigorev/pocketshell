@@ -994,4 +994,47 @@ else
   fi
 fi
 
+# --------------------------------------------------------------------------
+# Issue #2154 selection-viewport-stability proof (core-terminal androidTest).
+# The maintainer reported that selecting text on-device makes the terminal
+# "start jumping", so a multi-line copy-paste is impossible. The vendored
+# `TerminalView.onScreenUpdated` selection guard was already correct — the
+# jumping came from PocketShell's OWN viewport resets, which never consulted the
+# selection: the #184 IME pin (`setTopRow(0)` BEFORE `onScreenUpdated()`, fired
+# by the very `requestFocus()` the selection gesture performs) and
+# `TerminalView.updateSize` (`mTopRow = 0` on any row/column change, i.e. on
+# every layout shift around a selection drag). This proof drives a REAL
+# long-press selection on the production TerminalSurface with the transcript
+# scrolled BACK, then fires each reset path and asserts the viewport row and the
+# selection's on-screen row are unchanged: RED on base for the IME-pin and
+# resize members, plus characterization coverage for the capture-pane reseed and
+# a live `%output` burst. It ALSO pins the #184 pin's POSITIVE path (no selection
+# -> the pin still snaps to the bottom; and the guard does not latch once the
+# selection ends), so the selection guard cannot be hardened into a #184 kill.
+# Uses NO Docker fixture (in-process real TerminalView).
+if core_terminal_proof_deferred SELECTION_VIEWPORT_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred SELECTION_VIEWPORT_STATUS
+elif budget_exhausted; then
+  STEP_TIMEOUT_HIT=1
+  SELECTION_VIEWPORT_STATUS="SKIPPED"
+  echo "JOURNEY_STEP_TIMEOUT: skipping #2154 selection-viewport proof — suite budget exhausted (issue #835 / #470 stall)"
+else
+  echo "=========================================================="
+  echo ">>> CORE-TERMINAL #2154 SELECTION-VIEWPORT PROOF: $CORE_TERMINAL_SELECTION_VIEWPORT_CLASS (attempt 1)"
+  echo "=========================================================="
+  selection_viewport_start=$SECONDS
+  if run_core_terminal_selection_viewport; then
+    echo "SELECTION_VIEWPORT_PASS: passed on attempt 1 (elapsed $((SECONDS - selection_viewport_start))s)"
+  else
+    echo ">>> SELECTION-VIEWPORT PROOF FAILED attempt 1 — retrying once (CI-AVD infra flake / sibling-install)"
+    if run_core_terminal_selection_viewport; then
+      echo "SELECTION_VIEWPORT_FLAKE_RECOVERED: passed on retry (attempt 2)"
+    else
+      echo "SELECTION_VIEWPORT_FAILED: #2154 proof failed twice"
+      SELECTION_VIEWPORT_STATUS="FAIL"
+    fi
+  fi
+fi
+
 finish_ci_journey_suite

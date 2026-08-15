@@ -1627,6 +1627,18 @@ public final class TerminalView extends View {
             int newRows = Math.max(4, (viewHeight - mRenderer.mFontLineSpacingAndAscent) / mRenderer.mFontLineSpacing);
 
             if (mEmulator == null || (newColumns != mEmulator.mColumns || newRows != mEmulator.mRows)) {
+                // PocketShell issue #2154: a LIVE text selection makes the user the
+                // viewport owner, and a resize must not snap the transcript out from
+                // under their finger. Any layout shift re-runs this through
+                // onSizeChanged — the bottom chrome, the chip row, the IME inset, the
+                // floating selection action mode itself — so on a phone the reported
+                // "terminal starts jumping" while selecting is routinely THIS reset,
+                // not the output path (which the isSelectingText() branch in
+                // onScreenUpdated already guards). Remember where the user was looking
+                // and restore it after the resize instead of resetting to bottom.
+                boolean preserveViewportForSelection = isSelectingText();
+                int viewportTopRowBeforeResize = mTopRow;
+
                 mTermSession.updateSize(newColumns, newRows, (int) mRenderer.getFontWidth(), mRenderer.getFontLineSpacing());
                 mEmulator = mTermSession.getEmulator();
                 mClient.onEmulatorSet();
@@ -1635,8 +1647,16 @@ public final class TerminalView extends View {
                 if (mTerminalCursorBlinkerRunnable != null)
                     mTerminalCursorBlinkerRunnable.setEmulator(mEmulator);
 
-                mTopRow = 0;
-                scrollTo(0, 0);
+                if (preserveViewportForSelection) {
+                    // The resize reflows the transcript, so clamp into the new
+                    // history bounds — but keep the user in scrollback rather than
+                    // pinning to bottom.
+                    int rowsInHistory = mEmulator.getScreen().getActiveTranscriptRows();
+                    mTopRow = Math.max(-rowsInHistory, Math.min(0, viewportTopRowBeforeResize));
+                } else {
+                    mTopRow = 0;
+                    scrollTo(0, 0);
+                }
                 scheduleRenderInvalidation();
             }
         } catch (Throwable t) {

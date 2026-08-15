@@ -534,6 +534,27 @@ Minimum pre-push gate:
   vacuous green wearing mutation-testing clothes — and mutation is the technique
   that caught most of tonight's fakes, so its own failure mode matters.
 
+  **But "Gradle re-executed `compile*Kotlin`" is NOT liveness proof — the signal
+  is worthless in BOTH directions (#2154 round 2, 2026-08-15).** An implementer
+  cited task re-execution as evidence its mutant had landed; the reviewer ran the
+  *same* mutant, got `FROM-CACHE` on that compile task, and the mutant was fully
+  live. Task execution state is about the build cache, not about your edit. The
+  liveness evidence that actually holds is the trio the reviewer used: a **unique
+  in-code anchor** you can grep for at a known line, an **md5 delta** on the file,
+  and the **red outcome itself**. Note this cuts against the instinct the previous
+  paragraph invites — "compile it" means *make sure the mutated source is what got
+  built*, not *watch Gradle run the compile task*.
+
+  **Per-run test artifacts are OVERWRITTEN — a pull taken after a mutant run shows
+  the MUTANT's output (#2154 round 2).** The reviewer pulled
+  `additional_test_output` after its mutation run and read values that flatly
+  contradicted a green XML from the clean run; `additional_test_output` is replaced
+  every run, so it was reading the mutant's artifacts while believing they were the
+  green run's. It caught this only because the two disagreed. Delete the artifact
+  directory between runs, or stamp/copy artifacts to a per-run path immediately.
+  This is the mirror image of the stale-XML trap: there the artifact is older than
+  you think, here it is *newer*.
+
   **Cross-agent damage is real on a contended box.** Two separate incidents this
   session: a sibling's `gradlew --stop` silently killed another agent's daemon
   (disguise 5), and a `pkill -f "GradleWrapperMain.*test"` matched a *sibling

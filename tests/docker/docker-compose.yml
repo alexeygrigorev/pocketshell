@@ -18,11 +18,49 @@
 # container against `testuser@localhost` using `/root/test_key` (copied in
 # by the Dockerfile), so it exercises the same auth path as a real client
 # without depending on the host network.
+#
+# Issue #2150 — WHY THIS CHECK ALSO READS sshd's EFFECTIVE CONFIG.
+#
+# The `ssh testuser@localhost` probe above is structurally blind to the one
+# fixture failure that has actually cost us emulator runs. It originates
+# inside the container, so its source address is `::1`. Every client under
+# test — emulator or host — arrives instead through the published port from
+# the single docker gateway (172.17.0.1). Those are DIFFERENT sources, and
+# OpenSSH >= 9.8's PerSourcePenalties blocks per source. So sshd can be
+# refusing 100% of the traffic under test while this probe sails through, and
+# the container reports `healthy` throughout. Observed on the unfixed image,
+# same second, same log:
+#
+#   drop connection #0 from [172.17.0.1]:50426 ... penalty: failed authentication
+#   Accepted publickey for testuser from ::1 port 56122
+#
+# A fixture that reports healthy while refusing the traffic under test is the
+# "artifact that says fine when nothing works" class this repo keeps getting
+# burned by, and it is what turned #2150 into two wasted runs rather than one
+# obvious red. No probe originating inside the container can ever hold the
+# gateway's source address, so connectivity alone cannot close the gap. What
+# CAN be observed from in here is the causal precondition: whether sshd's
+# effective configuration permits penalties at all. `sshd -T` renders exactly
+# the config the running daemon parsed, so this asserts the fixture cannot
+# enter the penalising state — and fails loudly if it can.
+#
+# The assertion is deliberately version-shaped rather than value-shaped: it
+# fails only on an effective `persourcepenalties` whose value is not `no`. An
+# sshd predating the feature (real-agent's Debian OpenSSH 9.2) emits no such
+# line and passes, while the same fixture rebased onto an OpenSSH >= 9.8 base
+# image starts failing immediately instead of silently penalising lanes. A
+# non-parsing config also fails, via the `|| exit 1`.
+#
+# Deliberately written without `$`: compose interpolates `$` in command
+# strings, so `grep -x` replaces an end-of-line anchor here.
 x-ssh-healthcheck:
   &ssh-healthcheck
   test:
     - CMD-SHELL
     - >-
+      /usr/sbin/sshd -T > /tmp/ps-sshd-effective.conf 2>/dev/null || exit 1;
+      grep -i "^persourcepenalties " /tmp/ps-sshd-effective.conf
+      | grep -qvix "persourcepenalties no" && exit 1;
       ssh -o BatchMode=yes
       -o ConnectTimeout=2
       -o StrictHostKeyChecking=no

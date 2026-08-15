@@ -389,6 +389,9 @@ jobs:
           scripts/check-script-interpreter-hygiene.sh --self-test
           scripts/check-script-interpreter-hygiene.sh
 
+      - name: "androidTest compile-wiring guard (issues #1720, #2117)"
+        run: scripts/check-androidtest-compile-wiring.sh --self-test && scripts/check-androidtest-compile-wiring.sh
+
       # #2067 keeps unit-gate's needs/result lists aligned; the final grep keeps
       # #1956's executable lifecycle harness wired into guards-harness.
       - name: "Unit-gate wiring guard (issue #2067)"
@@ -800,6 +803,17 @@ jobs:
             --max-workers=4 \
             -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8"
           scripts/check-dex-register-pressure.sh
+
+      # Issues #1720/#2117. COMPILE ONLY; running stays in the emulator lane.
+      # All three source sets, not just :app. Rationale + the pinned property:
+      # scripts/check-androidtest-compile-wiring.sh (guards-static).
+      - name: "Compile androidTest source sets (issues #1720, #2117)"
+        run: |
+          ./gradlew --no-daemon --stacktrace --max-workers=4 \
+            -Dorg.gradle.jvmargs="-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8" \
+            :app:compileDebugAndroidTestKotlin \
+            :shared:core-terminal:compileDebugAndroidTestKotlin \
+            :shared:ui-kit:compileDebugAndroidTestKotlin
 
   # ---------------------------------------------------------------------------
   # Issue #2060 (CI Phase A): the protected-branch required check. `main`'s

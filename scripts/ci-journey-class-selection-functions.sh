@@ -85,10 +85,16 @@
 # Default (unset / TOTAL<=1) = the unsharded serial path, UNCHANGED — so local
 # runs and the budget self-test still run the FULL set. This is ORTHOGONAL to the
 # #724 POCKETSHELL_JOURNEY_SHARD dev-box pool sharding (multiple emulators on ONE
-# host); the two never combine on CI (one AVD per matrix leg). The six
-# core-terminal proofs are NOT sharded — they are cheap in-process Compose UI
-# tests (no Docker churn) and run on EVERY shard so a regression in any of them is
-# caught on every leg.
+# host); the two never combine on CI (one AVD per matrix leg).
+#
+# Issue #2110: the core-terminal proofs are sharded by this SAME hash now. They
+# used to run on EVERY leg "so a regression in any of them is caught on every
+# leg" — but every leg runs the same commit and these proofs are device-
+# independent in-process tests, so five of the six verdicts were copies costing
+# ~20-35 runner-minutes a push. The partition lives in
+# scripts/ci-journey-core-terminal-functions.sh
+# (select_effective_core_terminal_proofs), reusing journey_class_shard_index
+# below so there is exactly one partition mechanism to reason about.
 
 # FNV-1a/32 over the bytes of "$1", printed as an unsigned decimal.
 #
@@ -135,7 +141,7 @@ select_effective_journey_classes() {
         EFFECTIVE_JOURNEY_CLASSES+=("$_shard_class")
       fi
     done
-    echo ">>> CI journey shard ${JOURNEY_CI_SHARD_INDEX}/${JOURNEY_CI_SHARD_TOTAL} (issues #835, #1862): running ${#EFFECTIVE_JOURNEY_CLASSES[@]} of ${#JOURNEY_CLASSES[@]} journey classes (partitioned by class-name hash, so registering a journey does not re-roll the others), plus all 6 core-terminal proofs"
+    echo ">>> CI journey shard ${JOURNEY_CI_SHARD_INDEX}/${JOURNEY_CI_SHARD_TOTAL} (issues #835, #1862): running ${#EFFECTIVE_JOURNEY_CLASSES[@]} of ${#JOURNEY_CLASSES[@]} journey classes (partitioned by class-name hash, so registering a journey does not re-roll the others); the core-terminal proofs are partitioned by the same hash (issue #2110)"
   fi
 }
 

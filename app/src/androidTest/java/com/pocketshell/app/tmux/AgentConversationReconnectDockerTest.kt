@@ -9,7 +9,6 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
-import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.session.ConversationLoadState
 import com.pocketshell.app.session.SessionTab
@@ -28,7 +27,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
-import org.junit.Assume
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -83,15 +81,34 @@ import java.io.File
  * drop that is never observed surfaces as a clear bounded-wait failure
  * message, never an instrumentation-process hang.
  *
- * ### CI gate
+ * ### It runs on EVERY lane (issue #2111)
  *
- * Even with a dead-transport drop, the reconnect round-trip on the shared CI
- * emulator can be flaky under residual process / memory pressure (cf. #502).
- * The authoritative CI coverage of the remember/restore/reconcile/tab logic is
- * the unit layer (`AgentSessionMemoryTest` + the `TmuxSessionViewModelTest`
- * reconnect cases); this connected test is *local* reconnect evidence. It is
- * therefore CI-gated with `Assume.assumeFalse(isRunningOnCi())` so a flaky
- * emulator reconnect cannot spam red CI after merge.
+ * This test used to open with `Assume.assumeFalse(isRunningOnCi())`, which made
+ * it skip in **both** CI lanes: the per-push journey suite targets only this
+ * class's three other methods, and nightly phase 1 runs the whole class WITH
+ * `pocketshellCi=true` (`scripts/nightly-extensive-suite.sh:300`). So it read as
+ * coverage while protecting nothing — the whole reattach tab-restore logic could
+ * be deleted and every lane stayed green. The self-skip is gone; the test now
+ * executes wherever the class is selected (nightly phase 1 today).
+ *
+ * ### Why the open-time default is pinned to Terminal
+ *
+ * The load-bearing property is "the user who was on Conversation is put BACK on
+ * Conversation by the reattach memory restore, before live re-detection". With
+ * the production open-time default (Conversation, #818) that property is
+ * unobservable: even with [seedAgentConversationFromMemory] deleted, the #878
+ * auto-seeded placeholder — and later `markAgentTailLive`'s fresh-row branch —
+ * would land the pane on Conversation anyway, so the assertion would pass with
+ * the bug present (the G6 wrong-cost trap).
+ *
+ * So this test pins the open-time default to **Terminal** (the real #818
+ * opt-out a user can select). In that configuration nothing else can put the
+ * pane on Conversation after the reattach: the #878 seed self-gates on the
+ * Conversation default, and `markAgentTailLive`'s `current == null` branch
+ * applies the open-time default (Terminal). The ONLY thing that can restore
+ * Conversation is the reattach memory seed. Deleting it therefore turns this
+ * test RED, deterministically, with the exact reported symptom — the user is
+ * bounced out of Conversation onto the raw Terminal.
  *
  *  1. Seed a tmux session whose single pane runs a `claude`-named process
  *     in `/workspace/pocketshell`, and refresh the seeded Claude JSONL so
@@ -131,15 +148,8 @@ class AgentConversationReconnectDockerTest {
 
     @Test
     fun reconnectRestoresConversationTabImmediatelyForAgentSession() { runBlocking {
-        // Local-only reconnect evidence. The remember/restore/reconcile/tab
-        // logic is owned on CI by AgentSessionMemoryTest + the
-        // TmuxSessionViewModelTest reconnect cases; this connected reconnect
-        // round-trip is too sensitive to shared-CI-emulator process/memory
-        // pressure (cf. #502) to run unguarded.
-        Assume.assumeFalse(
-            "issue-495 connected reconnect is local-only evidence; CI coverage is the unit layer",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
+        // Issue #2111: NO `assumeFalse(isRunningOnCi())` here. This test ran on
+        // no lane at all — see the class KDoc. It runs unguarded now.
         val key = readFixtureKey()
         // agents:2222 readiness — so a not-yet-up fixture is the loud failure,
         // not the cause of a later hang.
@@ -225,6 +235,16 @@ class AgentConversationReconnectDockerTest {
             activeTmuxClients = registry,
             runtimeCache = TmuxSessionRuntimeCache(maxEntries = 0),
         )
+        // Issue #2111: pin the open-time default to Terminal (the real #818
+        // opt-out). This is what makes the reattach memory restore the ONLY
+        // thing that can put the pane back on Conversation after the reconnect —
+        // see the class KDoc. With the production Conversation default the #878
+        // auto-seed / markAgentTailLive fresh-row branch would land on
+        // Conversation regardless, so the core assertion below would pass with
+        // the restore logic deleted (G6).
+        vm.setDefaultAgentSessionViewForTest(
+            com.pocketshell.app.settings.DefaultAgentSessionView.Terminal,
+        )
 
         try {
             vm.connect(
@@ -251,6 +271,24 @@ class AgentConversationReconnectDockerTest {
                 vm.agentForWindow(windowId),
             )
             val firstPaneId = vm.panes.value.first { it.windowId == windowId }.paneId
+
+            // Issue #2111 precondition (HARD, not assumed): with the open-time
+            // default pinned to Terminal the freshly-detected agent row lands on
+            // Terminal. If this ever fails the pin did not take effect and the
+            // restore assertion below would be vacuous, so fail loudly here.
+            waitForCondition(
+                "issue2111 initial agent row exists",
+                timeoutMs = 15_000,
+                describe = { "conversations=${vm.agentConversations.value.keys}" },
+            ) { vm.agentConversations.value[firstPaneId] != null }
+            assertEquals(
+                "#2111: the open-time default is pinned to Terminal, so the freshly-detected " +
+                    "agent row must OPEN on Terminal — otherwise the restore assertion after " +
+                    "the reconnect could be satisfied by the open-time default instead of by " +
+                    "the reattach memory restore (G6)",
+                SessionTab.Terminal,
+                vm.agentConversations.value[firstPaneId]!!.selectedTab,
+            )
 
             // The user opens Conversation — this is remembered for the window.
             vm.selectSessionTab(firstPaneId, SessionTab.Conversation)
@@ -352,6 +390,14 @@ class AgentConversationReconnectDockerTest {
             // status is restored — the Conversation tab is available and the
             // user is back on Conversation — WITHOUT bouncing to Terminal. The
             // restore is seeded synchronously in applyParsedPanes.
+            //
+            // Issue #2111 — the mutation this assertion must catch: delete the
+            // reattach tab-restore (make `seedAgentConversationFromMemory` a
+            // no-op). With the open-time default pinned to Terminal nothing else
+            // seeds a row on reattach, so the pane comes back on Terminal and
+            // `selectedTab == Conversation` never becomes true — RED inside
+            // IMMEDIATE_RESTORE_TIMEOUT_MS. That is the maintainer's exact
+            // report: the reconnect bounced the user out of Conversation.
             //
             // Issue #819 (Slice A2): the reattach seed is a detection-LESS
             // RESOLVING placeholder (rememberedAgentPlaceholder = true,

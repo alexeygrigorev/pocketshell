@@ -1052,8 +1052,15 @@ jobs:
     # (the suite reads POCKETSHELL_JOURNEY_CI_SHARD_INDEX/_TOTAL; see
     # scripts/ci-journey-suite.sh), so each leg's wall clock drops and each
     # emulator stays healthier (~1/N install/teardown cycles). `fail-fast: false`
-    # so one shard's failure does not cancel the others. The 6 core-terminal
-    # proofs run on every leg (cheap Compose UI tests), not sharded.
+    # so one shard's failure does not cancel the others.
+    #
+    # Issue #2110: the core-terminal proofs are sharded by the same #1862 hash
+    # now. They used to run on EVERY leg "so a regression in any of them is caught
+    # on every leg", but all six legs run the SAME COMMIT and those proofs are
+    # device-independent in-process tests — five of every six verdicts were
+    # copies. Each proof now runs on exactly one leg per push; the union over the
+    # matrix is still the whole registry, asserted mechanically by
+    # scripts/test-ci-journey-budget.sh rather than by inspection.
     #
     # Issue #2060 (CI Phase A): 3 -> 6 shards, as much a RELIABILITY fix as a
     # speed one. The registry has grown to 173 entries and on BOTH recent green

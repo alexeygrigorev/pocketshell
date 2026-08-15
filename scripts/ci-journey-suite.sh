@@ -543,6 +543,15 @@ if [[ ! -f "$CI_JOURNEY_CORE_TERMINAL_HELPER" && -f "$INVOCATION_DIR/scripts/ci-
 fi
 source "$CI_JOURNEY_CORE_TERMINAL_HELPER"
 
+# Issue #2110: partition the core-terminal proofs across the CI matrix by the
+# same #1862 name hash the journey classes use, so each proof runs on exactly ONE
+# leg per push instead of all six. Six legs of the same commit re-running the
+# same device-independent in-process proof produced one verdict and five copies.
+# A proof this leg does not own is marked OTHER_SHARD before its block below and
+# skipped there; see the helper for why OTHER_SHARD is neither a pass nor a skip.
+# Unsharded runs (no matrix vars) select every proof, unchanged.
+select_effective_core_terminal_proofs
+
 # Result classification and markdown summary generation live in a sourced helper.
 # shellcheck source=scripts/ci-journey-summary-functions.sh
 CI_JOURNEY_SUMMARY_HELPER="$REPO_ROOT/scripts/ci-journey-summary-functions.sh"
@@ -572,7 +581,10 @@ source "$CI_JOURNEY_SUMMARY_HELPER"
 # cap and lose the artifact. A skipped proof is recorded as SKIPPED (not PASS,
 # not FAIL) so the summary is honest; the budget-timeout label below makes the
 # job red regardless.
-if budget_exhausted; then
+if core_terminal_proof_deferred APPEND_BURST_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred APPEND_BURST_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   APPEND_BURST_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #803 append-burst proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -607,7 +619,10 @@ fi
 # not at PR time. Adding it here closes the loop so the Codex ANR cannot reach a
 # green `main` again. Uses NO Docker fixture (in-process Compose UI test).
 # Issue #835: same budget guard as the #803 proof above.
-if budget_exhausted; then
+if core_terminal_proof_deferred OUTPUT_BURST_IME_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred OUTPUT_BURST_IME_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   OUTPUT_BURST_IME_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #796 output-burst-IME proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -641,7 +656,10 @@ fi
 # Uses NO Docker fixture (in-process Compose UI test). The JVM sibling
 # SshTerminalBridgeTest#onMainMultiChunkSeedRespectsTimeBudgetAcrossWholeFeed...
 # proves the same property deterministically in the per-push Unit job.
-if budget_exhausted; then
+if core_terminal_proof_deferred MULTICHUNK_SEED_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred MULTICHUNK_SEED_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   MULTICHUNK_SEED_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #866 multi-chunk seed attach proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -676,7 +694,10 @@ fi
 # a regression of #803's over-correction, an un-gated test invites the exact
 # recurrence — so it runs in this per-push gate alongside the #803/#796/#866
 # proofs. Uses NO Docker fixture (in-process Compose UI test).
-if budget_exhausted; then
+if core_terminal_proof_deferred AGENT_LINK_AFFORDANCE_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred AGENT_LINK_AFFORDANCE_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   AGENT_LINK_AFFORDANCE_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #871 agent-pane link-affordance proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -717,7 +738,10 @@ fi
 # a REAL TerminalView (its onDraw under the platform dirty clip + the real
 # forceFullRepaint() + the real TerminalSurfaceState.fullRepaintRequests
 # collector), not a renderer-model stand-in.
-if budget_exhausted; then
+if core_terminal_proof_deferred REATTACH_REPAINT_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred REATTACH_REPAINT_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   REATTACH_REPAINT_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #879 reattach-repaint proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -747,7 +771,10 @@ fi
 # proxy gap that bypassed TerminalView.currentSession and stayed green while
 # the connected journey lost the first post-grace key into stale session A.
 # Uses no Docker fixture.
-if budget_exhausted; then
+if core_terminal_proof_deferred SESSION_BINDING_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred SESSION_BINDING_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   SESSION_BINDING_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #959 mounted session-binding proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -785,7 +812,10 @@ fi
 # the un-fixed overlays (the activity dies with the out-of-range crash); GREEN
 # after the `layoutOverlayBounded` clamp. Uses NO Docker fixture (in-process
 # Compose UI test). It lives under com.pocketshell.core.terminal.selection.
-if budget_exhausted; then
+if core_terminal_proof_deferred OVERLAY_UNBOUNDED_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred OVERLAY_UNBOUNDED_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   OVERLAY_UNBOUNDED_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping overlay-unbounded-measure proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -822,7 +852,10 @@ fi
 # onDraw paints CONTENT (observer reports true). Proves the surface re-bind is
 # the load-bearing recovery, not another invalidate(). Uses NO Docker fixture
 # (in-process render test). Lives under com.termux.view.
-if budget_exhausted; then
+if core_terminal_proof_deferred SURFACE_REPAINT_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred SURFACE_REPAINT_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   SURFACE_REPAINT_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #1203 surface-repaint proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -860,7 +893,10 @@ fi
 # on-main scans per tick. Because #1233 is adjacent to the #796/#803/#866/#871
 # terminal-ANR class it runs alongside those proofs in this per-push gate. Uses
 # NO Docker fixture (in-process Compose UI test).
-if budget_exhausted; then
+if core_terminal_proof_deferred SHELL_SNAPSHOT_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred SHELL_SNAPSHOT_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   SHELL_SNAPSHOT_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #1233 shell-pane single-snapshot proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -891,7 +927,10 @@ fi
 # TerminalViewClient route, and requires two ACTION_VIEW intents carrying the
 # exact complete GitHub URI. It also pins the continuation not being exposed as
 # a local file path. Uses NO Docker fixture (in-process real TerminalView).
-if budget_exhausted; then
+if core_terminal_proof_deferred HARD_WRAPPED_URL_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred HARD_WRAPPED_URL_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   HARD_WRAPPED_URL_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #1955 hard-wrapped URL proof — suite budget exhausted (issue #835 / #470 stall)"
@@ -930,7 +969,10 @@ fi
 # with the base recycle it dies as "Process crashed", with the ownership fix the
 # process survives and the probe still works. A diagnostic must never be able to
 # abort the app, so it stays guarded per-push. Uses NO Docker fixture.
-if budget_exhausted; then
+if core_terminal_proof_deferred PIXEL_PROBE_ABANDON_STATUS; then
+  # Issue #2110: a sibling leg of THIS push owns this proof.
+  announce_core_terminal_deferred PIXEL_PROBE_ABANDON_STATUS
+elif budget_exhausted; then
   STEP_TIMEOUT_HIT=1
   PIXEL_PROBE_ABANDON_STATUS="SKIPPED"
   echo "JOURNEY_STEP_TIMEOUT: skipping #2003 abandoned-PixelCopy proof — suite budget exhausted (issue #835 / #470 stall)"

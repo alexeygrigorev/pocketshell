@@ -125,3 +125,106 @@ CORE_TERMINAL_PROOFS=(
   "HARD_WRAPPED_URL_STATUS|CORE_TERMINAL_HARD_WRAPPED_URL_CLASS|Core-terminal #1955 hard-wrapped URL target proof"
   "PIXEL_PROBE_ABANDON_STATUS|CORE_TERMINAL_PIXEL_PROBE_ABANDON_CLASS|Core-terminal #2003 abandoned-PixelCopy RenderThread abort proof"
 )
+
+# ---------------------------------------------------------------------------
+# Issue #2110: the proofs are SHARDED across the CI matrix, exactly like the
+# journey classes.
+#
+# THE WASTE THIS REMOVES
+# ----------------------
+# Every one of these proofs used to run on EVERY matrix leg. The stated reason
+# was "a regression in any of them is caught on every leg" — but all six legs
+# run the SAME COMMIT, and these are device-independent in-process Compose /
+# TerminalView tests with no Docker fixture and no cross-shard state. Six
+# identical verdicts on one commit is one verdict plus five copies: ~20-35
+# runner-minutes and 4-7 minutes of wall clock on five legs, buying zero
+# additional signal. (The measured suite is 206 of ~269 runner-min per push and
+# roughly half of that is work repeated six times — see _docs/2026-08-13-test-suite-audit.md §4.)
+#
+# THE MECHANISM AND WHY THIS SHAPE
+# --------------------------------
+# The partition reuses the #1862 class-name hash verbatim (journey_class_shard_hash
+# over the proof's SELECTOR, i.e. the FQCN or `FQCN#method` the runner is given).
+# So a proof's leg depends only on its own name: registering, removing or
+# reordering a proof cannot re-roll where the others land, and a red leg right
+# after a registration is signal about the new proof rather than noise from
+# relocated siblings. The same reasons the index-based partition was rejected for
+# journey classes apply here unchanged.
+#
+# Deliberately NOT chosen:
+#   * pinning the proofs to one nominated shard — that leg becomes strictly the
+#     slowest by construction and the imbalance grows with every new proof;
+#   * a second, proof-specific hash/salt — a second partition to reason about for
+#     no benefit; the #1862 mechanism already has the property we need.
+#
+# WHAT A DEFERRED PROOF IS
+# ------------------------
+# A proof this leg does not own gets status OTHER_SHARD. That is NOT a pass and
+# NOT a skip: it means another leg of the SAME push owns it, so this shard has no
+# opinion. `ci_journey_core_terminal_all_passed` therefore treats it as
+# "nothing to say" and the red-evidence fail-safe never names it as a cause.
+# The property that actually matters — every registered proof runs on exactly one
+# leg, and the union over the shipped matrix is the whole registry — is not left
+# to inspection: scripts/test-ci-journey-budget.sh drives the REAL suite once per
+# shipped shard and asserts disjointness + completeness mechanically, the same way
+# it already does for JOURNEY_CLASSES.
+#
+# Unsharded (total <= 1, i.e. every local run and every self-test that does not
+# set the matrix vars) selects ALL proofs, unchanged.
+CORE_TERMINAL_OTHER_SHARD_STATUS="OTHER_SHARD"
+
+# select_effective_core_terminal_proofs — partition CORE_TERMINAL_PROOFS by the
+# #1862 name hash and mark the proofs this leg does not own as OTHER_SHARD.
+# Populates EFFECTIVE_CORE_TERMINAL_PROOFS (registry entries this leg runs).
+select_effective_core_terminal_proofs() {
+  # Prefer the ALREADY-NORMALISED values select_effective_journey_classes wrote
+  # (it clamps a malformed/out-of-range matrix var), so the proofs and the
+  # classes can never be partitioned over two different totals.
+  local total="${JOURNEY_CI_SHARD_TOTAL:-${POCKETSHELL_JOURNEY_CI_SHARD_TOTAL:-1}}"
+  local index="${JOURNEY_CI_SHARD_INDEX:-${POCKETSHELL_JOURNEY_CI_SHARD_INDEX:-0}}"
+  [[ "$total" =~ ^[0-9]+$ ]] || total=1
+  [[ "$index" =~ ^[0-9]+$ ]] || index=0
+  (( total < 1 )) && total=1
+  (( index < 0 || index >= total )) && index=0
+
+  EFFECTIVE_CORE_TERMINAL_PROOFS=()
+  local entry status_var class_var label owner deferred=0
+  for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+    IFS='|' read -r status_var class_var label <<<"$entry"
+    if (( total <= 1 )); then
+      owner="$index"
+    else
+      owner="$(journey_class_shard_index "${!class_var}" "$total")"
+    fi
+    if [[ "$owner" == "$index" ]]; then
+      EFFECTIVE_CORE_TERMINAL_PROOFS+=("$entry")
+      echo "CORE_TERMINAL_SHARD_SELECTED: ${!class_var} (shard ${owner}/${total}) — ${label}"
+    else
+      printf -v "$status_var" '%s' "$CORE_TERMINAL_OTHER_SHARD_STATUS"
+      deferred=$((deferred + 1))
+      echo "CORE_TERMINAL_SHARD_DEFERRED: ${!class_var} (runs on shard ${owner}/${total} this push) — ${label}"
+    fi
+  done
+  echo ">>> CI core-terminal proof shard ${index}/${total} (issue #2110): running ${#EFFECTIVE_CORE_TERMINAL_PROOFS[@]} of ${#CORE_TERMINAL_PROOFS[@]} proofs on this leg, ${deferred} owned by sibling legs of the SAME push (partitioned by the #1862 proof-name hash)"
+}
+
+# core_terminal_proof_deferred <STATUS_VAR> — true when this leg does not own the
+# proof. The suite gates each proof block on it; the summary treats it as
+# "no opinion", never as a pass and never as a failure cause.
+core_terminal_proof_deferred() {
+  [[ "${!1:-}" == "$CORE_TERMINAL_OTHER_SHARD_STATUS" ]]
+}
+
+# announce_core_terminal_deferred <STATUS_VAR> — one greppable line at the point
+# in the run where the proof WOULD have executed, so a leg's log reads honestly
+# top-to-bottom instead of silently omitting it.
+announce_core_terminal_deferred() {
+  local wanted="$1" entry status_var class_var label
+  for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+    IFS='|' read -r status_var class_var label <<<"$entry"
+    [[ "$status_var" == "$wanted" ]] || continue
+    echo "CORE_TERMINAL_OTHER_SHARD: skipping ${label} (\`${!class_var}\`) — a sibling leg of this push owns it (issue #2110)"
+    return 0
+  done
+  echo "CORE_TERMINAL_OTHER_SHARD: skipping $wanted — a sibling leg of this push owns it (issue #2110)"
+}

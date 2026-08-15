@@ -500,9 +500,18 @@ STUB
 }
 
 # run_real_suite <workspace> [env assignments...] — the REAL suite. A large shard
-# total keeps the journey-class loop to a single class so the run is cheap; the
-# core-terminal proofs are NOT sharded and all run on every shard, which is the
-# part under test.
+# total keeps the journey-class loop to a single class so the run is cheap.
+#
+# Issue #2110: the core-terminal proofs are sharded by the SAME #1862 name hash,
+# so "run the suite and every proof executes" is no longer true — each proof runs
+# only on the leg its own name hashes to. Callers that need a SPECIFIC proof to
+# execute set RUN_REAL_SUITE_SHARD_INDEX to that proof's owning index (derived
+# from the production `journey_class_shard_index`, never hardcoded), which is
+# what the (b) matrix below does. Everything else keeps the resolved single-class
+# shard. Deliberately NOT done: an env knob that disables proof sharding for the
+# harness — that would stop this file traversing the production selector, which
+# is the exact "the guard presets the variable it exists to exercise" shape the
+# repo keeps getting bitten by.
 SUITE_RC=0
 run_real_suite() {
   local ws="$1"; shift
@@ -513,7 +522,7 @@ run_real_suite() {
     JOURNEY_CLASS_KILL_AFTER_SECS=1 \
     JOURNEY_GRADLE_STOP_TIMEOUT_SECS=5 \
     POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$SOLO_SHARD_TOTAL" \
-    POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$SOLO_SHARD_INDEX" \
+    POCKETSHELL_JOURNEY_CI_SHARD_INDEX="${RUN_REAL_SUITE_SHARD_INDEX:-$SOLO_SHARD_INDEX}" \
     "$@" \
     bash "$ws/scripts/ci-journey-suite.sh" > "$ws/suite.log" 2>&1
   SUITE_RC=$?
@@ -537,6 +546,15 @@ for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
   IFS='|' read -r status_var class_var label <<<"$entry"
   selector="${!class_var}"
   bare_class="${selector%%#*}"
+
+  # Issue #2110: run this arm on the leg that OWNS this proof, computed by the
+  # production selector rather than assumed. Before proof sharding every leg ran
+  # every proof, so any index worked; now the wrong index would silently defer the
+  # proof under test and turn both arms of this matrix vacuous (the suite would
+  # stay green with nothing failing, and the "no failed-both section" assertion
+  # in the red control would pass for entirely the wrong reason).
+  RUN_REAL_SUITE_SHARD_INDEX="$(journey_class_shard_index "$selector" "$SOLO_SHARD_TOTAL")"
+  export RUN_REAL_SUITE_SHARD_INDEX
 
   # --- RED CONTROL: the pre-#1827 writer for this one entry.
   mut="$SANDBOX/mutant-$status_var"
@@ -562,6 +580,12 @@ for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
   ws="$SANDBOX/fixed-$status_var"
   make_workspace "$ws"
   run_real_suite "$ws" JOURNEY_STUB_FAIL_CLASS="$selector"
+  # Issue #2110 anti-vacuity: prove the proof actually EXECUTED on this leg. If
+  # the ownership arithmetic above were wrong the proof would be deferred, the
+  # suite would pass, and every assertion in this arm would be about a proof that
+  # never ran.
+  grep -qF "PROOF: $selector (attempt 1)" "$ws/suite.log" \
+    || { sed -n '1,40p' "$ws/suite.log"; fail "(b/$status_var) $selector did not execute on shard $RUN_REAL_SUITE_SHARD_INDEX of $SOLO_SHARD_TOTAL — this arm would be vacuous (issue #2110 proof sharding)"; }
   [[ "$SUITE_RC" -ne 0 ]] \
     || { sed -n '1,40p' "$ws/suite.log"; fail "(b/$status_var) the suite exited 0 with a proof failed twice"; }
   summary="$ws/artifacts/ci-journey/summary.md"
@@ -592,7 +616,8 @@ for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
   [[ "$AGG_VERDICT" == "RED" && "$AGG_RC" -eq 1 ]] \
     || { printf '%s\n' "$AGG_OUT"; fail "(b/$status_var) expected aggregate RED/exit1, got $AGG_VERDICT/exit$AGG_RC"; }
 
-  pass "(b/$status_var) pre-#1827 writer -> INFRA / RE-RUN / exit 0   |   real writer -> RED / RED / exit 1   [$bare_class]"
+  pass "(b/$status_var) pre-#1827 writer -> INFRA / RE-RUN / exit 0   |   real writer -> RED / RED / exit 1   [$bare_class, shard $RUN_REAL_SUITE_SHARD_INDEX]"
+  unset RUN_REAL_SUITE_SHARD_INDEX
 done
 
 # ---------------------------------------------------------------------------
@@ -780,11 +805,25 @@ run_real_suite "$ws"
 summary="$ws/artifacts/ci-journey/summary.md"
 grep -qE 'Failed BOTH attempts|JOURNEY_STEP_TIMEOUT' "$summary" \
   && { cat "$summary"; fail "(e1) a healthy suite must write no failure evidence (no false red)"; }
+# Issue #2110: every registered proof still gets a status LINE on every leg — the
+# #1827 anti-drift property is unchanged — but its value is PASS only on the leg
+# that OWNS it and OTHER_SHARD elsewhere. Assert the exact expected value per
+# entry, derived from the production selector, so this stays a real constraint
+# rather than "PASS or anything else".
+e1_owned=0
 for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
   IFS='|' read -r status_var class_var label <<<"$entry"
-  grep -qF "$label (\`shared:core-terminal\`): **PASS**" "$summary" \
-    || { cat "$summary"; fail "(e1) the summary lost the status line for $label"; }
+  owner="$(journey_class_shard_index "${!class_var}" "$SOLO_SHARD_TOTAL")"
+  if [[ "$owner" == "$SOLO_SHARD_INDEX" ]]; then
+    expected="PASS"
+    e1_owned=$((e1_owned + 1))
+  else
+    expected="OTHER_SHARD"
+  fi
+  grep -qF "$label (\`shared:core-terminal\`): **$expected**" "$summary" \
+    || { cat "$summary"; fail "(e1) the summary line for $label is not **$expected** on shard $SOLO_SHARD_INDEX of $SOLO_SHARD_TOTAL (issue #2110)"; }
 done
+echo "   (e1) shard $SOLO_SHARD_INDEX of $SOLO_SHARD_TOTAL owns $e1_owned of ${#CORE_TERMINAL_PROOFS[@]} proofs; the other ${#CORE_TERMINAL_PROOFS[@]} - $e1_owned carry OTHER_SHARD and still have a status line"
 grep -q 'Warm build (issue #1814): \*\*ok\*\*' "$summary" \
   || { cat "$summary"; fail "(e1) the #1814 warm-build line is missing from the summary"; }
 run_journey_summary_step "$ws"
@@ -807,6 +846,45 @@ run_agg "$clean_dir"
 [[ "$AGG_VERDICT" == "RE-RUN" && "$AGG_RC" -eq 0 ]] \
   || { printf '%s\n' "$AGG_OUT"; fail "(e1) a missing shard token must downgrade CLEAN to RE-RUN, got $AGG_VERDICT/exit$AGG_RC"; }
 pass "(e1) #1458/#1800/#1814 preserved: all-CLEAN -> CLEAN -> aggregate CLEAN; missing token -> RE-RUN; every proof status line + the warm-build line intact"
+
+# (e1b) Issue #2110: (e1) runs on the resolved single-CLASS shard, which at
+# SOLO_SHARD_TOTAL owns few or no proofs — so on its own it can only ever check
+# the OTHER_SHARD half, and "every proof reports **PASS** on a healthy leg" would
+# quietly stop being asserted anywhere. Run ONE more healthy suite on a leg that
+# does own a proof and pin the exact split: that proof **PASS**, every other
+# **OTHER_SHARD**, and the shard still CLEAN.
+echo
+echo "== (e1b) a healthy leg reports PASS for the proof it owns, OTHER_SHARD for the rest =="
+e1b_entry="${CORE_TERMINAL_PROOFS[0]}"
+IFS='|' read -r e1b_status_var e1b_class_var e1b_label <<<"$e1b_entry"
+e1b_selector="${!e1b_class_var}"
+ws="$SANDBOX/all-clean-owning-leg"
+make_workspace "$ws"
+RUN_REAL_SUITE_SHARD_INDEX="$(journey_class_shard_index "$e1b_selector" "$SOLO_SHARD_TOTAL")"
+export RUN_REAL_SUITE_SHARD_INDEX
+run_real_suite "$ws"
+[[ "$SUITE_RC" -eq 0 ]] \
+  || { sed -n '1,40p' "$ws/suite.log"; fail "(e1b) a healthy suite on the owning leg exited $SUITE_RC"; }
+grep -qF "PROOF: $e1b_selector (attempt 1)" "$ws/suite.log" \
+  || { sed -n '1,40p' "$ws/suite.log"; fail "(e1b) $e1b_selector did not execute on its own shard $RUN_REAL_SUITE_SHARD_INDEX — the PASS assertion below would be vacuous"; }
+summary="$ws/artifacts/ci-journey/summary.md"
+for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+  IFS='|' read -r status_var class_var label <<<"$entry"
+  if [[ "$status_var" == "$e1b_status_var" ]]; then expected="PASS"; else
+    owner="$(journey_class_shard_index "${!class_var}" "$SOLO_SHARD_TOTAL")"
+    [[ "$owner" == "$RUN_REAL_SUITE_SHARD_INDEX" ]] && expected="PASS" || expected="OTHER_SHARD"
+  fi
+  grep -qF "$label (\`shared:core-terminal\`): **$expected**" "$summary" \
+    || { cat "$summary"; fail "(e1b) the summary line for $label is not **$expected** on the owning shard $RUN_REAL_SUITE_SHARD_INDEX"; }
+done
+run_journey_summary_step "$ws"
+[[ "$FIRST_FAILURE" == "false" && "$FIRST_TIMEOUT" == "false" ]] \
+  || fail "(e1b) owning-leg healthy summary reported first_failure=$FIRST_FAILURE first_timeout=$FIRST_TIMEOUT"
+run_classify_step "$ws" "$(classify_expressions success "$FIRST_TIMEOUT" "$FIRST_FAILURE")"
+[[ "$CLASSIFY_TOKEN" == "CLEAN" && "$CLASSIFY_RC" -eq 0 ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(e1b) expected CLEAN/exit0 on the owning leg, got '$CLASSIFY_TOKEN'/exit$CLASSIFY_RC"; }
+unset RUN_REAL_SUITE_SHARD_INDEX
+pass "(e1b) on shard $(journey_class_shard_index "$e1b_selector" "$SOLO_SHARD_TOTAL") of $SOLO_SHARD_TOTAL the owned proof reports **PASS** and every deferred proof **OTHER_SHARD**; the leg still classifies CLEAN"
 
 # The remaining sibling properties (#1800 real-IME INFRA, #1822 mixed-summary
 # RED, #1822 unreadable-entry RED, #1809 no-RED-with-INFRA neutral green) are

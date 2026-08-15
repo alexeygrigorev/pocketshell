@@ -19,12 +19,17 @@ declare -p FIXTURE_WEDGED_CLASSES >/dev/null 2>&1 || FIXTURE_WEDGED_CLASSES=()
 # construction. `ci_journey_assert_red_has_evidence` below is the belt-and-braces
 # backstop for any FUTURE red cause that is not a registered proof.
 
-# ci_journey_core_terminal_all_passed — true iff every registered proof is PASS.
+# ci_journey_core_terminal_all_passed — true iff every proof THIS LEG OWNS is
+# PASS. Issue #2110: a proof owned by a sibling leg of the same push carries
+# status OTHER_SHARD; this leg has no opinion about it, so it neither reddens
+# nor greens this shard. The union property (every proof owned by exactly one
+# leg) is asserted mechanically by scripts/test-ci-journey-budget.sh, not by
+# hoping each shard checks all eleven.
 ci_journey_core_terminal_all_passed() {
   local entry status_var
   for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
     status_var="${entry%%|*}"
-    [[ "${!status_var}" == "PASS" ]] || return 1
+    [[ "${!status_var}" == "PASS" || "${!status_var}" == "OTHER_SHARD" ]] || return 1
   done
   return 0
 }
@@ -51,6 +56,11 @@ ci_journey_core_terminal_status_lines() {
     echo
     echo "$label (\`shared:core-terminal\`): **${!status_var}**"
     echo "- \`${!class_var}\`"
+    # Issue #2110: say plainly that OTHER_SHARD is "another leg of this push ran
+    # it", so nobody reads the absent verdict as a silently dropped proof.
+    if [[ "${!status_var}" == "OTHER_SHARD" ]]; then
+      echo "- owned by a sibling matrix leg of this push (issue #2110 proof sharding); this shard did not run it"
+    fi
   done
 }
 
@@ -101,7 +111,10 @@ ci_journey_assert_red_has_evidence() {
   } >> "$summary"
   for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
     IFS='|' read -r status_var class_var label <<<"$entry"
-    [[ "${!status_var}" == "PASS" ]] && continue
+    # Issue #2110: PASS is not a cause, and neither is OTHER_SHARD — a proof a
+    # sibling leg of this push owns cannot be the reason THIS leg went red, and
+    # naming it would point the investigation at a class this shard never ran.
+    [[ "${!status_var}" == "PASS" || "${!status_var}" == "OTHER_SHARD" ]] && continue
     echo "- \`${!class_var}\` (${label#Core-terminal } — status ${!status_var})" >> "$summary"
     wrote=1
   done

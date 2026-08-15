@@ -2077,7 +2077,20 @@ pass "(shard-balance) the partition is uniform to 3 sigma on the real list (tota
 # emulator). Drive the REAL suite once per shard (instant gradle stub, generous
 # budget) and assert: (a) each shard launches ~class_count/N classes, (b) the
 # slices are pairwise DISJOINT (no class on two shards), (c) the UNION is every
-# class (none dropped), (d) the core-terminal proofs run on EVERY shard.
+# class (none dropped), (d) the SAME three properties for the core-terminal
+# proofs (issue #2110).
+#
+# Issue #2110 replaced (d). It used to be `grep 'CORE-TERMINAL #796 ...'` on every
+# shard — the right check for the old "proofs run on EVERY leg" design, and the
+# wrong one now that a proof runs on exactly ONE leg. The property that matters
+# did not get weaker, it moved: coverage is no longer "each shard runs all of
+# them" but "the UNION over the shipped matrix is the whole registry", which is
+# the criterion the issue demands be proven mechanically rather than asserted by
+# inspection. So it is now the same disjoint+complete arithmetic the classes get,
+# computed from the proofs the suite actually EXECUTED (the run headers), not
+# from the selector's own claim about what it picked — and (shard-proof-live)
+# below proves that arithmetic is sensitive by deferring one proof everywhere and
+# requiring the completeness check to redden.
 #
 # Issue #1862 widened (a)'s tolerance from +/-2 to +/-25%: the partition is now
 # by class-name hash, which is statistically rather than exactly balanced. The
@@ -2100,8 +2113,35 @@ chmod +x "$SANDBOX/gradlew"
 shard_total="$shipped_shard_total"
 [[ "$shard_total" =~ ^[0-9]+$ && "$shard_total" -ge 2 ]] \
   || fail "(shard) implausible shipped shard total '$shard_total' — refusing to drive the suite over an unknown partition"
+
+# Issue #2110: the proof registry, read from the REAL helper, so "the union is
+# complete" is measured against the shipping list rather than a copy that rots.
+# shellcheck source=scripts/ci-journey-core-terminal-functions.sh
+source "$SCRIPT_DIR/ci-journey-core-terminal-functions.sh"
+registry_proof_selectors=()
+registry_proof_status_vars=()
+for ct_entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+  IFS='|' read -r ct_status_var ct_class_var _ct_label <<<"$ct_entry"
+  registry_proof_selectors+=("${!ct_class_var}")
+  registry_proof_status_vars+=("$ct_status_var")
+done
+proof_count="${#registry_proof_selectors[@]}"
+[[ "$proof_count" -ge 9 ]] \
+  || fail "(shard-proof) only $proof_count core-terminal proofs parsed from the registry — the reader is broken, not the registry"
+
+# executed_proofs_in <log> — the proofs a shard actually RAN, from the run header
+# the suite prints inside the execute branch. A deferred proof prints
+# CORE_TERMINAL_OTHER_SHARD instead and is deliberately not matched here: this
+# must measure execution, not the selector's claim about its own output.
+executed_proofs_in() {
+  grep -oE '>>> CORE-TERMINAL .*PROOF: [^ ]+ \(attempt 1\)' "$1" \
+    | sed -E 's/^.*PROOF: ([^ ]+) \(attempt 1\)$/\1/'
+}
+
 declare -A seen_class_shard=()
+declare -A seen_proof_shard=()
 shard_union_count=0
+proof_union_count=0
 for (( shard_idx = 0; shard_idx < shard_total; shard_idx++ )); do
   shard_log="$SANDBOX/run-shard-$shard_idx.log"
   set +e
@@ -2127,12 +2167,116 @@ for (( shard_idx = 0; shard_idx < shard_total; shard_idx++ )); do
     seen_class_shard["$sc"]="$shard_idx"
     shard_union_count=$((shard_union_count + 1))
   done
-  grep -q 'CORE-TERMINAL #796 OUTPUT-BURST-IME PROOF' "$shard_log" \
-    || fail "(shard) shard $shard_idx did not run the core-terminal proofs (they must run on EVERY leg, not be sharded)"
+  # Issue #2110: the same disjointness bookkeeping for the core-terminal proofs.
+  mapfile -t shard_proofs < <(executed_proofs_in "$shard_log")
+  for sp in "${shard_proofs[@]}"; do
+    [[ -z "${seen_proof_shard[$sp]:-}" ]] \
+      || fail "(shard-proof) proof $sp ran on BOTH shard ${seen_proof_shard[$sp]} and shard $shard_idx — the proof partition is not disjoint, so the push pays for it twice"
+    seen_proof_shard["$sp"]="$shard_idx"
+    proof_union_count=$((proof_union_count + 1))
+  done
+  echo "    shard $shard_idx: ${shard_n} classes, ${#shard_proofs[@]} core-terminal proofs"
 done
 [[ "$shard_union_count" -eq "$class_count" ]] \
   || fail "(shard) union of all shards = $shard_union_count classes, expected the full $class_count (a class ran on no shard or twice)"
-pass "(shard) hash partition: the SHIPPED $shard_total shards each ~1/$shard_total, disjoint, union = all $class_count classes; proofs on every shard"
+
+# THE COVERAGE-PRESERVATION CRITERION, computed rather than asserted: every
+# registered proof must have executed on exactly one leg of the shipped matrix.
+[[ "$proof_union_count" -eq "$proof_count" ]] \
+  || fail "(shard-proof) union of all shards = $proof_union_count proof runs, expected exactly $proof_count (a proof ran on no shard, or on more than one)"
+for sel in "${registry_proof_selectors[@]}"; do
+  [[ -n "${seen_proof_shard[$sel]:-}" ]] \
+    || fail "(shard-proof) registered core-terminal proof $sel ran on NO shard of the shipped $shard_total — sharding the proofs must redistribute them, never drop one (issue #2110)"
+done
+pass "(shard) hash partition: the SHIPPED $shard_total shards each ~1/$shard_total, disjoint, union = all $class_count classes"
+pass "(shard-proof) all $proof_count core-terminal proofs ran exactly once across the SHIPPED $shard_total shards (disjoint + complete), so proof coverage per push is unchanged while five of every six runs are gone"
+
+# ---------------------------------------------------------------------------
+# (shard-proof-live) The completeness check above must be SENSITIVE, or it is
+# decorative. Name the mutation: make ONE registered proof deferred on EVERY leg
+# — the exact way proof sharding could silently delete coverage — and require
+# (shard-proof) to redden. Only the affected shard is re-run; the other legs'
+# already-collected sets are reused, so this liveness control costs one extra
+# suite invocation, not another full matrix.
+echo "== (shard-proof-live) a proof that runs NOWHERE must redden the completeness check =="
+live_target_var=""
+live_target_sel=""
+live_target_shard=""
+for (( li = 0; li < proof_count; li++ )); do
+  live_target_var="${registry_proof_status_vars[$li]}"
+  live_target_sel="${registry_proof_selectors[$li]}"
+  live_target_shard="${seen_proof_shard[$live_target_sel]}"
+  break
+done
+[[ -n "$live_target_var" && -n "$live_target_shard" ]] \
+  || fail "(shard-proof-live) could not pick a proof to drop — the control cannot run"
+
+# The mutant is written INTO THE SANDBOX, never into the repository. The suite
+# resolves each helper from its own $REPO_ROOT first (here: $SANDBOX, where only
+# the suite has been copied) and falls back to the invocation dir (the real
+# scripts/), so DROPPING a mutated copy into $SANDBOX/scripts shadows the real
+# helper for this one run and deleting it restores the fallback. Editing the
+# repository copy in place would be the #2054 write-through: a harness that
+# mutates the tree it is measuring produces results about a tree that no longer
+# exists. The real file's checksum is taken before and re-checked after, so a
+# future refactor that reintroduces an in-place edit is caught rather than
+# shipped.
+ct_real="$SCRIPT_DIR/ci-journey-core-terminal-functions.sh"
+ct_real_md5_before="$(md5sum "$ct_real" | awk '{print $1}')"
+ct_mutant="$SANDBOX/scripts/ci-journey-core-terminal-functions.sh"
+[[ ! -e "$ct_mutant" ]] \
+  || fail "(shard-proof-live) $ct_mutant already exists — the baseline shards above did NOT run the real helper, so the control compares two mutants"
+# Force this ONE proof's owner to a bucket no real shard index can equal.
+python3 - "$ct_real" "$ct_mutant" "$live_target_var" <<'PYEOF'
+import sys
+src_path, out_path, target = sys.argv[1], sys.argv[2], sys.argv[3]
+src = open(src_path).read()
+anchor = '    if [[ "$owner" == "$index" ]]; then\n'
+assert anchor in src, "(shard-proof-live) selector anchor moved; the mutant cannot be built"
+inject = ('    [[ "$status_var" == "%s" ]] && owner=999999  # mutant: owned by nobody\n' % target)
+open(out_path, "w").write(src.replace(anchor, inject + anchor, 1))
+PYEOF
+[[ $? -eq 0 ]] || fail "(shard-proof-live) could not build the mutant selector"
+grep -q 'owner=999999' "$ct_mutant" \
+  || fail "(shard-proof-live) the mutant does not contain the injected line — a mutation that never happened is not a passing mutation test"
+
+live_log="$SANDBOX/run-shard-$live_target_shard-mutant.log"
+set +e
+PATH="$STUBBIN:$PATH" \
+  JOURNEY_STEP_BUDGET_SECS=3600 \
+  JOURNEY_CLASS_TIMEOUT_SECS=420 \
+  POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$shard_total" \
+  POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$live_target_shard" \
+  bash "$SANDBOX/scripts/ci-journey-suite.sh" > "$live_log" 2>&1
+rc_live=$?
+set -e
+rm -f "$ct_mutant"   # restore the real helper for every later block
+[[ ! -e "$ct_mutant" ]] \
+  || fail "(shard-proof-live) the mutant helper survived — later blocks would measure a mutated tree"
+[[ "$(md5sum "$ct_real" | awk '{print $1}')" == "$ct_real_md5_before" ]] \
+  || fail "(shard-proof-live) the REPOSITORY copy of ci-journey-core-terminal-functions.sh changed during the mutation — the harness wrote through into the tree it is measuring (#2054)"
+[[ "$rc_live" -eq 0 ]] \
+  || { sed -n '1,40p' "$live_log"; fail "(shard-proof-live) the mutant shard exited $rc_live; the control must differ from the baseline ONLY in the dropped proof"; }
+
+mapfile -t live_proofs < <(executed_proofs_in "$live_log")
+for lp in "${live_proofs[@]}"; do
+  [[ "$lp" != "$live_target_sel" ]] \
+    || { sed -n '1,40p' "$live_log"; fail "(shard-proof-live) the mutant still ran $live_target_sel — the control is not live"; }
+done
+# Recompute completeness with the mutant leg substituted for its baseline leg.
+declare -A live_seen=()
+for sel in "${!seen_proof_shard[@]}"; do
+  [[ "${seen_proof_shard[$sel]}" == "$live_target_shard" ]] && continue
+  live_seen["$sel"]=1
+done
+for lp in "${live_proofs[@]}"; do live_seen["$lp"]=1; done
+live_missing=()
+for sel in "${registry_proof_selectors[@]}"; do
+  [[ -n "${live_seen[$sel]:-}" ]] || live_missing+=("$sel")
+done
+[[ "${#live_missing[@]}" -eq 1 && "${live_missing[0]}" == "$live_target_sel" ]] \
+  || fail "(shard-proof-live) dropping $live_target_sel everywhere left missing=[${live_missing[*]:-none}]; the completeness check must report exactly that one proof — anything else means it is over- or under-sensitive"
+pass "(shard-proof-live) deferring $live_target_var on every leg leaves exactly $live_target_sel uncovered, and (shard-proof) reddens on it — the completeness check is live, not decorative"
 
 # ---------------------------------------------------------------------------
 # (m) ACCEPTANCE — Issue #835 (REOPENED): the six core-terminal proofs are now

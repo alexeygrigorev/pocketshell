@@ -77,3 +77,8 @@ app/google-services.json
 
 # Generated CI journey harness output
 /artifacts/
+
+# Python bytecode caches (a stray scripts/__pycache__/*.pyc was tracked until 2026-08-15;
+# any full pytest run rewrote it and dirtied every worktree)
+__pycache__/
+*.pyc

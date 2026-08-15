@@ -15,10 +15,26 @@ services:
     # in ../docker-compose.yml. Callers wait on
     # `docker inspect --format='{{.State.Health.Status}}' <container>`
     # instead of polling SSH with a retry loop.
+    #
+    # Issue #2150: this fixture is the reason the penalty assertion is written
+    # to tolerate an sshd that predates the feature. Unlike the alpine fleet it
+    # does NOT copy tests/docker/sshd_config — it runs Debian bookworm's stock
+    # sshd, OpenSSH 9.2, where `PerSourcePenalties` is not merely defaulted off
+    # but an unknown keyword ("Bad configuration option"), so shipping the
+    # directive here would refuse to start. It is therefore unaffected today by
+    # accident of base image, not by design. `sshd -T` on 9.2 emits no
+    # `persourcepenalties` line, so the shared assertion passes; the moment this
+    # image is rebased onto a node base carrying OpenSSH >= 9.8 the fixture goes
+    # UNHEALTHY instead of quietly penalising every lane. Keep this check in
+    # lockstep with the `x-ssh-healthcheck` anchor in ../docker-compose.yml —
+    # tools/pocketshell/tests/test_ssh_fixture_penalties.py enforces that.
     healthcheck:
       test:
         - CMD-SHELL
         - >-
+          /usr/sbin/sshd -T > /tmp/ps-sshd-effective.conf 2>/dev/null || exit 1;
+          grep -i "^persourcepenalties " /tmp/ps-sshd-effective.conf
+          | grep -qvix "persourcepenalties no" && exit 1;
           ssh -o BatchMode=yes
           -o ConnectTimeout=2
           -o StrictHostKeyChecking=no

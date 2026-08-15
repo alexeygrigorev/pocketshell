@@ -7,3 +7,28 @@ AllowTcpForwarding yes
 GatewayPorts no
 X11Forwarding no
 Subsystem sftp /usr/lib/ssh/sftp-server
+
+# Issue #2150: OpenSSH >= 9.8 enables PerSourcePenalties by default, and this
+# fleet's alpine base now ships 10.3p1. The feature blocks a SOURCE ADDRESS
+# after its penalties accumulate past `min:15s` (authfail:5s, noauth:1s,
+# crash:90s).
+#
+# That is correct on the public internet and actively harmful here, because a
+# test fixture has exactly ONE source. Every emulator/host client reaches a
+# published container port through the single docker gateway (172.17.0.1), so
+# sshd cannot tell one journey lane from another: four routine harness auth
+# failures — the ordinary rhythm of a run — put 20s of penalty on that address
+# and sshd then refuses EVERY lane, including lanes that did nothing wrong.
+#
+# The failure is worse than a flake. A penalised lane presents as connection
+# failures inside the product under test, which is indistinguishable from a
+# real regression in SSH connect/lease/reattach — the exact area PocketShell's
+# journeys exercise. It manufactures evidence pointing at a product bug that
+# does not exist (#2150 cost two full emulator runs in #2111 before diagnosis;
+# same class as the #1842 agents-pool collision).
+#
+# Rate-limiting by source is meaningless for a disposable single-source
+# fixture, so turn it off rather than tune it. The compose healthcheck in
+# tests/docker/docker-compose.yml asserts this is in effect, so a fixture that
+# reverts to penalising can never report `healthy`.
+PerSourcePenalties no

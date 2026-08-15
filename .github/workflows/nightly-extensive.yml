@@ -215,12 +215,22 @@ jobs:
       # on ANY shard (round-robin), so every shard starts them. This mirrors how
       # the per-push emulator-journey job (.github/workflows/tests.yml) and the
       # release gate (scripts/pre-release-confidence-gate.sh) wire them.
+      # Issue #2111: the bootstrap phase now runs ALL TEN scenarios (six used to
+      # run on no lane at all), so the four remaining bootstrap fixtures must be
+      # up too: bootstrap-unsupported (2232, `unsupported`),
+      # bootstrap-daemon-disabled (2233, `daemonDisabled`),
+      # bootstrap-user-local-path (2234, `userLocalPath`) and
+      # bootstrap-fish-user-local-path (2235, `fishUserLocalPath`). The suite
+      # connects to these by host port (10.0.2.2:223x) and fails hard when the
+      # port is unforwarded, so they are started and health-waited like the rest.
       - name: Start Docker fixtures (agents, flaky-agent, tmux + toxiproxy + bootstrap + old-cli + daemon)
         run: |
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps \
             agents flaky-agent tmux network-fault-proxy packet-loss-proxy \
             bootstrap-ready bootstrap-uv-install bootstrap-uv-upgrade \
             bootstrap-notifications \
+            bootstrap-unsupported bootstrap-daemon-disabled \
+            bootstrap-user-local-path bootstrap-fish-user-local-path \
             agents-old-cli agents-daemon
 
       - name: Wait for fixture containers to report healthy
@@ -242,6 +252,17 @@ jobs:
           # Issue #1236 (D26): the silent-host notifications fixture (2241).
           wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-notifications /tmp/bootstrap-notifications-health.log 60
           cat /tmp/bootstrap-notifications-health.log
+          # Issue #2111: the four bootstrap fixtures the six previously-unrun
+          # scenarios need (2232 unsupported, 2233 daemon-disabled,
+          # 2234 user-local-path, 2235 fish-user-local-path).
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-unsupported /tmp/bootstrap-unsupported-health.log 60
+          cat /tmp/bootstrap-unsupported-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-daemon-disabled /tmp/bootstrap-daemon-disabled-health.log 60
+          cat /tmp/bootstrap-daemon-disabled-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-user-local-path /tmp/bootstrap-user-local-path-health.log 60
+          cat /tmp/bootstrap-user-local-path-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml bootstrap-fish-user-local-path /tmp/bootstrap-fish-user-local-path-health.log 60
+          cat /tmp/bootstrap-fish-user-local-path-health.log
           # Old-CLI (2238, #849) + daemon (2239, #839) fixtures: the phase-1
           # FolderList*DockerTest journeys target these by host port and fail
           # hard when the port is unforwarded, so wait on them before handing off
@@ -276,6 +297,20 @@ jobs:
               sleep 1
             done
           done
+
+      # Issue #2111 (audit item 4 — the cadence gap): the real-agent fixture for
+      # nightly phase 4. It lives in its own compose file and ships the REAL
+      # claude/codex/opencode CLIs, deliberately WITHOUT API keys — the gate
+      # asserts the credential-free deterministic output ("Not logged in", the
+      # Codex banner) and the JSONL each CLI writes, so no secret is needed.
+      # Only shard 0 runs the aux phases, so only shard 0 pays the image build.
+      - name: Start real-agent fixture (2240, shard 0 only)
+        if: matrix.shard == 0
+        run: |
+          docker compose -f tests/docker/real-agent/compose.yml up -d --build real-agents
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/real-agent/compose.yml real-agents /tmp/real-agents-health.log 120
+          cat /tmp/real-agents-health.log
 
       - name: Verify agent SSH target tool surface
         run: |
@@ -358,11 +393,17 @@ jobs:
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-install > artifacts/docker/bootstrap-uv-install.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-uv-upgrade > artifacts/docker/bootstrap-uv-upgrade.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-notifications > artifacts/docker/bootstrap-notifications.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-unsupported > artifacts/docker/bootstrap-unsupported.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-daemon-disabled > artifacts/docker/bootstrap-daemon-disabled.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-user-local-path > artifacts/docker/bootstrap-user-local-path.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color bootstrap-fish-user-local-path > artifacts/docker/bootstrap-fish-user-local-path.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents-old-cli > artifacts/docker/agents-old-cli.log 2>/dev/null || true
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents-daemon > artifacts/docker/agents-daemon.log 2>/dev/null || true
           docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
           docker inspect pocketshell-test-agents-old-cli > artifacts/docker/agents-old-cli-inspect.json 2>/dev/null || true
           docker inspect pocketshell-test-agents-daemon > artifacts/docker/agents-daemon-inspect.json 2>/dev/null || true
+          # Issue #2111: real-agent fixture (phase 4, shard 0 only).
+          docker compose -f tests/docker/real-agent/compose.yml logs --no-color --timestamps real-agents > artifacts/docker/real-agents.log 2>/dev/null || true
 
       - name: Publish extensive suite summary
         if: always()
@@ -414,7 +455,10 @@ jobs:
 
       - name: Stop Docker fixtures
         if: always()
-        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+        run: |
+          docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+          # Issue #2111: the real-agent fixture is a separate compose project.
+          docker compose -f tests/docker/real-agent/compose.yml down --volumes --remove-orphans || true
 
   # ---------------------------------------------------------------------------
   # Fault-injection safety verdict (issue #1201) — the RELEASE-GATING signal.

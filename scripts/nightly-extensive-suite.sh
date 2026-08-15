@@ -33,18 +33,28 @@
 #      `pocketshellNetworkFaultProofs=true` (so the `assumeTrue(...)` opt-in
 #      guard passes). This is the un-gating the per-push/smoke jobs never do.
 #
-#   3) BOOTSTRAP setup-scenario matrix (issue #667) — a TRIMMED but meaningful
-#      slice of HostBootstrapScenarioSuiteTest, run WITH
-#      `pocketshellBootstrapScenarios=true` so the `assumeTrue(...)` opt-in
-#      guard passes. The suite otherwise self-skips, leaving the first-run
-#      install / uv-install / app-update-required setup journeys guarded only
-#      by the release gate (so they can regress silently between releases).
-#      We select exactly three methods (ready + uvInstall + appUpdateRequired)
-#      via `class=...#method` so the cost stays bounded. These drive the real
-#      host-list tap path against the bootstrap Docker fixtures
-#      (bootstrap-ready:2230, bootstrap-uv-install:2231, bootstrap-uv-upgrade:2236;
-#      appUpdateRequired reuses the uv-upgrade container on 2236), which the
-#      workflow brings up alongside the journey fixtures.
+#   3) BOOTSTRAP setup-scenario matrix (issue #667) — HostBootstrapScenarioSuiteTest,
+#      run WITH `pocketshellBootstrapScenarios=true` so the `assumeTrue(...)`
+#      opt-in guard passes. The suite otherwise self-skips, leaving the setup
+#      journeys guarded only by the release gate (so they can regress silently
+#      between releases). Methods are selected by name via `class=...#method`.
+#      Issue #2111: this used to select FOUR of the class's TEN scenarios, so six
+#      executed on no lane at all; ALL TEN now run. They drive the real host-list
+#      tap path against the bootstrap Docker fixtures (bootstrap-ready:2230,
+#      -uv-install:2231, -unsupported:2232, -daemon-disabled:2233,
+#      -user-local-path:2234, -fish-user-local-path:2235, -uv-upgrade:2236 —
+#      reused by uvUpgradeFailure and appUpdateRequired — and
+#      -notifications:2241), which the workflow brings up alongside the journey
+#      fixtures.
+#
+#   4) REAL-AGENT CLI gate (issue #2111) — RealAgentReleaseGateTest against the
+#      separate `tests/docker/real-agent/compose.yml` fixture on port 2240, run
+#      WITH `pocketshellRealAgentReleaseGate=1`. It drives the REAL claude/codex
+#      binaries in a tmux pane through the app. It previously ran ONLY under
+#      `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh`, so a
+#      real-CLI rendering regression stayed invisible until someone cut a
+#      release. Its exit code feeds `overall_status` but NOT the #1201
+#      release-gating fault verdict.
 #
 # The script never aborts on the first phase failure: it runs all phases,
 # records each exit code, writes a pass/fail summary, and exits non-zero if
@@ -146,6 +156,13 @@ NETWORK_FAULT_CLASSES=(
 # ---------------------------------------------------------------------------
 # EXPECTED-FAIL lane (issue #1201, de-gated from the fault verdict).
 #
+# Issue #2111 widened this lane's remit slightly: it is the home for any
+# toxiproxy-fixture proof that must RUN nightly and have its artifacts collected
+# while its exit code is not yet trustworthy as a release signal — whether that
+# is a TDD spec for an unbuilt feature (#822 below) or a budget that the emulator
+# cannot meet (#2111's Conversation-open latency proof below). The promotion rule
+# is the same for both: move it into NETWORK_FAULT_CLASSES once it runs green.
+#
 # The #822 Slice C/D journeys (SilentMidSessionDropDetectionE2eTest) are TDD-style
 # executable specs for UNBUILT connection-manager features — the two tests assert
 # "Expected to FAIL until the LivenessProbe (Slice D) lands" / "until the
@@ -165,6 +182,62 @@ NETWORK_FAULT_CLASSES=(
 # pocketshellNetworkFaultProofs=true opt-in flag.
 EXPECTED_FAIL_CLASSES=(
   "$FQCN_PREFIX.SilentMidSessionDropDetectionE2eTest"
+  # Issue #2111 (audit §2.1 item 2): the #817/#828 network-realistic
+  # Conversation-open latency proof. It is not a NetworkFaultProofBase subclass
+  # (hence the fully-qualified name), but it is a toxiproxy fixture user with
+  # identical preconditions: it drives the production open path through
+  # network-fault-proxy:2228 with a symmetric-latency toxic and HARD-asserts the
+  # two #828 gates in TWO SEPARATE @Test methods — (a)
+  # `recordedClaudeColdOpenMeetsPhoneBudgetAtGoodRtt`: cold
+  # `conversation_open_full` < 300 ms at 80 ms RTT, and (b)
+  # `recordedClaudeFirstWindowIsPrefetchedUnderRealisticRtt`: the window-read leg
+  # collapsed to ~0 (at BOTH 150 ms and 80 ms RTT) because the first window is
+  # prefetched in the resolve exec. Two methods, not two asserts in one method,
+  # because (a) is known-red here (below) and would otherwise abort the method
+  # before (b) — the structural guard — ever ran, making a #828 regression
+  # indistinguishable from the standing environmental failure. Split, a #828
+  # regression changes this phase's FAILURE SET: 1 failing test becomes 2.
+  # It guards exactly what AGENTS.md warns about
+  # ("do not land #818 on localhost-only timings; localhost zero-RTT hides the
+  # whole cost"). It reuses network-fault-proxy:2228 + toxiproxy API:8474 — no
+  # new fixture.
+  #
+  # Before this enrolment it executed on NO lane at all: nightly phase 1 selected
+  # it WITHOUT the `pocketshellNetworkFaultProofs` opt-in so its `assumeTrue`
+  # skipped it, and its `assumeFalse(isRunningOnCi())` skipped it per-push. Both
+  # self-skips are now gone (the opt-in is a HARD assert in the class), so the
+  # only question was WHICH nightly phase it belongs in.
+  #
+  # It goes in the NON-GATING lane, and the reason is a measurement, not a
+  # preference. Running it for the first time (2026-08-13, this issue, emulator +
+  # the real toxiproxy fixture) shows assertion (b) is solidly satisfied —
+  # window-read leg = 0 ms at both 150 ms and 80 ms RTT, i.e. #828's fold is
+  # intact — while assertion (a) is NOT met on an emulator at ANY RTT: measured
+  # `conversation_open_full` was 840 / 429 / 753 / 842 ms at 80 ms RTT across four
+  # runs, and a control pass at 10 ms RTT still measured 406 ms. So the
+  # device-side fixed cost on this AVD is ~400 ms and the <0.3 s budget — a
+  # PHONE-class target — is unreachable there regardless of the network. Making
+  # this phase GATING would therefore turn the nightly fault verdict (and with it
+  # the release gate) permanently red for an environmental reason, while
+  # weakening the 300 ms budget to make it pass is explicitly forbidden
+  # (#2111 non-goal). Neither is acceptable, so it runs here: the proof EXECUTES
+  # every night against the real fixture, its per-method timing artifacts
+  # (`issue817-conversation-open-rtt-timing-<method>.txt`) are uploaded, and its
+  # status is shown in the summary — but its exit code stays informational.
+  #
+  # READ THIS PHASE'S RESULT PER-METHOD, NOT AS ONE EXIT CODE. The expected
+  # steady state is exactly ONE failing method here (the budget). If
+  # `recordedClaudeFirstWindowIsPrefetchedUnderRealisticRtt` ever joins it, #828's
+  # prefetch fold has regressed and the cold open grew a second serial SSH
+  # round-trip — that is a real product regression hiding in an informational
+  # lane, so the per-method report matters more than the phase's exit code.
+  #
+  # PROMOTE IT INTO `NETWORK_FAULT_CLASSES` the moment BOTH methods run green,
+  # exactly as this lane's #1201 protocol says. That needs a follow-up decision
+  # on the <0.3 s gate (make the budget device-class-aware, or cut the ~400 ms of
+  # device-side open cost); it is out of scope for #2111, which is about making
+  # the test run at all.
+  "com.pocketshell.app.tmux.ConversationOpenLatencyRttDockerTest"
 )
 
 # The bootstrap setup-scenario class (opt-in via pocketshellBootstrapScenarios).
@@ -173,11 +246,33 @@ EXPECTED_FAIL_CLASSES=(
 BOOTSTRAP_TEST_CLASS="com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest"
 NOTIFICATION_PERMISSION_TEST_CLASS="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
 
-# Trimmed but meaningful set of bootstrap scenarios (issue #667): the first-run
-# `ready` profile, the `uvInstall` first-install journey, and the
-# `appUpdateRequired` (remote-newer) journey. Selected by JUnit method name via
+# Issue #2111 (audit §2.1 item 4 — the cadence gap): the real-agent release gate.
+# It drives the REAL `claude` and `codex` binaries in a tmux pane through the app
+# and asserts on visible terminal output + the on-disk JSONL each CLI writes, so
+# it is the only guard against a real-CLI rendering/parsing regression. Until now
+# it ran ONLY under `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh`
+# — i.e. a regression stayed invisible until someone cut a release, which can be
+# weeks. It is opt-in via `pocketshellRealAgentReleaseGate=1` and needs the
+# separate `tests/docker/real-agent/compose.yml` fixture on port 2240 (which the
+# nightly workflow now starts). That image ships deliberately WITHOUT API keys and
+# the assertions are the credential-free deterministic strings ("Not logged in",
+# the Codex banner), so no secret is required to run it here.
+REAL_AGENT_TEST_CLASS="$FQCN_PREFIX.RealAgentReleaseGateTest"
+REAL_AGENT_COMPOSE_FILE="$REPO_ROOT/tests/docker/real-agent/compose.yml"
+
+# The bootstrap scenarios run nightly. Selected by JUnit method name via
 # `class=<FQCN>#<method>,<FQCN>#<method>`.
+#
+# Issue #2111 (audit §2.1 item 3): this list used to hold FOUR of the class's TEN
+# scenarios, so six scenarios executed on NO lane — the class is excluded from
+# phase 1 (it would only self-skip there without the opt-in) and phase 3 selected
+# by name. Breaking the uv-upgrade-failure recovery sheet or the fish-PATH
+# bootstrap reddened nothing. All ten now run. Every fixture they need is already
+# defined in `tests/docker/docker-compose.yml` and is started by
+# `.github/workflows/nightly-extensive.yml`.
 BOOTSTRAP_METHODS=(
+  # Issue #667: the first-run `ready` profile, the `uvInstall` first-install
+  # journey, and the `appUpdateRequired` (remote-newer) journey.
   "ready"
   "uvInstall"
   "appUpdateRequired"
@@ -186,6 +281,49 @@ BOOTSTRAP_METHODS=(
   # NON-DESTRUCTIVE `pocketshell hooks install` (pre-existing foreign hook
   # survives). Needs the bootstrap-notifications:2241 fixture (brought up below).
   "notifications"
+  # --- Issue #2111: the six scenarios that previously ran nowhere. ------------
+  # FAILURE PATHS — the ones the audit called out by name. A successful install
+  # is the easy half; what a user actually hits is the install that FAILS, and
+  # the recovery sheet is the only thing standing between them and a dead host.
+  # `uvUpgradeFailure` asserts the failed-upgrade sheet names the path, the
+  # remote/expected versions, the exact failing `uv tool install` command and the
+  # fixture's stderr, and that the old CLI is left in place (bootstrap-uv-upgrade
+  # :2236, already up for uvUpgrade/appUpdateRequired — no new fixture).
+  "uvUpgradeFailure"
+  # `unsupported` is the no-installer host: the sheet must offer the MANUAL
+  # `uv tool install ... or pipx install pocketshell` instruction and the Install
+  # attempt must fail closed with a reachable Close action (bootstrap-unsupported
+  # :2232).
+  "unsupported"
+  # `daemonDisabled` proves the OPTIONAL jobs daemon is genuinely optional: the
+  # host navigates normally and bootstrap must NOT enable it behind the user's
+  # back (bootstrap-daemon-disabled:2233).
+  "daemonDisabled"
+  # SUCCESS PATH the failure path is meaningless without: `uvUpgrade` is the
+  # working CLI-update journey AND the only proof of the #779 one-clear-action
+  # rule (badge "Outdated" + a single "Update" button; the synonym verb "Upgrade"
+  # must not appear as a control). Reuses bootstrap-uv-upgrade:2236.
+  "uvUpgrade"
+  # PATH DISCOVERY — `pocketshell` installed in `~/.local/bin` rather than on the
+  # default non-login PATH, under bash (`userLocalPath`, bootstrap-user-local-path
+  # :2234) and under fish, whose login-PATH handling is different again
+  # (`fishUserLocalPath`, bootstrap-fish-user-local-path:2235). This is the exact
+  # shape of the v0.4.10 connect break (AGENTS.md: the host `pocketshell` lives in
+  # `~/.local/bin`, where `PocketshellCommand.wrap()` is multi-statement), so it
+  # is real coverage, not a completeness box-tick.
+  #
+  # HONEST SCOPE, established by mutation (#2111): mutating the fish login-PATH
+  # probe body ALONE kills 0 tests — `fishUserLocalPath` stays green — because
+  # `HostBootstrapper.detectCommonToolPath` probes `$HOME/.local/bin/pocketshell`
+  # by ABSOLUTE path, independent of PATH, so the tool is still found. So what
+  # these two scenarios guard is "a bash/fish host whose pocketshell lives in
+  # ~/.local/bin bootstraps end-to-end", carried by the `COMMON_TOOL_DIRS`
+  # fallback — NOT the per-shell probe body in isolation. Mutating the whole
+  # ~/.local/bin bootstrap (the three login-PATH probe bodies + the
+  # `pathAwareCommand` fallback + `COMMON_TOOL_DIRS`) reddens exactly
+  # userLocalPath + fishUserLocalPath + uvInstall and nothing else.
+  "userLocalPath"
+  "fishUserLocalPath"
 )
 BOOTSTRAP_CLASS_ARG="$(printf "%s\n" "${BOOTSTRAP_METHODS[@]}" \
   | sed "s|^|$BOOTSTRAP_TEST_CLASS#|" | paste -sd, -)"
@@ -200,7 +338,10 @@ JOURNEY_EXCLUDED_CLASSES=(
   "${EXPECTED_FAIL_CLASSES[@]}"
   "$FQCN_PREFIX.LongRunningSessionStabilityTest"
   "$FQCN_PREFIX.LongRunningInstrumentationHeartbeatTest"
-  "$FQCN_PREFIX.RealAgentReleaseGateTest"
+  # Issue #2111: still excluded from phase 1 (which passes no opt-in, so it would
+  # only self-skip there); it now runs in its OWN phase 4 with the opt-in + the
+  # real-agent:2240 fixture.
+  "$REAL_AGENT_TEST_CLASS"
   "$BOOTSTRAP_TEST_CLASS"
   "$NOTIFICATION_PERMISSION_TEST_CLASS"
 )
@@ -322,15 +463,18 @@ NOTIFICATION_PERMISSION_EXIT=0
 NETWORK_FAULT_EXIT=0
 BOOTSTRAP_EXIT=0
 EXPECTED_FAIL_EXIT=0
+REAL_AGENT_EXIT=0
 notification_permission_status="SKIP"
 notification_permission_executed=0
 nf_status="SKIP"
 bootstrap_status="SKIP"
 expectedfail_status="SKIP"
+real_agent_status="SKIP"
 notification_permission_classification="SKIP"
 nf_classification="SKIP"
 bootstrap_classification="SKIP"
 expectedfail_classification="SKIP"
+real_agent_classification="SKIP"
 
 if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   echo "=========================================================="
@@ -421,11 +565,13 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   )"
 
   echo "=========================================================="
-  echo "Nightly Extensive Tests — phase 2b: #822 expected-fail lane (NON-GATING)"
+  echo "Nightly Extensive Tests — phase 2b: expected-fail lane (NON-GATING)"
   echo "Included classes: $EXPECTED_FAIL_CLASS_ARG"
-  echo "  (pocketshellNetworkFaultProofs=true; result is INFORMATIONAL ONLY —"
-  echo "   these are TDD specs for unbuilt Slice C/D features, designed RED, and"
-  echo "   are DELIBERATELY excluded from the fault verdict — issue #1201)"
+  echo "  (pocketshellNetworkFaultProofs=true; result is INFORMATIONAL ONLY and"
+  echo "   is DELIBERATELY excluded from the fault verdict — issue #1201. Holds"
+  echo "   the #822 TDD specs for unbuilt Slice C/D features AND the #2111"
+  echo "   Conversation-open latency proof, whose <0.3s budget an emulator cannot"
+  echo "   meet; each is promoted to the GATING phase 2 once it runs green.)"
   echo "=========================================================="
 
   # Issue #1201: the #822 Slice C/D journeys still RUN nightly (their tracking
@@ -437,7 +583,7 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     -Pandroid.testInstrumentationRunnerArguments.class="$EXPECTED_FAIL_CLASS_ARG" \
     --stacktrace
   EXPECTED_FAIL_EXIT=$?
-  echo "phase 2b (#822 expected-fail lane) exit code: $EXPECTED_FAIL_EXIT (NON-GATING)"
+  echo "phase 2b (expected-fail lane) exit code: $EXPECTED_FAIL_EXIT (NON-GATING)"
 
   # Snapshot phase 2b's report BEFORE the phase-3 gradle invocation overwrites it
   # (issue #1293). Observability only — never affects EXPECTED_FAIL_EXIT.
@@ -485,9 +631,57 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     classify_nightly_phase "$BOOTSTRAP_EXIT" "$PHASE_REPORTS_DIR/phase3-bootstrap"
   )"
 
+  echo "=========================================================="
+  echo "Nightly Extensive Tests — phase 4: real-agent CLI gate (opt-in, issue #2111)"
+  echo "Included class: $REAL_AGENT_TEST_CLASS"
+  echo "  (pocketshellRealAgentReleaseGate=1, real-agents:2240 fixture)"
+  echo "=========================================================="
+
+  # Issue #2111 (audit item 4): close the cadence gap. This phase's exit code
+  # feeds `overall_status` (so a real-CLI rendering regression makes the nightly
+  # shard RED and is visible the next morning) but is DELIBERATELY NOT an input
+  # to the machine-readable fault verdict: #1201 fixed that verdict's inputs to
+  # the network-fault + bootstrap phases, and widening it here would change the
+  # release-gating signal, which is out of this issue's scope. The release gate
+  # (`TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh`) remains
+  # the authoritative pre-tag run; this is the nightly early-warning copy.
+  #
+  # The fixture lives in its own compose file, so it is only exercised when the
+  # workflow actually started it. If port 2240 is not up the phase is recorded
+  # SKIP rather than a phantom red — the tests themselves fail loudly on an
+  # unreachable fixture, so this check only distinguishes "not provisioned on
+  # this runner" from "provisioned and broken".
+  if [[ -f "$REAL_AGENT_COMPOSE_FILE" ]] && \
+     timeout 2 bash -c 'exec 3<>/dev/tcp/127.0.0.1/2240' 2>/dev/null; then
+    "$GRADLEW" :app:connectedDebugAndroidTest \
+      -Pandroid.testInstrumentationRunnerArguments.pocketshellRealAgentReleaseGate=1 \
+      -Pandroid.testInstrumentationRunnerArguments.class="$REAL_AGENT_TEST_CLASS" \
+      --stacktrace
+    REAL_AGENT_EXIT=$?
+    echo "phase 4 (real-agent CLI gate) exit code: $REAL_AGENT_EXIT"
+
+    preserve_phase_reports "phase4-real-agent" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+    write_nightly_phase_classification \
+      "$PHASE_CLASSIFICATIONS_DIR/phase4-real-agent.txt" \
+      "phase4-real-agent" "$REAL_AGENT_EXIT" "$PHASE_REPORTS_DIR/phase4-real-agent"
+    capture_nightly_device_boundary \
+      "$PHASE_CLASSIFICATIONS_DIR/phase4-real-agent-device.txt" "phase4-real-agent"
+    real_agent_classification="$(
+      classify_nightly_phase "$REAL_AGENT_EXIT" "$PHASE_REPORTS_DIR/phase4-real-agent"
+    )"
+  else
+    echo "phase 4 (real-agent CLI gate) SKIPPED: real-agents:2240 fixture is not up on this runner"
+    real_agent_classification="SKIP"
+  fi
+
   nf_status="$(nightly_phase_status "$nf_classification")"
   bootstrap_status="$(nightly_phase_status "$bootstrap_classification")"
   expectedfail_status="$(nightly_phase_status "$expectedfail_classification")"
+  if [[ "$real_agent_classification" == "SKIP" ]]; then
+    real_agent_status="SKIP"
+  else
+    real_agent_status="$(nightly_phase_status "$real_agent_classification")"
+  fi
 
   # Issue #1201: emit the authoritative, machine-readable fault-injection safety
   # verdict from the network-fault + bootstrap phases ONLY. The journey suite
@@ -507,8 +701,9 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   echo "----------------------------------------------------------"
 else
   echo "=========================================================="
-  echo "Nightly Extensive Tests — phases 1b, 2, 2b & 3 SKIPPED on shard ${SHARD_INDEX:-0}"
-  echo "  (notification + network-fault + expected-fail + bootstrap run once, on shard 0)"
+  echo "Nightly Extensive Tests — phases 1b, 2, 2b, 3 & 4 SKIPPED on shard ${SHARD_INDEX:-0}"
+  echo "  (notification + network-fault + expected-fail + bootstrap + real-agent"
+  echo "   run once, on shard 0)"
   echo "=========================================================="
 fi
 
@@ -519,11 +714,17 @@ journey_status="$(nightly_phase_status "$JOURNEY_CLASSIFICATION")"
 # expected-fail lane (phase 2b) — including an intentionally-red TDD lane would
 # make the shard summary permanently red for a non-reason. Note: `overall_status`
 # is NOT the release-gating signal; the machine-readable fault verdict above is.
+#
+# Issue #2111: phase 4 (real-agent CLI gate) IS included here — that is the whole
+# point of closing the cadence gap: a real Claude/Codex rendering regression must
+# make the nightly shard red the next morning instead of waiting for a release
+# cut. It is still NOT an input to the release-gating fault verdict above.
 overall_status="PASS"
 if [[ "$JOURNEY_EXIT" -ne 0 \
       || "$NOTIFICATION_PERMISSION_EXIT" -ne 0 \
       || "$NETWORK_FAULT_EXIT" -ne 0 \
-      || "$BOOTSTRAP_EXIT" -ne 0 ]]; then
+      || "$BOOTSTRAP_EXIT" -ne 0 \
+      || "$REAL_AGENT_EXIT" -ne 0 ]]; then
   overall_status="FAIL"
 fi
 
@@ -543,8 +744,9 @@ fi
   echo "| Journey / E2E (non-gating) | full connected suite minus network-fault + expected-fail + opt-in classes ($shard_label) | \`pocketshellCi=true\` | $JOURNEY_EXIT | **$journey_status** ($JOURNEY_CLASSIFICATION) |"
   echo "| Notification permission (NON-GATING) | dedicated unsharded $NOTIFICATION_PERMISSION_TEST_CLASS; executed=$notification_permission_executed | external revoke/verify before instrumentation; external grant/verify after | $NOTIFICATION_PERMISSION_EXIT | **$notification_permission_status** ($notification_permission_classification) |"
   echo "| Network-fault proofs (GATING) | ${#NETWORK_FAULT_CLASSES[@]} Toxiproxy-backed classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** ($nf_classification) |"
-  echo "| #822 expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} Slice C/D TDD spec class(es) | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** ($expectedfail_classification) |"
-  echo "| Bootstrap setup scenarios (GATING) | ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (trimmed) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** ($bootstrap_classification) |"
+  echo "| Expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} class(es): #822 Slice C/D TDD specs + the #2111 Conversation-open latency proof | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** ($expectedfail_classification) |"
+  echo "| Bootstrap setup scenarios (GATING) | ALL ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (issue #2111) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** ($bootstrap_classification) |"
+  echo "| Real-agent CLI gate (issue #2111; in overall_status, NOT in the fault verdict) | $REAL_AGENT_TEST_CLASS against real-agents:2240 | \`pocketshellRealAgentReleaseGate=1\` | $REAL_AGENT_EXIT | **$real_agent_status** ($real_agent_classification) |"
   echo
   echo "**Extensive-shard overall (non-gating summary): $overall_status**"
   echo
@@ -574,7 +776,9 @@ fi
     echo "- \`$c\`"
   done
   echo
-  echo "#822 expected-fail lane (NON-GATING, tracked only — TDD specs for unbuilt Slice C/D):"
+  echo "Expected-fail lane (NON-GATING, tracked only — #822 TDD specs for unbuilt"
+  echo "Slice C/D, plus the #2111 Conversation-open latency proof whose <0.3s budget"
+  echo "an emulator cannot meet; each is promoted to the GATING phase once green):"
   for c in "${EXPECTED_FAIL_CLASSES[@]}"; do
     echo "- \`$c\`"
   done
@@ -583,6 +787,12 @@ fi
   for m in "${BOOTSTRAP_METHODS[@]}"; do
     echo "- \`$m\`"
   done
+  echo
+  echo "Real-agent CLI gate (issue #2111 — nightly cadence for the real"
+  echo "Claude/Codex rendering + JSONL parsing journeys; the release gate"
+  echo "\`TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh\` remains"
+  echo "the authoritative pre-tag run):"
+  echo "- \`$REAL_AGENT_TEST_CLASS\`"
 } > "$SUMMARY"
 
 echo "----------------------------------------------------------"

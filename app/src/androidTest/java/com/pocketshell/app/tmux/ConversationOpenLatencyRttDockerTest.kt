@@ -7,7 +7,6 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
-import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.ToxiproxyControl
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.session.SessionTab
@@ -29,9 +28,9 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TestName
 import org.junit.runner.RunWith
 import java.io.File
 
@@ -73,21 +72,117 @@ import java.io.File
  * scan) → `readEventsWindow` (1 exec). No fixture-image change is needed — real
  * tmux honours the user option and the seeding sets it directly.
  *
- * ### Gating
+ * ### Where it runs (issue #2111)
  *
- * The `network-fault-proxy` service is opt-in (the default CI workflow does not
- * start it), so this test is gated off CI (`isRunningOnCi()`) AND behind the
- * `pocketshellNetworkFaultProofs=true` instrumentation arg, exactly like the
- * other [com.pocketshell.app.proof.NetworkFaultProofBase] proofs. It is local
- * measurement evidence; CI coverage of the open-path correctness stays in the
- * unit + the deterministic `agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow`
- * connected test.
+ * It used to run on **no lane at all**. Its `assumeFalse(isRunningOnCi())`
+ * skipped it per-push, and nightly's `NETWORK_FAULT_CLASSES` list was
+ * `com.pocketshell.app.proof.*` only — so nightly phase 1 selected it WITHOUT
+ * the `pocketshellNetworkFaultProofs` opt-in and the `assumeTrue` skipped it
+ * there too. The #828 gates below were therefore unprotected: reintroducing the
+ * serial open-path detection execs left every lane green.
+ *
+ * It is now enrolled in nightly's fault run — specifically the NON-GATING
+ * **phase 2b** (`scripts/nightly-extensive-suite.sh` `EXPECTED_FAIL_CLASSES`),
+ * which runs WITH `pocketshellNetworkFaultProofs=true` against the
+ * `network-fault-proxy:2228` + toxiproxy API:8474 fixtures the nightly workflow
+ * already starts. Being in that list also excludes it from phase 1, so it is
+ * never selected without the opt-in on CI.
+ *
+ * The opt-in is therefore a HARD assertion, not an `assumeTrue` — mirroring the
+ * sibling toxiproxy fixture user `OutboundAttachmentOffsetResumeJourneyE2eTest`
+ * (#1733/#1866). A lost opt-in must be a loud red, never a silent skip that
+ * reads as coverage; that silent skip is exactly the defect #2111 removes.
+ *
+ * ### Why TWO `@Test` methods, and not one (issue #2111 round 2)
+ *
+ * This class asserts two DIFFERENT properties with two DIFFERENT current fates,
+ * and round 1 shipped them as two sequential `assertTrue` calls inside one
+ * `@Test`. That was a real defect, not a style nit:
+ *
+ *  - [recordedClaudeFirstWindowIsPrefetchedUnderRealisticRtt] is the STRUCTURAL
+ *    #828 guard — the window-read leg must collapse to ~0 because the first
+ *    window is folded into the resolve exec. It **passes today**.
+ *  - [recordedClaudeColdOpenMeetsPhoneBudgetAtGoodRtt] is the <0.3 s PHONE-class
+ *    budget. It **fails on an emulator at any RTT** (numbers below), tracked as
+ *    a follow-up.
+ *
+ * With both in one method the budget assertion threw first and the structural
+ * one was **never evaluated**, so the #828 mutation ("drop the prefetch fold")
+ * produced red-before and red-after — indistinguishable, i.e. zero protection.
+ * Splitting them means a #828 regression changes the run's FAILURE SET (one
+ * failing test becomes two) on a lane whose overall exit code is informational.
+ * Neither assertion was weakened to achieve this (a #2111 non-goal); both stay
+ * hard, they just no longer mask each other.
+ *
+ * ### Running it locally — pass `--no-pool` (issue #2111 round 2)
+ *
+ * This class seeds its tmux session over the DIRECT fixture port ([DEFAULT_PORT])
+ * but drives the app through the proxy on [NETWORK_FAULT_SSH_PORT], whose
+ * upstream is the SHARED `agents` container. `scripts/connected-test.sh`
+ * auto-enables `--pool` for a `*DockerTest*` class when more than one emulator is
+ * online, and pool mode relocates `DEFAULT_PORT` to a per-lane agents container —
+ * so the session would be seeded in one container while the app reads a different
+ * one, and the test fails for a reason that has nothing to do with the code. The
+ * fault proxy itself is a singleton and is not pool-isolated either. So always:
+ *
+ * ```
+ * scripts/connected-test.sh --no-pool --suffix i<issue> :app:connectedDebugAndroidTest \
+ *   -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true \
+ *   -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.tmux.ConversationOpenLatencyRttDockerTest
+ * ```
+ *
+ * Nightly is unaffected: `scripts/nightly-extensive-suite.sh` invokes Gradle
+ * directly and never takes the pool path.
+ *
+ * If every SSH attempt fails with `Server closed connection during identification
+ * exchange` while `docker ps` still reports the fixture healthy, it is not this
+ * test: OpenSSH 9.8+ `PerSourcePenalties` has penalised the docker gateway
+ * (`srclimit_penalise ... penalty: failed authentication` in `docker logs`). All
+ * emulator/host traffic NATs through that one source address, while the
+ * container's own healthcheck comes over `::1` and keeps passing — so the fixture
+ * looks fine and every lane fails. See the issue #2111 thread.
+ *
+ * ### What its first-ever execution measured (2026-08-13)
+ *
+ *  - [PREFETCHED_WINDOW_READ_GATE_MS] — **satisfied**: the window-read leg is
+ *    0 ms at both 150 ms and 80 ms RTT, i.e. #828's fold of the first window
+ *    into the resolve exec is intact. Removing that fold pushes it to 184 ms
+ *    (80 ms RTT) / 784 ms (150 ms RTT) and reddens this assertion. It is
+ *    asserted at BOTH measured RTTs: a dropped fold costs one extra serial
+ *    round-trip, so the higher RTT is the louder detector.
+ *
+ *    Re-confirmed by mutation on the SHIPPED tree (2026-08-14, round 2), with
+ *    [COLD_OPEN_GATE_MS] left untouched at 300 ms. Dropping the fold — deleting
+ *    the `prefetchedWindow ?:` in `TmuxSessionViewModel.startAgentConversation`
+ *    so the separate window read always runs — moves this method PASS -> FAIL
+ *    (window-read leg 0 ms -> 818 ms at 150 ms RTT) while the budget method
+ *    fails either way. The run's FAILURE SET therefore changes, 1 -> 2, which is
+ *    the signal this split exists to produce: before the split the budget
+ *    assertion threw first and this one never ran, so the same mutation gave red
+ *    before and red after — indistinguishable.
+ *  - [COLD_OPEN_GATE_MS] — **not met on an emulator at any RTT**: measured
+ *    `conversation_open_full` was 840 / 429 / 753 / 842 ms at 80 ms RTT across
+ *    four runs, and a control pass at 10 ms RTT still measured 406 ms; a fifth
+ *    run (round 2) measured 357 ms. The device-side fixed cost on this AVD is
+ *    ~400 ms, so a <0.3 s PHONE-class budget cannot be met there no matter how
+ *    fast the link. Tracked as a follow-up; #2111 only makes the test run.
+ *
+ * That is why the enrolment is the NON-GATING phase 2b and not the
+ * release-GATING phase 2: gating on a budget the runner's hardware cannot meet
+ * would turn the nightly fault verdict permanently red for an environmental
+ * reason. Promote this class into `NETWORK_FAULT_CLASSES` once the <0.3 s
+ * question is resolved (a device-class-aware budget, or cutting the ~400 ms of
+ * device-side open cost).
  */
 @RunWith(AndroidJUnit4::class)
 class ConversationOpenLatencyRttDockerTest {
 
     @get:Rule
     val preGrantPermissions = PreGrantPermissionsRule()
+
+    /** Issue #2111: keeps the two methods' timing artifacts from overwriting each other. */
+    @get:Rule
+    val testName = TestName()
 
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val cleanupCommands = mutableListOf<String>()
@@ -106,20 +201,70 @@ class ConversationOpenLatencyRttDockerTest {
         writeSummary()
     }
 
+    /**
+     * Issue #828 STRUCTURAL guard, and the load-bearing test of this class.
+     *
+     * The recorded-Claude cold open must be ONE SSH round-trip: kind + source +
+     * the first transcript window all folded into the resolve exec. So the
+     * window-read leg (`conversation_open`) must collapse to ~0 at every RTT.
+     * Reintroducing the separate window-read round-trip (the #817 baseline
+     * shape) reddens this and ONLY this.
+     *
+     * Issue #2111 round 2: this is deliberately its own `@Test`, separate from
+     * the <0.3 s budget below, so a budget failure cannot abort the method
+     * before this assertion runs. See the class KDoc.
+     */
     @Test
-    fun coldOpenAndWarmSwitchUnderRealisticRtt(): Unit { runBlocking {
-        // Opt-in, local-only: the network-fault-proxy is not started by CI.
-        Assume.assumeFalse(
-            "network-fault-proxy is an opt-in Docker fixture; tests.yml does not start it",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
-        val enabled = InstrumentationRegistry.getArguments()
-            .getString("pocketshellNetworkFaultProofs")
-            ?.toBooleanStrictOrNull() == true
-        Assume.assumeTrue(
-            "Enable with -Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true " +
+    fun recordedClaudeFirstWindowIsPrefetchedUnderRealisticRtt(): Unit { runBlocking {
+        val (key, keyPath) = prepareFixtures()
+        // Two RTTs: ~150 ms (typical mobile/wifi) and ~80 ms (a good link).
+        // One-way latencies of 75 / 40 ms; toxiproxy delays each direction.
+        // The fold is asserted at BOTH: a dropped fold costs one extra serial
+        // round-trip, so the higher RTT is the louder detector (784 ms vs 184 ms).
+        measureAtRtt(key, keyPath, oneWayMs = 75, gate = LatencyGate.PrefetchedWindowRead)
+        measureAtRtt(key, keyPath, oneWayMs = 40, gate = LatencyGate.PrefetchedWindowRead)
+    } }
+
+    /**
+     * Issue #828 BUDGET gate: the recorded-Claude cold Conversation open must fit
+     * the <0.3 s target at the realistic-good 80 ms RTT.
+     *
+     * Issue #2111 round 2: known-red on an emulator (~400 ms of device-side fixed
+     * cost — see the class KDoc for the measurements), which is why this class
+     * sits in nightly's NON-GATING phase 2b. The assertion is NOT weakened and
+     * NOT skipped; it is isolated in its own `@Test` so its environmental failure
+     * cannot mask the structural guard above.
+     */
+    @Test
+    fun recordedClaudeColdOpenMeetsPhoneBudgetAtGoodRtt(): Unit { runBlocking {
+        val (key, keyPath) = prepareFixtures()
+        measureAtRtt(key, keyPath, oneWayMs = GATE_RTT_MS / 2, gate = LatencyGate.ColdOpenBudget)
+    } }
+
+    /** Which hard gate [measureAtRtt] applies (issue #2111 round 2). */
+    private enum class LatencyGate {
+        /** #828 structural: the first window is prefetched, so no second round-trip. */
+        PrefetchedWindowRead,
+
+        /** #828 budget: cold `conversation_open_full` < [COLD_OPEN_GATE_MS]. */
+        ColdOpenBudget,
+    }
+
+    /** Hard-asserts the toxiproxy opt-in and readies both the direct and proxied fixtures. */
+    private suspend fun prepareFixtures(): Pair<String, String> {
+        // Issue #2111: HARD-assert the toxiproxy opt-in — never `assumeTrue`.
+        // This class is enrolled in nightly fault phase 2b, which passes the flag
+        // and is therefore excluded from phase 1; anything else selecting it
+        // without the fixture must be a loud red, not a silent skip that reads
+        // as coverage. Mirrors OutboundAttachmentOffsetResumeJourneyE2eTest.
+        assertTrue(
+            "issue #2111: this proof requires the explicitly opted-in Toxiproxy fixture. " +
+                "Run it via nightly fault phase 2b, or locally with " +
+                "-Pandroid.testInstrumentationRunnerArguments.pocketshellNetworkFaultProofs=true " +
                 "after `docker compose -f tests/docker/docker-compose.yml up -d --build agents network-fault-proxy`",
-            enabled,
+            InstrumentationRegistry.getArguments()
+                .getString("pocketshellNetworkFaultProofs")
+                ?.toBooleanStrictOrNull() == true,
         )
 
         val key = readFixtureKey()
@@ -129,15 +274,15 @@ class ConversationOpenLatencyRttDockerTest {
         proxyTouched = true
         waitForSshFixtureReady(SshKey.Pem(key), port = NETWORK_FAULT_SSH_PORT)
 
-        val keyPath = writeKeyFile(key)
+        return key to writeKeyFile(key)
+    }
 
-        // Two RTTs: ~150 ms (typical mobile/wifi) and ~80 ms (a good link).
-        // One-way latencies of 75 / 40 ms; toxiproxy delays each direction.
-        measureAtRtt(key, keyPath, oneWayMs = 75)
-        measureAtRtt(key, keyPath, oneWayMs = 40)
-    } }
-
-    private suspend fun measureAtRtt(key: String, keyPath: String, oneWayMs: Int) {
+    private suspend fun measureAtRtt(
+        key: String,
+        keyPath: String,
+        oneWayMs: Int,
+        gate: LatencyGate,
+    ) {
         val rttMs = oneWayMs * 2
         val suffix = "${System.currentTimeMillis().toString().takeLast(8)}-rtt$rttMs"
         val sessionName = "issue817-rtt-$suffix"
@@ -277,46 +422,6 @@ class ConversationOpenLatencyRttDockerTest {
             measurements += "  full=${fullOpen.toArtifactLine()}"
             measurements += "  window=${windowOpen.toArtifactLine()}"
 
-            // Issue #828: the recorded-Claude cold open must fit the <0.3s gate at
-            // the realistic-good 80 ms RTT. This is the HARD regression assertion —
-            // NOT behind any assumeTrue (the opt-in proxy gate at the top of the
-            // @Test is the infra precondition; once the test runs, this bound is
-            // load-bearing, per #657/F3). At 80 ms the recorded-Claude open path
-            // after #828 is candidate-enum + window-read (the standalone
-            // readRecordedAgentKind exec is cached away and the host-wide ps scan
-            // is skipped for Claude/OpenCode), so the full open must clear 300 ms.
-            // 150 ms RTT is reported for the record but not gated: with the two
-            // mandatory serial round-trips it physically cannot fit 300 ms, and
-            // 80 ms is the phone-to-remote target the issue asks us to certify.
-            if (rttMs == GATE_RTT_MS) {
-                assertTrue(
-                    "recorded Claude cold conversation_open_full at ${rttMs}ms RTT must be " +
-                        "< ${COLD_OPEN_GATE_MS}ms (the <0.3s gate); was ${fullOpen.durationMs}ms " +
-                        "(window_read=${windowOpen.durationMs}ms detection_chain=${detectionChainMs}ms). " +
-                        "A regression here means the open path grew an extra serial SSH round-trip — " +
-                        "check the recorded-kind cache (no readRecordedAgentKind re-exec), that the " +
-                        "Claude/OpenCode recorded path skips the host-wide ps scan, and that the " +
-                        "recorded-Claude first window is prefetched in the resolve exec (not a " +
-                        "separate window-read round-trip).",
-                    fullOpen.durationMs < COLD_OPEN_GATE_MS,
-                )
-                // After #828 the recorded-Claude cold open is ONE SSH round-trip:
-                // kind + source + first window folded into the resolve exec. So the
-                // window-read leg (conversation_open) collapses to ~0 (the window
-                // was prefetched, no separate read) — the proof that the fold took
-                // effect. A non-trivial window-read here means the prefetch was
-                // dropped and the path fell back to a second round-trip (the #817
-                // baseline shape). Allow a small margin for the StateFlow push /
-                // parse the span still spans.
-                assertTrue(
-                    "recorded Claude window-read leg at ${rttMs}ms RTT must collapse to ~0 — the " +
-                        "first window is prefetched in the resolve exec, so no separate window-read " +
-                        "round-trip should run; was ${windowOpen.durationMs}ms. A larger value means " +
-                        "the prefetch was dropped and a second SSH round-trip came back.",
-                    windowOpen.durationMs < PREFETCHED_WINDOW_READ_GATE_MS,
-                )
-            }
-
             // ---- Warm switch: Terminal -> Conversation on an already-loaded row.
             // The open-time default is pinned to Terminal for this latency test
             // (see setDefaultAgentSessionViewForTest above), so the transcript is
@@ -339,6 +444,58 @@ class ConversationOpenLatencyRttDockerTest {
             val switchSpan = waitForSpan(CONVERSATION_SWITCH_LATENCY_OPERATION, "rtt$rttMs switch")
             record("rtt${rttMs}_conversation_switch_ms", switchSpan.durationMs)
             measurements += "  switch=${switchSpan.toArtifactLine()}"
+
+            // Issue #2111 round 2: exactly ONE hard gate per measurement pass, and
+            // which one is decided by the calling @Test. Both are HARD assertions —
+            // NOT behind any assumeTrue (the opt-in proxy gate in prepareFixtures is
+            // the infra precondition; once the test runs, these bounds are
+            // load-bearing, per #657/F3). They live in separate @Test methods so
+            // the known-red budget cannot abort the method before the structural
+            // guard is evaluated; see the class KDoc. The gates run LAST so every
+            // measurement above reaches the timing artifact even when one fails.
+            when (gate) {
+                // After #828 the recorded-Claude cold open is ONE SSH round-trip:
+                // kind + source + first window folded into the resolve exec. So the
+                // window-read leg (conversation_open) collapses to ~0 (the window
+                // was prefetched, no separate read) — the proof that the fold took
+                // effect. A non-trivial window-read here means the prefetch was
+                // dropped and the path fell back to a second round-trip (the #817
+                // baseline shape). Allow a small margin for the StateFlow push /
+                // parse the span still spans.
+                LatencyGate.PrefetchedWindowRead -> assertTrue(
+                    "recorded Claude window-read leg at ${rttMs}ms RTT must collapse to ~0 — the " +
+                        "first window is prefetched in the resolve exec, so no separate window-read " +
+                        "round-trip should run; was ${windowOpen.durationMs}ms " +
+                        "(full_open=${fullOpen.durationMs}ms detection_chain=${detectionChainMs}ms). " +
+                        "A larger value means the prefetch was dropped and a second SSH round-trip " +
+                        "came back.",
+                    windowOpen.durationMs < PREFETCHED_WINDOW_READ_GATE_MS,
+                )
+                // The <0.3s gate is asserted at the realistic-good 80 ms RTT only:
+                // 150 ms is measured for the record but cannot fit 300 ms with the
+                // mandatory serial round-trips, and 80 ms is the phone-to-remote
+                // target the issue asks us to certify. `check` rather than an `if`
+                // so a future caller at the wrong RTT is a loud error, not a
+                // silently-skipped gate.
+                LatencyGate.ColdOpenBudget -> {
+                    check(rttMs == GATE_RTT_MS) {
+                        "the <0.3s budget is only asserted at the ${GATE_RTT_MS}ms gate RTT; " +
+                            "this pass ran at ${rttMs}ms"
+                    }
+                    assertTrue(
+                        "recorded Claude cold conversation_open_full at ${rttMs}ms RTT must be " +
+                            "< ${COLD_OPEN_GATE_MS}ms (the <0.3s gate); was ${fullOpen.durationMs}ms " +
+                            "(window_read=${windowOpen.durationMs}ms " +
+                            "detection_chain=${detectionChainMs}ms). " +
+                            "A regression here means the open path grew an extra serial SSH " +
+                            "round-trip — check the recorded-kind cache (no readRecordedAgentKind " +
+                            "re-exec), that the Claude/OpenCode recorded path skips the host-wide " +
+                            "ps scan, and that the recorded-Claude first window is prefetched in " +
+                            "the resolve exec (not a separate window-read round-trip).",
+                        fullOpen.durationMs < COLD_OPEN_GATE_MS,
+                    )
+                }
+            }
         } finally {
             vm.clearForTest()
         }
@@ -471,8 +628,10 @@ class ConversationOpenLatencyRttDockerTest {
 
     private fun writeSummary() {
         if (measurements.isEmpty()) return
+        val method = testName.methodName ?: "unknown"
         val text = buildString {
             appendLine("scenario=conversation-open+switch-under-realistic-rtt (#817 Rank-1 measurement)")
+            appendLine("test_method=$method")
             appendLine("recorded_session=@ps_agent_kind=claude (the #825 path #818 will default to)")
             appendLine("proxy=network-fault-proxy toxiproxy symmetric latency, upstream agents:22")
             appendLine("measurements:")
@@ -486,7 +645,10 @@ class ConversationOpenLatencyRttDockerTest {
         val mediaRoot = com.pocketshell.app.test.testArtifactsRoot(instrumentation.targetContext)
         val dir = File(mediaRoot, "additional_test_output/conversation-open-rtt")
         check(dir.exists() || dir.mkdirs()) { "could not create artifact dir ${dir.absolutePath}" }
-        val file = File(dir, "issue817-conversation-open-rtt-timing.txt")
+        // Issue #2111 round 2: one file per @Test method — the two methods run in
+        // the same instrumentation process, so a fixed name would let whichever
+        // ran last silently overwrite the other's timings.
+        val file = File(dir, "issue817-conversation-open-rtt-timing-$method.txt")
         file.writeText(text)
         println("ISSUE817_TEXT ${file.absolutePath}")
     }

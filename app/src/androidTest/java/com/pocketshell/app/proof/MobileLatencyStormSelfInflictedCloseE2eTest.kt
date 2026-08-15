@@ -96,7 +96,7 @@ import org.junit.runner.RunWith
  * uncredited entry trigger: it re-runs the classify over the shared lease
  * whenever the pane's `(cwd, command, tty)` input changes
  * ([com.pocketshell.app.tmux.TmuxSessionViewModel] `startAgentDetectionForPane`
- * / `refreshForeignGuessForConfirmedShellPane`). After the mobile profile is
+ * / `bustStaleForeignKindGuess`). After the mobile profile is
  * applied, [forceReclassifyOverDegradedLink] changes the ACTIVE pane's cwd and
  * forces an active-window reconcile, so the next classify runs over the degraded
  * `-CC` lease and overruns.
@@ -572,7 +572,7 @@ class MobileLatencyStormSelfInflictedCloseE2eTest : NetworkFaultProofBase() {
      * Two moves, both over the UN-PROXIED port so the setup itself is not delayed:
      *  1. Change the ACTIVE pane's cwd to a DISTINCT directory (`mkdir -p … ; cd …`)
      *     so the pane's `(cwd, command, tty)` input triple genuinely changes — the
-     *     trigger [refreshForeignGuessForConfirmedShellPane] busts the one-shot
+     *     trigger [bustStaleForeignKindGuess] busts the one-shot
      *     confirmed-shell guess cache on.
      *  2. A background split + `kill-pane -a` (`-d`, keeping the ACTIVE pane %0)
      *     emits a `%layout-change` on the ATTACHED window, driving a full

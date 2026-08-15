@@ -185,13 +185,29 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
                 generationSource,
                 vm.agentConversations.value["%0"]?.detection?.sourcePath,
             )
+            // Issue #2155: the generation-aware re-read is now FOLDED INTO the
+            // candidate-enumeration exec rather than being a second round-trip,
+            // so the re-validation costs nothing on the conversation-open path
+            // (#828). Asserting only "some generation-aware read happened" would
+            // also pass for a standalone exec that regresses that budget.
             assertTrue(
-                "the raw cached source must be overridden via a standalone " +
-                    "generation-aware source read; commands=${session.execCommands}",
+                "the raw cached source must be overridden via a generation-aware " +
+                    "source read FOLDED into the enumeration exec; " +
+                    "commands=${session.execCommands}",
                 session.execCommands.any {
                     it.contains("@@PS_RECORDED_SOURCE_GENERATION@@") &&
                         it.contains("@ps_agent_source_generation") &&
                         it.contains("@ps_agent_source") &&
+                        it.contains("claude_dir=") &&
+                        !it.contains("@@PS_RECORDED_KIND@@")
+                },
+            )
+            assertTrue(
+                "no STANDALONE @ps_agent_source round-trip may remain; " +
+                    "commands=${session.execCommands}",
+                session.execCommands.none {
+                    it.contains("@ps_agent_source") &&
+                        !it.contains("claude_dir=") &&
                         !it.contains("@@PS_RECORDED_KIND@@")
                 },
             )
@@ -2440,10 +2456,22 @@ class TmuxSessionAgentDetectionStateTest : TmuxSessionViewModelTestBase() {
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") ->
                     recordedKindOutput
+                // Issue #2155: the per-detection exec folds the live
+                // `@ps_agent_source_generation` / `@ps_agent_source` read ahead
+                // of the candidate enumeration (no extra round-trip).
+                command.contains("@@PS_RECORDED_SOURCE@@") &&
+                    command.contains("claude_dir=") -> buildString {
+                    append(recordedSourceGenerationOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
+                    append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
+                    append(detectionOutput)
+                }
                 command.contains("@@PS_RECORDED_SOURCE_GENERATION@@") -> buildString {
                     append(recordedSourceGenerationOutput.trim())
                     append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
                     append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_source") ->
                     recordedSourceOutput

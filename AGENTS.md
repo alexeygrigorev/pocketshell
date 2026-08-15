@@ -553,6 +553,20 @@ are looking at before proposing a fix:
   what the pipeline emits, so a failing run leaves you a 2-line file with the
   task name and no error — and you must re-run the whole thing to learn anything.
   Redirect the full log to a file (`> gate.log 2>&1`) and grep the file after.
+- **`gh run view --job N --log` SILENTLY TRUNCATES a large job's log — never read
+  a test count from it (2026-08-15).** Validating PR #2158, the on-call fetched
+  the `Python utility tests` log with `--log` and got 888 lines ending mid-run at
+  `[ 70%]`, with no pytest summary line. Read at face value that says "640 passed,
+  no final total" — a missing-tests scare invented entirely by the fetch. The same
+  job via `gh api .../actions/jobs/<id>/logs` is 1329 lines and carries the real
+  `902 passed in 73.19s`.
+  Note this cuts BOTH ways and the dangerous direction is the quiet one: a
+  truncated log can under-report a total (looks like a failure that is not there)
+  or cut before a failure (looks like a pass that is not there). It is the same
+  family as the FROM-CACHE XML and the killed-run partial counts — an artifact
+  that reads as authoritative while describing only part of the run. Use the API
+  endpoint whenever you are asserting a count, and treat a log whose last line is
+  a progress percentage rather than a summary as truncated, not as a result.
 - **Reconcile completed agents — don't trust the mental lane count.** Dispatched ≠
   running. Stale waiter-relay notifications bury REAL completions (4 finished
   deliverables sat unmerged for hours, 2026-06-14). Periodically verify true state

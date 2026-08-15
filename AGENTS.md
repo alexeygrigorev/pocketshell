@@ -553,6 +553,19 @@ are looking at before proposing a fix:
   what the pipeline emits, so a failing run leaves you a 2-line file with the
   task name and no error — and you must re-run the whole thing to learn anything.
   Redirect the full log to a file (`> gate.log 2>&1`) and grep the file after.
+- **PIPING A COMMAND THROUGH `tail` (or any pipeline) LAUNDERS ITS EXIT CODE — the
+  rc you read is the LAST stage's, not the one you care about (2026-08-15).** Two
+  independent instances in one session, both on the CI watcher. A pipeline printed
+  `CLIENT_RC=0` which was `tail`'s status while the watcher had `code=exited/status=1`;
+  and a `tail --pid` wrapper around a SIGTERM'd watcher emitted `[exited with code 0]`
+  for a watcher that produced no summary and no JSON at all. Read the second as "no
+  verdict", never as green — which is what the on-call did, correctly.
+  Use `set -o pipefail`, or capture `${PIPESTATUS[0]}`, or better: do not pipe a
+  process whose exit status is your evidence. This is the same family as the
+  FROM-CACHE XML, the truncated `--log`, and `systemctl show` reporting
+  `Result=success` on a unit that is still running or never existed — four costumes
+  of one hazard, all seen the same day. The invariant they share: **an absent result
+  must never render as a passing one.**
 - **`gh run view --job N --log` SILENTLY TRUNCATES a large job's log — never read
   a test count from it (2026-08-15).** Validating PR #2158, the on-call fetched
   the `Python utility tests` log with `--log` and got 888 lines ending mid-run at

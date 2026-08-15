@@ -560,8 +560,15 @@ are looking at before proposing a fix:
   and a `tail --pid` wrapper around a SIGTERM'd watcher emitted `[exited with code 0]`
   for a watcher that produced no summary and no JSON at all. Read the second as "no
   verdict", never as green — which is what the on-call did, correctly.
-  Use `set -o pipefail`, or capture `${PIPESTATUS[0]}`, or better: do not pipe a
-  process whose exit status is your evidence. This is the same family as the
+  **`set -o pipefail` is the BACKSTOP, not the fix.** It repairs the exit code and
+  nothing else — `tail` also *discarded the watcher's summary line and JSON verdict*
+  both times, and the real result was recovered from the tool's own `--log-file`, not
+  from the pipeline. So the durable rule is: have the long-running process write its
+  own log/verdict file and read the verdict from there; use `pipefail` or
+  `${PIPESTATUS[0]}` only as a secondary guard. Best of all, do not pipe a process
+  whose exit status is your evidence. (This is the same shape as the transient-unit
+  rule above — the artifact must come from the run itself.) This is the same family
+  as the
   FROM-CACHE XML, the truncated `--log`, and `systemctl show` reporting
   `Result=success` on a unit that is still running or never existed — four costumes
   of one hazard, all seen the same day. The invariant they share: **an absent result

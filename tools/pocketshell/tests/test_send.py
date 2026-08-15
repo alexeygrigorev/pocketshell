@@ -2480,3 +2480,142 @@ def test_classify_unresolved_reports_a_live_owner_without_a_second_read(
     record, alive = send_mod.classify_unresolved(path, token)
     assert record.state == send_mod.STATE_PENDING
     assert alive is True
+
+
+# --------------------------------------------------------------------------
+# AC (#2153): the README table and EXIT_CODE_TABLE cannot disagree
+# --------------------------------------------------------------------------
+#
+# `--help` is rendered from EXIT_CODE_TABLE, so that half cannot drift. The
+# README half had no such link — which is how #2136 happened: #2122 fixed the
+# exit-4 wording in the README and left `--help` stale, and #2136 then pinned
+# the descriptions on the EXIT_CODE_TABLE side only, leaving the same hole open
+# in the other direction. These tests close both directions.
+
+REPO_README = Path(__file__).resolve().parents[1] / "README.md"
+SYNC_SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "sync-readme-exit-codes.py"
+
+
+def _mutated_table(old: str, new: str) -> tuple[tuple[int, str, str], ...]:
+    """EXIT_CODE_TABLE with one description word changed — a live mutant.
+
+    Asserts the substitution actually applied. A mutation that silently missed
+    reads exactly like "my check is adequate" (AGENTS.md, the #1641 lesson).
+    """
+    mutated = tuple(
+        (code, reason, description.replace(old, new))
+        for code, reason, description in send_mod.EXIT_CODE_TABLE
+    )
+    assert mutated != send_mod.EXIT_CODE_TABLE, f"mutation {old!r} -> {new!r} did not apply"
+    return mutated
+
+
+def test_readme_exit_code_table_is_generated_from_the_source_table() -> None:
+    """The committed README block must equal the render of EXIT_CODE_TABLE.
+
+    Row for row, including the DESCRIPTION column — the column #2122/#2136
+    drifted on, and the one a #2124 client reads to decide whether an auto-retry
+    is safe.
+    """
+    committed = send_mod.extract_readme_exit_code_table(
+        REPO_README.read_text(encoding="utf-8")
+    )
+    assert committed == send_mod.render_readme_exit_code_table(), (
+        "tools/pocketshell/README.md disagrees with EXIT_CODE_TABLE; regenerate "
+        "with tools/pocketshell/scripts/sync-readme-exit-codes.py"
+    )
+
+
+def test_the_pin_reddens_when_only_EXIT_CODE_TABLE_moves() -> None:
+    """Direction 1: the code half is edited and the README is left behind.
+
+    This is the hole #2136's description pins left open — they pinned `--help`
+    against the tuple, and both move together, so nothing noticed the README.
+    """
+    committed = send_mod.extract_readme_exit_code_table(
+        REPO_README.read_text(encoding="utf-8")
+    )
+    mutated = _mutated_table("Nothing was injected or journaled.", "Nothing happened.")
+    assert committed != send_mod.render_readme_exit_code_table(mutated)
+
+
+def test_the_pin_reddens_when_only_the_README_moves() -> None:
+    """Direction 2: the README half is edited alone — the #2122 shape."""
+    readme = REPO_README.read_text(encoding="utf-8")
+    committed = send_mod.extract_readme_exit_code_table(readme)
+    edited = send_mod.extract_readme_exit_code_table(
+        readme.replace(
+            committed,
+            committed.replace("stays retryable", "is gone forever"),
+            1,
+        )
+    )
+    assert edited != committed, "README-side mutation did not apply"
+    assert edited != send_mod.render_readme_exit_code_table()
+
+
+def test_the_pin_ignores_edits_outside_the_generated_block() -> None:
+    """Selectivity: the pin guards the table, not the whole README."""
+    readme = REPO_README.read_text(encoding="utf-8")
+    unrelated = readme + "\n\nAn unrelated new paragraph.\n"
+    assert send_mod.extract_readme_exit_code_table(unrelated) == (
+        send_mod.render_readme_exit_code_table()
+    )
+
+
+def test_a_readme_without_its_fences_fails_loudly() -> None:
+    """A lost fence must raise, not silently stop checking anything."""
+    readme = REPO_README.read_text(encoding="utf-8")
+    with pytest.raises(ValueError):
+        send_mod.extract_readme_exit_code_table(
+            readme.replace(send_mod.README_TABLE_BEGIN, "")
+        )
+    with pytest.raises(ValueError):
+        send_mod.extract_readme_exit_code_table(readme + readme)
+
+
+def test_every_exit_code_and_reason_reaches_the_generated_readme_table() -> None:
+    """The render must carry every code and reason, not a subset."""
+    rendered = send_mod.render_readme_exit_code_table()
+    for code, reasons, description in send_mod.EXIT_CODE_TABLE:
+        assert f"| {code} |" in rendered, f"exit code {code} missing from the README table"
+        for reason in (part.strip() for part in reasons.split("|")):
+            assert f"`{reason}`" in rendered, f"reason {reason!r} missing"
+        # The description is carried VERBATIM (bar markdown pipe escaping), so
+        # the README reader and the `--help` reader get the same sentences.
+        assert description.replace("|", "\\|") in rendered
+
+
+def test_the_regenerator_rewrites_only_the_block_and_is_idempotent() -> None:
+    """`sync-readme-exit-codes.py`'s rewrite is a fixpoint on a clean tree."""
+    readme = REPO_README.read_text(encoding="utf-8")
+    assert send_mod.readme_with_exit_code_table(readme) == readme
+    stale = send_mod.readme_with_exit_code_table(
+        readme, _mutated_table("Invalid or missing", "Bogus or missing")
+    )
+    assert stale != readme
+    # Only the block moved: everything outside the fences is byte-identical.
+    assert stale.split(send_mod.README_TABLE_BEGIN)[0] == (
+        readme.split(send_mod.README_TABLE_BEGIN)[0]
+    )
+    assert stale.split(send_mod.README_TABLE_END)[1] == (
+        readme.split(send_mod.README_TABLE_END)[1]
+    )
+    assert send_mod.readme_with_exit_code_table(stale) == readme
+
+
+def test_the_sync_script_self_test_still_detects_drift() -> None:
+    """Run the guard's own `--self-test` in the required Python check.
+
+    It plants a drift of each direction on a throwaway copy and requires a RED
+    for each, plus a GREEN on the clean tree and on an edit outside the block.
+    A guard that has silently stopped detecting anything fails here.
+    """
+    assert SYNC_SCRIPT.exists(), SYNC_SCRIPT
+    result = subprocess.run(
+        [sys.executable, str(SYNC_SCRIPT), "--self-test"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SELF-TEST PASSED" in result.stdout

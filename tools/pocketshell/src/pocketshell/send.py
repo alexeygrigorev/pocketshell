@@ -234,6 +234,95 @@ EXIT_CODE_TABLE: tuple[tuple[int, str, str], ...] = (
 )
 
 # --------------------------------------------------------------------------
+# The SECOND rendering of the table above: the README (issue #2153)
+# --------------------------------------------------------------------------
+#
+# ``--help`` is rendered from ``EXIT_CODE_TABLE`` by ``_epilog()`` below, so it
+# cannot drift. The prose table in ``tools/pocketshell/README.md`` had no such
+# link, and that is precisely what produced #2136: #2122 corrected the exit-4
+# wording in the README and left ``--help`` stale, and a client author reads the
+# README (not ``--help``) while implementing #2124's auto-retry branching.
+#
+# So the README block is GENERATED from the same tuple and pinned by a test in
+# the required `Python utility tests (pocketshell)` check. Neither side can be
+# edited alone: change the tuple and the committed README no longer matches the
+# render; change the README and it no longer matches the tuple. Regenerate with
+#
+#     tools/pocketshell/scripts/sync-readme-exit-codes.py
+
+#: Fences of the generated block in ``tools/pocketshell/README.md``. Both must
+#: appear exactly once, in this order.
+README_TABLE_BEGIN = (
+    "<!-- BEGIN GENERATED: send exit codes (source: EXIT_CODE_TABLE in pocketshell/send.py) -->"
+)
+README_TABLE_END = "<!-- END GENERATED: send exit codes -->"
+
+
+def _escape_markdown_cell(text: str) -> str:
+    """Escape what would otherwise end a markdown table cell early."""
+    return text.replace("|", "\\|")
+
+
+def render_readme_exit_code_table(
+    table: Sequence[tuple[int, str, str]] = EXIT_CODE_TABLE,
+) -> str:
+    """Render ``EXIT_CODE_TABLE`` as the README's markdown table.
+
+    The ``Meaning`` column carries the table's description VERBATIM — the same
+    sentences ``--help`` prints. A shorter hand-written paraphrase is exactly
+    the seam #2136 came through: two wordings, one of them wrong, and nothing
+    to say which.
+    """
+    lines = [
+        "| Exit | stdout reason | Meaning |",
+        "| ---- | ------------- | ------- |",
+    ]
+    for code, reason, description in table:
+        reasons = " \\| ".join(f"`{part.strip()}`" for part in reason.split("|"))
+        lines.append(f"| {code} | {reasons} | {_escape_markdown_cell(description)} |")
+    return "\n".join(lines)
+
+
+def extract_readme_exit_code_table(readme_text: str) -> str:
+    """Return the generated block of ``readme_text``, between its two fences.
+
+    Raises ``ValueError`` when the fences are missing, duplicated or inverted —
+    a README that lost its fences must fail loudly, not silently stop being
+    checked (that would be the drift hole reopened, wearing a green tick).
+    """
+    begins = readme_text.count(README_TABLE_BEGIN)
+    ends = readme_text.count(README_TABLE_END)
+    if begins != 1 or ends != 1:
+        raise ValueError(
+            "README must contain exactly one generated send exit-code block; "
+            f"found {begins} begin marker(s) and {ends} end marker(s)"
+        )
+    start = readme_text.index(README_TABLE_BEGIN) + len(README_TABLE_BEGIN)
+    end = readme_text.index(README_TABLE_END)
+    if end < start:
+        raise ValueError("README send exit-code markers are inverted")
+    return readme_text[start:end].strip("\n")
+
+
+def readme_with_exit_code_table(
+    readme_text: str,
+    table: Sequence[tuple[int, str, str]] = EXIT_CODE_TABLE,
+) -> str:
+    """``readme_text`` with its generated block replaced by a fresh render."""
+    # Validates the fences before rewriting anything.
+    extract_readme_exit_code_table(readme_text)
+    start = readme_text.index(README_TABLE_BEGIN) + len(README_TABLE_BEGIN)
+    end = readme_text.index(README_TABLE_END)
+    return (
+        readme_text[:start]
+        + "\n\n"
+        + render_readme_exit_code_table(table)
+        + "\n\n"
+        + readme_text[end:]
+    )
+
+
+# --------------------------------------------------------------------------
 # Journal
 # --------------------------------------------------------------------------
 

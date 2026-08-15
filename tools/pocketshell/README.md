@@ -86,21 +86,28 @@ framing twice put the inner markers into the receiving program as literal
 text (issue #1854). Callers that want bracketed paste write the framed bytes
 to stdin.
 
-Exit codes are stable, and `--help` documents them (rendered from the same
-table the code exits with, so they cannot drift):
+Exit codes are stable. Both renderings below — this table and `--help` — are
+generated from the one `EXIT_CODE_TABLE` the code exits with, so neither can
+drift from the other (issue #2153; regenerate with
+`tools/pocketshell/scripts/sync-readme-exit-codes.py`, pinned by a test in the
+`Python utility tests (pocketshell)` check):
+
+<!-- BEGIN GENERATED: send exit codes (source: EXIT_CODE_TABLE in pocketshell/send.py) -->
 
 | Exit | stdout reason | Meaning |
 | ---- | ------------- | ------- |
-| 0 | `delivered` | Injected by this call and journaled. |
-| 0 | `already-delivered` | The token was already journaled; nothing injected. |
-| 0 | `pruned <n>` | `--prune-older-than` removed `n` records. |
-| 2 | `bad-usage` | Invalid/missing arguments. Nothing injected or journaled. |
-| 3 | `pane-not-found` | Pane missing or dead. Not journaled; stays retryable. |
-| 4 | `tmux-failed` | tmux missing / no server / a definitive tmux failure. This call put **nothing** into the pane and left the journal exactly as it found it — see the note below for what that does and does not promise. |
-| 5 | `send-interrupted` or `journal-corrupt` | Delivery is genuinely UNKNOWN and the token is left journaled-unresolved. Either a previous attempt died without an answer, or this call got past the paste and the payload may already be in the pane. Never auto-retry — see below. |
-| 6 | `timeout` | A tmux call exceeded `--timeout`. If it hit at or after the commit, the payload may already be in the pane and the token is left in the exit-5 unknown. |
-| 7 | `journal-failed` | The journal could not be read/written. Nothing injected. |
-| 8 | `send-in-progress` | Another send for this token is STILL RUNNING. Nothing injected, nothing unknown — retry shortly to read that call's answer. |
+| 0 | `delivered` \| `already-delivered` \| `pruned` | Success. 'delivered' = injected by THIS call and journaled. 'already-delivered' = the token was already journaled, nothing was injected. 'pruned' = --prune-older-than removed N records. |
+| 2 | `bad-usage` | Invalid or missing arguments. Nothing was injected or journaled. |
+| 3 | `pane-not-found` | The pane id does not exist on the tmux server, or it is dead. Nothing was injected; the token is NOT journaled and stays retryable. |
+| 4 | `tmux-failed` | tmux is missing, no server is running, or a tmux command returned a definitive failure. This call put NOTHING into the pane and recorded no delivery, and it left the journal exactly as it found it: a claim this call took is released, and a pre-existing unresolved record it overwrote under --resend-interrupted is restored byte-for-byte. A retry therefore cannot duplicate — but 'unchanged' is not 'absent': if the token was already journaled-unresolved it still is, and the next plain call answers 'send-interrupted' rather than injecting. |
+| 5 | `send-interrupted` \| `journal-corrupt` | Delivery is genuinely UNKNOWN and the token is left journaled-unresolved, so no plain call will ever inject it again. Two ways in. Either a PREVIOUS attempt died without an answer (or left an unreadable record) and its owning process is gone, in which case this call injected nothing; or THIS call got past the point of no return — tmux accepted the paste and then the Enter failed, or the delivery could not be journaled — in which case the payload may ALREADY be in the pane. Never auto-retry either reading. Re-run with --resend-interrupted only to accept a possible duplicate. |
+| 6 | `timeout` | A tmux invocation exceeded --timeout. If the timeout hit at or after the commit the token is left in the unknown state above and the payload may ALREADY be in the pane; a retry then reports 'send-interrupted' rather than injecting again. |
+| 7 | `journal-failed` | The durable token journal could not be read or written (permissions, disk). Nothing was injected — the journal is written BEFORE the pane is touched precisely so this failure is safe. |
+| 8 | `send-in-progress` | Another send for this token is STILL RUNNING (its process is alive on this host). Nothing was injected by this call and nothing is unknown: the outcome is owned by that call. Retry shortly to read the answer — it will be 'delivered'/'already-delivered' or, if that process dies, 'send-interrupted'. --resend-interrupted does not override this: there is no unknown to resolve while the owner is alive, and forcing one would duplicate the payload. |
+
+<!-- END GENERATED: send exit codes -->
+
+(`pruned` prints the record count after the reason word: `pruned <n>`.)
 
 **The paste is the point of no return, and that is the boundary between exit 4
 and exit 5** (issue #2136). A client that branches on this table to decide

@@ -79,8 +79,9 @@ class ConnectionLogPartStoreTest {
 
     @Test
     fun `compaction bounds the on-disk part count without dropping lines`() = runBlocking {
+        val directory = dir()
         val store = ConnectionLogPartStore(
-            directory = dir(),
+            directory = directory,
             maxLinesPerPart = 10,
             maxParts = 4,
         )
@@ -92,6 +93,17 @@ class ConnectionLogPartStoreTest {
         assertTrue(
             "on-disk part count must be bounded to maxParts=4, was ${store.partCount()}",
             store.partCount() <= 4,
+        )
+        // ...and the bound must hold on the FILESYSTEM, not merely in whatever the
+        // store tracks in memory. #1669 was 200+ stranded `.part-*` files on a real
+        // device; a compaction that folds a part but fails to remove its file would
+        // satisfy an in-memory count while the directory grew without limit, and the
+        // stranded parts would be invisible to the exported archive too (#2147).
+        val onDisk = directory.listFiles().orEmpty().filter { it.name.contains(".part-") }
+        assertTrue(
+            "on-disk part FILE count must be bounded to maxParts=4, was ${onDisk.size}: " +
+                onDisk.map { it.name }.sorted(),
+            onDisk.size <= 4,
         )
         // Bounding the part count must NOT lose events: all 500 still read back in order.
         val seqs = store.readAllLines().map { it.substringAfter("\"seq\":").substringBefore("}").toInt() }

@@ -390,6 +390,30 @@ Minimum pre-push gate:
   and it was only caught when an unrelated PR's rebase compiled the androidTest
   set. When you privatize/rename/remove any API, grep the `androidTest` tree for
   callers and compile that source set before merge.
+- **Changing a shared STRING or a DEFAULT needs the same caller sweep as
+  changing an API — and the compiler will not help you (2026-08-16).** Two
+  separate `main` regressions in one day, both with the identical shape: the
+  issue's own new tests passed, while an **adjacent pre-existing journey on the
+  same production path** went red. Neither was visible to any per-PR check,
+  because journeys run batched on `main` after merge.
+  - **#2176** appended `". Opens session ports"` to the forwarding pill's
+    content description. A pre-existing #1487 proof matched that description
+    **exactly**, so its wait became unsatisfiable and burned its full 20 s.
+  - **#2124** flipped the default outbound delivery authority. A pre-existing
+    journey gated its heal proof on `agent_submit_ack`, a signal only the
+    **legacy** stack emits, so under the new default the gate never ran at all
+    and the assertion saw `events=[]`.
+
+  The second is the more dangerous shape and the one to internalise: a default
+  flip silently **re-points an oracle**. Nothing fails to compile, nothing looks
+  wrong at the call site, and a test whose gate never fires can pass vacuously
+  rather than redden — so the failure surfaces only where some assertion happens
+  to demand the vanished signal. When you change a shared literal, a
+  content description, a diagnostic event name, or any default that selects
+  between paths, grep the whole test tree for the old value **and** for tests
+  whose oracle depends on the path you just stopped taking, and say in your
+  status comment what you found. "It compiles" and "my own tests pass" are both
+  satisfied while this defect is live.
 - **A NEW journey/connected test wired into `scripts/ci-journey-suite.sh` in the
   SAME commit has never executed on CI before merge — compiling it is not
   running it (2026-07-28).** The per-PR required checks compile `main` + unit

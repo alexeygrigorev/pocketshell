@@ -1185,205 +1185,21 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      # Issue #760: the AVD create intermittently FATAL-ed with
-      # "Not enough space to create userdata partition. Available: 6957 MB,
-      # need 7372 MB" — pure runner disk pressure, not a test failure. The
-      # ubuntu-latest image ships ~30 GB of preinstalled SDKs/toolchains we do
-      # not use for this job (.NET, Haskell/GHC, the bundled Android NDK, the
-      # large CodeQL/boost caches). Reclaim them BEFORE the emulator-runner
-      # creates the AVD so the userdata partition always fits, then print the
-      # free space so a future disk regression is visible in the log. The `|| true`
-      # guards keep the step green if a path is already gone on a newer image.
-      #
-      # Issue #771 (round-3, PROVEN ROOT CAUSE): the original #760 version also
-      # ran
-      #     sudo rm -rf "$AGENT_TOOLSDIRECTORY"   # == /opt/hostedtoolcache
-      # which DELETED the JDK that `actions/setup-java@v5` installs under
-      # `/opt/hostedtoolcache/Java_*` and that `JAVA_HOME` points into
-      # (e.g. /opt/hostedtoolcache/Java_Temurin-Hotspot_jdk/17.0.19-10/x64).
-      # After that delete, EVERY Java tool died with
-      #     ERROR: JAVA_HOME is set to an invalid directory: …
-      # so the runner's sdkmanager (and the #771 freshly-reinstalled copy)
-      # crashed instantly and the emulator never booted. The cmdline-tools were
-      # never the real problem — the missing JDK was. Fix: prune the OTHER
-      # tool-caches under $AGENT_TOOLSDIRECTORY but PRESERVE the directory the
-      # live JAVA_HOME resolves into, so the active JDK survives.
+      # Issue #760/#771 — runner disk pressure FATAL-ed the AVD create, and the
+      # first fix deleted the JDK while reclaiming space. Rationale, the
+      # JAVA_HOME preservation and the 9000 MB infra-classified floor live in
+      # the script header (extracted verbatim in #2134).
       - name: Free disk space for the AVD
-        run: |
-          set -uo pipefail
-          echo "::group::Disk before cleanup"
-          df -h /
-          echo "::endgroup::"
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /usr/local/lib/android/sdk/ndk || true
-          sudo rm -rf /opt/ghc /usr/local/.ghcup || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-          # Prune unused tool-caches under $AGENT_TOOLSDIRECTORY but KEEP the
-          # active JDK that JAVA_HOME depends on (issue #771). Resolve the
-          # top-level tool-cache subdir the live JAVA_HOME lives in (e.g.
-          # `Java_Temurin-Hotspot_jdk`) and exclude exactly that one, so the
-          # exact JDK setup-java installed survives even across version bumps.
-          if [[ -n "${AGENT_TOOLSDIRECTORY:-}" && -d "${AGENT_TOOLSDIRECTORY:-}" ]]; then
-            keep_dir=""
-            if [[ -n "${JAVA_HOME:-}" && "$JAVA_HOME" == "$AGENT_TOOLSDIRECTORY"/* ]]; then
-              # First path segment of JAVA_HOME relative to the tool-cache root.
-              rel="${JAVA_HOME#"$AGENT_TOOLSDIRECTORY"/}"
-              keep_dir="${rel%%/*}"
-            fi
-            echo "Pruning $AGENT_TOOLSDIRECTORY, keeping active JDK dir: '${keep_dir:-<none>}'"
-            if [[ -n "$keep_dir" ]]; then
-              sudo find "$AGENT_TOOLSDIRECTORY" -mindepth 1 -maxdepth 1 \
-                ! -name "$keep_dir" -exec rm -rf {} + || true
-            else
-              # No JAVA_HOME under the tool-cache (unexpected): leave the dir
-              # intact rather than risk deleting the JDK. The deletions above
-              # plus docker prune already free far more than the 9000 MB guard.
-              echo "JAVA_HOME not under \$AGENT_TOOLSDIRECTORY; leaving it intact to protect the JDK."
-            fi
-          fi
-          sudo docker image prune -af || true
-          echo "::group::Disk after cleanup"
-          df -h /
-          echo "::endgroup::"
-          # Confirm the active JDK survived the prune (issue #771): a deleted
-          # JAVA_HOME makes every Java tool fail with
-          # "JAVA_HOME is set to an invalid directory" and the emulator never
-          # boots. Fail NOW with an explicit infra classification if it's gone.
-          if [[ -n "${JAVA_HOME:-}" && ! -x "$JAVA_HOME/bin/java" ]]; then
-            echo "::error title=EMULATOR INFRA UNAVAILABLE::JAVA_HOME=$JAVA_HOME has no bin/java after disk cleanup; the JDK was deleted (issue #771 regression guard). This is an infra setup error, not a test failure."
-            exit 1
-          fi
-          avail_mb="$(df -m --output=avail / | tail -1 | tr -d ' ')"
-          echo "Available on / after cleanup: ${avail_mb} MB"
-          # The AVD userdata partition needs ~7372 MB; require a safe margin so
-          # the create cannot FATAL on disk. If it still can't be freed, fail
-          # NOW with an explicit infra classification rather than letting the
-          # emulator-runner FATAL deeper in with a confusing message.
-          if [[ "$avail_mb" -lt 9000 ]]; then
-            echo "::error title=EMULATOR INFRA UNAVAILABLE::Only ${avail_mb} MB free on / after cleanup; the AVD userdata partition needs ~7372 MB. This is a runner-disk infra shortage (issue #760), not a test failure."
-            exit 1
-          fi
+        run: scripts/ci-emulator-free-disk.sh
 
-      # Issue #771 — REAL root cause + fix (supersedes the earlier "warm up a
-      # separate SDK copy" pre-step, which was INEFFECTIVE).
-      #
-      # The job dies inside the emulator-runner action's OWN "Install Android SDK"
-      # step. The action runs, by name on PATH:
-      #     sh -c "yes | sdkmanager --licenses > /dev/null"
-      # and that exits 1 in ~10 ms — far too fast for a JVM tool that actually
-      # started. The matching symptom in the previous pre-step's log was
-      # `yes: standard output: Broken pipe` on EVERY attempt: `sdkmanager` exits
-      # before reading a single line of stdin, so `yes` gets SIGPIPE. In other
-      # words the runner image's PRE-INSTALLED `sdkmanager`
-      # ($ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager) is broken on the
-      # current ubuntu-24.04 image and crashes instantly. The later
-      # "could not connect to TCP port 5554" is only the action's cleanup handler
-      # firing after that crash — no emulator was ever started.
-      #
-      # Why the previous attempt did NOT work: it accepted licenses / warmed
-      # packages against the SAME broken sdkmanager and threw the output away
-      # (`> /dev/null 2>&1`), so it could not even tell the binary was crashing.
-      # And the action does not reuse a "warmed" SDK — it re-invokes its own
-      # `sdkmanager --licenses` regardless, against the same broken binary.
-      #
-      # Why bumping the action version does NOT help: android-emulator-runner only
-      # downloads its own cmdline-tools when `$ANDROID_HOME/cmdline-tools` does NOT
-      # already exist (`if (!fs.existsSync(cmdlineToolsPath))`). On the hosted
-      # runner that directory exists, so EVERY action version (incl. main) skips
-      # the download and uses the runner's broken pre-installed sdkmanager.
-      #
-      # THE FIX (targets the action's actual failing call): replace the runner's
-      # broken `$ANDROID_HOME/cmdline-tools/latest` with the exact known-good
-      # cmdline-tools build the action itself pins (commandlinetools build
-      # 14742923). When the action then runs `sdkmanager --licenses` by name on
-      # PATH, PATH resolves to THIS freshly-installed, working sdkmanager — the
-      # same path the action uses — so its own license step succeeds and the AVD
-      # actually boots. We also accept licenses + warm the api-34 packages with
-      # the fresh tools so the action's subsequent install is a no-op.
-      #
-      # This step runs BEFORE any emulator/test, so a failure here can only ever
-      # block the run on infra provisioning — it can NEVER turn a genuine J1/J3
-      # test failure green (no #636/#638 false-green). We keep the journey suite
-      # + #760 retry-once + classifier below as the sole authoritative test gate.
+      # Issue #771 — the hosted runner's pre-installed `sdkmanager` crashes in
+      # ~10 ms, so the emulator-runner action's own `sdkmanager --licenses`
+      # dies and no emulator ever boots. Full root-cause analysis, why the
+      # earlier warm-up and an action bump could not work, and the repair +
+      # verification steps live in the script header (extracted verbatim in
+      # #2134).
       - name: Repair Android cmdline-tools + accept licenses (issue #771)
-        run: |
-          set -uo pipefail
-          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          echo "Using SDK_ROOT=$SDK_ROOT"
-          PREINSTALLED="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-
-          # 1) DIAGNOSE the pre-installed sdkmanager so the next CI run proves the
-          #    root cause (do NOT discard stderr this time). A working sdkmanager
-          #    prints its version in well under a second; the broken one exits
-          #    instantly. `|| true` keeps this purely diagnostic.
-          echo "::group::Diagnose pre-installed sdkmanager (expected to be broken)"
-          if [[ -x "$PREINSTALLED" ]]; then
-            echo "java -version:"; java -version 2>&1 | sed 's/^/  /' || true
-            echo "sdkmanager --version (stderr included):"
-            "$PREINSTALLED" --version 2>&1 | sed 's/^/  /' || echo "  (non-zero exit from pre-installed sdkmanager --version)"
-          else
-            echo "No pre-installed sdkmanager at $PREINSTALLED"
-          fi
-          echo "::endgroup::"
-
-          # 2) REPAIR: install the action's exact known-good cmdline-tools build
-          #    over the (broken) pre-installed `latest`, so the action's own
-          #    PATH-resolved `sdkmanager --licenses` runs against a working copy.
-          CMDLINE_TOOLS_ZIP="commandlinetools-linux-14742923_latest.zip"
-          CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/${CMDLINE_TOOLS_ZIP}"
-          echo "::group::Reinstall known-good cmdline-tools (build 14742923)"
-          TMP_DL="$(mktemp -d)"
-          ok=""
-          for attempt in 1 2 3; do
-            if curl -fsSL --retry 3 -o "$TMP_DL/$CMDLINE_TOOLS_ZIP" "$CMDLINE_TOOLS_URL"; then
-              ok="yes"; echo "Downloaded $CMDLINE_TOOLS_ZIP on attempt $attempt"; break
-            fi
-            echo "cmdline-tools download attempt $attempt failed; retrying in 5s..."
-            sleep 5
-          done
-          if [[ -z "$ok" ]]; then
-            echo "::error title=cmdline-tools download failed::Could not fetch ${CMDLINE_TOOLS_URL} after retries. This is a runner-network infra failure, not a test failure (issue #771)."
-            exit 1
-          fi
-          rm -rf "$TMP_DL/extract"
-          unzip -q "$TMP_DL/$CMDLINE_TOOLS_ZIP" -d "$TMP_DL/extract"
-          # The zip extracts to `cmdline-tools/`; the action expects the tools at
-          # `$SDK_ROOT/cmdline-tools/latest`.
-          rm -rf "$SDK_ROOT/cmdline-tools/latest"
-          mkdir -p "$SDK_ROOT/cmdline-tools"
-          mv "$TMP_DL/extract/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
-          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          chmod +x "$SDKMANAGER" || true
-          echo "Installed fresh sdkmanager at $SDKMANAGER"
-          echo "::endgroup::"
-
-          # 3) VERIFY the fresh sdkmanager actually runs. This is the load-bearing
-          #    proof that the repair worked (a JVM tool that starts prints a
-          #    version line in well under a second). If it still can't run, fail
-          #    NOW with an explicit infra classification rather than letting the
-          #    action crash deeper with the confusing "TCP port 5554" message.
-          echo "::group::Verify fresh sdkmanager"
-          if ! "$SDKMANAGER" --version; then
-            echo "::error title=sdkmanager still broken after repair::The freshly-installed cmdline-tools sdkmanager still failed to run (issue #771). Treat as EMULATOR INFRA UNAVAILABLE, not a test failure."
-            exit 1
-          fi
-          echo "::endgroup::"
-
-          # 4) Accept licenses + warm the exact api-34 packages with the WORKING
-          #    tools so the action's own license/install step is a no-op. Output is
-          #    visible this time so a future regression is diagnosable. The `|| true`
-          #    keeps these non-fatal: the action re-runs them, and the journey
-          #    suite + classifier remain the authoritative test gate.
-          echo "::group::Accept SDK licenses"
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses || true
-          echo "::endgroup::"
-          echo "::group::Warm up api-35 packages"
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
-            "platform-tools" \
-            "platforms;android-35" \
-            "system-images;android-35;google_apis;x86_64" || true
-          echo "::endgroup::"
+        run: scripts/ci-emulator-repair-sdk-tools.sh
 
       - name: Build SSH base image
         run: scripts/ci-journey-fixture-retry.sh sshd -- docker compose -f tests/docker/docker-compose.yml build sshd
@@ -1715,22 +1531,14 @@ jobs:
         # Issue #771: same v2.37.0 pin as the first attempt (see note above).
         uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
-          # API 35 (Android 15): matches the maintainer's dogfood device and the
-          # three connection-core journeys (BoundedGraceSessionHoldJourneyE2eTest,
-          # NotificationTapLivePinnedForegroundReseedJourneyE2eTest,
-          # SessionConnectionServiceE2eTest) that hard-assert SDK_INT == 35.
-          # nightly-extensive.yml already runs these classes green on this exact
-          # image/action. (#1197)
+          # Byte-identical to the first attempt's `with:` block above; the #1197
+          # api-level and #1458 `-memory 6144` rationale is on that copy.
           api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7
           force-avd-creation: true
           disable-animations: true
-          # Issue #1458: `-memory 6144` raises the guest RAM from the pixel_7 AVD
-          # hwconfig default (2048 MB) to 6 GB, leaving the render pipeline and
-          # connected journeys enough guest headroom while Docker fixtures run.
-          # ubuntu-latest gives ~16 GB host RAM, so 6 GB leaves host headroom.
           emulator-options: -no-snapshot-save -no-snapshot-load -no-window -gpu swiftshader_indirect -memory 6144 -noaudio -no-boot-anim -camera-back none -camera-front none
           emulator-boot-timeout: 900
           script: scripts/ci-journey-suite.sh

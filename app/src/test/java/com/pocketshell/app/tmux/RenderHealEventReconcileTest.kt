@@ -234,6 +234,11 @@ class RenderHealEventReconcileTest {
         sshLeaseManager = sshLeaseManager,
         sessionLifecycleSignals = null,
     ).also {
+        // Issue #2124: this VM sends payloads, so it must select a delivery
+        // authority explicitly. It was written against the LEGACY inference
+        // lane; the acknowledged path has its own tests.
+        it.hostAck.authorityOverrideForTest =
+            com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference
         it.setSeedIoDispatcherForTest(StandardTestDispatcher(testScheduler))
         it.setConnectedBlankWatchdogAutoArmEnabledForTest(false)
         it.setStaleRenderWatchdogAutoArmEnabledForTest(false)

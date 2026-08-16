@@ -100,6 +100,13 @@ class AgentSubmitAckJourneyE2eTest {
     private fun seedFixtureRule(): TestRule = TestRule { base, _ ->
         object : Statement() {
             override fun evaluate() {
+                // Issue #2124: the #869 ack GATE this class proves is the
+                // legacy paste-ack oracle. The shipped default is now the
+                // acknowledged host-CLI path, so select the legacy authority
+                // by name instead of letting a default flip re-point the class.
+                pinOutboundDeliveryAuthority(
+                    com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference,
+                )
                 runBlocking {
                     val key = readFixtureKey()
                     seededKey = key
@@ -114,14 +121,24 @@ class AgentSubmitAckJourneyE2eTest {
 
     @Before
     fun setUp() {
+        // Issue #2124: zero before every test so the tearDown assertion below is
+        // about THIS test's sends.
+        com.pocketshell.app.tmux.HostAckSendProbe.reset()
         clearLastSessionPrefs()
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
     }
 
     @After
     fun tearDown() {
+        // Issue #2124: this class proves the LEGACY paste-ack gate, so not one
+        // of its sends may have ridden the acknowledged lane. This is the
+        // behavioural half of the authority pin's liveness proof — under the
+        // round-1 prefs-write pin the legacy `agent_submit_ack` gate never ran
+        // at all (`recorded acks=[]`).
+        assertNoAcknowledgedSendsWereRecorded("AgentSubmitAckJourneyE2eTest")
         diagnostics?.close()
         diagnostics = null
+        clearOutboundDeliveryAuthorityPin()
         clearLastSessionPrefs()
         seededKey?.let { key ->
             runCatching { runBlocking { cleanupRemoteTmuxSession(key) } }

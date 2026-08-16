@@ -97,6 +97,20 @@ case "${1:-}" in
     # `agents kind` is new in 0.4.10 (#827). An old CLI has no `agents` group.
     fail_connect_rpc agents
     ;;
+  send)
+    # Issue #2124 (G10 unhappy fixture): the acknowledged outbound send is new
+    # in #2122, so an OLD host CLI has no `send` command at all. This is the
+    # runtime-lockstep case the client must fail CLOSED on — a plain retryable
+    # `Failed` naming the host-CLI upgrade, never a hang and never a new
+    # "unknown" row state. A happy fixture cannot enter this state, which is
+    # exactly why G10 requires the fixture that can.
+    #
+    # Deliberately NOT routed through fail_connect_rpc: `send` is not a
+    # connect-path RPC, and the hang/slow modes exist to model the connect
+    # break. Click's exact unknown-command shape (stderr + exit 2) is what a
+    # real old CLI produces here.
+    reject_unknown send
+    ;;
   profiles)
     # `profiles` exists on the old CLI, so in the default `unknown` mode it
     # delegates normally (the connect/probe path must still work). Only the

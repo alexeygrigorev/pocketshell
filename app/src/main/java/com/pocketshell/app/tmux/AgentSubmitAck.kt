@@ -285,6 +285,9 @@ internal suspend fun awaitAgentPasteIngested(
     currentClientHash: () -> Int?,
     currentGeneration: () -> Long,
 ): CommandResponse {
+    // Issue #2124 hard-switch probe: the 800ms paste-ack needle gate is a
+    // LEGACY-stack entry point and must be unreached on the acknowledged path.
+    OutboundLegacyStackProbe.pasteAck.incrementAndGet()
     val floorMs = if (agent == AgentKind.Codex) {
         maxOf(configuredFloorMs, CODEX_AGENT_SUBMIT_DELAY_MS)
     } else {

@@ -164,6 +164,8 @@ internal class AgentTranscriptAuthority(
         currentClientHash: () -> Int?,
         currentGeneration: () -> Long,
     ) {
+        // Issue #2124 hard-switch probe (legacy-stack entry point).
+        OutboundLegacyStackProbe.turnoverProof.incrementAndGet()
         awaitAgentSubmitTurnover(
             identity = identity,
             paneId = paneId,

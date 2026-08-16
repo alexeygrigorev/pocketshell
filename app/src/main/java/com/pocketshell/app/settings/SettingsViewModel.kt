@@ -234,6 +234,14 @@ class SettingsViewModel @Inject constructor(
     fun setDefaultAgentSessionView(view: DefaultAgentSessionView) =
         repository.setDefaultAgentSessionView(view)
 
+    /**
+     * Issue #2124: flip the outbound delivery authority (host-CLI ack vs the
+     * legacy terminal-observation inference). A HARD switch — see
+     * [OutboundDeliveryAuthority].
+     */
+    fun setOutboundDeliveryAuthority(authority: OutboundDeliveryAuthority) =
+        repository.setOutboundDeliveryAuthority(authority)
+
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) =
         repository.setDiagnosticsRecordingEnabled(enabled)
 

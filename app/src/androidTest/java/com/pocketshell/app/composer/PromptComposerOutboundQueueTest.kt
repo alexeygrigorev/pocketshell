@@ -29,7 +29,6 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
-import com.pocketshell.app.proof.signals.assertNodeFullyWithinOwningRoot
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellColors
 import org.junit.Assert.assertEquals
@@ -201,7 +200,7 @@ class PromptComposerOutboundQueueTest {
                     compose.onNodeWithTag(rowTag, useUnmergedTree = true)
                         .performScrollTo()
                         .assertIsDisplayed()
-                    compose.assertNodeFullyWithinOwningRoot(rowTag, useUnmergedTree = true)
+                    compose.assertNodeFullyWithinRoot(rowTag, useUnmergedTree = true)
                     compose.waitForIdle()
                     var latestGeometry = statusLayoutRegistration.currentWindowGeometry(row.id)
                     val geometryWait = runCatching {
@@ -289,7 +288,7 @@ class PromptComposerOutboundQueueTest {
                             statusViewportBoundsAfterExactScroll,
                         ),
                     )
-                    compose.assertNodeFullyWithinOwningRoot(retryTag, useUnmergedTree = true)
+                    compose.assertNodeFullyWithinRoot(retryTag, useUnmergedTree = true)
                     offlineRetryNode.performTouchInput { click() }
                     compose.waitForIdle()
                     add(row.id)

@@ -1503,7 +1503,51 @@ applied (no `assumeTrue` skip), and checks `boundsInRoot` **containment** rather
 than mere "displayed". Copy that shape for any new keyboard-up / occlusion /
 layout proof. The reusable containment assertions live in
 `app/src/androidTest/java/com/pocketshell/app/proof/signals/ComposeSignals.kt`:
-`assertNodeFullyWithinRoot(tag)` and `assertNodeFullyAboveImeOrKeyboard(tag, keyboardTopPx)`.
+`assertNodeFullyWithinRoot(tag)`,
+`assertNodeFullyWithinSystemBarsContentArea(tag, bottomInsetPx, topInsetPx)` and
+`assertNodeFullyAboveImeOrKeyboard(tag, keyboardTopPx)`.
+
+**`assertNodeFullyWithinRoot` was itself defective until #2180, in both
+directions at once — and it is the assertion these rules recommend, so its
+correctness is load-bearing for the whole discipline.** It resolved the viewport
+with `onRoot()`, which (a) **hard-throws** `Expected exactly '1' node ...
+(isRoot)` the moment a popup/dialog/dropdown attaches a second Compose root —
+#2126 hit that as an off-class failure inside a *pre-existing* assertion line,
+so it presented as a mystery flake in whatever class was running — and (b)
+compared against a root that, under edge-to-edge, **includes the strip behind
+the system bars**, so #2176's `All host ports` footer shipped unreachable with
+the check green. Both are fixed: it now resolves the node's OWN root and
+subtracts the navigation-bar strip it measures overlapping that root. Three
+things follow for anyone writing a proof:
+
+- **Every window in this app is edge-to-edge, not just the `MainActivity`
+  journeys.** `targetSdk = 35` means Android 15 makes a plain `ComponentActivity`
+  edge-to-edge with no `enableEdgeToEdge()` call anywhere — measured on the AVD
+  as a Compose root spanning `0..2400` with a 74 px status strip and a 126 px
+  navigation strip. Do not reason about "the edge-to-edge screens" as a subset.
+- **A bare `setContent` harness is NOT the production window.** `MainActivity`
+  pads its top-level `Surface` with
+  `WindowInsets.safeDrawing.exclude(WindowInsets.ime)`; a component test that
+  mounts a production surface without it renders that surface 126 px lower than
+  device ever does. Repairing the assertion surfaced 21 such cases across 6
+  classes. Use `Modifier.productionWindowChromePadding()`
+  (`proof/signals/ProductionWindowChrome.kt`) on the harness root — that moves
+  the fixture towards the reported state (F2), rather than relaxing the
+  assertion.
+- **Use the explicit sibling when the state is synthetic.** A synthetic inset
+  dispatch (the #780 model) reaches Compose but does not change what the platform
+  reports for the window, so the auto-measured variant would judge the
+  composition against a different device's bars. Pass the inset you observed
+  Compose consume to `assertNodeFullyWithinSystemBarsContentArea`, and hard-fail
+  when it is absent rather than asserting against zero. `topInsetPx` is only
+  applied on that explicit path: a top-anchored node under the status bar in a
+  bare harness means the harness omitted the scaffold, not that the product is
+  unreachable, so it is not subtracted automatically.
+
+`ContainmentAssertionRepairProofTest` (per-push journey suite) pins all of the
+above, including #2176's M1 mutation as a standing test: a control with
+`navigationBarsPadding()` and its unpadded sibling in the same window, one
+frame apart, must give opposite verdicts.
 
 **F2 — Test the REAL reported state (no proxy, no stand-in).** A regression proof
 for a reported visual / occlusion / layout / lifecycle bug MUST:
@@ -1525,23 +1569,24 @@ for a reported visual / occlusion / layout / lifecycle bug MUST:
   `assertIsDisplayed()` is satisfied by layout participation, not viewport
   containment — a control pushed off the right edge or under the keyboard still
   reports "displayed".
-- **But `assertNodeFullyWithinRoot` is NOT sufficient for a bottom-anchored
-  surface under `enableEdgeToEdge()` — the root INCLUDES the area behind the
-  system bars (#2176, 2026-08-16).** `MainActivity` calls `enableEdgeToEdge()`,
-  so a row rendered underneath the navigation bar is "fully within root" while
-  the user physically cannot tap it: the Back triangle cuts through the label and
+- **`assertNodeFullyWithinRoot` was NOT sufficient for a bottom-anchored surface
+  under edge-to-edge — the root INCLUDES the area behind the system bars (#2176,
+  2026-08-16). FIXED in #2180; the guidance below is now history plus the one
+  rule that survives it.** The root includes the strip the navigation bar is
+  painted on, so a row rendered underneath it was "fully within root" while the
+  user physically could not tap it: the Back triangle cuts through the label and
   taps in that region go to the system nav bar. #2176's `All host ports` footer
   shipped that way and its `assertNodeFullyWithinRoot(...)` was **green with the
   defect fully present — no mutation could redden it.** Note the irony: this
   bullet's own recommendation, applied faithfully, produced a decorative
-  assertion. Better than `assertIsDisplayed()`, still not enough.
-  For any bottom-anchored / edge-adjacent surface, assert against the area the
-  user can actually reach — the content area inside the system-bar insets — not
-  the raw root, and prove it by removing the inset padding as a mutation and
-  watching the assertion go RED. On the production side the cure is already in
-  the tree and is what the sibling surfaces do: apply `navigationBarsPadding()`
-  (`DetectedPortOverlay` in the same overlay region does, and two siblings carry
-  comments recording this exact 126px failure) rather than a hand-tuned offset.
+  assertion. #2180 repaired the helper (it now subtracts the measured nav-bar
+  strip and resolves the node's own root), so the plain call is once again the
+  right default — see the `assertNodeFullyWithinRoot` block above for when to
+  reach for the explicit `assertNodeFullyWithinSystemBarsContentArea` instead.
+  On the production side the cure is unchanged and is what the sibling surfaces
+  do: apply `navigationBarsPadding()` (`DetectedPortOverlay` in the same overlay
+  region does, and two siblings carry comments recording this exact 126px
+  failure) rather than a hand-tuned offset.
 - For event-driven / lifecycle flows, cover BOTH the subscriber-alive path AND
   the subscriber-torn-down path. Emitting an event while the collector is still
   bound never exercises the navigated-away / VM-cleared edge that actually

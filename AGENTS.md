@@ -328,7 +328,9 @@ are looking at before proposing a fix:
   device the chip cluster pushes the launcher off the RIGHT edge; needs a real
   bottom-bar layout rework (#813) where the launcher reserves width first.
   `assertIsDisplayed()` is the WRONG check for clip (an off-edge chip still
-  reports displayed) — use `assertNodeFullyWithinRoot`.
+  reports displayed) — use `assertNodeFullyWithinRoot`, which since #2180
+  resolves the node's own Compose root (no `onRoot()` throw when a popup is up)
+  and subtracts the navigation-bar strip an edge-to-edge root includes.
 - **Coupling invariant:** the conversation-view-on-detection default and
   composer-always-present are coupled — any change to view-mode/detection defaults
   MUST keep the composer present + contained, or the

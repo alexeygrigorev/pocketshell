@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.productionWindowChromePadding
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -93,6 +94,11 @@ class TmuxConversationDetectingComposerVisibleTest {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
+                        // #2180: production mounts every screen inside
+                        // MainActivity's safeDrawing padding; a bare setContent
+                        // harness does not, so the bottom chrome would render
+                        // inside the navigation-bar strip that eats its taps.
+                        .productionWindowChromePadding()
                         .background(PocketShellColors.Background),
                     contentAlignment = Alignment.BottomCenter,
                 ) {

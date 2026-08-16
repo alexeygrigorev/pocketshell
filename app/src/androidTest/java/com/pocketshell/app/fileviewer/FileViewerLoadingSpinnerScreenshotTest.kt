@@ -3,10 +3,12 @@ package com.pocketshell.app.fileviewer
 import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.productionWindowChromePadding
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Rule
 import org.junit.Test
@@ -37,6 +39,8 @@ class FileViewerLoadingSpinnerScreenshotTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: match MainActivity's safeDrawing padding.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Loading("/home/agent/notes/big-report.pdf"),
                     onBack = {},

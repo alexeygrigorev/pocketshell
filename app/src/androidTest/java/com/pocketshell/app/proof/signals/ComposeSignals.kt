@@ -2,11 +2,14 @@ package com.pocketshell.app.proof.signals
 
 import android.os.SystemClock
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.platform.ViewRootForTest
+import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.test.junit4.ComposeTestRule
 import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onRoot
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 /**
  * Default upper-bound timeout for waiting on a Compose layout to settle.
@@ -182,11 +185,73 @@ private fun readRect(rule: ComposeTestRule, tag: String): Rect? = try {
 const val CONTAINMENT_SLOP_DP_DEFAULT: Float = 1f
 
 /**
- * Asserts the node tagged [tag] lies FULLY inside the window root rect, i.e.
- * every edge is within the root's bounds (within [slopDp] of tolerance). This
- * is the containment check `assertIsDisplayed()` is NOT: it catches a control
- * pushed off any edge of the screen (off the right by a long title, below the
- * fold, above the status bar) even when the node is "displayed".
+ * Asserts the node tagged [tag] lies FULLY inside the area the user can actually
+ * reach in the window that owns it — the node's own Compose root, minus whatever
+ * part of that root the system bars sit on top of.
+ *
+ * This is the containment check `assertIsDisplayed()` is NOT: it catches a control
+ * pushed off any edge (off the right by a long title, below the fold, above the
+ * status bar, or under the navigation bar) even when the node is "displayed".
+ *
+ * ## The two defects this used to have (issue #2180)
+ *
+ * Until #2180 this helper resolved the viewport as `onRoot()` and compared against
+ * its raw bounds. Both halves of that were wrong, and they failed in opposite
+ * directions — one threw where it should have passed, the other passed where it
+ * should have thrown:
+ *
+ *  1. **`onRoot()` hard-throws when a second Compose window is attached** —
+ *     `Expected exactly '1' node ... (isRoot)` — which any popup, dialog or
+ *     dropdown produces. #2126's review hit it as an off-class failure inside a
+ *     *pre-existing* assertion line, so it presented as a mystery flake in
+ *     whatever class happened to be running. Fixed by resolving the root that
+ *     OWNS the node ([systemBarStripOverlapping] / [assertNodeContained]).
+ *  2. **The raw root is not the reachable area under `enableEdgeToEdge()`** —
+ *     which `MainActivity` calls. The Compose root then INCLUDES the strip behind
+ *     the system navigation bar, so a bottom-anchored row drawn under the Back
+ *     triangle is "fully within root" while every tap there goes to the system
+ *     bar. #2176's `All host ports` footer shipped exactly that way with this
+ *     assertion green: under #2176's M1 mutation (delete the panel's inset
+ *     padding) the footer landed at `2274..2400` inside a root of `0..2400` and
+ *     this check **stayed green with the defect fully present** — the D32/G6
+ *     wrong-cost shape. Fixed by subtracting the measured system-bar strip.
+ *
+ * ## Where the inset comes from, and when to use the explicit sibling instead
+ *
+ * This overload measures the strip from the LIVE window: how much of the node's
+ * own Compose root the status bar and navigation bar physically cover, computed
+ * by intersecting the root's on-screen rect with the window's system-bar edges.
+ * That degrades to exactly zero for a window that is not edge-to-edge (the root
+ * already stops above the navigation bar there, so nothing is subtracted and the
+ * check is unchanged), and to the real bar height for one that is.
+ *
+ * It CANNOT see a synthetic inset dispatched by a fixture: `ViewCompat`'s
+ * dispatch reaches Compose, but it does not change what the platform reports for
+ * the window. So a proof that produces its keyboard-up / nav-bar state with the
+ * #780 synthetic-inset model must call
+ * [assertNodeFullyWithinSystemBarsContentArea] and pass the inset it observed
+ * Compose consume — otherwise it is judging the composition against a different
+ * device's bars.
+ *
+ * ## Why only the BOTTOM bar is subtracted automatically
+ *
+ * The status bar and the navigation bar are not symmetric for this question, and
+ * that is a measured finding rather than a preference. Every screen mounts an app
+ * bar / scaffold that owns the status-bar inset, so a top-anchored node sitting
+ * under the status bar in a component test means the HARNESS omitted the
+ * scaffold, not that the product is unreachable. The navigation bar is the
+ * opposite: it is exactly where the product's own bottom chrome lives (the
+ * composer launcher, the chip row, a panel footer), which is the surface #2176
+ * shipped unreachable with this assertion green.
+ *
+ * Measured on the AVD while building #2180: auto-subtracting the TOP strip as
+ * well reddened 8 `TmuxSessionVoiceSurfaceUiTest` cases, 1
+ * `TmuxConsolidatedChromeScreenshotTest` case, `UsageGlancePillE2eTest` and 2
+ * `FileViewerScaffoldTest` cases — every one of them a bare `setContent` harness
+ * placing production chrome at `y=0` with no scaffold, and not one of them a
+ * product defect. A proof that genuinely needs the status-bar edge asserts it
+ * explicitly through [assertNodeFullyWithinSystemBarsContentArea], which takes
+ * `topInsetPx`.
  *
  * @param tag the `testTag` of the node under test.
  * @param slopDp per-edge tolerance in dp (default [CONTAINMENT_SLOP_DP_DEFAULT]).
@@ -198,27 +263,20 @@ fun ComposeTestRule.assertNodeFullyWithinRoot(
     slopDp: Float = CONTAINMENT_SLOP_DP_DEFAULT,
     useUnmergedTree: Boolean = false,
 ) {
-    val density = density.density
-    val slopPx = slopDp * density
     val node = onNodeWithTag(tag, useUnmergedTree = useUnmergedTree).fetchSemanticsNode()
-    val bounds = node.boundsInRoot
-    val root = onRoot().fetchSemanticsNode().boundsInRoot
-
-    val withinLeft = bounds.left >= root.left - slopPx
-    val withinTop = bounds.top >= root.top - slopPx
-    val withinRight = bounds.right <= root.right + slopPx
-    val withinBottom = bounds.bottom <= root.bottom + slopPx
-
-    if (!withinLeft || !withinTop || !withinRight || !withinBottom) {
-        throw AssertionError(
-            "Node '$tag' is not fully within the window root (issue #657 / F1 " +
-                "containment). 'displayed' is satisfied by layout participation, " +
-                "not viewport containment, so this control may be off-screen / " +
-                "clipped even though assertIsDisplayed() passes. " +
-                "nodeBounds=$bounds rootBounds=$root slopPx=$slopPx " +
-                "(left=$withinLeft top=$withinTop right=$withinRight bottom=$withinBottom).",
-        )
-    }
+    // `runOnUiThread` (not `runOnIdle`): the View reads below must happen on the
+    // UI thread, but this assertion must not silently insert an idle barrier that
+    // its ~150 existing call sites never had.
+    val strip = runOnUiThread { systemBarStripOverlapping(tag, node) }
+    assertNodeContained(
+        tag = tag,
+        node = node,
+        bottomInsetPx = strip.bottomPx,
+        // Deliberately NOT strip.topPx — see "Why only the bottom bar" above.
+        topInsetPx = 0f,
+        slopDp = slopDp,
+        insetProvenance = strip.provenance,
+    )
 }
 
 /**
@@ -226,42 +284,22 @@ fun ComposeTestRule.assertNodeFullyWithinRoot(
  * REACH — the window root minus the system bars — rather than merely inside the
  * root.
  *
- * ## Why [assertNodeFullyWithinRoot] is not enough (issue #2176)
+ * ## When to use THIS instead of [assertNodeFullyWithinRoot] (issue #2176/#2180)
  *
- * Under `enableEdgeToEdge()` (which `MainActivity` calls) the Compose root
- * **includes the strip behind the system navigation bar**. So a bottom-anchored
- * row drawn underneath the Back triangle — where the system bar eats every tap —
- * is "fully within root" and `assertNodeFullyWithinRoot` passes with the defect
- * fully present. There is no mutation that reddens it, which makes it a
- * decorative assertion in exactly the D32/G6 sense. The #2176 round-1 build
- * shipped its footer under the nav bar with that check green.
- *
- * Note this is the same trap one level up from the one process.md's F3 rules
- * warn about: `assertNodeFullyWithinRoot` is the recommended cure for a bare
- * `assertIsDisplayed()`, and it is genuinely better — it is just still blind to
- * the system-bar strip once a window goes edge-to-edge. Use THIS helper whenever
- * the surface under test is bottom- or top-anchored in an edge-to-edge window.
- *
- * ## The viewport is resolved from the node's OWN root
- *
- * [assertNodeFullyWithinRoot] calls `onRoot()`, which hard-throws
- * `Expected exactly '1' node ... (isRoot)` the moment a second Compose window is
- * attached — a popup, a dialog, a dropdown (issue #2180, found independently on
- * #2126). This helper resolves the root that OWNS the node instead, the same way
- * [assertNodeFullyWithinOwningRoot] does, so a stray popup elsewhere in the tree
- * cannot make it throw. Both defects in the older helper trace to one assumption:
- * that `onRoot()` returns exactly one root whose bounds are the reachable area.
- * Neither half holds. Repairing the older helper's call sites is #2180's job and
- * is deliberately not done here.
+ * Both go through the same containment core and both resolve the node's OWN
+ * Compose root; the only difference is where the system-bar inset comes from.
+ * [assertNodeFullyWithinRoot] measures it from the live window. Use THIS overload
+ * when the state under test was produced by a SYNTHETIC inset dispatch (the #780
+ * model), because a synthetic dispatch reaches Compose but does not change what
+ * the platform reports for the window — so the live measurement would judge the
+ * composition against a different set of bars than the one it laid out for.
  *
  * [bottomInsetPx] / [topInsetPx] are the system-bar insets in the SAME root
- * coordinate space as `boundsInRoot`. They are passed explicitly (rather than
- * read here) for the same reason [assertNodeFullyAboveImeOrKeyboard] takes its
- * keyboard top explicitly: the caller may have produced the state with a
- * synthetic inset dispatch (the #780 model) or from the live window, and this
- * helper works for both. Callers reading a live inset MUST hard-fail when it is
- * absent rather than asserting against a zero inset, or the check goes vacuous
- * on exactly the devices that have no bar.
+ * coordinate space as `boundsInRoot`, for the same reason
+ * [assertNodeFullyAboveImeOrKeyboard] takes its keyboard top explicitly. Callers
+ * reading a live inset MUST hard-fail when it is absent rather than asserting
+ * against a zero inset, or the check goes vacuous on exactly the devices that
+ * have no bar.
  *
  * @param tag the `testTag` of the node under test.
  * @param bottomInsetPx height of the bottom system bar (navigation bar), in px.
@@ -276,8 +314,40 @@ fun ComposeTestRule.assertNodeFullyWithinSystemBarsContentArea(
     slopDp: Float = CONTAINMENT_SLOP_DP_DEFAULT,
     useUnmergedTree: Boolean = false,
 ) {
-    val slopPx = slopDp * density.density
     val node = onNodeWithTag(tag, useUnmergedTree = useUnmergedTree).fetchSemanticsNode()
+    assertNodeContained(
+        tag = tag,
+        node = node,
+        bottomInsetPx = bottomInsetPx,
+        topInsetPx = topInsetPx,
+        slopDp = slopDp,
+        insetProvenance = "explicit (caller-supplied, e.g. a #780 synthetic dispatch)",
+    )
+}
+
+/**
+ * The ONE containment core both public assertions delegate to (issue #2180).
+ *
+ * Two properties are load-bearing and are the reason there is exactly one core
+ * rather than a family of near-copies that drift:
+ *
+ *  - **The viewport is the root that OWNS [node]**, resolved by identity against
+ *    `SemanticsNode.root`, never `onRoot()`. `onRoot()` hard-throws as soon as a
+ *    second Compose window is attached, which is why a popup somewhere else in
+ *    the tree used to redden an unrelated pre-existing assertion line (#2126).
+ *  - **The reachable area is the root minus the system-bar strip.** Under
+ *    edge-to-edge the raw root includes the strip the bars are painted on, and a
+ *    node inside that strip cannot be tapped by the user at all.
+ */
+private fun ComposeTestRule.assertNodeContained(
+    tag: String,
+    node: SemanticsNode,
+    bottomInsetPx: Float,
+    topInsetPx: Float,
+    slopDp: Float,
+    insetProvenance: String,
+) {
+    val slopPx = slopDp * density.density
     val bounds = node.boundsInRoot
     val root = onAllNodes(isRoot()).fetchSemanticsNodes()
         .single { it.root === node.root }
@@ -293,12 +363,14 @@ fun ComposeTestRule.assertNodeFullyWithinSystemBarsContentArea(
 
     if (!aboveBottomBar || !belowTopBar || !withinLeft || !withinRight) {
         throw AssertionError(
-            "Node '$tag' is not fully within the reachable content area (issue " +
-                "#2176). Under edge-to-edge the Compose root INCLUDES the strip " +
-                "behind the system bars, so a node that fails here can still be " +
-                "'fully within root' — and taps landing on that strip go to the " +
-                "system bar, not the app. nodeBounds=$bounds rootBounds=$root " +
+            "Node '$tag' is not fully within the reachable content area (issues " +
+                "#657 / #2176 / #2180). 'displayed' is satisfied by layout " +
+                "participation, and under edge-to-edge even the Compose ROOT " +
+                "includes the strip behind the system bars — taps landing on that " +
+                "strip go to the system bar, not the app. " +
+                "nodeBounds=$bounds rootBounds=$root " +
                 "topInsetPx=$topInsetPx bottomInsetPx=$bottomInsetPx " +
+                "insetProvenance=$insetProvenance " +
                 "contentTop=$contentTop contentBottom=$contentBottom slopPx=$slopPx " +
                 "(aboveBottomBar=$aboveBottomBar belowTopBar=$belowTopBar " +
                 "left=$withinLeft right=$withinRight).",
@@ -306,28 +378,82 @@ fun ComposeTestRule.assertNodeFullyWithinSystemBarsContentArea(
     }
 }
 
-/** Modal-safe containment: resolves the root that owns [tag] when multiple windows exist. */
-fun ComposeTestRule.assertNodeFullyWithinOwningRoot(
+/** How much of a Compose root the system bars physically cover, in root px. */
+internal data class SystemBarStrip(
+    val topPx: Float,
+    val bottomPx: Float,
+    val provenance: String,
+)
+
+/**
+ * Measures the part of [node]'s own Compose root that the status bar and the
+ * navigation bar sit on top of, in the same coordinate space as `boundsInRoot`.
+ *
+ * The measurement is an INTERSECTION, not a plain inset read, and that is what
+ * makes it safe to apply to every existing call site:
+ *
+ *  - a window that is **not** edge-to-edge already has its Compose root stopping
+ *    below the status bar and above the navigation bar, so the intersection is
+ *    zero on both edges and containment is judged against the whole root exactly
+ *    as it was before #2180;
+ *  - a window that **is** edge-to-edge has its root spanning the bars, so the
+ *    intersection is the real bar height and that strip is excluded.
+ *
+ * A plain `getRootWindowInsets()` read would report the bar height in BOTH cases
+ * and would therefore shrink every non-edge-to-edge surface by a bar it does not
+ * actually overlap — inventing failures rather than finding them.
+ *
+ * Hard-fails when the strip cannot be measured. "I could not check" must never
+ * render as "I checked and it is fine".
+ */
+internal fun ComposeTestRule.systemBarStripOverlappingRootOf(
     tag: String,
-    slopDp: Float = CONTAINMENT_SLOP_DP_DEFAULT,
     useUnmergedTree: Boolean = false,
-) {
-    val slopPx = slopDp * density.density
+): SystemBarStrip {
     val node = onNodeWithTag(tag, useUnmergedTree = useUnmergedTree).fetchSemanticsNode()
-    val root = onAllNodes(isRoot()).fetchSemanticsNodes().single { it.root === node.root }
-    val bounds = node.boundsInRoot
-    val rootBounds = root.boundsInRoot
-    if (
-        bounds.left < rootBounds.left - slopPx ||
-        bounds.top < rootBounds.top - slopPx ||
-        bounds.right > rootBounds.right + slopPx ||
-        bounds.bottom > rootBounds.bottom + slopPx
-    ) {
-        throw AssertionError(
-            "Node '$tag' is not fully within its owning Compose window root. " +
-                "nodeBounds=$bounds rootBounds=$rootBounds slopPx=$slopPx",
+    return runOnUiThread { systemBarStripOverlapping(tag, node) }
+}
+
+internal fun systemBarStripOverlapping(tag: String, node: SemanticsNode): SystemBarStrip {
+    val view = (node.root as? ViewRootForTest)?.view
+        ?: throw AssertionError(
+            "Node '$tag': its Compose root is not backed by an Android View, so the " +
+                "system-bar strip covering that root cannot be measured and a " +
+                "containment check against the raw root would be vacuous under " +
+                "edge-to-edge (issue #2180). Use " +
+                "assertNodeFullyWithinSystemBarsContentArea and pass the inset " +
+                "explicitly.",
         )
-    }
+    val insets = ViewCompat.getRootWindowInsets(view)
+        ?: throw AssertionError(
+            "Node '$tag': the window hosting its Compose root reports no " +
+                "WindowInsets, so the system-bar strip cannot be measured (issue " +
+                "#2180). Use assertNodeFullyWithinSystemBarsContentArea and pass " +
+                "the inset explicitly rather than asserting against the raw root.",
+        )
+    val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+
+    val window = view.rootView
+    val windowLocation = IntArray(2).also(window::getLocationOnScreen)
+    val windowTop = windowLocation[1]
+    val windowBottom = windowTop + window.height
+
+    val rootLocation = IntArray(2).also(view::getLocationOnScreen)
+    val rootTop = rootLocation[1]
+    val rootBottom = rootTop + view.height
+
+    val statusBarBottom = windowTop + bars.top
+    val navigationBarTop = windowBottom - bars.bottom
+
+    val topOverlap = (statusBarBottom - rootTop).coerceAtLeast(0)
+    val bottomOverlap = (rootBottom - navigationBarTop).coerceAtLeast(0)
+
+    return SystemBarStrip(
+        topPx = topOverlap.toFloat(),
+        bottomPx = bottomOverlap.toFloat(),
+        provenance = "live window (systemBars=$bars, root=$rootTop..$rootBottom, " +
+            "window=$windowTop..$windowBottom on screen)",
+    )
 }
 
 /**
@@ -361,7 +487,13 @@ fun ComposeTestRule.assertNodeFullyAboveImeOrKeyboard(
     val slopPx = slopDp * density
     val node = onNodeWithTag(tag, useUnmergedTree = useUnmergedTree).fetchSemanticsNode()
     val bounds = node.boundsInRoot
-    val root = onRoot().fetchSemanticsNode().boundsInRoot
+    // The node's OWN root, never `onRoot()` (issue #2180): a keyboard-up proof
+    // very often has a dropdown / popup / modal sheet attached at the same
+    // moment, and `onRoot()` hard-throws `Expected exactly '1' node ... (isRoot)`
+    // as soon as a second Compose window exists.
+    val root = onAllNodes(isRoot()).fetchSemanticsNodes()
+        .single { it.root === node.root }
+        .boundsInRoot
 
     val aboveKeyboard = bounds.bottom <= keyboardTopPx + slopPx
     val withinLeft = bounds.left >= root.left - slopPx

@@ -168,7 +168,7 @@ class PromptComposerSheetSourceGuardTest {
             label = "journey",
             oracle = journey,
             actionMarker = "val offlineRetryControlNode = compose.onNode(",
-            endMarker = "compose.assertNodeFullyWithinOwningRoot(retryTag",
+            endMarker = "compose.assertNodeFullyWithinRoot(retryTag",
         )
         assertExactRetryScrollBeforeDisabledPointerTap(
             label = "journey physical first-row tap after proving both rows",
@@ -202,7 +202,7 @@ class PromptComposerSheetSourceGuardTest {
                 "geometryWait.isFailure",
                 "geometryWait.exceptionOrNull()",
                 "raw-window LayoutCoordinates",
-                "assertNodeFullyWithinOwningRoot(rowTag, useUnmergedTree = true)",
+                "assertNodeFullyWithinRoot(rowTag, useUnmergedTree = true)",
             ).forEach { required ->
                 assertTrue("#1602 geometry oracle lost term: $required", oracle.contains(required))
             }

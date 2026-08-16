@@ -311,7 +311,9 @@ class TmuxClientExecLaneTest {
             // was written to -CC stdin for the reconcile, and the exec carries the
             // tmux-prefixed list-panes command verbatim.
             val execCmd = session.execCommands.single { it.contains("list-panes") }
-            assertEquals("tmux $command", execCmd)
+            // Issue #2160: the exec lane expands `#{pane_current_path}` and the
+            // `@ps_*` user options, so it must ride the locale-proof client.
+            assertEquals("${TmuxRead.CLIENT} $command", execCmd)
         } finally {
             client.close()
         }
@@ -653,7 +655,7 @@ class TmuxClientExecLaneTest {
         runBlocking {
             assertSendLifecycleViaExecCompletesDuringCcWedge(
                 sessionCommand = "rename-session -t 'work' 'renamed'",
-                expectExecEquals = "tmux rename-session -t 'work' 'renamed'",
+                expectExecEquals = "${TmuxRead.CLIENT} rename-session -t 'work' 'renamed'",
             )
         }
 
@@ -662,7 +664,7 @@ class TmuxClientExecLaneTest {
         runBlocking {
             assertSendLifecycleViaExecCompletesDuringCcWedge(
                 sessionCommand = "new-session -d -s 'next' -c '~'",
-                expectExecEquals = "tmux new-session -d -s 'next' -c '~'",
+                expectExecEquals = "${TmuxRead.CLIENT} new-session -d -s 'next' -c '~'",
             )
         }
 
@@ -671,7 +673,7 @@ class TmuxClientExecLaneTest {
         runBlocking {
             assertSendLifecycleViaExecCompletesDuringCcWedge(
                 sessionCommand = "kill-session -t 'work'",
-                expectExecEquals = "tmux kill-session -t 'work'",
+                expectExecEquals = "${TmuxRead.CLIENT} kill-session -t 'work'",
             )
         }
 
@@ -718,7 +720,9 @@ class TmuxClientExecLaneTest {
                 )
                 assertEquals(
                     "the list-sessions must ride the exec lane verbatim",
-                    "tmux $listCommand",
+                    // Issue #2160: `@ps_agent_state` / `@ps_agent_state_updated_at`
+                    // ride this lane; it must use the locale-proof client.
+                    "${TmuxRead.CLIENT} $listCommand",
                     session.execCommands.single { it.contains("list-sessions") },
                 )
                 assertFalse(
@@ -775,7 +779,11 @@ class TmuxClientExecLaneTest {
                 assertFalse("a normal mutation must not be an error", response.isError)
                 assertTrue("rename-session prints nothing on success", response.output.isEmpty())
                 assertEquals(
-                    "tmux rename-session -t 'work' 'renamed'",
+                    // Issue #2160: the lifecycle exec lane rides the locale-proof
+                    // client uniformly (it also carries the `list-sessions -F`
+                    // poll with `@ps_agent_state`); `-u` only affects OUTPUT
+                    // encoding, so a mutation is byte-for-byte unaffected.
+                    "${TmuxRead.CLIENT} rename-session -t 'work' 'renamed'",
                     session.execCommands.single { it.contains("rename-session") },
                 )
             } finally {

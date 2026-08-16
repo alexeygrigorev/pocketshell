@@ -14,6 +14,7 @@ import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.OpenCodeReader
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.tmux.TmuxRead
 import com.pocketshell.core.tmux.TmuxTarget
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -580,9 +581,13 @@ public class AgentConversationRepository internal constructor(
         // with `<name>-2` alive this reads the NEIGHBOUR's recorded kind. That is
         // the #819/#825 wrong-source class with a different trigger.
         val target = sessionTarget.trim().ifBlank { return null }
+        // Issue #2160: `-u` — see [TmuxRead]. A tmux client without a UTF-8
+        // locale sanitises every byte it prints, so a bare read is only correct
+        // on hosts whose sshd happens to export one.
         val raw = runCatching {
             session.exec(
-                "tmux show-options -v -t ${shellQuote(TmuxTarget.pane(target))} @ps_agent_kind 2>/dev/null || true",
+                "${TmuxRead.CLIENT} show-options -v -t ${shellQuote(TmuxTarget.pane(target))} " +
+                    "@ps_agent_kind 2>/dev/null || true",
             ).stdout
         }.getOrNull() ?: return null
         return recordedAgentKindFromOption(raw)
@@ -751,11 +756,16 @@ public class AgentConversationRepository internal constructor(
     private fun recordedSourceOptionPreamble(target: String): String {
         // Issue #1820: EXACT pane target (see [readRecordedAgentKind]).
         val quotedTarget = shellQuote(TmuxTarget.pane(target))
+        // Issue #2160: `-u` on BOTH reads — see [TmuxRead]. `@ps_agent_source`
+        // is stored `<generation>\t<path>`, and without `-u` a non-UTF-8 tmux
+        // client turns that TAB into `_` ON READ, so the value can never be
+        // split and exact-source binding silently dies on every affected host.
         return "ps_recorded_source_generation=\$(" +
-            "tmux show-options -v -t $quotedTarget @ps_agent_source_generation 2>/dev/null || true" +
+            "${TmuxRead.CLIENT} show-options -v -t $quotedTarget " +
+            "@ps_agent_source_generation 2>/dev/null || true" +
             "); printf '%s\\n' \"\$ps_recorded_source_generation\"\n" +
             "printf '%s\\n' $RECORDED_SOURCE_GENERATION_SENTINEL\n" +
-            "tmux show-options -v -t $quotedTarget @ps_agent_source 2>/dev/null || true\n" +
+            "${TmuxRead.CLIENT} show-options -v -t $quotedTarget @ps_agent_source 2>/dev/null || true\n" +
             "printf '%s\\n' $RECORDED_SOURCE_SENTINEL"
     }
 
@@ -1163,8 +1173,10 @@ public class AgentConversationRepository internal constructor(
         val combined = buildString {
             // 1. The recorded-kind read first, then a sentinel. `|| true` keeps
             //    the exec exit code 0 on a foreign session (no option set).
+            //    Issue #2160: `-u` on every read in this exec — see [TmuxRead].
             append(
-                "tmux show-options -v -t $quotedSessionTarget @ps_agent_kind 2>/dev/null || true",
+                "${TmuxRead.CLIENT} show-options -v -t $quotedSessionTarget " +
+                    "@ps_agent_kind 2>/dev/null || true",
             )
             append("\n")
             append("printf '%s\\n' $kindSentinel")
@@ -1174,7 +1186,7 @@ public class AgentConversationRepository internal constructor(
             //     adds no round-trip to the cold-open path.
             append(
                 "ps_recorded_source_generation=\$(" +
-                    "tmux show-options -v -t $quotedSessionTarget " +
+                    "${TmuxRead.CLIENT} show-options -v -t $quotedSessionTarget " +
                     "@ps_agent_source_generation 2>/dev/null || true" +
                     "); printf '%s\\n' \"\$ps_recorded_source_generation\"",
             )
@@ -1183,7 +1195,8 @@ public class AgentConversationRepository internal constructor(
             append("\n")
             append(
                 "ps_recorded_source=\$(" +
-                    "tmux show-options -v -t $quotedSessionTarget @ps_agent_source 2>/dev/null || true" +
+                    "${TmuxRead.CLIENT} show-options -v -t $quotedSessionTarget " +
+                    "@ps_agent_source 2>/dev/null || true" +
                     "); printf '%s\\n' \"\$ps_recorded_source\"",
             )
             append("\n")

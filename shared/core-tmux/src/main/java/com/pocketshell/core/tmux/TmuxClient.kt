@@ -1252,7 +1252,12 @@ internal class RealTmuxClient(
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
         val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
-        val command = "tmux $listPanesCommand"
+        // Issue #2160: `-u` — this lane carries the `-F` enumeration formats,
+        // which expand user options (`@ps_agent_kind`, `@ps_agent_profile`,
+        // `@ps_agent_state`, …) and `#{session_path}`/`#{pane_current_path}`. A
+        // tmux client with no UTF-8 locale (an SSH exec on a host whose sshd
+        // exports none) sanitises every byte it prints. See [TmuxRead].
+        val command = "${TmuxRead.CLIENT} $listPanesCommand"
         val execResult =
             try {
                 // Independent of the busy `-CC` channel (fast under a burst); #1516's
@@ -1346,7 +1351,10 @@ internal class RealTmuxClient(
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
         val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
-        val command = "tmux $sessionCommand"
+        // Issue #2160: `-u` — the dashboard lane sends `list-sessions -F` with
+        // `@ps_agent_state` / `@ps_agent_state_updated_at`. See [TmuxRead] and
+        // [listPanesViaExec].
+        val command = "${TmuxRead.CLIENT} $sessionCommand"
         val execResult =
             try {
                 // Independent of the busy `-CC` channel (fast under a burst); #1516's

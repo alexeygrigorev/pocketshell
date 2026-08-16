@@ -55,12 +55,21 @@ import org.junit.Assert.assertTrue
  *
  * There is no `assumeTrue` / `assumeFalse` anywhere: an environment that cannot
  * reach the required state fails hard (F3).
+ *
+ * ## Issue #2126 — generic over the activity type
+ *
+ * This was pinned to `ComponentActivity` because every #1821 caller mounted its
+ * own content in a bare `createAndroidComposeRule<ComponentActivity>()`. The
+ * gating journey `TmuxTerminalSurfaceFailureE2eTest` needs exactly the same
+ * synthetic-IME contract on the REAL launch-owned
+ * `createAndroidComposeRule<MainActivity>()` harness, so the receiver is now
+ * generic over `A : ComponentActivity`. Nothing here reads anything beyond
+ * `ComponentActivity` (window, decor view, system services), so this is a pure
+ * widening: every existing call site infers `SyntheticImeStage<ComponentActivity>`
+ * and behaves byte-identically.
  */
-internal class SyntheticImeStage(
-    private val compose: AndroidComposeTestRule<
-        ActivityScenarioRule<ComponentActivity>,
-        ComponentActivity,
-        >,
+internal class SyntheticImeStage<A : ComponentActivity>(
+    private val compose: AndroidComposeTestRule<ActivityScenarioRule<A>, A>,
 ) {
 
     /** The synthetic keyboard height, in px on the device under test. */
@@ -79,7 +88,7 @@ internal class SyntheticImeStage(
     val density: Float
         get() = compose.density.density
 
-    private val scenario: ActivityScenario<ComponentActivity>
+    private val scenario: ActivityScenario<A>
         get() = compose.activityRule.scenario
 
     /**

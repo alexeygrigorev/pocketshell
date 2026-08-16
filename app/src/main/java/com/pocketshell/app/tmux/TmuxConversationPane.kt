@@ -214,6 +214,10 @@ internal fun TmuxConversationPane(
         // maintainer asked for.
         ConversationSyncStatusRow(
             syncStatus = syncStatus,
+            // Issue #2159: the status row is told whether there is anything
+            // under it, so a green `Live` can never sit above
+            // "No conversation events yet." (the reported screen).
+            hasEvents = events.isNotEmpty(),
             onRetry = onRetryAgentStream,
         )
         // Wrap the LazyColumn in a Box so the jump-to-latest FAB can

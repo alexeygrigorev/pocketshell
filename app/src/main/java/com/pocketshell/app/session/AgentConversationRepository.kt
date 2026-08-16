@@ -525,6 +525,24 @@ public data class ConversationEventsWindow(
      * is `0` there (and is never used as a line cursor).
      */
     val tailStartLine: Long = 0L,
+    /**
+     * Issue #2159: TRUE when the host answered but produced nothing usable for a
+     * transcript that is supposed to exist — as opposed to a transcript that
+     * genuinely has no messages yet.
+     *
+     * Every transcript read runs behind `2>/dev/null || true`, so a host CLI that
+     * could not resolve the session id, errored, or is version-skewed returns an
+     * EMPTY stdout that is byte-identical to "this transcript has no events". The
+     * maintainer's Conversation tab reported a green `Live` over
+     * "No conversation events yet." while a healthy 1.7 MB / 103-event rollout was
+     * bound, because that distinction was thrown away at the read boundary.
+     *
+     * The signal is deliberately conservative: it is raised only when the source
+     * is demonstrably NON-EMPTY (its `wc -l` is > 0) yet the read yielded no
+     * parseable window at all. A genuinely empty transcript reports `false` and
+     * resolves to the honest empty state, not to a failure.
+     */
+    val sourceUnavailable: Boolean = false,
 )
 
 private const val PROCESS_TREE_SCAN_COMMAND: String =
@@ -1662,6 +1680,7 @@ public class AgentConversationRepository internal constructor(
                 // that count into its own exec via a sentinel, so the cold-open
                 // path no longer needs the separate `lineCount` round-trip.
                 tailStartLine = codex.sourceLineCount,
+                sourceUnavailable = codex.sourceUnavailable,
             )
         }
         val parser = parserFor(detection.agent)
@@ -1693,9 +1712,17 @@ public class AgentConversationRepository internal constructor(
             lines
         }
         val events = parseTranscriptTailLines(parser, detection.agent, tailRawLines.asSequence())
+        // Issue #2159: same distinction as the Codex branch. `tail` runs behind
+        // `2>/dev/null || true`, so a vanished/unreadable transcript yields an
+        // empty window that reads exactly like an empty transcript. When the
+        // source's own `wc -l` says it HAS lines and the tail came back with no
+        // content at all, the read failed — surface it instead of painting a
+        // healthy empty conversation.
+        val tailReturnedNothing = tailRawLines.none { it.isNotBlank() }
         return ConversationEventsWindow(
             events = events,
             hasMoreOlder = totalLines > rawLineBudget,
+            sourceUnavailable = totalLines > 0L && tailReturnedNothing,
             // Issue #817: the file's line count at read time is exactly the
             // `fromLineExclusive` cursor the follow-tail needs — it is the same
             // value the separate `lineCount` exec used to fetch. Thread it
@@ -1715,6 +1742,8 @@ public class AgentConversationRepository internal constructor(
         val events: List<ConversationEvent>,
         val rawLineCount: Int,
         val sourceLineCount: Long,
+        /** Issue #2159: see [ConversationEventsWindow.sourceUnavailable]. */
+        val sourceUnavailable: Boolean = false,
     )
 
     private suspend fun readCodexWindow(
@@ -1769,13 +1798,24 @@ public class AgentConversationRepository internal constructor(
             envelope = agentLogEnvelopeOrNull(plainEnvelopeOutput)
         }
         if (envelope == null) {
-            if (envelopeOutput.isNotBlank()) {
-                diagnostic(
-                    "agent-log output had non-blank lines but no JSON envelope carrying " +
-                        "`lines` (preamble/format drift) — returning no messages",
-                )
-            }
-            return CodexWindow(emptyList(), 0, sourceLineCount)
+            // Issue #2159: the host answered with no envelope at all. For a
+            // source whose `wc -l` says it HAS lines that is a failed read
+            // (unresolvable session id / CLI error / version skew — all swallowed
+            // by `2>/dev/null || true`), NOT an empty transcript. Reporting it as
+            // an empty-but-healthy conversation is what put a green `Live` over
+            // "No conversation events yet." on the maintainer's screen.
+            diagnostic(
+                "agent-log produced no JSON envelope carrying `lines` for " +
+                    "${detection.sourcePath} (sourceLineCount=$sourceLineCount, " +
+                    "nonBlankOutput=${envelopeOutput.isNotBlank()}) — " +
+                    "treating as an unavailable read, not an empty transcript",
+            )
+            return CodexWindow(
+                events = emptyList(),
+                rawLineCount = 0,
+                sourceLineCount = sourceLineCount,
+                sourceUnavailable = sourceLineCount > 0L,
+            )
         }
         val lines = agentLogEnvelopeLines(envelope)
         // Issue #1267: route the envelope lines through the truncation-aware

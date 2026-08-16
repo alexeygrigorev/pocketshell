@@ -73,7 +73,6 @@ import kotlin.time.Duration.Companion.seconds
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -1049,7 +1048,8 @@ class TmuxSessionViewModelTest : TmuxSessionViewModelTestBase() {
             2,
             session.tailCalls,
         )
-        assertEquals(AgentConversationSyncStatus.Live, vm.agentConversations.value["%0"]?.syncStatus)
+        // #2159
+        assertEquals(AgentConversationSyncStatus.NoMessages, vm.agentConversations.value["%0"]?.syncStatus)
     }
 
     @Test

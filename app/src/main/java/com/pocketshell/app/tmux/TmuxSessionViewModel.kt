@@ -60,6 +60,8 @@ import com.pocketshell.app.session.OLDER_PAGE_GROWTH_FACTOR
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.canRetryAgentStream
+import com.pocketshell.app.session.conversationLoadStateForOutcome
+import com.pocketshell.app.session.conversationSyncStatusForLoad
 import com.pocketshell.app.session.markOptimisticFailed
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.connection.BackgroundArm
@@ -13277,7 +13279,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // the `fromLineExclusive` cursor the follow-tail needs. The cold-open
         // path therefore no longer pays a separate `lineCount` SSH round-trip
         // before the read — one fewer serial exec on every fresh open.
-        var loadFailed = false
+        var readThrew = false
         val window = try {
             // Issue #828: a recorded-Claude open already fetched the first window
             // in the resolve exec — use it and skip the read round-trip.
@@ -13296,14 +13298,27 @@ public class TmuxSessionViewModel @Inject constructor(
                 cause = t,
                 reason = "initial_window_read",
             )
-            loadFailed = true
+            readThrew = true
             ConversationEventsWindow(emptyList(), hasMoreOlder = false)
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
+        // Issue #2159: a read that THREW and a read that returned nothing usable
+        // for a non-empty source are the SAME user-facing failure (see
+        // [ConversationLoadOutcome]). Only the second was previously invisible.
+        val loadFailed = readThrew || window.sourceUnavailable
+        if (window.sourceUnavailable) {
+            recordAgentConversationTailStatus(
+                paneId = paneId,
+                detection = detection,
+                status = AgentConversationSyncStatus.LogUnavailable,
+                cause = null,
+                reason = "initial_window_read_no_content",
+            )
+        }
         val initialEvents = window.events
         val tailStartLine = window.tailStartLine
         val markLiveAtMs = SystemClock.elapsedRealtime()
-        markAgentTailLive(paneId, detection, initialEvents)
+        markAgentTailLive(paneId, detection, initialEvents, readFailed = loadFailed)
         TmuxSessionLatencyTelemetry.record(
             name = CONVERSATION_OPEN_LATENCY_OPERATION,
             durationMs = markLiveAtMs - openStartedAtMs,
@@ -13411,6 +13426,13 @@ public class TmuxSessionViewModel @Inject constructor(
         // read failure we keep the previously-restored events (the reconnect
         // fallback) rather than blanking the pane.
         var restoreHasMoreOlder = restored.hasMoreOlderEvents
+        // Issue #2159: the restore read's OUTCOME was discarded — `loadState` was
+        // forced to Ready and `Live` was stamped unconditionally, so a failed
+        // restore rendered as a healthy empty conversation with no retry. Starts
+        // true and is cleared only by a read that actually completed:
+        // `recoverAgentConversationStartupRead` swallows the throw and returns the
+        // fallback, so "never reached the `also`" IS the failure signal.
+        var restoreFailed = true
         val initialEvents = recoverAgentConversationStartupRead(
             paneId = paneId,
             detection = detection,
@@ -13421,13 +13443,19 @@ public class TmuxSessionViewModel @Inject constructor(
                 session = session,
                 detection = detection,
                 maxMessages = FIRST_PAINT_MESSAGE_BUDGET,
-            ).also { restoreHasMoreOlder = it.hasMoreOlder }.events
+            ).also {
+                restoreHasMoreOlder = it.hasMoreOlder
+                restoreFailed = it.sourceUnavailable
+            }.events
         }
         if (!isCurrentRuntime(refreshGuard)) return
-        markRestoredAgentTailLive(paneId, detection, initialEvents)
+        markRestoredAgentTailLive(paneId, detection, initialEvents, readFailed = restoreFailed)
         updateAgentConversation(paneId) { current ->
             current.copy(
-                loadState = ConversationLoadState.Ready,
+                loadState = conversationLoadStateForOutcome(
+                    readFailed = restoreFailed,
+                    hasEvents = current.events.isNotEmpty(),
+                ),
                 hasMoreOlderEvents = restoreHasMoreOlder,
             )
         }
@@ -14645,7 +14673,20 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun appendAgentEvents(paneId: String, events: List<ConversationEvent>) {
         if (events.isEmpty()) return
         updateAgentConversation(paneId) { current ->
-            current.copy(events = boundedDistinctEvents(current.events + events))
+            val merged = boundedDistinctEvents(current.events + events)
+            // Issue #2159: an honestly-empty row becomes genuinely Live the
+            // moment the tail delivers its first message.
+            val wasEmptyFeed = current.syncStatus == AgentConversationSyncStatus.NoMessages ||
+                current.loadState == ConversationLoadState.Empty
+            if (merged.isEmpty() || !wasEmptyFeed) {
+                current.copy(events = merged)
+            } else {
+                current.copy(
+                    events = merged,
+                    syncStatus = conversationSyncStatusForLoad(false, hasEvents = true),
+                    loadState = conversationLoadStateForOutcome(false, hasEvents = true),
+                )
+            }
         }
         scanAgentConversationEventsForPortOffers(paneId, events)
     }
@@ -14756,8 +14797,10 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         detection: AgentDetection,
         fallbackEvents: List<ConversationEvent>,
+        // Issue #2159: a failed restore is never stamped `Live`.
+        readFailed: Boolean = false,
     ) {
-        markAgentTailLive(paneId, detection, fallbackEvents, preserveDifferentDetection = true)
+        markAgentTailLive(paneId, detection, fallbackEvents, true, readFailed)
     }
 
     private fun markAgentTailLive(
@@ -14765,62 +14808,22 @@ public class TmuxSessionViewModel @Inject constructor(
         detection: AgentDetection,
         initialEvents: List<ConversationEvent>,
         preserveDifferentDetection: Boolean = false,
+        // Issue #2159: the read that produced [initialEvents] could not be
+        // completed. `Live` is a CLAIM and must never be stamped over it.
+        readFailed: Boolean = false,
     ) {
         _agentConversations.update { conversations ->
             val current = conversations[paneId]
-            val updated = when {
-                // A fresh POSITIVE agent detection landed on a pane with no
-                // existing conversation row. This is the OPEN/initial-tab moment
-                // for the agent session, so the new row lands on the user's
-                // configured open-time default (#818) — Conversation by default
-                // (the black-screen cure), Terminal if the user opted out. This
-                // is NOT a mid-session yank: there is no existing row, so no tab
-                // the user is currently viewing is being changed (the #815 line
-                // is about detection/refresh on an ALREADY-open session, handled
-                // by the `current != null` branches below, which preserve the
-                // user's tab). A remembered/explicit per-session choice still
-                // wins — `seedAgentConversationFromMemory` runs first and would
-                // have created the row already if a remembered choice existed.
-                current == null -> AgentConversationUiState(
-                    detection = detection,
-                    events = boundedDistinctEvents(initialEvents),
-                    selectedTab = openTimeDefaultSessionTab(),
-                    syncStatus = AgentConversationSyncStatus.Live,
-                )
-                current.detection != detection && preserveDifferentDetection -> current
-                // Issue #495: when live detection refines the SAME agent on
-                // the SAME log for this window (only confidence/sessionId
-                // drifted — e.g. a seeded reconnect verdict promoted from
-                // RecentFile to ProcessConfirmed), keep the user's selected
-                // tab. The previous unconditional reset-to-Terminal here
-                // bounced a user who was in Conversation back to Terminal on
-                // every reconnect, which is the bug this issue fixes.
-                current.detection != detection && sameAgentSource(current.detection, detection) ->
-                    current.copy(
-                        detection = detection,
-                        events = boundedDistinctEvents(current.events + initialEvents),
-                        syncStatus = AgentConversationSyncStatus.Live,
-                    )
-                // A DIFFERENT agent (no same-source continuity) took over this
-                // pane's window. This is a detection/refresh on an ALREADY-open
-                // session, NOT an open-time event, so it must NOT yank the user
-                // onto another view in EITHER direction (#815): we PRESERVE the
-                // tab the user is currently viewing rather than apply the
-                // open-time default. (The open-time default only governs the
-                // fresh-row branch above. Applying it here would yank a user on
-                // Terminal onto Conversation on a mid-session takeover — exactly
-                // the #815 regression.)
-                current.detection != detection -> AgentConversationUiState(
-                    detection = detection,
-                    events = boundedDistinctEvents(initialEvents),
-                    selectedTab = current.selectedTab,
-                    syncStatus = AgentConversationSyncStatus.Live,
-                )
-                else -> current.copy(
-                    events = boundedDistinctEvents(current.events + initialEvents),
-                    syncStatus = AgentConversationSyncStatus.Live,
-                )
-            }
+            // Issue #1555/#2159: the reducer itself is a pure, VM-state-free
+            // function in [TmuxSessionConversationHelpers].
+            val updated = nextAgentTailLiveState(
+                current = current,
+                detection = detection,
+                initialEvents = initialEvents,
+                preserveDifferentDetection = preserveDifferentDetection,
+                readFailed = readFailed,
+                openTimeDefaultTab = openTimeDefaultSessionTab(),
+            )
             if (updated == current) conversations else conversations + (paneId to updated)
         }
         // Issue #962: a live agent detection just bound to [paneId]. If that
@@ -14909,11 +14912,11 @@ public class TmuxSessionViewModel @Inject constructor(
             if (current.detection != null && !sameAgentSource(current.detection, detection)) {
                 return@updateAgentConversation current
             }
-            val nextLoadState = when {
-                failed -> ConversationLoadState.Failed
-                current.events.isEmpty() && loadedEvents.isEmpty() -> ConversationLoadState.Empty
-                else -> ConversationLoadState.Ready
-            }
+            // Issue #2159: shared with the restore path ([ConversationLoadOutcome]).
+            val nextLoadState = conversationLoadStateForOutcome(
+                readFailed = failed,
+                hasEvents = current.events.isNotEmpty() || loadedEvents.isNotEmpty(),
+            )
             current.copy(
                 loadState = nextLoadState,
                 hasMoreOlderEvents = hasMoreOlder && !failed,

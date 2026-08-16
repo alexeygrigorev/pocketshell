@@ -26,6 +26,25 @@ public enum class AgentConversationSyncStatus {
     Stale,
     LogUnavailable,
     Retrying,
+
+    /**
+     * Issue #2159: the transcript read SUCCEEDED but the transcript carries no
+     * messages yet — a bound source with an empty feed.
+     *
+     * The maintainer's report was a green `Live` dot sitting next to
+     * "No conversation events yet." while the Terminal of the SAME session
+     * showed a live Codex mid-turn. `Live` means "the feed is healthy and
+     * current"; rendering it over an empty pane tells the user the transcript is
+     * fine when it is bound to nothing they can see. The two must not be able to
+     * disagree, so an empty feed gets its own honest, RETRYABLE status instead of
+     * borrowing `Live`'s green.
+     *
+     * This is NOT [LogUnavailable]: nothing failed. It is the "we are bound and
+     * waiting for the first message" state — a genuinely fresh agent that has not
+     * completed a turn. A read that could not be completed at all resolves to
+     * [LogUnavailable] + [ConversationLoadState.Failed] instead.
+     */
+    NoMessages,
 }
 
 /**

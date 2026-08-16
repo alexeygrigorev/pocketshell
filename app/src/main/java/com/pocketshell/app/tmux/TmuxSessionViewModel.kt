@@ -134,7 +134,6 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
-import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -312,6 +311,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private val diagnosticRecorder: com.pocketshell.app.diagnostics.DiagnosticRecorder? = null,
     // Issue #1587 (H3): injected @Singleton store, one lock (see outboundDeliveryLedgerFor).
     private val outboundQueueStore: com.pocketshell.app.composer.OutboundQueueStore? = null,
+    // Issue #2176: injected @Singleton store of the ports each session mentions.
+    private val sessionPortsStore: com.pocketshell.app.portfwd.SessionPortsStore =
+        com.pocketshell.app.portfwd.SessionPortsStore(),
 ) : ViewModel() {
 
     /**
@@ -2272,15 +2274,32 @@ public class TmuxSessionViewModel @Inject constructor(
     private val paneInputQueues: MutableMap<String, TmuxPaneInputQueue> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
-    // Issue #448 (epic #432 slice C): session-scoped new-port detection.
-    // [portDetector] owns the regex trigger + de-dup (dismissed /
-    // forwarded / already-listening ports are never re-offered). One
-    // collector per pane scans the same shared output flow the terminal
-    // consumes; the jobs are tracked so they tear down with the pane.
-    // Scoped to this view model instance (one per tmux session screen);
-    // de-dup is retained across same-host warm switches so a parked-then-
-    // restored runtime never re-prompts a port already handled.
+    // Issue #448 (epic #432 slice C): session-scoped new-port detection. The
+    // regex trigger + overlay de-dup live in [PortDetector] (see its KDoc); one
+    // collector per pane reads the shared output flow the terminal already
+    // consumes, and the jobs tear down with the pane. Scoped to this view model
+    // (one per session screen), so de-dup survives same-host warm switches.
     private val portDetector: PortDetector = PortDetector()
+
+    // Issue #2176: the `LISTEN`-confirm + attribution stage, lifted OUT of this
+    // god-object (D28); see SessionMentionedPortsTracker. `by lazy` because
+    // [bridgeScope] is declared below and first access is post-construction.
+    private val sessionMentionedPorts by lazy {
+        com.pocketshell.app.portfwd.SessionMentionedPortsTracker(
+            detector = portDetector,
+            store = sessionPortsStore,
+            scope = bridgeScope,
+            sessionProvider = { sessionRef },
+            sessionKeyProvider = {
+                (activeTarget ?: connectingTarget)?.let {
+                    com.pocketshell.app.portfwd.SessionPortsKey(it.hostId, it.sessionName)
+                }
+            },
+            appActive = { appActive },
+            overlayPort = { _detectedPort.value },
+            setOverlayPort = { _detectedPort.value = it },
+        )
+    }
     private val panePortDetectorJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val panePortDetectorClients: MutableMap<String, TmuxClient> = ConcurrentHashMap()
     private val panePortDetectorGenerations: MutableMap<String, Long> = ConcurrentHashMap()
@@ -9966,6 +9985,8 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         panePortDetectorClients[paneId] = client
         panePortDetectorGenerations[paneId] = guard.generation
+        // Issue #2176: one-shot fire-and-forget read of `@ps_session_ports`.
+        sessionMentionedPorts.ensureHostLoad()
         val job = bridgeScope.launch {
             client.outputFor(paneId).collect { event ->
                 if (panePortDetectorClients[paneId] !== client) return@collect
@@ -9979,7 +10000,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // overlay confirm hops back to the bridge scope (Main).
                 val candidates = scanOutputEventForPorts(event)
                 for (candidate in candidates) {
-                    confirmAndSurfaceDetectedPort(candidate.port)
+                    sessionMentionedPorts.confirmAndSurface(candidate)
                 }
             }
         }
@@ -10009,41 +10030,6 @@ public class TmuxSessionViewModel @Inject constructor(
         val text = runCatching { String(event.data, Charsets.UTF_8) }.getOrNull()
             ?: return@withContext emptyList<PortDetector.Candidate>()
         portDetector.scan(text)
-    }
-
-    /**
-     * Issue #448: confirm a regex candidate is actually in `LISTEN` via a
-     * single [PortScanner.scan] over the session's SSH transport, then —
-     * if confirmed and not already resolved — surface the overlay. A
-     * candidate that is not actually listening (echoed/old URL) is
-     * released so a later real bind of the same port can still be offered.
-     */
-    private suspend fun confirmAndSurfaceDetectedPort(port: Int) {
-        // Don't replace an overlay the user hasn't acted on yet.
-        if (_detectedPort.value != null) {
-            portDetector.confirmFailed(port)
-            return
-        }
-        val session = sessionRef ?: run {
-            portDetector.confirmFailed(port)
-            return
-        }
-        val listening = runCatching { PortScanner.scan(session) }
-            .getOrDefault(emptyList())
-            .any { it.port == port }
-        if (!appActive) {
-            // Went to background mid-confirm — don't pop an overlay the
-            // user can't see; release so it can re-fire next foreground.
-            portDetector.confirmFailed(port)
-            return
-        }
-        if (!listening) {
-            portDetector.confirmFailed(port)
-            return
-        }
-        if (portDetector.confirmed(port) && _detectedPort.value == null) {
-            _detectedPort.value = port
-        }
     }
 
     /**
@@ -14995,20 +14981,22 @@ public class TmuxSessionViewModel @Inject constructor(
         events: List<ConversationEvent>,
     ) {
         if (!appActive || events.isEmpty()) return
-        val candidates = LinkedHashSet<Int>()
+        // Issue #2176: keep the matched text, so a port announced in the
+        // Conversation view reaches the Ports panel with a recognisable line.
+        val candidates = LinkedHashMap<Int, PortDetector.Candidate>()
         val scopeKey = activeTarget?.let { "${it.hostId}:${it.sessionName}" } ?: "no-target"
         for (event in events) {
             val text = event.portOfferText() ?: continue
             val key = "$scopeKey:$paneId:${event.id}:${text.hashCode()}:${text.length}"
             if (!scannedConversationPortEventKeys.add(key)) continue
             for (candidate in portDetector.scan("$text\n")) {
-                candidates += candidate.port
+                candidates.putIfAbsent(candidate.port, candidate)
             }
         }
         if (candidates.isEmpty()) return
         bridgeScope.launch {
-            for (port in candidates) {
-                confirmAndSurfaceDetectedPort(port)
+            for (candidate in candidates.values) {
+                sessionMentionedPorts.confirmAndSurface(candidate)
             }
         }
     }

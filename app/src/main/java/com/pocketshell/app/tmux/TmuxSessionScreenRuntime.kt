@@ -398,4 +398,6 @@ internal class TmuxSessionOverlayState {
     var showHotkeysPanel by mutableStateOf(false)
     // Issue #488: a tapped server-local URL whose remote port is not yet forwarded.
     var pendingLocalhostForward by mutableStateOf<com.pocketshell.core.terminal.selection.LocalhostUrl?>(null)
+    // Issue #2176: the per-session Ports panel (the ports THIS session opened).
+    var showSessionPorts by mutableStateOf(false)
 }

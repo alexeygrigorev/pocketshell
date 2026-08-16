@@ -480,6 +480,7 @@ public fun TmuxSessionScreen(
             panesSel = panesSel,
             overlay = overlay,
             context = context,
+            hostId = hostId,
             hostName = hostName,
             host = host,
             user = user,
@@ -493,6 +494,7 @@ public fun TmuxSessionScreen(
             onReplaceTmuxSession = onReplaceTmuxSession,
             onBack = onBack,
             onOpenPortForwardingWithPort = onOpenPortForwardingWithPort,
+            onOpenPortForwarding = onOpenPortForwarding,
         )
     }
 
@@ -1009,6 +1011,12 @@ private fun TmuxSessionHeaderRegion(
                 overlay.moreExpanded = false
                 onOpenPortForwarding()
             },
+            // Issue #2176: the ports THIS session opened. Opens over the live
+            // session (no navigation, no second connection).
+            onOpenSessionPorts = {
+                overlay.moreExpanded = false
+                overlay.showSessionPorts = true
+            },
             onOpenFile = {
                 overlay.moreExpanded = false
                 overlay.openFilePath = ""
@@ -1104,6 +1112,10 @@ private fun TmuxSessionHeaderRegion(
                     },
                     connectionStatus = conn.pillStatus,
                     forwardingState = sessionForwardingState,
+                    // Issue #2176: the forwarding pill is the single chrome
+                    // entry point into ports; the panel's footer routes on to
+                    // the host-wide list.
+                    onOpenSessionPorts = { overlay.showSessionPorts = true },
                     modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                 )
             }
@@ -1127,6 +1139,7 @@ private fun TmuxSessionHeaderRegion(
                     moreMenu = { AnchoredTmuxMoreMenu() },
                     connectionStatus = conn.pillStatus,
                     forwardingState = sessionForwardingState,
+                    onOpenSessionPorts = { overlay.showSessionPorts = true },
                     modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                 )
             }
@@ -1703,6 +1716,7 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
     panesSel: TmuxSessionPaneSelection,
     overlay: TmuxSessionOverlayState,
     context: android.content.Context,
+    hostId: Long,
     hostName: String,
     host: String,
     user: String,
@@ -1716,6 +1730,8 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
     onReplaceTmuxSession: (target: TmuxSessionNavigationTarget) -> Unit,
     onBack: () -> Unit,
     onOpenPortForwardingWithPort: (remotePort: Int, autoOpenLocalhostUrl: LocalhostUrl?) -> Unit,
+    // Issue #2176: the session Ports panel's footer route to the host-wide list.
+    onOpenPortForwarding: () -> Unit,
 ) {
     val currentPane = panesSel.currentPane
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
@@ -1813,6 +1829,60 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
             val target = acceptedLocalhostForwardNavigation(pending)
             overlay.pendingLocalhostForward = null
             onOpenPortForwardingWithPort(target.remotePort, target.autoOpenLocalhostUrl)
+        },
+    )
+
+    // Issue #2176: the ports THIS session opened. Rows are attributed by the
+    // detector that already watches this session's pane output, so the panel
+    // answers "which port is mine?" — the question the host-wide panel cannot.
+    // Both tap paths reuse machinery that already exists: a forwarded port opens
+    // its loopback URL directly, and a not-yet-forwarded one goes through the
+    // #488 confirm → prefilled-forward → auto-open flow rather than dumping the
+    // user on a dead `localhost` page.
+    val sessionPortsPanelViewModel: com.pocketshell.app.portfwd.SessionPortsPanelViewModel =
+        androidx.hilt.navigation.compose.hiltViewModel()
+    val sessionPortsState by remember(hostId, sessionName) {
+        sessionPortsPanelViewModel.stateFor(hostId = hostId, sessionName = sessionName)
+    }.collectAsState()
+    com.pocketshell.app.portfwd.SessionPortsOverlay(
+        visible = overlay.showSessionPorts,
+        hostName = hostName.ifBlank { host },
+        sessionName = sessionName,
+        state = sessionPortsState,
+        onDismiss = { overlay.showSessionPorts = false },
+        onOpenForwarded = { row ->
+            val url = row.localUrl ?: return@SessionPortsOverlay
+            DiagnosticEvents.record(
+                "action",
+                "session_ports_open_forwarded",
+                "hostId" to hostId,
+                "remotePort" to row.port,
+            )
+            overlay.showSessionPorts = false
+            com.pocketshell.core.terminal.ui.openUrlWithFallback(context, url)
+        },
+        onRequestForward = { row ->
+            DiagnosticEvents.record(
+                "action",
+                "session_ports_request_forward",
+                "hostId" to hostId,
+                "remotePort" to row.port,
+            )
+            overlay.showSessionPorts = false
+            overlay.pendingLocalhostForward = LocalhostUrl(
+                remotePort = row.port,
+                scheme = "http",
+                pathAndQuery = "",
+            )
+        },
+        onOpenHostPorts = {
+            DiagnosticEvents.record(
+                "action",
+                "session_ports_open_host_panel",
+                "hostId" to hostId,
+            )
+            overlay.showSessionPorts = false
+            onOpenPortForwarding()
         },
     )
 

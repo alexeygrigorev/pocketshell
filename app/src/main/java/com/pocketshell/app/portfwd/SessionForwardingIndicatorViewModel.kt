@@ -98,4 +98,13 @@ data class SessionForwardingIndicatorState(
             tunnelCount > 1 -> "$tunnelCount ports forwarding active for this host"
             else -> "Port forwarding active for this host"
         }
+
+    /**
+     * Issue #2176: the pill became a real control, so its description must say
+     * so. A screen-reader user given only the status ("58 ports forwarding
+     * active") has no way to know the element is actionable, which for the one
+     * route into the ports list is a genuine loss of function, not a nicety.
+     */
+    val actionableContentDescription: String
+        get() = "$contentDescription. Opens session ports"
 }

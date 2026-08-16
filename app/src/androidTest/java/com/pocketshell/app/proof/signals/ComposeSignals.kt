@@ -221,6 +221,91 @@ fun ComposeTestRule.assertNodeFullyWithinRoot(
     }
 }
 
+/**
+ * Asserts the node tagged [tag] lies fully inside the area the user can actually
+ * REACH — the window root minus the system bars — rather than merely inside the
+ * root.
+ *
+ * ## Why [assertNodeFullyWithinRoot] is not enough (issue #2176)
+ *
+ * Under `enableEdgeToEdge()` (which `MainActivity` calls) the Compose root
+ * **includes the strip behind the system navigation bar**. So a bottom-anchored
+ * row drawn underneath the Back triangle — where the system bar eats every tap —
+ * is "fully within root" and `assertNodeFullyWithinRoot` passes with the defect
+ * fully present. There is no mutation that reddens it, which makes it a
+ * decorative assertion in exactly the D32/G6 sense. The #2176 round-1 build
+ * shipped its footer under the nav bar with that check green.
+ *
+ * Note this is the same trap one level up from the one process.md's F3 rules
+ * warn about: `assertNodeFullyWithinRoot` is the recommended cure for a bare
+ * `assertIsDisplayed()`, and it is genuinely better — it is just still blind to
+ * the system-bar strip once a window goes edge-to-edge. Use THIS helper whenever
+ * the surface under test is bottom- or top-anchored in an edge-to-edge window.
+ *
+ * ## The viewport is resolved from the node's OWN root
+ *
+ * [assertNodeFullyWithinRoot] calls `onRoot()`, which hard-throws
+ * `Expected exactly '1' node ... (isRoot)` the moment a second Compose window is
+ * attached — a popup, a dialog, a dropdown (issue #2180, found independently on
+ * #2126). This helper resolves the root that OWNS the node instead, the same way
+ * [assertNodeFullyWithinOwningRoot] does, so a stray popup elsewhere in the tree
+ * cannot make it throw. Both defects in the older helper trace to one assumption:
+ * that `onRoot()` returns exactly one root whose bounds are the reachable area.
+ * Neither half holds. Repairing the older helper's call sites is #2180's job and
+ * is deliberately not done here.
+ *
+ * [bottomInsetPx] / [topInsetPx] are the system-bar insets in the SAME root
+ * coordinate space as `boundsInRoot`. They are passed explicitly (rather than
+ * read here) for the same reason [assertNodeFullyAboveImeOrKeyboard] takes its
+ * keyboard top explicitly: the caller may have produced the state with a
+ * synthetic inset dispatch (the #780 model) or from the live window, and this
+ * helper works for both. Callers reading a live inset MUST hard-fail when it is
+ * absent rather than asserting against a zero inset, or the check goes vacuous
+ * on exactly the devices that have no bar.
+ *
+ * @param tag the `testTag` of the node under test.
+ * @param bottomInsetPx height of the bottom system bar (navigation bar), in px.
+ * @param topInsetPx height of the top system bar (status bar), in px.
+ * @param slopDp per-edge tolerance in dp (default [CONTAINMENT_SLOP_DP_DEFAULT]).
+ * @param useUnmergedTree pass `true` for a child inside a merged subtree.
+ */
+fun ComposeTestRule.assertNodeFullyWithinSystemBarsContentArea(
+    tag: String,
+    bottomInsetPx: Float,
+    topInsetPx: Float = 0f,
+    slopDp: Float = CONTAINMENT_SLOP_DP_DEFAULT,
+    useUnmergedTree: Boolean = false,
+) {
+    val slopPx = slopDp * density.density
+    val node = onNodeWithTag(tag, useUnmergedTree = useUnmergedTree).fetchSemanticsNode()
+    val bounds = node.boundsInRoot
+    val root = onAllNodes(isRoot()).fetchSemanticsNodes()
+        .single { it.root === node.root }
+        .boundsInRoot
+
+    val contentTop = root.top + topInsetPx
+    val contentBottom = root.bottom - bottomInsetPx
+
+    val aboveBottomBar = bounds.bottom <= contentBottom + slopPx
+    val belowTopBar = bounds.top >= contentTop - slopPx
+    val withinLeft = bounds.left >= root.left - slopPx
+    val withinRight = bounds.right <= root.right + slopPx
+
+    if (!aboveBottomBar || !belowTopBar || !withinLeft || !withinRight) {
+        throw AssertionError(
+            "Node '$tag' is not fully within the reachable content area (issue " +
+                "#2176). Under edge-to-edge the Compose root INCLUDES the strip " +
+                "behind the system bars, so a node that fails here can still be " +
+                "'fully within root' — and taps landing on that strip go to the " +
+                "system bar, not the app. nodeBounds=$bounds rootBounds=$root " +
+                "topInsetPx=$topInsetPx bottomInsetPx=$bottomInsetPx " +
+                "contentTop=$contentTop contentBottom=$contentBottom slopPx=$slopPx " +
+                "(aboveBottomBar=$aboveBottomBar belowTopBar=$belowTopBar " +
+                "left=$withinLeft right=$withinRight).",
+        )
+    }
+}
+
 /** Modal-safe containment: resolves the root that owns [tag] when multiple windows exist. */
 fun ComposeTestRule.assertNodeFullyWithinOwningRoot(
     tag: String,

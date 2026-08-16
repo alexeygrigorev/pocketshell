@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -22,7 +21,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -211,7 +209,7 @@ fun PortForwardPanelScreen(
             }
 
             SectionHeader(label = "Ports", count = displayedTunnels.size)
-            PortTableHeader()
+            PortTableHeader(HOST_WIDE_PORT_COLUMNS)
 
             when {
                 state.autoForwardEnabled && displayedTunnels.isEmpty() &&
@@ -469,25 +467,18 @@ internal fun hiddenNoisyPortsToggleLabel(checked: Boolean, hiddenCount: Int): St
         "Show hidden/noisy ports"
     }
 
-@Composable
-private fun PortTableHeader() {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Background)
-            .padding(
-                horizontal = PocketShellDensity.rowPadH,
-                vertical = PocketShellDensity.rowPadV,
-            ),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        HeaderCell("Remote", 0.18f)
-        HeaderCell("Local", 0.16f)
-        HeaderCell("Process", 0.28f)
-        HeaderCell("Status", 0.18f)
-        HeaderCell("Traffic", 0.20f)
-    }
-}
+/**
+ * Issue #2176: the host-wide table's columns. The chrome lives in the shared
+ * [PortTableHeader] so this table and the per-session Ports panel render as one
+ * design, not two.
+ */
+private val HOST_WIDE_PORT_COLUMNS: List<PortColumn> = listOf(
+    PortColumn("Remote", 0.18f),
+    PortColumn("Local", 0.16f),
+    PortColumn("Process", 0.28f),
+    PortColumn("Status", 0.18f),
+    PortColumn("Traffic", 0.20f),
+)
 
 @Composable
 private fun PortForwardRow(
@@ -512,33 +503,11 @@ private fun PortForwardRow(
         onRowClick != null -> onRowClick
         else -> null
     }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .defaultMinSize(
-                minHeight = if (rowClick != null) {
-                    PocketShellDensity.tapTargetMin
-                } else {
-                    PocketShellDensity.rowMinHeight
-                },
-            )
-            .let { base ->
-                if (rowClick != null) {
-                    base.clickable(role = Role.Button, onClick = rowClick)
-                } else {
-                    base
-                }
-            }
-            .padding(
-                horizontal = PocketShellDensity.rowPadH,
-                vertical = PocketShellDensity.rowPadV,
-            ),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        BodyCell("${tunnel.remotePort}", 0.18f, monospace = true)
-        BodyCell("${tunnel.localPort}", 0.16f, monospace = true)
-        BodyCell(tunnel.process.ifBlank { "-" }, 0.28f)
-        BodyCell(tunnel.status.label, 0.18f, color = statusColor)
+    PortTableRow(onClick = rowClick) {
+        PortBodyCell("${tunnel.remotePort}", 0.18f, monospace = true)
+        PortBodyCell("${tunnel.localPort}", 0.16f, monospace = true)
+        PortBodyCell(tunnel.process.ifBlank { "-" }, 0.28f)
+        PortBodyCell(tunnel.status.label, 0.18f, color = statusColor)
         // Issue #456: declutter the table. Discovered/available rows have no
         // traffic yet, so rendering "0 B / 0 B/s" on every row is just noise.
         // Show the traffic figures only for rows that are actually forwarding.
@@ -572,34 +541,6 @@ private fun PortForwardRow(
             variant = if (forwarding) ButtonVariant.Text else ButtonVariant.Primary,
         )
     }
-}
-
-@Composable
-private fun RowScope.HeaderCell(text: String, weight: Float) {
-    Text(
-        text = text.uppercase(),
-        modifier = Modifier.weight(weight),
-        color = PocketShellColors.TextMuted,
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.SemiBold,
-    )
-}
-
-@Composable
-private fun RowScope.BodyCell(
-    text: String,
-    weight: Float,
-    monospace: Boolean = false,
-    color: Color = PocketShellColors.TextSecondary,
-) {
-    Text(
-        text = text,
-        modifier = Modifier.weight(weight),
-        color = color,
-        style = if (monospace) PocketShellType.bodyMono else PocketShellType.bodyDense,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-    )
 }
 
 @Composable

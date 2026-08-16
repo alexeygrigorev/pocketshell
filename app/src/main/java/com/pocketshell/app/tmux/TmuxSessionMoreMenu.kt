@@ -45,6 +45,10 @@ internal fun TmuxMoreMenu(
     // port-forward panel. Defaulted so existing direct callers / tests
     // of TmuxMoreMenu stay source-compatible.
     onOpenPortForwarding: () -> Unit = {},
+    // Issue #2176: "Session ports" kebab item — the ports THIS session opened,
+    // as opposed to the host-wide port-forward panel above it. Defaulted so
+    // existing direct callers / tests of TmuxMoreMenu stay source-compatible.
+    onOpenSessionPorts: () -> Unit = {},
     // Issue #235: user-driven detach. Tears the `-CC` control client
     // down (server-clean — uses the same `detach-client` round-trip
     // [TmuxSessionViewModel.detachAndExit] runs internally) and pops
@@ -164,6 +168,15 @@ internal fun TmuxMoreMenu(
         // Issue #1487 hard-cut (D22): keep the navigation/control route, but
         // remove its duplicate active/restoring/count decoration. The top-chrome
         // pill is the sole in-app forwarding status surface.
+        // Issue #2176: the per-session view of the same subject, listed FIRST
+        // because on a box running many projects it is the one that answers
+        // "which port is mine?" — the host-wide panel below it lists everything
+        // listening and cannot attribute.
+        DropdownMenuItem(
+            text = { Text("Session ports") },
+            onClick = onOpenSessionPorts,
+            modifier = Modifier.testTag(TMUX_SESSION_PORTS_BUTTON_TAG),
+        )
         DropdownMenuItem(
             text = { Text("Port forwarding") },
             onClick = onOpenPortForwarding,

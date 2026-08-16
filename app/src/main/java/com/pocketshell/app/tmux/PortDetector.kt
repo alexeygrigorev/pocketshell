@@ -68,8 +68,15 @@ internal class PortDetector(
      * A port matched by the regex that has NOT yet been resolved (not yet
      * confirmed, dismissed, or forwarded). Returned by [offer] so the
      * caller can run its single `ss` confirm scan.
+     *
+     * [matchedText] (issue #2176) is the literal terminal text that produced the
+     * match — "Local:   http://localhost:5173/". The overlay does not need it,
+     * but the per-session Ports panel does: a row reading only "5173" is not
+     * recognisable to the human who watched that line scroll past, whereas the
+     * line they actually saw is. Defaulted to empty so the many existing
+     * detector tests that construct a candidate by port alone still compile.
      */
-    data class Candidate(val port: Int)
+    data class Candidate(val port: Int, val matchedText: String = "")
 
     // Guards every read/write of [handled] and [pendingConfirm]. Both sets
     // are mutated from two dispatchers (issue #938: [scan] off-Main, the
@@ -110,7 +117,11 @@ internal class PortDetector(
             tail.delete(0, tail.length - TAIL_LIMIT)
         }
         val text = tail.toString()
-        val found = LinkedHashSet<Int>()
+        // Issue #2176: the matched text is carried alongside the port so the
+        // per-session Ports panel can show the line the user actually saw. The
+        // FIRST match for a port wins (`putIfAbsent`), which is the line that
+        // announced the server rather than a later passing reference.
+        val found = LinkedHashMap<Int, String>()
         for (regex in PORT_REGEXES) {
             for (match in regex.findAll(text)) {
                 // Skip a match whose digits run to the very end of the
@@ -123,7 +134,7 @@ internal class PortDetector(
                     ?.toIntOrNull()
                     ?: continue
                 if (port !in VALID_PORT_RANGE) continue
-                found += port
+                found.putIfAbsent(port, match.value.trim())
             }
         }
         for (reference in detectLocalhostPortReferences(text)) {
@@ -131,7 +142,7 @@ internal class PortDetector(
             // source span. A chunk ending in `localhost:51` should wait for the
             // next bytes before offering what may become `localhost:5173`.
             if (reference.endExclusive == text.length) continue
-            found += reference.localhostUrl.remotePort
+            found.putIfAbsent(reference.localhostUrl.remotePort, reference.text.trim())
         }
         // The decode + regex work above is intentionally OUTSIDE the lock
         // (issue #877: keep the expensive off-Main scan off the critical
@@ -139,10 +150,10 @@ internal class PortDetector(
         // serialized here (issue #938).
         val candidates = mutableListOf<Candidate>()
         synchronized(lock) {
-            for (port in found) {
+            for ((port, matchedText) in found) {
                 if (port in handled || port in pendingConfirm) continue
                 pendingConfirm += port
-                candidates += Candidate(port)
+                candidates += Candidate(port, matchedText)
             }
         }
         return candidates

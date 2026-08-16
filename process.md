@@ -1501,6 +1501,23 @@ for a reported visual / occlusion / layout / lifecycle bug MUST:
   `assertIsDisplayed()` is satisfied by layout participation, not viewport
   containment — a control pushed off the right edge or under the keyboard still
   reports "displayed".
+- **But `assertNodeFullyWithinRoot` is NOT sufficient for a bottom-anchored
+  surface under `enableEdgeToEdge()` — the root INCLUDES the area behind the
+  system bars (#2176, 2026-08-16).** `MainActivity` calls `enableEdgeToEdge()`,
+  so a row rendered underneath the navigation bar is "fully within root" while
+  the user physically cannot tap it: the Back triangle cuts through the label and
+  taps in that region go to the system nav bar. #2176's `All host ports` footer
+  shipped that way and its `assertNodeFullyWithinRoot(...)` was **green with the
+  defect fully present — no mutation could redden it.** Note the irony: this
+  bullet's own recommendation, applied faithfully, produced a decorative
+  assertion. Better than `assertIsDisplayed()`, still not enough.
+  For any bottom-anchored / edge-adjacent surface, assert against the area the
+  user can actually reach — the content area inside the system-bar insets — not
+  the raw root, and prove it by removing the inset padding as a mutation and
+  watching the assertion go RED. On the production side the cure is already in
+  the tree and is what the sibling surfaces do: apply `navigationBarsPadding()`
+  (`DetectedPortOverlay` in the same overlay region does, and two siblings carry
+  comments recording this exact 126px failure) rather than a hand-tuned offset.
 - For event-driven / lifecycle flows, cover BOTH the subscriber-alive path AND
   the subscriber-torn-down path. Emitting an event while the collector is still
   bound never exercises the navigated-away / VM-cleared edge that actually

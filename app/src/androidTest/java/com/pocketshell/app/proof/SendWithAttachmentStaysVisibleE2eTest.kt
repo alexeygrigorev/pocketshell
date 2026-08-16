@@ -115,6 +115,18 @@ class SendWithAttachmentStaysVisibleE2eTest {
     private var diagnostics: RecordingDiagnosticSink? = null
 
     private suspend fun seedBeforeLaunch() {
+        // Issue #2124: the acknowledgement this class asserts
+        // (`assertExactlyCurrentAckObserved` — exactly one observed
+        // `agent_submit_ack`, never timeout/fallback) is the LEGACY
+        // terminal-inference oracle, emitted only by `AgentSubmitAck`. The
+        // shipped default is now the acknowledged host-CLI path, which never
+        // consults that stack, so select the legacy authority by name rather
+        // than letting a default flip silently re-point the class at a
+        // different state machine. The #1153 send-heal behaviour this class
+        // exists to prove is unchanged by the selection.
+        pinOutboundDeliveryAuthority(
+            com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference,
+        )
         BackgroundGraceTestOverride.setForTest(null)
         val key = readFixtureKey()
         fixtureKey = key
@@ -125,13 +137,24 @@ class SendWithAttachmentStaysVisibleE2eTest {
 
     @Before
     fun setUp() {
+        // Issue #2124: zero before every test so the tearDown assertion below is
+        // about THIS test's sends.
+        com.pocketshell.app.tmux.HostAckSendProbe.reset()
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
     }
 
     @After
     fun tearDown() {
+        // Issue #2124: this class asserts the LEGACY inference acknowledgement,
+        // so not one of its sends may have ridden the acknowledged host-CLI
+        // lane. This is the behavioural half of the authority pin's liveness
+        // proof: without the pin the legacy `agent_submit_ack` never fires at
+        // all (`events=[]`), which is exactly how this class reddened on
+        // run 31953547265.
+        assertNoAcknowledgedSendsWereRecorded("SendWithAttachmentStaysVisibleE2eTest")
         diagnostics?.close()
         diagnostics = null
+        clearOutboundDeliveryAuthorityPin()
         BackgroundGraceTestOverride.setForTest(null)
         if (::fixtureKey.isInitialized) {
             runCatching { runBlocking { cleanupRemoteTmuxSession(fixtureKey) } }

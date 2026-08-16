@@ -22,6 +22,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.tmux.TmuxRead
 import com.pocketshell.core.tmux.TmuxTarget
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.parseAgentStateUpdatedAtEpochSec
@@ -1545,7 +1546,11 @@ class SshFolderListGateway internal constructor(
             } else {
                 val listWindows = session.exec(
                     pathAware(
-                        "tmux list-windows -t $quotedName -F '#{window_index}'",
+                        // Issue #2160: `-u` — this listing is PARSED (the
+                        // remaining window indices decide whether the kill
+                        // succeeded), so it must not be read through a tmux
+                        // client that sanitises what it prints. See [TmuxRead].
+                        "${TmuxRead.CLIENT} list-windows -t $quotedName -F '#{window_index}'",
                     ),
                 )
                 val remainingIndices = listWindows.stdout
@@ -2098,15 +2103,25 @@ class SshFolderListGateway internal constructor(
          */
         const val ENUMERATION_MARKER: String = "__pocketshell_enum_$FIELD_SEP@@"
 
+        /**
+         * Issue #2160: `tmux -u` — the exec form of the enumeration reads FOUR
+         * user options (`@ps_agent_kind`, `@ps_agent_profile`, `@ps_agent_state`,
+         * `@ps_agent_state_updated_at`) plus `session_path`. A tmux client
+         * without a UTF-8 locale sanitises every byte it prints, so on a host
+         * whose sshd exports no locale (a container, Alpine/BusyBox, hardened
+         * sshd) each non-printable byte and each multi-byte UTF-8 sequence in
+         * those fields comes back as `_`. See [com.pocketshell.core.tmux.TmuxRead].
+         */
         const val LIST_SESSIONS_COMMAND: String =
-            "tmux list-sessions -F " +
+            "${TmuxRead.CLIENT} list-sessions -F " +
                 "'#{session_name}$FIELD_SEP#{session_id}$FIELD_SEP#{session_created}$FIELD_SEP" +
                 "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP" +
                 "#{@ps_agent_kind}$FIELD_SEP#{@ps_agent_profile}$FIELD_SEP" +
                 "#{@ps_agent_state}$FIELD_SEP#{@ps_agent_state_updated_at}$FIELD_SEP#{session_path}'"
 
+        /** Issue #2160: `tmux -u` — see [LIST_SESSIONS_COMMAND]. */
         const val LIST_PANES_COMMAND: String =
-            "tmux list-panes -a -F " +
+            "${TmuxRead.CLIENT} list-panes -a -F " +
                 "'#{session_name}$FIELD_SEP#{window_index}$FIELD_SEP#{window_name}$FIELD_SEP" +
                 "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}" +
@@ -2245,6 +2260,23 @@ class SshFolderListGateway internal constructor(
         const val POCKETSHELL_PROJECT_HISTORY_COMMAND: String =
             "pocketshell logs tail --kind agent --json -n 200"
 
+        /**
+         * The `-CC`-form of [LIST_SESSIONS_COMMAND] (no leading `tmux`). It is
+         * sent EITHER over the exec lane ([com.pocketshell.core.tmux.TmuxClient.listPanesViaExec]
+         * / `sendLifecycleViaExec`, which prefix it with the locale-proof client)
+         * OR as a control-mode command over the attached `tmux -CC` client.
+         *
+         * Issue #2160: the control-mode leg is NOT locale-proof — the flag would
+         * have to move to the `-CC` attach itself, which changes the app's
+         * control-client command line (an identity oracle keys on it) and is
+         * connection-core surface. Measured, that leg is not a live hole: the four
+         * user options it expands carry only printable ASCII today
+         * (`@ps_agent_kind` claude/codex/opencode/shell, `@ps_agent_state`
+         * idle/waiting_for_input/working, `@ps_agent_state_updated_at` ISO-8601,
+         * `@ps_agent_profile` an ASCII label). Only a NON-ASCII profile label or
+         * project path on a host with no UTF-8 locale would surface it, so it is
+         * tracked as **issue #2175** rather than folded in here.
+         */
         const val CONTROL_LIST_SESSIONS_COMMAND: String =
             "list-sessions -F " +
                 "'#{session_name}$FIELD_SEP#{session_id}$FIELD_SEP#{session_created}$FIELD_SEP" +

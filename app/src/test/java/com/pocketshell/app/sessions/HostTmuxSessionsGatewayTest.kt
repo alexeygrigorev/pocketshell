@@ -109,10 +109,15 @@ class HostTmuxSessionsGatewayTest {
             assertEquals("${HOST.id}:$KEY_PATH", connector.targets.single().leaseKey.credentialId)
             assertEquals("accept-all", connector.targets.single().leaseKey.knownHostsId)
             assertFalse(session.closed)
+            // Issue #2160: derived from the production constant, so an
+            // invocation change (e.g. adding/removing the locale-proof `-u`)
+            // cannot silently turn this behavioural assertion into a false
+            // negative. The locale-proof property itself is asserted by
+            // `Issue2160HostSessionPickerLocaleProofTest`.
             assertEquals(
                 listOf(
-                    "tmux list-sessions -F '#{session_id}::#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
-                    "tmux list-sessions -F '#{session_id}::#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
+                    SshHostTmuxSessionsGateway.LIST_SESSIONS_COMMAND,
+                    SshHostTmuxSessionsGateway.LIST_SESSIONS_COMMAND,
                 ).map { ReposRemoteSource.pathAwareCommand(it) },
                 session.execCommands,
             )

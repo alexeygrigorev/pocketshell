@@ -121,8 +121,12 @@ class FolderListGatewayExecTimeoutTest {
                 // POSIX shell command, so the format strings' embedded quotes
                 // are escaped at this boundary. Match the stable command heads
                 // here; FolderListLandingProbeTest pins the exact raw batch.
-                command.contains("tmux list-sessions") &&
-                    command.contains("tmux list-panes") &&
+                // Issue #2160: derive the heads from the production constants
+                // instead of re-typing `tmux list-…` — a literal silently stops
+                // matching the moment the invocation changes (the `-u`
+                // locale-proof client), which is how this assertion went red.
+                command.contains(SshFolderListGateway.LIST_SESSIONS_COMMAND.substringBefore(" -F")) &&
+                    command.contains(SshFolderListGateway.LIST_PANES_COMMAND.substringBefore(" -F")) &&
                     command.contains(SshFolderListGateway.ENUMERATION_MARKER)
             },
         )

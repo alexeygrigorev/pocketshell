@@ -6,6 +6,7 @@ import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxRead
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
@@ -80,14 +81,7 @@ class SshHostTmuxSessionsGateway internal constructor(
             target = host.toLeaseSessionTarget(keyPath, passphrase),
             blockTimeoutMs = leaseBlockTimeoutMs,
         ) { session ->
-            val tmux = session.exec(
-                pathAware(
-                    // Issue #1944: picker navigation must carry a correlated
-                    // tmux generation. A name-only proxy row is unsafe after
-                    // runtime-cache eviction, so query id + created directly.
-                    "tmux list-sessions -F '#{session_id}::#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
-                ),
-            )
+            val tmux = session.exec(pathAware(LIST_SESSIONS_COMMAND))
             when {
                 tmux.exitCode == 0 -> HostTmuxSessionListResult.Sessions(parser.parseTmuxListSessions(tmux.stdout))
                 tmux.exitCode == 127 || tmux.stderr.contains("not found", ignoreCase = true) ->
@@ -164,8 +158,31 @@ class SshHostTmuxSessionsGateway internal constructor(
             username == host.username &&
             this.keyPath == keyPath
 
-    private companion object {
+    internal companion object {
         const val LOG_TAG: String = "HostTmuxSessions"
+
+        /**
+         * The cold (no warm `-CC` client) session-picker enumeration.
+         *
+         * Issue #1944: picker navigation must carry a correlated tmux
+         * generation. A name-only proxy row is unsafe after runtime-cache
+         * eviction, so query id + created directly.
+         *
+         * Issue #2160: `tmux -u`. `#{session_name}` is free-form — the
+         * maintainer routinely names sessions in Russian — and a tmux client
+         * that is not in UTF-8 mode replaces every non-printable-ASCII
+         * character it prints with `_`. On a host whose sshd hands the SSH
+         * exec channel no locale (a container, Alpine/BusyBox, a hardened
+         * sshd with no `AcceptEnv`/PAM locale) a bare read returns `______`
+         * for such a name, and the picker can no longer target the session it
+         * is showing. Same command shape, same exec lane, same byte class as
+         * [com.pocketshell.app.projects.SshFolderListGateway.LIST_SESSIONS_COMMAND].
+         * See [com.pocketshell.core.tmux.TmuxRead].
+         */
+        const val LIST_SESSIONS_COMMAND: String =
+            "${TmuxRead.CLIENT} list-sessions -F " +
+                "'#{session_id}::#{session_name}::#{session_created}::" +
+                "#{session_activity}::#{session_attached}'"
 
         const val LEASE_BLOCK_TIMEOUT_MS: Long = 3_500L
 

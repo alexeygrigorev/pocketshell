@@ -177,7 +177,10 @@ class FolderListGatewayLiveClientTest {
         // the wedged control channel.
         assertTrue(
             "live enumeration wedge must fall through to the SSH-lease enumeration; got ${leaseSession.execCommands}",
-            leaseSession.execCommands.any { it.contains("tmux list-sessions") },
+            // Issue #2160: match the PRODUCTION command head, not a re-typed
+            // `tmux list-sessions` literal — the literal silently stopped
+            // matching when the read moved to the locale-proof `tmux -u` client.
+            leaseSession.execCommands.any { it.contains(LIST_SESSIONS_HEAD) },
         )
         // The result is a bounded FolderListResult (NOT a permanent Loading
         // hang). With the empty-success lease there are no live sessions, so an
@@ -256,7 +259,9 @@ class FolderListGatewayLiveClientTest {
         // but NEVER re-enumerated tmux sessions/panes.
         assertTrue(
             "lease must not re-run tmux list-sessions when the live client enumerated; got ${leaseSession.execCommands}",
-            leaseSession.execCommands.none { it.contains("tmux list-sessions") || it.contains("tmux list-panes") },
+            leaseSession.execCommands.none {
+                it.contains(LIST_SESSIONS_HEAD) || it.contains(LIST_PANES_HEAD)
+            },
         )
     }
 
@@ -369,6 +374,19 @@ class FolderListGatewayLiveClientTest {
     }
 
     private companion object {
+        /**
+         * Issue #2160: the `tmux … list-sessions` / `list-panes` heads DERIVED
+         * from the production constants. These assertions used to re-type
+         * `"tmux list-sessions"`, which stopped matching — silently — the moment
+         * the enumeration moved to the locale-proof `tmux -u` client. Deriving
+         * them means the invocation can change again without turning a
+         * behavioural assertion into a false negative.
+         */
+        val LIST_SESSIONS_HEAD: String =
+            SshFolderListGateway.LIST_SESSIONS_COMMAND.substringBefore(" -F")
+        val LIST_PANES_HEAD: String =
+            SshFolderListGateway.LIST_PANES_COMMAND.substringBefore(" -F")
+
         const val KEY_PATH: String = "/tmp/pocketshell-test-key"
         val HOST: HostEntity = HostEntity(
             id = 42L,

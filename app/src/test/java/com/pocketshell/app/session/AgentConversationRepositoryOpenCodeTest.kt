@@ -20,6 +20,15 @@ import org.junit.Test
 import java.io.File
 import java.io.InputStream
 
+/**
+ * Issue #2155: the tmux `-t` target every recorded-source-resolving exec reads
+ * `@ps_agent_source_generation` / `@ps_agent_source` against. It is now a
+ * required parameter of `detectRecordedSessionForPane` — the source is resolved
+ * LIVE inside that exec instead of being handed in by a caller that may be
+ * holding a path from a PREVIOUS agent launch in the same session.
+ */
+private const val RECORDED_SESSION_TARGET: String = "$3"
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentConversationRepositoryOpenCodeTest {
     @Test
@@ -278,6 +287,7 @@ class AgentConversationRepositoryOpenCodeTest {
         // Claude JSONL. (Kind-guessing is hard-cut; the kind is passed in.)
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/pocketshell",
             paneTty = "/dev/pts/3",
             paneCommand = "opencode",

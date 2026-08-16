@@ -390,6 +390,18 @@ internal const val MAX_TRANSCRIPT_LINE_BYTES: Int = 262_144
 internal const val LINE_TRUNCATION_SENTINEL: String = "@@PS_LINE_TRUNCATED@@"
 
 /**
+ * Issue #2155: sentinels delimiting the `@ps_agent_source_generation` /
+ * `@ps_agent_source` section that is folded into every recorded-source-resolving
+ * exec (the #828 single-round-trip open AND the per-detection enumeration), so
+ * the LIVE generation is always re-read without an extra round-trip. ONE
+ * definition, used by every producer and parser, so a rename cannot desync a
+ * shell fragment from its parse.
+ */
+internal const val RECORDED_SOURCE_GENERATION_SENTINEL: String =
+    "@@PS_RECORDED_SOURCE_GENERATION@@"
+internal const val RECORDED_SOURCE_SENTINEL: String = "@@PS_RECORDED_SOURCE@@"
+
+/**
  * Issue #1225: the server-side shell fragment that byte-clamps a tailed JSONL
  * transcript, one line at a time. Any line whose byte length exceeds
  * [MAX_TRANSCRIPT_LINE_BYTES] is replaced by
@@ -577,77 +589,34 @@ public class AgentConversationRepository internal constructor(
     }
 
     /**
-     * Issue #821 branch 1: read the exact transcript source PocketShell recorded
-     * for this tmux session (`@ps_agent_source`). It is optional and best-effort:
-     * legacy sessions and old host CLIs simply return `null`, which keeps the
-     * existing source selector unchanged.
+     * Issue #2155: resolve the raw `@ps_agent_source` option value against the
+     * CURRENT [generation].
+     *
+     * The host CLI writes `"<generation>\t<path>"`, minting a fresh generation on
+     * EVERY agent launch. A value whose generation does not match the live one is
+     * from a PREVIOUS agent in this tmux session and resolves to `null`, so the
+     * caller degrades to its mtime selector — verbatim what `record_agent_source`'s
+     * docstring specifies. A bare path with NO live generation is a legacy/old-host
+     * value and is accepted as-is; a bare path WHILE a generation is live is
+     * unattributable and rejected.
+     *
+     * There is deliberately no "this source was generation-scoped" flag: the whole
+     * point of the generation is that a source EXPIRES, so any signal inviting a
+     * caller to cache and trust one permanently is the #2155 defect itself.
      */
-    suspend fun readRecordedAgentSource(
-        session: SshSession,
-        sessionTarget: String,
-    ): String? = readRecordedAgentSourceOption(session, sessionTarget).source
-
-    data class RecordedAgentSourceOption(
-        val source: String?,
-        val generationScoped: Boolean,
-    )
-
-    suspend fun readRecordedAgentSourceOption(
-        session: SshSession,
-        sessionTarget: String,
-    ): RecordedAgentSourceOption {
-        val target = sessionTarget.trim().ifBlank {
-            return RecordedAgentSourceOption(source = null, generationScoped = false)
-        }
-        val generationSentinel = "@@PS_RECORDED_SOURCE_GENERATION@@"
-        // Issue #1820: EXACT pane target (see [readRecordedAgentKind]).
-        val quotedTarget = shellQuote(TmuxTarget.pane(target))
-        val raw = runCatching {
-            session.exec(
-                "ps_recorded_source_generation=\$(" +
-                    "tmux show-options -v -t $quotedTarget @ps_agent_source_generation 2>/dev/null || true" +
-                    "); printf '%s\\n' \"\$ps_recorded_source_generation\"; " +
-                    "printf '%s\\n' $generationSentinel; " +
-                    "tmux show-options -v -t $quotedTarget @ps_agent_source 2>/dev/null || true",
-            ).stdout
-        }.getOrNull() ?: return RecordedAgentSourceOption(source = null, generationScoped = false)
-        val lines = raw.split("\n")
-        val generationIndex = lines.indexOf(generationSentinel)
-        val generation = if (generationIndex >= 0) {
-            lines.take(generationIndex).joinToString("\n").trim().ifBlank { null }
-        } else {
-            null
-        }
-        val sourceRaw = if (generationIndex >= 0) {
-            lines.drop(generationIndex + 1).joinToString("\n")
-        } else {
-            raw
-        }
-        return recordedAgentSourceOptionFromRaw(sourceRaw, generation)
-    }
-
-    internal fun recordedAgentSourceOptionFromRaw(
+    internal fun recordedAgentSourceFromRaw(
         raw: String?,
         generation: String? = null,
-    ): RecordedAgentSourceOption {
-        val value = raw?.trim()?.takeIf { it.isNotEmpty() }
-            ?: return RecordedAgentSourceOption(source = null, generationScoped = false)
+    ): String? {
+        val value = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
         val currentGeneration = generation?.trim().orEmpty()
         val parts = value.split("\t", limit = 2)
         if (parts.size == 2 && parts[0].isNotBlank()) {
-            if (currentGeneration.isNotEmpty() && parts[0] != currentGeneration) {
-                return RecordedAgentSourceOption(source = null, generationScoped = false)
-            }
-            val source = parts[1].trim().takeIf { it.isNotEmpty() }
-            return RecordedAgentSourceOption(
-                source = source,
-                generationScoped = source != null && currentGeneration.isNotEmpty(),
-            )
+            if (currentGeneration.isNotEmpty() && parts[0] != currentGeneration) return null
+            return parts[1].trim().takeIf { it.isNotEmpty() }
         }
-        if (currentGeneration.isNotEmpty()) {
-            return RecordedAgentSourceOption(source = null, generationScoped = false)
-        }
-        return RecordedAgentSourceOption(source = value, generationScoped = false)
+        if (currentGeneration.isNotEmpty()) return null
+        return value
     }
 
     /**
@@ -698,22 +667,65 @@ public class AgentConversationRepository internal constructor(
      * Returns `null` only when no candidate of the recorded kind exists for
      * this pane (the agent's log has not appeared yet / the agent exited) —
      * the caller treats that exactly like a null detection.
+     *
+     * ### Issue #2155 — the recorded source is read LIVE, never remembered
+     *
+     * [sessionTarget] is the tmux `-t` target whose `@ps_agent_source_generation`
+     * + `@ps_agent_source` this exec ALSO reads, folded in ahead of the candidate
+     * enumeration so it costs **no extra SSH round-trip** (the #828 budget is
+     * unchanged). There is deliberately no CACHED-source parameter: the host CLI
+     * mints a fresh generation on EVERY agent launch and unsets the stale option,
+     * so a source value that is correct at one moment expires the instant a new
+     * agent starts in the same tmux session. Letting a caller pass a remembered
+     * path from a session-scoped cache is exactly the defect #2155 fixed — the
+     * Conversation stayed bound to the previous agent's transcript for the life
+     * of the runtime. The generation comparison lives in
+     * [recordedAgentSourceFromRaw] and yields `null` on a mismatch, which
+     * degrades to the mtime selector — the behaviour the host's
+     * `record_agent_source` docstring specifies.
+     *
+     * A blank [sessionTarget] reads no option (source `null` → mtime selector).
+     *
+     * ### [boundSourcePath] — the pane's OWN live binding, last resort only
+     *
+     * The Conversation stream RETRY re-fetches the transcript the user is
+     * already viewing, so it passes the transcript that pane is bound to RIGHT
+     * NOW. It is consulted **only when the live `@ps_agent_source` resolved to
+     * `null`** (foreign session, watcher-never-wrote window, a host whose option
+     * read is unusable) and only if that path is still among this cwd's
+     * enumerated candidates of the recorded kind. Without it the retry falls
+     * through to "newest same-cwd candidate", which re-binds a BUSIER SIBLING
+     * sharing the project dir — the #819/#825 wrong-source symptom, on the one
+     * path where the correct answer is already known. It is NOT a cache: it is
+     * refreshed by every detection pass, so a live source always wins over it
+     * and an in-session relaunch still re-anchors (#2155). Detection callers
+     * pass nothing — they have no prior binding to preserve.
      */
     suspend fun detectRecordedSessionForPane(
         session: SshSession,
+        sessionTarget: String,
         cwd: String,
         paneTty: String,
         paneCommand: String,
         recordedKind: AgentKind,
-        recordedSource: String? = null,
+        boundSourcePath: String? = null,
     ): AgentDetection? {
         val normalizedCwd = cwd.trim().ifBlank { return null }
         val normalizedTty = paneTty.trim().ifBlank { return null }
         // cwd-scoped candidate enumeration, keeping ONLY the candidates of the
         // recorded/guessed kind — the source selector never gets to pick the
-        // kind from a cross-kind path-hint / mtime race.
-        val candidates = session.exec(detectionCommand(normalizedCwd))
-            .stdout
+        // kind from a cross-kind path-hint / mtime race. The live recorded-source
+        // option read (#2155) rides along in the SAME exec.
+        val target = sessionTarget.trim()
+        val stdout = session.exec(
+            if (target.isEmpty()) {
+                detectionCommand(normalizedCwd)
+            } else {
+                recordedSourceOptionPreamble(target) + "\n" + detectionCommand(normalizedCwd)
+            },
+        ).stdout
+        val split = splitRecordedSourceOptionPreamble(stdout, hasPreamble = target.isNotEmpty())
+        val candidates = split.remainder
             .lineSequence()
             .mapNotNull(::parseCandidate)
             .filter { it.agent == recordedKind }
@@ -724,8 +736,57 @@ public class AgentConversationRepository internal constructor(
             normalizedTty = normalizedTty,
             paneCommand = paneCommand,
             recordedKind = recordedKind,
-            recordedSource = recordedSource,
+            // The LIVE option wins; the pane's own binding is the last resort.
+            recordedSource = split.source ?: boundSourcePath,
             candidates = candidates,
+        )
+    }
+
+    /**
+     * Issue #2155: the shell fragment that reads
+     * `@ps_agent_source_generation` + `@ps_agent_source` for [target] and emits
+     * them delimited by the same sentinels [resolveRecordedSessionOpen] uses, so
+     * it can be prefixed to ANY exec without a second round-trip.
+     */
+    private fun recordedSourceOptionPreamble(target: String): String {
+        // Issue #1820: EXACT pane target (see [readRecordedAgentKind]).
+        val quotedTarget = shellQuote(TmuxTarget.pane(target))
+        return "ps_recorded_source_generation=\$(" +
+            "tmux show-options -v -t $quotedTarget @ps_agent_source_generation 2>/dev/null || true" +
+            "); printf '%s\\n' \"\$ps_recorded_source_generation\"\n" +
+            "printf '%s\\n' $RECORDED_SOURCE_GENERATION_SENTINEL\n" +
+            "tmux show-options -v -t $quotedTarget @ps_agent_source 2>/dev/null || true\n" +
+            "printf '%s\\n' $RECORDED_SOURCE_SENTINEL"
+    }
+
+    private class RecordedSourceSplit(
+        val source: String?,
+        val remainder: String,
+    )
+
+    /**
+     * Issue #2155: split an exec's stdout into the [recordedSourceOptionPreamble]
+     * section and everything after it. A host whose tmux/option read produced no
+     * sentinels (an old host CLI, a dead session) degrades to "no recorded
+     * source" and the FULL stdout as the remainder, so the candidate enumeration
+     * is never lost — the option is an optimisation, the enumeration is not.
+     */
+    private fun splitRecordedSourceOptionPreamble(
+        stdout: String,
+        hasPreamble: Boolean,
+    ): RecordedSourceSplit {
+        if (!hasPreamble) return RecordedSourceSplit(source = null, remainder = stdout)
+        val lines = stdout.split("\n")
+        val generationIndex = lines.indexOf(RECORDED_SOURCE_GENERATION_SENTINEL)
+        val sourceIndex = lines.indexOf(RECORDED_SOURCE_SENTINEL)
+        if (generationIndex < 0 || sourceIndex <= generationIndex) {
+            return RecordedSourceSplit(source = null, remainder = stdout)
+        }
+        val generation = lines.take(generationIndex).joinToString("\n").trim().ifBlank { null }
+        val rawSource = lines.subList(generationIndex + 1, sourceIndex).joinToString("\n")
+        return RecordedSourceSplit(
+            source = recordedAgentSourceFromRaw(rawSource, generation),
+            remainder = lines.drop(sourceIndex + 1).joinToString("\n"),
         )
     }
 
@@ -1030,7 +1091,6 @@ public class AgentConversationRepository internal constructor(
     data class RecordedSessionOpen(
         val recordedKind: AgentKind?,
         val recordedSource: String?,
-        val recordedSourceGenerationScoped: Boolean,
         val detection: AgentDetection?,
         val needsCodexResolution: Boolean,
         val prefetchedWindow: ConversationEventsWindow? = null,
@@ -1082,14 +1142,13 @@ public class AgentConversationRepository internal constructor(
             return RecordedSessionOpen(
                 recordedKind = null,
                 recordedSource = null,
-                recordedSourceGenerationScoped = false,
                 detection = null,
                 needsCodexResolution = false,
             )
         }
         val kindSentinel = "@@PS_RECORDED_KIND@@"
-        val sourceGenerationSentinel = "@@PS_RECORDED_SOURCE_GENERATION@@"
-        val sourceSentinel = "@@PS_RECORDED_SOURCE@@"
+        val sourceGenerationSentinel = RECORDED_SOURCE_GENERATION_SENTINEL
+        val sourceSentinel = RECORDED_SOURCE_SENTINEL
         val sourceGenerationSeparator = "\t"
         // The Claude window-fold tail budget mirrors [readEventsWindow]: raw
         // lines = messages * JSONL_RAW_LINES_PER_EVENT, floored at the message
@@ -1133,7 +1192,7 @@ public class AgentConversationRepository internal constructor(
             // Parse the raw tmux option into the exact path the host watcher
             // recorded. New host CLIs write "<generation><tab><path>"; older
             // hosts wrote just "<path>". Keep this shell-side parse in lockstep
-            // with [recordedAgentSourceOptionFromRaw] so the folded Claude
+            // with [recordedAgentSourceFromRaw] so the folded Claude
             // window reads the exact recorded file instead of falling back to
             // the newest same-cwd sibling.
             append(
@@ -1204,7 +1263,6 @@ public class AgentConversationRepository internal constructor(
             ?: return RecordedSessionOpen(
                 recordedKind = null,
                 recordedSource = null,
-                recordedSourceGenerationScoped = false,
                 detection = null,
                 needsCodexResolution = false,
             )
@@ -1226,8 +1284,7 @@ public class AgentConversationRepository internal constructor(
         } else {
             null
         }
-        val recordedSourceOption = recordedAgentSourceOptionFromRaw(rawSource, rawSourceGeneration)
-        val recordedSource = recordedSourceOption.source
+        val recordedSource = recordedAgentSourceFromRaw(rawSource, rawSourceGeneration)
         // Candidate rows live between the source sentinel and the FIRST Claude
         // window sentinel (the section-2 enumeration). Everything from the
         // SECOND Claude window sentinel onward is the prefetched window.
@@ -1254,7 +1311,6 @@ public class AgentConversationRepository internal constructor(
             return RecordedSessionOpen(
                 recordedKind = recordedKind,
                 recordedSource = recordedSource,
-                recordedSourceGenerationScoped = recordedSourceOption.generationScoped,
                 detection = null,
                 needsCodexResolution = true,
             )
@@ -1270,7 +1326,6 @@ public class AgentConversationRepository internal constructor(
         ) ?: return RecordedSessionOpen(
             recordedKind = recordedKind,
             recordedSource = recordedSource,
-            recordedSourceGenerationScoped = recordedSourceOption.generationScoped,
             detection = null,
             needsCodexResolution = false,
         )
@@ -1296,7 +1351,6 @@ public class AgentConversationRepository internal constructor(
         return RecordedSessionOpen(
             recordedKind = recordedKind,
             recordedSource = recordedSource,
-            recordedSourceGenerationScoped = recordedSourceOption.generationScoped,
             detection = detection,
             needsCodexResolution = false,
             prefetchedWindow = prefetchedWindow,

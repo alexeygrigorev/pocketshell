@@ -2220,9 +2220,10 @@ public class TmuxSessionViewModel @Inject constructor(
     // from "read = foreign/null" (present-but-null) so a foreign session is not
     // re-probed on every reconcile either. Cleared with the other per-runtime
     // detection maps on park/restore/clear so a different session never inherits
-    // a stale recorded kind/source. Issue #821 branch 1 carries the sibling
-    // `@ps_agent_source` exact transcript identity through the same cache so
-    // later opens/retries do not fall back to same-kind mtime selection.
+    // a stale recorded KIND. Issue #2155: the SOURCE is deliberately NOT cached
+    // — the kind is fixed for a session's life, the source is not (every agent
+    // launch mints a new `@ps_agent_source_generation`), so it is re-read live
+    // inside the detection exec at zero extra round-trip cost.
     private val sessionRecordedKindCache: MutableMap<String, RecordedKindCacheEntry> =
         ConcurrentHashMap()
     // Epic #821 slice A2: per-tmux-session cache of the ONE-SHOT FOREIGN kind
@@ -12437,11 +12438,19 @@ public class TmuxSessionViewModel @Inject constructor(
      * Cheap + idempotent. A genuine shell re-probes and the daemon returns "no
      * agent" again (no flap — the #894 invariant holds; no detection ever binds,
      * so the confirmed-shell verdict is never cleared).
+     *
+     * Issue #2155 (kind-shaped twin of the stale-source bug): a guess that NAMED
+     * an agent is stale-across-relaunch too — exit `claude`, start `codex`, and
+     * the cached ClaudeCode verdict binds the wrong engine's transcript forever.
+     * Bust it on a real input change (at most one RPC per genuine agent change).
+     * #1641 is untouched: unchanged input never re-probes, and a NULL verdict
+     * keeps its one-shot rule outside the #962 confirmed-shell case above.
      */
-    private fun refreshForeignGuessForConfirmedShellPane(pane: TmuxPaneState) {
+    private fun bustStaleForeignKindGuess(pane: TmuxPaneState) {
         val sessionKey = pane.sessionId.trim()
         if (sessionKey.isEmpty()) return
-        if (!confirmedShellSessionIds.contains(sessionKey)) return
+        val cachedNamedAnAgent = sessionForeignKindGuessCache[sessionKey]?.kind != null
+        if (!cachedNamedAnAgent && !confirmedShellSessionIds.contains(sessionKey)) return
         sessionForeignKindGuessCache.remove(sessionKey)
     }
 
@@ -12551,36 +12560,15 @@ public class TmuxSessionViewModel @Inject constructor(
      * a `null` map value would be indistinguishable from "no entry", so a
      * foreign session would be re-probed (a wasted `readRecordedAgentKind`
      * round-trip) on every reconcile — defeating the cache for exactly the
-     * sessions that have no recorded kind to find. [source] is the optional
-     * exact `@ps_agent_source` transcript path captured by the host-side launch
-     * watcher for sessions PocketShell started.
+     * sessions that have no recorded kind to find.
+     *
+     * Issue #2155: KIND only. The cached `@ps_agent_source` + its
+     * `sourceGenerationScoped` flag short-circuited every later resolve, so the
+     * Conversation stayed on the previous agent's transcript after an in-session
+     * relaunch; that flag inverted the generation's purpose (it EXPIRES a
+     * source). Both are deleted — `detectRecordedSessionForPane` resolves live.
      */
-    private class RecordedKindCacheEntry(
-        val kind: AgentKind?,
-        val source: String?,
-        val sourceGenerationScoped: Boolean,
-    )
-
-    private suspend fun recordedSourceForCachedKind(
-        session: SshSession,
-        sessionTarget: String,
-        cachedKind: RecordedKindCacheEntry,
-    ): String? {
-        val recordedKind = cachedKind.kind ?: return null
-        cachedKind.source?.takeIf { cachedKind.sourceGenerationScoped }?.let { return it }
-        val key = sessionTarget.trim()
-        if (key.isEmpty()) return null
-        val refreshedSource = agentRepository.readRecordedAgentSourceOption(
-            session = session,
-            sessionTarget = key,
-        )
-        sessionRecordedKindCache[key] = RecordedKindCacheEntry(
-            kind = recordedKind,
-            source = refreshedSource.source,
-            sourceGenerationScoped = refreshedSource.generationScoped,
-        )
-        return refreshedSource.source
-    }
+    private class RecordedKindCacheEntry(val kind: AgentKind?)
 
     /**
      * Epic #821 slice A2: box for the per-session ONE-SHOT FOREIGN kind guess.
@@ -12689,6 +12677,8 @@ public class TmuxSessionViewModel @Inject constructor(
         if (guessedKind != null) {
             return agentRepository.detectRecordedSessionForPane(
                 session = session,
+                // Issue #2155: read any recorded source LIVE in the same exec.
+                sessionTarget = sessionTarget,
                 cwd = cwd,
                 paneTty = tty,
                 paneCommand = command,
@@ -12760,7 +12750,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // crucially, spawns no further classify RPC.
         val inputChanged = paneAgentInputs[pane.paneId] != input
         if (inputChanged) {
-            refreshForeignGuessForConfirmedShellPane(pane)
+            bustStaleForeignKindGuess(pane)
         }
         if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) {
             // Input unchanged and a probe is already in flight — dedup. Nothing
@@ -12839,18 +12829,17 @@ public class TmuxSessionViewModel @Inject constructor(
                     // Cache HIT — kind already known, no `@ps_agent_kind` exec.
                     val recordedKind = cachedKind.kind
                     if (recordedKind != null) {
-                        val recordedSource = recordedSourceForCachedKind(
-                            session = session,
-                            sessionTarget = sessionTarget,
-                            cachedKind = cachedKind,
-                        )
+                        // Issue #2155: the SOURCE is re-read live inside this one
+                        // exec, so a new agent started in this same session (which
+                        // the app never sees as a launch event) re-anchors instead
+                        // of serving the previous agent's transcript.
                         agentRepository.detectRecordedSessionForPane(
                             session = session,
+                            sessionTarget = sessionTarget,
                             cwd = cwd,
                             paneTty = tty,
                             paneCommand = command,
                             recordedKind = recordedKind,
-                            recordedSource = recordedSource,
                         )
                     } else {
                         // Epic #821 slice A2: FOREIGN session (no recorded kind).
@@ -12880,11 +12869,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     )
                     sessionRecordedKindCache.putIfAbsent(
                         sessionTarget.trim(),
-                        RecordedKindCacheEntry(
-                            kind = open.recordedKind,
-                            source = open.recordedSource,
-                            sourceGenerationScoped = open.recordedSourceGenerationScoped,
-                        ),
+                        RecordedKindCacheEntry(kind = open.recordedKind),
                     )
                     when {
                         open.recordedKind == null ->
@@ -12903,11 +12888,11 @@ public class TmuxSessionViewModel @Inject constructor(
                             // Recorded Codex needs the second owned-rollout pass.
                             agentRepository.detectRecordedSessionForPane(
                                 session = session,
+                                sessionTarget = sessionTarget,
                                 cwd = cwd,
                                 paneTty = tty,
                                 paneCommand = command,
                                 recordedKind = open.recordedKind,
-                                recordedSource = open.recordedSource,
                             )
                         // Recorded Claude/OpenCode: resolved in the one round-trip.
                         // Claude also carries the prefetched first window.
@@ -14638,21 +14623,18 @@ public class TmuxSessionViewModel @Inject constructor(
         // recorded-source resolution scoped to the known kind so we re-bind the
         // same engine's transcript without re-classifying.
         val detection = runCatching {
-            val cachedEntry = sessionRecordedKindCache[pane.sessionId.trim()]
-            val cachedSource = cachedEntry?.let {
-                recordedSourceForCachedKind(
-                    session = session,
-                    sessionTarget = pane.sessionId,
-                    cachedKind = it,
-                )
-            }
+            // Issue #2155: the source is resolved LIVE against the CURRENT
+            // generation, so a relaunch during the stale window re-anchors. Only
+            // when nothing live resolves do we keep this pane's OWN binding —
+            // otherwise "newest same-cwd" re-binds a busier sibling (#819).
             agentRepository.detectRecordedSessionForPane(
                 session = session,
+                sessionTarget = pane.sessionId,
                 cwd = pane.cwd,
                 paneTty = pane.paneTty,
                 paneCommand = pane.currentCommand,
                 recordedKind = currentDetection.agent,
-                recordedSource = cachedSource ?: currentDetection.sourcePath,
+                boundSourcePath = currentDetection.sourcePath,
             )
         }.getOrNull()
         if (!isCurrentRuntime(refreshGuard)) return

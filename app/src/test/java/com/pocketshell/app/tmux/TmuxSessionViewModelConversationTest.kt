@@ -121,10 +121,22 @@ class TmuxSessionViewModelConversationTest : TmuxSessionViewModelTestBase() {
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") ->
                     recordedKindOutput
+                // Issue #2155: the per-detection exec folds the live
+                // `@ps_agent_source_generation` / `@ps_agent_source` read ahead
+                // of the candidate enumeration (no extra round-trip).
+                command.contains("@@PS_RECORDED_SOURCE@@") &&
+                    command.contains("claude_dir=") -> buildString {
+                    append(recordedSourceGenerationOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
+                    append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
+                    append(detectionOutput)
+                }
                 command.contains("@@PS_RECORDED_SOURCE_GENERATION@@") -> buildString {
                     append(recordedSourceGenerationOutput.trim())
                     append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
                     append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_source") ->
                     recordedSourceOutput
@@ -919,11 +931,27 @@ class TmuxSessionViewModelConversationTest : TmuxSessionViewModelTestBase() {
             ownSource,
             vm.agentConversations.value["%0"]?.detection?.sourcePath,
         )
+        // Issue #2155: the re-read must be FOLDED INTO the candidate-enumeration
+        // exec, not a second round-trip. Asserting only "some source read
+        // happened" would also pass for a standalone exec that regresses the
+        // #828 cold-open budget, so pin the fold itself.
         assertTrue(
-            "the cache-hit path must issue a standalone source option read; commands=${session.execCommands}",
+            "the cache-hit path must re-read @ps_agent_source INSIDE the " +
+                "candidate-enumeration exec (no extra round-trip); " +
+                "commands=${session.execCommands}",
             session.execCommands.any {
                 it.contains("show-options -v") &&
                     it.contains("@ps_agent_source") &&
+                    it.contains("claude_dir=") &&
+                    !it.contains("@@PS_RECORDED_KIND@@")
+            },
+        )
+        assertTrue(
+            "no STANDALONE @ps_agent_source round-trip may remain on the " +
+                "cache-hit path; commands=${session.execCommands}",
+            session.execCommands.none {
+                it.contains("@ps_agent_source") &&
+                    !it.contains("claude_dir=") &&
                     !it.contains("@@PS_RECORDED_KIND@@")
             },
         )

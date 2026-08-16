@@ -26,6 +26,15 @@ import org.junit.Test
 import java.io.File
 import java.io.InputStream
 
+/**
+ * Issue #2155: the tmux `-t` target every recorded-source-resolving exec reads
+ * `@ps_agent_source_generation` / `@ps_agent_source` against. It is now a
+ * required parameter of `detectRecordedSessionForPane` — the source is resolved
+ * LIVE inside that exec instead of being handed in by a caller that may be
+ * holding a path from a PREVIOUS agent launch in the same session.
+ */
+private const val RECORDED_SESSION_TARGET: String = "$3"
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentConversationRepositoryTest {
     @Test
@@ -416,14 +425,77 @@ class AgentConversationRepositoryTest {
         assertEquals(null, AgentConversationRepository().readRecordedAgentKind(session, "\$9"))
     }
 
+    /**
+     * Issue #2155: the standalone `readRecordedAgentSource` round-trip is DELETED
+     * (D22) — detection always reads the option folded into the exec it already
+     * issues. Its parse semantics survive here, asserted directly on the one
+     * shared parser, and the #1820 exact-target property it carried is asserted
+     * on the FOLDED read below (the only remaining reader).
+     */
     @Test
-    fun readRecordedAgentSourceReadsSessionScopedTmuxOption() = runTest {
+    fun recordedAgentSourceFromRawAcceptsSourceFromCurrentGeneration() {
+        val source = "/home/testuser/.claude/projects/-workspace-proj/current.jsonl"
+
+        assertEquals(
+            source,
+            AgentConversationRepository().recordedAgentSourceFromRaw("launch-2\t$source\n", "launch-2"),
+        )
+    }
+
+    @Test
+    fun recordedAgentSourceFromRawIgnoresSourceFromStaleGeneration() {
+        val source = "/home/testuser/.claude/projects/-workspace-proj/stale.jsonl"
+
+        assertEquals(
+            "a source minted under a PREVIOUS generation is the previous agent's " +
+                "transcript and must expire (#2155)",
+            null,
+            AgentConversationRepository().recordedAgentSourceFromRaw("old-launch\t$source\n", "new-launch"),
+        )
+    }
+
+    @Test
+    fun recordedAgentSourceFromRawRejectsRawSourceWhenGenerationIsCurrent() {
+        val source = "/home/testuser/.claude/projects/-workspace-proj/raw.jsonl"
+
+        assertEquals(
+            "a bare path WHILE a generation is live is unattributable",
+            null,
+            AgentConversationRepository().recordedAgentSourceFromRaw("$source\n", "current-launch"),
+        )
+    }
+
+    @Test
+    fun recordedAgentSourceFromRawAcceptsLegacyBarePathWithNoGeneration() {
         val source = "/home/testuser/.claude/projects/-workspace-proj/own.jsonl"
-        val session = FakeSshSession(recordedSourceOutput = "$source\n")
 
-        val recordedSource = AgentConversationRepository().readRecordedAgentSource(session, "\$3")
+        assertEquals(source, AgentConversationRepository().recordedAgentSourceFromRaw("$source\n", ""))
+    }
 
-        assertEquals(source, recordedSource)
+    @Test
+    fun recordedAgentSourceFromRawIsNullWhenOptionIsBlank() {
+        assertEquals(null, AgentConversationRepository().recordedAgentSourceFromRaw("\n", "launch-2"))
+    }
+
+    @Test
+    fun foldedRecordedSourceReadTargetsThePanesSessionExactly() = runTest {
+        val now = System.currentTimeMillis() / 1000
+        val own = "/home/testuser/.claude/projects/-workspace-proj/own.jsonl"
+        val session = FakeSshSession(
+            recordedSourceGenerationOutput = "launch-2\n",
+            recordedSourceOutput = "launch-2\t$own\n",
+            detectionOutput = "claude|$now|/workspace/proj|$own",
+        )
+
+        AgentConversationRepository().detectRecordedSessionForPane(
+            session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
+            cwd = "/workspace/proj",
+            paneTty = "/dev/pts/7",
+            paneCommand = "node",
+            recordedKind = AgentKind.ClaudeCode,
+        )
+
         val command = session.execCommands.single()
         assertTrue(command.contains("show-options -v"))
         assertTrue(command.contains("@ps_agent_source"))
@@ -431,48 +503,6 @@ class AgentConversationRepositoryTest {
         // prefix-match a `<session>-2` sibling and read ITS recorded kind/source
         // (the #819/#825 wrong-source class). tmux accepts a session ID here too.
         assertTrue("must target the pane's session exactly; got $command", command.contains("'=\$3:'"))
-    }
-
-    @Test
-    fun readRecordedAgentSourceAcceptsSourceFromCurrentGeneration() = runTest {
-        val source = "/home/testuser/.claude/projects/-workspace-proj/current.jsonl"
-        val session = FakeSshSession(
-            recordedSourceGenerationOutput = "launch-2\n",
-            recordedSourceOutput = "launch-2\t$source\n",
-        )
-
-        val recordedSource = AgentConversationRepository().readRecordedAgentSource(session, "\$3")
-
-        assertEquals(source, recordedSource)
-    }
-
-    @Test
-    fun readRecordedAgentSourceIsNullWhenOptionIsBlank() = runTest {
-        val session = FakeSshSession(recordedSourceOutput = "\n")
-
-        assertEquals(null, AgentConversationRepository().readRecordedAgentSource(session, "\$9"))
-    }
-
-    @Test
-    fun readRecordedAgentSourceIgnoresSourceFromStaleGeneration() = runTest {
-        val source = "/home/testuser/.claude/projects/-workspace-proj/stale.jsonl"
-        val session = FakeSshSession(
-            recordedSourceGenerationOutput = "new-launch\n",
-            recordedSourceOutput = "old-launch\t$source\n",
-        )
-
-        assertEquals(null, AgentConversationRepository().readRecordedAgentSource(session, "\$3"))
-    }
-
-    @Test
-    fun readRecordedAgentSourceRejectsRawSourceWhenGenerationIsCurrent() = runTest {
-        val source = "/home/testuser/.claude/projects/-workspace-proj/raw.jsonl"
-        val session = FakeSshSession(
-            recordedSourceGenerationOutput = "current-launch\n",
-            recordedSourceOutput = "$source\n",
-        )
-
-        assertEquals(null, AgentConversationRepository().readRecordedAgentSource(session, "\$3"))
     }
 
     @Test
@@ -504,6 +534,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/7",
             paneCommand = "node",
@@ -529,6 +560,11 @@ class AgentConversationRepositoryTest {
         val ownPath = "/home/testuser/.claude/projects/-workspace-proj/own.jsonl"
         val siblingPath = "/home/testuser/.claude/projects/-workspace-proj/busier.jsonl"
         val session = FakeSshSession(
+            // Issue #2155: the recorded source is read LIVE from the tmux
+            // options in the SAME exec as the enumeration (no caller-supplied
+            // path), scoped to the current generation.
+            recordedSourceGenerationOutput = "launch-1\n",
+            recordedSourceOutput = "launch-1\t$ownPath\n",
             detectionOutput = """
                 claude|${now - 120}|/workspace/proj|$ownPath
                 claude|$now|/workspace/proj|$siblingPath
@@ -537,11 +573,11 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/7",
             paneCommand = "node",
             recordedKind = AgentKind.ClaudeCode,
-            recordedSource = ownPath,
         )
 
         assertEquals(
@@ -570,11 +606,11 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/7",
             paneCommand = "node",
             recordedKind = AgentKind.ClaudeCode,
-            recordedSource = null,
         )
 
         assertEquals(
@@ -603,6 +639,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/7",
             paneCommand = "bash",
@@ -1113,6 +1150,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/7",
             paneCommand = "node",
@@ -1149,6 +1187,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/3",
             paneCommand = "node",
@@ -1178,6 +1217,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/3",
             paneCommand = "node",
@@ -1198,6 +1238,9 @@ class AgentConversationRepositoryTest {
         val ownPath = "/home/testuser/.local/share/opencode/opencode.db#own"
         val siblingPath = "/home/testuser/.local/share/opencode/opencode.db#busier"
         val session = FakeSshSession(
+            // Issue #2155: recorded source read live in the detection exec.
+            recordedSourceGenerationOutput = "launch-1\n",
+            recordedSourceOutput = "launch-1\t$ownPath\n",
             detectionOutput = """
                 opencode|${now - 120}|/workspace/proj|$ownPath
                 opencode|$now|/workspace/proj|$siblingPath
@@ -1206,11 +1249,11 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/3",
             paneCommand = "node",
             recordedKind = AgentKind.OpenCode,
-            recordedSource = ownPath,
         )
 
         assertEquals(AgentKind.OpenCode, detection?.agent)
@@ -1243,6 +1286,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/5",
             paneCommand = "codex",
@@ -1281,6 +1325,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/5",
             paneCommand = "codex",
@@ -1301,6 +1346,9 @@ class AgentConversationRepositoryTest {
         val recordedButUnowned = "/home/testuser/.codex/sessions/2026/06/18/rollout-sibling.jsonl"
         val ownCandidate = "/home/testuser/.codex/sessions/2026/06/18/rollout-mine.jsonl"
         val session = FakeSshSession(
+            // Issue #2155: recorded source read live in the detection exec.
+            recordedSourceGenerationOutput = "launch-1\n",
+            recordedSourceOutput = "launch-1\t$recordedButUnowned\n",
             detectionOutput = """
                 codex|$now|/workspace/proj|$recordedButUnowned
                 codex|${now - 60}|/workspace/proj|$ownCandidate
@@ -1311,11 +1359,11 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/5",
             paneCommand = "codex",
             recordedKind = AgentKind.Codex,
-            recordedSource = recordedButUnowned,
         )
 
         assertEquals(
@@ -1349,6 +1397,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/5",
             paneCommand = "codex",
@@ -1610,6 +1659,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/proj",
             paneTty = "/dev/pts/2",
             paneCommand = "claude",
@@ -1669,6 +1719,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/workspace/pocketshell",
             paneTty = "/dev/pts/1",
             paneCommand = "claude",
@@ -1711,6 +1762,7 @@ class AgentConversationRepositoryTest {
 
         val detection = AgentConversationRepository().detectRecordedSessionForPane(
             session = session,
+            sessionTarget = RECORDED_SESSION_TARGET,
             cwd = "/home/alexey/git/.claude",
             paneTty = "/dev/pts/1",
             paneCommand = "claude",
@@ -2426,10 +2478,24 @@ class AgentConversationRepositoryTest {
                     }
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") -> recordedKindOutput
+                // Issue #2155: the per-detection exec folds the live
+                // `@ps_agent_source_generation` / `@ps_agent_source` read ahead
+                // of the candidate enumeration, so the recorded source is
+                // re-validated against the CURRENT generation with no extra
+                // round-trip. Emit both sections in that order.
+                command.contains("@@PS_RECORDED_SOURCE@@") &&
+                    command.contains("claude_dir=") -> buildString {
+                    append(recordedSourceGenerationOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
+                    append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
+                    append(detectionOutput)
+                }
                 command.contains("@@PS_RECORDED_SOURCE_GENERATION@@") -> buildString {
                     append(recordedSourceGenerationOutput.trim())
                     append("\n@@PS_RECORDED_SOURCE_GENERATION@@\n")
                     append(recordedSourceOutput.trim())
+                    append("\n@@PS_RECORDED_SOURCE@@\n")
                 }
                 command.contains("show-options -v") && command.contains("@ps_agent_source") -> recordedSourceOutput
                 command.contains("/proc/") && command.contains(".codex/sessions/") -> procFdOutput

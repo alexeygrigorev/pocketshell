@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.RecordingClipboardManager
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -13,6 +14,7 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.productionWindowChromePadding
 import com.pocketshell.app.test.ClipboardOverrideContext
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
@@ -36,6 +38,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Loading("/tmp/a.png"),
                     onBack = {},
@@ -51,6 +58,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/tmp/notes.txt",
@@ -72,6 +84,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.CannotPreview(
                         displayPath = "/tmp/big.bin",
@@ -99,6 +116,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.CannotPreview(
                         displayPath = "/home/alexey/git/3d-models/renders/white_bathtub_3d_preview.png",
@@ -133,6 +155,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Audio(
                         displayPath = "/tmp/clip.wav",
@@ -158,6 +185,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/tmp/main.kt",
@@ -179,6 +211,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/tmp/long.log",
@@ -202,6 +239,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/tmp/README.md",
@@ -227,6 +269,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/tmp/README.md",
@@ -256,6 +303,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/tmp/report.md",
@@ -329,6 +381,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/tmp/notes.txt",
@@ -365,6 +422,11 @@ class FileViewerScaffoldTest {
             ) {
                 PocketShellTheme {
                     FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                         hostName = "agents",
                         state = FileViewerUiState.TextContent(
                             displayPath = "/tmp/copyme.txt",
@@ -396,6 +458,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Image(
                         displayPath = "/tmp/shot.png",
@@ -427,6 +494,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Image(
                         displayPath = "/tmp/shot.png",
@@ -479,6 +551,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Image(
                         displayPath = "/tmp/shot.png",
@@ -516,6 +593,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Image(
                         displayPath = "/tmp/shot.png",
@@ -558,6 +640,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Image(
                         displayPath = "/tmp/shot.png",
@@ -580,6 +667,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Loading("/tmp/a.png"),
                     onBack = {},
@@ -597,6 +689,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.CannotPreview(
                         displayPath = "/tmp/big.bin",
@@ -627,6 +724,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.CannotPreview(
                         displayPath = "/tmp/data.tar.gz",
@@ -665,6 +767,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.CannotPreview(
                         displayPath = "/tmp/archive.zip",
@@ -696,6 +803,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.Loading("/tmp/a.png"),
                     onBack = { backs++ },
@@ -723,6 +835,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/home/alexey/README.md",
@@ -759,6 +876,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/home/alexey/README.md",
@@ -790,6 +912,11 @@ class FileViewerScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 FileViewerScaffold(
+                    // #2180: production mounts every screen inside
+                    // MainActivity's safeDrawing padding; a bare setContent
+                    // harness does not, so without this the scaffold renders
+                    // 126px lower than it ever does on device.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = FileViewerUiState.TextContent(
                         displayPath = "/home/alexey/README.md",

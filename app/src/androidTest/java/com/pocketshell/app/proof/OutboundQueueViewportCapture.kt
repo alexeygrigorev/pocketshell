@@ -14,7 +14,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.app.composer.composerOutboundQueueItemRowTestTag
-import com.pocketshell.app.proof.signals.assertNodeFullyWithinOwningRoot
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import org.junit.Assert.assertEquals
 
 /** Captures reviewer-visible stable-id queue rows in exact FIFO order. */
@@ -57,7 +57,7 @@ internal class OutboundQueueViewportCapture(
             compose.waitForIdle()
             val row = compose.onNodeWithTag(tag, useUnmergedTree = true)
             row.assertIsDisplayed()
-            compose.assertNodeFullyWithinOwningRoot(tag, useUnmergedTree = true)
+            compose.assertNodeFullyWithinRoot(tag, useUnmergedTree = true)
             compose.onNode(
                 hasText(payload, substring = true) and hasAnyAncestor(hasTestTag(tag)),
                 useUnmergedTree = true,

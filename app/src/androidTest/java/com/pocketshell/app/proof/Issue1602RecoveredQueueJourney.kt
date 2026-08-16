@@ -28,7 +28,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.composerOutboundQueueItemRowTestTag
 import com.pocketshell.app.composer.composerOutboundQueueRetryTestTag
 import com.pocketshell.app.composer.composerOutboundQueueStatusTestTag
-import com.pocketshell.app.proof.signals.assertNodeFullyWithinOwningRoot
+import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
@@ -132,7 +132,7 @@ internal class Issue1602RecoveredQueueJourney(
                 compose.onNodeWithTag(rowTag, useUnmergedTree = true)
                     .performScrollTo()
                     .assertIsDisplayed()
-                compose.assertNodeFullyWithinOwningRoot(rowTag, useUnmergedTree = true)
+                compose.assertNodeFullyWithinRoot(rowTag, useUnmergedTree = true)
                 compose.waitForIdle()
                 var latestGeometry = statusLayoutRegistration.currentWindowGeometry(row.id)
                 val geometryWait = runCatching {
@@ -171,7 +171,7 @@ internal class Issue1602RecoveredQueueJourney(
                     .performScrollTo()
                     .assertIsDisplayed()
                     .assertIsNotEnabled()
-                compose.assertNodeFullyWithinOwningRoot(retryTag, useUnmergedTree = true)
+                compose.assertNodeFullyWithinRoot(retryTag, useUnmergedTree = true)
                 val offlineRetryControlBounds = offlineRetryControlNode.fetchSemanticsNode().boundsInRoot
                 val statusViewportBoundsInRoot = compose.onNodeWithTag(
                     COMPOSER_STATUS_VIEWPORT_TAG,
@@ -443,7 +443,7 @@ internal class Issue1602RecoveredQueueJourney(
         retryNode: androidx.compose.ui.test.SemanticsNodeInteraction,
         stage: String,
     ) {
-        compose.assertNodeFullyWithinOwningRoot(retryTag, useUnmergedTree = true)
+        compose.assertNodeFullyWithinRoot(retryTag, useUnmergedTree = true)
         val retryBounds = retryNode.fetchSemanticsNode().boundsInRoot
         val rowBounds = compose.onNodeWithTag(rowTag, useUnmergedTree = true)
             .fetchSemanticsNode().boundsInRoot

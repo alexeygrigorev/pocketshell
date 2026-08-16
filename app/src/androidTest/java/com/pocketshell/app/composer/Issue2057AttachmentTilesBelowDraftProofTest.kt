@@ -41,7 +41,6 @@ import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.proof.signals.assertNodeFullyAboveImeOrKeyboard
-import com.pocketshell.app.proof.signals.assertNodeFullyWithinOwningRoot
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.proof.signals.waitForComposeLayoutStable
 import com.pocketshell.core.voice.WhisperClient
@@ -188,7 +187,7 @@ class Issue2057AttachmentTilesBelowDraftProofTest {
             COMPOSER_SEND_ENTER_TAG,
             COMPOSER_MIC_TAG,
         ).forEach { tag ->
-            compose.assertNodeFullyWithinOwningRoot(tag, useUnmergedTree = true)
+            compose.assertNodeFullyWithinRoot(tag, useUnmergedTree = true)
         }
 
         // Keyboard-DOWN there is room for the tiles at full size, so both staged
@@ -202,7 +201,7 @@ class Issue2057AttachmentTilesBelowDraftProofTest {
                     "field. tile=$tile strip=${geometry.strip}",
                 tile.height > 0f && tile.top >= geometry.draft.bottom - geometry.slopPx,
             )
-            compose.assertNodeFullyWithinOwningRoot(
+            compose.assertNodeFullyWithinRoot(
                 composerAttachmentRemoveTestTag(path),
                 useUnmergedTree = true,
             )
@@ -278,7 +277,7 @@ class Issue2057AttachmentTilesBelowDraftProofTest {
             COMPOSER_SEND_ENTER_TAG,
             COMPOSER_MIC_TAG,
         ).forEach { tag ->
-            compose.assertNodeFullyWithinOwningRoot(tag, useUnmergedTree = true)
+            compose.assertNodeFullyWithinRoot(tag, useUnmergedTree = true)
         }
     }
 

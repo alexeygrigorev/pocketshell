@@ -1,6 +1,7 @@
 package com.pocketshell.app.git
 
 import androidx.activity.ComponentActivity
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -10,6 +11,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.app.proof.signals.productionWindowChromePadding
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -45,6 +47,8 @@ class GitHistoryScaffoldTest {
         compose.setContent {
             PocketShellTheme {
                 GitHistoryScaffold(
+                    // #2180: match MainActivity's safeDrawing padding.
+                    modifier = Modifier.productionWindowChromePadding(),
                     hostName = "agents",
                     state = state,
                     onBack = {},

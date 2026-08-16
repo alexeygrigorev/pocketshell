@@ -45,6 +45,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -400,7 +401,16 @@ class TmuxSessionViewModelAgentTailTest : TmuxSessionViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(1, retrySession.tailCalls)
-        assertEquals(AgentConversationSyncStatus.Live, vm.agentConversations.value["%0"]!!.syncStatus)
+        // Issue #2159: this row's transcript read returns NOTHING, so the honest
+        // post-retry status is `NoMessages` — not `Live`. Asserting `Live` here
+        // was asserting the reported defect: a green "the feed is healthy and
+        // current" dot above "No conversation events yet.". What the retry must
+        // prove is unchanged and still asserted: it left the Retrying state and
+        // did not land on a failure.
+        val retriedStatus = vm.agentConversations.value["%0"]!!.syncStatus
+        assertEquals(AgentConversationSyncStatus.NoMessages, retriedStatus)
+        assertNotEquals(AgentConversationSyncStatus.Retrying, retriedStatus)
+        assertNotEquals(AgentConversationSyncStatus.LogUnavailable, retriedStatus)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
     }
 

@@ -552,6 +552,7 @@ def _watch_and_record_agent_source(
     cwd: str,
     started_at: str,
     generation: str,
+    target: str,
     timeout_seconds: str = "20",
 ) -> int:
     """Watch for this launch's transcript and record it on the tmux session.
@@ -559,7 +560,28 @@ def _watch_and_record_agent_source(
     The wrapper starts this helper immediately before ``execvpe``. The agent
     process has not minted its transcript id yet, so this runs in a detached
     host-side child and records ``@ps_agent_source`` once the source appears.
+
+    ``target`` is the tmux ``-t`` target of the session this launch belongs to,
+    resolved by the PARENT (issue #2159). It is not optional and there is no
+    ambient-inference fallback (D22 — hard cut).
+
+    Both tmux calls used to omit ``-t`` and let tmux infer "the current session"
+    from the child's environment. That inference is only correct while
+    ``$TMUX_PANE`` survives into the detached child; without it tmux silently
+    resolves the **most-recently-used session on the server**, which produced
+    the maintainer's exact host state: the guard read another session's
+    generation, saw a mismatch, and gave up without writing — leaving
+    ``@ps_agent_source_generation`` set (written by the parent, whose inference
+    IS authoritative) and ``@ps_agent_source`` absent. The other direction is
+    worse: the write itself could land on an unrelated session, handing it a
+    bogus recorded transcript (the #819/#2155 wrong-source class).
+
+    ``-u`` forces a UTF-8 tmux client on the read (#2160): a client without a
+    UTF-8 locale sanitises every byte it prints, so a bare read is only correct
+    on hosts whose environment happens to carry one.
     """
+    if not target:
+        return 2
     try:
         started = float(started_at)
         timeout = float(timeout_seconds)
@@ -571,7 +593,15 @@ def _watch_and_record_agent_source(
         if source:
             try:
                 current_generation = subprocess.run(
-                    ["tmux", "show-options", "-v", "@ps_agent_source_generation"],
+                    [
+                        "tmux",
+                        "-u",
+                        "show-options",
+                        "-v",
+                        "-t",
+                        target,
+                        "@ps_agent_source_generation",
+                    ],
                     check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
@@ -580,7 +610,14 @@ def _watch_and_record_agent_source(
                 if current_generation != generation:
                     return 1
                 subprocess.run(
-                    ["tmux", "set-option", "@ps_agent_source", f"{generation}\t{source}"],
+                    [
+                        "tmux",
+                        "set-option",
+                        "-t",
+                        target,
+                        "@ps_agent_source",
+                        f"{generation}\t{source}",
+                    ],
                     check=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -592,12 +629,51 @@ def _watch_and_record_agent_source(
     return 1
 
 
+def _resolve_tmux_session_target(env: dict[str, str]) -> Optional[str]:
+    """Resolve the tmux session id this launch belongs to (issue #2159).
+
+    Runs in the PARENT, where ``$TMUX_PANE`` is authoritative, and returns a
+    stable ``$N`` session id the detached watcher can pass to ``-t``. The
+    session id outlives pane churn inside the session, so it stays valid for the
+    whole watch window.
+
+    ``$TMUX_PANE`` is REQUIRED: it is the only honest evidence of which session
+    this launch belongs to. Without it, ``tmux display-message`` would answer
+    from the server's most-recently-used session — a confident, unrelated
+    answer, which is the very defect #2159 exists to kill one layer down. So an
+    absent pane resolves to ``None`` rather than to somebody else's session (no
+    ambient-inference fallback survives — D22).
+
+    Returns ``None`` when ``$TMUX_PANE`` is absent or tmux cannot name that
+    pane's session — the caller then refuses to start an untargeted watcher
+    rather than risk writing onto another session.
+    """
+    pane = env.get("TMUX_PANE", "").strip()
+    if not pane:
+        return None
+    argv = ["tmux", "display-message", "-p", "-t", pane, "#{session_id}"]
+    try:
+        result = subprocess.run(
+            argv,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+        )
+    except Exception:
+        return None
+    session_id = result.stdout.strip()
+    return session_id or None
+
+
 def record_agent_source(
     kind: str,
     cwd: str,
     env: Optional[dict[str, str]] = None,
     runner=None,
     popen=None,
+    resolve_target=None,
 ) -> bool:
     """Start a best-effort recorder for this launch's transcript source.
 
@@ -617,14 +693,26 @@ def record_agent_source(
         runner = subprocess.run
     if popen is None:
         popen = subprocess.Popen
+    if resolve_target is None:
+        resolve_target = _resolve_tmux_session_target
     try:
+        # Issue #2159: resolve the tmux target HERE, in the launching process,
+        # where `$TMUX_PANE` is authoritative — then name it explicitly on every
+        # option write and hand it to the detached watcher. Nothing on this path
+        # relies on tmux's ambient "current session" inference any more; when the
+        # target cannot be resolved there is no safe write, so we do not start a
+        # watcher at all rather than risk recording onto another session (D22 —
+        # no ambient fallback branch survives).
+        target = resolve_target(dict(source_env))
+        if not target:
+            return False
         generation = uuid.uuid4().hex
         runner(
-            ["tmux", "set-option", "@ps_agent_source_generation", generation],
+            ["tmux", "set-option", "-t", target, "@ps_agent_source_generation", generation],
             check=False,
         )
         runner(
-            ["tmux", "set-option", "-uq", "@ps_agent_source"],
+            ["tmux", "set-option", "-t", target, "-uq", "@ps_agent_source"],
             check=False,
         )
         started_at = str(time.time() - 1.0)
@@ -636,12 +724,14 @@ def record_agent_source(
                     "from pocketshell.agents import "
                     "_watch_and_record_agent_source; import sys; "
                     "raise SystemExit(_watch_and_record_agent_source("
-                    "sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]))"
+                    "sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], "
+                    "sys.argv[5]))"
                 ),
                 kind,
                 cwd,
                 started_at,
                 generation,
+                target,
             ],
             env=dict(source_env),
             stdin=subprocess.DEVNULL,

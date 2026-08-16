@@ -550,15 +550,25 @@ def test_record_agent_source_clears_stale_source_and_starts_watcher(tmp_path):
         env={"TMUX": "/tmp/tmux-1000/default,1234,0", "PATH": "/usr/bin"},
         runner=lambda argv, **kw: run_calls.append((argv, kw)),
         popen=lambda *args, **kwargs: popen_calls.append((args, kwargs)) or _FakePopen(),
+        # Issue #2159: the target is resolved in the parent and named explicitly
+        # on every tmux write; nothing relies on ambient `$TMUX_PANE` inference.
+        resolve_target=lambda env: "$3",
     )
 
     assert ok is True
     generation = run_calls[0][0][-1]
-    assert run_calls[0][0] == ["tmux", "set-option", "@ps_agent_source_generation", generation]
+    assert run_calls[0][0] == [
+        "tmux",
+        "set-option",
+        "-t",
+        "$3",
+        "@ps_agent_source_generation",
+        generation,
+    ]
     assert len(generation) == 32
     assert run_calls[0][1] == {"check": False}
     assert run_calls[1] == (
-        ["tmux", "set-option", "-uq", "@ps_agent_source"],
+        ["tmux", "set-option", "-t", "$3", "-uq", "@ps_agent_source"],
         {"check": False},
     )
     assert len(popen_calls) == 1
@@ -566,6 +576,7 @@ def test_record_agent_source_clears_stale_source_and_starts_watcher(tmp_path):
     assert argv[:2] == [sys.executable, "-c"]
     assert argv[3:5] == ["codex", str(tmp_path)]
     assert argv[6] == generation
+    assert argv[7] == "$3"
     assert popen_calls[0][1]["env"]["TMUX"] == "/tmp/tmux-1000/default,1234,0"
 
 
@@ -579,7 +590,7 @@ def test_watch_agent_source_refuses_stale_generation(monkeypatch):
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        if argv[:3] == ["tmux", "show-options", "-v"]:
+        if argv[:4] == ["tmux", "-u", "show-options", "-v"]:
             return agents.subprocess.CompletedProcess(argv, 0, stdout="newer-generation\n")
         return agents.subprocess.CompletedProcess(argv, 0, stdout="")
 
@@ -590,11 +601,22 @@ def test_watch_agent_source_refuses_stale_generation(monkeypatch):
         "/workspace/proj",
         "100",
         "older-generation",
+        "$3",
         timeout_seconds="0.01",
     ) == 1
+    # Issue #2159: the guard read names its session with `-t` (and `-u` for the
+    # #2160 UTF-8 client) instead of letting tmux infer the current session.
     assert calls == [
         (
-            ["tmux", "show-options", "-v", "@ps_agent_source_generation"],
+            [
+                "tmux",
+                "-u",
+                "show-options",
+                "-v",
+                "-t",
+                "$3",
+                "@ps_agent_source_generation",
+            ],
             {
                 "check": False,
                 "stdout": agents.subprocess.PIPE,
@@ -615,7 +637,7 @@ def test_watch_agent_source_records_generation_scoped_source(monkeypatch):
 
     def fake_run(argv, **kwargs):
         calls.append((argv, kwargs))
-        if argv[:3] == ["tmux", "show-options", "-v"]:
+        if argv[:4] == ["tmux", "-u", "show-options", "-v"]:
             return agents.subprocess.CompletedProcess(argv, 0, stdout="same-generation\n")
         return agents.subprocess.CompletedProcess(argv, 0, stdout="")
 
@@ -626,11 +648,15 @@ def test_watch_agent_source_records_generation_scoped_source(monkeypatch):
         "/workspace/proj",
         "100",
         "same-generation",
+        "$3",
         timeout_seconds="0.01",
     ) == 0
+    # Issue #2159: the write names the session it was launched for.
     assert calls[-1][0] == [
         "tmux",
         "set-option",
+        "-t",
+        "$3",
         "@ps_agent_source",
         "same-generation\t/tmp/current.jsonl",
     ]

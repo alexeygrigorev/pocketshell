@@ -48,8 +48,20 @@ internal const val TMUX_CONNECTION_STATUS_PILL_TAG = "tmux:chrome:connection-pil
 // session top chrome while forwarding is active for the host on screen.
 internal const val TMUX_PORT_FORWARD_PILL_TAG = "tmux:chrome:port-forward-pill"
 
+// Issue #2176: the PAINTED chip inside the pill's (unpainted) 48dp touch
+// target. Tagged separately so a proof can assert the two are different sizes:
+// the hit area is floored to 48dp, the paint must stay at its intrinsic ~20dp
+// and never become the tallest thing in the chrome row. Reachable only through
+// the unmerged tree — the parent is `clickable`, which merges descendants.
+internal const val TMUX_PORT_FORWARD_PILL_PAINT_TAG =
+    "tmux:chrome:port-forward-pill:paint"
+
 internal const val TMUX_DETACH_BUTTON_TAG = "tmux:session:detach-button"
 internal const val TMUX_PORT_FORWARDING_BUTTON_TAG = "tmux:session:port-forwarding-button"
+
+// Issue #2176: opens the per-session Ports panel (the ports THIS session
+// opened), the attribution the host-wide panel above cannot provide.
+internal const val TMUX_SESSION_PORTS_BUTTON_TAG = "tmux:session:session-ports-button"
 internal const val TMUX_SETTINGS_BUTTON_TAG = "tmux:session:settings-button"
 internal const val TMUX_REDRAW_BUTTON_TAG = "tmux:session:redraw-button"
 internal const val TMUX_RECONNECT_BUTTON_TAG = "tmux:session:reconnect-button"

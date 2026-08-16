@@ -139,6 +139,27 @@ class DesignRenders {
     }
 
     /**
+     * Issue #2176: the per-session Ports panel — the ports THIS session opened,
+     * one forwarded and three not, including two outside the host-wide
+     * `3000..10000` denoise range (attribution has already solved the noise
+     * problem that range exists for, so a session's own ports are never hidden).
+     * The design question this render answers is whether the per-session table
+     * reads as the SAME table as the host-wide port-forward panel; the emulator
+     * screenshot is the acceptance. See [SessionPortsPanelRender]'s KDoc for why
+     * this mirrors the app composable rather than calling it.
+     */
+    @Test
+    fun sessionPortsPanel() = render("session-ports-panel") {
+        SessionPortsPanelRender()
+    }
+
+    /** Issue #2176: the honest zero-ports state, never a blank surface. */
+    @Test
+    fun sessionPortsPanelEmpty() = render("session-ports-panel-empty") {
+        SessionPortsPanelEmptyRender()
+    }
+
+    /**
      * Issue #1449: the design-token / hex swatch sheet — the ONE coverage gap
      * ported over when the redundant IDE-only `@Preview` composables in
      * `shared/ui-kit/src/main/.../preview/` were deleted (hard-cut D22;

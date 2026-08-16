@@ -225,6 +225,11 @@ abstract class TmuxSessionViewModelTestBase {
         // The default preserves the genuine reader-loop coverage used by the
         // terminal-feed integration tests documented above.
         tmuxClientFactory: TmuxClientFactory = TmuxClientFactory(factoryScope),
+        // Issue #2176: the @Singleton store of ports each session mentions. A
+        // test that asserts attribution passes ONE store to two view models, so
+        // it observes the same rendezvous production uses.
+        sessionPortsStore: com.pocketshell.app.portfwd.SessionPortsStore =
+            com.pocketshell.app.portfwd.SessionPortsStore(),
     ): TmuxSessionViewModel =
         TmuxSessionViewModel(
             tmuxClientFactory = tmuxClientFactory,
@@ -240,6 +245,7 @@ abstract class TmuxSessionViewModelTestBase {
             applicationContext = applicationContext,
             outboundQueueStore = outboundQueueStore,
             diagnosticRecorder = diagnosticRecorder,
+            sessionPortsStore = sessionPortsStore,
         ).also {
             // Issue #576 (Slice A of #792): pin the structural-reconcile
             // dispatcher to Main (the MainDispatcherRule's

@@ -8,8 +8,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -46,6 +48,7 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.uikit.components.KebabTrigger
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -193,6 +196,10 @@ internal fun ConsolidatedTopChrome(
     // Issue #1487: active-only forwarding status for the host on screen.
     // Default hidden keeps direct render/test callers source-compatible.
     forwardingState: SessionForwardingIndicatorState = SessionForwardingIndicatorState(),
+    // Issue #2176: tapping the forwarding pill opens the session Ports panel
+    // (whose footer routes on to the host-wide list). Defaulted to a no-op so
+    // existing direct callers / render fixtures stay source-compatible.
+    onOpenSessionPorts: () -> Unit = {},
 ) {
     Row(
         modifier = modifier
@@ -302,7 +309,7 @@ internal fun ConsolidatedTopChrome(
         // The whole spacer+pill pair disappears when inactive, leaving no gap.
         if (forwardingState.visible) {
             Spacer(modifier = Modifier.width(6.dp))
-            ForwardingStatusPill(forwardingState)
+            ForwardingStatusPill(forwardingState, onClick = onOpenSessionPorts)
         }
 
         // Issue #1320: the Terminal/Conversation toggle - a PRIMARY control that
@@ -541,6 +548,10 @@ internal fun CompactBreadcrumb(
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
         com.pocketshell.uikit.model.ConnectionStatus.Connected,
     forwardingState: SessionForwardingIndicatorState = SessionForwardingIndicatorState(),
+    // Issue #2176: tapping the forwarding pill opens the session Ports panel
+    // (whose footer routes on to the host-wide list). Defaulted to a no-op so
+    // existing direct callers / render fixtures stay source-compatible.
+    onOpenSessionPorts: () -> Unit = {},
 ) {
     Row(
         modifier = modifier
@@ -581,7 +592,7 @@ internal fun CompactBreadcrumb(
         ConnectionStatusPill(connectionStatus)
         if (forwardingState.visible) {
             Spacer(modifier = Modifier.width(4.dp))
-            ForwardingStatusPill(forwardingState)
+            ForwardingStatusPill(forwardingState, onClick = onOpenSessionPorts)
         }
         Spacer(modifier = Modifier.width(4.dp))
         Box(
@@ -645,27 +656,71 @@ private fun ConnectionStatusPill(
  * connection pill vocabulary while naming a single remote port or summarising
  * multiple ports in at most seven characters. Restoring uses amber and an
  * ellipsis so a transient reconnect never looks like forwarding disappeared.
+ *
+ * Issue #2176: it is now ACTIONABLE. It used to be a pure status display — the
+ * one element announcing "forwarding is happening" was a dead end, and on a box
+ * with dozens of tunnels ("58p") that is precisely when the user wants to look
+ * through them. Tapping opens the session Ports panel, whose footer routes on to
+ * the full host-wide list.
+ *
+ * An 11sp label with 3dp of vertical padding is roughly 20dp tall: a visible
+ * control with an unusable hit area. So the 48dp [PocketShellDensity.tapTargetMin]
+ * floor is real and stays — but it is carried by an OUTER, unpainted wrapper that
+ * owns the click, the semantics and the tag, while the painted chip stays a
+ * child at its own intrinsic height.
+ *
+ * That split is the whole point, and the first attempt got it wrong: putting
+ * `defaultMinSize` on the SAME node as `.background(...)` — and before it in the
+ * chain — grows the paint too, which shipped a 48dp dark-teal block that was
+ * visibly taller and boxier than the 32dp tab pill beside it in a 56dp row. The
+ * touch area and the painted chip are different things; only the former should
+ * be floored.
+ *
+ * The floor is deliberately applied to the HEIGHT only. Height is free here —
+ * the pill sits inside a 56dp chrome row — whereas width is the contended axis:
+ * the trailing cluster (tab pill + this pill + the 48dp kebab) does not shrink,
+ * and issue #747 shipped a kebab pushed clean off the right edge when that
+ * cluster grew. Forcing a 48dp minimum WIDTH measurably worsened that pressure
+ * (it collapsed the title's `weight(1f)` to zero at a 360dp content width during
+ * this issue's own on-device run), so the vertical axis — the one that was
+ * actually unusable at ~20dp — is the one that is floored.
  */
 @Composable
-private fun ForwardingStatusPill(state: SessionForwardingIndicatorState) {
+private fun ForwardingStatusPill(
+    state: SessionForwardingIndicatorState,
+    onClick: () -> Unit,
+) {
     val tint = if (state.restoring) PocketShellColors.Amber else PocketShellColors.Accent
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
+    Box(
+        contentAlignment = Alignment.Center,
         modifier = Modifier
-            .background(color = tint.copy(alpha = 0.14f), shape = PocketShellShapes.small)
-            .padding(horizontal = 8.dp, vertical = 3.dp)
-            .semantics { contentDescription = state.contentDescription }
+            // Unpainted: this node exists ONLY to make the target reachable.
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .semantics { contentDescription = state.actionableContentDescription }
             .testTag(TMUX_PORT_FORWARD_PILL_TAG),
     ) {
-        ForwardingGlyph(modifier = Modifier.size(12.dp), color = tint)
-        Spacer(modifier = Modifier.width(4.dp))
-        Text(
-            text = forwardingPillLabel(state),
-            color = tint,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+            modifier = Modifier
+                .background(color = tint.copy(alpha = 0.14f), shape = PocketShellShapes.small)
+                .padding(horizontal = 8.dp, vertical = 3.dp)
+                // `clickable` on the parent merges descendants, so this tag is
+                // reachable only through the UNMERGED tree — which is what the
+                // paint-height proof uses.
+                .testTag(TMUX_PORT_FORWARD_PILL_PAINT_TAG),
+        ) {
+            ForwardingGlyph(modifier = Modifier.size(12.dp), color = tint)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text(
+                text = forwardingPillLabel(state),
+                color = tint,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+            )
+        }
     }
 }
 

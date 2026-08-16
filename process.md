@@ -39,6 +39,38 @@ implementers/reviewers, integrate, file issues) or ends the turn. "I'll poll it
 every few minutes" is the banned anti-pattern. Every agent that needs to wait on
 CI uses `scripts/watch-ci.py`, never a hand-rolled poll loop or an LLM-turn wait.
 
+**Every on-call gets its OWN worktree and its OWN log paths — concurrent
+on-calls sharing the root checkout silently corrupt each other's work
+(2026-08-16).** Three on-calls ran against one merge train that day, all working
+in the root checkout and the shared scratchpad. Three distinct clobbers
+resulted, and the first is the one that matters:
+
+- One on-call's in-flight edit was **silently reverted by a sibling's `git`
+  operation mid-compile**. Its `BUILD SUCCESSFUL` was therefore a **vacuous
+  green against unmodified code** — it caught this only because it re-verified
+  the file after the compile, rather than trusting the build banner.
+- A sibling copied another's watcher `--log-file` out of `build/` and
+  **unlinked the original mid-run**; that verdict survived only because the
+  runbook's transient unit also writes `StandardOutput=journal`.
+- Generic `shard0..5.log` names in the shared scratchpad overwrote a sibling's
+  files of the same name.
+
+The orchestrator owns this: **do not dispatch a second on-call into the same
+checkout.** Dispatch with `isolation: "worktree"` (the `oncall-engineer`
+definition already assumes an assigned worktree), and brief every agent —
+on-call, implementer, reviewer — to keep logs and artifacts **inside its own
+worktree**, never `/tmp` and never the shared scratchpad. Prefer ONE on-call per
+merge train over one per push: on a fast train the later dispatches mostly
+re-triage runs the earlier one has already classified, and each extra agent is
+another writer on shared state.
+
+Note the general shape, which is why this sits next to the CI rules rather than
+in a housekeeping section: **a build or test that runs against a tree someone
+else changed underneath it reports a result about a tree that no longer
+exists.** That is the same hazard as the FROM-CACHE XML and the GC'd transient
+unit — an artifact that reads authoritative while describing something other
+than the run you think you are looking at.
+
 **The orchestrator NEVER runs the CI watcher itself — not even in a background
 shell (locked directive, 2026-06-27).** Watching CI is the on-call's job, full
 stop. The orchestrator does not launch `scripts/watch-ci.py` (foreground OR

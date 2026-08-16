@@ -331,6 +331,22 @@ abstract class TmuxSessionViewModelTestBase {
             it.setTerminalSurfaceStateFactoryForTest {
                 TerminalSurfaceState(externalProducerDispatcher = StandardTestDispatcher(scheduler))
             }
+            // Issue #2124: PIN this harness to the LEGACY inference path.
+            //
+            // The PRODUCTION default is the acknowledged host-CLI path
+            // ([AppSettings.DEFAULT_OUTBOUND_DELIVERY_AUTHORITY] ==
+            // `HostCliAck`) — the field test only happens if the new path is the
+            // default, and `Issue2124HostAckDeliveryTest` pins that default so
+            // this line cannot silently become the product's answer. But every
+            // pre-existing test in this suite was written against the legacy
+            // inference lane (paste-ack needles, turnover proofs, ledger
+            // baselines) and the issue's own acceptance criterion is that with
+            // the flag on OLD "behaviour is byte-for-byte today's, and the
+            // existing suite still passes". So the harness selects OLD
+            // explicitly, and the #2124 tests opt INTO the acknowledged path
+            // explicitly. Neither path is ever exercised by accident.
+            it.hostAck.authorityOverrideForTest =
+                com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference
             createdViewModels += it
         }
 

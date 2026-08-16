@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2619,3 +2620,93 @@ def test_the_sync_script_self_test_still_detects_drift() -> None:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "SELF-TEST PASSED" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# AC (#2124): the ANDROID CLIENT's mirrored exit constants cannot drift either
+# ---------------------------------------------------------------------------
+#
+# #2136 §3's structural note: the pre-#2136 pinning tests pinned exit codes and
+# reason strings but never the descriptions, which is why `--help` drifted from
+# the README. #2124 adds a THIRD rendering of the same table — Kotlin constants
+# in the Android client, which branch on these codes to decide whether a row is
+# Delivered or a plain retryable Failed. A transcribed copy is the same drift
+# waiting to happen, so it is pinned here against EXIT_CODE_TABLE itself.
+
+KOTLIN_CLIENT_MIRROR = (
+    Path(__file__).resolve().parents[3]
+    / "app"
+    / "src"
+    / "main"
+    / "java"
+    / "com"
+    / "pocketshell"
+    / "app"
+    / "tmux"
+    / "HostAckOutboundDelivery.kt"
+)
+
+#: Kotlin constant name -> the `send.py` exit constant it must equal.
+_CLIENT_EXIT_MIRROR = {
+    "HOST_ACK_EXIT_OK": send_mod.EXIT_OK,
+    "HOST_ACK_EXIT_BAD_USAGE": send_mod.EXIT_BAD_USAGE,
+    "HOST_ACK_EXIT_PANE_NOT_FOUND": send_mod.EXIT_PANE_NOT_FOUND,
+    "HOST_ACK_EXIT_TMUX_FAILED": send_mod.EXIT_TMUX_FAILED,
+    "HOST_ACK_EXIT_SEND_INTERRUPTED": send_mod.EXIT_SEND_INTERRUPTED,
+    "HOST_ACK_EXIT_TIMEOUT": send_mod.EXIT_TIMEOUT,
+    "HOST_ACK_EXIT_JOURNAL_FAILED": send_mod.EXIT_JOURNAL_FAILED,
+    "HOST_ACK_EXIT_SEND_IN_PROGRESS": send_mod.EXIT_SEND_IN_PROGRESS,
+}
+
+_CLIENT_REASON_MIRROR = {
+    "HOST_ACK_REASON_DELIVERED": send_mod.REASON_DELIVERED,
+    "HOST_ACK_REASON_ALREADY_DELIVERED": send_mod.REASON_ALREADY_DELIVERED,
+    "HOST_ACK_REASON_BAD_USAGE": send_mod.REASON_BAD_USAGE,
+}
+
+
+def _kotlin_client_source() -> str:
+    assert KOTLIN_CLIENT_MIRROR.is_file(), (
+        f"the Android client's mirror of this table is missing at "
+        f"{KOTLIN_CLIENT_MIRROR}; if it moved, move this pin with it rather "
+        f"than deleting it"
+    )
+    return KOTLIN_CLIENT_MIRROR.read_text(encoding="utf-8")
+
+
+def test_android_client_mirrors_every_exit_code_exactly() -> None:
+    """Every documented exit code has a client constant with the same value."""
+    source = _kotlin_client_source()
+    for name, expected in _CLIENT_EXIT_MIRROR.items():
+        match = re.search(rf"^internal const val {name}: Int = (\d+)$", source, re.M)
+        assert match, f"the Android client has no {name} constant"
+        assert int(match.group(1)) == expected, (
+            f"{name} is {match.group(1)} but send.py exits {expected}; the client "
+            f"would classify a delivery outcome wrongly"
+        )
+
+
+def test_android_client_mirrors_the_reason_tokens() -> None:
+    source = _kotlin_client_source()
+    for name, expected in _CLIENT_REASON_MIRROR.items():
+        match = re.search(rf'^internal const val {name}: String = "([^"]+)"$', source, re.M)
+        assert match, f"the Android client has no {name} constant"
+        assert match.group(1) == expected
+
+
+def test_every_documented_exit_code_is_classified_by_the_android_client() -> None:
+    """No row of the table may be unknown to the client (#2124).
+
+    The dangerous direction is a NEW exit code added here and silently absent
+    there: the client's `else` branch would classify it as a generic failure,
+    which is safe, but a code that should mean DELIVERED would then strand a
+    delivered payload as a failed row. So the table drives the check.
+    """
+    source = _kotlin_client_source()
+    documented = {code for code, _reason, _description in send_mod.EXIT_CODE_TABLE}
+    mirrored = set(_CLIENT_EXIT_MIRROR.values())
+    assert documented == mirrored, (
+        "EXIT_CODE_TABLE and the Android client's constants disagree; "
+        f"only in the table: {sorted(documented - mirrored)}, "
+        f"only in the client: {sorted(mirrored - documented)}"
+    )

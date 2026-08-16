@@ -62,6 +62,52 @@ enum class DefaultAgentSessionView {
 }
 
 /**
+ * Issue #2124: the persisted `app_settings` file and the outbound-authority key,
+ * named ONCE here so an instrumentation test can pin the authority before the
+ * app launches without transcribing string literals that would silently drift
+ * from [SettingsRepository]'s own constants.
+ */
+internal const val SETTINGS_PREFS_NAME: String = "app_settings"
+internal const val SETTINGS_KEY_OUTBOUND_DELIVERY_AUTHORITY: String = "outbound_delivery_authority"
+
+/**
+ * Issue #2124 (step 1b of epic #2121): which authority owns an outbound row's
+ * lifecycle — the host CLI's acknowledgement, or the legacy terminal-observation
+ * inference stack.
+ *
+ * ## Why this flag exists at all (and why it is not a D22 violation)
+ *
+ * D22 bans "use the old behaviour" settings flags, and this is a **deliberate,
+ * maintainer-recorded, time-boxed exception** (2026-08-13, recorded on #2124).
+ * Step 2 (#2125) deletes the old path AND this flag, restoring the D22 end
+ * state. It is not a precedent for keeping fallbacks.
+ *
+ * ## It is a HARD switch, never an automatic fallback
+ *
+ * Exactly ONE path owns row lifecycle at a time, chosen by this value and
+ * nothing else:
+ *
+ * - [HostCliAck] (the default — the field test only happens if it is the
+ *   default): `pocketshell send --pane <pane> --token <rowId> --enter` is the
+ *   SOLE delivery authority. The old inference stack — paste-ack, turnover
+ *   proof, late-ack reconciler, `verifyBeforeAgentResend` — is not consulted at
+ *   all, not even to break a tie, and cannot move a row. A new-path failure
+ *   surfaces an honest `Failed`; it NEVER silently runs the old path. An
+ *   automatic degradation would make a clean field run meaningless (we could
+ *   not tell whether the ack worked or the old guesswork covered for it) and is
+ *   exactly how this bug class survived five fixes.
+ * - [TerminalInference]: today's behaviour, byte-for-byte, as the escape hatch
+ *   if the new path misbehaves in real use.
+ */
+enum class OutboundDeliveryAuthority {
+    /** The host CLI's exit status is the acknowledgement (issue #2122). */
+    HostCliAck,
+
+    /** The legacy bounded-observation inference stack (pre-#2124). */
+    TerminalInference,
+}
+
+/**
  * Snapshot of all PocketShell user-tunable settings exposed by the
  * settings surface introduced in issue #112.
  *
@@ -169,6 +215,13 @@ data class AppSettings(
      * mid-session switch (#815).
      */
     val defaultAgentSessionView: DefaultAgentSessionView = DEFAULT_AGENT_SESSION_VIEW,
+    /**
+     * Issue #2124: which authority owns outbound row lifecycle. Defaults to
+     * [OutboundDeliveryAuthority.HostCliAck] — the host-CLI acknowledgement —
+     * because the field test only happens if the new path is the default. See
+     * [OutboundDeliveryAuthority] for the hard-switch contract.
+     */
+    val outboundDeliveryAuthority: OutboundDeliveryAuthority = DEFAULT_OUTBOUND_DELIVERY_AUTHORITY,
 ) {
     companion object {
         const val MIN_TERMINAL_FONT_SP: Float = 10f
@@ -352,6 +405,15 @@ data class AppSettings(
          */
         val DEFAULT_AGENT_SESSION_VIEW: DefaultAgentSessionView =
             DefaultAgentSessionView.Conversation
+
+        /**
+         * Issue #2124: the NEW acknowledged path is the default. The whole
+         * point of step 1b is a real field run on the host-CLI ack; a default
+         * of [OutboundDeliveryAuthority.TerminalInference] would mean the new
+         * path is never exercised and the flag would be dead weight.
+         */
+        val DEFAULT_OUTBOUND_DELIVERY_AUTHORITY: OutboundDeliveryAuthority =
+            OutboundDeliveryAuthority.HostCliAck
 
         const val BACKGROUND_GRACE_30_SECONDS_MS: Long = 30_000L
         const val BACKGROUND_GRACE_90_SECONDS_MS: Long = 90_000L

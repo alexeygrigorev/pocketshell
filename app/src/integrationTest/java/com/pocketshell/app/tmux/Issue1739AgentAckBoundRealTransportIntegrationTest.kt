@@ -299,6 +299,11 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
                 activeTmuxClients = ActiveTmuxClients(),
                 outboundQueueStore = queue,
             )
+            // Issue #2124: this proof exercises the LEGACY inference lane's
+            // ack bound; select it explicitly (production defaults to the
+            // acknowledged host-CLI path).
+            vm.hostAck.authorityOverrideForTest =
+                com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference
             vm.attachClientForTest(client)
             vm.applyParsedPanesForTest(
                 listOf(

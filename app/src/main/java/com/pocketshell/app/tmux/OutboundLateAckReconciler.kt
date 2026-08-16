@@ -106,12 +106,16 @@ internal suspend fun resolveLateOutboundAck(
     authority: AgentTranscriptAuthority,
     item: OutboundItem,
     capturePane: OutboundPaneCapture?,
-): Boolean = ledger.resolveLateAuthoritativeSubmitAck(
-    transcriptAuthority = authority,
-    paneId = item.paneId,
-    payload = appendAttachmentPaths(item.cleanText, item.attachments.map { it.remotePath }),
-    sendToken = item.id,
-    durableRow = DurableOutboundRowIdentity(item.sessionKey, item.id),
-    capturePane = capturePane,
-    consumeOnSuccess = false,
-)
+): Boolean {
+    // Issue #2124 hard-switch probe (legacy-stack entry point).
+    OutboundLegacyStackProbe.lateAckReconciler.incrementAndGet()
+    return ledger.resolveLateAuthoritativeSubmitAck(
+        transcriptAuthority = authority,
+        paneId = item.paneId,
+        payload = appendAttachmentPaths(item.cleanText, item.attachments.map { it.remotePath }),
+        sendToken = item.id,
+        durableRow = DurableOutboundRowIdentity(item.sessionKey, item.id),
+        capturePane = capturePane,
+        consumeOnSuccess = false,
+    )
+}

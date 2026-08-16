@@ -122,6 +122,9 @@ internal suspend fun verifyBeforeAgentResend(
     durableRow: DurableOutboundRowIdentity? = null,
     capturePane: OutboundPaneCapture? = null,
 ): DeliveryProbeOutcome? {
+    // Issue #2124 hard-switch probe: this is a LEGACY-stack entry point. With
+    // the flag on the acknowledged path it must never be reached at all.
+    OutboundLegacyStackProbe.verifyBeforeResend.incrementAndGet()
     if (!ledger.hasAmbiguousAttempt(paneId, sendToken, payload, durableRow)) return null
     // Issue #1944: once Enter itself was attempted, the old payload-presence
     // probe cannot distinguish "still typed" from "already submitted and shown
@@ -298,6 +301,8 @@ internal suspend fun OutboundDeliveryLedger.persistSubmitWriteAhead(
     durableRow: DurableOutboundRowIdentity?,
     transcriptBaseline: OutboundSubmitTranscriptBaseline?,
 ) {
+    // Issue #2124 hard-switch probe (legacy-stack entry point).
+    OutboundLegacyStackProbe.submitWriteAhead.incrementAndGet()
     if (durableRow == null) return
     check(
         withContext(ioContext) {
@@ -397,6 +402,8 @@ internal class OutboundDeliveryLedger(
         collapsedMarkerBaselineCount: Int? = null,
         durableRow: DurableOutboundRowIdentity? = null,
     ): Unit = synchronized(lock) {
+        // Issue #2124 hard-switch probe (legacy-stack entry point).
+        OutboundLegacyStackProbe.ledgerWireAttempt.incrementAndGet()
         val key = key(paneId, sendToken)
         entries.remove(key)
         entries.add(key)
@@ -925,4 +932,20 @@ private suspend fun probeInputBatchAlreadyLanded(
         "outcome" to outcome.name,
     )
     return outcome == DeliveryProbeOutcome.AlreadyLanded
+}
+
+/**
+ * Issue #1526 (S1) synthetic result-lost seam, extracted out of the
+ * connection-core god object (D28 / the #1047 downward ratchet) by #2124.
+ *
+ * Models the audit's cut point (c): the paste ran server-side, then the link
+ * died before the submit Enter's result came back. Production never arms it.
+ */
+internal fun TmuxSessionViewModel.consumeSendResultLostSeamForTest() {
+    if (!OutboundDeliverySeams.consumeSendResultLostBeforeSubmitEnter()) return
+    val dropped = triggerCleanPassiveDropForTest()
+    DiagnosticEvents.record("action", "outbound_result_lost_seam", "dropped" to dropped)
+    throw IllegalStateException(
+        "test-seam: transport dropped after paste, before submit Enter (result lost)",
+    )
 }

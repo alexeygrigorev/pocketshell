@@ -226,6 +226,8 @@ fun SettingsScreen(
                     onBackgroundGraceChange = viewModel::setBackgroundGraceMillis,
                     defaultAgentSessionView = settings.defaultAgentSessionView,
                     onDefaultAgentSessionViewChange = viewModel::setDefaultAgentSessionView,
+                    outboundDeliveryAuthority = settings.outboundDeliveryAuthority,
+                    onOutboundDeliveryAuthorityChange = viewModel::setOutboundDeliveryAuthority,
                     hosts = hosts,
                     selectedHostId = settings.defaultHostId,
                     onSelectDefaultHost = viewModel::setDefaultHostId,
@@ -557,6 +559,8 @@ private fun TerminalSection(
     onBackgroundGraceChange: (Long) -> Unit,
     defaultAgentSessionView: DefaultAgentSessionView,
     onDefaultAgentSessionViewChange: (DefaultAgentSessionView) -> Unit,
+    outboundDeliveryAuthority: OutboundDeliveryAuthority,
+    onOutboundDeliveryAuthorityChange: (OutboundDeliveryAuthority) -> Unit,
     hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
     selectedHostId: Long?,
     onSelectDefaultHost: (Long?) -> Unit,
@@ -830,6 +834,46 @@ private fun TerminalSection(
                 selected = defaultAgentSessionView == DefaultAgentSessionView.Terminal,
                 onClick = { onDefaultAgentSessionViewChange(DefaultAgentSessionView.Terminal) },
                 testTag = defaultAgentSessionViewOptionTag(DefaultAgentSessionView.Terminal),
+            )
+
+            // Issue #2124 (step 1b of epic #2121): WHICH authority owns an
+            // outbound row's lifecycle. A hard switch, never an automatic
+            // fallback — the selected path is the only one that runs, and the
+            // ACTIVE one is named here so a field report is unambiguous about
+            // which produced it. Deleted together with the old path by #2125.
+            Spacer(modifier = Modifier.height(PocketShellSpacing.lg))
+            Text(
+                text = "Outbound delivery confirmation",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Active: " + outboundDeliveryAuthorityLabel(outboundDeliveryAuthority) +
+                    ". How PocketShell decides a prompt was delivered.",
+                color = PocketShellColors.TextSecondary,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag(OUTBOUND_DELIVERY_AUTHORITY_ACTIVE_TAG),
+            )
+            Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
+            DefaultHostOptionRow(
+                title = outboundDeliveryAuthorityLabel(OutboundDeliveryAuthority.HostCliAck),
+                subtitle = "Default \u2014 the host CLI acknowledges the injection",
+                selected = outboundDeliveryAuthority == OutboundDeliveryAuthority.HostCliAck,
+                onClick = { onOutboundDeliveryAuthorityChange(OutboundDeliveryAuthority.HostCliAck) },
+                testTag = outboundDeliveryAuthorityOptionTag(OutboundDeliveryAuthority.HostCliAck),
+            )
+            DefaultHostOptionRow(
+                title = outboundDeliveryAuthorityLabel(OutboundDeliveryAuthority.TerminalInference),
+                subtitle = "Escape hatch \u2014 guess from the terminal screen",
+                selected = outboundDeliveryAuthority == OutboundDeliveryAuthority.TerminalInference,
+                onClick = {
+                    onOutboundDeliveryAuthorityChange(OutboundDeliveryAuthority.TerminalInference)
+                },
+                testTag = outboundDeliveryAuthorityOptionTag(
+                    OutboundDeliveryAuthority.TerminalInference,
+                ),
             )
 
             // -- Startup: open-on-launch destination (folded in from the
@@ -2157,6 +2201,24 @@ fun backgroundGraceOptionTag(millis: Long): String =
  */
 fun defaultAgentSessionViewOptionTag(view: DefaultAgentSessionView): String =
     "settings:terminal:default-agent-view:" + view.name.lowercase()
+
+/**
+ * Issue #2124: stable test tag for the "Outbound delivery confirmation" radio
+ * option, and for the line that names the CURRENTLY ACTIVE authority (so a
+ * field report is unambiguous about which path produced it).
+ */
+fun outboundDeliveryAuthorityOptionTag(authority: OutboundDeliveryAuthority): String =
+    "settings:terminal:outbound-delivery-authority:" + authority.name.lowercase()
+
+const val OUTBOUND_DELIVERY_AUTHORITY_ACTIVE_TAG: String =
+    "settings:terminal:outbound-delivery-authority:active"
+
+/** Issue #2124: the user-facing name of an [OutboundDeliveryAuthority]. */
+fun outboundDeliveryAuthorityLabel(authority: OutboundDeliveryAuthority): String =
+    when (authority) {
+        OutboundDeliveryAuthority.HostCliAck -> "Host CLI acknowledgement"
+        OutboundDeliveryAuthority.TerminalInference -> "Terminal observation (legacy)"
+    }
 
 internal fun voiceLanguageOptionTestTag(code: String): String =
     "settings:voice:language:" + code.lowercase()

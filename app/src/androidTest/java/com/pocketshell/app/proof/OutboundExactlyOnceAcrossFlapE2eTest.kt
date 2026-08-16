@@ -117,6 +117,15 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     private suspend fun seedBeforeLaunch() {
         clearLastSessionPrefs()
+        // Issue #2124: this class asserts the LEGACY delivery-inference
+        // lifecycle (bounded paste-ack, turnover proof, the unconfirmed row
+        // waiting for late authority). The shipped default is now the
+        // acknowledged host-CLI path, so the legacy authority is selected here
+        // EXPLICITLY rather than the class being silently re-pointed at a
+        // different state machine — or, worse, its assertions rewritten.
+        pinOutboundDeliveryAuthority(
+            com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference,
+        )
         val key = OutboundExactlyOnceFixture.readFixtureKey()
         fixtureKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
@@ -126,6 +135,10 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     @Before
     fun setUp() {
+        // Issue #2124: zero before every test so tearDown's assertion is about
+        // THIS test's sends — the behavioural half of the authority pin's
+        // liveness proof (see [assertNoAcknowledgedSendsWereRecorded]).
+        com.pocketshell.app.tmux.HostAckSendProbe.reset()
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
         authoritativeLeaseConnector().resetOutageForTest()
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
@@ -137,6 +150,12 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
 
     @After
     fun tearDown() {
+        // Issue #2124: EVERY test in this class asserts the legacy inference
+        // lifecycle, so not one of its sends may have ridden the acknowledged
+        // lane. Asserted here (not per-test) so a new test in this class cannot
+        // forget it, and BEFORE the pin is cleared.
+        assertNoAcknowledgedSendsWereRecorded(testName.methodName)
+        clearOutboundDeliveryAuthorityPin()
         runCatching { authoritativeLeaseConnector().resetOutageForTest() }
         OutboundDeliverySeams.failSendResultLostBeforeSubmitEnter = false
         OutboundDeliverySeams.failInputSendResultLostOnce = false

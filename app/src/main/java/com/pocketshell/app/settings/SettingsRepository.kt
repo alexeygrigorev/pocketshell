@@ -429,6 +429,18 @@ class SettingsRepository @VisibleForTesting internal constructor(
         _settings.value = _settings.value.copy(defaultAgentSessionView = view)
     }
 
+    /**
+     * Issue #2124: flip which authority owns outbound row lifecycle. A HARD
+     * switch — see [OutboundDeliveryAuthority]. Exposed on-device so the
+     * maintainer can move between the acknowledged and the legacy inference
+     * path without a reinstall while the field test runs.
+     */
+    fun setOutboundDeliveryAuthority(authority: OutboundDeliveryAuthority) {
+        if (_settings.value.outboundDeliveryAuthority == authority) return
+        prefs.edit().putString(KEY_OUTBOUND_DELIVERY_AUTHORITY, authority.name).apply()
+        _settings.value = _settings.value.copy(outboundDeliveryAuthority = authority)
+    }
+
     fun setDiagnosticsRecordingEnabled(enabled: Boolean) {
         if (_settings.value.diagnosticsRecordingEnabled == enabled) return
         prefs.edit().putBoolean(KEY_DIAGNOSTICS_RECORDING_ENABLED, enabled).apply()
@@ -512,6 +524,13 @@ class SettingsRepository @VisibleForTesting internal constructor(
         val defaultAgentSessionView = runCatching {
             DefaultAgentSessionView.valueOf(defaultAgentSessionViewName)
         }.getOrDefault(AppSettings.DEFAULT_AGENT_SESSION_VIEW)
+        val outboundDeliveryAuthorityName = prefs.safeString(
+            KEY_OUTBOUND_DELIVERY_AUTHORITY,
+            AppSettings.DEFAULT_OUTBOUND_DELIVERY_AUTHORITY.name,
+        ) ?: AppSettings.DEFAULT_OUTBOUND_DELIVERY_AUTHORITY.name
+        val outboundDeliveryAuthority = runCatching {
+            OutboundDeliveryAuthority.valueOf(outboundDeliveryAuthorityName)
+        }.getOrDefault(AppSettings.DEFAULT_OUTBOUND_DELIVERY_AUTHORITY)
         return AppSettings(
             terminalFontSizeSp = font,
             conversationFontSizeSp = conversationFont,
@@ -528,6 +547,7 @@ class SettingsRepository @VisibleForTesting internal constructor(
             backgroundGraceMillis = backgroundGraceMillis,
             diagnosticsRecordingEnabled = diagnosticsRecordingEnabled,
             defaultAgentSessionView = defaultAgentSessionView,
+            outboundDeliveryAuthority = outboundDeliveryAuthority,
         )
     }
 
@@ -616,7 +636,7 @@ class SettingsRepository @VisibleForTesting internal constructor(
 
     private companion object {
         const val TAG = "PsSettingsRepo"
-        const val PREFS_NAME = "app_settings"
+        const val PREFS_NAME = SETTINGS_PREFS_NAME
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
         const val KEY_CONVERSATION_FONT_SP = "conversation_font_sp"
         const val KEY_TERMINAL_KEYBOARD_MODE = "terminal_keyboard_mode"
@@ -632,5 +652,6 @@ class SettingsRepository @VisibleForTesting internal constructor(
         const val KEY_BACKGROUND_GRACE_MILLIS = "background_grace_millis"
         const val KEY_DIAGNOSTICS_RECORDING_ENABLED = "diagnostics_recording_enabled"
         const val KEY_DEFAULT_AGENT_SESSION_VIEW = "default_agent_session_view"
+        const val KEY_OUTBOUND_DELIVERY_AUTHORITY = SETTINGS_KEY_OUTBOUND_DELIVERY_AUTHORITY
     }
 }

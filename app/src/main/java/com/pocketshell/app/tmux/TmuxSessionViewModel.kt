@@ -14095,17 +14095,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // Issue #1526 S1 / #1541 / #1587: verify-before-resend ledger, durable-backed by
     // the injected @Singleton store (see [outboundDeliveryLedgerFor]). Null ⇒ base S1.
     private val outboundDeliveryLedger = outboundDeliveryLedgerFor(outboundQueueStore)
-    private fun consumeSendResultLostSeamForTest() {
-        if (!OutboundDeliverySeams.consumeSendResultLostBeforeSubmitEnter()) return
-        // The seam models the audit's cut point (c): the paste ran server-side,
-        // then the link died before the submit Enter's result came back.
-        val dropped = triggerCleanPassiveDropForTest()
-        DiagnosticEvents.record("action", "outbound_result_lost_seam", "dropped" to dropped)
-        throw IllegalStateException(
-            "test-seam: transport dropped after paste, before submit Enter (result lost)",
-        )
-    }
-
+    // Issue #2124: the acknowledged outbound lane (HostAckOutboundDelivery.kt).
+    internal val hostAck = HostAckDeliveryPort({ sessionRef }, { seedIoDispatcher }, { pane -> clientRef?.let { requestReconcile(it, pane, ReconcileReason.Send) } }) { settingsRepository?.settings?.value?.outboundDeliveryAuthority }
     private fun snapshotAgentSendRuntime(client: TmuxClient): AgentSendRuntimeIdentity =
         AgentSendRuntimeIdentity(client = client, generation = connectGeneration, target = activeTarget)
 
@@ -14185,6 +14176,7 @@ public class TmuxSessionViewModel @Inject constructor(
         if (!isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
             return Result.failure(IllegalStateException("Agent send target is stale or foreign."))
         }
+        if (hostAck.active) return hostAck.sendAgentPayload(paneId, payload, sendToken)
         val boundedCapture = boundedPaneCapture(runtimeIdentity)
         if (outboundDeliveryLedger.resolveLateAuthoritativeSubmitAck(agentTranscriptAuthority, paneId, payload, sendToken, durableRow, boundedCapture)) return Result.success(Unit).also { requestReconcile(client, paneId, ReconcileReason.Send) }
         // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt for THIS send —
@@ -15374,7 +15366,8 @@ public class TmuxSessionViewModel @Inject constructor(
         bytes: ByteArray,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity? = null,
-    ): Result<Unit> = deliverRawInputWithGuard(
+    ): Result<Unit> = hostAck.sendRawBytesOrNull(paneId, bytes, sendToken, durableRow)
+        ?: deliverRawInputWithGuard(
         ledger = outboundDeliveryLedger,
         client = client,
         paneId = paneId,

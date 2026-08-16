@@ -406,12 +406,56 @@ fi
 # alternatives from the invoke marker took the seam from 15 packages / 569
 # classes to 9 / 210 and NOTHING noticed, because both host-CLI floors were
 # `>= 1`. It must be loud now.
+#
+# WHAT IS PINNED, AND WHY IT IS NOT AN EXACT COUNT (#2124 round 4).
+# This case used to assert the literal `wire-seam PRODUCER packages = 9`. The
+# eroded count is not a constant: it is "how many production packages still
+# name `PocketshellCommand` after the two string-literal alternatives are
+# dropped", and that GROWS whenever a new sender routes through the host CLI.
+# #2124 added one (HostAckOutboundDelivery), the count became 10, and this case
+# went red on a tree where the guard was working exactly as designed — a false
+# alarm that costs a CI round and teaches the next author to bump the literal,
+# which re-arms the identical trap. So the assertion is the RELATIONSHIP the
+# case actually exists to prove, in two parts:
+#
+#   (i)  the narrowed marker trips the PRODUCER floor SPECIFICALLY — not merely
+#        "some floor somewhere fired", which `the import-dependency index looks
+#        broken` alone would accept from the consumer or shared-reach floor —
+#        and the count it reports is under the floor production itself
+#        enforces, read off production's own message rather than duplicated
+#        here, so raising or lowering that floor cannot silently desync;
+#   (ii) the erosion genuinely ERODES: the producer count under the narrowed
+#        marker is strictly SMALLER than the count on the unmutated marker.
+#
+# The mutations that must redden it, and do (both run against a private copy
+# of the tree):
+#   * restore the round-2 `>= 1` producer floor in --verify-manifest check 7 —
+#     precisely the B7a regression this case was written for. No PRODUCER line
+#     is emitted under the narrowed marker, so (i) fails. It is the ONLY case
+#     that reddens (56 pass / 1 fail), which is the selectivity this check
+#     needs. Note this mutation does NOT disturb the `index looks broken`
+#     grep: the consumer and shared-reach floors still fire under the narrowed
+#     marker, so that grep alone accepts the regression and reading the
+#     PRODUCER line by name is the load-bearing half.
+#   * narrow production's own marker to `PocketshellCommand` so the erosion is
+#     a no-op. The unmutated producer count is then unreadable (the clean run
+#     is itself red), the `-n` guards below refuse to read a verdict out of it,
+#     and (ii) fails closed rather than passing on a missing baseline.
+# Neither number is written down here, so neither mutation can be absorbed by
+# a stale literal, and legitimate growth of the seam cannot fake a failure.
+clean_manifest="$(bash "$SELECT" --verify-manifest 2>&1)"
+unmutated_producer="$(sed -n 's/.*wire-seam packages = \([0-9]\{1,\}\) producer .*/\1/p' <<<"$clean_manifest")"
 out="$(POCKETSHELL_TA_HOSTCLI_MARKER='PocketshellCommand' bash "$SELECT" --verify-manifest 2>&1)"
+producer_line="$(grep -E 'wire-seam PRODUCER packages = [0-9]+ \(< [0-9]+\)' <<<"$out" || true)"
+eroded_producer="$(sed -n 's/.*wire-seam PRODUCER packages = \([0-9]\{1,\}\) (< [0-9]\{1,\}).*/\1/p' <<<"$producer_line")"
+producer_floor="$(sed -n 's/.*wire-seam PRODUCER packages = [0-9]\{1,\} (< \([0-9]\{1,\}\)).*/\1/p' <<<"$producer_line")"
 if grep -q 'the import-dependency index looks broken' <<<"$out" &&
-   grep -q 'wire-seam PRODUCER packages = 9' <<<"$out"; then
-  ok "16d the reviewer's 15->9 seam erosion now reddens --verify-manifest (round-2 B7a: it was silently green)"
+   [[ -n "$unmutated_producer" && -n "$eroded_producer" && -n "$producer_floor" ]] &&
+   [[ "$eroded_producer" -lt "$producer_floor" ]] &&
+   [[ "$eroded_producer" -lt "$unmutated_producer" ]]; then
+  ok "16d the reviewer's seam erosion now reddens --verify-manifest on the PRODUCER floor by name (round-2 B7a: it was silently green) — narrowed marker yields $eroded_producer producer packages, under the enforced floor of $producer_floor and under the unmutated $unmutated_producer"
 else
-  bad "16d the 15->9 seam erosion is STILL green — the floors are not substantive:\n$out"
+  bad "16d the seam erosion is STILL green, or did not trip the PRODUCER floor, or did not erode at all (unmutated='$unmutated_producer' eroded='$eroded_producer' floor='$producer_floor'):\n$out"
 fi
 
 # 16e / 16f — CODE mutations, on their own private copies so case 17's mutation

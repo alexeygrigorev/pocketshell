@@ -1,13 +1,43 @@
 #!/bin/sh
 set -eu
 
-if { [ "${1:-}" = "-CC" ] || [ "${1:-}" = "list-panes" ]; } &&
+# Issue #2160 broke this shim silently. It used to match the tmux verb as "$1",
+# which held only while every PocketShell invocation was a bare `tmux <verb>`.
+# #2160 routed the read lanes through `TmuxRead.CLIENT` ("tmux -u"), so
+# `listPanesViaExec` now sends `tmux -u list-panes ...`; "$1" became "-u", the
+# `list-panes` arm stopped matching, no fault was injected, the attach SUCCEEDED,
+# and TmuxCreateAfterAttachFailureDockerTest timed out waiting for an error band
+# that could never appear (run 31945790110, shard 4, 4/4 deterministic).
+#
+# Client flags precede the sub-command, so scan past them and match on the VERB
+# instead of on argument position. This also pre-empts the same silent break on
+# the `-CC` arm when #2175 moves `-u` onto the control-mode attach line
+# (`tmux -u -CC attach-session`), which would otherwise disable the hang
+# injection in TmuxAttachTimeoutDockerTest with no failing test to notice.
+control_mode=false
+verb=""
+for arg in "$@"; do
+  case "$arg" in
+    -CC) control_mode=true ;;
+    -*) ;;
+    *) if [ -z "$verb" ]; then verb="$arg"; fi ;;
+  esac
+done
+
+# Report the arm that matched, so the message stays byte-identical to the one
+# the pre-#2160 green runs produced ("rejecting tmux -CC" / "... list-panes").
+matched="$verb"
+if [ "$control_mode" = true ]; then
+  matched="-CC"
+fi
+
+if { [ "$control_mode" = true ] || [ "$verb" = "list-panes" ]; } &&
   [ -f /tmp/pocketshell-fail-tmux-control ]; then
-  echo "pocketshell-tmux-fail-shim: rejecting tmux ${1:-} for $USER" >&2
+  echo "pocketshell-tmux-fail-shim: rejecting tmux $matched for $USER" >&2
   exit 86
 fi
 
-if [ "${1:-}" = "-CC" ] && [ -f "$HOME/.pocketshell-hang-tmux-control" ]; then
+if [ "$control_mode" = true ] && [ -f "$HOME/.pocketshell-hang-tmux-control" ]; then
   echo "pocketshell-tmux-hang-shim: withholding tmux -CC response for $USER" >&2
   while true; do
     sleep 3600

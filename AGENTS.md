@@ -749,6 +749,22 @@ those sections, not repeated here.)
   `docker-agents-1` container squats it. The maintainer pre-authorized
   `docker stop docker-agents-1` yourself — don't ask (it's reversible:
   `docker start` brings it back).
+- **The `agents` fixture's sshd exports NO locale, but its `/etc/profile` exports
+  `LANG=C.UTF-8` — so a `sh -lc`-wrapped command gets UTF-8 there and CANNOT
+  reproduce a locale-mangling bug (#2160, 2026-08-16).** The two halves disagree,
+  and which half you hit depends on how the command is invoked: a bare SSH exec
+  reads a mangled `A_B`, while anything wrapped by `ReposRemoteSource.pathAwareCommand`
+  (or any other `sh -lc` wrapper, since `-l` sources `/etc/profile`) reads a
+  correct `A<TAB>B`. The tell is brutal and easy to misread: the #2160 lane's
+  first connected picker test **passed 3/3 with the mutant in the APK** — a green
+  that proved the fixture could not enter the failing state, not that the code
+  was right. Same family as `docker exec` inheriting the image's UTF-8 locale
+  while an SSH exec on the same container does not, which is why two careful
+  probes of "the same command" disagreed during #2160's investigation.
+  **Rule:** for any locale/encoding/control-byte work, determine whether your
+  site is `sh -lc`-wrapped BEFORE choosing a fixture, and when the fixture cannot
+  reach the failing state, inject it synthetically and hard-assert the mangling
+  itself as the non-vacuity proof (the #780 model) rather than trusting a green.
 - **NEVER run `tmux kill-server`** (locked). `tmuxctl`/`t` operate on the DEFAULT
   socket by design, and `TMUX_TMPDIR`/`-L` do NOT isolate them (the server
   bootstrap goes through `systemd-run --user`, which drops env). A bare

@@ -622,10 +622,24 @@ class ConversationStaysReachableAfterDetectionDropsDockerTest {
         (InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as App)
             .forwardingController
 
+    /**
+     * Matches the forwarding STATUS the pill announces, as a substring.
+     *
+     * #2176 made the pill a real control and appended ". Opens session ports"
+     * to its description, so an exact match here can never be satisfied and
+     * burned the full [SURFACE_TIMEOUT_MS] instead. The property this #1487
+     * journey owns is that the pill announces *this* status and stays
+     * contained; the actionable suffix is #2176's own assertion
+     * (`ForwardingPillOpensSessionPortsTest`) and is deliberately not
+     * re-asserted here. Dropping the status text still reddens this wait.
+     */
     private fun waitForPillDescription(description: String) {
         compose.waitUntil(timeoutMillis = SURFACE_TIMEOUT_MS) {
-            compose.onAllNodesWithContentDescription(description, useUnmergedTree = true)
-                .fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithContentDescription(
+                description,
+                substring = true,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(PORT_FORWARD_PILL_TAG, useUnmergedTree = true)
             .assertIsDisplayed()

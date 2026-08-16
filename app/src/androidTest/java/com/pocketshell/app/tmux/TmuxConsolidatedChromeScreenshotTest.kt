@@ -128,8 +128,11 @@ class TmuxConsolidatedChromeScreenshotTest {
         compose.assertNodeFullyWithinRoot(TMUX_TABS_TAG)
         assertTrue(
             "active forwarding must expose the status semantics in top chrome",
+            // Substring: #2176 appends ". Opens session ports" to the pill's
+            // description. The status text is what this screenshot proof owns.
             compose.onAllNodesWithContentDescription(
                 "2 ports forwarding active for this host",
+                substring = true,
             ).fetchSemanticsNodes().isNotEmpty(),
         )
         compose.waitForIdle()

@@ -64,6 +64,28 @@ merge train over one per push: on a fast train the later dispatches mostly
 re-triage runs the earlier one has already classified, and each extra agent is
 another writer on shared state.
 
+**But EVIDENCE YOU CITE must be copied OUT of the worktree before you report —
+the worktree is deleted on merge (2026-08-16).** These two rules pull in
+opposite directions and the resolution is a split, so state it plainly rather
+than letting an agent guess:
+
+- **Working files** (logs, scratch, mutation snapshots) live **inside your own
+  worktree** while you run. That is what stops siblings clobbering each other.
+- **Artifacts you cite in a review verdict or status comment** must be copied to
+  a **durable, per-agent path** before you post, because the orchestrator prunes
+  the worktree the moment the work merges. Use a namespaced directory outside
+  every worktree — `~/.cache/pocketshell/evidence/issue-<N>-<role>/` — which is
+  durable *and* collision-free. One reviewer already used
+  `~/.cache/pocketshell/review-2124/rev2/` and its paths still resolve; #2180's
+  reviewer preserved only inside its worktree and every cited path died on
+  merge, which it disclosed rather than leaving as a dangling reference.
+
+The findings themselves survive when a review comment records counts, verbatim
+failure text, measured values and the md5 chain **inline** — #2180's did, so its
+reasoning stayed auditable even with the raw XML gone. Treat that as the
+minimum: a verdict whose only support is a filesystem path is one merge away
+from being unfalsifiable.
+
 Note the general shape, which is why this sits next to the CI rules rather than
 in a housekeeping section: **a build or test that runs against a tree someone
 else changed underneath it reports a result about a tree that no longer

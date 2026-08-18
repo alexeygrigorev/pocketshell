@@ -429,6 +429,11 @@ def classify_run(
     failure is always checked FIRST and always wins, so a run that genuinely
     broke and was cancelled afterwards still reports RESULT_FAILED — the fix for
     the false-alarm bug must never launder real red CI into "superseded".
+    Issue #2187: that precedence includes a non-required unit-lane job
+    (Static guards, JVM unit tests, …). The `unit-gate` rollup now uses
+    `if: ${{ !cancelled() }}`, so a superseded run concludes the required
+    `Unit tests` check as `cancelled` instead of manufacturing `failure`;
+    a real input failure still lives on that input job and must still win.
     Absent a genuine failure, a cancelled run yields NO verdict.
     """
     required = resolve_required_checks(jobs, required_names)
@@ -477,14 +482,34 @@ def classify_run(
             reason=f"run concluded {run_conclusion}",
         )
 
-    # No genuine failure anywhere. Was anything cancelled? Then this run reached
-    # no trustworthy verdict — the caller decides superseded vs no_verdict.
+    # No genuine failure on the required-check / run-conclusion surface. Was
+    # anything cancelled? Then this run reached no trustworthy verdict — the
+    # caller decides superseded vs no_verdict.
     cancelled_required = [
         rc.name
         for rc in required.values()
         if rc.status == "completed" and (rc.conclusion or "") == CANCELLED
     ]
-    if (run_conclusion or "") == CANCELLED or cancelled_required:
+    run_was_cancelled = (run_conclusion or "") == CANCELLED or bool(
+        cancelled_required
+    )
+    # Issue #2187: the unit-gate rollup uses `if: ${{ !cancelled() }}`, so a
+    # superseded run never dispatches the required `Unit tests` check (it
+    # concludes `cancelled` instead of manufacturing `failure`). A unit-lane
+    # job that had already failed still lives on that input job. Genuine
+    # failure anywhere still wins — otherwise a Static-guards red plus a
+    # later concurrency-cancel would be laundered into exit 4.
+    if run_was_cancelled and failed_jobs:
+        return Classification(
+            result=RESULT_FAILED,
+            required=required,
+            failing_jobs=failed_jobs,
+            reason=(
+                "job(s) concluded failing on a cancelled run: "
+                + ", ".join(failed_jobs)
+            ),
+        )
+    if run_was_cancelled:
         detail = (
             "required check(s) cancelled: " + ", ".join(cancelled_required)
             if cancelled_required

@@ -29,6 +29,11 @@
 #   C7  every workflow job is either wired into the gate or explicitly exempt
 #   C8  every exempt name still exists                          (the list cannot rot)
 #   C9  the #2063 selection guards are NOT reachable from a Gradle test task
+#   C11 the aggregator uses `if: ${{ !cancelled() }}` and not `always()`
+#       (issue #2187: a concurrency-cancel must conclude the required check
+#       as cancelled, not dispatch the job so `!= success` paints it failure)
+#   C13 the extracted result loop still fail-closes on skipped / empty /
+#       failure / cancelled-while-running (the original #2060 property)
 #
 # C5 is the subtle one: without it `GUARDS_STATIC: ${{ needs.guards-ci-harness.result }}`
 # passes C4 and C6 while the loop prints one job's label next to another job's
@@ -134,6 +139,34 @@ sorted_unique() {
 
 upper_snake() {
   printf '%s' "$1" | tr '[:lower:]-' '[:upper:]_'
+}
+
+# Issue #2187: the exact job-level `if:` that lets GitHub mark the required
+# check `cancelled` when the workflow is cancelled, while still dispatching
+# the job when a needed job failed or was skipped. `always()` is the bug —
+# it keeps the job running after a concurrency-cancel, and the result loop
+# then paints the required check red. `always() && !cancelled()` is also
+# wrong: GitHub evaluates it (because of `always()`) and the false result
+# is `skipped`, which required-check rulesets can treat as passing.
+EXPECTED_GATE_IF='${{ !cancelled() }}'
+
+extract_job_if() {
+  # First job-level `if:` (4-space indent) in the supplied job block.
+  printf '%s\n' "$1" | sed -n 's/^    if:[[:space:]]*//p' | head -1
+}
+
+extract_gate_script() {
+  # The `run: |` body of the unit-gate result loop. Fails loudly on empty:
+  # C13 executes this script, so "I could not extract it" must not look like
+  # "the rollup is fine".
+  printf '%s\n' "$1" | awk '
+    /^        run: \|[[:space:]]*$/ { inrun = 1; next }
+    inrun {
+      if ($0 != "" && $0 !~ /^          /) exit
+      sub(/^          /, "")
+      print
+    }
+  '
 }
 
 check_workflow() {
@@ -279,13 +312,60 @@ a step to that job instead."
     fail "C9: \`$scan_root\` is not a git checkout, so the Gradle-test-graph scan could not run. 'I could not check' is not 'I checked and it is fine'."
   fi
 
+  # --- C11: cancelled must not be dispatched into a manufactured failure ----
+  # G6 mutation: restore `if: always()` (or wrap `!cancelled()` in `always()`).
+  # That is exactly how run 31952697403 painted `Unit tests` failure over
+  # five cancelled inputs: the job kept running after the concurrency-cancel
+  # and `!= success` folded `cancelled` into failure.
+  local gate_if
+  gate_if="$(extract_job_if "$block")"
+  [ -n "$gate_if" ] || fail "C11: \`$GATE_JOB\` has no job-level \`if:\`. The default \`success()\` skips the gate when a needed job fails (#2060) and leaves a cancelled run's required check pending. The required form is \`if: $EXPECTED_GATE_IF\` (#2187)."
+  if [ "$gate_if" != "$EXPECTED_GATE_IF" ]; then
+    fail "C11: \`$GATE_JOB\` if: is '$gate_if', but must be '$EXPECTED_GATE_IF' (#2187). \`always()\` keeps the job running after a concurrency-cancel so the result loop paints the required \`$GATE_CHECK_NAME\` check as failure; \`always() && !cancelled()\` evaluates to skipped, which a required-check ruleset can treat as passing. No \`always()\` is load-bearing: GitHub then marks the undispatched check cancelled."
+  fi
+
+  # --- C13: the result loop still fail-closes on every non-success ----------
+  # The job-level if is what makes a SUPERSEDED run conclude cancelled. Once
+  # the job actually runs (a needed job failed, skipped, or a single job was
+  # cancelled while the workflow continued), the loop must still reject
+  # anything that is not success. Narrowing it to `== "failure"` would let a
+  # skipped or missing input pass — the original #2060 hole.
+  local gate_script
+  gate_script="$(extract_gate_script "$block")"
+  [ -n "$gate_script" ] || fail "C13: could not extract \`$GATE_JOB\`'s \`run: |\` body — the fail-closed loop is unreadable, so this is not a pass"
+  assert_rollup_exit() {
+    local want="$1" label="$2"
+    local unit="$3" gs="$4" gch="$5" gts="$6" dex="$7"
+    local out rc
+    set +e
+    out="$(UNIT="$unit" GUARDS_STATIC="$gs" GUARDS_CI_HARNESS="$gch" \
+           GUARDS_TEST_SELECTION="$gts" DEX="$dex" \
+           bash <<<"$gate_script" 2>&1)"
+    rc=$?
+    set -e
+    if [ "$rc" -ne "$want" ]; then
+      fail "C13: $label: extracted rollup exited $rc, expected $want
+$out"
+    fi
+  }
+  assert_rollup_exit 0 "all-success" success success success success success
+  assert_rollup_exit 1 "a failing input" failure success success success success
+  assert_rollup_exit 1 "a skipped input" success skipped success success success
+  assert_rollup_exit 1 "an empty/missing input" success success "" success success
+  # Conservative: a cancelled input WHILE THIS JOB RAN is a single-job cancel
+  # (timeout / runner death), not a concurrency-supersession. Those must still
+  # fail closed. The concurrency case never reaches this script (C11).
+  assert_rollup_exit 1 "cancelled-while-running" cancelled cancelled cancelled cancelled cancelled
+
   echo "OK: \`$GATE_JOB\` is named '$GATE_CHECK_NAME' and its three lists agree."
   echo "OK: \`$PYTHON_JOB\` is named '$PYTHON_CHECK_NAME' (the second required check)."
+  echo "OK: \`$GATE_JOB\` if: is '$EXPECTED_GATE_IF' (concurrency-cancel concludes cancelled, #2187)."
   echo "    needs      : $(printf '%s' "$needs" | tr '\n' ' ')"
   echo "    env reads  : $(printf '%s' "$env_vars" | tr '\n' ' ')"
   echo "    loop checks: $(printf '%s' "$loop_vars" | tr '\n' ' ')"
   echo "    exempt     : $(printf '%s' "$exempt_list" | tr '\n' ' ')"
   echo "OK: the #2063 selection guards are not reachable from any Gradle test source or build script."
+  echo "OK: the extracted rollup fail-closes on failure / skipped / empty / cancelled-while-running."
 }
 
 # --- self-test ---------------------------------------------------------------
@@ -293,7 +373,7 @@ a step to that job instead."
 # for the intended reason. The pass count is asserted at the end, so the
 # anti-vacuous guard cannot itself pass vacuously.
 
-SELFTEST_EXPECTED_CASES=12 # 11 + case 4b (the second required check name, #2134)
+SELFTEST_EXPECTED_CASES=16 # 12 + C11/C13 cases for #2187 (11, 12, 13, 14)
 selftest_passed=0
 selftest_failed=0
 # Overridden per case so C9's scan can be pointed at a sandbox checkout instead
@@ -478,6 +558,52 @@ self_test() {
   git -C "$scan_sandbox" add -A
   expect_red "10 a Gradle test task reaching the guards again" "C9" "$src"
   EXPECT_SCAN_ROOT=""
+
+  # Case 11 (issue #2187) — THE HEADLINE MUTATION: restore `if: always()`.
+  # That is how a concurrency-superseded run manufactured a red required
+  # check: the job kept running and `!= success` folded `cancelled` into
+  # failure. This case is the reproduce-first proof.
+  local m11="$sandbox/m11.yml"
+  awk '
+    /^  unit-gate:$/ { ingate = 1 }
+    ingate && /^    if:/ { print "    if: always()"; ingate = 0; next }
+    { print }
+  ' "$src" > "$m11"
+  cmp -s "$src" "$m11" && st_bad "11 mutation did not apply" || \
+    expect_red "11 if: always() restored (cancelled becomes failure)" "C11" "$m11"
+
+  # Case 12 — no job-level if: defaults to success(), so a failed needed job
+  # skips the gate and a cancelled run leaves the required check pending.
+  local m12="$sandbox/m12.yml"
+  awk '
+    /^  unit-gate:$/ { ingate = 1 }
+    ingate && /^    if:/ { next }
+    /^  [A-Za-z0-9_-]+:/ && !/^  unit-gate:$/ { ingate = 0 }
+    { print }
+  ' "$src" > "$m12"
+  cmp -s "$src" "$m12" && st_bad "12 mutation did not apply" || \
+    expect_red "12 job-level if: removed" "C11" "$m12"
+
+  # Case 13 — `always() && !cancelled()` looks like the fix but GitHub
+  # evaluates it (because of always()) and a false result is `skipped`,
+  # which a required-check ruleset can treat as passing.
+  local m13="$sandbox/m13.yml"
+  awk '
+    /^  unit-gate:$/ { ingate = 1 }
+    ingate && /^    if:/ { print "    if: ${{ always() && !cancelled() }}"; ingate = 0; next }
+    { print }
+  ' "$src" > "$m13"
+  cmp -s "$src" "$m13" && st_bad "13 mutation did not apply" || \
+    expect_red "13 if: always() && !cancelled() (skipped, not cancelled)" "C11" "$m13"
+
+  # Case 14 — the loop only reddens on `failure`, so skipped/empty/cancelled
+  # while running pass. That is the original #2060 hole reopened while
+  # "fixing" #2187.
+  local m14="$sandbox/m14.yml"
+  sed 's/if \[\[ "\$result" != "success" \]\]; then/if [[ "$result" == "failure" ]]; then/' \
+    "$src" > "$m14"
+  cmp -s "$src" "$m14" && st_bad "14 mutation did not apply" || \
+    expect_red "14 loop only treats failure as bad" "C13" "$m14"
 
   echo
   echo "$selftest_passed passed, $selftest_failed failed"

@@ -529,6 +529,184 @@ def test_healthy_long_running_emulator_shard_is_not_a_hang():
 # ── The exit-code contract stays complete and distinct ───────────────────────
 
 
+# ── Issue #2187: rollup concludes cancelled, watcher must agree ───────────────
+# After the #2060 unit-gate rollup, a concurrency-superseded `main` run kept
+# dispatching the required `Unit tests` check (`if: always()`) and the result
+# loop painted every cancelled input as failure. The rollup now uses
+# `if: ${{ !cancelled() }}`, so the check itself concludes `cancelled`. These
+# fixtures are the post-fix shape of the reported runs; the watcher must
+# classify them exit 4 (superseded) / exit 1 (real failure), never confuse
+# the two.
+
+
+def _issue2187_unit_lane_jobs(*, unit_tests_conclusion: str, extra_jobs=None):
+    """Unit-lane + required-check jobs for the #2187 superseded-run shape.
+
+    Mirrors the input set the rollup reads (run 31952697403 / 31952932366):
+    JVM unit (matrix), the three guard jobs, dex, plus the required checks.
+    """
+    jobs = [
+        _job("JVM unit tests (Debug)", "completed", "cancelled", 1),
+        _job("JVM unit tests (Release)", "completed", "cancelled", 2),
+        _job("Static guards", "completed", "cancelled", 3),
+        _job("CI harness guards", "completed", "cancelled", 4),
+        _job("Test-selection coverage guards", "completed", "success", 5),
+        _job("Dex register-pressure ratchet", "completed", "cancelled", 6),
+        _job("Unit tests", "completed", unit_tests_conclusion, 7),
+        _job("Python utility tests (pocketshell)", "completed", "cancelled", 8),
+        _job("Integration tests (Docker)", "completed", "cancelled", 9),
+        _job(
+            "Emulator journey subset (load-bearing, Docker agents) (0)",
+            "completed",
+            "cancelled",
+            10,
+        ),
+    ]
+    if extra_jobs:
+        jobs.extend(extra_jobs)
+    return jobs
+
+
+def _issue2187_run_state(jobs):
+    return {
+        "status": "completed",
+        "conclusion": "cancelled",
+        "databaseId": 31952697403,
+        "headBranch": "main",
+        "workflowName": "Tests",
+        "createdAt": "2026-08-16T12:00:00Z",
+        "jobs": jobs,
+    }
+
+
+def _issue2187_newer_run():
+    return [
+        {
+            "databaseId": 31952932366,
+            "workflowName": "Tests",
+            "headBranch": "main",
+            "status": "in_progress",
+            "createdAt": "2026-08-16T12:05:00Z",
+        },
+        {
+            "databaseId": 31952697403,
+            "workflowName": "Tests",
+            "headBranch": "main",
+            "status": "completed",
+            "createdAt": "2026-08-16T12:00:00Z",
+        },
+    ]
+
+
+def test_issue2187_superseded_rollup_cancelled_is_exit_4_not_failed():
+    """THE reported instance, post-fix. Unit tests concludes cancelled.
+
+    Run 31952697403: every unit-lane input cancelled (or one leftover
+    success), required check cancelled, newer run on `main`. Must be
+    superseded (exit 4), not the exit-1 path that sent the on-call hunting
+    a test failure that did not exist.
+    """
+    gh = FakeGh()
+    gh.queue_run_state(
+        **_issue2187_run_state(
+            _issue2187_unit_lane_jobs(unit_tests_conclusion="cancelled")
+        )
+    )
+    gh.run_list_json = _issue2187_newer_run()
+    watcher, _ = _make_watcher(gh)
+
+    outcome = watcher.watch(run_id="31952697403")
+
+    assert outcome.result == wci.RESULT_SUPERSEDED
+    assert outcome.exit_code == 4
+    assert outcome.signature is None
+    assert "31952932366" in outcome.reason
+
+
+def test_issue2187_mixed_success_and_cancelled_inputs_still_exit_4():
+    """Run 31952932366 shape: one input cancelled, the rest success.
+
+    The rollup no longer runs, so Unit tests is cancelled even though
+    four of five inputs succeeded. Nothing failed; this is still a
+    supersession, not a unit-lane break.
+    """
+    jobs = _issue2187_unit_lane_jobs(unit_tests_conclusion="cancelled")
+    for j in jobs:
+        if j["name"] in {
+            "JVM unit tests (Debug)",
+            "JVM unit tests (Release)",
+            "CI harness guards",
+            "Dex register-pressure ratchet",
+        }:
+            j["conclusion"] = "success"
+        if j["name"] == "Static guards":
+            j["conclusion"] = "cancelled"
+    gh = FakeGh()
+    gh.queue_run_state(**_issue2187_run_state(jobs))
+    gh.run_list_json = _issue2187_newer_run()
+    watcher, _ = _make_watcher(gh)
+
+    outcome = watcher.watch(run_id="31952697403")
+
+    assert outcome.result == wci.RESULT_SUPERSEDED
+    assert outcome.exit_code == 4
+
+
+def test_issue2187_genuine_unit_lane_failure_then_cancel_is_still_exit_1():
+    """AC2/AC4: a real failing input still wins after the rollup stops running.
+
+    `if: ${{ !cancelled() }}` means Unit tests itself is cancelled when the
+    workflow is cancelled, even if Static guards already failed. The watcher
+    must not launder that into superseded.
+    """
+    jobs = _issue2187_unit_lane_jobs(unit_tests_conclusion="cancelled")
+    for j in jobs:
+        if j["name"] == "Static guards":
+            j["conclusion"] = "failure"
+    gh = FakeGh()
+    gh.queue_run_state(**_issue2187_run_state(jobs))
+    gh.run_list_json = _issue2187_newer_run()
+    gh.log_text = (
+        "Static guards\tUnit-gate wiring guard\t2026-08-16T12:03:00Z "
+        "error: C11: unit-gate if: is always()\n"
+    )
+    watcher, _ = _make_watcher(gh)
+
+    outcome = watcher.watch(run_id="31952697403")
+
+    assert outcome.result == wci.RESULT_FAILED, (
+        "a genuinely failed unit-lane job must stay FAILED even though the "
+        f"required check was cancelled — got {outcome.result}: {outcome.reason}"
+    )
+    assert outcome.exit_code == 1
+    assert "Static guards" in outcome.failing_jobs
+
+
+def test_issue2187_manufactured_rollup_failure_still_reads_as_failed():
+    """If the rollup regresses and paints cancelled inputs as failure again,
+    the watcher agrees with that conclusion (exit 1). Agreement is the AC;
+    the wiring guard is what stops the regression from landing.
+    """
+    gh = FakeGh()
+    gh.queue_run_state(
+        **_issue2187_run_state(
+            _issue2187_unit_lane_jobs(unit_tests_conclusion="failure")
+        )
+    )
+    gh.run_list_json = _issue2187_newer_run()
+    gh.log_text = (
+        "Unit tests\tRequire every unit-lane job to have succeeded\t"
+        "2026-08-16T12:04:00Z ##[error]A unit-lane job did not succeed (#2060).\n"
+    )
+    watcher, _ = _make_watcher(gh)
+
+    outcome = watcher.watch(run_id="31952697403")
+
+    assert outcome.result == wci.RESULT_FAILED
+    assert outcome.exit_code == 1
+    assert "Unit tests" in outcome.failing_jobs
+
+
 def test_exit_code_contract_is_complete_and_distinct():
     codes = wci.EXIT_CODE
     assert codes[wci.RESULT_GREEN] == 0

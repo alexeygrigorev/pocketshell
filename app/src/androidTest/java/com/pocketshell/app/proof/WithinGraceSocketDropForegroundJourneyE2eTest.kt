@@ -7,12 +7,13 @@ import android.os.SystemClock
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
@@ -446,8 +447,18 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         // The user must SEE the drop (the maintainer's "nothing tells me it dropped"
         // report): the breadcrumb pill/dot reads the amber "Reconnecting", not the
         // green Connected the retained frame used to imply.
-        compose.onNodeWithTag(TMUX_CONNECTION_STATUS_PILL_TAG, useUnmergedTree = true)
-            .assertTextEquals("Reconnecting")
+        val reconnectingPillLabel = compose
+            .onNodeWithTag(TMUX_CONNECTION_STATUS_PILL_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+            .getOrNull(SemanticsProperties.Text)
+            .orEmpty()
+            .joinToString(separator = "") { it.text }
+        assertTrue(
+            "#822/#2130: the breadcrumb pill must be a complete honest reconnecting " +
+                "word, never a clipped fragment like 'Reco'; got '$reconnectingPillLabel'",
+            reconnectingPillLabel in setOf("Reconnecting", "Retrying", "Retry"),
+        )
         compose.onNodeWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true).assertExists()
         // ...and must be able to ACT on it. Containment, not `assertIsDisplayed`
         // (#657/F3): an off-edge control still reports displayed, and this tap target

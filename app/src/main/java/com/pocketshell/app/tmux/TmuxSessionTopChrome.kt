@@ -10,6 +10,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.Row
@@ -35,10 +36,17 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.SemanticsPropertyReceiver
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -257,24 +265,33 @@ internal fun ConsolidatedTopChrome(
         //
         // Within this region the yield order is: the title (its own
         // `weight(1f)` + ellipsis) shrinks FIRST; the crumb (capped <=120dp,
-        // ellipsis) and the connection-status pill only clip under extreme
-        // pressure - both are acceptable to shrink, the toggle is not.
+        // ellipsis) shrinks next. Issue #2130: the connection-status pill is
+        // measured FIRST (non-weighted, leading) so it can pick a complete
+        // honest word before the crumb/title take leftover. The toggle
+        // still never yields (#1320).
         Row(
             modifier = Modifier.weight(1f),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Issues #177 / #249 / #2130: the compact status pill sits at the
+            // LEADING edge of the yielding region, next to the status dot, so
+            // it is measured against the full leftover (not the sliver after
+            // a long crumb). It picks a complete word that fits; it does not
+            // clip to `Reco`.
+            ConnectionStatusPill(connectionStatus)
+
             // Issue #463: the tappable project/folder crumb. Opens a dropdown
             // of this project's sibling sessions; selecting one warm-switches
             // to it. Hidden entirely when we don't know the project; the
             // chevron is hidden when there's nothing to switch to.
             if (projectLabel != null) {
+                Spacer(modifier = Modifier.width(6.dp))
                 ProjectSwitcherCrumb(
                     projectLabel = projectLabel,
                     switcher = projectSwitcher,
                     onOpen = onProjectSwitcherOpen,
                     onSwitchToSibling = onSwitchToSibling,
                 )
-                Spacer(modifier = Modifier.width(6.dp))
             }
 
             // Issue #481: the title - the agent/model name when a conversation
@@ -282,7 +299,7 @@ internal fun ConsolidatedTopChrome(
             // tmux session name. It takes the inner `weight(1f)` slot so it is
             // the FIRST element to yield/ellipsise (issue #1320), keeping the
             // crumb, pill, toggle, and kebab intact. The 8dp end padding keeps
-            // the name from butting straight against the pill/toggle.
+            // the name from butting straight against the toggle.
             val sessionLabelModifier = Modifier
                 .weight(1f)
                 .padding(end = 8.dp)
@@ -296,12 +313,6 @@ internal fun ConsolidatedTopChrome(
                 overflow = TextOverflow.Ellipsis,
                 modifier = sessionLabelModifier,
             )
-
-            // Issues #177 / #249: the compact "Reconnecting"/"Disconnected"
-            // pill. It sits at the right edge of the yielding region (adjacent
-            // to the toggle) so, under extreme width pressure, it clips AFTER
-            // the title but BEFORE the toggle (#1320 - the toggle never yields).
-            ConnectionStatusPill(connectionStatus)
         }
 
         // Issue #1487: reserve this compact status outside the yielding title
@@ -578,6 +589,7 @@ internal fun CompactBreadcrumb(
         Spacer(modifier = Modifier.width(4.dp))
         com.pocketshell.uikit.components.StatusDot(status = connectionStatus)
         Spacer(modifier = Modifier.width(6.dp))
+        ConnectionStatusPill(connectionStatus)
         val compactSessionLabelModifier = Modifier
             .weight(1f)
         Text(
@@ -589,7 +601,6 @@ internal fun CompactBreadcrumb(
             overflow = TextOverflow.Ellipsis,
             modifier = compactSessionLabelModifier,
         )
-        ConnectionStatusPill(connectionStatus)
         if (forwardingState.visible) {
             Spacer(modifier = Modifier.width(4.dp))
             ForwardingStatusPill(forwardingState, onClick = onOpenSessionPorts)
@@ -612,13 +623,34 @@ internal fun CompactBreadcrumb(
 }
 
 /**
- * Issues #177 / #249: compact "Reconnecting" / "Disconnected" pill shown
- * in the breadcrumb next to the [com.pocketshell.uikit.components.StatusDot].
+ * Issue #2130: test-readable flag, `true` when the connection-status pill's
+ * label visually overflowed its slot (`onTextLayout.hasVisualOverflow`). A
+ * containment / `assertTextEquals` check cannot see the `Reco` clip —
+ * Compose publishes the full string and clamps the node's rect to the slot.
+ */
+val ConnectionStatusPillTruncatedKey: SemanticsPropertyKey<Boolean> =
+    SemanticsPropertyKey("ConnectionStatusPillTruncated")
+var SemanticsPropertyReceiver.connectionStatusPillTruncated: Boolean
+    by ConnectionStatusPillTruncatedKey
+
+private val ConnectionStatusPillTextStyle = TextStyle(
+    fontFamily = FontFamily.SansSerif,
+    fontWeight = FontWeight.Medium,
+    fontSize = 11.sp,
+)
+
+/**
+ * Issues #177 / #249 / #2130: compact status pill shown in the breadcrumb
+ * next to the [com.pocketshell.uikit.components.StatusDot].
  *
  * Rendered only for the non-live states so the steady-state breadcrumb
  * stays uncluttered. It is the always-visible textual confirmation of
  * what the dot's colour signals - the user should never have to guess
- * whether the session is live before they dictate into it. Tagged with
+ * whether the session is live before they dictate into it.
+ *
+ * Issue #2130: the label is the longest *complete* honest word that fits
+ * the incoming max width (`Reconnecting` → `Retrying` → `Retry`). We
+ * never clip a prefix like `Reco`. Tagged with
  * [TMUX_CONNECTION_STATUS_PILL_TAG] so connected tests can assert it
  * appears while a reattach handshake is in flight and clears when live.
  */
@@ -626,30 +658,55 @@ internal fun CompactBreadcrumb(
 private fun ConnectionStatusPill(
     status: com.pocketshell.uikit.model.ConnectionStatus,
 ) {
-    val (label, color) = when (status) {
+    val candidates = ConnectionStatusPillLabels.candidates(status)
+    if (candidates.isEmpty()) return
+    val color = when (status) {
+        com.pocketshell.uikit.model.ConnectionStatus.Connecting -> PocketShellColors.Amber
+        com.pocketshell.uikit.model.ConnectionStatus.Error -> PocketShellColors.Red
+        com.pocketshell.uikit.model.ConnectionStatus.Idle -> PocketShellColors.TextMuted
         com.pocketshell.uikit.model.ConnectionStatus.Connected -> return
-        com.pocketshell.uikit.model.ConnectionStatus.Connecting ->
-            "Reconnecting" to PocketShellColors.Amber
-        com.pocketshell.uikit.model.ConnectionStatus.Error ->
-            "Disconnected" to PocketShellColors.Red
-        com.pocketshell.uikit.model.ConnectionStatus.Idle ->
-            "Connecting" to PocketShellColors.TextMuted
     }
-    Text(
-        text = label,
-        color = color,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.Medium,
-        maxLines = 1,
-        modifier = Modifier
-            .background(
-                color = color.copy(alpha = 0.14f),
-                shape = PocketShellShapes.small,
-            )
-            .padding(horizontal = 8.dp, vertical = 3.dp)
-            .testTag(TMUX_CONNECTION_STATUS_PILL_TAG),
-    )
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    var truncated by remember { mutableStateOf(false) }
+    BoxWithConstraints(modifier = Modifier.padding(end = 4.dp)) {
+        val padPx = with(density) { ConnectionStatusPillPadH.roundToPx() * 2 }
+        val available = if (constraints.hasBoundedWidth &&
+            constraints.maxWidth != Int.MAX_VALUE
+        ) {
+            (constraints.maxWidth - padPx).coerceAtLeast(0)
+        } else {
+            Int.MAX_VALUE
+        }
+        val label = ConnectionStatusPillLabels.pick(status, available) { candidate ->
+            measurer.measure(
+                text = AnnotatedString(candidate),
+                style = ConnectionStatusPillTextStyle,
+                maxLines = 1,
+                softWrap = false,
+            ).size.width
+        }
+        Text(
+            text = label,
+            color = color,
+            style = ConnectionStatusPillTextStyle,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            onTextLayout = { truncated = it.hasVisualOverflow },
+            modifier = Modifier
+                .semantics { connectionStatusPillTruncated = truncated }
+                .background(
+                    color = color.copy(alpha = 0.14f),
+                    shape = PocketShellShapes.small,
+                )
+                .padding(horizontal = ConnectionStatusPillPadH, vertical = 3.dp)
+                .testTag(TMUX_CONNECTION_STATUS_PILL_TAG),
+        )
+    }
 }
+
+private val ConnectionStatusPillPadH = 8.dp
 
 /**
  * Issue #1487: the sole in-app forwarding status surface. It mirrors the

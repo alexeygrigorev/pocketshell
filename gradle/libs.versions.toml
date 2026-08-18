@@ -38,6 +38,15 @@ androidx-hilt-navigation-compose = "1.2.0"
 
 # core-ssh (issue #4). sshj replaces JSch per D3.
 sshj = "0.40.0"
+# Issue #2172: pin sshj 0.40.0's transitive BouncyCastle graph to the
+# exact versions resolution selects today. bcpkix-jdk18on:1.80 declares
+# bcutil-jdk18on:[1.80,1.81); a dynamic range forces a maven-metadata.xml
+# fetch on every resolve and 429s Maven Central. Do not bump these as
+# part of a range-pin — an upgrade is a separate, separately-reviewed
+# change.
+bouncycastle-bcutil = "1.80.2"
+bouncycastle-bcpkix = "1.80"
+bouncycastle-bcprov = "1.80.2"
 slf4j = "2.0.17"
 kotlinx-coroutines = "1.10.2"
 testcontainers = "1.21.3"
@@ -151,6 +160,10 @@ androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navig
 
 # core-ssh (issue #4).
 sshj = { group = "com.hierynomus", name = "sshj", version.ref = "sshj" }
+# Issue #2172: exact pins for sshj's BC graph (see [versions] above).
+bouncycastle-bcutil = { group = "org.bouncycastle", name = "bcutil-jdk18on", version.ref = "bouncycastle-bcutil" }
+bouncycastle-bcpkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", version.ref = "bouncycastle-bcpkix" }
+bouncycastle-bcprov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle-bcprov" }
 slf4j-nop = { group = "org.slf4j", name = "slf4j-nop", version.ref = "slf4j" }
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }

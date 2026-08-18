@@ -98,7 +98,21 @@ dependencies {
     // backend at runtime; slf4j-nop is the no-op binding so we don't pull in
     // logback or log4j on Android.
     api(libs.sshj)
-    implementation("org.bouncycastle:bcprov-jdk18on:1.80.2")
+    implementation(libs.bouncycastle.bcprov)
+    // Issue #2172: sshj 0.40.0 → bcpkix-jdk18on:1.80 declares
+    // bcutil-jdk18on:[1.80,1.81). Pin every BC sibling to the exact
+    // version resolution selects today so a normal resolve needs no
+    // maven-metadata.xml fetch. Root `subprojects` repeats the same
+    // constraints on every Android module so a second path cannot
+    // revive the range.
+    constraints {
+        api(libs.bouncycastle.bcutil)
+        api(libs.bouncycastle.bcpkix)
+        api(libs.bouncycastle.bcprov)
+        testImplementation(libs.bouncycastle.bcutil)
+        testImplementation(libs.bouncycastle.bcpkix)
+        testImplementation(libs.bouncycastle.bcprov)
+    }
     runtimeOnly(libs.slf4j.nop)
 
     // Coroutines are part of the public surface (SshSession.tail returns

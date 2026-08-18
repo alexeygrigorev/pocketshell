@@ -94,11 +94,11 @@ class TmuxClientExecLaneTest {
             val execCmd = session.execCommands.single { it.contains("capture-pane") }
             assertTrue(
                 "exec must carry the pane-targeted capture-pane",
-                execCmd.contains("tmux capture-pane -p -e -S -200 -t '%3'"),
+                execCmd.contains("${TmuxRead.CLIENT} capture-pane -p -e -S -200 -t '%3'"),
             )
             assertTrue(
                 "exec must carry the pane-targeted cursor query",
-                execCmd.contains("tmux display-message -p -t '%3' '#{cursor_x},#{cursor_y}'"),
+                execCmd.contains("${TmuxRead.CLIENT} display-message -p -t '%3' '#{cursor_x},#{cursor_y}'"),
             )
         } finally {
             client.close()
@@ -177,7 +177,7 @@ class TmuxClientExecLaneTest {
             assertFalse(response.isError)
             assertEquals(listOf("first", "second"), response.output)
             assertEquals(
-                "tmux capture-pane -p -t '%3'",
+                "${TmuxRead.CLIENT} capture-pane -p -t '%3'",
                 session.execCommands.single { it.contains("capture-pane") },
             )
         } finally {
@@ -207,7 +207,7 @@ class TmuxClientExecLaneTest {
             assertFalse(response.isError)
             assertEquals(listOf("scrolled", "off", "line"), response.output)
             assertEquals(
-                "tmux capture-pane -p -S -200 -t '%3'",
+                "${TmuxRead.CLIENT} capture-pane -p -S -200 -t '%3'",
                 session.execCommands.single { it.contains("capture-pane") },
             )
         } finally {

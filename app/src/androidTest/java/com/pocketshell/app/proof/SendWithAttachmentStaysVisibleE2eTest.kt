@@ -125,6 +125,12 @@ class SendWithAttachmentStaysVisibleE2eTest {
         // than letting a default flip silently re-point the class at a
         // different state machine. The #1153 send-heal behaviour this class
         // exists to prove is unchanged by the selection.
+        //
+        // Issue #2189 decision: REPLACE. The send-heal is preserved verbatim
+        // on HostAck (`onDelivered` → `ReconcileReason.Send`). Keep this class
+        // as the inference-ack proof until #2125; the shipped-default sibling
+        // is [Issue2189HostAckSendHealJourneyE2eTest]. The `agent_submit_ack`
+        // field-binding oracle drops with the stack.
         pinOutboundDeliveryAuthority(
             com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference,
         )

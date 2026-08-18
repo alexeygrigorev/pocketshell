@@ -175,6 +175,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"  # #848 #900 audit / ): the foreground outbound queue surface was
   "com.pocketshell.app.tmux.Issue1686QueueDrainWireOracleDockerTest"  # #1686 D33/G4 the composer-queue clog fix on the REAL wire: a false not-Connected label (inline enum Reconnecting + drain-gate sessionLive=false) while the -CC transport is writable — the queued prompt must DRAIN to the real tmux pane (capture-pane), and the transport-alive edge un-parks the storm-stranded backlog
   "$FQCN_PREFIX.OutboundExactlyOnceAcrossFlapE2eTest"  # #1963/#1526 D31/D32: full-class fixture isolation plus delivery-level exactly-once across a mid-send flap (server capture-pane occurrence == 1, composer + keystroke lanes)
+  "$FQCN_PREFIX.Issue2189HostAckExactlyOnceAcrossFlapE2eTest"  # #2189: the #1526 exactly-once-across-flap property on the SHIPPED HostAck default (same-token retry after a real transport drop; capture-pane occurrence == 1; HostAckSendProbe live)
   "$FQCN_PREFIX.Issue2124HostAckDeliveryJourneyE2eTest"  # #2124 (epic #2121) D33/G10: the host-CLI ack is the SOLE delivery authority — a send to a WORKING agent (the framed surface no oracle can read) still reaches Delivered with ZERO legacy-stack calls, and the agents-old-cli:2238 fixture without `send` fails CLOSED to a bounded retryable Failed naming the upgrade, never a hang and never a new unknown row state
   "com.pocketshell.app.settings.Issue2124OutboundAuthorityVisibleInSettingsE2eTest"  # #2124 AC8 / G9: deleting the whole "Outbound delivery confirmation" block left 107 settings tests green. The real Settings screen must NAME the authority actually in effect (seeded to the NON-default legacy path, and following the repository when it moves underneath the screen), and tapping either row must flip both the visible Active line and the persisted preference. No Docker fixture, ~15s.
   "$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"  # #1733 durable queued sidecar: real app-worker death preserves checkpoint N, fresh session sends total-N, atomic SHA-identical promotion and once-only prompt+Enter
@@ -211,6 +212,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.MostlyEmptyModelHealsAtRevealJourneyE2eTest"  # #1214 #1208 mostly-empty-model reveal-time leg of the fragments-over-bla…
   "$FQCN_PREFIX.IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest"  # #1302 #1208 #780 #1297 / — the COMPOSITE recovery journey, the campaign's acceptanc…
   "$FQCN_PREFIX.SendWithAttachmentStaysVisibleE2eTest"  # #1153 #941 send-with-attachment half-black, v0.4.21 dogfood): a compose…
+  "$FQCN_PREFIX.Issue2189HostAckSendHealJourneyE2eTest"  # #2189: the #1153 half-black send-heal on the SHIPPED HostAck default (onDelivered → ReconcileReason.Send; HostAckSendProbe live)
   "$FQCN_PREFIX.PreExistingMultiWindowSeedE2eTest"  # #782 #662 #638 #691 D30 / D28(3)): the pre-existing multi-window `[wN]` switcher…
   "com.pocketshell.app.projects.FolderListWindowCloseAfterStopPollingDockerTest"  # #783 #657 epic / F-wiring): the project-tree torn-down prune journey…
   "com.pocketshell.app.projects.FolderListKillWindowDockerTest"  # #883 window-aware Stop session. The tree shows each tmux WINDOW
@@ -307,6 +309,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.projects.FolderListScaleAnrStrictModeDockerTest"  # #965 the SCALE ANR proof — the folder list at
   "com.pocketshell.app.projects.FolderListDurableTreeDaemonDockerTest"  # #839 #821 #837 epic workstream C — the durable-tree daemon journey): the
   "$FQCN_PREFIX.AgentSubmitAckJourneyE2eTest"  # #869 the composer-Send ACK-GATE on-device submit JOURNEY — the lo…
+  "$FQCN_PREFIX.Issue2189HostAckSubmitJourneyE2eTest"  # #2189: the #869/#1687 submit property on the SHIPPED HostAck default (short + wrapped + multi-line actually SUBMIT; HostAckSendProbe live)
   "com.pocketshell.app.projects.FolderListScreenE2eTest#profiledSessionsShowProfileChipDefaultSessionsDoNot"  # #881 #858 follow-up to — D32 G9): the agent-PROFILE on-device journeys
   "com.pocketshell.app.projects.SessionKindPickerUiTest"
   "com.pocketshell.app.projects.SessionTypePickerNameFieldUiTest"  # #1184 D32 G9): the new-session picker's editable Session name fiel…

@@ -7,6 +7,7 @@ import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import dagger.hilt.android.EntryPointAccessors
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 
 /**
  * Issue #2124: select the outbound delivery authority for a connected journey —
@@ -88,6 +89,69 @@ internal fun assertNoAcknowledgedSendsWereRecorded(context: String) {
         0L,
         com.pocketshell.app.tmux.HostAckSendProbe.count(),
     )
+}
+
+/**
+ * Issue #2189 — the SHIPPED-path inverse of [assertNoAcknowledgedSendsWereRecorded].
+ *
+ * A HostAck sibling that never asserts this can pass vacuously: the send rode
+ * the still-reachable legacy stack, the new `outbound_host_ack_send` signal
+ * never fired, and the user-visible property was never proven on the path
+ * users take. The count is the attempt counter at the top of
+ * `HostAckDeliveryPort.deliver`; a zero here means the sibling did not enter
+ * the acknowledged lane at all.
+ *
+ * New HostAck siblings must NOT call [pinOutboundDeliveryAuthority] — they
+ * run on the shipped default via [clearOutboundDeliveryAuthorityPin]. The pin
+ * helper and this file go with #2125.
+ */
+internal fun assertAcknowledgedSendsWereRecorded(context: String, atLeast: Long = 1L) {
+    val observed = com.pocketshell.app.tmux.HostAckSendProbe.count()
+    assertTrue(
+        "$context: this class proves the SHIPPED HostAck path, so at least $atLeast " +
+            "send must have travelled the acknowledged lane (observed=$observed) — a " +
+            "zero here means the sibling silently ran the legacy stack (issue #2189)",
+        observed >= atLeast,
+    )
+}
+
+/**
+ * Issue #2189: a HostAck sibling must not consult the inference stack. The
+ * inverse of the legacy-pinned journeys' non-zero probe.
+ */
+internal fun assertLegacyStackWasNotConsulted(context: String) {
+    assertEquals(
+        "$context: the shipped HostAck path must not consult the legacy inference " +
+            "stack: " + com.pocketshell.app.tmux.OutboundLegacyStackProbe.snapshot(),
+        0L,
+        com.pocketshell.app.tmux.OutboundLegacyStackProbe.total(),
+    )
+}
+
+/**
+ * Issue #2189: bind the shipped HostAck default on the singleton AFTER
+ * MainActivity has launched, so a late SettingsRepository preload cannot
+ * overwrite the seed-time clear with a stale prefs snapshot.
+ *
+ * Returns the authority the production expression now observes.
+ */
+internal fun ensureShippedHostAckAuthority(): OutboundDeliveryAuthority {
+    val repository = settingsRepositorySingletonForTest()
+    val shipped = AppSettings.DEFAULT_OUTBOUND_DELIVERY_AUTHORITY
+    assertEquals(
+        "the shipped default must be HostAck — a default flip is what orphaned " +
+            "the three pinned journeys (issue #2189)",
+        OutboundDeliveryAuthority.HostCliAck,
+        shipped,
+    )
+    repository.setOutboundDeliveryAuthority(shipped)
+    val observed = repository.settings.value.outboundDeliveryAuthority
+    assertEquals(
+        "the shipped HostAck default must be the authority the app reads",
+        OutboundDeliveryAuthority.HostCliAck,
+        observed,
+    )
+    return observed
 }
 
 /** Restore the shipped default so the next class starts unpinned. */

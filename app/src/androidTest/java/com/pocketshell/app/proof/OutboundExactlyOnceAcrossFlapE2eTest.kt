@@ -123,6 +123,12 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         // acknowledged host-CLI path, so the legacy authority is selected here
         // EXPLICITLY rather than the class being silently re-pointed at a
         // different state machine — or, worse, its assertions rewritten.
+        //
+        // Issue #2189 decision: REPLACE the exactly-once-across-flap property;
+        // DROP the late-authority / unconfirmed / paste-ack-timeout / turnover
+        // tests with #2125 (they assert inference semantics the host ack
+        // deleted). The shipped-path sibling is
+        // [Issue2189HostAckExactlyOnceAcrossFlapE2eTest].
         pinOutboundDeliveryAuthority(
             com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference,
         )

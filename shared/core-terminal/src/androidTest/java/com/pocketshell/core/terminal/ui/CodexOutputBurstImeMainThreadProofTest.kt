@@ -19,6 +19,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatcher
+import com.pocketshell.testsupport.captureViewToBitmap
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -836,23 +837,20 @@ class CodexOutputBurstImeMainThreadProofTest {
         SystemClock.sleep(150)
         var bitmap: Bitmap? = null
         instrumentation.runOnMainSync {
-            if (view.width > 0 && view.height > 0) {
-                val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-                view.draw(Canvas(b))
-                bitmap = b
-            }
+            bitmap = captureViewToBitmap(view, name)
+        }
+        val captured = checkNotNull(bitmap) {
+            "main thread did not produce viewport bitmap '$name' (#2206)"
         }
         val ctx = instrumentation.targetContext
-        bitmap?.let { b ->
-            val file = artifactFile(ctx, "$name-viewport.png")
-            FileOutputStream(file).use { out ->
-                check(b.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    "failed to write bitmap to ${file.absolutePath}"
-                }
+        val file = artifactFile(ctx, "$name-viewport.png")
+        FileOutputStream(file).use { out ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
             }
-            println("ISSUE796_BURST_VIEWPORT ${file.absolutePath}")
-            b.recycle()
         }
+        println("ISSUE796_BURST_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile(ctx, "$name-visible-terminal.txt").writeText(visibleTerminalText(view))
     }
 

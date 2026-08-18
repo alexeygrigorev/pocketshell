@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.testsupport.captureViewToBitmap
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -390,25 +391,20 @@ class CodexMultiChunkSeedAttachMainThreadProofTest {
         SystemClock.sleep(150)
         var bitmap: android.graphics.Bitmap? = null
         instrumentation.runOnMainSync {
-            if (view.width > 0 && view.height > 0) {
-                val b = android.graphics.Bitmap.createBitmap(
-                    view.width, view.height, android.graphics.Bitmap.Config.ARGB_8888,
-                )
-                view.draw(android.graphics.Canvas(b))
-                bitmap = b
-            }
+            bitmap = captureViewToBitmap(view, name)
+        }
+        val captured = checkNotNull(bitmap) {
+            "main thread did not produce viewport bitmap '$name' (#2206)"
         }
         val ctx = instrumentation.targetContext
-        bitmap?.let { b ->
-            val file = artifactFile(ctx, "$name-viewport.png")
-            java.io.FileOutputStream(file).use { out ->
-                check(b.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)) {
-                    "failed to write bitmap to ${file.absolutePath}"
-                }
+        val file = artifactFile(ctx, "$name-viewport.png")
+        java.io.FileOutputStream(file).use { out ->
+            check(captured.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
             }
-            println("ISSUE866_SEED_VIEWPORT ${file.absolutePath}")
-            b.recycle()
         }
+        println("ISSUE866_SEED_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile(ctx, "$name-visible-terminal.txt").writeText(visibleTerminalText(view))
     }
 

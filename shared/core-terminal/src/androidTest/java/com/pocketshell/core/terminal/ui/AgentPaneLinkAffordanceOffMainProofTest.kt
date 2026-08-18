@@ -1,7 +1,6 @@
 package com.pocketshell.core.terminal.ui
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.Looper
 import android.os.SystemClock
 import android.view.MotionEvent
@@ -19,6 +18,7 @@ import com.pocketshell.core.terminal.selection.findVisibleFilePaths
 import com.pocketshell.core.terminal.selection.findVisibleUrls
 import com.pocketshell.core.terminal.selection.hitTestFilePath
 import com.pocketshell.core.terminal.selection.hitTestUrl
+import com.pocketshell.testsupport.captureViewToBitmap
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -654,23 +654,20 @@ class AgentPaneLinkAffordanceOffMainProofTest {
         SystemClock.sleep(150)
         var bitmap: Bitmap? = null
         instrumentation.runOnMainSync {
-            if (view.width > 0 && view.height > 0) {
-                val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-                view.draw(Canvas(b))
-                bitmap = b
-            }
+            bitmap = captureViewToBitmap(view, name)
+        }
+        val captured = checkNotNull(bitmap) {
+            "main thread did not produce viewport bitmap '$name' (#2206)"
         }
         val ctx = instrumentation.targetContext
-        bitmap?.let { b ->
-            val file = artifactFile(ctx, "$name-viewport.png")
-            FileOutputStream(file).use { out ->
-                check(b.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    "failed to write bitmap to ${file.absolutePath}"
-                }
+        val file = artifactFile(ctx, "$name-viewport.png")
+        FileOutputStream(file).use { out ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
             }
-            println("ISSUE871_VIEWPORT ${file.absolutePath}")
-            b.recycle()
         }
+        println("ISSUE871_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile(ctx, "$name-visible-terminal.txt").writeText(visibleTerminalText(view))
     }
 
@@ -683,20 +680,17 @@ class AgentPaneLinkAffordanceOffMainProofTest {
         val root = view.rootView
         var bitmap: Bitmap? = null
         instrumentation.runOnMainSync {
-            if (root.width > 0 && root.height > 0) {
-                bitmap = Bitmap.createBitmap(root.width, root.height, Bitmap.Config.ARGB_8888).also {
-                    root.draw(Canvas(it))
-                }
-            }
+            bitmap = captureViewToBitmap(root, "issue558-pixel7-wrapped-url-root")
         }
-        bitmap?.let { captured ->
-            val screenshot = artifactFile(instrumentation.targetContext, "issue558-pixel7-wrapped-url-root.png")
-            FileOutputStream(screenshot).use { out ->
-                check(captured.compress(Bitmap.CompressFormat.PNG, 100, out))
-            }
-            println("ISSUE558_PIXEL7_VIEWPORT ${screenshot.absolutePath}")
-            captured.recycle()
+        val captured = checkNotNull(bitmap) {
+            "main thread did not produce viewport bitmap 'issue558-pixel7-wrapped-url-root' (#2206)"
         }
+        val screenshot = artifactFile(instrumentation.targetContext, "issue558-pixel7-wrapped-url-root.png")
+        FileOutputStream(screenshot).use { out ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, out))
+        }
+        println("ISSUE558_PIXEL7_VIEWPORT ${screenshot.absolutePath}")
+        captured.recycle()
         val routed = artifactFile(instrumentation.targetContext, "issue558-routed-url.txt")
         routed.writeText(
             buildString {

@@ -15,6 +15,11 @@ plugins {
 // `dumpsys input_method` text, so the emulator-only IO stays in `androidTest`
 // while the discrimination it drives is pinned in the required per-PR Unit job.
 //
+// Issue #2206 added a third: `ViewCapture.kt` (`captureViewToBitmap`) is the
+// shared-module sibling of the app-module #2135 helper. `:shared:core-terminal`
+// instrumented tests cannot import `app/.../proof/signals/`, so the hard-fail
+// 0x0 capture lives here instead of silently skipping a collapsed TerminalView.
+//
 // The pump itself is pure JVM (Long deadlines + lambdas) — it deliberately does
 // NOT depend on Robolectric or kotlinx-coroutines-test. The per-tick drain
 // (looper idle / `runCurrent()`) is injected by each caller, which already has

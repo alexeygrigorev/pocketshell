@@ -153,7 +153,11 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     // Issue #1048: the ONE audited shared de-flake settle-pump
     // (`drainMainLooperUntil`) the SshTerminalBridge flood pump converges on.
+    // Issue #2206: the same module also hosts `captureViewToBitmap`, the
+    // hard-fail 0x0 viewport capture the leftover core-terminal androidTests
+    // now share (they cannot import the app-module #2135 helper).
     testImplementation(project(":shared:test-support"))
+    androidTestImplementation(project(":shared:test-support"))
 
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.core)

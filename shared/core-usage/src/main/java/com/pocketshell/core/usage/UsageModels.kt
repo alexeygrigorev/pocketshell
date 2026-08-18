@@ -82,6 +82,7 @@ public data class UsageProviderRecord(
             "codex" -> "Codex"
             "opencode", "open_code", "open-code" -> "OpenCode"
             "copilot", "github_copilot", "github-copilot" -> "GitHub Copilot"
+            "grok", "grok-build" -> "Grok Build"
             else -> provider
                 .split('-', '_', ' ')
                 .filter { it.isNotBlank() }

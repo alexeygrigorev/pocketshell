@@ -1,0 +1,170 @@
+{
+  "claude": {
+    "details": {
+      "limit_reached": true,
+      "subscription": null,
+      "windows": {
+        "five_hour": {
+          "reset_at": null,
+          "used_percent": 0.0
+        },
+        "seven_day": {
+          "reset_at": "2026-08-20T15:00:00Z",
+          "used_percent": 96.0
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 4.0,
+      "reset_at": "2026-08-20T15:00:00Z",
+      "window": "7d"
+    },
+    "short_term": {
+      "percent_remaining": 100.0,
+      "reset_at": null,
+      "window": "5h"
+    },
+    "status": "ok"
+  },
+  "codex": {
+    "details": {
+      "limit_reached": true,
+      "reset_credits": [],
+      "reset_credits_available": 0,
+      "reset_credits_error": null,
+      "windows": {
+        "primary_window": {
+          "limit_window_seconds": 604800,
+          "present": true,
+          "reset_at": "2026-08-20T03:30:22Z",
+          "used_percent": 98.0
+        },
+        "secondary_window": {
+          "limit_window_seconds": null,
+          "present": false,
+          "reset_at": null,
+          "used_percent": 0.0
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 2.0,
+      "reset_at": "2026-08-20T03:30:22Z",
+      "window": "7d"
+    },
+    "short_term": {
+      "percent_remaining": null,
+      "reset_at": null,
+      "window": null
+    },
+    "status": "ok"
+  },
+  "copilot": {
+    "details": {
+      "limit_reached": false,
+      "premium_entitlement": 1500,
+      "premium_percent_remaining": 100.0,
+      "premium_remaining": 1500
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 100.0,
+      "reset_at": "2026-09-01T00:00:00Z",
+      "window": "monthly"
+    },
+    "short_term": {
+      "percent_remaining": 100.0,
+      "reset_at": null,
+      "window": null
+    },
+    "status": "ok"
+  },
+  "grok": {
+    "details": {
+      "has_grok_code_access": true,
+      "is_unified_billing_user": true,
+      "limit_reached": false,
+      "on_demand_cap": 0.0,
+      "on_demand_used": 0.0,
+      "prepaid_balance": 0.0,
+      "product_usage": [
+        {
+          "product": "GrokBuild",
+          "usage_percent": 5.0
+        }
+      ],
+      "subscription": "SuperGrokPlus",
+      "windows": {
+        "monthly": {
+          "limit": null,
+          "present": false,
+          "reset_at": null,
+          "used": null,
+          "used_percent": null
+        },
+        "weekly": {
+          "limit": 0.0,
+          "present": true,
+          "reset_at": "2026-08-25T00:08:17Z",
+          "used": 0.0,
+          "used_percent": 5.0
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 95.0,
+      "reset_at": "2026-08-25T00:08:17Z",
+      "window": "weekly"
+    },
+    "short_term": {
+      "percent_remaining": null,
+      "reset_at": null,
+      "window": null
+    },
+    "status": "ok"
+  },
+  "zai": {
+    "details": {
+      "limit_reached": false,
+      "max_used_percent": 22.0,
+      "windows": {
+        "five_hour": {
+          "limit": null,
+          "remaining": null,
+          "reset_at": null,
+          "used_percent": 1.0,
+          "window_hours": 5
+        },
+        "monthly_web_search": {
+          "limit": 4000,
+          "remaining": 3971,
+          "reset_at": "2026-08-27T14:04:58Z",
+          "used_percent": 1.0,
+          "window_hours": 5
+        },
+        "weekly": {
+          "limit": null,
+          "remaining": null,
+          "reset_at": "2026-08-24T14:04:58Z",
+          "used_percent": 22.0,
+          "window_hours": null
+        }
+      }
+    },
+    "error": null,
+    "long_term": {
+      "percent_remaining": 78.0,
+      "reset_at": "2026-08-24T14:04:58Z",
+      "window": "weekly"
+    },
+    "short_term": {
+      "percent_remaining": 99.0,
+      "reset_at": null,
+      "window": "5h"
+    },
+    "status": "ok"
+  }
+}

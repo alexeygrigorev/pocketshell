@@ -235,6 +235,10 @@ private const val CLAUDE_USAGE_AUTH_SETUP_MESSAGE =
     "Claude login needed on this host. " +
         "Open Claude Code on the host and sign in, then refresh usage."
 
+private const val GROK_USAGE_AUTH_SETUP_MESSAGE =
+    "Grok login needed on this host. " +
+        "Sign in with `grok` on the host, then refresh usage."
+
 /**
  * Rewrite a provider `error` string into an actionable, human message. This is
  * genuine error-message UX (a legit runtime state, kept per issue #1318), NOT
@@ -270,6 +274,18 @@ private fun actionableProviderError(provider: String, error: String?): String? {
                     lower == "no credentials"
             ) ->
             "Codex login needed on this host. Run `codex login` in the host shell, then refresh usage."
+        (
+            provider.equals("grok", ignoreCase = true) ||
+                provider.equals("grok-build", ignoreCase = true)
+            ) &&
+            (
+                lower == "no-credentials" ||
+                    lower == "no credentials" ||
+                    lower == "no-auth-token" ||
+                    lower == "no auth token" ||
+                    lower.contains("auth.json")
+            ) ->
+            GROK_USAGE_AUTH_SETUP_MESSAGE
         else -> text
     }
 }

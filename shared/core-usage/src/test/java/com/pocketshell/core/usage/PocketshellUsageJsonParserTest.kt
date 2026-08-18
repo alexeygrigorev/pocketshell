@@ -169,6 +169,99 @@ class PocketshellUsageJsonParserTest {
         assertEquals("GitHub Copilot", records[2].displayName)
     }
 
+    @Test
+    fun parse_weeklyOnlyGrok_rendersWeeklyWindow_displayNameIsGrokBuild() {
+        // #2195 live quse 0.0.13 shape: null short_term, weekly long_term.
+        // Null short_term must not throw. used = 100 - percent_remaining.
+        // displayName MUST be "Grok Build" — generic title-case "Grok" is a
+        // G6 miss (reverting the explicit mapping reddens this).
+        val record = parser.parse(
+            """{"provider":"grok","status":"ok","short_term":{"percent_remaining":null,"reset_at":null,"window":null},"long_term":{"percent_remaining":95.0,"reset_at":"2026-08-25T00:08:17Z","window":"weekly"},"error":null,"details":{"subscription":"SuperGrokPlus"}}""",
+        ).single()
+
+        assertEquals("grok", record.provider)
+        assertEquals("Grok Build", record.displayName)
+        assertTrue(
+            "generic title-case 'Grok' is not the product name",
+            record.displayName != "Grok",
+        )
+        assertEquals(1, record.windows.size)
+        val weekly = record.windows.single()
+        assertEquals("weekly", weekly.name)
+        assertEquals(5.0, weekly.percent, 0.001) // 100 - 95
+        assertEquals(Instant.parse("2026-08-25T00:08:17Z"), weekly.resetAt)
+    }
+
+    @Test
+    fun parse_grokBuildAlias_displayNameIsGrokBuild() {
+        val record = parser.parse(
+            """{"provider":"grok-build","status":"ok","short_term":null,"long_term":{"percent_remaining":95.0,"reset_at":null,"window":"weekly"},"error":null,"details":{}}""",
+        ).single()
+        assertEquals("Grok Build", record.displayName)
+    }
+
+    @Test
+    fun parse_grokBothWindows_weeklyShortAndMonthlyLong() {
+        val record = parser.parse(
+            """{"provider":"grok","status":"ok","short_term":{"percent_remaining":62.5,"reset_at":"2026-08-25T00:08:17Z","window":"weekly"},"long_term":{"percent_remaining":75.0,"reset_at":"2026-09-01T00:00:00Z","window":"monthly"},"error":null,"details":{}}""",
+        ).single()
+
+        assertEquals("Grok Build", record.displayName)
+        assertEquals(2, record.windows.size)
+        assertEquals("weekly", record.windows[0].name)
+        assertEquals(37.5, record.windows[0].percent, 0.001) // 100 - 62.5
+        assertEquals(Instant.parse("2026-08-25T00:08:17Z"), record.windows[0].resetAt)
+        assertEquals("monthly", record.windows[1].name)
+        assertEquals(25.0, record.windows[1].percent, 0.001) // 100 - 75
+        assertEquals(Instant.parse("2026-09-01T00:00:00Z"), record.windows[1].resetAt)
+    }
+
+    @Test
+    fun parse_grokNullPercentsOnBothWindows_recordExistsNoThrow() {
+        // A grok record with null percents on both windows must still parse
+        // (zero renderable windows) and must not fail the whole panel.
+        val record = parser.parse(
+            """{"provider":"grok","status":"ok","short_term":{"percent_remaining":null,"reset_at":null,"window":null},"long_term":{"percent_remaining":null,"reset_at":null,"window":null},"error":null,"details":{}}""",
+        ).single()
+
+        assertEquals("grok", record.provider)
+        assertEquals("Grok Build", record.displayName)
+        assertEquals(UsageStatus.Ok, record.status)
+        assertTrue(record.windows.isEmpty())
+    }
+
+    @Test
+    fun parse_grokNoCredentials_mapsToActionableSignInError() {
+        val record = parser.parse(
+            """{"provider":"grok","status":"error","short_term":null,"long_term":null,"error":"no-credentials","details":{}}""",
+        ).single()
+
+        assertEquals(UsageStatus.Error, record.status)
+        assertEquals(
+            "Grok login needed on this host. " +
+                "Sign in with `grok` on the host, then refresh usage.",
+            record.lastError,
+        )
+        assertTrue(record.lastError?.contains("no-credentials", ignoreCase = true) == false)
+        assertTrue(record.lastError?.contains("Sign in with `grok` on the host") == true)
+        assertTrue(record.windows.isEmpty())
+    }
+
+    @Test
+    fun parse_grokAuthJsonMissing_mapsToActionableSignInError() {
+        val record = parser.parse(
+            """{"provider":"grok","status":"error","short_term":null,"long_term":null,"error":"grok auth.json not found","details":{}}""",
+        ).single()
+
+        assertEquals(UsageStatus.Error, record.status)
+        assertEquals(
+            "Grok login needed on this host. " +
+                "Sign in with `grok` on the host, then refresh usage.",
+            record.lastError,
+        )
+        assertTrue(record.lastError?.contains("auth.json") == false)
+    }
+
     // -- genuine runtime states (kept) ---------------------------------------
 
     @Test

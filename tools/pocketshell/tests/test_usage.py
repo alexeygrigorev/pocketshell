@@ -34,6 +34,14 @@ from pocketshell.usage import (
     usage_command,
 )
 
+# Load-bearing Grok auth UX (#2195): must mention signing in with `grok` on
+# the host. Kept as a test-side literal so a generic/raw "no-credentials"
+# rewrite cannot silently satisfy the assertion.
+_EXPECTED_GROK_AUTH = (
+    "Grok authentication is missing on this host. "
+    "Sign in with `grok` on the host, then refresh usage."
+)
+
 _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 _FIXTURE = Path(__file__).resolve().parent / "data" / "quse-0.0.9-usage.json"
 # Captured LIVE from the pinned quse 0.0.11 (`quse --json`) on 2026-07-15 —
@@ -46,6 +54,12 @@ _FIXTURE = Path(__file__).resolve().parent / "data" / "quse-0.0.9-usage.json"
 # "0% / unavailable" ghost row. Claude / Copilot / zai in the same document
 # keep their correct 5h / 7d / monthly / weekly labels (class coverage).
 _FIXTURE_0011 = Path(__file__).resolve().parent / "data" / "quse-0.0.11-usage.json"
+# Captured LIVE from host quse 0.0.13 (`quse --json`) on 2026-08-18 — the
+# first release that emits a `grok` provider (alias `grok-build`). Live
+# shape is weekly-only: null short_term, weekly long_term. Claude / Codex /
+# Copilot / zai stay in the same document (class coverage).
+_FIXTURE_0013 = Path(__file__).resolve().parent / "data" / "quse-0.0.13-usage.json"
+_LOCK = Path(__file__).resolve().parent.parent / "uv.lock"
 
 
 def _fake_completed(
@@ -72,11 +86,17 @@ def _quse_keyed_json() -> str:
 
 
 def test_pyproject_pins_quse_exactly() -> None:
-    # AC: pocketshell pins quse==0.0.11 as a hard dependency (frozen contract).
-    # 0.0.11 (#1564) labels Codex windows from the actual `limit_window_seconds`
-    # and omits a dropped window rather than emitting a phantom "5h"/ghost row.
+    # AC (#2195): pocketshell pins quse==0.0.13 as a hard dependency so the
+    # usage panel can see Grok. Reverting the pin to 0.0.11 must redden this
+    # assertion (G6). 0.0.13 is the first quse that emits a `grok` provider.
     text = _PYPROJECT.read_text()
-    assert '"quse==0.0.11"' in text, "pyproject must pin quse==0.0.11 in dependencies"
+    assert '"quse==0.0.13"' in text, "pyproject must pin quse==0.0.13 in dependencies"
+    assert '"quse==0.0.11"' not in text, "the 0.0.11 pin must not remain"
+    lock = _LOCK.read_text()
+    assert 'name = "quse"' in lock
+    assert 'version = "0.0.13"' in lock
+    assert 'specifier = "==0.0.13"' in lock
+    assert 'specifier = "==0.0.11"' not in lock
 
 
 def test_resolve_quse_binary_uses_pinned_env_next_to_interpreter(tmp_path: Path) -> None:
@@ -258,6 +278,111 @@ def test_flatten_codex_0011_leaves_other_providers_unchanged() -> None:
     assert zai["long_term"]["window"] == "weekly"
 
 
+def test_flatten_quse_0013_emits_grok_and_passes_windows_through() -> None:
+    """#2195: quse 0.0.13 adds grok; flatten must emit it unchanged.
+
+    Feeds the REAL captured quse 0.0.13 document (weekly-only grok: null
+    short_term, weekly long_term) and asserts the wire shape the app consumes.
+    Reverting the pin without a grok line in the 0.0.13 fixture reddens the
+    provider set. The four historical providers stay present.
+    """
+    out = normalize_usage_stdout(_FIXTURE_0013.read_text())
+    by_provider = {r["provider"]: r for r in (json.loads(ln) for ln in out.splitlines())}
+
+    assert set(by_provider) == {"claude", "codex", "copilot", "grok", "zai"}
+    grok = by_provider["grok"]
+    assert grok["provider"] == "grok"
+    assert grok["status"] == "ok"
+    # Live 0.0.13 weekly-only shape: unused term is a null placeholder.
+    assert grok["short_term"] == {
+        "percent_remaining": None,
+        "reset_at": None,
+        "window": None,
+    }
+    assert grok["long_term"] == {
+        "percent_remaining": 95.0,
+        "reset_at": "2026-08-25T00:08:17Z",
+        "window": "weekly",
+    }
+    # Historical four-provider cards stay in the same document.
+    assert by_provider["claude"]["short_term"]["window"] == "5h"
+    assert by_provider["claude"]["long_term"]["window"] == "7d"
+    assert by_provider["copilot"]["long_term"]["window"] == "monthly"
+    assert by_provider["zai"]["long_term"]["window"] == "weekly"
+
+
+def test_flatten_handles_grok_only_object() -> None:
+    # AC: flattening a grok-only object `{"grok": {...}}` emits one NDJSON
+    # line with provider "grok" and passes weekly/monthly fields through.
+    keyed = json.dumps(
+        {
+            "grok": {
+                "status": "ok",
+                "short_term": {
+                    "percent_remaining": None,
+                    "reset_at": None,
+                    "window": None,
+                },
+                "long_term": {
+                    "percent_remaining": 95.0,
+                    "reset_at": "2026-08-25T00:08:17Z",
+                    "window": "weekly",
+                },
+                "error": None,
+                "details": {"subscription": "SuperGrokPlus"},
+            }
+        }
+    )
+    out = normalize_usage_stdout(keyed)
+    lines = out.splitlines()
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["provider"] == "grok"
+    assert record["long_term"] == {
+        "percent_remaining": 95.0,
+        "reset_at": "2026-08-25T00:08:17Z",
+        "window": "weekly",
+    }
+    assert record["short_term"]["percent_remaining"] is None
+    assert record["short_term"]["window"] is None
+
+
+def test_flatten_passes_grok_both_windows_through_unchanged() -> None:
+    # quse maps weekly SuperGrok + monthly credit to short_term / long_term
+    # when both windows are present. Flatten must not relabel or drop them.
+    keyed = json.dumps(
+        {
+            "grok": {
+                "status": "ok",
+                "short_term": {
+                    "percent_remaining": 62.5,
+                    "reset_at": "2026-08-25T00:08:17Z",
+                    "window": "weekly",
+                },
+                "long_term": {
+                    "percent_remaining": 75.0,
+                    "reset_at": "2026-09-01T00:00:00Z",
+                    "window": "monthly",
+                },
+                "error": None,
+                "details": {},
+            }
+        }
+    )
+    record = json.loads(normalize_usage_stdout(keyed).splitlines()[0])
+    assert record["provider"] == "grok"
+    assert record["short_term"] == {
+        "percent_remaining": 62.5,
+        "reset_at": "2026-08-25T00:08:17Z",
+        "window": "weekly",
+    }
+    assert record["long_term"] == {
+        "percent_remaining": 75.0,
+        "reset_at": "2026-09-01T00:00:00Z",
+        "window": "monthly",
+    }
+
+
 def test_flatten_raises_on_non_json() -> None:
     try:
         normalize_usage_stdout("this is not json")
@@ -329,6 +454,33 @@ def test_claude_stale_auth_telemetry_error_is_usage_unavailable() -> None:
     assert _actionable_error("claude", stale_error) == _CLAUDE_USAGE_AUTH_SETUP_MESSAGE
 
 
+def test_flatten_maps_grok_no_credentials_to_actionable_error() -> None:
+    keyed = json.dumps(
+        {
+            "grok": {
+                "status": "error",
+                "short_term": None,
+                "long_term": None,
+                "error": "no-credentials",
+                "details": {},
+            }
+        }
+    )
+    record = json.loads(normalize_usage_stdout(keyed).splitlines()[0])
+    assert record["error"] == _EXPECTED_GROK_AUTH
+    assert "no-credentials" not in record["error"].lower()
+    assert "Sign in with `grok` on the host" in record["error"]
+
+
+def test_actionable_error_rewrites_grok_auth_json_miss() -> None:
+    rewritten = _actionable_error("grok", "grok auth.json not found")
+    assert rewritten == _EXPECTED_GROK_AUTH
+    assert _actionable_error("grok", "no credentials") == _EXPECTED_GROK_AUTH
+    assert _actionable_error("grok-build", "no-credentials") == _EXPECTED_GROK_AUTH
+    # Idempotent — the rewritten message must not re-match.
+    assert _actionable_error("grok", rewritten) == _EXPECTED_GROK_AUTH
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring: forwards to the pinned quse and flattens JSON output
 # ---------------------------------------------------------------------------
@@ -392,6 +544,43 @@ def test_usage_forwards_provider_and_json_flag_together() -> None:
     invoked: Sequence[str] = run.call_args.args[0]
     assert invoked == ["/fake/quse", "claude", "--json"]
     assert json.loads(result.output.splitlines()[0])["provider"] == "claude"
+
+
+def test_usage_forwards_grok_provider_and_json() -> None:
+    # AC: `pocketshell usage grok` is an accepted provider filter (quse 0.0.13
+    # already accepts it once pinned). Flatten of the grok-only object is the
+    # load-bearing JSON contract; the CLI must forward `grok` + `--json`.
+    runner = CliRunner()
+    single = json.dumps(
+        {
+            "grok": {
+                "status": "ok",
+                "short_term": {
+                    "percent_remaining": None,
+                    "reset_at": None,
+                    "window": None,
+                },
+                "long_term": {
+                    "percent_remaining": 95.0,
+                    "reset_at": "2026-08-25T00:08:17Z",
+                    "window": "weekly",
+                },
+                "error": None,
+                "details": {},
+            }
+        }
+    )
+    with patch("pocketshell.usage._resolve_quse_binary", return_value="/fake/quse"), patch(
+        "pocketshell.usage.subprocess.run",
+        return_value=_fake_completed(stdout=single),
+    ) as run, patch("pocketshell.usage._try_daemon_usage_fetch", return_value=None):
+        result = runner.invoke(usage_command, ["grok", "--json", "--no-daemon"])
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/quse", "grok", "--json"]
+    record = json.loads(result.output.splitlines()[0])
+    assert record["provider"] == "grok"
+    assert record["long_term"]["window"] == "weekly"
 
 
 def test_usage_fails_loud_when_pinned_quse_missing() -> None:

@@ -1,7 +1,6 @@
 package com.termux.view
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
@@ -15,6 +14,7 @@ import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.terminal.ui.pinTerminalToBottom
 import com.pocketshell.core.terminal.ui.testArtifactsRoot
+import com.pocketshell.testsupport.captureViewToBitmap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -828,22 +828,19 @@ class TerminalSelectionViewportStabilityInstrumentedTest {
         instrumentation.waitForIdleSync()
         var bitmap: Bitmap? = null
         onMain {
-            if (view.width > 0 && view.height > 0) {
-                val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-                view.draw(Canvas(b))
-                bitmap = b
+            bitmap = captureViewToBitmap(view, name)
+        }
+        val captured = checkNotNull(bitmap) {
+            "main thread did not produce viewport bitmap '$name' (#2206)"
+        }
+        val file = artifactFile("$name-viewport.png")
+        FileOutputStream(file).use { out ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
             }
         }
-        bitmap?.let { b ->
-            val file = artifactFile("$name-viewport.png")
-            FileOutputStream(file).use { out ->
-                check(b.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    "failed to write bitmap to ${file.absolutePath}"
-                }
-            }
-            println("ISSUE2154_VIEWPORT ${file.absolutePath}")
-            b.recycle()
-        }
+        println("ISSUE2154_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile("$name-visible-terminal.txt").writeText(visibleTerminalText(view))
     }
 

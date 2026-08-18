@@ -1,7 +1,6 @@
 package com.pocketshell.core.terminal.ui
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.Looper
 import android.os.SystemClock
 import android.view.MotionEvent
@@ -20,6 +19,7 @@ import com.pocketshell.core.terminal.selection.UrlRegion
 import com.pocketshell.core.terminal.selection.findVisibleEngineCommands
 import com.pocketshell.core.terminal.selection.findVisibleFilePaths
 import com.pocketshell.core.terminal.selection.findVisibleUrls
+import com.pocketshell.testsupport.captureViewToBitmap
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -430,23 +430,20 @@ class ShellPaneAffordanceSingleSnapshotProofTest {
         SystemClock.sleep(150)
         var bitmap: Bitmap? = null
         instrumentation.runOnMainSync {
-            if (view.width > 0 && view.height > 0) {
-                val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-                view.draw(Canvas(b))
-                bitmap = b
-            }
+            bitmap = captureViewToBitmap(view, name)
+        }
+        val captured = checkNotNull(bitmap) {
+            "main thread did not produce viewport bitmap '$name' (#2206)"
         }
         val ctx = instrumentation.targetContext
-        bitmap?.let { b ->
-            val file = artifactFile(ctx, "$name-viewport.png")
-            FileOutputStream(file).use { out ->
-                check(b.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    "failed to write bitmap to ${file.absolutePath}"
-                }
+        val file = artifactFile(ctx, "$name-viewport.png")
+        FileOutputStream(file).use { out ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
             }
-            println("ISSUE1233_VIEWPORT ${file.absolutePath}")
-            b.recycle()
         }
+        println("ISSUE1233_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile(ctx, "$name-visible-terminal.txt").writeText(visibleTerminalText(view))
     }
 

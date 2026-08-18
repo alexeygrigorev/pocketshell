@@ -1,0 +1,6 @@
+# Issue #2168 reproduction probe. Derive from a pocketshell-test tag whose
+# in-tree Dockerfile does not copy the shared ssh config. The C2 guard must
+# NOT treat the FROM prefix as the anchor.
+FROM pocketshell-test:packet-loss-proxy
+RUN apk add --no-cache openssh-server
+CMD ["/usr/sbin/sshd", "-D", "-e"]

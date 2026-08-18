@@ -32,7 +32,10 @@ WHAT IS CHECKED
 
 C1  tests/docker/sshd_config disables PerSourcePenalties.
 C2  every fixture Dockerfile that ends up running an sshd either inherits that
-    config or is a named, justified, existence-checked exception.
+    config or is a named, justified, existence-checked exception. Inheritance
+    via ``FROM pocketshell-test:<tag>`` counts only when the named tag resolves
+    to an in-tree Dockerfile that itself carries the config (issue #2168) —
+    the prefix alone is not the anchor.
 C3  every SSH healthcheck asserts the effective daemon config, so a fixture that
     can penalise cannot report healthy.
 
@@ -77,6 +80,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 DOCKER_DIR = REPO_ROOT / "tests" / "docker"
@@ -134,6 +138,12 @@ UNAMBIGUOUS_SSHD_PACKAGES = ("openssh-server", "openssh")
 
 _DOCKERFILE_COMMENT = re.compile(r"^[ \t]*#.*$", re.MULTILINE)
 _LINE_CONTINUATION = re.compile(r"\\[ \t]*\n")
+_FROM_INTREE = re.compile(
+    r"^FROM\s+pocketshell-test:([A-Za-z0-9._-]+)",
+    re.MULTILINE,
+)
+_COPY_SHARED = re.compile(r"^COPY\s+\S*sshd_config\s", re.MULTILINE)
+_COMPOSE_IMAGE_TAG = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Package managers, tolerant of flags interleaved before the verb
 # (`apk --no-cache add`, `apt-get -qq install`).
@@ -230,12 +240,88 @@ def _is_sshd_fixture(dockerfile_text: str) -> bool:
     return bool(sshd_signals(dockerfile_text))
 
 
-def _inherits_shared_config(dockerfile_text: str) -> bool:
-    """Copies tests/docker/sshd_config, or FROMs an image that already did
-    (e.g. Dockerfile.tmux extends pocketshell-test:ssh)."""
-    copies_shared = re.search(r"^COPY\s+\S*sshd_config\s", dockerfile_text, re.MULTILINE)
-    extends_fixture = re.search(r"^FROM\s+pocketshell-test:", dockerfile_text, re.MULTILINE)
-    return copies_shared is not None or extends_fixture is not None
+def _intree_image_dockerfiles(
+    compose_files: list[Path] | None = None,
+) -> dict[str, Path]:
+    """Map ``pocketshell-test:<tag>`` to the in-tree Dockerfile that builds it.
+
+    Compose is the source of truth for that mapping — tag names do not follow
+    a single convention (``real-agents`` vs ``real-agent/``, many
+    ``bootstrap-*`` tags share ``Dockerfile.bootstrap``). A tag that does not
+    appear here cannot satisfy the C2 anchor (issue #2168).
+    """
+    mapping: dict[str, Path] = {}
+    files = compose_files if compose_files is not None else _compose_files()
+    for compose in files:
+        data = yaml.safe_load(_read(compose))
+        if not isinstance(data, dict):
+            continue
+        services = data.get("services")
+        if not isinstance(services, dict):
+            continue
+        for service in services.values():
+            if not isinstance(service, dict):
+                continue
+            image = service.get("image")
+            if not isinstance(image, str):
+                continue
+            image_name = image.strip()
+            if not image_name.startswith("pocketshell-test:") or "${" in image_name:
+                continue
+            tag = image_name.split(":", 1)[1]
+            if not _COMPOSE_IMAGE_TAG.fullmatch(tag):
+                continue
+            image_name = f"pocketshell-test:{tag}"
+
+            build = service.get("build")
+            if isinstance(build, str):
+                context_rel = build
+                dockerfile_rel = "Dockerfile"
+            elif isinstance(build, dict):
+                context_rel = str(build.get("context") or ".")
+                dockerfile_rel = str(build.get("dockerfile") or "Dockerfile")
+            else:
+                continue
+            mapping[image_name] = (compose.parent / context_rel / dockerfile_rel).resolve()
+    return mapping
+
+
+def _inherits_shared_config(
+    dockerfile_text: str,
+    *,
+    tag_map: dict[str, Path] | None = None,
+    _seen: frozenset[str] | None = None,
+) -> bool:
+    """Copies tests/docker/sshd_config, or FROMs an image whose in-tree
+    Dockerfile itself does (resolved, not assumed from the prefix).
+
+    ``FROM pocketshell-test:<tag>`` is the anchor only when ``<tag>`` maps to
+    a Dockerfile that copies the shared config or, recursively, FROMs one
+    that does (issue #2168). An unknown tag, a cycle with no COPY, or a
+    base like ``packet-loss-proxy`` that never ships the config is not
+    an anchor. ``SHARED_CONFIG_EXEMPT`` is a per-file escape hatch, not
+    something children inherit as "has the config".
+    """
+    body = _join_continuations(_strip_comments(dockerfile_text))
+    if _COPY_SHARED.search(body):
+        return True
+
+    resolved_map = _intree_image_dockerfiles() if tag_map is None else tag_map
+    seen = _seen if _seen is not None else frozenset()
+    for match in _FROM_INTREE.finditer(body):
+        image = f"pocketshell-test:{match.group(1)}"
+        if image in seen:
+            continue
+        base = resolved_map.get(image)
+        if base is None or not base.is_file():
+            continue
+        if _inherits_shared_config(
+            _read(base),
+            tag_map=resolved_map,
+            _seen=seen | {image},
+        ):
+            return True
+    return False
 
 
 def _rel(path: Path) -> str:
@@ -329,11 +415,13 @@ def test_c2_sshd_fixture_inherits_shared_config(dockerfile: Path) -> None:
 
     assert _inherits_shared_config(text), (
         f"{rel} runs an sshd ({'; '.join(sshd_signals(text))}) but neither copies "
-        "tests/docker/sshd_config nor extends a pocketshell-test image that does "
-        "(issue #2150).\n"
+        "tests/docker/sshd_config nor extends a pocketshell-test image whose "
+        "in-tree Dockerfile itself does (issue #2150 / #2168).\n"
         "OpenSSH >= 9.8 turns PerSourcePenalties ON by default, so a fixture "
         "without that config penalises the shared docker-gateway source and "
         "refuses every journey lane — while still reporting healthy.\n"
+        "`FROM pocketshell-test:<tag>` is not enough on its own: the named "
+        "base must resolve to a Dockerfile that carries the shared config.\n"
         "Remedy: `COPY sshd_config /etc/ssh/sshd_config`, or add the fixture to "
         "SHARED_CONFIG_EXEMPT with a written reason (and keep its healthcheck's "
         "penalty assertion, which is what actually covers the exempt case)."
@@ -622,6 +710,254 @@ def test_c2_comment_only_mention_does_not_arm_the_detector() -> None:
         "FROM alpine:3.20\nRUN apk add --no-cache socat\n"
     )
     assert not sshd_signals(prose)
+
+
+# --------------------------------------------------------------------------
+# C2 inheritance — FROM pocketshell-test:<tag> is not an automatic anchor
+# (issue #2168). The named base must itself be verified to carry the config.
+# --------------------------------------------------------------------------
+
+_SSHD_ANCHOR_FIXTURES = Path(__file__).resolve().parent / "data" / "sshd_anchor"
+_FROM_UNANCHORED_PROBE = _SSHD_ANCHOR_FIXTURES / "Dockerfile.from-unanchored-base"
+
+
+def test_c2_from_unanchored_intree_base_is_selected_and_unanchored(
+    tmp_path: Path,
+) -> None:
+    """The exact #2168 report, end-to-end over the guard's own decision.
+
+    A fixture `FROM pocketshell-test:packet-loss-proxy` plus an sshd used to
+    satisfy the C2 anchor just because of the prefix, even though that base
+    is a socat relay and never copies the shared sshd_config. This is the
+    reproduction that was GREEN before the fix: the fixture must be selected
+    as sshd-bearing AND must not be treated as anchored.
+    """
+    probe_text = _read(_FROM_UNANCHORED_PROBE)
+    fixture = tmp_path / "Dockerfile.from-unanchored"
+    fixture.write_text(probe_text, encoding="utf-8")
+
+    selected = _sshd_fixture_dockerfiles(tmp_path)
+    assert selected == [fixture], (
+        "the packet-loss-proxy-derived probe was not selected for the C2 "
+        f"anchor check; scan returned {[p.name for p in selected]} (issue #2168)"
+    )
+    assert not _inherits_shared_config(probe_text), (
+        "FROM pocketshell-test:packet-loss-proxy must not satisfy the "
+        "anchor — that image is a socat relay and never copies sshd_config "
+        "(issue #2168). Trusting the prefix is how a fixture ships with "
+        "PerSourcePenalties ON while this guard reports the tree fine."
+    )
+
+
+def test_c2_from_unanchored_intree_base_probe_names_packet_loss_proxy() -> None:
+    """Non-vacuity: the committed probe really is the reviewer's shape."""
+    text = _read(_FROM_UNANCHORED_PROBE)
+    assert re.search(
+        r"^FROM\s+pocketshell-test:packet-loss-proxy\s*$", text, re.MULTILINE
+    ), f"probe must FROM pocketshell-test:packet-loss-proxy:\n{text}"
+    assert not re.search(r"^COPY\s+\S*sshd_config\s", text, re.MULTILINE), (
+        "probe must omit the shared sshd_config COPY; if it copies one, "
+        "the reproduction no longer reproduces anything."
+    )
+    assert sshd_signals(text), (
+        "probe must be sshd-bearing so C2 actually applies to it"
+    )
+
+
+def test_c2_from_anchored_intree_base_stays_green() -> None:
+    """Selectivity: a real shared-config base must still count as the anchor."""
+    text = "FROM pocketshell-test:ssh\nRUN apk add --no-cache tmux\n"
+    assert _inherits_shared_config(text), (
+        "FROM pocketshell-test:ssh must stay anchored — Dockerfile.ssh "
+        "copies tests/docker/sshd_config. If this goes red, the resolver "
+        "is over-strict and will block Dockerfile.tmux and every other "
+        "legitimate inherit (issue #2168)."
+    )
+
+
+def test_c2_unknown_intree_tag_is_not_treated_as_anchored() -> None:
+    """Fail-closed: a tag that does not resolve to an in-tree Dockerfile
+    cannot satisfy the anchor. The unfixed guard treated ANY
+    `pocketshell-test:` prefix as enough."""
+    text = (
+        "FROM pocketshell-test:definitely-not-a-real-tag\n"
+        "RUN apk add --no-cache openssh-server\n"
+        'CMD ["/usr/sbin/sshd", "-D", "-e"]\n'
+    )
+    assert sshd_signals(text)
+    assert not _inherits_shared_config(text), (
+        "FROM pocketshell-test:<unknown> must not satisfy the anchor "
+        "(issue #2168). An unresolvable tag is the same shape as a base "
+        "that carries no shared config: fail closed."
+    )
+
+
+def test_c2_from_exempt_base_is_not_treated_as_anchored() -> None:
+    """SHARED_CONFIG_EXEMPT is per-file, not an inherited "has the config"."""
+    text = (
+        "FROM pocketshell-test:real-agents\n"
+        "RUN apk add --no-cache openssh-server\n"
+    )
+    assert not _inherits_shared_config(text), (
+        "FROM pocketshell-test:real-agents must not satisfy the anchor — "
+        "that base is SHARED_CONFIG_EXEMPT precisely because it does NOT "
+        "copy the shared config (issue #2168)."
+    )
+
+
+def test_c2_from_chain_via_tmux_stays_green() -> None:
+    """Real-tree A -> B -> C: ssh copies the config, tmux FROMs ssh, leaf
+    FROMs tmux. Only the root carries the COPY."""
+    text = "FROM pocketshell-test:tmux\nRUN echo leaf\n"
+    assert _inherits_shared_config(text), (
+        "FROM pocketshell-test:tmux must resolve through Dockerfile.tmux "
+        "to Dockerfile.ssh, which copies sshd_config (issue #2168). If this "
+        "goes red, the chain walker is broken and will block a legitimate "
+        "three-level inherit."
+    )
+
+
+def test_c2_intree_tag_map_resolves_known_bases() -> None:
+    """Guard the resolver: a broken compose parser must not read as a pass.
+
+    Two failure modes are the same shape as #2168: an empty map fail-closes
+    every inherit (blocks Dockerfile.tmux), and a map that points every tag
+    at Dockerfile.ssh would treat packet-loss-proxy as anchored.
+    """
+    mapping = _intree_image_dockerfiles()
+    assert len(mapping) >= 10, (
+        f"only resolved {len(mapping)} pocketshell-test tags from compose; "
+        "the parser is broken, not the tree."
+    )
+
+    ssh = mapping.get("pocketshell-test:ssh")
+    proxy = mapping.get("pocketshell-test:packet-loss-proxy")
+    tmux = mapping.get("pocketshell-test:tmux")
+    assert ssh == (DOCKER_DIR / "Dockerfile.ssh").resolve(), (
+        f"pocketshell-test:ssh resolved to {ssh}"
+    )
+    assert proxy == (DOCKER_DIR / "packet-loss-proxy" / "Dockerfile").resolve(), (
+        f"pocketshell-test:packet-loss-proxy resolved to {proxy}"
+    )
+    assert tmux == (DOCKER_DIR / "Dockerfile.tmux").resolve(), (
+        f"pocketshell-test:tmux resolved to {tmux}"
+    )
+    assert ssh != proxy
+    assert not _inherits_shared_config(_read(proxy)), (
+        "packet-loss-proxy's own Dockerfile must stay unanchored — that is "
+        "the #2168 non-vacuity proof. If this is True, the resolver is "
+        "treating a no-sshd base as if it carried the config."
+    )
+    assert _inherits_shared_config(_read(ssh))
+    assert _inherits_shared_config(_read(tmux)), (
+        "Dockerfile.tmux does not COPY sshd_config; it is anchored only "
+        "via FROM pocketshell-test:ssh. If this is False, the chain walker "
+        "lost the real two-level inherit."
+    )
+
+
+def _write_chain_tree(
+    root: Path, *, root_copies_config: bool
+) -> tuple[dict[str, Path], Path, Path, Path]:
+    """A -> B -> C under `root`, with compose mapping each tag."""
+    dockerfile_a = root / "Dockerfile.a"
+    dockerfile_b = root / "Dockerfile.b"
+    dockerfile_c = root / "Dockerfile.c"
+    if root_copies_config:
+        dockerfile_a.write_text(
+            "FROM alpine:latest\nCOPY sshd_config /etc/ssh/sshd_config\n",
+            encoding="utf-8",
+        )
+    else:
+        dockerfile_a.write_text(
+            "FROM alpine:latest\nRUN apk add --no-cache socat\n",
+            encoding="utf-8",
+        )
+    dockerfile_b.write_text("FROM pocketshell-test:a\nRUN echo b\n", encoding="utf-8")
+    dockerfile_c.write_text(
+        "FROM pocketshell-test:b\n"
+        "RUN apk add --no-cache openssh-server\n"
+        'CMD ["/usr/sbin/sshd", "-D", "-e"]\n',
+        encoding="utf-8",
+    )
+    (root / "compose.yml").write_text(
+        "services:\n"
+        "  a:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.a\n"
+        "    image: pocketshell-test:a\n"
+        "  b:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.b\n"
+        "    image: pocketshell-test:b\n"
+        "  c:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.c\n"
+        "    image: pocketshell-test:c\n",
+        encoding="utf-8",
+    )
+    tag_map = _intree_image_dockerfiles(compose_files=[root / "compose.yml"])
+    return tag_map, dockerfile_a, dockerfile_b, dockerfile_c
+
+
+def test_c2_three_level_chain_resolves_to_root_anchor(tmp_path: Path) -> None:
+    """A -> B -> C where only A copies the config must stay green."""
+    tag_map, dockerfile_a, dockerfile_b, dockerfile_c = _write_chain_tree(
+        tmp_path, root_copies_config=True
+    )
+    assert tag_map["pocketshell-test:a"] == dockerfile_a.resolve()
+    assert tag_map["pocketshell-test:c"] == dockerfile_c.resolve()
+    assert _inherits_shared_config(_read(dockerfile_a), tag_map=tag_map)
+    assert _inherits_shared_config(_read(dockerfile_b), tag_map=tag_map)
+    assert _inherits_shared_config(_read(dockerfile_c), tag_map=tag_map), (
+        "C FROMs B FROMs A, and only A copies sshd_config; the chain "
+        "walker must treat C as anchored (issue #2168)."
+    )
+
+
+def test_c2_three_level_chain_without_root_anchor_is_unanchored(
+    tmp_path: Path,
+) -> None:
+    """A -> B -> C where A has no config must go red — prefix trust would
+    have called C anchored because it FROMs pocketshell-test:b."""
+    tag_map, dockerfile_a, dockerfile_b, dockerfile_c = _write_chain_tree(
+        tmp_path, root_copies_config=False
+    )
+    assert not _inherits_shared_config(_read(dockerfile_a), tag_map=tag_map)
+    assert not _inherits_shared_config(_read(dockerfile_b), tag_map=tag_map)
+    assert not _inherits_shared_config(_read(dockerfile_c), tag_map=tag_map), (
+        "C FROMs B FROMs A, and A never copies sshd_config; treating C as "
+        "anchored is the #2168 defect wearing a longer chain."
+    )
+
+
+def test_c2_inherit_cycle_without_copy_is_unanchored(tmp_path: Path) -> None:
+    """A cycle with no COPY must not hang and must not count as anchored."""
+    (tmp_path / "Dockerfile.a").write_text(
+        "FROM pocketshell-test:b\nRUN echo a\n", encoding="utf-8"
+    )
+    (tmp_path / "Dockerfile.b").write_text(
+        "FROM pocketshell-test:a\nRUN echo b\n", encoding="utf-8"
+    )
+    (tmp_path / "compose.yml").write_text(
+        "services:\n"
+        "  a:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.a\n"
+        "    image: pocketshell-test:a\n"
+        "  b:\n"
+        "    build:\n"
+        "      dockerfile: Dockerfile.b\n"
+        "    image: pocketshell-test:b\n",
+        encoding="utf-8",
+    )
+    tag_map = _intree_image_dockerfiles(compose_files=[tmp_path / "compose.yml"])
+    assert not _inherits_shared_config(
+        _read(tmp_path / "Dockerfile.a"), tag_map=tag_map
+    )
+    assert not _inherits_shared_config(
+        _read(tmp_path / "Dockerfile.b"), tag_map=tag_map
+    )
 
 
 # --------------------------------------------------------------------------

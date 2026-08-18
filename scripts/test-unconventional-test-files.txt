@@ -34,11 +34,16 @@
 # <executor> HOW the file's @Test methods actually reach a runner. Answering
 #            "does it execute in any gate?" per file is the whole point of
 #            #2065; a claim is only allowed if the guard can confirm its shape.
-#              unit-source-set    the path is under */src/test/, so
-#                                 `./gradlew test` — the required `Unit tests`
-#                                 check — runs it unconditionally.
-#              nightly-connected  the path is under app/src/androidTest/ and
-#                                 nightly-extensive phase 1 runs
+#              unit-source-set    the path is under */src/test/ AND is a
+#                                 compiling Kotlin/Java source (*.kt / *.java),
+#                                 so `./gradlew test` — the required `Unit
+#                                 tests` check — runs it unconditionally. A
+#                                 parked non-source such as *.kt.txt is
+#                                 rejected (#2170): the directory prefix alone
+#                                 is not an execution claim.
+#              nightly-connected  the path is under app/src/androidTest/, is a
+#                                 compiling Kotlin/Java source (*.kt / *.java),
+#                                 and nightly-extensive phase 1 runs
 #                                 :app:connectedDebugAndroidTest WHOLESALE with
 #                                 only a `notClass` exclusion list, so the class
 #                                 executes even though it is in no explicit
@@ -47,7 +52,10 @@
 #                                 scripts/nightly-extensive-suite.sh, which is
 #                                 fail-closed: the moment somebody names it
 #                                 there (exclusion, shard pin, comment) the
-#                                 executor claim has to be re-argued.
+#                                 executor claim has to be re-argued. A parked
+#                                 non-source such as *.kt.txt / *.kt.turned-off
+#                                 is rejected even when the prefix matches
+#                                 (#2170).
 #
 # <gate>     WHAT accounts for the file, given no registry can see it.
 #              <FQCN>                 a conventional test class that carries the

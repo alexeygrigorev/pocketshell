@@ -259,6 +259,19 @@ is_unit_source_set() {
   case "$1" in test|testDebug|testRelease) return 0 ;; *) return 1 ;; esac
 }
 
+# Source files Gradle compiles from a test source set into a test APK.
+# A prefix match on the source-set directory is NOT enough: a parked
+# `Foo.kt.txt` / `Foo.kt.turned-off` lives under androidTest/test but is
+# never compiled, so `nightly-connected` / `unit-source-set` would be a
+# false execution claim (#2170). The mutation that reddens 21k is making
+# this always return true (prefix-only).
+is_compiling_test_source() {
+  case "$1" in
+    *.kt|*.java) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 class_selected() {
   local fqcn="${1%%#*}" area dep
   [[ "$SELECT_MODE" == "full" ]] && return 0
@@ -603,19 +616,26 @@ verify_manifest() {
     # The executor claim answers "does it execute in any gate?" — the question
     # #2065 exists to force per file. Only the SHAPE of each claim is machine-
     # checkable, and that is exactly what is checked: an unverifiable claim is
-    # rejected rather than believed.
+    # rejected rather than believed. Path prefix is not enough (#2170): the
+    # file must also be a compiling Kotlin/Java source, or the claim is a lie.
     case "${exempt_exec[$e_path]}" in
       unit-source-set)
         case "$e_path" in
           */src/test/*) : ;;
           *) exempt_bad+=("$e_path: executor 'unit-source-set' but the path is not under */src/test/, so \`./gradlew test\` does not run it") ;;
         esac
+        if ! is_compiling_test_source "$e_path"; then
+          exempt_bad+=("$e_path: executor 'unit-source-set' but the file is not a compiling Kotlin/Java source, so \`./gradlew test\` cannot execute it")
+        fi
         ;;
       nightly-connected)
         case "$e_path" in
           app/src/androidTest/*) : ;;
           *) exempt_bad+=("$e_path: executor 'nightly-connected' but the path is not under app/src/androidTest/") ;;
         esac
+        if ! is_compiling_test_source "$e_path"; then
+          exempt_bad+=("$e_path: executor 'nightly-connected' but the file is not a compiling Kotlin/Java source, so :app:connectedDebugAndroidTest cannot execute it")
+        fi
         if [[ ! -f "$NIGHTLY_SUITE" ]]; then
           exempt_bad+=("$e_path: executor 'nightly-connected' cannot be checked — nightly suite not found: $NIGHTLY_SUITE")
         elif [[ "$nightly_wholesale" -eq 1 ]]; then

@@ -20,7 +20,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELECT="$SCRIPT_DIR/select-test-areas.sh"
 
 SANDBOX="$(mktemp -d)"
-cleanup() { rm -rf "$SANDBOX"; }
+# #2170 plants a tracked non-source under a real test source set via a private
+# index copy so the real worktree index is never dirtied. Working-tree files
+# still have to exist (the guard greps them for @Test) and must be removed.
+ISSUE2170_INDEX=""
+ISSUE2170_PLANTS=()
+cleanup() {
+  local p
+  for p in "${ISSUE2170_PLANTS[@]:-}"; do
+    rm -f "$SCRIPT_DIR/../$p"
+  done
+  [[ -n "$ISSUE2170_INDEX" ]] && rm -f "$ISSUE2170_INDEX"
+  rm -rf "$SANDBOX"
+}
 trap cleanup EXIT
 
 PASS=0
@@ -1122,6 +1134,7 @@ fi
 # nightly suite) is swapped for a mutated copy; everything else is the shipped
 # guard reading the shipped tree. The verdict is read from the specific FAIL
 # line, not the exit code, since the real tree emits many other checks.
+# 21k–21m (#2170) also plant a tracked non-source via a private index copy.
 # ---------------------------------------------------------------------------
 UNCONV_REAL="$SCRIPT_DIR/test-unconventional-test-files.txt"
 UNCONVDIR="$SANDBOX/unconventional"
@@ -1280,6 +1293,130 @@ else
     ok "21h an enumerated-by: script that never mentions the file reddens"
   else
     bad "21h a bogus enumerated-by: claim survived:\n$(grep -E 'exemption' -A3 <<<"$out")"
+  fi
+
+  # -------------------------------------------------------------------------
+  # #2170 — a nightly-connected / unit-source-set row is a claim that the
+  # file EXECUTES in that lane. Path-prefix matching accepts any file under
+  # the source-set directory, including a parked `*.kt.txt` / `*.kt.turned-off`
+  # that Gradle never compiles. The rows below are the currently-passing
+  # lie: they are green on a prefix-only matcher and must be red once the
+  # guard requires a compiling Kotlin/Java source.
+  #
+  # The plant is tracked via a private GIT_INDEX_FILE copy so `git ls-files`
+  # (what the guard inventories) sees it, without touching the real index.
+  # A valid gate FQCN is reused so a red cannot be a stale-row or ghost-gate
+  # miss in costume.
+  # -------------------------------------------------------------------------
+  ISSUE2170_INDEX="$(mktemp)"
+  cp "$(git -C "$SCRIPT_DIR/.." rev-parse --absolute-git-dir)/index" "$ISSUE2170_INDEX"
+
+  plant_hidden_unconventional() {  # $1 = repo-relative path
+    local rel="$1" abs="$SCRIPT_DIR/../$1"
+    mkdir -p "$(dirname "$abs")"
+    cat > "$abs" <<'KT'
+package com.pocketshell.app.proof
+import org.junit.Test
+class Issue2170NonCompilingParked {
+    @Test
+    fun neverRuns() {}
+}
+KT
+    ISSUE2170_PLANTS+=("$rel")
+    GIT_INDEX_FILE="$ISSUE2170_INDEX" git -C "$SCRIPT_DIR/.." update-index --add -- "$rel"
+  }
+  unplant_hidden_unconventional() {  # $1 = repo-relative path
+    local rel="$1"
+    rm -f "$SCRIPT_DIR/../$rel"
+    GIT_INDEX_FILE="$ISSUE2170_INDEX" git -C "$SCRIPT_DIR/.." update-index --remove -- "$rel" 2>/dev/null || true
+  }
+
+  run_unconv_planted() {  # $1 = exemption file, $2 = select-test-areas.sh (optional)
+    POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$1" \
+    POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE="$SCRIPT_DIR/nightly-extensive-suite.sh" \
+    GIT_INDEX_FILE="$ISSUE2170_INDEX" \
+    bash "${2:-$SELECT}" --verify-manifest 2>&1
+  }
+
+  ISSUE2170_NIGHTLY_PATH="app/src/androidTest/java/com/pocketshell/app/proof/Issue2170NonCompilingParked.kt.txt"
+  ISSUE2170_UNIT_PATH="shared/ui-kit/src/test/java/com/pocketshell/uikit/render/Issue2170NonCompilingParked.kt.turned-off"
+  ISSUE2170_GATE="com.pocketshell.app.composer.Issue1622ComposerSheetGeometryProofTest"
+  plant_hidden_unconventional "$ISSUE2170_NIGHTLY_PATH"
+
+  {
+    cat "$UNCONV_REAL"
+    printf '%s\tnightly-connected\t%s\tparked non-source — must be rejected (#2170)\n' \
+      "$ISSUE2170_NIGHTLY_PATH" "$ISSUE2170_GATE"
+  } > "$UNCONVDIR/parked-nightly.txt"
+  if ! grep -Fq "$ISSUE2170_NIGHTLY_PATH" "$UNCONVDIR/parked-nightly.txt"; then
+    bad "21k MUTATION DID NOT APPLY — the parked nightly-connected row is missing from the copy"
+  fi
+  out="$(run_unconv_planted "$UNCONVDIR/parked-nightly.txt")"
+  if grep -Fq "$ISSUE2170_NIGHTLY_PATH" <<<"$out" &&
+     grep -q "executor 'nightly-connected' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
+    ok "21k a nightly-connected row for a parked .kt.txt under app/src/androidTest/ reddens (prefix-only matching is the lie)"
+  else
+    bad "21k a nightly-connected row for a non-compiling androidTest path survived (the #2170 currently-passing case):\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
+  fi
+
+  # 21m — G6: a prefix-only matcher must redden 21k. Restore the old
+  # `is_compiling_test_source` (always-true ≡ path-prefix only) on a private
+  # copy and assert the planted nightly-connected .kt.txt is ACCEPTED. If it
+  # is still rejected, 21k is red for the wrong reason (stale / gate / hidden)
+  # and the new assertion is decorative. Runs while the nightly plant is
+  # still the only extra tracked file.
+  prefix_only="$(mut_copy issue2170-prefix-only)"
+  if ! grep -q 'is_compiling_test_source()' "$prefix_only/select-test-areas.sh"; then
+    bad "21m MUTATION DID NOT APPLY — is_compiling_test_source() is missing from the copy, so a prefix-only revert cannot be shown"
+  else
+    awk '
+      /^is_compiling_test_source\(\)/ { print "is_compiling_test_source() { return 0; }"; skip=1; next }
+      skip && /^}/ { skip=0; next }
+      !skip { print }
+    ' "$prefix_only/select-test-areas.sh" > "$prefix_only/select-test-areas.sh.mut" &&
+      mv "$prefix_only/select-test-areas.sh.mut" "$prefix_only/select-test-areas.sh"
+    if ! grep -Fxq 'is_compiling_test_source() { return 0; }' "$prefix_only/select-test-areas.sh" ||
+       grep -qE '\*\.kt\|\*\.java\) return 0' "$prefix_only/select-test-areas.sh"; then
+      bad "21m MUTATION DID NOT APPLY — prefix-only stub not in place (compiling-extension matcher still live)"
+    else
+      out="$(
+        POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
+        POCKETSHELL_TEST_AREAS_MANIFEST="$prefix_only/test-areas.txt" \
+        POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$prefix_only/ci-journey-suite.sh" \
+        POCKETSHELL_TEST_AREAS_UNCONVENTIONAL="$UNCONVDIR/parked-nightly.txt" \
+        POCKETSHELL_TEST_AREAS_NIGHTLY_SUITE="$prefix_only/nightly-extensive-suite.sh" \
+        GIT_INDEX_FILE="$ISSUE2170_INDEX" \
+        bash "$prefix_only/select-test-areas.sh" --verify-manifest 2>&1
+      )"
+      if grep -q "executor 'nightly-connected' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
+        bad "21m prefix-only matcher still rejected the parked .kt.txt — 21k is red for another reason:\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
+      elif grep -q "OK: no new @Test-bearing file outside" <<<"$out"; then
+        ok "21m a prefix-only matcher accepts the parked nightly-connected .kt.txt (the mutation that reddens 21k)"
+      else
+        bad "21m prefix-only matcher did not cleanly accept the parked row (verdict is not the shipped-list OK):\n$(grep -E 'convention|exemption|FAIL' <<<"$out")"
+      fi
+    fi
+  fi
+
+  # 21l — the mirror: unit-source-set + */src/test/ + a file Gradle will not
+  # compile. Same shape, other executor. A prefix-only `*/src/test/*` matcher
+  # accepts it. Swap the plant so the extra tracked file is this one only.
+  unplant_hidden_unconventional "$ISSUE2170_NIGHTLY_PATH"
+  plant_hidden_unconventional "$ISSUE2170_UNIT_PATH"
+  {
+    cat "$UNCONV_REAL"
+    printf '%s\tunit-source-set\t%s\tparked non-source — must be rejected (#2170)\n' \
+      "$ISSUE2170_UNIT_PATH" "$ISSUE2170_GATE"
+  } > "$UNCONVDIR/parked-unit.txt"
+  if ! grep -Fq "$ISSUE2170_UNIT_PATH" "$UNCONVDIR/parked-unit.txt"; then
+    bad "21l MUTATION DID NOT APPLY — the parked unit-source-set row is missing from the copy"
+  fi
+  out="$(run_unconv_planted "$UNCONVDIR/parked-unit.txt")"
+  if grep -Fq "$ISSUE2170_UNIT_PATH" <<<"$out" &&
+     grep -q "executor 'unit-source-set' but the file is not a compiling Kotlin/Java source" <<<"$out"; then
+    ok "21l a unit-source-set row for a parked .kt.turned-off under */src/test/ reddens (the #2170 mirror)"
+  else
+    bad "21l a unit-source-set row for a non-compiling src/test path survived:\n$(grep -E 'convention|exemption' -A3 <<<"$out")"
   fi
 fi
 

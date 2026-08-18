@@ -601,22 +601,20 @@ run_signature "$root/ci-journey/summary.md" "$root/ci-journey"
   || { printf '%s\n' "$SIG_OUT"; fail "(x6) one app-owned reading among foreign readings must stay product_failure, got '$SIG_CLASS'"; }
 pass "(x6) one app-owned reading vetoes the downgrade across the whole failure"
 
-# (x7) The real journey must emit the evidence the classifier decides on and
-# hard-establish the app-window-focus precondition. Otherwise the foreign
-# control above would be a fixture-only value the production path cannot emit.
-grep -q 'private fun waitForAppWindowFocus' "$ANDROID_TEST" \
-  || fail "(x7) the real-IME journey does not hard-establish app window focus"
-grep -q 'activeAppWindowRoots(activity).any { it.hasWindowFocus() }' "$ANDROID_TEST" \
-  || fail "(x7) the precondition does not observe every app-owned window root"
-grep -q 'active_window_pkg=' "$ANDROID_TEST" \
-  || fail "(x7) the real failure does not emit the classifier's owner reading"
-grep -q 'physicalImeWindows=' "$ANDROID_TEST" \
-  || fail "(x7) the real failure does not preserve the observed #1818 residual-window shape"
-grep -q 'The real system input-method window never became visible\.' "$ANDROID_TEST" \
-  || fail "(x7) the exact #1800 signature sentence was removed"
+# (x7) Issue #2139: the Saturated journey no longer raises the real system IME.
+# The classifier still understands the historical #1800 signature (fixtures
+# above), but the production class must not be the source of that flake.
+grep -q 'requestRealImeAndAssertVisible' "$ANDROID_TEST" \
+  && fail "(x7) Saturated journey still raises the real system IME"
+grep -q 'WithRealIme' "$ANDROID_TEST" \
+  && fail "(x7) Saturated journey still has a real-IME @Test"
+grep -q 'showSoftInput' "$ANDROID_TEST" \
+  && fail "(x7) Saturated journey still calls showSoftInput"
+grep -q 'dispatchSyntheticInsets' "$ANDROID_TEST" \
+  || fail "(x7) Saturated journey lost its synthetic Type.ime() dispatch"
 grep -qE '\bassume(True|False|NotNull|That)[[:space:]]*\(' "$ANDROID_TEST" \
-  && fail "(x7) no Assume self-skip may shield the load-bearing real-IME assertion"
-pass "(x7) production journey hardens focus and emits owner/residual evidence without a skip"
+  && fail "(x7) no Assume self-skip may shield the load-bearing assertion"
+pass "(x7) Saturated journey is synthetic-only (issue #2139); historical classifier fixtures remain"
 
 echo
 echo "== #1879 foreign-window focus is a loud label, never auto-INFRA =="
@@ -1917,21 +1915,21 @@ pass "(z) #1814 preserved: a cold-build timeout with no build-level failure stil
 
 
 echo
-echo "== #1800 synthetic coverage is present and wired =="
+echo "== #1800 / #2139 synthetic coverage is present and wired =="
 
 [[ -f "$ANDROID_TEST" ]] || fail "missing $ANDROID_TEST"
 grep -q 'fun saturatedDraftAndAllActionsStayReachableWithSyntheticImeThenRestoreAfterHide' "$ANDROID_TEST" \
-  || fail "the synthetic mirror of the real-IME reachability journey is missing"
+  || fail "the synthetic reachability journey is missing"
 grep -q 'val REAL_IME_REACHABLE_TAGS' "$ANDROID_TEST" \
-  || fail "the real-IME and synthetic paths no longer share one reachable-tag set"
-grep -c 'REAL_IME_REACHABLE_TAGS.forEach' "$ANDROID_TEST" | grep -qE '^[3-9]$|^[0-9]{2,}$' \
-  || fail "both paths must iterate the shared reachable-tag set"
+  || fail "the shared reachable-tag set is missing"
+grep -c 'REAL_IME_REACHABLE_TAGS.forEach' "$ANDROID_TEST" | grep -qE '^[2-9]$|^[0-9]{2,}$' \
+  || fail "the synthetic reachability path must iterate the shared reachable-tag set"
 grep -qE '\bassume(True|False|NotNull|That)[[:space:]]*\(' "$ANDROID_TEST" \
   && fail "no Assume self-skip may guard these load-bearing assertions (F3)"
 grep -q "com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest" \
   "$REPO_ROOT/scripts/ci-journey-suite.sh" \
-  || fail "the class carrying the synthetic mirror is not wired into the per-push journey gate"
-pass "the synthetic mirror exists, shares the tag set, and runs in the per-push gate"
+  || fail "the class carrying the synthetic journey is not wired into the per-push journey gate"
+pass "the synthetic journey exists, iterates the tag set, and runs in the per-push gate"
 
 echo
 echo "ALL TESTS PASSED: scripts/test-ci-journey-infra-signature.sh"

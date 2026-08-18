@@ -169,7 +169,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerDegradedSendE2eTest"  # #745 #638 #691 composer Send feedback on a DEGRADED connection. The maintai…
   "com.pocketshell.app.composer.PromptComposerDraftLossOnFinalizeE2eTest"  # #1616/#1620: real-sheet prompt-B preservation plus one status-led queue progress owner with keyboard up
   "com.pocketshell.app.composer.AttachmentStagerRealUploadDockerTest"  # #2036: production OpenMultipleDocuments picker -> editable tile -> Send performs one real SSH upload
-  "com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"  # #1744: isolated synthetic anchor oracle plus real-IME full-device reachability/hide restoration
+  "com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"  # #1744 #2139: isolated synthetic-inset anchor + reachability/hide restoration (#780 model; real-IME path hard-cut)
   "com.pocketshell.app.composer.PromptComposerSendPipeliningE2eTest"  # #1621 real-sheet A-active/B-queued FIFO, once-only completion, queue-empty and quiescent-close proof
   "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest"  # #1108 #694 #872 #971 the composer send/dismiss + ATTACHMENT-on-failed-send journe…
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"  # #848 #900 audit / ): the foreground outbound queue surface was

@@ -37,6 +37,7 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.signals.activityWindowFocused
+import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
 import com.pocketshell.app.proof.signals.dismissFocusedLauncherFrameworkDialog
 import com.pocketshell.app.proof.signals.focusedFrameworkErrorPackage
@@ -591,10 +592,14 @@ class TmuxSessionOpencodeInputDockerTest {
                     appendLine("ime_visible_after_one_tap=$imeVisibleAfterTap")
                 },
             )
-            assertTrue(
-                "#1977: one real show-keyboard tap must raise the IME on OpenCode",
-                imeVisibleAfterTap,
-            )
+            if (!imeVisibleAfterTap) {
+                throw AssertionError(
+                    describeRealImeRaiseFailure(
+                        scenario = scenario,
+                        context = "#1977: one real show-keyboard tap must raise the IME on OpenCode",
+                    ),
+                )
+            }
             compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
                 .assertIsDisplayed()
             captureFullFrame("issue1977-opencode-toolbar-after-keyboard-tap-full")
@@ -1446,10 +1451,14 @@ class TmuxSessionOpencodeInputDockerTest {
             "issue1979_show_keyboard_tap_to_ime_visible_ms",
             SystemClock.elapsedRealtime() - tapAt,
         )
-        assertTrue(
-            "#1979: exactly one show-keyboard tap must raise the real IME",
-            imeVisibleAfterTap,
-        )
+        if (!imeVisibleAfterTap) {
+            throw AssertionError(
+                describeRealImeRaiseFailure(
+                    scenario = scenario,
+                    context = "#1979: exactly one show-keyboard tap must raise the real IME",
+                ),
+            )
+        }
         captureFullFrame("issue1979-opencode-after-keyboard-tap-full")
 
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
@@ -1504,6 +1513,27 @@ class TmuxSessionOpencodeInputDockerTest {
             "issue1979-opencode-hotkeys-$stage.txt",
             "stage=$stage\nhotkeys_panel_visible=true\nctrl_c_label=^C\nctrl_d_label=^D\n",
         )
+    }
+
+    /**
+     * Issue #2139 AC3: a real-IME raise that never happens is three worlds
+     * (focus stolen, IME service down, chip broken). Name the one we observed
+     * instead of a bare "IME did not appear".
+     */
+    private fun describeRealImeRaiseFailure(
+        scenario: ActivityScenario<MainActivity>,
+        context: String,
+    ): String {
+        val lateFocus = awaitActivityWindowFocus(scenario, timeoutMs = 0L)
+        val prefix = if (!lateFocus.focused) {
+            "$FOREIGN_WINDOW_FOCUS_SIGNATURE "
+        } else {
+            ""
+        }
+        return prefix + context +
+            ". This is the environment (focus / IME service), not a chip " +
+            "geometry failure, unless the app window is focused and the IME " +
+            "service is healthy. ${lateFocus.diagnosis}"
     }
 
     /**

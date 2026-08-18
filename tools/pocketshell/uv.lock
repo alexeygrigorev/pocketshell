@@ -3,8 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-08-07T21:38:29.279222994Z"
-exclude-newer-span = "P7D"
+exclude-newer = "2027-01-01T23:00:00Z"
 
 [[package]]
 name = "annotated-doc"
@@ -347,7 +346,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qrcode", extras = ["pil"], marker = "extra == 'qr'", specifier = ">=7.4" },
-    { name = "quse", specifier = "==0.0.11" },
+    { name = "quse", specifier = "==0.0.13" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.0" },
     { name = "tmuxctl", specifier = ">=0.3.3" },
 ]
@@ -488,14 +487,14 @@ pil = [
 
 [[package]]
 name = "quse"
-version = "0.0.11"
+version = "0.0.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fd/5d/c659757cf4532e8f347476881caf998e4339f1e9dc7c71ee7887270f2069/quse-0.0.11.tar.gz", hash = "sha256:3728b89b5011638a48c68465870ec9be824844ce3b1e2a8f0a9a4d3dc888124b", size = 52456, upload-time = "2026-07-15T08:26:18.888Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7a/b5/d2e510f2fde5ef3edc8d01a94bb0e4423789279b5d84d299ad50378b742c/quse-0.0.13.tar.gz", hash = "sha256:3f744d730f0583d78456f32847a8ed64eb16f0acc16d474bb7696c3bdef91060", size = 58806, upload-time = "2026-08-18T17:20:35.102Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d0/c1/53e5a3ab471833b0fec1dcaaa81affd07e2bbbefa059e793ca7b333934f2/quse-0.0.11-py3-none-any.whl", hash = "sha256:2fae4365f7c9c78c544e7afff5ce9aa2e5543892c3736402ff06bb1e3d16230a", size = 19051, upload-time = "2026-07-15T08:26:18Z" },
+    { url = "https://files.pythonhosted.org/packages/8c/5e/309a8a2ba7c441d1d94a8f7a963d6ec4f7458424eb05ebc8debceb694e6a/quse-0.0.13-py3-none-any.whl", hash = "sha256:ea4da9826d7cf5abeeab2cf690cc49134cd4e58af92575291ff3633983c081d9", size = 24666, upload-time = "2026-08-18T17:20:34.084Z" },
 ]
 
 [[package]]

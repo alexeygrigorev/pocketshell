@@ -39,14 +39,13 @@ dependencies = [
     # provider-keyed `--json` document (per provider: status +
     # short_term/long_term {percent_remaining, reset_at, window} + error) and
     # fails loudly on any schema drift, so the version is frozen, not a range.
-    # 0.0.11 (#1564): quse labels each Codex window from its actual
+    # 0.0.13 (#2195): adds the `grok` provider (alias `grok-build`) so
+    # `pocketshell usage --json` can emit Grok Build quota. 0.0.11 (#1564)
+    # still matters historically: it labels each Codex window from its actual
     # `limit_window_seconds` instead of assuming primary==5h / secondary==7d,
     # and omits a window Codex drops (`present: false`) as a null placeholder
-    # rather than a phantom "0% / unavailable" ghost row. Codex temporarily
-    # removed the 5h window, so its `primary_window` now carries the WEEKLY
-    # (604800s) span — the old positional labels mislabeled weekly data as a
-    # "5h window" with a 5-day reset and left a "7d" ghost.
-    "quse==0.0.11",
+    # rather than a phantom "0% / unavailable" ghost row.
+    "quse==0.0.13",
     # FCM HTTP v1 push delivery (#690): service-account OAuth2 bearer minting
     # for `pocketshell push` / the `usage --capture` reset-push send. Imported
     # lazily and fail-soft — a host without it (or without a Firebase

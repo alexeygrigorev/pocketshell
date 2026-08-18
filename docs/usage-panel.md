@@ -1,6 +1,6 @@
 # Usage Panel
 
-Provider quota tracking for Claude Code, Codex, GitHub Copilot, Z.AI, and other coding-agent CLIs — surfaced as a dedicated screen and a dashboard widget. Lets the user check "how much budget have I burned through this week" without leaving PocketShell.
+Provider quota tracking for Claude Code, Codex, GitHub Copilot, Grok Build, Z.AI, and other coding-agent CLIs — surfaced as a dedicated screen and a dashboard widget. Lets the user check "how much budget have I burned through this week" without leaving PocketShell.
 
 ## Key principle: zero credentials on the phone
 
@@ -207,7 +207,8 @@ straight from `short_term.window` / `long_term.window`. The app ignores
 `details` except for Codex's strict reset-credit inventory fields documented
 above; it never reads `details.windows` or re-derives quota state from details.
 
-The supported providers are `codex`, `claude`, `copilot`, and `zai`.
+The supported providers are `codex`, `claude`, `copilot`, `grok` (Grok Build;
+alias `grok-build`), and `zai`.
 `gemini` is accepted but reports `status: "unsupported"` because Gemini
 does not currently expose a usage endpoint.
 

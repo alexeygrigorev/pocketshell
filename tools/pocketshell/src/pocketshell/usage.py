@@ -56,6 +56,10 @@ _CLAUDE_USAGE_AUTH_SETUP_MESSAGE = (
     "Claude usage authentication needs setup on this host. "
     "Open Claude Code on the host and complete sign-in, then refresh usage."
 )
+_GROK_USAGE_AUTH_SETUP_MESSAGE = (
+    "Grok authentication is missing on this host. "
+    "Sign in with `grok` on the host, then refresh usage."
+)
 
 # quse is bundled WITH pocketshell as a pinned dependency (issue #1318). A
 # missing pinned quse is therefore a packaging-integrity error, NOT a user
@@ -161,6 +165,11 @@ def _actionable_error(provider: str, error: Any) -> Optional[str]:
             "Codex authentication is missing on this host. "
             "Run `codex login` in the host shell, then refresh usage."
         )
+    if provider in {"grok", "grok-build"} and (
+        lower in {"no-credentials", "no credentials", "no-auth-token", "no auth token"}
+        or "auth.json" in lower
+    ):
+        return _GROK_USAGE_AUTH_SETUP_MESSAGE
     return text
 
 

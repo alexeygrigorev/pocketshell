@@ -85,6 +85,8 @@ REQUIRED_PER_PUSH_ANDROID_TEST_SELECTORS=(
 # per-push journey allowlist. New *E2eTest/*DockerTest classes must either be
 # wired into scripts/ci-journey-suite.sh or added here with an intentional
 # follow-up. Keep full FQCNs so moves are visible.
+# Non-E2e/Docker concrete classes (Screenshot/Scaffold/Ui/Proof/component) are
+# covered by scripts/androidtest-unwired-baseline.txt (issue #2188).
 KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.composer.ComposerPartialExpandE2eTest"
   "com.pocketshell.app.costs.CostsScreenE2eTest"
@@ -191,6 +193,14 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.usage.UsageScreenE2eTest"
 )
 
+# Issue #2188: every OTHER concrete androidTest class (Screenshot / Scaffold /
+# Ui / Proof / component) must be in scripts/ci-journey-suite.sh or explicitly
+# exempted with a reason. A class that only compiles (dex job) and never runs
+# is how TmuxConsolidatedChromeScreenshotTest sat red on main unnoticed.
+# E2e/Docker backlog stays in KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES above —
+# do not duplicate it in the sidecar. Override the path in the self-test.
+ANDROIDTEST_UNWIRED_BASELINE="${POCKETSHELL_ANDROIDTEST_UNWIRED_BASELINE:-scripts/androidtest-unwired-baseline.txt}"
+
 in_list() {
   local item="$1"; shift
   local candidate
@@ -246,6 +256,26 @@ android_test_fqcn_for_file() {
   local rel="${file#"$ANDROID_TEST_ROOT"/}"
   rel="${rel%.kt}"
   printf '%s\n' "${rel//\//.}"
+}
+
+file_has_line_annotation() {
+  local file="$1" name="$2"
+  grep -Eq "^[[:space:]]*@(${name}|org[.]junit[.]${name})([[:space:]]|\$|[[:space:]]*\\()" "$file"
+}
+
+is_abstract_class_file() {
+  grep -Eq '^[[:space:]]*abstract[[:space:]]+class[[:space:]]+' "$1"
+}
+
+is_e2e_or_docker_fqcn() {
+  case "$1" in
+    *E2eTest|*DockerTest) return 0 ;;
+  esac
+  return 1
+}
+
+file_has_androidtest_gate_justification() {
+  grep -Eq 'ANDROIDTEST_GATE_JUSTIFIED:[[:space:]]*[^[:space:]]' "$1"
 }
 
 declare -a JOURNEY_CLASSES=()
@@ -314,6 +344,35 @@ declare -a UNWIRED_ANDROID_E2E_DOCKER_NEW=()
 declare -a UNWIRED_ANDROID_E2E_DOCKER_KNOWN=()
 declare -a STALE_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=()
 declare -a NIGHTLY_FIXTURE_ROUTING_FAILURE=()
+declare -a BASELINE_UNWIRED_ANDROID_TEST_CLASSES=()
+declare -A BASELINE_UNWIRED_ANDROID_TEST_SEEN=()
+declare -a UNWIRED_ANDROID_TEST_NEW=()
+declare -a UNWIRED_ANDROID_TEST_KNOWN=()
+declare -a UNWIRED_ANDROID_TEST_JUSTIFIED=()
+declare -a STALE_UNWIRED_ANDROID_TEST_BASELINE=()
+declare -a ANDROIDTEST_BASELINE_PARSE_FAILURE=()
+
+if [[ -f "$ANDROIDTEST_UNWIRED_BASELINE" ]]; then
+  while IFS=$'\t' read -r fqcn reason || [[ -n "${fqcn:-}" ]]; do
+    [[ -z "${fqcn:-}" || "$fqcn" == \#* ]] && continue
+    if [[ "$fqcn" != com.pocketshell.app.* ]]; then
+      ANDROIDTEST_BASELINE_PARSE_FAILURE+=("not an app androidTest FQCN: $fqcn")
+      continue
+    fi
+    if is_e2e_or_docker_fqcn "$fqcn"; then
+      ANDROIDTEST_BASELINE_PARSE_FAILURE+=("E2e/Docker belongs in KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES: $fqcn")
+      continue
+    fi
+    if [[ -z "${reason:-}" ]]; then
+      ANDROIDTEST_BASELINE_PARSE_FAILURE+=("missing reason: $fqcn")
+      continue
+    fi
+    if [[ -z "${BASELINE_UNWIRED_ANDROID_TEST_SEEN[$fqcn]:-}" ]]; then
+      BASELINE_UNWIRED_ANDROID_TEST_CLASSES+=("$fqcn")
+      BASELINE_UNWIRED_ANDROID_TEST_SEEN[$fqcn]=1
+    fi
+  done < "$ANDROIDTEST_UNWIRED_BASELINE"
+fi
 
 if [[ "${#JOURNEY_CLASSES[@]}" -eq 0 ]]; then
   PARSER_FAILURE+=("NO_PROOF_CLASSES_PARSED")
@@ -545,6 +604,41 @@ done < <(
     | sort
 )
 
+# Issue #2188: every concrete non-E2e/Docker androidTest class must be wired
+# into the per-push suite, listed in the sidecar baseline with a reason, or
+# carry a local ANDROIDTEST_GATE_JUSTIFIED comment. Helpers (no @Test) and
+# abstract bases are skipped. E2e/Docker stay in the scan above.
+if [[ -d "$ANDROID_TEST_ROOT" ]]; then
+  while IFS= read -r file; do
+    [[ -z "${file:-}" ]] && continue
+    is_abstract_class_file "$file" && continue
+    file_has_line_annotation "$file" "Test" || continue
+    fqcn="$(android_test_fqcn_for_file "$file")"
+    is_e2e_or_docker_fqcn "$fqcn" && continue
+    if in_list "$fqcn" "${WIRED_ANDROID_TEST_CLASSES[@]}"; then
+      if in_list "$fqcn" "${BASELINE_UNWIRED_ANDROID_TEST_CLASSES[@]}"; then
+        STALE_UNWIRED_ANDROID_TEST_BASELINE+=("$fqcn")
+      fi
+      continue
+    fi
+    if file_has_androidtest_gate_justification "$file"; then
+      UNWIRED_ANDROID_TEST_JUSTIFIED+=("$fqcn")
+      continue
+    fi
+    if in_list "$fqcn" "${BASELINE_UNWIRED_ANDROID_TEST_CLASSES[@]}"; then
+      UNWIRED_ANDROID_TEST_KNOWN+=("$fqcn")
+    else
+      UNWIRED_ANDROID_TEST_NEW+=("$fqcn")
+    fi
+  done < <(find "$ANDROID_TEST_ROOT" -type f -name '*.kt' | sort)
+fi
+
+for fqcn in "${BASELINE_UNWIRED_ANDROID_TEST_CLASSES[@]}"; do
+  if [[ ! -f "$(android_class_file_for "$fqcn")" ]]; then
+    STALE_UNWIRED_ANDROID_TEST_BASELINE+=("$fqcn")
+  fi
+done
+
 for class_name in "${JOURNEY_CLASSES[@]}"; do
   file="$(class_file_for "$class_name")"
   if [[ ! -f "$file" ]]; then
@@ -658,11 +752,15 @@ print_list "PASS - launch-owned MainActivity harness with SeedBeforeLaunchRule" 
 print_list "KNOWN - manual old harness baseline" "${MANUAL_KNOWN[@]:-}"
 print_list "KNOWN - launch-owned but missing shared SeedBeforeLaunchRule baseline" "${MISSING_SHARED_SEED_KNOWN[@]:-}"
 print_list "KNOWN - unwired androidTest E2e/Docker baseline" "${UNWIRED_ANDROID_E2E_DOCKER_KNOWN[@]:-}"
+print_list "KNOWN - unwired androidTest class baseline (#2188)" "${UNWIRED_ANDROID_TEST_KNOWN[@]:-}"
 print_list "JUSTIFIED - local JOURNEY_HARNESS_JUSTIFIED exemption" "${MANUAL_JUSTIFIED[@]:-}" "${MISSING_SHARED_SEED_JUSTIFIED[@]:-}"
+print_list "JUSTIFIED - local ANDROIDTEST_GATE_JUSTIFIED exemption" "${UNWIRED_ANDROID_TEST_JUSTIFIED[@]:-}"
 print_list "IGNORED - listed proof class does not launch MainActivity" "${NOT_MAINACTIVITY_LAUNCHERS[@]:-}"
 print_list "STALE BASELINE - class no longer matches its baseline entry" "${STALE_BASELINE[@]:-}"
 print_list "STALE BASELINE - unwired androidTest E2e/Docker class is now wired" "${STALE_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]:-}"
+print_list "STALE BASELINE - unwired androidTest class is now wired or deleted" "${STALE_UNWIRED_ANDROID_TEST_BASELINE[@]:-}"
 print_list "PARSER FAIL - proof allowlist parser" "${PARSER_FAILURE[@]:-}"
+print_list "PARSER FAIL - androidTest unwired baseline" "${ANDROIDTEST_BASELINE_PARSE_FAILURE[@]:-}"
 print_list "MISSING FILE - listed proof class has no source file" "${MISSING_FILES[@]:-}"
 print_list "MISSING REQUIRED - #848 per-push androidTest class not wired" "${MISSING_REQUIRED_PER_PUSH[@]:-}"
 print_list "MISSING REQUIRED SELECTOR - exact per-push androidTest method not wired" "${MISSING_REQUIRED_PER_PUSH_SELECTOR[@]:-}"
@@ -671,6 +769,7 @@ print_list "INVALID REQUIRED SELECTOR - exact method retains a CI self-skip" "${
 print_list "NEW FAIL - manual ActivityScenario/createEmptyComposeRule harness" "${MANUAL_NEW[@]:-}"
 print_list "NEW FAIL - createAndroidComposeRule without SeedBeforeLaunchRule" "${MISSING_SHARED_SEED_NEW[@]:-}"
 print_list "NEW FAIL - androidTest E2e/Docker class not wired into ci-journey-suite.sh" "${UNWIRED_ANDROID_E2E_DOCKER_NEW[@]:-}"
+print_list "NEW FAIL - androidTest class not wired into ci-journey-suite.sh" "${UNWIRED_ANDROID_TEST_NEW[@]:-}"
 print_list "FIXTURE ROUTING FAIL - #1733 nightly selection" "${NIGHTLY_FIXTURE_ROUTING_FAILURE[@]:-}"
 
 hard_fail=()
@@ -684,9 +783,12 @@ for item in \
   "${MANUAL_NEW[@]:-}" \
   "${MISSING_SHARED_SEED_NEW[@]:-}" \
   "${UNWIRED_ANDROID_E2E_DOCKER_NEW[@]:-}" \
+  "${UNWIRED_ANDROID_TEST_NEW[@]:-}" \
+  "${ANDROIDTEST_BASELINE_PARSE_FAILURE[@]:-}" \
   "${NIGHTLY_FIXTURE_ROUTING_FAILURE[@]:-}" \
   "${STALE_BASELINE[@]:-}" \
-  "${STALE_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]:-}"; do
+  "${STALE_UNWIRED_ANDROID_E2E_DOCKER_BASELINE[@]:-}" \
+  "${STALE_UNWIRED_ANDROID_TEST_BASELINE[@]:-}"; do
   [[ -n "$item" ]] && hard_fail+=("$item")
 done
 
@@ -698,7 +800,7 @@ fi
 
 if [[ "${#hard_fail[@]}" -gt 0 ]]; then
   echo
-  echo "::error title=CI journey harness guard (#848/#788/#743)::A required #848 androidTest is missing from the per-push journey allowlist, a new androidTest E2e/Docker class is unwired, a listed com.pocketshell.app.proof journey that launches MainActivity is not using createAndroidComposeRule<MainActivity>() plus SeedBeforeLaunchRule, the allowlist parser failed, or a known-baseline entry is stale. Wire the test into scripts/ci-journey-suite.sh, add an intentional unwired baseline for backlog-only E2e/Docker classes, migrate to the launch-owned harness, remove stale baselines, or add a local // JOURNEY_HARNESS_JUSTIFIED: comment naming why the manual/old pattern is required."
+  echo "::error title=CI journey harness guard (#848/#788/#743/#2188)::A required #848 androidTest is missing from the per-push journey allowlist, a new androidTest class is unwired, a listed com.pocketshell.app.proof journey that launches MainActivity is not using createAndroidComposeRule<MainActivity>() plus SeedBeforeLaunchRule, the allowlist parser failed, or a known-baseline entry is stale. Wire the test into scripts/ci-journey-suite.sh, add it to scripts/androidtest-unwired-baseline.txt (or KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES for E2e/Docker) with a reason, migrate to the launch-owned harness, remove stale baselines, or add a local // JOURNEY_HARNESS_JUSTIFIED: / // ANDROIDTEST_GATE_JUSTIFIED: comment."
   echo
   echo "FAIL: ${#hard_fail[@]} CI journey harness issue(s)."
   exit 1

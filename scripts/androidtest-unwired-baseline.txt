@@ -1,0 +1,128 @@
+# Concrete app/src/androidTest classes that are intentionally NOT in
+# scripts/ci-journey-suite.sh. Issue #2188: a test nobody runs looks like
+# coverage and provides none. New concrete @Test classes must be wired
+# into the per-push suite, added here with a reason, or marked with a
+# local // ANDROIDTEST_GATE_JUSTIFIED: comment.
+#
+# Format: FQCN<TAB>reason
+# E2e/Docker backlog stays in check-ci-journey-harness.sh
+# KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES — do not duplicate it here.
+# Stale entries (class now wired or deleted) fail the guard.
+
+com.pocketshell.app.bootstrap.CliUpdateRowSingleActionScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest	nightly/release opt-in bootstrap matrix (pocketshellBootstrapScenarios); would ALL-SKIP in the per-push suite
+com.pocketshell.app.cards.SessionChecklistUiInteractionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.EngineCommandPrefillsComposerAcceptanceTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.Issue1622DeadBandScreenshotHarness	local visual screenshot harness; not a per-push property
+com.pocketshell.app.composer.PromptComposerCancelRecordingTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerDismissReleasesMicTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerImeDeadSpaceScreenshotHarness	local visual screenshot harness; not a per-push property
+com.pocketshell.app.composer.PromptComposerImeEmptyDraftDeadSpaceProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.composer.PromptComposerImeLayoutRegressionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerImeShortDraftDeadSpaceProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.composer.PromptComposerPendingTranscriptionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerRecreateAndKeepScreenOnTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerSendWhileRecordingTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerSheetImeReachabilityTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerSilenceThresholdTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerSlashButtonTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.composer.PromptComposerSlashDropdownImeContainmentProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.composer.PromptComposerVisualScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.conversation.ConversationCopyActionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.conversation.ConversationDetectingPlaceholderRenderTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.conversation.ConversationFontSizeScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.conversation.ConversationInteractionCleanupTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.conversation.ConversationTimestampScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.conversation.ConversationToTerminalSwapLatchTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.conversation.ConversationToolArgsSectionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.costs.CostsScreenScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.crash.Issue863ButtonSweepScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.fileexplorer.FileExplorerRedesignScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.fileexplorer.FileExplorerRowIconRegressionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.fileviewer.FileViewerActOnFileScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.fileviewer.FileViewerAnnotateScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.fileviewer.FileViewerSaveMediaStoreTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.fileviewer.FileViewerTypeIconTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.fileviewer.FileViewerWrapMarkdownScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.hosts.AddEditHostScreenTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.AppUpdateActionBannerTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.FirstHostTestConnectScreenTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.HostCardConnectingIndicatorTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.HostCardSetupBadgeTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.HostCardStatusChipTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.HostListEmptyStateActionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.HostOverflowMenuEditItemTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.HostUsagePerHostAccessScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.hosts.SshKeysDeleteDialogButtonScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.hosts.SshKeysManagementPaneActionsTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.hosts.UpdateBannerFeedbackTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.jobs.RecurringJobsScreenTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.nav.NavigatorSystemBackTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.portfwd.AutoForwardControlScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.portfwd.PortForwardScanningStateScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.portfwd.ShowAllPortsScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.projects.FolderContextActionSheetScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.projects.FolderListRefreshIndicatorScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.projects.FolderListSessionClickTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.projects.FolderListStopSessionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.projects.HostDetailAssistantFlowTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.projects.HostDetailAssistantFolderDisambiguationTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.projects.RepoBrowserScreenTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.projects.RepoBrowserSessionPickerTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.projects.RootProjectAddSheetTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.projects.SessionTypePickerSkipPermissionsUiTest	isolated component UI; not load-bearing for the per-push subset
+com.pocketshell.app.proof.EmulatorDockerSshSmokeTest	local Docker/SSH smoke; not a per-push property
+com.pocketshell.app.proof.Issue1733ArtifactPreservationSmokeTest	test-infrastructure / helper coverage; not product chrome
+com.pocketshell.app.proof.LongRunningInstrumentationHeartbeatTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.proof.RealAgentReleaseGateTest	nightly/release opt-in real-agent CLI gate; would ALL-SKIP in the per-push suite
+com.pocketshell.app.proof.TerminalTextMatcherTest	test-infrastructure / helper coverage; not product chrome
+com.pocketshell.app.proof.WalkthroughConversationScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.proof.WalkthroughVisualScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.proof.signals.SignalsTest	test-infrastructure / helper coverage; not product chrome
+com.pocketshell.app.release.ReleaseCheckerInstrumentedTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.session.InlineDictationTranscribingSpinnerTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.session.RawSessionKeyboardPanLayoutTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.settings.SettingsUpdateCheckUiTest	isolated component UI; not load-bearing for the per-push subset
+com.pocketshell.app.snippets.CommandTemplateEditorDialogTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.snippets.FormDialogMigrationScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.snippets.SnippetPickerBodyPreviewTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.snippets.SnippetPickerSendButtonsTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.snippets.SnippetTemplateAndroidRegexTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.snippets.SnippetsScreenTabsTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.terminal.TerminalKeyboardStressTest	interactive lab / stress harness; not a per-push property
+com.pocketshell.app.terminal.TerminalLabInteractiveInputTest	interactive lab / stress harness; not a per-push property
+com.pocketshell.app.tmux.Issue796ComposerOpenDuringCodexBurstProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.tmux.Issue796ImeRecompositionProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.tmux.Issue796ImeRecompositionScopeProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.tmux.ReservedTmuxTerminalBottomBandTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.ShiftTabHotkeyContainmentTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TerminalHotkeysPanelNoTruncationTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TerminalHotkeysPanelScreenshotHarness	local visual screenshot harness; not a per-push property
+com.pocketshell.app.tmux.TmuxChromeKebabReachableTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxComposerLauncherLargeFontScreenshotHarness	local visual screenshot harness; not a per-push property
+com.pocketshell.app.tmux.TmuxComposerLauncherNeverClippedProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.tmux.TmuxConnectingProgressOverlayTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxConversationCodexAgentsInstructionsCollapseTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxConversationPaneNavigationUiTest	isolated component UI; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxConversationTurnDensityScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.tmux.TmuxHotkeysLauncherImeProofTest	local component proof; not promoted to the per-push subset
+com.pocketshell.app.tmux.TmuxKeyBarImeReachabilityTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxKeyboardPanLayoutTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxMoreMenuGroupingTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxMoreMenuOpenFileTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxMoreMenuPortForwardingTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxMoreMenuReconnectTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxMoreMenuRedrawTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxMoreMenuSettingsTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxNewSessionRichSheetTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxSessionBackHandlerTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxSessionDrawerUiTest	isolated component UI; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxSessionScreenImeChromeTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.tmux.TmuxTerminalImeHotkeysOverlayLifecycleTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.usage.UsageOverflowMenuTest	isolated component / instrumented unit; not load-bearing for the per-push subset
+com.pocketshell.app.usage.UsageResetBannerScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.usage.UsageResetTimeScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.usage.UsageSchedulerTestIsolationRuleTest	test-infrastructure / helper coverage; not product chrome
+com.pocketshell.app.usage.UsageStaleWhileRevalidateScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.usage.UsageThresholdTintScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.usage.UsageWindowLabelScreenshotTest	local visual screenshot harness; not a per-push property

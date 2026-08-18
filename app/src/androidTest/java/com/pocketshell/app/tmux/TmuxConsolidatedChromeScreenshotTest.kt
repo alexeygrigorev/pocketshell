@@ -47,6 +47,13 @@ import org.junit.runner.RunWith
  * Combined with [TmuxSessionScreenImeChromeTest] (which asserts the
  * 56dp height limit and the IME-down/up tag visibility contract), this
  * is the visual gate for the chrome IA.
+ *
+ * Issue #2188: this class is in the per-push journey suite. It compiled
+ * for months and ran in no gate; `activeForwardingRendersContainedHeaderPillWithLongTitleAndToggle`
+ * was red on main after #2176 appended ". Opens session ports" to the
+ * pill description. 1b096d30 switched that wait to a substring match
+ * (the status wording is what this proof owns; actionability lives in
+ * [ForwardingPillOpensSessionPortsTest]).
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxConsolidatedChromeScreenshotTest {

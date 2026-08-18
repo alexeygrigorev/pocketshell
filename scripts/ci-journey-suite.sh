@@ -245,6 +245,10 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest"  # #1320 #962 #975 #1057 the Terminal/Conversation TOGGLE-CLIP regression guard — the…
   "com.pocketshell.app.cards.SessionCardFeedRegistryTest"  # #859 B): the typed-card RENDERER REGISTRY proof. The session feed
   "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest"  # #750 3rd occurrence — D31 durable-fix gate): the tmux non-Connect…
+  "com.pocketshell.app.tmux.TmuxConsolidatedChromeScreenshotTest"  # #2188 #1487 #189 #192 #637: in-session chrome IA + forwarding-pill containment under long-title+toggle pressure. Was red on main unnoticed because it compiled in the dex job and ran in no per-push gate.
+  "com.pocketshell.app.git.GitHistoryScaffoldTest"  # #2188 #646: 30 scaffold states / 29 containment assertions. Unregistered before this; #2180 migrated the helpers but CI only compiled them.
+  "com.pocketshell.app.tmux.TmuxConversationDetectingComposerVisibleTest"  # #2188 #805: composer launcher stays contained during detection-uncertainty (the v0.4.7 clip). Component proof, no Docker.
+  "com.pocketshell.app.fileviewer.FileViewerLoadingSpinnerScreenshotTest"  # #2188 #862: loading state uses the shared spinner and stays contained.
   "com.pocketshell.app.tmux.SessionSurfaceReconnectWrapperTest"  # #823 the manual-reconnect AFFORDANCE proof. The maintainer's ask…
   "$FQCN_PREFIX.Issue1831BackFromRestoredSessionJourneyE2eTest"  # #1831 D33/G10: Back from an agent session restored after process death / a config change must reach the SESSION list, not the host list; 3rd Back on the root host list still EXITS (#520)
   "com.pocketshell.app.nav.Issue1831SessionEntryPathBackE2eTest"  # #1831 G2: the other empty-back-stack producers — share-into-session, active-sessions widget, #859 agent-card push, onNewIntent re-delivery — plus the usage-notification path whose host-list fallback must NOT change

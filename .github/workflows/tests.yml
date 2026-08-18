@@ -822,9 +822,24 @@ jobs:
   # non-blocking until someone edited the ruleset by hand — a real loss of
   # enforcement dressed up as a speed-up. This ~10-second aggregator keeps the
   # name and fails unless every unit-lane job succeeded, so the blocking
-  # contract is bit-for-bit the same with zero admin action. `if: always()` so it
-  # still reports (as a failure) when a dependency fails, is cancelled or is
-  # skipped — a `needs:` job that never reports would leave it pending forever.
+  # contract is bit-for-bit the same with zero admin action.
+  #
+  # `if: ${{ !cancelled() }}` (issue #2187) is load-bearing and is NOT
+  # `always()`. `always()` kept this job running after the `main` push
+  # concurrency group cancelled the run, and the result loop then folded
+  # every `cancelled` input into a red required check — an absent result
+  # rendering as a failure (runs 31950499521 / 31952697403 / 31952932366).
+  # Without `always()`, GitHub does not dispatch the job on a cancelled
+  # workflow and the required check concludes `cancelled`, which is what
+  # `scripts/watch-ci.py` already treats as exit 4/5 rather than exit 1.
+  # `always() && !cancelled()` is also wrong: GitHub evaluates it and a
+  # false result is `skipped`, which a required-check ruleset can treat as
+  # passing. The job still runs when a needed job failed or was skipped
+  # (`!cancelled()` is not the default `success()`), so #2060 stays
+  # fail-closed. A single-job cancel while the workflow continues
+  # (timeout / runner death) still reaches the loop and fails closed —
+  # that is not a concurrency-supersession and must not be laundered.
+  # `scripts/check-unit-gate-wiring.sh` C11/C13 assert both halves.
   #
   # Issue #2067 — THIS JOB HAS THREE LISTS AND THEY MUST AGREE: `needs:`, the
   # `env:` mapping, and the loop. A job in `needs:` but not in the loop runs, can
@@ -836,7 +851,7 @@ jobs:
     name: Unit tests
     runs-on: ubuntu-latest
     needs: [unit, guards-static, guards-ci-harness, guards-test-selection, dex]
-    if: always()
+    if: ${{ !cancelled() }}
     timeout-minutes: 5
     steps:
       - name: Require every unit-lane job to have succeeded

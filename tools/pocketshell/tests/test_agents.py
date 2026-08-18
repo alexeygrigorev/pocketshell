@@ -156,6 +156,12 @@ def test_opencode_ignores_config_dir():
     env = agents.build_env("opencode", {}, {}, config_dir="/whatever")
     assert "CODEX_HOME" not in env
     assert "CLAUDE_CONFIG_DIR" not in env
+    assert "GROK_HOME" not in env
+
+
+def test_grok_config_dir_sets_grok_home():
+    env = agents.build_env("grok", {}, {}, config_dir="/home/u/.grok-work")
+    assert env["GROK_HOME"] == "/home/u/.grok-work"
 
 
 def test_no_config_dir_leaves_profile_vars_unset():
@@ -262,9 +268,20 @@ def test_opencode_argv_is_bare_no_flags():
     assert off == ["opencode"]
 
 
+def test_grok_argv_skip_permissions_is_always_approve():
+    on = agents.build_argv("grok", skip_permissions=True)
+    off = agents.build_argv("grok", skip_permissions=False)
+    assert on == ["grok", "--always-approve"]
+    assert off == ["grok"]
+
+
 def test_unknown_kind_argv_raises():
     with pytest.raises(ValueError):
         agents.build_argv("nope", skip_permissions=True)
+
+
+def test_grok_is_a_recognised_agent_kind():
+    assert "grok" in agents.AGENT_KINDS
 
 
 # ---------------------------------------------------------------------------
@@ -689,6 +706,33 @@ def test_latest_claude_source_ignores_prelaunch_sibling(tmp_path, monkeypatch):
     assert agents._latest_agent_source("claude", cwd, started_at=200) == str(newer)
 
 
+def test_latest_grok_source_uses_percent_encoded_cwd(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    cwd = "/home/alexey/git/pocketshell"
+    encoded = "%2Fhome%2Falexey%2Fgit%2Fpocketshell"
+    session_dir = tmp_path / ".grok" / "sessions" / encoded / "sess-1"
+    session_dir.mkdir(parents=True)
+    transcript = session_dir / "updates.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    os.utime(transcript, (300, 300))
+
+    assert agents._latest_agent_source("grok", cwd, started_at=200) == str(transcript)
+
+
+def test_latest_grok_source_honors_grok_home(tmp_path, monkeypatch):
+    grok_home = tmp_path / "custom-grok"
+    monkeypatch.setenv("GROK_HOME", str(grok_home))
+    cwd = "/workspace/proj"
+    encoded = "%2Fworkspace%2Fproj"
+    session_dir = grok_home / "sessions" / encoded / "sess-9"
+    session_dir.mkdir(parents=True)
+    transcript = session_dir / "updates.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    os.utime(transcript, (300, 300))
+
+    assert agents._latest_agent_source("grok", cwd, started_at=200) == str(transcript)
+
+
 def test_latest_codex_source_matches_cwd_and_launch_time(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     root = tmp_path / ".codex" / "sessions" / "2026" / "06" / "27"
@@ -836,6 +880,17 @@ def test_record_agent_kind_empty_profile_clears_profile_option():
         ["tmux", "set-option", "@ps_agent_kind", "codex"],
         ["tmux", "set-option", "-uq", "@ps_agent_profile"],
     ]
+
+
+def test_record_agent_kind_writes_grok():
+    calls = []
+    ok = agents.record_agent_kind(
+        "grok",
+        env={"TMUX": "x"},
+        runner=lambda argv, **kw: calls.append(argv),
+    )
+    assert ok is True
+    assert ["tmux", "set-option", "@ps_agent_kind", "grok"] in calls
 
 
 def test_record_agent_kind_default_relaunch_clears_stale_profile():

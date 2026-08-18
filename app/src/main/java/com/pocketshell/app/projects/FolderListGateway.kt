@@ -1787,6 +1787,7 @@ class SshFolderListGateway internal constructor(
             AgentKind.ClaudeCode -> SessionAgentKind.Claude
             AgentKind.Codex -> SessionAgentKind.Codex
             AgentKind.OpenCode -> SessionAgentKind.OpenCode
+            AgentKind.GrokBuild -> SessionAgentKind.Grok
         }
 
 

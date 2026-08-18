@@ -230,6 +230,7 @@ internal fun sessionBadgeLabel(session: FolderSessionEntry): String = when (sess
     SessionAgentKind.Claude -> "Claude"
     SessionAgentKind.Codex -> "Codex"
     SessionAgentKind.OpenCode -> "OpenCode"
+    SessionAgentKind.Grok -> "Grok"
     SessionAgentKind.Probing -> "Detecting"
     SessionAgentKind.Exited -> "Shell"
     SessionAgentKind.Shell -> "Shell"
@@ -240,6 +241,7 @@ internal fun sessionBadgeMonogram(session: FolderSessionEntry): String = when (s
     SessionAgentKind.Claude -> "CL"
     SessionAgentKind.Codex -> "CX"
     SessionAgentKind.OpenCode -> "OC"
+    SessionAgentKind.Grok -> "GK"
     SessionAgentKind.Probing -> "…"
     SessionAgentKind.Exited,
     SessionAgentKind.Shell,
@@ -251,6 +253,7 @@ internal fun sessionKindLabel(session: FolderSessionEntry): String = when (sessi
     SessionAgentKind.Claude -> "Claude · ${agentStateLabel(session)}"
     SessionAgentKind.Codex -> "Codex · ${agentStateLabel(session)}"
     SessionAgentKind.OpenCode -> "OpenCode · ${agentStateLabel(session)}"
+    SessionAgentKind.Grok -> "Grok · ${agentStateLabel(session)}"
     SessionAgentKind.Probing -> "Detecting"
     SessionAgentKind.Exited -> "Shell"
     SessionAgentKind.Shell -> "Shell"
@@ -291,6 +294,7 @@ internal fun SessionAgentKind.isAgent(): Boolean = when (this) {
     SessionAgentKind.Claude,
     SessionAgentKind.Codex,
     SessionAgentKind.OpenCode,
+    SessionAgentKind.Grok,
     SessionAgentKind.Probing,
     SessionAgentKind.Exited,
     -> true

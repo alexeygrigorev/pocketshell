@@ -10,6 +10,7 @@ enum class SessionAgentKind {
     Claude,
     Codex,
     OpenCode,
+    Grok,
     Shell,
     Probing,
     Exited,
@@ -33,11 +34,11 @@ enum class SessionAgentKind {
          * [Probing], [Exited], and [Unknown] are transient/derived states,
          * not user-assignable classifications, so they are excluded.
          *
-         * Ordered Claude / Codex / OpenCode / Shell — agents first (the
+         * Ordered Claude / Codex / OpenCode / Grok / Shell — agents first (the
          * common case), shell last.
          */
         val pickable: List<SessionAgentKind> =
-            listOf(Claude, Codex, OpenCode, Shell)
+            listOf(Claude, Codex, OpenCode, Grok, Shell)
     }
 }
 
@@ -54,6 +55,7 @@ fun SessionAgentKind.isLiveAgent(): Boolean = when (this) {
     SessionAgentKind.Claude,
     SessionAgentKind.Codex,
     SessionAgentKind.OpenCode,
+    SessionAgentKind.Grok,
     -> true
     SessionAgentKind.Shell,
     SessionAgentKind.Probing,
@@ -75,6 +77,7 @@ fun SessionAgentKind.tmuxOptionValue(): String? = when (this) {
     SessionAgentKind.Claude -> "claude"
     SessionAgentKind.Codex -> "codex"
     SessionAgentKind.OpenCode -> "opencode"
+    SessionAgentKind.Grok -> "grok"
     SessionAgentKind.Shell -> "shell"
     SessionAgentKind.Probing,
     SessionAgentKind.Exited,
@@ -96,6 +99,7 @@ fun sessionAgentKindFromOption(raw: String?): SessionAgentKind? =
         "claude" -> SessionAgentKind.Claude
         "codex" -> SessionAgentKind.Codex
         "opencode" -> SessionAgentKind.OpenCode
+        "grok" -> SessionAgentKind.Grok
         "shell" -> SessionAgentKind.Shell
         else -> null
     }

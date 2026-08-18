@@ -37,6 +37,7 @@ internal fun SessionAgentKind?.toRecordedAgentKindOrNull(): AgentKind? = when (t
     SessionAgentKind.Claude -> AgentKind.ClaudeCode
     SessionAgentKind.Codex -> AgentKind.Codex
     SessionAgentKind.OpenCode -> AgentKind.OpenCode
+    SessionAgentKind.Grok -> AgentKind.GrokBuild
     SessionAgentKind.Shell,
     SessionAgentKind.Probing,
     SessionAgentKind.Exited,

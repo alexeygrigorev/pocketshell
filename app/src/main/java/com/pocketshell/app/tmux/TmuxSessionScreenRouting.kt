@@ -334,7 +334,8 @@ internal fun tmuxSessionRecordedAgentKind(recordedKind: SessionAgentKind?): Bool
     when (recordedKind) {
         SessionAgentKind.Claude,
         SessionAgentKind.Codex,
-        SessionAgentKind.OpenCode -> true
+        SessionAgentKind.OpenCode,
+        SessionAgentKind.Grok -> true
         SessionAgentKind.Shell,
         SessionAgentKind.Probing,
         SessionAgentKind.Exited,
@@ -741,6 +742,7 @@ internal fun tmuxComposerAgentToken(agent: AgentKind?): String? = when (agent) {
     AgentKind.ClaudeCode -> "claude"
     AgentKind.Codex -> "codex"
     AgentKind.OpenCode -> "opencode"
+    AgentKind.GrokBuild -> "grok"
     null -> null
 }
 
@@ -748,6 +750,7 @@ internal fun tmuxComposerAgentKindFromToken(token: String?): AgentKind? = when (
     "claude", "claudecode", "claude_code" -> AgentKind.ClaudeCode
     "codex" -> AgentKind.Codex
     "opencode", "open_code" -> AgentKind.OpenCode
+    "grok", "grokbuild", "grok_build" -> AgentKind.GrokBuild
     else -> null
 }
 

@@ -589,6 +589,7 @@ internal object FolderTreeProjection {
         SessionAgentKind.Claude,
         SessionAgentKind.Codex,
         SessionAgentKind.OpenCode,
+        SessionAgentKind.Grok,
         SessionAgentKind.Probing,
         SessionAgentKind.Exited,
         -> true

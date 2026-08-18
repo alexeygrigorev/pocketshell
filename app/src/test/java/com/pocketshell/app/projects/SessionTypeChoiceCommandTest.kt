@@ -136,6 +136,21 @@ class SessionTypeChoiceCommandTest {
     }
 
     @Test
+    fun grokWithSkipPermissionsIsShortWrapperNoExtraFlag() {
+        val command = agentChoice(AgentCli.Grok, skip = true).startCommand()!!
+        assertEquals("pocketshell agent grok --dir '/srv/app'", command)
+    }
+
+    @Test
+    fun grokWithoutSkipPermissionsEmitsNoSkipFlag() {
+        val command = agentChoice(AgentCli.Grok, skip = false).startCommand()!!
+        assertEquals(
+            "pocketshell agent grok --dir '/srv/app' --no-skip-permissions",
+            command,
+        )
+    }
+
+    @Test
     fun openCodeIsShortWrapperAndNeverGetsSkipFlag() {
         // The checkbox is a no-op for OpenCode: same command either way and
         // never `--no-skip-permissions` (the wrapper does the billing strip).

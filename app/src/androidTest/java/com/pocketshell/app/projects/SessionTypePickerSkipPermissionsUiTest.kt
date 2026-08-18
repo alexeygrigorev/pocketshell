@@ -147,13 +147,37 @@ class SessionTypePickerSkipPermissionsUiTest {
             .fetchSemanticsNode().boundsInRoot
         val opencode = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG)
             .fetchSemanticsNode().boundsInRoot
+        val grok = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_GROK_TAG)
+            .fetchSemanticsNode().boundsInRoot
 
         assertTrue("codex should sit to the right of claude", codex.left > claude.left)
         assertTrue("opencode should sit to the right of codex", opencode.left > codex.left)
+        assertTrue("grok should sit to the right of opencode", grok.left > opencode.left)
         assertTrue("CLI segments should share one row", abs(claude.top - codex.top) < 1f)
         assertTrue("CLI segments should share one row", abs(codex.top - opencode.top) < 1f)
+        assertTrue("CLI segments should share one row", abs(opencode.top - grok.top) < 1f)
         assertTrue("CLI segments should have matching heights", abs(claude.height - codex.height) < 1f)
         assertTrue("CLI segments should have matching heights", abs(codex.height - opencode.height) < 1f)
+        assertTrue("CLI segments should have matching heights", abs(opencode.height - grok.height) < 1f)
+    }
+
+    @Test
+    fun skipPermissionsCheckboxStaysVisibleForGrok() {
+        compose.setContent {
+            PocketShellTheme {
+                SessionTypePickerContent(
+                    folderPath = "/srv/app",
+                    folderLabel = "app",
+                    onCancel = {},
+                    onCreate = {},
+                )
+            }
+        }
+
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_GROK_TAG).performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Skip permissions").assertIsDisplayed()
     }
 
     @Test

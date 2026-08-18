@@ -54,6 +54,86 @@ class AgentConversationRepositoryDetectionCommandTest {
     }
 
     @Test
+    fun detectionCommandEmitsGrokRowsForUpdatesJsonlUnderEncodedCwd() {
+        val home = File.createTempFile("ps-grok-home", "").let { tmp ->
+            tmp.delete()
+            tmp.mkdirs()
+            tmp
+        }
+        try {
+            val cwd = "/home/me/proj"
+            val encoded = "%2Fhome%2Fme%2Fproj"
+            val sessionDir = File(home, ".grok/sessions/$encoded/sess-1")
+            sessionDir.mkdirs()
+            File(sessionDir, "updates.jsonl").writeText("{}\n")
+
+            val otherDir = File(home, ".grok/sessions/%2Fother/sess-2")
+            otherDir.mkdirs()
+            File(otherDir, "updates.jsonl").writeText("{}\n")
+
+            val script = AgentConversationRepository().detectionCommand(cwd)
+            val process = ProcessBuilder("sh", "-c", script)
+                .apply { environment()["HOME"] = home.absolutePath }
+                .start()
+            val stdout = process.inputStream.bufferedReader().readText()
+            process.waitFor()
+
+            val grokRows = stdout.lineSequence().filter { it.startsWith("grok|") }.toList()
+            assertTrue(
+                "detectionCommand must emit a grok| row for updates.jsonl under the encoded cwd; got: $stdout",
+                grokRows.any { it.contains("sess-1/updates.jsonl") && it.contains(cwd) },
+            )
+            assertTrue(
+                "detectionCommand must not emit a grok| row for a different encoded cwd; got: $stdout",
+                grokRows.none { it.contains("sess-2/updates.jsonl") },
+            )
+        } finally {
+            home.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun detectionCommandHonorsGrokHomeWhenResolvingUpdatesJsonl() {
+        val home = File.createTempFile("ps-grok-default-home", "").let { tmp ->
+            tmp.delete()
+            tmp.mkdirs()
+            tmp
+        }
+        val grokHome = File.createTempFile("ps-grok-custom", "").let { tmp ->
+            tmp.delete()
+            tmp.mkdirs()
+            tmp
+        }
+        try {
+            val cwd = "/workspace/proj"
+            val encoded = "%2Fworkspace%2Fproj"
+            val sessionDir = File(grokHome, "sessions/$encoded/sess-9")
+            sessionDir.mkdirs()
+            File(sessionDir, "updates.jsonl").writeText("{}\n")
+
+            val script = AgentConversationRepository().detectionCommand(cwd)
+            val process = ProcessBuilder("sh", "-c", script)
+                .apply {
+                    environment()["HOME"] = home.absolutePath
+                    environment()["GROK_HOME"] = grokHome.absolutePath
+                }
+                .start()
+            val stdout = process.inputStream.bufferedReader().readText()
+            process.waitFor()
+
+            assertTrue(
+                "detectionCommand must honor GROK_HOME; got: $stdout",
+                stdout.lineSequence().any {
+                    it.startsWith("grok|") && it.contains("sess-9/updates.jsonl")
+                },
+            )
+        } finally {
+            home.deleteRecursively()
+            grokHome.deleteRecursively()
+        }
+    }
+
+    @Test
     fun detectionCommandUsesA120MinuteFreshnessWindowForClaude() {
         val command = AgentConversationRepository().detectionCommand("/workspace/pocketshell")
 

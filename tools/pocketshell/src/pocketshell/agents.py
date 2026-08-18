@@ -1,6 +1,6 @@
 """`pocketshell agent <kind> --dir <dir>` subcommand.
 
-Launch a coding-agent CLI (``codex`` / ``claude`` / ``opencode``) in a
+Launch a coding-agent CLI (``codex`` / ``claude`` / ``opencode`` / ``grok``) in a
 folder, server-side, replacing the giant inline ``env -u VAR1 -u VAR2 …``
 line the Android app used to type into the new tmux pane (issue #703).
 
@@ -67,6 +67,9 @@ Prompt suppression (the part that fixes "the agent doesn't start")
   wrapper pre-seeds ``projects.<dir>.hasTrustDialogAccepted = true`` before
   exec, so claude starts straight into the usable agent prompt.
 - **opencode** — config-driven; no first-run modal to suppress.
+- **grok** — no first-run trust modal. ``--always-approve`` is the
+  skip-permissions flag. Session logs live under ``$GROK_HOME/sessions``
+  (default ``~/.grok``).
 """
 
 from __future__ import annotations
@@ -81,6 +84,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import click
 
@@ -182,7 +186,7 @@ PROVIDER_ENV_UNSET_VARS: tuple[str, ...] = (
 
 # Recognised agent kinds. Order is the picker's order (claude, codex,
 # opencode) but the wrapper is keyed by name, not ordinal.
-AGENT_KINDS: tuple[str, ...] = ("codex", "claude", "opencode")
+AGENT_KINDS: tuple[str, ...] = ("codex", "claude", "opencode", "grok")
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +242,8 @@ def build_env(
             env["CODEX_HOME"] = config_dir
         elif kind == "claude":
             env["CLAUDE_CONFIG_DIR"] = config_dir
+        elif kind == "grok":
+            env["GROK_HOME"] = config_dir
 
     return env
 
@@ -271,6 +277,11 @@ def build_argv(kind: str, *, skip_permissions: bool) -> list[str]:
         return argv
     if kind == "opencode":
         return ["opencode"]
+    if kind == "grok":
+        argv = ["grok"]
+        if skip_permissions:
+            argv.append("--always-approve")
+        return argv
     raise ValueError(f"unknown agent kind: {kind!r}")
 
 
@@ -451,6 +462,19 @@ def _encode_agent_cwd(cwd: str) -> str:
     return trimmed.replace("/", "-").replace(".", "-") if trimmed else "-"
 
 
+def _encode_grok_cwd(cwd: str) -> str:
+    """Percent-encode a cwd the way Grok names ``~/.grok/sessions/<cwd>/``."""
+    trimmed = cwd.strip() or "/"
+    return quote(trimmed, safe="")
+
+
+def _grok_home() -> Path:
+    override = os.environ.get("GROK_HOME")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".grok"
+
+
 def _codex_file_cwd(path: Path) -> Optional[str]:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -504,6 +528,20 @@ def _latest_codex_source(cwd: str, started_at: float) -> Optional[str]:
     return str(max(candidates, key=_path_mtime))
 
 
+def _latest_grok_source(cwd: str, started_at: float) -> Optional[str]:
+    root = _grok_home() / "sessions" / _encode_grok_cwd(cwd)
+    if not root.is_dir():
+        return None
+    candidates = [
+        path
+        for path in root.glob("*/updates.jsonl")
+        if path.is_file() and _path_mtime(path) >= started_at
+    ]
+    if not candidates:
+        return None
+    return str(max(candidates, key=_path_mtime))
+
+
 def _latest_opencode_source(cwd: str, started_at: float) -> Optional[str]:
     db = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
     if not db.is_file():
@@ -544,6 +582,8 @@ def _latest_agent_source(
         return _latest_codex_source(cwd, started_at)
     if kind == "opencode":
         return _latest_opencode_source(cwd, started_at)
+    if kind == "grok":
+        return _latest_grok_source(cwd, started_at)
     return None
 
 
@@ -901,7 +941,8 @@ def _make_agent_command(kind: str):
         show_default=True,
         help=(
             "Launch with per-action approval prompts disabled "
-            "(codex YOLO / claude bypass). No-op for opencode."
+            "(codex YOLO / claude bypass / grok --always-approve). "
+            "No-op for opencode."
         ),
     )
     @click.option(

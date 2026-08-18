@@ -3,6 +3,7 @@ package com.pocketshell.core.agents
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -127,6 +128,89 @@ class AgentDetectorTest {
             listOf(".local/share/opencode/opencode.db"),
             hints[AgentKind.OpenCode],
         )
+        val grokHints = hints[AgentKind.GrokBuild]
+        assertTrue(
+            "Grok hint must include .grok/sessions/; got $grokHints",
+            grokHints.orEmpty().any { it.contains(".grok/sessions/") },
+        )
+        assertTrue(
+            "Grok hint must include the URL-encoded cwd; got $grokHints",
+            grokHints.orEmpty().any { it.contains("%2Fhome%2Falexey%2Fgit%2Fpocketshell") },
+        )
+    }
+
+    @Test
+    fun encodesGrokCwdAsPercentEncodedPath() {
+        assertEquals(
+            "%2Fhome%2Falexey%2Fgit%2Fpocketshell",
+            detector.encodeGrokCwd("/home/alexey/git/pocketshell"),
+        )
+        assertEquals(
+            "%2Fhome%2Fme%2Fproj",
+            detector.encodeGrokCwd("/home/me/proj"),
+        )
+    }
+
+    @Test
+    fun detectsGrokCandidateWhenPathMatchesEncodedCwd() {
+        val detection = detector.detect(
+            cwd = "/home/me/proj",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.GrokBuild,
+                    path = "/home/me/.grok/sessions/%2Fhome%2Fme%2Fproj/sess-1/updates.jsonl",
+                    modifiedAtMillis = 9_500,
+                    sessionId = "sess-1",
+                    cwd = "/home/me/proj",
+                ),
+            ),
+            processLines = listOf("1234 pts/0 00:00:01 grok --always-approve"),
+        )
+
+        assertNotNull(detection)
+        assertEquals(AgentKind.GrokBuild, detection?.agent)
+        assertEquals("sess-1", detection?.sessionId)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
+    fun rejectsGrokCandidateOutsideExpectedDirectoryTree() {
+        val detection = detector.detect(
+            cwd = "/home/me/proj",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.GrokBuild,
+                    path = "/tmp/backup/updates.jsonl",
+                    modifiedAtMillis = 9_500,
+                    cwd = "/home/me/proj",
+                ),
+            ),
+            processLines = listOf("1234 grok"),
+        )
+
+        assertNull(detection)
+    }
+
+    @Test
+    fun groqEnvLineDoesNotConfirmGrokProcess() {
+        val detection = detector.detect(
+            cwd = "/home/me/proj",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.GrokBuild,
+                    path = "/home/me/.grok/sessions/%2Fhome%2Fme%2Fproj/sess-1/updates.jsonl",
+                    modifiedAtMillis = 9_500,
+                    sessionId = "sess-1",
+                ),
+            ),
+            processLines = listOf("4242 pts/3 00:00:00 env GROQ_API_KEY=secret node app.js"),
+            requireProcessMatch = true,
+        )
+
+        assertNull(detection)
     }
 
     @Test

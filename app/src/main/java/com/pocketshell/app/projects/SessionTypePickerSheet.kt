@@ -617,6 +617,7 @@ enum class AgentCli(val command: String) {
     Claude("claude"),
     Codex("codex"),
     OpenCode("opencode"),
+    Grok("grok"),
     ;
 
     /**
@@ -630,6 +631,7 @@ enum class AgentCli(val command: String) {
         Claude -> SessionAgentKind.Claude
         Codex -> SessionAgentKind.Codex
         OpenCode -> SessionAgentKind.OpenCode
+        Grok -> SessionAgentKind.Grok
     }
 
     /**
@@ -665,7 +667,7 @@ enum class AgentCli(val command: String) {
                 ?.takeUnless { it.default }?.name
             Codex -> codexProfiles.firstOrNull { it.name == codexProfileName }
                 ?.takeUnless { it.default }?.name
-            OpenCode -> null
+            OpenCode, Grok -> null
         }?.trim()?.takeIf { it.isNotBlank() }
 
         // OpenCode's skip-permissions checkbox is a no-op, so never emit the
@@ -722,6 +724,7 @@ const val SESSION_TYPE_PICKER_AGENT_TAG: String = "session-type-picker:agent"
 const val SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG: String = "session-type-picker:agent:claude"
 const val SESSION_TYPE_PICKER_AGENT_CODEX_TAG: String = "session-type-picker:agent:codex"
 const val SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG: String = "session-type-picker:agent:opencode"
+const val SESSION_TYPE_PICKER_AGENT_GROK_TAG: String = "session-type-picker:agent:grok"
 const val SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG: String = "session-type-picker:skip-permissions"
 const val SESSION_TYPE_PICKER_CWD_TAG: String = "session-type-picker:cwd"
 const val SESSION_TYPE_PICKER_NAME_TAG: String = "session-type-picker:name"
@@ -734,13 +737,14 @@ const val SESSION_TYPE_PICKER_CODEX_PROFILE_TAG: String = "session-type-picker:c
 
 // Segment labels and per-segment tags for the shared SegmentedToggle controls.
 // AGENT_CLI_* lists are ordered to match AgentCli.entries (Claude, Codex,
-// OpenCode), so the segment index maps straight onto the enum ordinal.
+// OpenCode, Grok), so the segment index maps straight onto the enum ordinal.
 private val SESSION_TYPE_LABELS = listOf("Shell", "Agent")
-private val AGENT_CLI_LABELS = listOf("claude", "codex", "opencode")
+private val AGENT_CLI_LABELS = listOf("claude", "codex", "opencode", "grok")
 private val AGENT_CLI_SEGMENT_TAGS = listOf(
     SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG,
     SESSION_TYPE_PICKER_AGENT_CODEX_TAG,
     SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG,
+    SESSION_TYPE_PICKER_AGENT_GROK_TAG,
 )
 
 /**

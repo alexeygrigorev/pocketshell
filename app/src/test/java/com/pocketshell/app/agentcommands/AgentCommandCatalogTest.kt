@@ -82,6 +82,15 @@ class AgentCommandCatalogTest {
     }
 
     @Test
+    fun `grok curated set includes new compact export context`() {
+        val commands = AgentCommandCatalog.commandsFor(AgentKind.GrokBuild).map { it.command }
+        assertTrue(commands.contains("/new"))
+        assertTrue(commands.contains("/compact"))
+        assertTrue(commands.contains("/export"))
+        assertTrue(commands.contains("/context"))
+    }
+
+    @Test
     fun `openCode curated set leads with new compact sessions undo`() {
         val curated = AgentCommandCatalog.commandsFor(AgentKind.OpenCode)
             .take(4)

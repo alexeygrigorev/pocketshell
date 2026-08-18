@@ -11,6 +11,8 @@ import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationParser
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.GrokBuildParser
+import com.pocketshell.core.agents.GrokBuildReader
 import com.pocketshell.core.agents.OpenCodeReader
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
@@ -456,7 +458,7 @@ internal fun parseTranscriptTailLines(
             out += parser.parseLine(line)
         }
     }
-    return out
+    return if (agent == AgentKind.GrokBuild) GrokBuildReader.coalesce(out) else out
 }
 
 private fun truncatedLineByteCountOrNull(line: String): Long? {
@@ -547,7 +549,7 @@ public data class ConversationEventsWindow(
 
 private const val PROCESS_TREE_SCAN_COMMAND: String =
     "ps -eo pid,ppid,tty,comm,args 2>/dev/null | " +
-        "grep -E 'claude|codex|opencode|node' | grep -v grep || true"
+        "grep -E 'claude|codex|opencode|grok|node' | grep -v grep || true"
 
 // Issue #576: public type (the TmuxSessionViewModel constructor now takes it
 // as an injectable parameter so a burst-ingest test can wire a repository
@@ -645,7 +647,7 @@ public class AgentConversationRepository internal constructor(
     /**
      * Epic #821 slice #3 (#825): map a raw `@ps_agent_kind` option value to an
      * [AgentKind]. The launch wrapper writes the lowercase engine token
-     * (`claude` / `codex` / `opencode`); anything else (blank, a foreign
+     * (`claude` / `codex` / `opencode` / `grok`); anything else (blank, a foreign
      * session with no option, an unknown value) maps to `null`. Kept in lockstep
      * with `FolderListGateway.recordedKindFromOption`.
      */
@@ -654,6 +656,7 @@ public class AgentConversationRepository internal constructor(
             "claude" -> AgentKind.ClaudeCode
             "codex" -> AgentKind.Codex
             "opencode" -> AgentKind.OpenCode
+            "grok" -> AgentKind.GrokBuild
             else -> null
         }
 
@@ -1541,10 +1544,11 @@ public class AgentConversationRepository internal constructor(
      * `null` for a path outside a known transcript convention. Kept in lockstep
      * with the enumeration directories in [detectionCommand].
      */
-    private fun kindOfOwnedTranscriptPath(path: String): AgentKind? = when {
+    internal fun kindOfOwnedTranscriptPath(path: String): AgentKind? = when {
         path.contains("/.codex/sessions/") && path.endsWith(".jsonl") -> AgentKind.Codex
         path.contains("/.claude/projects/") && path.endsWith(".jsonl") -> AgentKind.ClaudeCode
         path.substringBefore('#').endsWith("/opencode.db") -> AgentKind.OpenCode
+        path.contains("/.grok/sessions/") && path.endsWith("/updates.jsonl") -> AgentKind.GrokBuild
         else -> null
     }
 
@@ -2281,10 +2285,12 @@ public class AgentConversationRepository internal constructor(
         // OpenCode is read exclusively from its SQLite database via the
         // [isOpenCodeSqlite] branches; it has no JSONL-tailing parser.
         AgentKind.OpenCode -> null
+        AgentKind.GrokBuild -> GrokBuildParser()
     }
 
     internal fun detectionCommand(cwd: String): String {
         val encodedClaudeCwd = detector.encodeClaudeCwd(cwd)
+        val encodedGrokCwd = detector.encodeGrokCwd(cwd)
         val quotedCwd = shellQuote(cwd)
         val sqlCwd = sqlQuote(cwd.trim().trimEnd('/').ifBlank { "/" })
         val openCodeCwdWhere = """
@@ -2339,6 +2345,8 @@ public class AgentConversationRepository internal constructor(
             codex_dir="${'$'}HOME/.codex/sessions"
             opencode_dir="${'$'}HOME/.local/share/opencode"
             opencode_db="${'$'}opencode_dir/opencode.db"
+            grok_home="${'$'}{GROK_HOME:-${'$'}HOME/.grok}"
+            grok_dir="${'$'}grok_home/sessions/$encodedGrokCwd"
             find "${'$'}claude_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'claude|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
@@ -2364,6 +2372,10 @@ public class AgentConversationRepository internal constructor(
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'codex|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
+            find "${'$'}grok_dir" -type f -name 'updates.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
+              mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
+              printf 'grok|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
+            done
             if [ -f "${'$'}opencode_db" ] && command -v sqlite3 >/dev/null 2>&1; then
               sqlite3 -readonly -separator '|' "${'$'}opencode_db" ${shellQuote(openCodeSessionQuery)} 2>/dev/null | while IFS='|' read -r sid updated _worktree _directory; do
                 [ -n "${'$'}sid" ] || continue
@@ -2386,6 +2398,7 @@ public class AgentConversationRepository internal constructor(
             "claude" -> AgentKind.ClaudeCode
             "codex" -> AgentKind.Codex
             "opencode" -> AgentKind.OpenCode
+            "grok" -> AgentKind.GrokBuild
             else -> return null
         }
         val seconds = parts[1].toDoubleOrNull() ?: return null
@@ -2397,6 +2410,8 @@ public class AgentConversationRepository internal constructor(
             modifiedAtMillis = (seconds * 1000).toLong(),
             sessionId = when {
                 agent == AgentKind.OpenCode && "#" in path -> path.substringAfter('#')
+                agent == AgentKind.GrokBuild && path.endsWith("/updates.jsonl") ->
+                    path.removeSuffix("/updates.jsonl").substringAfterLast('/')
                 else -> path.substringAfterLast('/').substringBeforeLast('.')
             },
             cwd = cwd,

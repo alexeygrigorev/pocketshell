@@ -26,6 +26,7 @@ private fun String?.toSessionAgentKindOrNull(): SessionAgentKind? = when (this) 
     "claude" -> SessionAgentKind.Claude
     "codex" -> SessionAgentKind.Codex
     "opencode" -> SessionAgentKind.OpenCode
+    "grok" -> SessionAgentKind.Grok
     else -> null
 }
 
@@ -33,6 +34,7 @@ private fun SessionAgentKind.toRegistryKindString(): String? = when (this) {
     SessionAgentKind.Claude -> "claude"
     SessionAgentKind.Codex -> "codex"
     SessionAgentKind.OpenCode -> "opencode"
+    SessionAgentKind.Grok -> "grok"
     else -> null
 }
 

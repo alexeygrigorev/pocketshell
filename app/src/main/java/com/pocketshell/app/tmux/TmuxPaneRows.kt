@@ -44,12 +44,14 @@ internal fun parsePaneRow(line: String): TmuxSessionViewModel.ParsedPane? {
         // Epic #821 slice A2: `#{pane_pid}` for the foreign-session kind guess.
         // Older tmux (or unit tests on the legacy format) omit it -> 0.
         panePid = parts.getOrNull(paneIndexIndex + 5)?.trim()?.toLongOrNull() ?: 0L,
-        // Issue #1158: `#{alternate_on}` is the LAST field — the SERVER-TRUTH
-        // alternate-screen flag that drives the detection-independent alt-buffer
-        // agent latch. Older tmux / legacy-format tests omit it -> false (no
-        // latch), preserving the #894 no-flap invariant for a plain shell.
+        // Issue #1158: `#{alternate_on}` — SERVER-TRUTH alt-buffer flag.
+        // Older tmux / legacy-format tests omit it -> false (no latch).
         alternateOn = parseTmuxBoolean(parts.getOrNull(paneIndexIndex + 6)),
         sessionCreated = parts.getOrNull(paneIndexIndex + 7)?.trim()?.toLongOrNull(),
+        // Issue #2155: `#{@ps_agent_source_generation}` — last field. Absent
+        // (older tmux / legacy-format tests) -> empty, so detection input is
+        // unchanged from the pre-#2155 (cwd, command, tty) key.
+        sourceGeneration = parts.getOrNull(paneIndexIndex + 8)?.trim().orEmpty(),
         sessionName = sessionName,
     )
 }

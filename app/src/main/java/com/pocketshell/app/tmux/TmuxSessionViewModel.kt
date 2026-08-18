@@ -1123,8 +1123,28 @@ public class TmuxSessionViewModel @Inject constructor(
         // real wire. Production default is false (the real probe runs).
         if (forceLivenessProbeDeadForTest) return false
         val client = clientRef ?: return false
-        return runCatching { client.probeLiveness(requireAnsweredRoundTrip) }.getOrDefault(false)
+        val alive = runCatching { client.probeLiveness(requireAnsweredRoundTrip) }.getOrDefault(false)
+        // #2155: same-command relaunch emits no structural event; peek generation
+        // on the existing liveness cadence (no new timer / no extra open-path RT).
+        if (alive) bridgeScope.launch { recheckSourceGeneration() }
+        return alive
     }
+
+    /** #2155: if `@ps_agent_source_generation` moved, re-run detection. */
+    private suspend fun recheckSourceGeneration() {
+        val session = sessionRef ?: return
+        val pane = _panes.value.firstOrNull() ?: return
+        if (_agentConversations.value.none { it.value.detection != null }) return
+        val gen = agentRepository.readRecordedSourceGeneration(session, pane.sessionId)
+            ?.trim().orEmpty()
+        if (gen.isEmpty()) return
+        for (row in paneRows.values) {
+            startAgentDetectionForPane(row, sourceGeneration = gen)
+        }
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun recheckSourceGenerationForTest() = recheckSourceGeneration()
 
     /** Issue #964 keepalive-coordination guard — rationale + seam order in [keepAliveProvenAliveRecently]. */
     private fun isTransportKeepAliveProvenAliveRecently(): Boolean =
@@ -2224,10 +2244,9 @@ public class TmuxSessionViewModel @Inject constructor(
     // from "read = foreign/null" (present-but-null) so a foreign session is not
     // re-probed on every reconcile either. Cleared with the other per-runtime
     // detection maps on park/restore/clear so a different session never inherits
-    // a stale recorded KIND. Issue #2155: the SOURCE is deliberately NOT cached
-    // — the kind is fixed for a session's life, the source is not (every agent
-    // launch mints a new `@ps_agent_source_generation`), so it is re-read live
-    // inside the detection exec at zero extra round-trip cost.
+    // a stale recorded KIND. #2155: SOURCE is not cached — generation rides
+    // list-panes + the existing liveness cadence so a same-command relaunch
+    // re-reads it at zero extra open-path round-trip.
     private val sessionRecordedKindCache: MutableMap<String, RecordedKindCacheEntry> =
         ConcurrentHashMap()
     // Epic #821 slice A2: per-tmux-session cache of the ONE-SHOT FOREIGN kind
@@ -9812,7 +9831,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // status (user opted into Terminal, or a prior Conversation row) is
             // NEVER overwritten (no #815 mid-session yank).
             seedPresumedAgentPlaceholder(row)
-            startAgentDetectionForPane(row, refreshGuard)
+            startAgentDetectionForPane(row, refreshGuard, p.sourceGeneration)
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return emptyList()
 
@@ -12559,11 +12578,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * round-trip) on every reconcile — defeating the cache for exactly the
      * sessions that have no recorded kind to find.
      *
-     * Issue #2155: KIND only. The cached `@ps_agent_source` + its
-     * `sourceGenerationScoped` flag short-circuited every later resolve, so the
-     * Conversation stayed on the previous agent's transcript after an in-session
-     * relaunch; that flag inverted the generation's purpose (it EXPIRES a
-     * source). Both are deleted — `detectRecordedSessionForPane` resolves live.
+     * #2155: KIND only. The source is re-read live; caching it was the stale tab.
      */
     private class RecordedKindCacheEntry(val kind: AgentKind?)
 
@@ -12709,17 +12724,16 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun startAgentDetectionForPane(
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard? = null,
+        // #2155: live `@ps_agent_source_generation` from list-panes / liveness.
+        sourceGeneration: String = "",
     ) {
         val session = sessionRef ?: return
         val cwd = pane.cwd.takeIf { it.isNotBlank() } ?: return
         val command = pane.currentCommand
         val tty = pane.paneTty
-        // Issue #186: include the pane TTY in the dedup key so a tmux
-        // re-attach that re-assigns the pane to a different `/dev/pts/N`
-        // re-runs detection. Without the tty in the key, a pane that
-        // moved between ttys would keep its stale "no agent" verdict
-        // even after the agent CLI was started on the new tty.
-        val input = Triple(cwd, command, tty)
+        // Issue #186: include the pane TTY so a re-attach that rotates `/dev/pts`
+        // re-runs detection. #2155: generation rides the same key (`/new`).
+        val input = Triple(cwd, command, "$tty\u0000${sourceGeneration.trim()}")
         // Issue #1641 (C2): re-classify a CONFIRMED-SHELL pane ONLY on a real
         // trigger — its detection input `(cwd, command, tty)` changing since the
         // last probe — NOT on every reconcile.
@@ -17393,6 +17407,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // false for older tmux / tests that omit the field.
         val alternateOn: Boolean = false,
         val sessionCreated: Long? = null,
+        // #2155: `#{@ps_agent_source_generation}` from list-panes. Empty if absent.
+        val sourceGeneration: String = "",
         val sessionName: String = "",
     )
 

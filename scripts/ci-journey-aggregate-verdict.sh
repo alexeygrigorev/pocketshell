@@ -51,6 +51,11 @@
 #                  mismatch and fails closed to RED (#1913). Genuine typed
 #                  INFRA shards finish successfully, so their upstream result
 #                  is `success` and their aggregate remains green RE-RUN.
+#   CI_JOURNEY_PROGRESS_DIR (env, optional) extra-runner last-completed-class
+#                  records collected by ci-journey-progress-telemetry.sh
+#                  (issue #2090). When a shard is missing, the last class and
+#                  job metadata are printed as an INFRA diagnostic. This never
+#                  flips CLEAN/RED — attendance fail-closed stays with #2082.
 #
 # Verdict / exit code:
 #   CLEAN   every shard reported CLEAN (and none are missing). exit 0.
@@ -92,6 +97,7 @@ one_shot_shards=()
 external_setup_infra_shards=()
 unclassified_infra=0
 fresh_tokens=0
+reported_shards=()
 
 current_attempt="${GITHUB_RUN_ATTEMPT:-}"
 [[ "$current_attempt" =~ ^[0-9]+$ ]] || current_attempt=""
@@ -172,6 +178,9 @@ if [[ -d "$verdict_dir" ]]; then
 
     count=$((count + 1))
     tokens+=("$token")
+    if [[ "$tok_shard" =~ ^[0-9]+$ ]]; then
+      reported_shards+=("$tok_shard")
+    fi
     case "$token" in
       CLEAN) have_clean=$((have_clean + 1)) ;;
       INFRA) have_infra=$((have_infra + 1)) ;;
@@ -188,6 +197,44 @@ fi
 
 echo "per-shard verdict tokens found: ${count} ${tokens[*]:-<none>}"
 echo "  CLEAN=$have_clean  INFRA=$have_infra  RED=$have_red  UNKNOWN=$have_unknown  MISSING=$missing (expected ${expected_shards})"
+
+# Issue #2090: a vanished shard may still have extra-runner last-completed-class
+# telemetry. That is INFRA diagnostic, never a product CLEAN/RED flip — #2082
+# still owns fail-closed attendance, and missing stays at least RE-RUN.
+progress_dir="${CI_JOURNEY_PROGRESS_DIR:-}"
+if (( missing > 0 )) && [[ -n "$progress_dir" && -d "$progress_dir" ]]; then
+  progress_idx=0
+  while (( progress_idx < expected_shards )); do
+    shard_seen=0
+    for seen in "${reported_shards[@]:-}"; do
+      if [[ "$seen" == "$progress_idx" ]]; then
+        shard_seen=1
+        break
+      fi
+    done
+    if (( shard_seen == 0 )); then
+      progress_file=""
+      for candidate in "$progress_dir"/journey-progress-shard-${progress_idx}-*.txt \
+                       "$progress_dir"/*shard-${progress_idx}*.txt; do
+        [[ -f "$candidate" ]] || continue
+        progress_file="$candidate"
+        break
+      done
+      if [[ -n "$progress_file" ]]; then
+        last_class="$(sed -n 's/^last_completed_class=//p' "$progress_file" | head -n 1)"
+        last_status="$(sed -n 's/^last_completed_status=//p' "$progress_file" | head -n 1)"
+        in_progress="$(sed -n 's/^in_progress_class=//p' "$progress_file" | head -n 1)"
+        job_name="$(sed -n 's/^job_name=//p' "$progress_file" | head -n 1)"
+        run_id="$(sed -n 's/^run_id=//p' "$progress_file" | head -n 1)"
+        run_attempt="$(sed -n 's/^run_attempt=//p' "$progress_file" | head -n 1)"
+        [[ -n "$last_class" ]] || last_class="(none recorded)"
+        echo "missing shard ${progress_idx} last-completed-class (infra diagnostic, issue #2090): ${last_class} status=${last_status:-unknown} in_progress=${in_progress:-} job=${job_name:-unknown} run=${run_id:-unknown} attempt=${run_attempt:-unknown}"
+        echo "::notice title=Emulator journey shard ${progress_idx} last-completed-class (infra)::owner=infra signature=hosted_runner_progress last_completed_class=${last_class} — diagnostic only, not a product verdict (issue #2090)"
+      fi
+    fi
+    progress_idx=$((progress_idx + 1))
+  done
+fi
 
 # Issue #1809: per-shard provenance, so a G5 "clean re-run" claim is backed by
 # the artifact rather than by which button someone remembers pressing.

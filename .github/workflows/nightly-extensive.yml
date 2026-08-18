@@ -132,6 +132,10 @@ jobs:
     needs: guard
     if: needs.guard.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+      checks: write
     # SHARD (issue #835 follow-up): the full connected suite is ~680 tests and
     # could NOT finish serially on ONE swiftshader AVD inside this ceiling
     # (a triage run reached only 544/683 at the 150-min timeout, so phases 2 & 3
@@ -431,6 +435,10 @@ jobs:
             **/build/outputs/connected_android_test_additional_output/
             artifacts/nightly-extensive/
           if-no-files-found: ignore
+
+      - name: "Mark journey progress artifacts-uploaded (issue #2090)"
+        if: always()
+        run: scripts/ci-journey-progress-telemetry.sh artifacts-uploaded || true
 
       - name: Upload Docker logs
         if: always()

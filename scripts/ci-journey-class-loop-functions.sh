@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # Journey class retry loop and result buckets for scripts/ci-journey-suite.sh.
 
+# Issue #2090: fail-soft last-completed-class heartbeat. A missing helper, a
+# publish fault, or a non-CI invocation must never change a class verdict.
+ci_journey_progress_event() {
+  local helper="${CI_JOURNEY_PROGRESS_HELPER:-}"
+  if [[ -z "$helper" && -n "${REPO_ROOT:-}" ]]; then
+    helper="$REPO_ROOT/scripts/ci-journey-progress-telemetry.sh"
+  fi
+  [[ -n "$helper" && -f "$helper" ]] || return 0
+  bash "$helper" "$@" || true
+}
+
 # run_journey_classes_with_retry - issue #712.
 #
 # The per-push job runs on the GitHub `android-emulator-runner` AVD - a 2-core
@@ -77,6 +88,7 @@ run_journey_classes_with_retry() {
       STEP_TIMEOUT_HIT=1
       echo "JOURNEY_STEP_TIMEOUT: suite budget (${JOURNEY_STEP_BUDGET_SECS}s) exhausted before $fqcn — not run (issue #835 / #470 stall)"
       BUDGET_TIMEOUT_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" budget_skipped
       continue
     fi
 
@@ -85,6 +97,7 @@ run_journey_classes_with_retry() {
     echo "=========================================================="
     class_start=$SECONDS
     class_wedged=0
+    ci_journey_progress_event class-started "$fqcn"
 
     run_class "$fqcn"
     rc=$?
@@ -98,11 +111,13 @@ run_journey_classes_with_retry() {
     if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
       echo "JOURNEY_ISOLATION_FAILURE: $fqcn primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every retry/next class because isolation is unproven"
       FAILED_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" isolation_failure
       break
     fi
     if [[ $rc -eq 0 ]]; then
       echo "JOURNEY_PASS: $fqcn passed on attempt 1 (elapsed $((SECONDS - class_start))s)"
       PASSED_FIRST_TRY+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" pass
       continue
     fi
 
@@ -114,11 +129,13 @@ run_journey_classes_with_retry() {
       STEP_TIMEOUT_HIT=1
       echo "JOURNEY_STEP_TIMEOUT: $fqcn attempt 1 exhausted the suite budget (rc=$rc) — not retried (issue #835 / #470 stall)"
       BUDGET_TIMEOUT_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" budget_timeout
       continue
     fi
     if budget_exhausted; then
       echo "JOURNEY_FAILED: $fqcn failed before retry and cleanup exhausted the suite budget (rc=$rc)"
       FAILED_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" fail
       continue
     fi
 
@@ -142,6 +159,7 @@ run_journey_classes_with_retry() {
     if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
       echo "JOURNEY_ISOLATION_FAILURE: $fqcn retry primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every next class because isolation is unproven"
       FAILED_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" isolation_failure
       break
     fi
     if [[ $rc -eq 0 ]]; then
@@ -149,6 +167,7 @@ run_journey_classes_with_retry() {
       # degrading trend is detectable in the CI logs.
       echo "JOURNEY_FLAKE_RECOVERED: $fqcn passed on retry (attempt 2) (retry elapsed $((SECONDS - retry_start))s)"
       RECOVERED_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" flake_recovered
     elif class_attempt_hit_time_budget "$rc"; then
       # rc=124 == `timeout` sent TERM at the class cap; rc=137 == the command
       # survived TERM and hit the SIGKILL backstop. Either way this is a time-
@@ -158,12 +177,15 @@ run_journey_classes_with_retry() {
       STEP_TIMEOUT_HIT=1
       echo "JOURNEY_STEP_TIMEOUT: $fqcn retry was cut by the suite budget (rc=$rc) (issue #835 / #470 stall)"
       BUDGET_TIMEOUT_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" budget_timeout
     elif budget_exhausted; then
       echo "JOURNEY_FAILED: $fqcn retry failed and cleanup exhausted the suite budget (rc=$rc)"
       FAILED_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" fail
     else
       echo "JOURNEY_FAILED: $fqcn failed twice"
       FAILED_CLASSES+=("$fqcn")
+      ci_journey_progress_event class-completed "$fqcn" fail
     fi
 
     # Issue #2143: a class that failed while the SHARED fixture was not answering

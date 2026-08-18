@@ -22,7 +22,10 @@ import com.pocketshell.uikit.theme.PocketShellColors
 @Composable
 internal fun ConversationSyncStatusRow(
     syncStatus: AgentConversationSyncStatus,
-    hasEvents: Boolean = true,
+    // Issue #2185: required. A default of `true` silently disables the
+    // Live-over-empty fence at any future call site that forgets the
+    // argument — and the call site still looks correct.
+    hasEvents: Boolean,
     onRetry: (() -> Unit)? = null,
 ) {
     // Issue #2159: the row NEVER renders the raw status. `Live` over an empty

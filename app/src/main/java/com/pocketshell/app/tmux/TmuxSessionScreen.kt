@@ -1606,12 +1606,11 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
         val controlsInputEnabled = sessionLive && pane != null
         TmuxSessionBottomBandPlacement(
             isImeVisible = isImeVisible,
-            onConversationTab = showConversation || showConversationPlaceholder,
+            onConversationTab = tmuxSessionBottomControlsShowsConversation(currentSelectedTab),
             modifier = Modifier.fillMaxWidth(),
         ) {
                 TmuxSessionBottomControlsCallSite(
-                    showConversationTranscript = showConversation,
-                    showConversationDetectingPlaceholder = showConversationPlaceholder,
+                    selectedTab = currentSelectedTab,
                     sessionLive = controlsInputEnabled,
                     terminalHeld = terminalHeld,
                     onDictateTap = {

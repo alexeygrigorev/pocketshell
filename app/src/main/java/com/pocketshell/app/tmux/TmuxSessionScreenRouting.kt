@@ -152,32 +152,29 @@ internal fun tmuxSessionHasPositiveAgentEvidence(
 ): Boolean = hasLiveDetection || hasStickyAgent || recordedAgentKind
 
 /**
- * Issue #805 (regression of #744/#716): whether the bottom-bar chrome wears its
+ * Issue #805 / #1979 / #2191: whether the bottom-bar chrome wears its
  * CONVERSATION layout — i.e. drops the Terminal-tab chips (`Enter` /
- * `show keyboard` / `hotkeys`) so the composer launcher fits.
+ * `show keyboard` / `hotkeys`) so the composer launcher fits and the
+ * Terminal-only show-keyboard chip is unreachable.
  *
- * This must follow the Conversation TAB, not the detection-gated transcript.
- * The screen has two distinct "conversation is showing" signals:
+ * This must follow the Conversation TAB itself, never the content-area
+ * surface. [tmuxSessionConversationSurface] can return
+ * [TmuxConversationSurface.Terminal] while Conversation is selected (the
+ * visible pane is not yet the active runtime pane, or there is no
+ * transcript to mount). Keying chrome off that surface left the
+ * show-keyboard chip reachable on Conversation — the #2191 leak that
+ * `TmuxSessionOpencodeInputDockerTest` counted as `expected:<0> but was:<1>`.
  *
- *  - [showConversationTranscript] — the heavyweight live transcript is mounted
- *    (detection has landed). The OLD bottom-bar predicate.
- *  - [showConversationDetectingPlaceholder] — the user is on the Conversation
- *    tab but the agent engine is still being detected (`detection == null`), so
- *    the "Loading conversation…" placeholder is shown instead.
- *
- * On v0.4.7 the bottom bar keyed its Conversation chrome off the transcript
- * signal ALONE. During detection (placeholder shown, transcript not yet mounted)
- * the bar fell back to the THREE Terminal chips, which overflowed the primary
- * cluster and pushed the composer launcher off the right edge — the maintainer's
- * "composer absent while the agent is being detected" symptom (#805). The #744
- * invariant is that the composer stays reachable throughout the detection
- * window; this helper restores it by treating the WHOLE Conversation tab
- * (detecting OR loaded) as conversation chrome.
+ * On v0.4.7 the bar keyed Conversation chrome off the live transcript
+ * alone, so the detecting-placeholder window fell back to the three
+ * Terminal chips and pushed the composer off-screen (#805). Treating the
+ * tab as the single signal keeps chrome conversation-shaped for the
+ * whole Conversation tab (detecting, loaded, or content still on
+ * Terminal) and keeps Terminal chrome on the Terminal tab.
  */
 internal fun tmuxSessionBottomControlsShowsConversation(
-    showConversationTranscript: Boolean,
-    showConversationDetectingPlaceholder: Boolean,
-): Boolean = showConversationTranscript || showConversationDetectingPlaceholder
+    selectedTab: SessionTab?,
+): Boolean = selectedTab == SessionTab.Conversation
 
 /**
  * Issue #761 / #454: whether the bottom controls surface the saved-snippet

@@ -3,9 +3,11 @@ package com.pocketshell.app.tmux
 import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.proof.AgentsFixtureTarget
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
+import com.pocketshell.app.proof.NetworkFaultPorts
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.ToxiproxyControl
 import com.pocketshell.app.proof.waitForSshFixtureReady
@@ -657,8 +659,10 @@ class ConversationOpenLatencyRttDockerTest {
         "'" + value.replace("'", "'\"'\"'") + "'"
 
     private companion object {
-        const val NETWORK_FAULT_SSH_PORT: Int = 2228
-        const val TOXIPROXY_API_PORT: Int = 8474
+        val NETWORK_FAULT_SSH_PORT: Int
+            get() = NetworkFaultPorts.faultSshPort(AgentsFixtureTarget.port)
+        val TOXIPROXY_API_PORT: Int
+            get() = NetworkFaultPorts.toxiproxyApiPort(AgentsFixtureTarget.port)
 
         // Issue #828: the RTT the <0.3s gate is asserted at — the realistic-good
         // 80 ms phone-to-remote link. 150 ms is measured + reported but not gated

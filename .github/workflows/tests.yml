@@ -489,6 +489,18 @@ jobs:
           chmod +x scripts/test-agents-pool-isolation.sh
           scripts/test-agents-pool-isolation.sh
 
+      # Issue #2128: --pool promised a distinct (emulator, agents-port) claim
+      # but NetworkFaultProofBase hard-coded 2222/2228 and Toxiproxy upstream
+      # agents:22, so fault-class lanes stayed pinned to the shared fixture
+      # and siblings wiped it mid-run (empty session list). Fast, JVM-free,
+      # no docker daemon: proves the pin is gone, two pool lanes get disjoint
+      # fault ports, compose is parameterized, and a wiped proxy is rc 90
+      # with a banner that cannot be read as a product failure.
+      - name: "Network-fault pool isolation guard (issue #2128)"
+        run: |
+          chmod +x scripts/test-network-fault-pool-isolation.sh
+          scripts/test-network-fault-pool-isolation.sh
+
       # Issue #2143 (rationale + case list in the script header). Fast, stubbed:
       # no JVM, no Docker, no emulator.
       - name: "Shared SSH/tmux fixture health guard (issue #2143)"

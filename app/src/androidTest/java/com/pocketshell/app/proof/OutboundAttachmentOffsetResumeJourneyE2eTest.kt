@@ -1331,9 +1331,11 @@ class OutboundAttachmentOffsetResumeJourneyE2eTest {
         const val SSHD_SNAPSHOT = "ps -o pid,ppid,stat,cmd -u testuser | grep '[s]shd' || true"
         const val PRESERVED_DEVICE_ROOT = "/sdcard/Download/pocketshell-issue1733"
         const val NETWORK_FAULT_ARG = "pocketshellNetworkFaultProofs"
-        const val DIRECT_AGENTS_SSH_PORT = 2222
-        const val NETWORK_FAULT_SSH_PORT = 2228
-        const val TOXIPROXY_API_PORT = 8474
+        val DIRECT_AGENTS_SSH_PORT: Int get() = DEFAULT_PORT
+        val NETWORK_FAULT_SSH_PORT: Int
+            get() = NetworkFaultPorts.faultSshPort(AgentsFixtureTarget.port)
+        val TOXIPROXY_API_PORT: Int
+            get() = NetworkFaultPorts.toxiproxyApiPort(AgentsFixtureTarget.port)
         val CLAIMED_OUTBOUND_STATES = setOf(OutboundState.Uploading, OutboundState.InFlight)
         const val ATTACHING_LABEL = "Attaching…"
 

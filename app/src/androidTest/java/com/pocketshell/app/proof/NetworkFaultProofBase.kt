@@ -65,10 +65,13 @@ import java.util.concurrent.CopyOnWriteArrayList
  * Shared harness for opt-in network-fault proof tests.
  *
  * The tests route PocketShell through the Docker `network-fault-proxy`
- * service on host port 2228. Control traffic uses Toxiproxy's HTTP API
- * on host port 8474. Toxiproxy documents `timeout=0` as a non-closing
- * data drop, which gives us a half-open/no-FIN failure instead of the
- * existing EOF/process-kill fixtures.
+ * service. Single-lane / nightly keep host port 2228 and Toxiproxy's HTTP
+ * API on 8474. A `connected-test.sh --pool` lane derives a disjoint pair
+ * from its claimed agents port ([NetworkFaultPorts]) and talks to its own
+ * compose-project proxy (issue #2128) so a sibling cannot wipe the shared
+ * 2222/2228 fixture out from under it. Toxiproxy documents `timeout=0` as
+ * a non-closing data drop, which gives us a half-open/no-FIN failure
+ * instead of the existing EOF/process-kill fixtures.
  */
 abstract class NetworkFaultProofBase {
 
@@ -119,6 +122,7 @@ abstract class NetworkFaultProofBase {
                 "agents network-fault-proxy packet-loss-proxy`.",
             enabled,
         )
+        NetworkFaultPorts.checkNotPinnedToSharedFixture(AgentsFixtureTarget.port)
         networkFaultProofEnabled = true
     }
 
@@ -131,7 +135,11 @@ abstract class NetworkFaultProofBase {
             .use { it.readText() }
 
     protected fun toxiproxy(): ToxiproxyControl =
-        ToxiproxyControl(baseUrl = "http://$DEFAULT_HOST:$TOXIPROXY_API_PORT")
+        ToxiproxyControl(
+            baseUrl = "http://$DEFAULT_HOST:$TOXIPROXY_API_PORT",
+            listen = NetworkFaultPorts.CONTAINER_LISTEN,
+            upstream = NetworkFaultPorts.CONTAINER_UPSTREAM,
+        )
 
     /**
      * Issue #1681 — open the UN-PROXIED sentinel: a direct SSH connection to the
@@ -1075,9 +1083,12 @@ abstract class NetworkFaultProofBase {
 
     protected companion object {
         const val NETWORK_FAULT_ARG: String = "pocketshellNetworkFaultProofs"
-        const val NETWORK_FAULT_SSH_PORT: Int = 2228
-        const val PACKET_LOSS_SSH_PORT: Int = 2229
-        const val TOXIPROXY_API_PORT: Int = 8474
+        val NETWORK_FAULT_SSH_PORT: Int
+            get() = NetworkFaultPorts.faultSshPort(AgentsFixtureTarget.port)
+        val PACKET_LOSS_SSH_PORT: Int
+            get() = NetworkFaultPorts.packetLossSshPort(AgentsFixtureTarget.port)
+        val TOXIPROXY_API_PORT: Int
+            get() = NetworkFaultPorts.toxiproxyApiPort(AgentsFixtureTarget.port)
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue342-network-faults"
 

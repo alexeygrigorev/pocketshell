@@ -76,12 +76,16 @@ set -euo pipefail
 #                        emulator serial is claimable as a SECOND lane (single
 #                        AVD, e.g. CI), --pool falls back cleanly to that one
 #                        emulator + port 2222.
-#                        WARNING: the toxiproxy network-fault proxies
-#                        (NetworkFaultProofBase: hardcoded 10.0.2.2:2228 / API
-#                        8474, single shared proxy) are NOT pool-isolated, so two
-#                        network-fault lanes corrupt each other's toxics. The
-#                        wrapper warns + serializes network-fault classes onto a
-#                        single shared lock even under --pool (issue #776 P3).
+#                        Network-fault classes under --pool (issue #2128) get a
+#                        per-lane toxiproxy + packet-loss proxy on the same
+#                        compose project as the claimed agents fixture, derived
+#                        from that agents port (2243 -> 2253/2263/8495). They
+#                        no longer attach through the shared 2228/8474
+#                        singleton. The wrapper still serializes fault-class
+#                        runs on the machine-wide toxiproxy lock (issue #776
+#                        P3) so a --no-pool sibling cannot race the shared
+#                        singleton; isolation is what stops a sibling wipe
+#                        presenting as an empty session list.
 #   --no-pool            Force the legacy single-lane path even for a journey/E2e
 #                        class that would otherwise auto-default to --pool (P2).
 #                        Still honours the P0/P1 base-sweep + serial-pin hygiene.
@@ -393,17 +397,14 @@ if [[ "$POOL_FLAG" == "0" && "$CLEANUP_ONLY" != "1" ]]; then
   fi
 fi
 
-# P3 (issue #776) — network-fault classes share ONE global toxiproxy.
-# NetworkFaultProofBase connects to a HARDCODED 10.0.2.2:2228 / API 8474 single
-# shared proxy and its @After does toxiproxy().reset(); --pool does NOT isolate
-# that (it only relocates the agents SSH port, not the fault proxy). So two
-# network-fault lanes running concurrently reset/blackhole/latency EACH OTHER's
-# connection mid-test -> a spurious `Broken transport: EOF` on the innocent lane.
-# Until the per-lane toxiproxy plumbing lands (research P3, an M-sized Kotlin +
-# compose change), detect a network-fault class here and SERIALIZE it: force
-# every such run onto ONE shared lock file regardless of emulator, so at most one
-# network-fault lane touches the singleton proxy at a time. Detection matches the
-# known NetworkFaultProofBase-derived class names.
+# P3 (issue #776) + #2128 — network-fault classes used to share ONE global
+# toxiproxy (hardcoded 10.0.2.2:2228 / API 8474). --pool now isolates that:
+# a pool lane brings up its own network-fault-proxy under the claimed
+# agents compose project and NetworkFaultPorts derives the host ports from
+# the agents port. The machine-wide toxiproxy lock still serializes
+# fault-class runs so a --no-pool sibling on the shared 2228 singleton
+# cannot race another --no-pool (or a pool fallback to 2222). Detection
+# matches the known NetworkFaultProofBase-derived class names.
 NETWORK_FAULT_RUN=0
 gradle_args_str="${GRADLE_ARGS[*]:-}"
 if [[ "$CLEANUP_ONLY" != "1" ]]; then
@@ -411,7 +412,10 @@ if [[ "$CLEANUP_ONLY" != "1" ]]; then
     *NetworkFault*|*NetworkLatencyModel*|*PacketLoss*|*DisconnectBlackhole*\
       |*DisconnectFlap*|*KeepAliveDeadPeer*|*RideThrough*|*WithinGrace*\
       |*StaleLeaseSwitchRecovery*|*CodexRedrawOverflowReconnect*\
-      |*OutboundAttachmentOffsetResumeJourneyE2eTest*)
+      |*OutboundAttachmentOffsetResumeJourneyE2eTest*\
+      |*SilentMidSessionDrop*|*ColdDialUnderBandwidth*|*RealisticWifiStability*\
+      |*NatIdleMapping*|*MobileLatencyStorm*|*PushResumeDeadSocket*\
+      |*ConversationOpenLatency*)
       NETWORK_FAULT_RUN=1
       ;;
   esac
@@ -423,7 +427,7 @@ if [[ "$NETWORK_FAULT_RUN" == "1" ]]; then
   # pool emulators each hold their own serial lock but must still not share the
   # singleton proxy, so they queue on this one shared lock.
   POCKETSHELL_TOXIPROXY_SERIALIZED=1
-  printf 'Network-fault class detected (issue #776 P3): the toxiproxy proxy is a global singleton, so this run is SERIALIZED on a shared lock (no concurrent network-fault lanes).\n' >&2
+  printf 'Network-fault class detected (issue #776 P3 / #2128): serialized on the shared toxiproxy lock; a --pool lane still gets its own derived proxy so a sibling wipe of 2222/2228 cannot look like a product failure.\n' >&2
 fi
 
 # Issue #2007: own this checkout's Gradle OUTPUT TREE before ANY other shared
@@ -514,6 +518,29 @@ if [[ "$USE_POOL" == "1" && -z "${POCKETSHELL_AGENTS_PORT:-}" ]]; then
     exit 1
   fi
   printf 'Pool mode: agents fixture on host port %s\n' "${POCKETSHELL_AGENTS_PORT:-?}" >&2
+fi
+
+# Issue #2128: a pool fault-class lane must actually HAVE a per-lane
+# toxiproxy. Claiming agents:2243 and then attaching through the shared
+# 2228 proxy is the pin this issue exists to kill. Bring the proxies up
+# on the derived host ports under this lane's compose project, then
+# fingerprint the proxy so a mid-run wipe is rc 90, not an empty session
+# list. Single-lane / 2222 fallback keeps the historical shared proxy
+# (started by nightly / the caller) and does not recreate it here.
+if [[ "$CLEANUP_ONLY" != "1" && "$NETWORK_FAULT_RUN" == "1" \
+      && "$USE_POOL" == "1" \
+      && -n "${POCKETSHELL_AGENTS_PORT:-}" \
+      && "${POCKETSHELL_AGENTS_PORT}" != "2222" ]]; then
+  if ! pocketshell_network_fault_fixture_up "$ROOT_DIR" "$POCKETSHELL_AGENTS_PORT"; then
+    printf 'FAIL: could not bring up the per-lane network-fault proxy for agents port %s (issue #2128).\n' \
+      "$POCKETSHELL_AGENTS_PORT" >&2
+    exit 1
+  fi
+  pocketshell_network_fault_record_fixture_identity "$POCKETSHELL_AGENTS_PORT"
+  printf 'Pool mode: network-fault proxy on host port %s (API %s) for agents %s\n' \
+    "$(pocketshell_network_fault_ssh_port "$POCKETSHELL_AGENTS_PORT")" \
+    "$(pocketshell_toxiproxy_api_port "$POCKETSHELL_AGENTS_PORT")" \
+    "$POCKETSHELL_AGENTS_PORT" >&2
 fi
 
 # Optional same-run fixture evidence. The capture happens while this wrapper still

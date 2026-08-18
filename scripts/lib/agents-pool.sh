@@ -132,6 +132,100 @@ pocketshell_agents_compose_env_for_port() {
 }
 
 # ---------------------------------------------------------------------------
+# Network-fault / packet-loss / Toxiproxy host ports (issue #2128)
+#
+# NetworkFaultProofBase used to hardcode 2228/2229/8474, so a --pool lane
+# that had claimed agents:2243 still attached through the shared
+# pocketshell-test-network-fault-proxy (upstream agents:22 = the 2222
+# fixture). Keep these offsets in lockstep with NetworkFaultPorts.kt
+# (POOL_FAULT_SSH_OFFSET / POOL_PACKET_LOSS_OFFSET). Single-lane 2222 keeps
+# the historical identity; every other agents port derives a disjoint triple.
+# ---------------------------------------------------------------------------
+FAULT_SSH_OFFSET=10
+PACKET_LOSS_OFFSET=20
+
+pocketshell_network_fault_ssh_port() {
+  local agents_port="$1"
+  if [[ "$agents_port" == "2222" ]]; then
+    printf '2228\n'
+  else
+    printf '%s\n' "$((agents_port + FAULT_SSH_OFFSET))"
+  fi
+}
+
+pocketshell_packet_loss_ssh_port() {
+  local agents_port="$1"
+  if [[ "$agents_port" == "2222" ]]; then
+    printf '2229\n'
+  else
+    printf '%s\n' "$((agents_port + PACKET_LOSS_OFFSET))"
+  fi
+}
+
+pocketshell_toxiproxy_api_port() {
+  local agents_port="$1"
+  if [[ "$agents_port" == "2222" ]]; then
+    printf '8474\n'
+  else
+    printf '%s\n' "$((8474 + agents_port - 2222))"
+  fi
+}
+
+pocketshell_network_fault_container_for_port() {
+  local port="$1"
+  if [[ "$port" == "2222" ]]; then
+    printf 'pocketshell-test-network-fault-proxy\n'
+  else
+    printf 'pocketshell-test-network-fault-proxy-%s\n' "$port"
+  fi
+}
+
+pocketshell_packet_loss_container_for_port() {
+  local port="$1"
+  if [[ "$port" == "2222" ]]; then
+    printf 'pocketshell-test-packet-loss-proxy\n'
+  else
+    printf 'pocketshell-test-packet-loss-proxy-%s\n' "$port"
+  fi
+}
+
+# Agents env + the per-lane fault-proxy publish/name overrides.
+pocketshell_network_fault_compose_env_for_port() {
+  local port="$1"
+  pocketshell_agents_compose_env_for_port "$port"
+  printf 'NETWORK_FAULT_HOST_PORT=%s\n' "$(pocketshell_network_fault_ssh_port "$port")"
+  printf 'TOXIPROXY_API_HOST_PORT=%s\n' "$(pocketshell_toxiproxy_api_port "$port")"
+  printf 'NETWORK_FAULT_CONTAINER_NAME=%s\n' "$(pocketshell_network_fault_container_for_port "$port")"
+  printf 'PACKET_LOSS_HOST_PORT=%s\n' "$(pocketshell_packet_loss_ssh_port "$port")"
+  printf 'PACKET_LOSS_CONTAINER_NAME=%s\n' "$(pocketshell_packet_loss_container_for_port "$port")"
+}
+
+# Bring up the per-lane network-fault + packet-loss proxies on $port's
+# compose project (idempotent). The agents fixture must already be up —
+# `depends_on: agents` will start it if not, but a pool claim already did.
+pocketshell_network_fault_fixture_up() {
+  local root_dir="$1"
+  local port="$2"
+  local compose_file container
+  compose_file="$(pocketshell_agents_compose_file "$root_dir")"
+  container="$(pocketshell_network_fault_container_for_port "$port")"
+
+  local env_prefix=(env)
+  local assignment
+  while IFS= read -r assignment; do
+    env_prefix+=("$assignment")
+  done < <(pocketshell_network_fault_compose_env_for_port "$port")
+
+  printf 'Bringing up network-fault fixtures for agents port %s (proxy %s on host %s / API %s)...\n' \
+    "$port" "$container" \
+    "$(pocketshell_network_fault_ssh_port "$port")" \
+    "$(pocketshell_toxiproxy_api_port "$port")" >&2
+  _pocketshell_agents_run_without_avd_lock_fd \
+    "${env_prefix[@]}" docker compose -f "$compose_file" up -d --build \
+    network-fault-proxy packet-loss-proxy >&2
+}
+
+# ---------------------------------------------------------------------------
 # Per-port lock file — MACHINE-anchored, not checkout-anchored (issue #1842)
 #
 # This carried the exact defect #1657 found and fixed in the AVD half, and it
@@ -350,6 +444,68 @@ BANNER
 # test failure without parsing text.
 POCKETSHELL_AGENTS_DISTURBED_RC=90
 
+# Issue #2128: fingerprint the per-lane network-fault-proxy the same way.
+# A wiped toxiproxy presents as ATTACH death / empty session list just like
+# a wiped agents fixture — the app attaches through 2228-equivalent onto a
+# proxy that no longer forwards to the seeded tmux. Same inoculation.
+pocketshell_network_fault_fixture_identity() {
+  local port="$1"
+  local container
+  container="$(pocketshell_network_fault_container_for_port "$port")"
+  local out=""
+  out="$(_pocketshell_agents_run_without_avd_lock_fd \
+    docker inspect --format='{{.Id}} {{.State.StartedAt}}' "$container" 2>/dev/null)" || out=""
+  out="${out%%$'\n'*}"
+  if [[ -z "$out" ]]; then
+    out="unknown"
+  fi
+  printf '%s\n' "$out"
+}
+
+pocketshell_network_fault_record_fixture_identity() {
+  local port="$1"
+  POCKETSHELL_NETWORK_FAULT_FIXTURE_IDENTITY="$(pocketshell_network_fault_fixture_identity "$port")"
+  export POCKETSHELL_NETWORK_FAULT_FIXTURE_IDENTITY
+}
+
+pocketshell_network_fault_assert_fixture_undisturbed() {
+  local port="${1:-${POCKETSHELL_AGENTS_PORT:-}}"
+  local expected="${POCKETSHELL_NETWORK_FAULT_FIXTURE_IDENTITY:-}"
+  if [[ -z "$port" || -z "$expected" || "$expected" == "unknown" ]]; then
+    return 0
+  fi
+  local actual
+  actual="$(pocketshell_network_fault_fixture_identity "$port")"
+  if [[ "$actual" == "$expected" ]]; then
+    return 0
+  fi
+  local container
+  container="$(pocketshell_network_fault_container_for_port "$port")"
+  cat >&2 <<BANNER
+=====================================================================
+FAIL: NETWORK-FAULT FIXTURE DISTURBED MID-RUN (pool isolation violated)
+
+  agents port : $port
+  container   : $container
+  at claim    : $expected
+  now         : $actual
+
+Another process recreated or restarted THIS LANE's network-fault-proxy
+while the run was in progress. The Toxiproxy this run was asserting
+against no longer exists (or no longer forwards to the seeded tmux).
+
+DO NOT read this run's result as a product signal. In particular, an
+empty session list / "got []" / ATTACH death / a missing session in
+the picker is EXPECTED after the fixture is wiped and is NOT evidence of a product
+defect (it mimics #1810 and #1820 exactly). Any PASS is equally void.
+
+Find the other writer before re-running: 'docker ps' will show this
+container with a short uptime. Issue #2128.
+=====================================================================
+BANNER
+  return 1
+}
+
 # Fold the fixture check into a run's final exit code.
 #
 # Takes the gradle/test exit code, returns the code the wrapper should exit with.
@@ -357,7 +513,10 @@ POCKETSHELL_AGENTS_DISTURBED_RC=90
 # disturbed PASS is as worthless as a disturbed FAIL.
 pocketshell_agents_final_rc() {
   local gradle_rc="$1"
-  if pocketshell_agents_assert_fixture_undisturbed; then
+  local disturbed=0
+  pocketshell_agents_assert_fixture_undisturbed || disturbed=1
+  pocketshell_network_fault_assert_fixture_undisturbed || disturbed=1
+  if (( disturbed == 0 )); then
     printf '%s\n' "$gradle_rc"
     return 0
   fi
@@ -598,4 +757,5 @@ pocketshell_release_agents_port() {
   unset POCKETSHELL_AGENTS_OWNER_PID
   unset POCKETSHELL_AGENTS_PORT
   unset POCKETSHELL_AGENTS_FIXTURE_IDENTITY
+  unset POCKETSHELL_NETWORK_FAULT_FIXTURE_IDENTITY
 }

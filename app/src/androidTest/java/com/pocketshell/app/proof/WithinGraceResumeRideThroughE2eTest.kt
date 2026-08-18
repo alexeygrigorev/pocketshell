@@ -36,10 +36,14 @@ import java.io.FileOutputStream
  * tmux session, a quick step-away while the link is momentarily dead (metro
  * tunnel / dead spot), and a return *within* the background grace window.
  *
- * The toxiproxy `addBlackhole` toxic models that case: a half-open, no-FIN byte
- * drop that keeps the socket "established" (so the warm `-CC` lease is intact)
- * while bytes are dropped. The warm lease means the within-grace foreground takes
- * the #754 driver-owned RESEED-ONLY path.
+ * The toxiproxy `addHalfOpenStall` toxic models that case: a half-open, no-FIN
+ * byte drop (`bandwidth` `rate=0` on both streams) that keeps the socket
+ * "established" (so the warm `-CC` lease is intact) while bytes are dropped,
+ * and that HEALS on removal. `addBlackhole()` is the wrong fixture here —
+ * Toxiproxy FINs every connection carrying a `timeout` toxic when that toxic is
+ * removed (#2127 / #1678), so blackhole-then-clear is a stall followed by a
+ * genuine close, not a recoverable metro-tunnel blip. The warm lease means the
+ * within-grace foreground takes the #754 driver-owned RESEED-ONLY path.
  *
  * #754 hard-cut DELETED the inline `probeCurrentRuntimeOnForegroundIfNeeded →
  * connect(LifecycleReattach)` path that raised the reveal-machine hold (the
@@ -110,14 +114,15 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
 
         // Use a short grace override so the resume lands well within grace
         // without holding the cut longer than grace (which would be a genuine
-        // outage). The blackhole stays half-open the whole time so the socket
+        // outage). The stall stays half-open the whole time so the socket
         // remains `isConnected` (the `-CC` lease stays warm) — exactly the
-        // within-grace case the #754 reseed-only path handles.
+        // within-grace case the #754 reseed-only path handles. #2127: must be
+        // addHalfOpenStall, not addBlackhole — timeout-toxic removal FINs.
         BackgroundGraceTestOverride.setForTest(WITHIN_GRACE_MS)
 
         val proxy = toxiproxy()
         val cycleStart = SystemClock.elapsedRealtime()
-        proxy.addBlackhole()
+        proxy.addHalfOpenStall()
         try {
             // Background within grace WHILE the link is cut.
             launchedActivity?.moveToState(Lifecycle.State.CREATED)
@@ -139,9 +144,9 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
         }
 
         // Ride-through: the live session is held, no disconnect band appears,
-        // and the link recovers without a reconnect. The blackhole keeps the
+        // and the link recovers without a reconnect. The stall keeps the
         // socket established (warm lease), so the dropped bytes drain on restore
-        // and the same `-CC` lease makes progress again.
+        // and the same `-CC` lease makes progress again — no fixture FIN.
         waitForNoDisconnectBandDuring("wgrace_after_restore", durationMillis = POST_RESTORE_SETTLE_MS)
         waitForConnected("within-grace foreground after restore")
         assertNoExtraConnectAttempts(
@@ -180,7 +185,7 @@ class WithinGraceResumeRideThroughE2eTest : NetworkFaultProofBase() {
             lines = listOf(
                 "session=$sessionName",
                 "marker=$marker",
-                "scenario=blackhole link, background within grace, foreground while cut, restore",
+                "scenario=half-open stall, background within grace, foreground while cut, restore",
                 "grace_override_ms=$WITHIN_GRACE_MS",
                 "expectation=no Attaching overlay, reseed_only (no probe), no disconnect band, " +
                     "no reconnect, same client",

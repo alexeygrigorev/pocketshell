@@ -771,14 +771,20 @@ abstract class NetworkFaultProofBase {
     }
 
     /**
-     * Half-open/no-FIN link starvation for short ride-through checks. Toxiproxy
+     * Half-open/no-FIN link starvation for short ride-through checks. Uses
+     * [ToxiproxyControl.addHalfOpenStall] (`bandwidth` `rate=0`) so Toxiproxy
      * keeps the socket established while dropping bytes for [downMillis], then
-     * removes the toxic so the same SSH/tmux connection can make progress again.
+     * removing the toxic lets the SAME SSH/tmux connection make progress again.
+     *
+     * Do not use [ToxiproxyControl.addBlackhole] here: Toxiproxy FINs every
+     * connection carrying a `timeout` toxic when that toxic is removed (#2127 /
+     * #1678), so blackhole-then-clear is a stall followed by a genuine close —
+     * not a recoverable blip.
      */
     protected fun starveLinkFor(label: String, downMillis: Long) {
         val proxy = toxiproxy()
         val cutStart = SystemClock.elapsedRealtime()
-        proxy.addBlackhole()
+        proxy.addHalfOpenStall()
         try {
             recordTiming("${label}_link_starved_ms", downMillis)
             waitForNoDisconnectBandDuring("${label}_while_starved", downMillis)

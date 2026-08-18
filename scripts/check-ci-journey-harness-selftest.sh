@@ -511,6 +511,87 @@ else
   note_fail "a required update-notification method with a CI self-skip should fail specifically (got exit $rc)"
 fi
 
+# ---------------------------------------------------------------------------
+# Issue #2188: a concrete non-E2e/Docker androidTest class that is in neither
+# the per-push suite nor the sidecar baseline must hard-fail. That is the
+# TmuxConsolidatedChromeScreenshotTest hole: compiled, looks like coverage,
+# executed nowhere.
+# ---------------------------------------------------------------------------
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/notifications/UpdateAvailableNotificationE2eTest.kt" <<'KT'
+package com.pocketshell.app.notifications
+class UpdateAvailableNotificationE2eTest {
+    @Test
+    fun updateNotification_postsToStatusBar_andIsTappable() {
+        check(true)
+    }
+}
+KT
+mkdir -p "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/tmux"
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/tmux/UnlistedChromeScreenshotTest.kt" <<'KT'
+package com.pocketshell.app.tmux
+class UnlistedChromeScreenshotTest {
+    @Test
+    fun capture() = Unit
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | awk '/NEW FAIL - androidTest class not wired/{capture=1; next} /^$/{if (capture) exit} capture {print}' | grep -q 'UnlistedChromeScreenshotTest'; then
+  note_pass "unlisted ScreenshotTest is reported by the #2188 wiring guard"
+else
+  note_fail "unlisted ScreenshotTest should be reported as unwired (got exit $rc)"
+fi
+
+cat > "$SANDBOX/scripts/androidtest-unwired-baseline.txt" <<'TXT'
+com.pocketshell.app.tmux.UnlistedChromeScreenshotTest	local screenshot harness; not a per-push property
+TXT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  note_pass "baseline-exempted ScreenshotTest is spared"
+else
+  note_fail "baseline-exempted ScreenshotTest should pass (got exit $rc)"
+  printf '%s\n' "$out" | tail -40
+fi
+
+cat >> "$SANDBOX/scripts/ci-journey-suite.sh" <<'SH'
+  "com.pocketshell.app.tmux.UnlistedChromeScreenshotTest"
+SH
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 1 ]] && printf '%s' "$out" | grep -q 'UnlistedChromeScreenshotTest'; then
+  note_pass "wired ScreenshotTest left in the unwired baseline is stale"
+else
+  note_fail "wired+baselined ScreenshotTest should be a stale-baseline failure (got exit $rc)"
+fi
+
+rm -f "$SANDBOX/scripts/androidtest-unwired-baseline.txt"
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  note_pass "wired ScreenshotTest with no baseline entry passes"
+else
+  note_fail "wired ScreenshotTest should pass once the stale baseline is gone (got exit $rc)"
+  printf '%s\n' "$out" | tail -40
+fi
+
+cat > "$SANDBOX/app/src/androidTest/java/com/pocketshell/app/tmux/JustifiedLocalScreenshotTest.kt" <<'KT'
+package com.pocketshell.app.tmux
+// ANDROIDTEST_GATE_JUSTIFIED: local visual harness only
+class JustifiedLocalScreenshotTest {
+    @Test
+    fun capture() = Unit
+}
+KT
+out="$(run_guard)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  note_pass "inline ANDROIDTEST_GATE_JUSTIFIED ScreenshotTest is spared"
+else
+  note_fail "inline ANDROIDTEST_GATE_JUSTIFIED ScreenshotTest should pass (got exit $rc)"
+  printf '%s\n' "$out" | tail -40
+fi
+
 echo
 echo "=============================================================="
 echo " Self-test result: $PASS passed, $FAIL failed"

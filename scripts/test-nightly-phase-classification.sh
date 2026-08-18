@@ -175,6 +175,50 @@ grep -Fq 'nf_status="$(nightly_phase_status "$nf_classification")"' "$suite" \
 grep -Fq 'if [[ "$verdict" == "INFRA" ]]' "$workflow" \
   || failures=$((failures + 1))
 grep -Fq 'BLOCK-INFRA:' "$workflow" || failures=$((failures + 1))
+# Issue #2141: skipped / unreached gating members must flow from the preserved
+# phase-2 snapshot through the verdict file and refuse a clean PASS. Pin the
+# joined assess statement so a leftover NETWORK_FAULT_CLASSES mention elsewhere
+# cannot vouch for a disconnected coverage call.
+suite_joined="$SANDBOX/suite-joined.sh"
+awk '{
+  line = $0
+  while (sub(/[[:space:]]*\\$/, "", line) > 0) {
+    if ((getline nextline) <= 0) break
+    sub(/^[[:space:]]+/, "", nextline)
+    line = line " " nextline
+  }
+  print line
+}' "$suite" > "$suite_joined"
+coverage_call="$(grep -F 'assess_fault_gating_coverage' "$suite_joined" | head -1)"
+if [[ -z "$coverage_call" ]]; then
+  echo 'FAIL [2141 wiring]: assess_fault_gating_coverage is not called'
+  failures=$((failures + 1))
+else
+  case "$coverage_call" in
+    *'"$PHASE_REPORTS_DIR/phase2-network-fault"'*'"${NETWORK_FAULT_CLASSES[@]}"'*)
+      echo 'ok   [2141 wiring] assess reads phase-2 snapshot vs NETWORK_FAULT_CLASSES'
+      ;;
+    *)
+      echo 'FAIL [2141 wiring]: assess is no longer phase-2 snapshot vs NETWORK_FAULT_CLASSES'
+      failures=$((failures + 1))
+      ;;
+  esac
+fi
+verdict_call="$(grep -F 'write_fault_verdict_file' "$suite_joined" | head -1)"
+case "$verdict_call" in
+  *'"$FAULT_COVERAGE_FILE"'*)
+    echo 'ok   [2141 wiring] verdict consumes the coverage file'
+    ;;
+  *)
+    echo 'FAIL [2141 wiring]: write_fault_verdict_file no longer takes FAULT_COVERAGE_FILE'
+    failures=$((failures + 1))
+    ;;
+esac
+grep -Fq 'if [[ "$verdict" == "INCOMPLETE" ]]' "$workflow" \
+  || failures=$((failures + 1))
+grep -Fq 'BLOCK-INCOMPLETE:' "$workflow" || failures=$((failures + 1))
+grep -Fq 'skipped_gating_methods=' "$workflow" \
+  || failures=$((failures + 1))
 
 # ---------------------------------------------------------------------------
 # G6: removing one new signature reddens only that signature's fixture.

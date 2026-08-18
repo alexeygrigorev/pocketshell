@@ -46,13 +46,13 @@ class RideThroughInterruptionE2eTest : NetworkFaultProofBase() {
      * blip, and the same tmux session resumes so input reaches the agent again
      * without teardown/reconnect.
      *
-     * Issue #1678: this case has an anti-correlated FAST-night flake on the nightly
-     * toxiproxy phase-2 cohort (it fails only on the FASTEST emulator nights, passes
-     * otherwise). Per the maintainer-approved #1676 plan (option 3) and #1678, it is
-     * GATED off the automated gate with this documented reference until the #1678
-     * root-cause (the FAST-night anti-correlation mechanism) yields a deterministic
-     * grace-vs-blip seam. See issue #1678 for the tracking + intended deterministic
-     * reframe.
+     * Issue #1678 owns deleting this Assume and making the five-second journey
+     * non-vacuous. Issue #2141 does NOT restore this method: it makes the skip
+     * fail-closed in `fault-verdict.txt` so a green verdict cannot hide the hole.
+     * Neither issue covers the other. The FAST-night anti-correlation tracking
+     * and the intended deterministic reframe stay on #1678; do not treat this
+     * skip as "covered by #2141" or the verdict hole as "covered by #1678".
+     * See issue #1678 for the tracking + intended deterministic reframe.
      */
     @Test
     fun briefLinkCutRidesThroughWithoutDisconnectOrTeardown() { runBlocking {

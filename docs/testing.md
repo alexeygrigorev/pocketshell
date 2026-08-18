@@ -594,7 +594,22 @@ force-full path is in the diff — plus nightly, plus the release gate.
 |---|---|---|
 | per-PR / per-push | every push | always-tier + affected areas + their couplings |
 | nightly | `nightly-extensive.yml` cron | everything |
+| nightly binding mutations (#1932 / #1671) | `nightly-extensive.yml` `binding-mutations` job | curated production-binding mutants only |
 | release gate | `scripts/release-emulator-validation.sh` | everything, unchanged |
+
+### Production-binding mutation lane (issue #1932)
+
+A conventional constructor change can keep policy-unit tests green while
+bypassing the intended production owner. The curated periodic lane in
+`.github/workflows/nightly-extensive.yml` (`binding-mutations`) applies one
+deterministic mutant at a time from
+`scripts/production-binding-manifest.json` and requires the named
+production-wired proof to fail. Attendance and per-binding evidence land on
+that job's step summary and the `production-binding-mutations` artifact
+(rolled up to nightly/reliability epic #1671). The cheap Unit half is
+`scripts/check-production-binding-mutations.py --self-test` plus
+`--check-sites`: it does **not** apply the production mutants. A missing or
+`--self-test`-only nightly job is treated as decorative and fails closed.
 
 ### Force-full triggers (blast-radius escapes)
 

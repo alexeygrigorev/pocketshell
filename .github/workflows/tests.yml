@@ -424,6 +424,14 @@ jobs:
       - name: "androidTest compile-wiring guard (issues #1720, #2117)"
         run: scripts/check-androidtest-compile-wiring.sh --self-test && scripts/check-androidtest-compile-wiring.sh
 
+      # Issue #1932: curated production-binding mutation harness. The cheap Unit
+      # half proves the harness can still go red and that every manifest target
+      # still exists. The mutants themselves run on nightly (`--run`), not here.
+      - name: "Production-binding mutation harness (issue #1932)"
+        run: |
+          scripts/check-production-binding-mutations.py --self-test
+          scripts/check-production-binding-mutations.py --check-sites
+
       # #2067 keeps unit-gate's needs/result lists aligned; the final grep keeps
       # #1956's executable lifecycle harness wired into guards-harness.
       - name: "Unit-gate wiring guard (issue #2067)"

@@ -439,6 +439,16 @@ if [[ "$SHARDING" == "yes" && "${SHARD_INDEX:-0}" -ne 0 ]]; then
   RUN_AUX_PHASES="no"
 fi
 
+# Choose the observer outside the phase-1 block. select-test-areas.sh slices
+# `/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/` and requires wholesale-minus-notClass
+# with JOURNEY_EXIT= at column 0; indenting the assignment widens the slice into
+# later class= phases and falsely flags phase 1 as an allowlist.
+if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+  PHASE1_OBSERVER=(bash "$CI_JOURNEY_PROGRESS_HELPER" observe-stream)
+else
+  PHASE1_OBSERVER=(cat)
+fi
+
 echo "=========================================================="
 echo "Nightly Extensive Tests — phase 1: journey/E2E (pocketshellCi=true)"
 echo "Excluded classes: $JOURNEY_NOTCLASS_ARG"
@@ -449,21 +459,12 @@ else
 fi
 echo "=========================================================="
 
-if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
-  "$GRADLEW" :app:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
-    -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
-    "${JOURNEY_SHARD_ARGS[@]}" \
-    --stacktrace 2>&1 | bash "$CI_JOURNEY_PROGRESS_HELPER" observe-stream
-  JOURNEY_EXIT=${PIPESTATUS[0]}
-else
-  "$GRADLEW" :app:connectedDebugAndroidTest \
-    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
-    -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
-    "${JOURNEY_SHARD_ARGS[@]}" \
-    --stacktrace
-  JOURNEY_EXIT=$?
-fi
+"$GRADLEW" :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+  -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
+  "${JOURNEY_SHARD_ARGS[@]}" \
+  --stacktrace 2>&1 | "${PHASE1_OBSERVER[@]}"
+JOURNEY_EXIT=${PIPESTATUS[0]}
 echo "phase 1 (journey/E2E) exit code: $JOURNEY_EXIT"
 
 # Snapshot phase 1's report BEFORE the phase-2 gradle invocation overwrites it

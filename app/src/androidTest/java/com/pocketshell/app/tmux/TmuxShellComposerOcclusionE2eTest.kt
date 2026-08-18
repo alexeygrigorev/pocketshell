@@ -2,7 +2,6 @@ package com.pocketshell.app.tmux
 
 import android.app.Dialog
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -67,6 +66,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #641 (reopened) — full-device E2E proving that every composer
@@ -972,11 +972,10 @@ class TmuxShellComposerOcclusionE2eTest {
     private fun captureTerminalViewport(name: String) {
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val rendered = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(rendered))
-            bitmap = rendered
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
         val rendered = checkNotNull(bitmap) { "TerminalView was not renderable for $name" }
         try {

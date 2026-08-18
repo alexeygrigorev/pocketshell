@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -29,6 +28,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #576 / J4 — deterministic RED harness for the Codex alt-screen-redraw
@@ -415,17 +415,19 @@ class CodexRedrawOverflowReconnectE2eTest : NetworkFaultProofBase() {
 
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView()
-                ?: activity.findViewById<View>(android.R.id.content)
-                ?: activity.window.decorView
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView()
+                    ?: activity.findViewById<View>(android.R.id.content)
+                    ?: activity.window.decorView,
+                name,
+            )
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         artifactFile("$name-visible-terminal.txt").writeText(visibleTerminalText())
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {

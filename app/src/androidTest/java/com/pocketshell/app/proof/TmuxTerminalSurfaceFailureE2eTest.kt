@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -54,6 +53,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #423 — terminal-surface failures must be distinguished from SSH
@@ -1088,17 +1088,19 @@ class TmuxTerminalSurfaceFailureE2eTest {
             // no attached TerminalView (the broken surface is replaced by the
             // error composable), so fall back to the activity's content view so
             // the error UI still produces a `*-viewport.png`.
-            val view = activity.window.decorView.findTerminalView()
-                ?: activity.findViewById<View>(android.R.id.content)
-                ?: activity.window.decorView
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView()
+                    ?: activity.findViewById<View>(android.R.id.content)
+                    ?: activity.window.decorView,
+                name,
+            )
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     private fun captureFullDevice(name: String) {

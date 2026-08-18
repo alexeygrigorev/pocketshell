@@ -46,6 +46,7 @@ import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.util.UUID
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #1072 (v0.4.19 release blocker, maintainer dogfood): "When I attach
@@ -696,24 +697,20 @@ class AttachmentDropReconnectRecoversE2eTest {
         SystemClock.sleep(150)
         var bitmap: android.graphics.Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = android.graphics.Bitmap.createBitmap(
-                view.width,
-                view.height,
-                android.graphics.Bitmap.Config.ARGB_8888,
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
             )
-            view.draw(android.graphics.Canvas(b))
-            bitmap = b
         }
-        bitmap?.let {
-            val file = artifactFile("$name-viewport.png")
-            java.io.FileOutputStream(file).use { out ->
-                it.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
-            }
-            println("ISSUE1072_VIEWPORT ${file.absolutePath}")
-            it.recycle()
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
         }
+        val file = artifactFile("$name-viewport.png")
+        java.io.FileOutputStream(file).use { out ->
+            captured.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+        }
+        println("ISSUE1072_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile("$name-visible-terminal.txt").writeText(visibleTerminalText())
     }
 

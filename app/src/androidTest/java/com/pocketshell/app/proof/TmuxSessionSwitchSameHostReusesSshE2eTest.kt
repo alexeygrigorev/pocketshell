@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -59,6 +58,7 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
 import kotlin.math.ceil
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #178 — verifies that switching tmux sessions on the SAME host
@@ -934,13 +934,15 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         var text = ""
         launchedActivity?.onActivity { activity ->
             text = activity.window.decorView
@@ -952,7 +954,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 .orEmpty()
         }
         writeText("$name-visible-terminal.txt", text)
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {

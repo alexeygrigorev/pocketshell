@@ -1,7 +1,6 @@
 package com.pocketshell.app.tmux
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
 import android.os.SystemClock
@@ -50,6 +49,7 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import kotlin.math.max
 import kotlin.math.min
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #103 — Tmux attach should render full screen quickly.
@@ -167,9 +167,9 @@ class TmuxAttachPrefillDockerTest {
             // a cold AVD's slow tmux -CC enumeration.
             waitForAttachedSessionInPicker(sessionName = sessionName, hostRowTag = hostRowTag)
 
-            // ---- Authoritative "before" capture: terminal not attached yet. ----
+            // ---- Authoritative "before" capture: picker is on screen, no TerminalView yet. ----
             recordStamp("picker_visible")
-            captureViewportArtifact("issue103-01-before-attach")
+            captureDecorViewport("issue103-01-before-attach")
             captureVisibleTerminalSidecar("issue103-01-before-attach")
 
             val attachTapAt = SystemClock.elapsedRealtime()
@@ -903,22 +903,34 @@ class TmuxAttachPrefillDockerTest {
 
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val viewportBitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(viewportBitmap))
-            bitmap = viewportBitmap
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        val viewportBitmap = bitmap ?: run {
-            // Pre-attach there is no terminal view yet — write a tiny
-            // placeholder so the artifact bundle is still complete and the
-            // reviewer can see we captured the "before" state intentionally.
-            val placeholder = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
-            placeholder.eraseColor(Color.BLACK)
-            placeholder
+        val viewportBitmap = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
         }
         val file = writeBitmap("$name-viewport", viewportBitmap)
         viewportBitmap.recycle()
+        return file
+    }
+
+    private fun captureDecorViewport(name: String): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+        var bitmap: Bitmap? = null
+        val activityHolder = launchedActivity
+            ?: throw AssertionError("activity was not available to capture decor '$name' (#2135)")
+        activityHolder.onActivity { activity ->
+            bitmap = captureViewToBitmap(activity.window.decorView, name)
+        }
+        val captured = checkNotNull(bitmap) {
+            "onActivity did not produce a decor bitmap for '$name' (#2135)"
+        }
+        val file = writeBitmap("$name-viewport", captured)
+        captured.recycle()
         return file
     }
 

@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -49,6 +48,7 @@ import org.junit.runner.RunWith
 import org.junit.runners.model.Statement
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #993 — DEVICE-TRUTH journey for the new kebab **"Reconnect"** action, on the
@@ -830,12 +830,12 @@ class ReconnectKebabInPlaceJourneyE2eTest {
         var bitmap: Bitmap? = null
         var terminalPresent = false
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
+            val view = activity.window.decorView.findTerminalView()
+            if (view == null) {
+                return@onActivity
+            }
             terminalPresent = true
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(view, name)
         }
         bitmap?.let { captured ->
             writeBitmap("$name-viewport", captured)

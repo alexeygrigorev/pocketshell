@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
@@ -55,6 +54,7 @@ import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #1206 (AC4) — DEVICE-TRUTH journey: a fresh pane whose FIRST
@@ -681,15 +681,17 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
 
         var bitmap: Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findOnScreenTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findOnScreenTerminalView(),
+                name,
+            )
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     private fun captureFullFrame(name: String) {
@@ -698,14 +700,13 @@ class Issue1206PrewarmEmptyCaptureSeedRetryJourneyE2eTest {
         SystemClock.sleep(150)
         var bitmap: Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(activity.window.decorView, name)
         }
-        bitmap?.let { writeBitmap(name, it) }
-        bitmap?.recycle()
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture decor '$name' (#2135)"
+        }
+        writeBitmap(name, captured)
+        captured.recycle()
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {

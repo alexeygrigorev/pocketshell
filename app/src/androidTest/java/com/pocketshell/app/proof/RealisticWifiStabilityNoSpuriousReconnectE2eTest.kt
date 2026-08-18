@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -36,6 +35,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #970 — the realistic-wifi STABILITY regression gate (the durable proof
@@ -563,22 +563,22 @@ class RealisticWifiStabilityNoSpuriousReconnectE2eTest : NetworkFaultProofBase()
         SystemClock.sleep(120)
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        bitmap?.let {
-            val file = artifactFile("$name-viewport.png")
-            java.io.FileOutputStream(file).use { out ->
-                check(it.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    "failed to write bitmap to ${file.absolutePath}"
-                }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        val file = artifactFile("$name-viewport.png")
+        java.io.FileOutputStream(file).use { out ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
             }
-            println("ISSUE970_VIEWPORT ${file.absolutePath}")
-            it.recycle()
         }
+        println("ISSUE970_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile("$name-visible-terminal.txt").writeText(visibleTerminalText())
     }
 

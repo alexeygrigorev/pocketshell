@@ -20,12 +20,13 @@ SUITE="$SCRIPT_DIR/ci-journey-suite.sh"
 CLASS_LOOP="$SCRIPT_DIR/ci-journey-class-loop-functions.sh"
 NIGHTLY_SUITE="$SCRIPT_DIR/nightly-extensive-suite.sh"
 SUMMARY_FN="$SCRIPT_DIR/ci-journey-summary-functions.sh"
+SHARD_COUNT="$SCRIPT_DIR/ci-journey-shard-count.sh"
 
 fail() { echo "TEST FAIL: $*" >&2; exit 1; }
 pass() { echo "  ok: $*"; }
 
 for required in "$PROGRESS" "$AGG" "$WRITER" "$WORKFLOW" "$SUITE" "$CLASS_LOOP" \
-                "$NIGHTLY_SUITE" "$SUMMARY_FN"; do
+                "$NIGHTLY_SUITE" "$SUMMARY_FN" "$SHARD_COUNT"; do
   [[ -f "$required" ]] || fail "missing required file: $required"
 done
 chmod +x "$PROGRESS" "$AGG" "$WRITER"
@@ -36,6 +37,15 @@ trap 'rm -rf "$SANDBOX"' EXIT
 CLASS_A="com.pocketshell.app.proof.DeepLinkSessionSwitchE2eTest"
 CLASS_B="com.pocketshell.app.proof.MultiSessionSwitchJourneyE2eTest"
 CLASS_C="com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"
+
+# Issue #2060: derive the shipped matrix length. Hardcoded EXPECTED_SHARDS=3 /
+# POCKETSHELL_JOURNEY_CI_SHARD_TOTAL=6 / `for idx in 0 1 2` are the exact
+# shapes the downward-only ratchet refuses to absorb as a new file.
+SHARD_TOTAL="$(bash "$SHARD_COUNT" "$WORKFLOW")" \
+  || fail "could not derive the emulator-journey shard count from the matrix"
+(( SHARD_TOTAL >= 2 )) \
+  || fail "matrix must have at least 2 shards so a missing-shard case exists"
+LAST_SHARD="$((SHARD_TOTAL - 1))"
 
 # ---------------------------------------------------------------------------
 # AC1 RED: local-only publisher (the pre-#2090 shape) loses last-completed-class
@@ -73,13 +83,13 @@ chmod +x "$local_only"
   export CI_JOURNEY_PROGRESS_EXTERNAL_DIR=""
   export CI_JOURNEY_PROGRESS_DISABLE_GITHUB=1
   export GITHUB_RUN_ID=2038 GITHUB_RUN_ATTEMPT=1 GITHUB_JOB=extensive
-  export POCKETSHELL_NIGHTLY_SHARD_INDEX=2 POCKETSHELL_NIGHTLY_SHARD_TOTAL=3
+  export POCKETSHELL_NIGHTLY_SHARD_INDEX="$LAST_SHARD" POCKETSHELL_NIGHTLY_SHARD_TOTAL="$SHARD_TOTAL"
   bash "$local_only" start
   bash "$local_only" class-completed "$CLASS_A" pass
   bash "$local_only" class-completed "$CLASS_B" pass
 )
 rm -rf "$runner_dead"
-if [[ -e "$external_dead/journey-progress-shard-2-attempt-1-run-2038.txt" ]] \
+if [[ -e "$external_dead/journey-progress-shard-${LAST_SHARD}-attempt-1-run-2038.txt" ]] \
    || grep -Rqs "$CLASS_B" "$external_dead" 2>/dev/null; then
   fail "AC1 RED control was vacuous: the local-only mutant still left extra-runner evidence"
 fi
@@ -108,8 +118,8 @@ progress_env=(
   GITHUB_SHA=e08c336bdeadbeef
   RUNNER_NAME=GitHubActions-hosted
   RUNNER_OS=Linux
-  POCKETSHELL_JOURNEY_CI_SHARD_INDEX=2
-  POCKETSHELL_JOURNEY_CI_SHARD_TOTAL=6
+  POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$LAST_SHARD"
+  POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$SHARD_TOTAL"
   CI_JOURNEY_PROGRESS_CLASSES_SELECTED=3
 )
 
@@ -151,7 +161,7 @@ grep -qx "job_id=92770537075" "$surviving" \
   || fail "AC1 GREEN: surviving record missing job_id"
 grep -qx "runner_name=GitHubActions-hosted" "$surviving" \
   || fail "AC1 GREEN: surviving record missing runner_name"
-grep -qx "shard=2" "$surviving" \
+grep -qx "shard=$LAST_SHARD" "$surviving" \
   || fail "AC1 GREEN: surviving record missing shard"
 [[ ! -e "$runner_live" ]] \
   || fail "AC1 GREEN: runner workspace was not wiped"
@@ -218,19 +228,19 @@ pass "artifact-upload failure -> hosted_runner_artifact_upload_failure (infra di
 echo "== #2090 AC2: missing shard stays fail-closed / not green =="
 
 verdict_dir="$SANDBOX/verdicts-missing"
-mkdir -p "$verdict_dir/emulator-journey-verdict-shard-0" \
-         "$verdict_dir/emulator-journey-verdict-shard-1"
-GITHUB_RUN_ID=2090 GITHUB_RUN_ATTEMPT=1 POCKETSHELL_JOURNEY_CI_SHARD_INDEX=0 \
-  SHARD_VERDICT_FILE="$verdict_dir/emulator-journey-verdict-shard-0/shard-verdict.txt" \
-  bash "$WRITER" CLEAN journey_ok >/dev/null
-GITHUB_RUN_ID=2090 GITHUB_RUN_ATTEMPT=1 POCKETSHELL_JOURNEY_CI_SHARD_INDEX=1 \
-  SHARD_VERDICT_FILE="$verdict_dir/emulator-journey-verdict-shard-1/shard-verdict.txt" \
-  bash "$WRITER" CLEAN journey_ok >/dev/null
-# shard 2 missing — only extra-runner progress survived.
+mkdir -p "$verdict_dir"
+for (( idx = 0; idx < SHARD_TOTAL; idx++ )); do
+  (( idx == LAST_SHARD )) && continue
+  mkdir -p "$verdict_dir/emulator-journey-verdict-shard-$idx"
+  GITHUB_RUN_ID=2090 GITHUB_RUN_ATTEMPT=1 POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$idx" \
+    SHARD_VERDICT_FILE="$verdict_dir/emulator-journey-verdict-shard-$idx/shard-verdict.txt" \
+    bash "$WRITER" CLEAN journey_ok >/dev/null
+done
+# last shard missing — only extra-runner progress survived.
 
 set +e
 AGG_OUT="$(
-  EXPECTED_SHARDS=3 \
+  EXPECTED_SHARDS="$SHARD_TOTAL" \
   GITHUB_STEP_SUMMARY="" \
   GITHUB_RUN_ATTEMPT=1 \
   CI_JOURNEY_PROGRESS_DIR="$external_live" \
@@ -274,7 +284,7 @@ PY
 chmod +x "$agg_mutant"
 set +e
 MUT_OUT="$(
-  EXPECTED_SHARDS=3 \
+  EXPECTED_SHARDS="$SHARD_TOTAL" \
   GITHUB_STEP_SUMMARY="" \
   GITHUB_RUN_ATTEMPT=1 \
   CI_JOURNEY_PROGRESS_DIR="$external_live" \
@@ -299,19 +309,17 @@ echo "== #2090 AC3: successful shard keeps the existing contract =="
 success_runner="$SANDBOX/success-runner"
 success_external="$SANDBOX/success-external"
 success_verdicts="$SANDBOX/success-verdicts"
-mkdir -p "$success_runner" "$success_external" \
-  "$success_verdicts/emulator-journey-verdict-shard-0" \
-  "$success_verdicts/emulator-journey-verdict-shard-1" \
-  "$success_verdicts/emulator-journey-verdict-shard-2"
+mkdir -p "$success_runner" "$success_external" "$success_verdicts"
 
-for idx in 0 1 2; do
+for (( idx = 0; idx < SHARD_TOTAL; idx++ )); do
+  mkdir -p "$success_verdicts/emulator-journey-verdict-shard-$idx"
   GITHUB_RUN_ID=2090 GITHUB_RUN_ATTEMPT=1 POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$idx" \
     SHARD_VERDICT_FILE="$success_verdicts/emulator-journey-verdict-shard-$idx/shard-verdict.txt" \
     bash "$WRITER" CLEAN journey_ok >/dev/null
 done
 
 # Pin the pre-#2090 verdict contract: line 1 is the bare token, then key=value.
-success_token="$success_verdicts/emulator-journey-verdict-shard-2/shard-verdict.txt"
+success_token="$success_verdicts/emulator-journey-verdict-shard-$LAST_SHARD/shard-verdict.txt"
 first_line="$(awk 'NR==1 { print; exit }' "$success_token")"
 [[ "$first_line" == "CLEAN" ]] \
   || fail "AC3: successful shard verdict line 1 must stay the bare CLEAN token"
@@ -327,8 +335,8 @@ grep -q '^run_id=' "$success_token" \
   export CI_JOURNEY_PROGRESS_DISABLE_GITHUB=1
   export GITHUB_RUN_ID=2090 GITHUB_RUN_ATTEMPT=1
   export GITHUB_JOB=emulator-journey
-  export POCKETSHELL_JOURNEY_CI_SHARD_INDEX=2
-  export POCKETSHELL_JOURNEY_CI_SHARD_TOTAL=6
+  export POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$LAST_SHARD"
+  export POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$SHARD_TOTAL"
   export CI_JOURNEY_PROGRESS_CLASSES_SELECTED=3
   bash "$PROGRESS" start
   bash "$PROGRESS" class-completed "$CLASS_A" pass
@@ -338,7 +346,7 @@ grep -q '^run_id=' "$success_token" \
   bash "$PROGRESS" artifacts-uploaded
 )
 
-success_progress="$(find "$success_external" -type f -name 'journey-progress-shard-2-*.txt' | head -n 1)"
+success_progress="$(find "$success_external" -type f -name "journey-progress-shard-${LAST_SHARD}-*.txt" | head -n 1)"
 [[ -f "$success_progress" ]] || fail "AC3: successful shard wrote no bounded telemetry"
 progress_bytes="$(wc -c < "$success_progress" | tr -d ' ')"
 (( progress_bytes <= 4096 )) \
@@ -359,7 +367,7 @@ grep -qx "suite_state=artifacts_uploaded" "$success_progress" \
 
 set +e
 SUCCESS_OUT="$(
-  EXPECTED_SHARDS=3 \
+  EXPECTED_SHARDS="$SHARD_TOTAL" \
   GITHUB_STEP_SUMMARY="" \
   GITHUB_RUN_ATTEMPT=1 \
   CI_JOURNEY_PROGRESS_DIR="$success_external" \
@@ -397,9 +405,9 @@ obs_file="$SANDBOX/observe-local.txt"
     CI_JOURNEY_PROGRESS_EXTERNAL_DIR="$obs_external" \
     CI_JOURNEY_PROGRESS_DISABLE_GITHUB=1 \
     GITHUB_RUN_ID=obs GITHUB_RUN_ATTEMPT=1 \
-    POCKETSHELL_NIGHTLY_SHARD_INDEX=2 POCKETSHELL_NIGHTLY_SHARD_TOTAL=3 \
+    POCKETSHELL_NIGHTLY_SHARD_INDEX="$LAST_SHARD" POCKETSHELL_NIGHTLY_SHARD_TOTAL="$SHARD_TOTAL" \
     bash "$PROGRESS" observe-stream >/dev/null
-obs_surviving="$(find "$obs_external" -type f -name 'journey-progress-shard-2-*.txt' | head -n 1)"
+obs_surviving="$(find "$obs_external" -type f -name "journey-progress-shard-${LAST_SHARD}-*.txt" | head -n 1)"
 [[ -f "$obs_surviving" ]] || fail "observe-stream wrote no extra-runner record"
 grep -qx "last_completed_class=com.pocketshell.app.proof.BarTest" "$obs_surviving" \
   || { cat "$obs_surviving"; fail "observe-stream must keep the last completed class"; }

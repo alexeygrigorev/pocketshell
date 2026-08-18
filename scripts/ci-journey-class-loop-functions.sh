@@ -88,7 +88,13 @@ run_journey_classes_with_retry() {
 
     run_class "$fqcn"
     rc=$?
-    [[ "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "ok" || "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "skipped" ]] || class_wedged=1
+    # Issue #2145: go through was_wedged so `unavailable` before any server
+    # has been created is not labelled a fixture SETUP failure. A real
+    # wedge (or unavailable AFTER a server was seen) still sets the bit.
+    if declare -F journey_fixture_health_was_wedged >/dev/null 2>&1 \
+       && journey_fixture_health_was_wedged; then
+      class_wedged=1
+    fi
     if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
       echo "JOURNEY_ISOLATION_FAILURE: $fqcn primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every retry/next class because isolation is unproven"
       FAILED_CLASSES+=("$fqcn")
@@ -126,7 +132,13 @@ run_journey_classes_with_retry() {
 
     run_class "$fqcn"
     rc=$?
-    [[ "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "ok" || "${LAST_RUN_CLASS_FIXTURE_HEALTH:-ok}" == "skipped" ]] || class_wedged=1
+    # Issue #2145: go through was_wedged so `unavailable` before any server
+    # has been created is not labelled a fixture SETUP failure. A real
+    # wedge (or unavailable AFTER a server was seen) still sets the bit.
+    if declare -F journey_fixture_health_was_wedged >/dev/null 2>&1 \
+       && journey_fixture_health_was_wedged; then
+      class_wedged=1
+    fi
     if [[ "${JOURNEY_ABORT_ISOLATION_FAILED:-0}" -eq 1 ]]; then
       echo "JOURNEY_ISOLATION_FAILURE: $fqcn retry primary_rc=${LAST_RUN_CLASS_PRIMARY_RC:-unknown} cleanup_failed=${LAST_RUN_CLASS_ABORT_CLEANUP_FAILED:-0} artifact_failed=${LAST_RUN_CLASS_ARTIFACT_SNAPSHOT_FAILED:-0} — refusing every next class because isolation is unproven"
       FAILED_CLASSES+=("$fqcn")

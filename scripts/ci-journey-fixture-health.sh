@@ -90,6 +90,12 @@ JOURNEY_FIXTURE_HEALTH_DISABLED="${JOURNEY_FIXTURE_HEALTH_DISABLED:-0}"
 JOURNEY_FIXTURE_HEALTH_STATUS="not_run"
 JOURNEY_FIXTURE_HEALTH_PROBE_MS="unknown"
 JOURNEY_FIXTURE_HEALTH_DETAIL=""
+# Issue #2145: has any probe in this shard observed a live tmux server
+# (sessions listed, or a hang that can only happen once the socket exists)?
+# `unavailable` is the normal state before that point and is not a wedge;
+# after it, the same status is suspicious — the fixture was answering and
+# then became unreachable.
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN="${JOURNEY_FIXTURE_HEALTH_SERVER_SEEN:-0}"
 
 journey_fixture_health_tsv_path() {
   local root="${JOURNEY_FIXTURE_HEALTH_TSV:-}"
@@ -137,9 +143,11 @@ journey_fixture_health_now_ms() {
 #
 # Exit codes carry the classification, and the three outcomes are genuinely
 # distinct (this is the part a naive probe gets wrong):
-#   0  healthy — either sessions listed (rc 0) or a FAST, explicit
-#      "no server running" (rc 1). An idle fixture with no server is healthy:
-#      the next `new-session` starts one.
+#   0  healthy — either sessions listed (rc 0) or a FAST, explicit idle-no-
+#      server answer. An idle fixture with no server is healthy: the next
+#      `new-session` starts one. Both phrasings tmux uses for that reading
+#      count: `no server running` and `error connecting to … (No such file
+#      or directory)` (the socket has not been created yet; issue #2145).
 #   1  wedged  — the bound expired. A stopped/blocked server accepts the socket
 #      connection and never answers, so the client hangs forever; that is the
 #      exact shape of the reported failure.
@@ -173,8 +181,15 @@ journey_fixture_probe() {
   JOURNEY_FIXTURE_HEALTH_PROBE_MS=$((ended - started))
   JOURNEY_FIXTURE_HEALTH_DETAIL="$(printf '%s' "$out" | tr '\n\t' ';  ' | cut -c1-200)"
   case "$rc" in
-    0) return 0 ;;
+    0)
+      JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=1
+      return 0
+      ;;
     124 | 137)
+      # A hang means the SSH path accepted a connection and nobody answered —
+      # the socket existed. Remember that so a later `unavailable` is
+      # suspicious rather than the pre-server reading (issue #2145).
+      JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=1
       JOURNEY_FIXTURE_HEALTH_DETAIL="probe_timeout_after_${JOURNEY_FIXTURE_HEALTH_PROBE_SECS}s: $JOURNEY_FIXTURE_HEALTH_DETAIL"
       return 1
       ;;
@@ -182,10 +197,20 @@ journey_fixture_probe() {
   # A non-timeout, non-zero exit is healthy ONLY when tmux itself answered that
   # there is no server. Anything else (auth failure, refused connection, unknown
   # host) is an unavailable fixture, not a healthy one.
-  if printf '%s' "$out" | grep -qE 'no server running|no current (client|session)'; then
+  if journey_fixture_health_is_idle_no_server "$out"; then
     return 0
   fi
   return 2
+}
+
+# journey_fixture_health_is_idle_no_server — tmux answered immediately that
+# no server has been created yet. Distinct from a hang (wedge) and from SSH
+# not reaching the fixture (unavailable). Both phrasings are the same
+# reading: the next `new-session` starts a server.
+journey_fixture_health_is_idle_no_server() {
+  local msg="${1:-}"
+  printf '%s' "$msg" | grep -qE \
+    'no server running|no current (client|session)|error connecting to .*tmux-.*No such file or directory'
 }
 
 # journey_fixture_repair — restore a wedged shared fixture, escalating.
@@ -299,10 +324,23 @@ journey_fixture_health_record() {
 
 # journey_fixture_health_was_wedged — did the LAST gate observe a broken fixture?
 # Used by the class loop to classify a failure as SETUP rather than assertion.
+#
+# Issue #2145: `unavailable` is two readings. Before any probe in this shard
+# has seen a server it is the normal "no server created yet" / "I could not
+# reach the fixture on a cold shard" state and is NOT a wedge — labelling
+# an early-shard product failure as `shared_fixture_setup_failure` is the
+# misattribution this function exists to stop. After a server has been
+# seen, the same status is suspicious and stays wedge-class. A real
+# `wedged` / `wedged_repaired` is always wedge-class: a missed wedge is
+# worse than a mislabel.
 journey_fixture_health_was_wedged() {
-  [[ "$JOURNEY_FIXTURE_HEALTH_STATUS" == "wedged_repaired" \
-     || "$JOURNEY_FIXTURE_HEALTH_STATUS" == "wedged" \
-     || "$JOURNEY_FIXTURE_HEALTH_STATUS" == "unavailable" ]]
+  case "$JOURNEY_FIXTURE_HEALTH_STATUS" in
+    wedged | wedged_repaired) return 0 ;;
+    unavailable)
+      [[ "${JOURNEY_FIXTURE_HEALTH_SERVER_SEEN:-0}" == "1" ]]
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

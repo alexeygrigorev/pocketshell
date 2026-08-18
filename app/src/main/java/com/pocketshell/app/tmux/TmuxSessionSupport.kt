@@ -1066,6 +1066,14 @@ internal object LivenessProbeTestOverride {
  * real wire round-trip). [consumedCount] lets the journey hard-assert the
  * injected fault was actually hit by the prewarm seed path (no vacuous pass),
  * and the analogue of [LivenessProbeTestOverride]. Production keeps it at 0.
+ *
+ * The forced-empty decision is taken BEFORE the wire round-trip, so a journey
+ * gets the retry/deferred-reseed recovery driven against a real pane
+ * deterministically rather than by waiting for a genuinely wedged channel.
+ * [onSeedAttempt] is a plain diagnostic counter (how many times the prewarm seed
+ * path ran), which lets a journey tell "prewarm never seeded the target" apart
+ * from "prewarm seeded but the seam was never armed". Production never arms the
+ * seam (default 0), so both are pure test hooks on the real path.
  */
 internal object PrewarmSeedFaultTestOverride {
     @Volatile

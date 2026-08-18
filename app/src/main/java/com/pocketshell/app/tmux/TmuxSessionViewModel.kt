@@ -4924,34 +4924,31 @@ public class TmuxSessionViewModel @Inject constructor(
         client: TmuxClient,
         pane: TmuxPaneState,
     ): Boolean {
-        // Issue #1206 (connected AC4 proof, #780 synthetic-injection): a busy
-        // shared `-CC` channel can wedge/empty the FIRST `capture-pane` on a
-        // fresh prewarmed pane even though the pane HAS content — the exact
-        // non-happy state the happy real-agent workbench structurally cannot
-        // enter. This seam lets a connected journey force the first seed attempt
-        // to be TREATED as empty (deterministically, BEFORE the wire round-trip),
-        // driving the retry/deferred-reseed recovery against a real pane.
-        // [onSeedAttempt] is a diagnostic counter (how many times the prewarm
-        // seed path ran). Production never arms the seam (default 0), so this is
-        // a pure test hook.
+        // Issue #1206 / #780: see [PrewarmSeedFaultTestOverride]'s KDoc for what
+        // this seam injects and why the real path reaches that state.
         PrewarmSeedFaultTestOverride.onSeedAttempt()
         if (PrewarmSeedFaultTestOverride.consumeForcedEmpty(pane.paneId)) return false
-        val combined = runCatching {
-            withContext(seedIoDispatcher) {
-                client.captureWithCursor(
-                    pane.paneId,
-                    scrollbackLines = SEED_SCROLLBACK_LINES,
-                    timeoutMs = seedCaptureTimeoutMs,
-                )
-            }
-        }.getOrNull() ?: return false
-        val capture = combined.capture
-        if (capture.isError || capture.output.isEmpty()) return false
-        val cursor = parseTmuxPaneCursor(combined.cursorReply)
-        pane.terminalState.appendRemoteOutput(
-            capture.output.toTerminalViewportBytes(cursor),
-        )
-        return true
+        // Issue #2178 — third capture→apply site. Guarded by the seed GATE
+        // (buffer-and-replay), not by refusal; see [seedGatedPrewarmApply].
+        return seedGatedPrewarmApply(pane) {
+            val combined = runCatching {
+                withContext(seedIoDispatcher) {
+                    client.captureWithCursor(
+                        pane.paneId,
+                        scrollbackLines = SEED_SCROLLBACK_LINES,
+                        timeoutMs = seedCaptureTimeoutMs,
+                    )
+                }
+            }.getOrNull() ?: return@seedGatedPrewarmApply false
+            val capture = combined.capture
+            if (capture.isError || capture.output.isEmpty()) return@seedGatedPrewarmApply false
+            val cursor = parseTmuxPaneCursor(combined.cursorReply)
+            ReseedApplyRaceTestGate.awaitReleaseIfArmed()
+            pane.terminalState.appendRemoteOutput(
+                capture.output.toTerminalViewportBytes(cursor),
+            )
+            true
+        }
     }
 
     /**
@@ -11828,6 +11825,8 @@ public class TmuxSessionViewModel @Inject constructor(
         val quiesceLiveDeltas =
             surfaceBlack || pane.terminalState.renderLooksSuspect()
         if (quiesceLiveDeltas) pane.terminalState.closeSeedGate()
+        // Issue #2178: inert while quiesced; load-bearing when the gate is open.
+        val echoWindow = ReseedEchoWindow.openedOver(pane.terminalState)
         try {
         val captureAttempt = runCatching {
             withContext(seedIoDispatcher) {
@@ -11927,6 +11926,11 @@ public class TmuxSessionViewModel @Inject constructor(
             BLACK_FRAME_CLASS_LOST_AFTER_PAINT
         }
         recordBlackFrameObserved(pane, observedClass, captureText)
+        // Issue #2178 — the SECOND capture→apply site; see [ReseedEchoRaceGuard].
+        ReseedApplyRaceTestGate.awaitReleaseIfArmed()
+        if (!quiesceLiveDeltas && echoWindow.racedLiveEcho(pane, activeTarget?.sessionName)) {
+            return result(HealAttemptReason.SnapshotRacedLiveEcho, captureText, captureResponse.output.size)
+        }
         val cursor = parseTmuxPaneCursor(combined.cursorReply)
         Log.i(
             ISSUE_145_RECONNECT_TAG,
@@ -12004,6 +12008,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // [sendMutex] acquisition, collapsing the previous two serial seed
         // round-trips into one wire exchange. The cursor restore (#259) is
         // preserved, not dropped.
+        // Issue #2178 — opened before the round-trip; see [ReseedEchoWindow].
+        val echoWindow = ReseedEchoWindow.openedOver(pane.terminalState)
         val captureStartedAtMs = SystemClock.elapsedRealtime()
         // Issue #926: run the BLOCKING `capture-pane`+cursor round-trip OFF the
         // Main (UI) thread on [seedIoDispatcher], bounded by the SHORT seed
@@ -12076,6 +12082,9 @@ public class TmuxSessionViewModel @Inject constructor(
             detail = "folded_into_capture=true present=${cursor != null}",
         )
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        // Issue #2178: refuse a snapshot older than the screen; the retry re-captures.
+        ReseedApplyRaceTestGate.awaitReleaseIfArmed()
+        if (echoWindow.racedLiveEcho(pane, activeTarget?.sessionName)) return false
         val response = captureResponse
         val appendStartedAtMs = SystemClock.elapsedRealtime()
         try {

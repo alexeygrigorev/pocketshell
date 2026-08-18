@@ -243,6 +243,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.conversation.ConversationShowAllJourneyTest"  # #1889 capped messages retain a lazy in-app full-text route
 
   "com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest"  # #1320 #962 #975 #1057 the Terminal/Conversation TOGGLE-CLIP regression guard — the…
+  "com.pocketshell.app.tmux.TmuxChromeReconnectingPillLegibleTest"  # #2130 breadcrumb 'Reconnecting'→'Reco' truncation: pill must render a complete honest word at narrow + large-font widths
   "com.pocketshell.app.cards.SessionCardFeedRegistryTest"  # #859 B): the typed-card RENDERER REGISTRY proof. The session feed
   "com.pocketshell.app.tmux.TmuxConnectingStatesScreenshotTest"  # #750 3rd occurrence — D31 durable-fix gate): the tmux non-Connect…
   "com.pocketshell.app.tmux.TmuxConsolidatedChromeScreenshotTest"  # #2188 #1487 #189 #192 #637: in-session chrome IA + forwarding-pill containment under long-title+toggle pressure. Was red on main unnoticed because it compiled in the dex job and ran in no per-push gate.

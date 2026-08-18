@@ -240,7 +240,15 @@ read_paste_body() {
   while true; do
     read_byte || cleanup
     b="$REPLY"
-    if [ "$b" = "$ESC" ]; then
+    # Real ESC, or tmux 3.7c paste-buffer caret-ESC (`^[`, issue #2205).
+    if [ "$(printf '%d' "'$b")" = "27" ] || [ "$b" = "^" ]; then
+      if [ "$b" = "^" ]; then
+        read_byte || cleanup
+        if [ "$REPLY" != "[" ]; then
+          PASTE_BODY="$PASTE_BODY^$REPLY"
+          continue
+        fi
+      fi
       read_byte || cleanup
       if [ "$REPLY" = "[" ]; then
         csi=""
@@ -302,9 +310,31 @@ handle_esc() {
 
 # Handle one input byte. Shared by the initial read and the debounce drain so a
 # paste is parsed identically no matter which loop sees its leading ESC.
+# The caller leaves the byte in REPLY (do not pass it as $1 — an ESC argument
+# is lossy on some bash/PTY combinations).
 process_byte() {
-  ch="$1"
+  ch="$REPLY"
   [ -z "$ch" ] && return 0
+  # Real ESC (0x1b). Also accept tmux 3.7c paste-buffer's vis-encoding of ESC
+  # as the two-byte caret sequence `^[` (0x5e 0x5b) — issue #2205. Without
+  # that, a framed `\e[200~`…`\e[201~` is typed, the embedded newline submits
+  # the first line, and the paste-ack needle fires without a collapsed chip.
+  if [ "$(printf '%d' "'$ch")" = "27" ]; then
+    handle_esc
+    return 0
+  fi
+  if [ "$ch" = "^" ]; then
+    read_byte || cleanup
+    if [ "$REPLY" = "[" ]; then
+      handle_esc
+      return 0
+    fi
+    buffer="$buffer^"
+    submit_buffer="$submit_buffer^"
+    dirty=1
+    process_byte
+    return 0
+  fi
   case "$ch" in
     "$CR"|"$LF")
       # Submit: record the submitted line (shown by the next render) and clear
@@ -341,9 +371,6 @@ process_byte() {
       buffer=""
       submit_buffer=""
       dirty=1
-      ;;
-    "$ESC")
-      handle_esc
       ;;
     *)
       buffer="$buffer$ch"
@@ -396,10 +423,10 @@ while true; do
     # EOF on the channel — exit; the outer `exec sh` keeps the pane alive.
     cleanup
   fi
-  process_byte "$REPLY"
+  process_byte
   # Drain any back-to-back burst bytes before redrawing (debounce).
   while IFS= read -r -s -N 1 -t 0.02 REPLY; do
-    process_byte "$REPLY"
+    process_byte
   done
   flush
 done

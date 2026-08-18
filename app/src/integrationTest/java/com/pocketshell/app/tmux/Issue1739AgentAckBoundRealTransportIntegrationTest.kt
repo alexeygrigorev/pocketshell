@@ -83,6 +83,7 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
         private const val DIAGNOSTIC_POLL_INTERVAL_MS = 20L
         private const val DETERMINISTIC_SHORT_TIMEOUT_MS = 100L
         private const val DETERMINISTIC_LONG_TIMEOUT_MS = 5_000L
+        private const val NEEDLE_ONLY_HIDES_BEFORE_WEDGE = 3
         private val TERMINAL_ACK_TIMEOUT_RESULTS = setOf("ack_timeout", "capture_timeout")
 
         private val projectRoot: Path by lazy { findProjectRoot() }
@@ -327,6 +328,8 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
                 ),
             )
 
+            HostAckSendProbe.reset()
+            OutboundLegacyStackProbe.reset()
             client.wedgeNextVisibleCapture = true
             val startedAt = System.currentTimeMillis()
             val first = withTimeout(CALLER_BOUND_MS) {
@@ -340,7 +343,31 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
             }
             val firstElapsedMs = System.currentTimeMillis() - startedAt
 
-            assertTrue("unconfirmed first attempt must remain retryable", first.isFailure)
+            assertTrue(
+                "this proof is the LEGACY inference lane, not HostAck " +
+                    "(authority=${vm.hostAck.authority} active=${vm.hostAck.active})",
+                !vm.hostAck.active,
+            )
+            assertEquals(
+                "HostAck must not own a TerminalInference send: " +
+                    OutboundLegacyStackProbe.snapshot(),
+                0L,
+                HostAckSendProbe.count(),
+            )
+            assertTrue(
+                "the send must have entered the legacy paste-ack gate: " +
+                    OutboundLegacyStackProbe.snapshot(),
+                OutboundLegacyStackProbe.pasteAck.get() > 0L,
+            )
+            assertTrue(
+                "unconfirmed first attempt must remain retryable " +
+                    "(success=${first.isSuccess} elapsed=${firstElapsedMs}ms " +
+                    "hostAckActive=${vm.hostAck.active} hostAckSends=${HostAckSendProbe.count()} " +
+                    "legacy=${OutboundLegacyStackProbe.snapshot()} " +
+                    "realCaptureCompleted=${client.realCaptureCompleted} " +
+                    "landed=${client.landedCapture} seen=${client.seenFrames})",
+                first.isFailure,
+            )
             assertTrue(
                 "ack caller must resolve well below the old 50s composer timeout; " +
                     "elapsed=${firstElapsedMs}ms",
@@ -348,7 +375,13 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
             )
             assertTrue("the real capture completed before teardown wedged", client.realCaptureCompleted)
             assertTrue(
-                "the real pane must reproduce Claude's collapsed multiline-paste chip: " +
+                "the real capture must be ack-positive (collapsed chip or payload needle): " +
+                    client.landedCapture,
+                agentSubmitVisibleFrameAcksPaste(client.landedCapture, PAYLOAD),
+            )
+            assertTrue(
+                "after settle the real pane must show Claude's collapsed chip " +
+                    "(needle-only means the fixture treated the paste as typed): " +
                     client.landedCapture,
                 client.landedCapture.any { it.contains("[Pasted text #") },
             )
@@ -609,6 +642,11 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
         var landedCapture: List<String> = emptyList()
             private set
 
+        val seenFrames: MutableList<List<String>> = CopyOnWriteArrayList()
+
+        @Volatile
+        private var needleOnlyHides: Int = 0
+
         override suspend fun sendKeysViaExec(
             sendKeysCommand: String,
             timeoutMs: Long?,
@@ -623,16 +661,37 @@ class Issue1739AgentAckBoundRealTransportIntegrationTest {
             scrollbackLines: Int,
         ): CommandResponse {
             val response = delegate.capturePaneTextViaExec(paneId, timeoutMs, scrollbackLines)
-            if (
-                !wedgeNextVisibleCapture ||
-                scrollbackLines != 0 ||
-                response.output.none { it.contains("[Pasted text #") }
-            ) {
+            // Issue #2205: never hand an ack-positive frame back to the paste-ack
+            // gate while the wedge is armed. Matching only `[Pasted text #` left a
+            // needle-visible body unwedged, so the first send returned success.
+            //
+            // A needle-only frame can appear MID-paste (bytes echoed before the
+            // fake-agent finishes `\e[200~`…`\e[201~`). Returning it acks the
+            // send; wedging it immediately can let a later `\n` submit a second
+            // turn. Hide transient needle frames (the gate keeps polling) until
+            // the collapsed chip arrives, or until a few polls show the needle
+            // is stable — then park cleanup.
+            if (!wedgeNextVisibleCapture || scrollbackLines != 0) {
                 return response
+            }
+            val hasChip = response.output.any { it.contains("[Pasted text #") }
+            val acksPaste = agentSubmitVisibleFrameAcksPaste(response.output, PAYLOAD)
+            if (!acksPaste) {
+                return response
+            }
+            if (!hasChip && needleOnlyHides < NEEDLE_ONLY_HIDES_BEFORE_WEDGE) {
+                needleOnlyHides += 1
+                seenFrames += response.output
+                return CommandResponse(
+                    number = response.number,
+                    output = listOf("> "),
+                    isError = false,
+                )
             }
             wedgeNextVisibleCapture = false
             realCaptureCompleted = true
             landedCapture = response.output
+            seenFrames += response.output
             try {
                 CompletableDeferred<Unit>().await()
             } catch (cancelled: CancellationException) {

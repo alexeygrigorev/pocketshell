@@ -54,6 +54,30 @@ class FakeAgentTranscriptJsonTest {
         assertEquals(payload, parsed.text)
     }
 
+    @Test
+    fun tmux37cCaretEncodedBracketedPasteCollapsesToChip() {
+        val script = projectRoot().resolve(FAKE_AGENT_SCRIPT)
+        // tmux 3.7c paste-buffer vis-encodes ESC as `^[` (issue #2205).
+        val caretFramed = "^[[200~echo line1\necho line2^[[201~"
+        val process = ProcessBuilder(script.toString())
+            .directory(projectRoot().toFile())
+            .redirectErrorStream(true)
+            .start()
+        process.outputStream.use { it.write(caretFramed.toByteArray(Charsets.UTF_8)) }
+        val completed = process.waitFor(5, TimeUnit.SECONDS)
+        if (!completed) process.destroyForcibly()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        assertTrue("fake-agent timed out on caret-encoded paste: $output", completed)
+        assertTrue(
+            "tmux 3.7c caret-ESC framed paste must collapse to the Claude chip, got: $output",
+            output.contains("[Pasted text #1 +1 lines]"),
+        )
+        assertTrue(
+            "caret-encoded paste must not submit on the embedded newline, got: $output",
+            !output.contains("FAKE-AGENT SUBMITTED:"),
+        )
+    }
+
     private fun projectRoot(): Path {
         var candidate: Path? = Paths.get(System.getProperty("user.dir")).toAbsolutePath()
         while (candidate != null) {

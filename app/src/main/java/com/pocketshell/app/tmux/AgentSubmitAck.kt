@@ -614,6 +614,28 @@ private fun agentPaneShowsPayload(
             )
 }
 
+/**
+ * Issue #2205: would the paste-ack gate accept [visibleLines] as proof this
+ * [payload] landed? The #1739 capture-wedge must use THIS predicate — not the
+ * collapsed-chip substring alone — so a needle-visible body (no
+ * `[Pasted text #`) cannot silently succeed the first send.
+ */
+internal fun agentSubmitVisibleFrameAcksPaste(
+    visibleLines: List<String>,
+    payload: String,
+    baselineNeedleCount: Int = 0,
+    collapsedMarkerBaseline: Int = 0,
+): Boolean {
+    val needle = agentSubmitAckNeedle(payload) ?: return false
+    return agentPaneShowsPayload(
+        response = CommandResponse(number = -1L, output = visibleLines, isError = false),
+        needle = needle,
+        baselineNeedleCount = baselineNeedleCount,
+        payloadIsMultiLine = agentSubmitPayloadIsMultiLine(payload),
+        collapsedMarkerBaseline = collapsedMarkerBaseline,
+    )
+}
+
 internal fun agentSubmitAckNeedle(payload: String): String? {
     val lastLine = payload
         .split('\n')

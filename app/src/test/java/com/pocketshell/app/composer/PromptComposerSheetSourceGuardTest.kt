@@ -1,7 +1,9 @@
 package com.pocketshell.app.composer
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -63,25 +65,15 @@ class PromptComposerSheetSourceGuardTest {
             actionMarker = "fun provePromotionThenRetry(",
             endMarker = "val youngerRelease = CountDownLatch",
         )
-        val immediateReadIndex = promotionDraftBlock.indexOf("composer.loadComposerDraft(durableKey)")
-        val durabilityWaitIndex = promotionDraftBlock.indexOf(
-            "compose.waitUntil(timeoutMillis = uiTimeoutMs)",
-            startIndex = immediateReadIndex.coerceAtLeast(0),
-        )
-        val durableReadIndex = promotionDraftBlock.indexOf(
-            "composer.composerDraftStore.load(durableKey) == replacementDraft",
-            startIndex = durabilityWaitIndex.coerceAtLeast(0),
-        )
-        val fallbackRemovalIndex = promotionDraftBlock.indexOf(
-            "composer.composerDraftStore.load(fallbackKey) == null",
-            startIndex = durableReadIndex.coerceAtLeast(0),
-        )
-        assertTrue(
-            "#1602 must prove immediate ordered visibility before bounded raw-store durability",
-            immediateReadIndex >= 0 &&
-                durabilityWaitIndex > immediateReadIndex &&
-                durableReadIndex > durabilityWaitIndex &&
-                fallbackRemovalIndex > durableReadIndex,
+        assertOrderedMarkers(
+            "must prove immediate ordered visibility before bounded raw-store durability",
+            promotionDraftBlock,
+            listOf(
+                "composer.loadComposerDraft(durableKey)",
+                "compose.waitUntil(timeoutMillis = uiTimeoutMs)",
+                "composer.composerDraftStore.load(durableKey) == replacementDraft",
+                "composer.composerDraftStore.load(fallbackKey) == null",
+            ),
         )
         assertRecoveredJourneyControlScrollOrdering(journey)
         listOf(
@@ -286,23 +278,53 @@ class PromptComposerSheetSourceGuardTest {
         }
     }
 
+    /**
+     * Walk [markers] in order through [block], searching each from after the
+     * previous match. A miss hard-fails immediately, naming that marker —
+     * Java's indexOf would otherwise restart from offset 0. Returns the match
+     * indices only when the whole chain is strictly increasing.
+     */
+    private fun assertOrderedMarkers(
+        label: String,
+        block: String,
+        markers: List<String>,
+    ): List<Int> {
+        val indices = ArrayList<Int>(markers.size)
+        var startIndex = 0
+        for ((offset, marker) in markers.withIndex()) {
+            val found = block.indexOf(marker, startIndex)
+            val markerNumber = offset + 1
+            val predecessor = if (offset == 0) "start of block" else "marker $offset"
+            assertTrue(
+                "#1602 $label: marker $markerNumber of ${markers.size} not found after $predecessor — \"$marker\"",
+                found >= 0,
+            )
+            if (indices.isNotEmpty()) {
+                assertTrue(
+                    "#1602 $label: marker $markerNumber of ${markers.size} is not after marker $offset — \"$marker\"",
+                    found > indices.last(),
+                )
+            }
+            indices.add(found)
+            startIndex = found + 1
+        }
+        return indices
+    }
+
     private fun assertCopyScrollThenPairedGeometry(
         label: String,
         oracle: String,
         copyMatcherName: String,
     ) {
-        val copyIndex = oracle.indexOf(
-            "compose.onAllNodes($copyMatcherName, useUnmergedTree = true).assertCountEquals(1)",
-        )
-        val scrollIndex = oracle.indexOf(".performScrollTo()", startIndex = copyIndex.coerceAtLeast(0))
-        val idleIndex = oracle.indexOf("compose.waitForIdle()", startIndex = scrollIndex.coerceAtLeast(0))
-        val geometryIndex = oracle.indexOf(
-            "currentWindowGeometry(row.id)",
-            startIndex = idleIndex.coerceAtLeast(0),
-        )
-        assertTrue(
-            "#1602 $label exact copy must precede scroll, idle, and lazy paired geometry",
-            copyIndex >= 0 && scrollIndex > copyIndex && idleIndex > scrollIndex && geometryIndex > idleIndex,
+        assertOrderedMarkers(
+            "$label exact copy must precede scroll, idle, and lazy paired geometry",
+            oracle,
+            listOf(
+                "compose.onAllNodes($copyMatcherName, useUnmergedTree = true).assertCountEquals(1)",
+                ".performScrollTo()",
+                "compose.waitForIdle()",
+                "currentWindowGeometry(row.id)",
+            ),
         )
     }
 
@@ -311,19 +333,15 @@ class PromptComposerSheetSourceGuardTest {
         oracle: String,
         copyMatcherName: String,
     ) {
-        val scrollIndex = oracle.indexOf(".performScrollTo()")
-        val idleIndex = oracle.indexOf("compose.waitForIdle()", startIndex = scrollIndex.coerceAtLeast(0))
-        val geometryIndex = oracle.indexOf(
-            "currentWindowGeometry(row.id)",
-            startIndex = idleIndex.coerceAtLeast(0),
-        )
-        val copyIndex = oracle.indexOf(
-            "compose.onAllNodes($copyMatcherName, useUnmergedTree = true).assertCountEquals(1)",
-            startIndex = geometryIndex.coerceAtLeast(0),
-        )
-        assertTrue(
-            "#1602 $label must prove raw geometry before the old product copy boundary",
-            scrollIndex >= 0 && idleIndex > scrollIndex && geometryIndex > idleIndex && copyIndex > geometryIndex,
+        assertOrderedMarkers(
+            "$label must prove raw geometry before the old product copy boundary",
+            oracle,
+            listOf(
+                ".performScrollTo()",
+                "compose.waitForIdle()",
+                "currentWindowGeometry(row.id)",
+                "compose.onAllNodes($copyMatcherName, useUnmergedTree = true).assertCountEquals(1)",
+            ),
         )
     }
 
@@ -334,13 +352,15 @@ class PromptComposerSheetSourceGuardTest {
         endMarker: String,
     ) {
         val actionBlock = boundedOracleBlock(label, oracle, actionMarker, endMarker)
-        val scrollIndex = actionBlock.indexOf(".performScrollTo()")
-        val displayedIndex = actionBlock.indexOf(".assertIsDisplayed()", startIndex = scrollIndex.coerceAtLeast(0))
-        val disabledIndex = actionBlock.indexOf(".assertIsNotEnabled()", startIndex = displayedIndex.coerceAtLeast(0))
-        assertTrue(
-            "#1602 $label must scroll the exact bounded-viewport Retry control before " +
+        assertOrderedMarkers(
+            "$label must scroll the exact bounded-viewport Retry control before " +
                 "proving it physically displayed and disabled",
-            scrollIndex >= 0 && displayedIndex > scrollIndex && disabledIndex > displayedIndex,
+            actionBlock,
+            listOf(
+                ".performScrollTo()",
+                ".assertIsDisplayed()",
+                ".assertIsNotEnabled()",
+            ),
         )
     }
 
@@ -351,20 +371,16 @@ class PromptComposerSheetSourceGuardTest {
         endMarker: String,
     ) {
         val actionBlock = boundedOracleBlock(label, oracle, actionMarker, endMarker)
-        val scrollIndex = actionBlock.indexOf(".performScrollTo()")
-        val displayedIndex = actionBlock.indexOf(".assertIsDisplayed()", startIndex = scrollIndex.coerceAtLeast(0))
-        val disabledIndex = actionBlock.indexOf(".assertIsNotEnabled()", startIndex = displayedIndex.coerceAtLeast(0))
-        val pointerTapIndex = actionBlock.indexOf(
-            ".performTouchInput { click() }",
-            startIndex = disabledIndex.coerceAtLeast(0),
-        )
-        assertTrue(
-            "#1602 $label must scroll the exact bounded-viewport Retry control before " +
+        assertOrderedMarkers(
+            "$label must scroll the exact bounded-viewport Retry control before " +
                 "proving it physically displayed, disabled, and pointer-no-op",
-            scrollIndex >= 0 &&
-                displayedIndex > scrollIndex &&
-                disabledIndex > displayedIndex &&
-                pointerTapIndex > disabledIndex,
+            actionBlock,
+            listOf(
+                ".performScrollTo()",
+                ".assertIsDisplayed()",
+                ".assertIsNotEnabled()",
+                ".performTouchInput { click() }",
+            ),
         )
     }
 
@@ -396,77 +412,33 @@ class PromptComposerSheetSourceGuardTest {
             )
         }
 
-        val waitingStatusNode = method.indexOf("compose.onNode(waitingStatus, useUnmergedTree = true)")
-        val waitingStatusScroll = method.indexOf(
-            ".performScrollTo()",
-            startIndex = waitingStatusNode.coerceAtLeast(0),
-        )
-        val waitingRetryNode = method.indexOf(
-            "val waitingRetryNode = compose.onNode(waitingRetryControl, useUnmergedTree = true)",
-            startIndex = waitingStatusScroll.coerceAtLeast(0),
-        )
-        val waitingRetryScroll = method.indexOf(
-            ".performScrollTo()",
-            startIndex = waitingRetryNode.coerceAtLeast(0),
-        )
-        val waitingContainment = method.indexOf(
-            "stage = \"waiting behind younger real send\"",
-            startIndex = waitingRetryScroll.coerceAtLeast(0),
-        )
-        val waitingLabelDisplayed = method.indexOf(
-            "compose.onNode(waitingRetryLabel, useUnmergedTree = true).assertIsDisplayed()",
-            startIndex = waitingContainment.coerceAtLeast(0),
-        )
-        val youngerStatusNode = method.indexOf(
-            "compose.onNode(youngerSendingStatus, useUnmergedTree = true)",
-            startIndex = waitingLabelDisplayed.coerceAtLeast(0),
-        )
-        val youngerStatusScroll = method.indexOf(
-            ".performScrollTo()",
-            startIndex = youngerStatusNode.coerceAtLeast(0),
-        )
-        assertTrue(
-            "#1602 must scroll exact waiting status, then exact row-owned control and prove containment " +
+        assertOrderedMarkers(
+            "must scroll exact waiting status, then exact row-owned control and prove containment " +
                 "before its label, then scroll the exact younger Sending status",
-            waitingStatusNode >= 0 &&
-                waitingStatusScroll > waitingStatusNode &&
-                waitingRetryNode > waitingStatusScroll &&
-                waitingRetryScroll > waitingRetryNode &&
-                waitingContainment > waitingRetryScroll &&
-                waitingLabelDisplayed > waitingContainment &&
-                youngerStatusNode > waitingLabelDisplayed &&
-                youngerStatusScroll > youngerStatusNode,
+            method,
+            listOf(
+                "compose.onNode(waitingStatus, useUnmergedTree = true)",
+                ".performScrollTo()",
+                "val waitingRetryNode = compose.onNode(waitingRetryControl, useUnmergedTree = true)",
+                ".performScrollTo()",
+                "stage = \"waiting behind younger real send\"",
+                "compose.onNode(waitingRetryLabel, useUnmergedTree = true).assertIsDisplayed()",
+                "compose.onNode(youngerSendingStatus, useUnmergedTree = true)",
+                ".performScrollTo()",
+            ),
         )
 
-        val retryingStatusNode = method.indexOf("compose.onNode(retryingStatus, useUnmergedTree = true)")
-        val retryingStatusScroll = method.indexOf(
-            ".performScrollTo()",
-            startIndex = retryingStatusNode.coerceAtLeast(0),
-        )
-        val retryingControlNode = method.indexOf(
-            "val retryingControlNode = compose.onNode(waitingRetryControl, useUnmergedTree = true)",
-            startIndex = retryingStatusScroll.coerceAtLeast(0),
-        )
-        val retryingControlScroll = method.indexOf(
-            ".performScrollTo()",
-            startIndex = retryingControlNode.coerceAtLeast(0),
-        )
-        val retryingContainment = method.indexOf(
-            "stage = \"Retrying after physical tap\"",
-            startIndex = retryingControlScroll.coerceAtLeast(0),
-        )
-        val retryingLabelDisplayed = method.indexOf(
-            "compose.onNode(retryingLabel, useUnmergedTree = true).assertIsDisplayed()",
-            startIndex = retryingContainment.coerceAtLeast(0),
-        )
-        assertTrue(
-            "#1602 Retrying copy must follow exact status/control scroll and containment",
-            retryingStatusNode >= 0 &&
-                retryingStatusScroll > retryingStatusNode &&
-                retryingControlNode > retryingStatusScroll &&
-                retryingControlScroll > retryingControlNode &&
-                retryingContainment > retryingControlScroll &&
-                retryingLabelDisplayed > retryingContainment,
+        assertOrderedMarkers(
+            "Retrying copy must follow exact status/control scroll and containment",
+            method,
+            listOf(
+                "compose.onNode(retryingStatus, useUnmergedTree = true)",
+                ".performScrollTo()",
+                "val retryingControlNode = compose.onNode(waitingRetryControl, useUnmergedTree = true)",
+                ".performScrollTo()",
+                "stage = \"Retrying after physical tap\"",
+                "compose.onNode(retryingLabel, useUnmergedTree = true).assertIsDisplayed()",
+            ),
         )
     }
 
@@ -477,97 +449,38 @@ class PromptComposerSheetSourceGuardTest {
             actionMarker = "fun offlineModalRowsOwnGeometryCopyAndScrollableDisabledRetryControls()",
             endMarker = "fun statusLedSingleRowsOwnCopyProgressAndResendPresentation()",
         )
-        val seedIndex = method.indexOf("val seededViewportRowIds = buildList")
-        val seedRowIndex = method.indexOf(
-            "composerOutboundQueueItemRowTestTag(seedRow.id)",
-            startIndex = seedIndex.coerceAtLeast(0),
-        )
-        val seedScrollIndex = method.indexOf(
-            ".performScrollTo()",
-            startIndex = seedRowIndex.coerceAtLeast(0),
-        )
-        val seedOrderProofIndex = method.indexOf(
-            "FIFO viewport seed must finish on the lower exact queue row",
-            startIndex = seedScrollIndex.coerceAtLeast(0),
-        )
-        val rowMarkerIndex = method.indexOf(
-            "compose.onNodeWithTag(rowTag, useUnmergedTree = true)",
-            startIndex = seedOrderProofIndex.coerceAtLeast(0),
-        )
-        val rowLevelScrollIndex = method.indexOf(
-            ".performScrollTo()",
-            startIndex = rowMarkerIndex.coerceAtLeast(0),
-        )
-        val rawRetryBoundsIndex = method.indexOf(
-            "val retryRawBoundsBeforeExactScroll",
-            startIndex = rowLevelScrollIndex.coerceAtLeast(0),
-        )
-        val rawRetryWithinRowIndex = method.indexOf(
-            "retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(",
-            startIndex = rawRetryBoundsIndex.coerceAtLeast(0),
-        )
         // Issue #2123 deleted the `offlineRetryNode.assertIsNotDisplayed()`
         // precondition that used to separate the row-level scroll from the exact
         // action scroll: it pinned a viewport-size accident ("this control happens
         // to be off-screen at this offset"), which was false on every device. The
         // separator is now the exact trailing-action RECEIVER — the scroll proving
         // reachability must be performed on the Retry control itself, not merely on
-        // its potentially taller row.
-        val exactActionNodeIndex = method.indexOf(
-            "offlineRetryNode",
-            startIndex = rawRetryWithinRowIndex.coerceAtLeast(0),
-        )
-        val exactActionScrollIndex = method.indexOf(
-            ".performScrollTo()",
-            startIndex = exactActionNodeIndex.coerceAtLeast(0),
-        )
-        val namedDisplayedPostconditionIndex = method.indexOf(
-            "postcondition: exact offline Retry must be displayed after its own scroll",
-            startIndex = exactActionScrollIndex.coerceAtLeast(0),
-        )
-        val disabledPostconditionIndex = method.indexOf(
-            "offlineRetryNode.assertIsNotEnabled()",
-            startIndex = namedDisplayedPostconditionIndex.coerceAtLeast(0),
-        )
-        // The device-independent property #2123 put in the accident's place: the
-        // blocked reason travels ON the control, so a reachable action never reads
-        // as a bare, silently-inert "Retry" regardless of viewport height.
-        val blockedReasonCopyIndex = method.indexOf(
-            "hasText(\"Offline\") and",
-            startIndex = disabledPostconditionIndex.coerceAtLeast(0),
-        )
-        val postBoundsIndex = method.indexOf(
-            "val retryBoundsAfterExactScroll",
-            startIndex = blockedReasonCopyIndex.coerceAtLeast(0),
-        )
-        val containedPostconditionIndex = method.indexOf(
-            "retryBoundsAfterExactScroll.isNonEmptyAndFullyContainedBy(",
-            startIndex = postBoundsIndex.coerceAtLeast(0),
-        )
-        val physicalTapIndex = method.indexOf(
-            "offlineRetryNode.performTouchInput { click() }",
-            startIndex = containedPostconditionIndex.coerceAtLeast(0),
-        )
-        assertTrue(
-            "#1602 component must seed the real FIFO capture position, prove the laid-out Retry contained by " +
+        // its potentially taller row. The blocked-reason copy is the
+        // device-independent property that replaced the accident: a reachable
+        // action never reads as a bare, silently-inert "Retry".
+        assertOrderedMarkers(
+            "component must seed the real FIFO capture position, prove the laid-out Retry contained by " +
                 "its own row after the row scroll, then exact-scroll the trailing action itself into the " +
                 "bounded viewport before the disabled/blocked-reason/containment/tap proof",
-            seedIndex >= 0 &&
-                seedRowIndex > seedIndex &&
-                seedScrollIndex > seedRowIndex &&
-                seedOrderProofIndex > seedScrollIndex &&
-                rowMarkerIndex > seedOrderProofIndex &&
-                rowLevelScrollIndex > rowMarkerIndex &&
-                rawRetryBoundsIndex > rowLevelScrollIndex &&
-                rawRetryWithinRowIndex > rawRetryBoundsIndex &&
-                exactActionNodeIndex > rawRetryWithinRowIndex &&
-                exactActionScrollIndex > exactActionNodeIndex &&
-                namedDisplayedPostconditionIndex > exactActionScrollIndex &&
-                disabledPostconditionIndex > namedDisplayedPostconditionIndex &&
-                blockedReasonCopyIndex > disabledPostconditionIndex &&
-                postBoundsIndex > blockedReasonCopyIndex &&
-                containedPostconditionIndex > postBoundsIndex &&
-                physicalTapIndex > containedPostconditionIndex,
+            method,
+            listOf(
+                "val seededViewportRowIds = buildList",
+                "composerOutboundQueueItemRowTestTag(seedRow.id)",
+                ".performScrollTo()",
+                "FIFO viewport seed must finish on the lower exact queue row",
+                "compose.onNodeWithTag(rowTag, useUnmergedTree = true)",
+                ".performScrollTo()",
+                "val retryRawBoundsBeforeExactScroll",
+                "retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(",
+                "offlineRetryNode",
+                ".performScrollTo()",
+                "postcondition: exact offline Retry must be displayed after its own scroll",
+                "offlineRetryNode.assertIsNotEnabled()",
+                "hasText(\"Offline\") and",
+                "val retryBoundsAfterExactScroll",
+                "retryBoundsAfterExactScroll.isNonEmptyAndFullyContainedBy(",
+                "offlineRetryNode.performTouchInput { click() }",
+            ),
         )
         // Issue #2123: keep the deleted accident deleted. A scroll-offset-dependent
         // invisibility assertion inside THIS proof is the exact defect that made the
@@ -587,8 +500,8 @@ class PromptComposerSheetSourceGuardTest {
         endMarker: String,
     ): String {
         val actionIndex = oracle.indexOf(actionMarker)
-        val endIndex = oracle.indexOf(endMarker, startIndex = actionIndex.coerceAtLeast(0) + 1)
         assertTrue("#1602 $label action marker must exist", actionIndex >= 0)
+        val endIndex = oracle.indexOf(endMarker, startIndex = actionIndex + 1)
         assertTrue("#1602 $label end marker must follow its action marker", endIndex > actionIndex)
         return oracle.substring(actionIndex, endIndex)
     }
@@ -606,6 +519,144 @@ class PromptComposerSheetSourceGuardTest {
                 callback.contains(".query(") ||
                 callback.contains(".openInputStream("),
         )
+    }
+
+    @Test
+    fun missingMarkerFailsClosedNamingTheGapInsteadOfSearchingFromZero() {
+        // #2123 replay: the seed's `.performScrollTo()` sits BEFORE the last
+        // found marker. The next required marker is absent. Search-from-0 then
+        // resolves `.performScrollTo()` at the seed — earlier than the last
+        // found marker.
+        val block =
+            """
+            val seededViewportRowIds = buildList
+            seedRow.performScrollTo()
+            FIFO viewport seed must finish on the lower exact queue row
+            retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(
+            offlineRetryNode
+            .performScrollTo()
+            postcondition: exact offline Retry must be displayed after its own scroll
+            """.trimIndent()
+        val markers = listOf(
+            "val seededViewportRowIds = buildList",
+            "FIFO viewport seed must finish on the lower exact queue row",
+            "retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(",
+            "offlineRetryNode.assertIsNotDisplayed()",
+            ".performScrollTo()",
+        )
+        val lastFound = block.indexOf("retryRawBoundsBeforeExactScroll.isNonEmptyAndFullyContainedBy(")
+        val seedScroll = block.indexOf(".performScrollTo()")
+        val searchFromZero = block.indexOf(".performScrollTo()", startIndex = 0)
+        assertTrue(lastFound >= 0)
+        assertEquals(
+            "fixture must reproduce the #2123 search-from-0 trap, otherwise this test is vacuous",
+            seedScroll,
+            searchFromZero,
+        )
+        assertTrue(
+            "search-from-0 must be anti-ordered vs the last found marker",
+            searchFromZero < lastFound,
+        )
+
+        // G6: restoring search-from-0 (and continuing past a -1) must redden
+        // the named-missing-marker assertion. The old conjunction either
+        // fails with a message that names none of the markers, or — if the
+        // missing conjunct is dropped — goes green on the remaining terms.
+        val error = assertThrows(AssertionError::class.java) {
+            assertOrderedMarkers(
+                "component clipped-to-visible Retry transition",
+                block,
+                markers,
+            )
+        }
+        val message = error.message.orEmpty()
+        assertTrue(
+            "must name the missing marker, not a later anti-ordered conjunction: $message",
+            message.contains("marker 4 of 5 not found after marker 3"),
+        )
+        assertTrue(
+            "must quote the missing marker text: $message",
+            message.contains("offlineRetryNode.assertIsNotDisplayed()"),
+        )
+    }
+
+    @Test
+    fun missingMarkerFailsClosedWhenLaterMarkersStayUniqueAndOrdered() {
+        // The fail-open shape: the missing marker's successor exists only
+        // AFTER the predecessor, so search-from-0 still finds it in order.
+        // Soundness then rests on every computed index appearing in the
+        // final conjunction — drop that one conjunct and the guard is green
+        // while a required marker is gone.
+        val block =
+            """
+            first-marker
+            third-marker
+            """.trimIndent()
+        val first = block.indexOf("first-marker")
+        val thirdFromZero = block.indexOf("third-marker", startIndex = 0)
+        assertTrue(first >= 0)
+        assertTrue(
+            "fixture must keep the later marker unique and ordered from 0",
+            thirdFromZero > first,
+        )
+
+        val error = assertThrows(AssertionError::class.java) {
+            assertOrderedMarkers(
+                "fail-open trap",
+                block,
+                listOf("first-marker", "second-marker-absent", "third-marker"),
+            )
+        }
+        val message = error.message.orEmpty()
+        assertTrue(
+            "must fail at the missing marker, not accept the unique later term: $message",
+            message.contains("marker 2 of 3 not found after marker 1"),
+        )
+        assertTrue(
+            "must quote the missing marker text: $message",
+            message.contains("second-marker-absent"),
+        )
+    }
+
+    @Test
+    fun orderedMarkersReturnStrictlyIncreasingIndices() {
+        val block = "aaa xxx bbb yyy ccc"
+        val indices = assertOrderedMarkers("toy chain", block, listOf("aaa", "bbb", "ccc"))
+        assertEquals(listOf(block.indexOf("aaa"), block.indexOf("bbb"), block.indexOf("ccc")), indices)
+        assertTrue(indices.zipWithNext().all { (prev, next) -> next > prev })
+    }
+
+    @Test
+    fun orderedMarkerChainsUseSharedHelperAndDoNotRestartMissingSearchAtZero() {
+        val src = locateProject(
+            "app/src/test/java/com/pocketshell/app/composer/PromptComposerSheetSourceGuardTest.kt",
+        )
+        val helperStart = src.indexOf("private fun assertOrderedMarkers(")
+        assertTrue(helperStart >= 0)
+        val helperEnd = src.indexOf("\n    private fun ", helperStart + 1)
+        val helperBody = src.substring(helperStart, if (helperEnd >= 0) helperEnd else src.length)
+        val restartToken = "coerceAtLeast" + "(0)"
+        assertFalse(
+            "assertOrderedMarkers must fail closed on a missing predecessor instead of restarting at offset 0",
+            helperBody.contains(restartToken),
+        )
+        listOf(
+            "private fun assertCopyScrollThenPairedGeometry",
+            "private fun assertScrollThenPairedGeometryThenCopy",
+            "private fun assertExactRetryScrollBeforeDisabledProof",
+            "private fun assertExactRetryScrollBeforeDisabledPointerTap",
+            "private fun assertRecoveredJourneyControlScrollOrdering",
+            "private fun assertComponentRetryClipTransition",
+        ).forEach { helper ->
+            val start = src.indexOf(helper)
+            assertTrue("$helper must exist", start >= 0)
+            val nextFn = src.indexOf("\n    private fun ", start + helper.length)
+            val body = src.substring(start, if (nextFn >= 0) nextFn else src.length)
+            assertTrue(
+                "$helper must walk markers through assertOrderedMarkers",
+                body.contains("assertOrderedMarkers("),
+            )
+        }
     }
 
     private fun String.substringFrom(marker: String): String {

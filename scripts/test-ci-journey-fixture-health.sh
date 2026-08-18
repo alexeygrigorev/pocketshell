@@ -38,6 +38,11 @@
 #       G6 wrong-cost trap; this is the mutation that must redden it.
 #   (8) REAL DOCKER (opt-in, POCKETSHELL_FIXTURE_HEALTH_REAL_DOCKER=1): the
 #       mechanism and the repair on a live `agents` container over real SSH.
+#   (9) issue #2145 — two readings of "the fixture did not list sessions":
+#       no server created yet (`error connecting` / No such file) is NOT a
+#       wedge; a real wedge still is. `unavailable` is benign before any
+#       class in this shard has created a server, and suspicious after.
+#       G6: restoring the old unavailable=wedge mapping must redden (9a).
 #
 # JVM-free, Docker-free and emulator-free by default (ssh/docker/gradle stubbed).
 set -uo pipefail
@@ -71,6 +76,7 @@ printf '%s\n' "$mode" >> "$FIXTURE_STATE/probe.log"
 case "$mode" in
   healthy)     printf 'seed: 1 windows (created now)\n'; exit 0 ;;
   no_server)   printf 'no server running on /tmp/tmux-1000/default\n' >&2; exit 1 ;;
+  no_socket)   printf 'error connecting to /tmp/tmux-1000/default (No such file or directory)\n' >&2; exit 1 ;;
   wedged)      sleep 3600; exit 0 ;;
   unreachable) printf 'ssh: connect to host 127.0.0.1 port 2222: Connection refused\n' >&2; exit 255 ;;
 esac
@@ -208,14 +214,14 @@ pass "(3) per-attempt bring-up timings are recorded with a preflight baseline"
 # Sandbox repo for the end-to-end suite cases. `cp -a` (never symlinks — a
 # symlinked mutation root writes through into the tree under review, #2054).
 # ---------------------------------------------------------------------------
-# build_suite_sandbox <root> <failing-class> <wedges-the-fixture: 1|0>
+# build_suite_sandbox <root> <failing-class> <wedges-the-fixture: 1|0> [on-fail-mode]
 #
 # The wedging stub models REALITY: the class does not merely fail, it leaves the
 # SHARED fixture frozen behind it, exactly as the killed storm test left the tmux
 # server SIGSTOPped. Flipping the fixture to `wedged` before the suite starts
 # would instead be repaired by the preflight probe and never reach a class.
 build_suite_sandbox() {
-  local root="$1" failing_class="$2" wedges="${3:-0}"
+  local root="$1" failing_class="$2" wedges="${3:-0}" fail_mode="${4:-}"
   rm -rf "$root"
   mkdir -p "$root"
   cp -a "$REPO_ROOT/scripts" "$root/scripts"
@@ -228,6 +234,9 @@ for arg in "\$@"; do
       if [[ "$wedges" == "1" && ! -f "\$FIXTURE_STATE/already-wedged" ]]; then
         : > "\$FIXTURE_STATE/already-wedged"
         printf 'wedged\n' > "\$FIXTURE_STATE/fixture-mode"
+      fi
+      if [[ -n "$fail_mode" ]]; then
+        printf '%s\n' "$fail_mode" > "\$FIXTURE_STATE/fixture-mode"
       fi
       exit 1
       ;;
@@ -415,6 +424,180 @@ fi
 grep -q 'Failed BOTH attempts' "$MUTANT_ROOT/artifacts/ci-journey/summary.md" \
   || fail "(7) the mutant run should still have failed the class (the mutation must redden only the new check)"
 pass "(7) mutation confirmed: without the gate the setup failure is invisible, and only that check reddens"
+
+# ---------------------------------------------------------------------------
+# (9) issue #2145 — no-server-yet is not a wedge; a real wedge still is
+# ---------------------------------------------------------------------------
+echo "== (9) no-server-yet vs wedge (issue #2145) =="
+# Reset the shard-level "a server has been seen" bit so earlier cases that
+# probed a healthy listing cannot leak into these readings.
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
+
+# (9a) THE REPRODUCE-FIRST CHECK. On current main, was_wedged treats
+# `unavailable` as wedge-class unconditionally, so a pre-server
+# `error connecting / No such file` reading (the normal state before any
+# class has created a tmux server) is classified as a wedge. That is the
+# #2145 mislabel. This assertion is FALSE on the unfixed mapping.
+JOURNEY_FIXTURE_HEALTH_STATUS="unavailable"
+JOURNEY_FIXTURE_HEALTH_DETAIL="error connecting to /tmp/tmux-1000/default (No such file or directory)"
+if journey_fixture_health_was_wedged; then
+  fail "(9a) unavailable with no server created yet must NOT be wedge-class — that is the #2145 mislabel (a product failure would be attributed shared_fixture_setup_failure)"
+fi
+pass "(9a) unavailable before any server has been created is not a wedge"
+
+# (9b) AC 2: the same status is suspicious AFTER a class in this shard
+# has created a server — the fixture was answering and then became
+# unreachable.
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=1
+JOURNEY_FIXTURE_HEALTH_STATUS="unavailable"
+journey_fixture_health_was_wedged \
+  || fail "(9b) unavailable AFTER a server was created must stay wedge-class — a missed wedge is worse than a mislabel"
+pass "(9b) unavailable after a server has been seen stays wedge-class"
+
+# (9c) A real wedge is always wedge-class, even before any listing.
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
+JOURNEY_FIXTURE_HEALTH_STATUS="wedged"
+journey_fixture_health_was_wedged \
+  || fail "(9c) status=wedged must stay wedge-class even before any server was listed"
+JOURNEY_FIXTURE_HEALTH_STATUS="wedged_repaired"
+journey_fixture_health_was_wedged \
+  || fail "(9c) status=wedged_repaired must stay wedge-class even before any server was listed"
+pass "(9c) a real wedge is always wedge-class"
+
+# (9d) The observed CI phrasing — tmux answering immediately that the
+# socket does not exist — is "no server created yet", not "SSH could not
+# reach the fixture" and not a hang. The probe must not collapse it into
+# unavailable (rc=2), and the gate must not report it as a wedge.
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
+reset_logs
+set_mode no_socket
+journey_fixture_probe; rc=$?
+[[ $rc -eq 0 ]] \
+  || fail "(9d) 'error connecting ... (No such file or directory)' is idle-no-server and must probe healthy (rc=0), got rc=$rc — same reading as 'no server running'"
+journey_fixture_health_gate preflight no_socket_preflight >/dev/null 2>&1
+[[ "$JOURNEY_FIXTURE_HEALTH_STATUS" == "ok" ]] \
+  || fail "(9d) idle-no-server must gate as ok, got status=$JOURNEY_FIXTURE_HEALTH_STATUS"
+if journey_fixture_health_was_wedged; then
+  fail "(9d) idle-no-server must not be classified as a wedge"
+fi
+[[ "${JOURNEY_FIXTURE_HEALTH_SERVER_SEEN:-0}" == "0" ]] \
+  || fail "(9d) an idle-no-server probe must not mark the shard as having created a server"
+pass "(9d) observed CI phrasing (error connecting / No such file) is idle-no-server, not unavailable, not a wedge"
+
+# (9e) END-TO-END: a genuine product failure on a no-socket fixture
+# (the early-shard shape: TmuxSessionScreenArtVerify / ForwardingResume)
+# must stay RED and must NOT be attributed as a fixture setup failure.
+echo "== (9e) product failure on idle-no-server is not a setup failure =="
+NOSOCKET_ROOT="$SANDBOX/nosocket"
+build_suite_sandbox "$NOSOCKET_ROOT" SandboxWedgingClass 0
+reset_logs
+set_mode no_socket
+rm -f "$STATE/already-wedged"
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
+out9e="$SANDBOX/nosocket.log"
+run_suite_sandbox "$NOSOCKET_ROOT" "$out9e"; rc9e=$?
+[[ $rc9e -ne 0 ]] || fail "(9e) the suite must stay RED — the reading change must not turn a failure green"
+if grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$out9e"; then
+  sed -n '1,80p' "$out9e"
+  fail "(9e) a product failure while the fixture has no tmux server yet was mislabelled a fixture setup failure"
+fi
+summary9e="$NOSOCKET_ROOT/artifacts/ci-journey/summary.md"
+[[ -f "$summary9e" ]] || fail "(9e) no summary.md"
+if grep -q 'Shared SSH/tmux fixture was WEDGED' "$summary9e"; then
+  cat "$summary9e"
+  fail "(9e) the summary claimed a wedged fixture on an idle-no-server run"
+fi
+grep -q 'Failed BOTH attempts' "$summary9e" \
+  || { cat "$summary9e"; fail "(9e) the genuine failure must still be reported"; }
+[[ "$(probe_reason "$summary9e")" == "first_attempt_journey_failure" ]] \
+  || fail "(9e) verdict must stay a product failure, got '$(probe_reason "$summary9e")'"
+pass "(9e) product failure on idle-no-server stays RED and is not attributed to the fixture"
+
+# (9f) END-TO-END: unavailable AFTER a server has been seen IS a setup
+# failure — the fixture was answering, then became unreachable.
+echo "== (9f) unavailable after a server was seen is a setup failure =="
+AFTER_ROOT="$SANDBOX/after-server"
+# First class (SandboxWedgingClass) PASSES against a healthy listing;
+# the second class fails and flips the fixture to unreachable.
+build_suite_sandbox "$AFTER_ROOT" SandboxHealthyClass 0 unreachable
+reset_logs
+set_mode healthy
+rm -f "$STATE/already-wedged"
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
+out9f="$SANDBOX/after-server.log"
+run_suite_sandbox "$AFTER_ROOT" "$out9f"; rc9f=$?
+[[ $rc9f -ne 0 ]] || fail "(9f) the suite must stay RED"
+grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE: com.pocketshell.app.proof.SandboxHealthyClass' "$out9f" \
+  || { sed -n '1,80p' "$out9f"; fail "(9f) unavailable after a server was seen must be classified as a fixture SETUP failure"; }
+[[ "$(probe_reason "$AFTER_ROOT/artifacts/ci-journey/summary.md")" == "shared_fixture_setup_failure" ]] \
+  || fail "(9f) verdict must be shared_fixture_setup_failure, got '$(probe_reason "$AFTER_ROOT/artifacts/ci-journey/summary.md")'"
+pass "(9f) unavailable after a server was seen is still a fixture setup failure, still RED"
+
+# (9h) END-TO-END: unreachable BEFORE any server has been created is
+# benign — same status, opposite reading from (9f).
+echo "== (9h) unavailable before any server is not a setup failure =="
+BEFORE_ROOT="$SANDBOX/before-server"
+build_suite_sandbox "$BEFORE_ROOT" SandboxWedgingClass 0
+reset_logs
+set_mode unreachable
+rm -f "$STATE/already-wedged"
+JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
+out9h="$SANDBOX/before-server.log"
+run_suite_sandbox "$BEFORE_ROOT" "$out9h"; rc9h=$?
+[[ $rc9h -ne 0 ]] || fail "(9h) the suite must stay RED"
+if grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$out9h"; then
+  sed -n '1,80p' "$out9h"
+  fail "(9h) unavailable before any server has been created was mislabelled a fixture setup failure"
+fi
+[[ "$(probe_reason "$BEFORE_ROOT/artifacts/ci-journey/summary.md")" == "first_attempt_journey_failure" ]] \
+  || fail "(9h) verdict must stay a product failure, got '$(probe_reason "$BEFORE_ROOT/artifacts/ci-journey/summary.md")'"
+pass "(9h) unavailable before any server stays a product failure, still RED"
+
+# (9g) G6 MUTATION — restore the old unavailable=wedge mapping and
+# require (9a) to go red. A green (9a) that would stay green with the
+# bug present is the G6 wrong-cost trap.
+echo "== (9g) mutation: restore unavailable=wedge and require (9a) to redden =="
+MUTANT_MAP="$SANDBOX/mutant-unavailable-wedge.sh"
+cp "$HEALTH" "$MUTANT_MAP"
+python3 - "$MUTANT_MAP" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = '''journey_fixture_health_was_wedged() {
+  [[ "$JOURNEY_FIXTURE_HEALTH_STATUS" == "wedged_repaired" \\
+     || "$JOURNEY_FIXTURE_HEALTH_STATUS" == "wedged" \\
+     || "$JOURNEY_FIXTURE_HEALTH_STATUS" == "unavailable" ]]
+}'''
+# Anchor on the function name so a rename fails closed rather than
+# silently applying a no-op mutation.
+needle = 'journey_fixture_health_was_wedged() {'
+assert needle in s, "mutation anchor missing — the mutant would be a no-op"
+# Replace from the function opener through its closing brace.
+start = s.index(needle)
+end = s.index('\n}', start) + 2
+s = s[:start] + old + s[end:]
+open(p, 'w').write(s)
+PY
+grep -q '|| "$JOURNEY_FIXTURE_HEALTH_STATUS" == "unavailable" ]]' "$MUTANT_MAP" \
+  || fail "(9g) the old unavailable=wedge mapping was not restored — a mutation that never happened is not a passing mutation test"
+# The mutant must redden ONLY the new check: (9a) becomes true-as-wedge,
+# while a real wedge stays a wedge and a healthy status stays not-wedge.
+(
+  # shellcheck source=scripts/ci-journey-fixture-health.sh
+  source "$MUTANT_MAP"
+  JOURNEY_FIXTURE_HEALTH_SERVER_SEEN=0
+  JOURNEY_FIXTURE_HEALTH_STATUS="unavailable"
+  journey_fixture_health_was_wedged \
+    || fail "(9g) restoring the old mapping did not classify unavailable-before-server as a wedge — (9a) is not load-bearing"
+  JOURNEY_FIXTURE_HEALTH_STATUS="wedged"
+  journey_fixture_health_was_wedged \
+    || fail "(9g) the mutant must not break the real-wedge reading"
+  JOURNEY_FIXTURE_HEALTH_STATUS="ok"
+  if journey_fixture_health_was_wedged; then
+    fail "(9g) the mutant must not start classifying a healthy fixture as a wedge"
+  fi
+)
+pass "(9g) mutation confirmed: the old unavailable=wedge mapping reddens (9a) and only (9a)"
 
 # ---------------------------------------------------------------------------
 # (8) REAL DOCKER (opt-in)

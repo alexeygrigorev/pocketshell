@@ -522,6 +522,11 @@ jobs:
           nf="$(grep -E '^network_fault_status=' "$file" | head -1 | cut -d= -f2)"
           bootstrap="$(grep -E '^bootstrap_status=' "$file" | head -1 | cut -d= -f2)"
           expectedfail="$(grep -E '^expected_fail_status=' "$file" | head -1 | cut -d= -f2)"
+          expected_n="$(grep -E '^expected_gating_classes=' "$file" | head -1 | cut -d= -f2-)"
+          executed_n="$(grep -E '^executed_gating_classes=' "$file" | head -1 | cut -d= -f2-)"
+          missing="$(grep -E '^missing_gating_classes=' "$file" | head -1 | cut -d= -f2-)"
+          skipped="$(grep -E '^skipped_gating_methods=' "$file" | head -1 | cut -d= -f2-)"
+          coverage="$(grep -E '^gating_coverage=' "$file" | head -1 | cut -d= -f2-)"
 
           {
             echo "# Fault-injection safety verdict"
@@ -529,6 +534,10 @@ jobs:
             echo "- network-fault (GATING): \`$nf\`"
             echo "- bootstrap (GATING): \`$bootstrap\`"
             echo "- #822 expected-fail lane (NON-GATING, tracked only): \`$expectedfail\`"
+            echo "- gating classes executed/expected (#2141): \`${executed_n:-?}/${expected_n:-?}\`"
+            echo "- skipped gating methods (#2141): \`${skipped:-}\`"
+            echo "- missing gating classes (#2141): \`${missing:-}\`"
+            echo "- gating coverage (#2141): \`${coverage:-unknown}\`"
             echo "- **fault_verdict: \`$verdict\`**"
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
@@ -538,6 +547,10 @@ jobs:
           fi
           if [[ "$verdict" == "INFRA" ]]; then
             echo "BLOCK-INFRA: a gating phase lost the emulator/device; preserved UTP evidence did not contain a substantive product assertion. Re-run on a healthy AVD before release."
+            exit 1
+          fi
+          if [[ "$verdict" == "INCOMPLETE" ]]; then
+            echo "BLOCK-INCOMPLETE: a gating method was skipped or a gating class never executed (executed=${executed_n:-?}/${expected_n:-?}; skipped=${skipped:-none}). The brief-cut hole is #1678's to fill; this job only refuses a clean PASS while it is open."
             exit 1
           fi
           echo "BLOCK: fault_verdict=$verdict — a fault-injection safety phase failed on this HEAD."

@@ -368,9 +368,13 @@ source "$REPO_ROOT/scripts/lib/nightly-exact-method-guard.sh"
 # The machine-readable fault-verdict helper (issue #1201): pure PASS/FAIL from the
 # network-fault + bootstrap phases ONLY (never the journey suite or the
 # expected-fail lane). Written to a file the CI fault-verdict job reads.
+# Issue #2141: skipped / unreached gating members are assessed from the
+# preserved phase-2 report and refuse fault_verdict=PASS. #2141 owns
+# visibility of that hole; #1678 owns deleting the brief-cut Assume.
 # shellcheck source=scripts/lib/nightly-fault-verdict.sh
 source "$REPO_ROOT/scripts/lib/nightly-fault-verdict.sh"
 FAULT_VERDICT_FILE="$ARTIFACT_DIR/fault-verdict.txt"
+FAULT_COVERAGE_FILE="$ARTIFACT_DIR/fault-gating-coverage.txt"
 
 # Per-phase test-report preservation (issue #1293): each phase below is a
 # SEPARATE `:app:connectedDebugAndroidTest` invocation that writes its JUnit
@@ -552,6 +556,16 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   # DisconnectBlackhole / NatIdle failing assertions unrecoverable. Observability
   # only — never affects NETWORK_FAULT_EXIT.
   preserve_phase_reports "phase2-network-fault" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+  # Issue #2141: compare the preserved phase-2 JUnit XML to NETWORK_FAULT_CLASSES
+  # AFTER the snapshot (later phases overwrite app/build). A skipped method or
+  # a truncated class set is recorded here and refuses fault_verdict=PASS.
+  # Read the snapshot, not the live report path — phase 2b/3/4 clobber it.
+  assess_fault_gating_coverage \
+    "$PHASE_REPORTS_DIR/phase2-network-fault" \
+    "${NETWORK_FAULT_CLASSES[@]}" \
+    > "$FAULT_COVERAGE_FILE" || true
+  echo "phase 2 (network-fault proofs) gating coverage:"
+  cat "$FAULT_COVERAGE_FILE"
   write_nightly_phase_classification \
     "$PHASE_CLASSIFICATIONS_DIR/phase2-network-fault.txt" \
     "phase2-network-fault" "$NETWORK_FAULT_EXIT" \
@@ -693,7 +707,8 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     "$FAULT_VERDICT_FILE" \
     "$nf_status" "$NETWORK_FAULT_EXIT" \
     "$bootstrap_status" "$BOOTSTRAP_EXIT" \
-    "$expectedfail_status" "$EXPECTED_FAIL_EXIT"
+    "$expectedfail_status" "$EXPECTED_FAIL_EXIT" \
+    "$FAULT_COVERAGE_FILE"
   fault_verdict="$(grep -E '^fault_verdict=' "$FAULT_VERDICT_FILE" | head -1 | cut -d= -f2)"
   echo "----------------------------------------------------------"
   echo "Fault-injection safety verdict (issue #1201) -> $fault_verdict"
@@ -761,8 +776,10 @@ fi
   echo "## Fault-injection safety verdict (issue #1201 — the RELEASE-GATING signal)"
   echo
   if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
-    echo "\`fault_verdict\` = network-fault ($nf_status) + bootstrap ($bootstrap_status) ONLY."
+    echo "\`fault_verdict\` = network-fault ($nf_status) + bootstrap ($bootstrap_status) ONLY,"
+    echo "then refuse PASS when the phase-2 gating set is skipped or truncated (#2141)."
     echo "The journey suite and the #822 expected-fail lane are DELIBERATELY excluded."
+    echo "#1678 owns deleting the brief-cut Assume; #2141 only makes that hole visible."
     echo
     echo '```'
     cat "$FAULT_VERDICT_FILE"

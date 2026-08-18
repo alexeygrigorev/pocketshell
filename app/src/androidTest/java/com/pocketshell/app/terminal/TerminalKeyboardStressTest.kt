@@ -3,8 +3,6 @@ package com.pocketshell.app.terminal
 import android.app.Instrumentation
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.View
@@ -38,6 +36,7 @@ import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.security.MessageDigest
 import kotlin.system.measureTimeMillis
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #104 stress harness — drives the keyboard/typing path under live
@@ -545,7 +544,7 @@ class TerminalKeyboardStressTest {
     // --- Viewport capture --------------------------------------------------
 
     private fun currentViewportHash(): String {
-        val bitmap = renderTerminalViewport() ?: return "empty"
+        val bitmap = renderTerminalViewport("hash")
         return try {
             val digest = MessageDigest.getInstance("SHA-256")
             val width = bitmap.width
@@ -567,8 +566,8 @@ class TerminalKeyboardStressTest {
         }
     }
 
-    private fun captureViewport(label: String): File? {
-        val bitmap = renderTerminalViewport() ?: return null
+    private fun captureViewport(label: String): File {
+        val bitmap = renderTerminalViewport(label)
         return try {
             val file = artifactFile("keyboard-stress-viewport-$label.png")
             FileOutputStream(file).use { output ->
@@ -582,16 +581,19 @@ class TerminalKeyboardStressTest {
         }
     }
 
-    private fun renderTerminalViewport(): Bitmap? {
+    private fun renderTerminalViewport(label: String): Bitmap {
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
-            val view = findTerminalView(activity.window.decorView) ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val rendered = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(rendered))
-            bitmap = rendered
+        val activityHolder = launchedActivity
+            ?: throw AssertionError("activity was not available to capture viewport '$label' (#2135)")
+        activityHolder.onActivity { activity ->
+            bitmap = captureViewToBitmap(
+                findTerminalView(activity.window.decorView),
+                label,
+            )
         }
-        return bitmap
+        return checkNotNull(bitmap) {
+            "onActivity did not produce a viewport bitmap for '$label' (#2135)"
+        }
     }
 
     // --- Activity / controller plumbing ------------------------------------

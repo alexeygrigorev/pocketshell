@@ -2,7 +2,6 @@ package com.pocketshell.app.proof
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -48,6 +47,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #1181 — DEVICE-TRUTH journey for the BLACK terminal on tapping the connection
@@ -424,7 +424,7 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
         var rows = Int.MAX_VALUE
         while (true) {
             feedBlackScreenFrameToEmulator()
-            val bitmap = renderViewportBitmap()
+            val bitmap = renderViewportBitmap(name)
             if (bitmap != null) {
                 rows = paintedRowCount(bitmap)
                 if (rows <= MAX_BLACK_PAINTED_ROWS) {
@@ -448,7 +448,7 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
     }
 
     private fun capturePaintedRows(name: String): Int {
-        val bitmap = renderViewportBitmap() ?: return 0
+        val bitmap = renderViewportBitmap(name)
         writeBitmap("$name-viewport", bitmap)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
         val rows = paintedRowCount(bitmap)
@@ -456,17 +456,18 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
         return rows
     }
 
-    private fun renderViewportBitmap(): Bitmap? {
+    private fun renderViewportBitmap(label: String): Bitmap {
         instrumentation.waitForIdleSync()
         var bitmap: Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                label,
+            )
         }
-        return bitmap
+        return checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$label' (#2135)"
+        }
     }
 
     private fun paintedRowCount(bitmap: Bitmap): Int {
@@ -498,10 +499,9 @@ class NotificationTapLivePinnedForegroundReseedJourneyE2eTest {
     private fun captureViewport(name: String) {
         instrumentation.waitForIdleSync()
         SystemClock.sleep(150)
-        renderViewportBitmap()?.let {
-            writeBitmap("$name-viewport", it)
-            it.recycle()
-        }
+        val captured = renderViewportBitmap(name)
+        writeBitmap("$name-viewport", captured)
+        captured.recycle()
         writeText("$name-visible-terminal.txt", visibleTerminalText())
     }
 

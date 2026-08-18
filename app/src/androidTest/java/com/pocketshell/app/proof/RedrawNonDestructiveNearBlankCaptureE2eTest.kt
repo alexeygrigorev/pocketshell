@@ -37,6 +37,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #989 — DEVICE-TRUTH journey for the maintainer's load-bearing requirement:
@@ -238,12 +239,10 @@ class RedrawNonDestructiveNearBlankCaptureE2eTest {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         var rows = 0
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = android.graphics.Bitmap.createBitmap(
-                view.width, view.height, android.graphics.Bitmap.Config.ARGB_8888,
+            val b = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
             )
-            view.draw(android.graphics.Canvas(b))
             rows = paintedRowCount(b)
             writeBitmap("$name-viewport", b)
             b.recycle()

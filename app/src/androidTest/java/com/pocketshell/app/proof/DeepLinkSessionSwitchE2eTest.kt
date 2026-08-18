@@ -3,7 +3,6 @@ package com.pocketshell.app.proof
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -36,6 +35,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #470 (3rd attempt — FALLBACK path). The shared session-PICKER
@@ -361,22 +361,22 @@ class DeepLinkSessionSwitchE2eTest {
         SystemClock.sleep(150)
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        bitmap?.let {
-            val file = artifactFile("$name-viewport.png")
-            FileOutputStream(file).use { out ->
-                check(it.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    "failed to write bitmap to ${file.absolutePath}"
-                }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        val file = artifactFile("$name-viewport.png")
+        FileOutputStream(file).use { out ->
+            check(captured.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
             }
-            println("ISSUE470_VIEWPORT ${file.absolutePath}")
-            it.recycle()
         }
+        println("ISSUE470_VIEWPORT ${file.absolutePath}")
+        captured.recycle()
         artifactFile("$name-visible-terminal.txt").writeText(visibleTerminalText())
     }
 

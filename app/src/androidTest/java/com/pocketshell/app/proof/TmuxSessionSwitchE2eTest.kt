@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.graphics.Rect
 import android.os.SystemClock
 import android.util.Log
@@ -50,6 +49,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #151 — regression test for the v0.2.7 crash on tmux session
@@ -666,15 +666,17 @@ class TmuxSessionSwitchE2eTest {
 
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {

@@ -43,6 +43,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #1153 — the DISCRIMINATING on-device journey for the maintainer's "I attach something and
@@ -611,7 +612,7 @@ class SendWithAttachmentStaysVisibleE2eTest {
     // ---------------------------------------------------------------- Render capture
 
     private fun capturePaintedRows(name: String): Int {
-        val bitmap = renderViewportBitmap() ?: return 0
+        val bitmap = renderViewportBitmap(name)
         writeBitmap("$name-viewport", bitmap)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
         val rows = paintedRowCount(bitmap)
@@ -619,17 +620,18 @@ class SendWithAttachmentStaysVisibleE2eTest {
         return rows
     }
 
-    private fun renderViewportBitmap(): Bitmap? {
+    private fun renderViewportBitmap(label: String): Bitmap {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         var bitmap: Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                label,
+            )
         }
-        return bitmap
+        return checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$label' (#2135)"
+        }
     }
 
     private fun paintedRowCount(bitmap: Bitmap): Int {

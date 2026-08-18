@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -49,6 +48,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #966/#967 — the DISCRIMINATING journey: a RENDER death on a LIVE transport.
@@ -637,7 +637,7 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
     // ---------------------------------------------------------------- Render capture
 
     private fun capturePaintedRows(name: String): Int {
-        val bitmap = renderViewportBitmap() ?: return 0
+        val bitmap = renderViewportBitmap(name)
         writeBitmap("$name-viewport", bitmap)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
         val rows = paintedRowCount(bitmap)
@@ -645,17 +645,20 @@ class StaleRenderHealOnLiveTransportJourneyE2eTest {
         return rows
     }
 
-    private fun renderViewportBitmap(): Bitmap? {
+    private fun renderViewportBitmap(label: String): Bitmap {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+        val activityHolder = launchedActivity
+            ?: throw AssertionError("activity was not available to capture viewport '$label' (#2135)")
+        activityHolder.onActivity { activity ->
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                label,
+            )
         }
-        return bitmap
+        return checkNotNull(bitmap) {
+            "onActivity did not produce a viewport bitmap for '$label' (#2135)"
+        }
     }
 
     private fun paintedRowCount(bitmap: Bitmap): Int {

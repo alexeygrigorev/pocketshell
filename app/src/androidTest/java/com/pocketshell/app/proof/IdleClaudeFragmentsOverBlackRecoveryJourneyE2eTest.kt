@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -43,6 +42,7 @@ import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #1302 / #1208 — the COMPOSITE recovery journey: the campaign's acceptance
@@ -657,24 +657,25 @@ class IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest {
     // ---------------------------------------------------------------- Artifacts
 
     private fun capturePaintedRows(name: String): Int {
-        val bitmap = renderViewportBitmap() ?: return 0
+        val bitmap = renderViewportBitmap(name)
         writeBitmap("$name-viewport", bitmap)
         val rows = paintedRowCount(bitmap)
         bitmap.recycle()
         return rows
     }
 
-    private fun renderViewportBitmap(): Bitmap? {
+    private fun renderViewportBitmap(label: String): Bitmap {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         var bitmap: Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                label,
+            )
         }
-        return bitmap
+        return checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$label' (#2135)"
+        }
     }
 
     private fun paintedRowCount(bitmap: Bitmap): Int {
@@ -706,15 +707,17 @@ class IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest {
         SystemClock.sleep(150)
         var bitmap: Bitmap? = null
         compose.activityRule.scenario.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     private fun writeBitmap(name: String, bitmap: Bitmap): File {

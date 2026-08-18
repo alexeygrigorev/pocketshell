@@ -1,8 +1,6 @@
 package com.pocketshell.app.tmux
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -44,6 +42,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #1235 (AC "Tapping a chip sends the exact keystroke to the correct pane:
@@ -505,15 +504,16 @@ class AgentApprovalQuickReplyJourneyDockerTest {
         SystemClock.sleep(250)
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        val b = bitmap ?: Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888).also { it.eraseColor(Color.BLACK) }
-        writeBitmap("$name-viewport", b)
-        b.recycle()
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
+        captured.recycle()
         writeText("$name-visible-terminal.txt", visibleTerminalText())
     }
 

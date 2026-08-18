@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -44,6 +43,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #553 (epic #687 Phase 3, J2) — DEVICE-TRUTH journey: a within-grace
@@ -864,15 +864,17 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
 
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     /**
@@ -905,13 +907,14 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
             var candidate: Bitmap? = null
             var candidateText = ""
             launchedActivity?.onActivity { activity ->
-                val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-                if (view.width <= 0 || view.height <= 0) return@onActivity
+                val view = activity.window.decorView.findTerminalView()
+                // Wait for a measurable painted frame; 0x0 here is a settle
+                // condition, not the artifact write. The deadline path below
+                // hard-fails via captureViewToBitmap.
+                if (view == null || view.width <= 0 || view.height <= 0) return@onActivity
                 val bufferText = view.currentSession?.emulator?.screen?.transcriptText.orEmpty()
                 if (!bufferText.contains(BANNER_MARKER)) return@onActivity
-                val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-                view.draw(Canvas(b))
-                candidate = b
+                candidate = captureViewToBitmap(view, name)
                 candidateText = bufferText
             }
             val c = candidate
@@ -923,24 +926,24 @@ class ReconnectPartialBlankReseedJourneyE2eTest {
             c?.recycle()
             SystemClock.sleep(100)
         }
-        // Fall back to a best-effort one-shot if the settle never produced a painted frame, so the
-        // artifact set is never silently missing (it would then be a genuine review signal).
         if (bitmap == null) {
-            launchedActivity?.onActivity { activity ->
-                val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-                if (view.width <= 0 || view.height <= 0) return@onActivity
-                val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-                view.draw(Canvas(b))
-                bitmap = b
-                settledBufferText = view.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+            val activityHolder = launchedActivity
+                ?: throw AssertionError("activity was not available to capture viewport '$name' (#2135)")
+            activityHolder.onActivity { activity ->
+                val view = activity.window.decorView.findTerminalView()
+                bitmap = captureViewToBitmap(view, name)
+                settledBufferText = view?.currentSession?.emulator?.screen?.transcriptText.orEmpty()
             }
         }
-        bitmap?.let { writeBitmap("$name-viewport", it) }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
+        }
+        writeBitmap("$name-viewport", captured)
         writeText(
             "$name-visible-terminal.txt",
             settledBufferText.ifBlank { visibleTerminalText() },
         )
-        bitmap?.recycle()
+        captured.recycle()
     }
 
     private fun bitmapHasNonBlackPixels(bitmap: Bitmap): Boolean {

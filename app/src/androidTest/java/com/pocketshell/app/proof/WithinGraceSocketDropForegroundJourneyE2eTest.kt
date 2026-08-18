@@ -55,6 +55,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #635/#822 (epic #687 Phase 0, J1) — DEVICE-TRUTH journey: after a socket
@@ -788,33 +789,30 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         SystemClock.sleep(150)
 
         var bitmap: Bitmap? = null
-        var problem: String? = "MainActivity was not available"
-        launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView()
-            if (view == null) {
-                problem = "no TerminalView in the decor view"
-                return@onActivity
-            }
-            if (view.width <= 0 || view.height <= 0) {
-                problem = "TerminalView measured ${view.width}x${view.height} " +
-                    "(shown=${view.isShown}) — the retained frame is not rendered"
-                return@onActivity
-            }
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
-            problem = null
-        }
-        // Always write the buffer text first, so the failure below carries context.
-        writeText("$name-visible-terminal.txt", visibleTerminalText())
-        val captured = bitmap
-        if (captured == null) {
+        val activityHolder = launchedActivity
+        if (activityHolder == null) {
+            writeText("$name-visible-terminal.txt", visibleTerminalText())
             runCatching { captureScreen("$name-failure-no-viewport") }
-            error(
-                "#822: the authoritative viewport artifact '$name-viewport.png' could not " +
-                    "be captured: $problem. A missing terminal viewport capture is a hard " +
-                    "failure, never a silent skip.",
+            throw AssertionError(
+                "#822/#2135: the authoritative viewport artifact '$name-viewport.png' " +
+                    "could not be captured: MainActivity was not available",
             )
+        }
+        try {
+            activityHolder.onActivity { activity ->
+                bitmap = captureViewToBitmap(
+                    activity.window.decorView.findTerminalView(),
+                    name,
+                )
+            }
+        } catch (failed: AssertionError) {
+            writeText("$name-visible-terminal.txt", visibleTerminalText())
+            runCatching { captureScreen("$name-failure-no-viewport") }
+            throw failed
+        }
+        writeText("$name-visible-terminal.txt", visibleTerminalText())
+        val captured = checkNotNull(bitmap) {
+            "#822/#2135: onActivity did not produce a viewport bitmap for '$name'"
         }
         writeBitmap("$name-viewport", captured)
         captured.recycle()
@@ -831,11 +829,7 @@ class WithinGraceSocketDropForegroundJourneyE2eTest {
         SystemClock.sleep(150)
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+            bitmap = captureViewToBitmap(activity.window.decorView, name)
         }
         val captured = requireNotNull(bitmap) { "decor view was not measurable for $name" }
         writeBitmap("$name-screen", captured)

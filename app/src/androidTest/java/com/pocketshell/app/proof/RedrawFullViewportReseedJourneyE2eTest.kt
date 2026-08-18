@@ -1,7 +1,6 @@
 package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
-import android.graphics.Canvas
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -45,6 +44,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #892 — DEVICE-TRUTH journey for the manual **Redraw** kebab action.
@@ -320,7 +320,7 @@ class RedrawFullViewportReseedJourneyE2eTest {
      * even while the scrollback buffer still holds the text. Writes the bitmap artifact.
      */
     private fun capturePaintedRows(name: String): Int {
-        val bitmap = renderViewportBitmap() ?: return 0
+        val bitmap = renderViewportBitmap(name)
         bitmap.let { writeBitmap("$name-viewport", it) }
         writeText("$name-visible-terminal.txt", visibleTerminalText())
         val rows = paintedRowCount(bitmap)
@@ -351,7 +351,7 @@ class RedrawFullViewportReseedJourneyE2eTest {
             // Re-feed the wipe each iteration: if a prior frame's erase was dropped or applied
             // late relative to View.draw, the retry re-establishes the (near-)black grid.
             feedBlackScreenFrameToEmulator()
-            val bitmap = renderViewportBitmap()
+            val bitmap = renderViewportBitmap(name)
             if (bitmap != null) {
                 rows = paintedRowCount(bitmap)
                 if (rows <= MAX_BLACK_PAINTED_ROWS) {
@@ -378,17 +378,20 @@ class RedrawFullViewportReseedJourneyE2eTest {
         return captured
     }
 
-    private fun renderViewportBitmap(): Bitmap? {
+    private fun renderViewportBitmap(label: String): Bitmap {
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         var bitmap: Bitmap? = null
-        launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val b = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(b))
-            bitmap = b
+        val activityHolder = launchedActivity
+            ?: throw AssertionError("activity was not available to capture viewport '$label' (#2135)")
+        activityHolder.onActivity { activity ->
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                label,
+            )
         }
-        return bitmap
+        return checkNotNull(bitmap) {
+            "onActivity did not produce a viewport bitmap for '$label' (#2135)"
+        }
     }
 
     /**

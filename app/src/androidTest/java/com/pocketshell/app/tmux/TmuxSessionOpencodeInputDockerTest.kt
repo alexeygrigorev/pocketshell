@@ -3,7 +3,6 @@ package com.pocketshell.app.tmux
 import android.app.ActivityManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
 import android.os.SystemClock
@@ -71,6 +70,7 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
+import com.pocketshell.app.proof.signals.captureViewToBitmap
 
 /**
  * Issue #102 (reopen) — end-to-end emulator + Docker test for the
@@ -1618,16 +1618,13 @@ class TmuxSessionOpencodeInputDockerTest {
 
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
-            val view = activity.window.decorView.findTerminalView() ?: return@onActivity
-            if (view.width <= 0 || view.height <= 0) return@onActivity
-            val viewportBitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
-            view.draw(Canvas(viewportBitmap))
-            bitmap = viewportBitmap
+            bitmap = captureViewToBitmap(
+                activity.window.decorView.findTerminalView(),
+                name,
+            )
         }
-        val viewportBitmap = bitmap ?: run {
-            val placeholder = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
-            placeholder.eraseColor(Color.BLACK)
-            placeholder
+        val viewportBitmap = checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$name' (#2135)"
         }
         val viewportFile = writeBitmap("$name-viewport", viewportBitmap)
         viewportBitmap.recycle()

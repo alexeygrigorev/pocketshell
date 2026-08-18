@@ -8,6 +8,29 @@ import org.junit.Test
 class ToxiproxyControlTest {
 
     @Test
+    fun resetHonoursConstructorListenAndUpstream() {
+        val transport = RecordingTransport()
+        ToxiproxyControl(
+            baseUrl = "http://unused",
+            transport = transport,
+            listen = "0.0.0.0:2253",
+            upstream = "agents:22",
+        ).reset()
+
+        assertEquals(
+            listOf(
+                RecordedRequest("DELETE", "/proxies/agents_ssh", null),
+                RecordedRequest(
+                    "POST",
+                    "/proxies",
+                    """{"name":"agents_ssh","listen":"0.0.0.0:2253","upstream":"agents:22","enabled":true}""",
+                ),
+            ),
+            transport.requests,
+        )
+    }
+
+    @Test
     fun resetRecreatesTheAgentsProxy() {
         val transport = RecordingTransport()
         ToxiproxyControl(baseUrl = "http://unused", transport = transport).reset()

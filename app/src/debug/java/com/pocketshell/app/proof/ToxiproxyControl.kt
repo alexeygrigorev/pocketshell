@@ -9,6 +9,8 @@ import java.nio.charset.StandardCharsets
 class ToxiproxyControl(
     baseUrl: String,
     private val transport: ToxiproxyTransport = HttpToxiproxyTransport(baseUrl),
+    private val listen: String = NetworkFaultPorts.CONTAINER_LISTEN,
+    private val upstream: String = NetworkFaultPorts.CONTAINER_UPSTREAM,
 ) {
 
     data class ProxyState(
@@ -215,17 +217,16 @@ class ToxiproxyControl(
     }
 
     private fun createProxy() {
-        // Tolerate HTTP 409 "proxy already exists": toxiproxy is a single shared
-        // instance, so when more than one connected lane resets concurrently the
-        // DELETE+POST pair can interleave (one lane's POST lands after another
-        // re-created the proxy). The post-condition of [reset] — an enabled
-        // `agents_ssh` proxy on :2228 — still holds, so a 409 is benign and must
-        // not fail the reset.
+        // Tolerate HTTP 409 "proxy already exists": a shared toxiproxy (the
+        // single-lane 8474 instance) can see two resets interleave. The
+        // post-condition of [reset] — an enabled `agents_ssh` proxy on
+        // [listen] — still holds, so a 409 is benign and must not fail the
+        // reset. Per-lane --pool proxies (#2128) do not share that instance.
         runCatching {
             transport.request(
                 "POST",
                 "/proxies",
-                """{"name":"$PROXY_NAME","listen":"0.0.0.0:2228","upstream":"agents:22","enabled":true}""",
+                """{"name":"$PROXY_NAME","listen":"$listen","upstream":"$upstream","enabled":true}""",
             )
         }.onFailure { error ->
             if (error.message?.contains("HTTP 409") != true) throw error

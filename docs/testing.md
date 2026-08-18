@@ -224,6 +224,27 @@ androidTest suite via
 `-Pandroid.testInstrumentationRunnerArguments.agentsPort=<port>`. Two concurrent
 invocations land on different `(emulator, port)` lanes with no cross-talk.
 
+**Network-fault classes under `--pool` are isolated too (issue #2128).** Until
+this fix, `NetworkFaultProofBase` hard-coded host ports 2228 / 2229 / 8474 and
+Toxiproxy's upstream `agents:22`, so a fault-class lane stayed pinned to the
+shared `pocketshell-test-agents` / `pocketshell-test-network-fault-proxy`
+fixture no matter which agents port the pool allocated. A sibling wiping that
+fixture mid-run presented as an empty session list — the #1842 class, in a
+place #1842's agents-port lock does not reach. A `--pool` fault-class lane
+now brings up its own `network-fault-proxy` + `packet-loss-proxy` under the
+same compose project as its claimed agents fixture. Host ports are derived
+from the agents port (2243 → fault 2253 / packet-loss 2263 / API 8495;
+single-lane 2222 still maps to 2228 / 2229 / 8474). Inside each container
+the listen stays `:2228` and the upstream stays `agents:22` — that hostname
+is the compose service on *this* project. A wipe of the per-lane proxy
+exits **90** with a `NETWORK-FAULT FIXTURE DISTURBED` banner that names the
+empty-session-list signature so it cannot be read as a product failure.
+
+Remaining limitation, stated honestly: `--no-pool` / nightly / a `--pool`
+fallback onto port 2222 still use the historical shared 2228/8474 singleton
+and still serialize on the machine-wide toxiproxy lock (#776 P3). Isolation
+is a property of a claimed non-2222 pool port, not of the class name.
+
 Both halves of that claim are anchored to the MACHINE
 (`$HOME/.cache/pocketshell/avd-locks/`), not to the checkout. Until #1842 the
 agents-port half was `"$root_dir/build/.agents-port-lock-$port"` — the worktree
@@ -1770,6 +1791,12 @@ They require a booted emulator plus the Docker `agents` target behind
 Toxiproxy. Default CI does not start these services, and the tests also skip
 when the instrumentation process detects CI, so run them manually for reviewer
 evidence or after explicitly changing the workflow.
+
+A `--pool` run of a fault-class journey (issue #2128) does **not** use the
+shared 2228/8474 singleton: `scripts/connected-test.sh --pool` brings up a
+per-lane proxy on ports derived from the claimed agents port
+([NetworkFaultPorts] / `scripts/lib/agents-pool.sh`). `--no-pool` and the
+commands below still start the historical shared fixture.
 
 Start the ride-through fixture:
 

@@ -326,15 +326,11 @@ pocketshell_release_all() {
 # ---------------------------------------------------------------------------
 # Toxiproxy serialization lock (issue #776 P3)
 #
-# The network-fault tests (NetworkFaultProofBase) all drive ONE global toxiproxy
-# (hardcoded 10.0.2.2:2228 / API 8474, single shared proxy, @After reset()).
-# --pool does NOT isolate that singleton, so two network-fault lanes corrupt
-# each other's toxics. Until per-lane toxiproxy plumbing lands, serialize every
-# network-fault lane on ONE shared, machine-wide flock so at most one touches the
-# proxy at a time — even across distinct pool emulators. This is SEPARATE from
-# the per-serial AVD lock (two lanes on different emulators each hold their own
-# serial lock but must still NOT share the proxy). Released by
-# pocketshell_release_all on exit.
+# The --no-pool / 2222-fallback network-fault tests still drive ONE global
+# toxiproxy (10.0.2.2:2228 / API 8474). A --pool lane now gets its own
+# proxy (issue #2128) but this lock still serializes every fault-class run
+# so a --no-pool sibling cannot race the shared singleton. This is SEPARATE
+# from the per-serial AVD lock. Released by pocketshell_release_all on exit.
 #
 # Issue #1657: this lock carried the SAME defect as the AVD lock — it promised
 # "ONE shared, machine-wide flock" while living under `$root_dir/build/`, so two

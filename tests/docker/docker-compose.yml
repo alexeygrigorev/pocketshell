@@ -362,18 +362,25 @@ services:
   # to the normal `agents` SSH fixture on the compose network. Tests control
   # toxics through the HTTP API exposed on 10.0.2.2:8474.
   #
+  # Issue #2128: a `--pool` lane cannot share this singleton. The host ports
+  # and container name are parameterized (defaults keep the single-lane
+  # identity) so `scripts/lib/agents-pool.sh` can bring up a per-lane proxy
+  # under the same COMPOSE_PROJECT_NAME as that lane's `agents` fixture.
+  # Inside the container the listen stays 2228 and the upstream stays
+  # `agents:22` — that hostname is the compose service on THIS project.
+  #
   # The default GitHub workflow does not start this service, so the Android
   # tests that use it are gated with `pocketshellNetworkFaultProofs=true` and
   # skipped on CI unless the workflow is explicitly expanded later.
   network-fault-proxy:
     image: ghcr.io/shopify/toxiproxy:2.9.0
-    container_name: pocketshell-test-network-fault-proxy
+    container_name: ${NETWORK_FAULT_CONTAINER_NAME:-pocketshell-test-network-fault-proxy}
     command: ["-host", "0.0.0.0"]
     depends_on:
       - agents
     ports:
-      - "2228:2228"
-      - "8474:8474"
+      - "${NETWORK_FAULT_HOST_PORT:-2228}:2228"
+      - "${TOXIPROXY_API_HOST_PORT:-8474}:8474"
 
   # Issue #346: true packet-loss proxy for opt-in connected Android proofs.
   # The emulator reaches this proxy at 10.0.2.2:2229. Linux `tc netem loss`
@@ -389,7 +396,7 @@ services:
       context: .
       dockerfile: packet-loss-proxy/Dockerfile
     image: pocketshell-test:packet-loss-proxy
-    container_name: pocketshell-test-packet-loss-proxy
+    container_name: ${PACKET_LOSS_CONTAINER_NAME:-pocketshell-test-packet-loss-proxy}
     cap_add:
       - NET_ADMIN
     environment:
@@ -402,4 +409,4 @@ services:
     depends_on:
       - agents
     ports:
-      - "2229:2229"
+      - "${PACKET_LOSS_HOST_PORT:-2229}:2229"

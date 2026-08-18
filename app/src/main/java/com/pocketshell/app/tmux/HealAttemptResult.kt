@@ -53,6 +53,14 @@ internal enum class HealAttemptReason(internal val outcome: HealOutcome) {
     CaptureEmpty(HealOutcome.Unverified),
     AuthoritativeCaptureMatched(HealOutcome.Healthy),
     DivergenceApplyFailed(HealOutcome.Unverified),
+
+    /**
+     * Issue #2178: live `%output` reached the emulator (ungated) after this
+     * capture's snapshot was taken, so applying it would have cleared away bytes
+     * already on screen. Unverified — the render was NOT confirmed against
+     * tmux's grid, so the watchdog keeps its hot cadence and re-captures.
+     */
+    SnapshotRacedLiveEcho(HealOutcome.Unverified),
     DivergenceApplied(HealOutcome.Healed),
     ForcedSnapshotApplied(HealOutcome.Healed),
     ForcedSnapshotUnavailable(HealOutcome.Unverified),

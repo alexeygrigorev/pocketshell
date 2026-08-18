@@ -181,6 +181,36 @@ public class SshTerminalBridge(
     private val gatedLiveBuffer = java.io.ByteArrayOutputStream()
 
     /**
+     * Issue #2178 — monotonic count of live `%output` feeds that reached the
+     * emulator WITHOUT passing through the seed gate.
+     *
+     * A `capture-pane` reseed repaints the whole grid with a leading `CSI 2J`
+     * clear, so it destroys anything the emulator applied after the server took
+     * that snapshot. Bytes that land while the gate is CLOSED are safe — they are
+     * buffered and replayed ON TOP of the snapshot by [seedThenOpenGate] — but
+     * bytes that reach the emulator with the gate OPEN are silently discarded by
+     * the repaint. That is the "typing within ~300 ms of a pane appearing loses
+     * its leading characters" defect.
+     *
+     * A reseed therefore samples this counter BEFORE issuing its capture and
+     * re-reads it before applying the result: an advance means live bytes reached
+     * the screen after the snapshot was taken, so the snapshot is stale and must
+     * not be painted over them. Incremented only on the ungated path, so a
+     * gate-protected seed (the #468 cold-open path) never sees a false advance.
+     *
+     * This cannot reuse `TerminalSurfaceState`'s existing
+     * `renderModelMutationEpoch`: that one also ticks for GATED bytes and for the
+     * reseed's own apply, so it cannot distinguish "live bytes are on screen and
+     * a repaint would destroy them" from "live bytes are safely buffered behind
+     * the gate" — it would make the #2178 guard fire on exactly the paths where
+     * it must stay inert.
+     */
+    private val liveOutputAppliedEpoch = java.util.concurrent.atomic.AtomicLong(0L)
+
+    /** Issue #2178: see [liveOutputAppliedEpoch]. */
+    public fun liveOutputAppliedEpoch(): Long = liveOutputAppliedEpoch.get()
+
+    /**
      * Issue #866: deadlock- and ordering-safe handoff of a large MULTI-CHUNK
      * on-main seed feed to the frame-budgeted [drainScheduler].
      *
@@ -321,6 +351,15 @@ public class SshTerminalBridge(
                 gatedLiveBuffer.write(data, offset, count)
                 return
             }
+            // Issue #2178: these bytes reach the emulator UNGATED, so a reseed
+            // snapshot taken before now would destroy them. Stamp the epoch
+            // under the SAME [gateLock] that decided they are ungated (and that
+            // [seedThenOpenGate] takes to apply a snapshot), so a reseed can
+            // never observe "ungated bytes committed" as "nothing raced". The
+            // stamp precedes the feed, so a reseed sampling concurrently errs
+            // toward "raced" (refuse + re-capture) rather than toward a
+            // destructive paint.
+            liveOutputAppliedEpoch.incrementAndGet()
         }
 
         feedBytesToEmulator(data, offset, count)

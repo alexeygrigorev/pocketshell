@@ -549,6 +549,18 @@ class TerminalSurfaceState(
     }
 
     /**
+     * Issue #2178: monotonic count of live `%output` feeds that reached this
+     * pane's emulator with the seed gate OPEN — the bytes a `capture-pane`
+     * repaint would destroy. A reseed samples this before issuing its capture
+     * and again before applying the snapshot; an advance means the snapshot is
+     * older than what is already on screen. See
+     * [com.pocketshell.core.terminal.bridge.SshTerminalBridge.liveOutputAppliedEpoch].
+     *
+     * Returns 0 when no bridge is attached (nothing can have been applied).
+     */
+    fun liveOutputAppliedEpoch(): Long = bridge?.liveOutputAppliedEpoch() ?: 0L
+
+    /**
      * Issue #468: open the seed gate without applying a snapshot, flushing any
      * buffered live `%output` in order. Called when the `capture-pane` seed
      * never arrives (capture failed, older tmux) so live output is never

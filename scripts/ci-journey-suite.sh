@@ -358,6 +358,14 @@ source "$CI_JOURNEY_CLASS_SELECTION_HELPER"
 select_effective_journey_classes
 print_journey_class_selection
 
+# Issue #2090: start extra-runner last-completed-class telemetry before the
+# first class so a runner loss mid-shard still names how far this leg got.
+CI_JOURNEY_PROGRESS_HELPER="${CI_JOURNEY_PROGRESS_HELPER:-$REPO_ROOT/scripts/ci-journey-progress-telemetry.sh}"
+if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+  CI_JOURNEY_PROGRESS_CLASSES_SELECTED="${#EFFECTIVE_JOURNEY_CLASSES[@]}" \
+    bash "$CI_JOURNEY_PROGRESS_HELPER" start || true
+fi
+
 # Issue #691 (S2 defense-in-depth): pass AndroidJUnitRunner's per-test
 # `timeout_msec` so a wedged test is interrupted and FAILS FAST (~5 min) instead
 # of hanging the whole job to the runner cap. A hang is worse than a clean fail

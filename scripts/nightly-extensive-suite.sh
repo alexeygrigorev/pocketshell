@@ -69,6 +69,13 @@ ARTIFACT_DIR="$REPO_ROOT/artifacts/nightly-extensive"
 mkdir -p "$ARTIFACT_DIR"
 SUMMARY="$ARTIFACT_DIR/summary.md"
 
+# Issue #2090: extra-runner last-completed-class heartbeat. Nightly has no
+# per-class bash loop, so phase-1 Gradle output is parsed via observe-stream.
+CI_JOURNEY_PROGRESS_HELPER="${CI_JOURNEY_PROGRESS_HELPER:-$REPO_ROOT/scripts/ci-journey-progress-telemetry.sh}"
+if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+  bash "$CI_JOURNEY_PROGRESS_HELPER" start || true
+fi
+
 GRADLEW="$REPO_ROOT/gradlew"
 
 # The Toxiproxy-backed proofs. This is primarily the NetworkFaultProofBase
@@ -442,12 +449,21 @@ else
 fi
 echo "=========================================================="
 
-"$GRADLEW" :app:connectedDebugAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
-  -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
-  "${JOURNEY_SHARD_ARGS[@]}" \
-  --stacktrace
-JOURNEY_EXIT=$?
+if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+  "$GRADLEW" :app:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+    -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
+    "${JOURNEY_SHARD_ARGS[@]}" \
+    --stacktrace 2>&1 | bash "$CI_JOURNEY_PROGRESS_HELPER" observe-stream
+  JOURNEY_EXIT=${PIPESTATUS[0]}
+else
+  "$GRADLEW" :app:connectedDebugAndroidTest \
+    -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
+    -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
+    "${JOURNEY_SHARD_ARGS[@]}" \
+    --stacktrace
+  JOURNEY_EXIT=$?
+fi
 echo "phase 1 (journey/E2E) exit code: $JOURNEY_EXIT"
 
 # Snapshot phase 1's report BEFORE the phase-2 gradle invocation overwrites it
@@ -815,6 +831,10 @@ fi
 echo "----------------------------------------------------------"
 cat "$SUMMARY"
 echo "----------------------------------------------------------"
+
+if [[ -f "${CI_JOURNEY_PROGRESS_HELPER:-}" ]]; then
+  bash "$CI_JOURNEY_PROGRESS_HELPER" suite-completed "$overall_status" || true
+fi
 
 if [[ "$overall_status" == "FAIL" ]]; then
   exit 1

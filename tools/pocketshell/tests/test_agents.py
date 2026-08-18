@@ -894,11 +894,15 @@ def test_record_agent_kind_writes_grok():
     calls = []
     ok = agents.record_agent_kind(
         "grok",
-        env={"TMUX": "x"},
+        env={"TMUX": "x", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: calls.append(argv),
+        # Issue #2185: the write names an explicit session target so it never
+        # depends on ambient `$TMUX_PANE` inference. Grok is a first-class
+        # kind (#2193) and uses the same targeted contract as the others.
+        resolve_target=lambda env: "$1",
     )
     assert ok is True
-    assert ["tmux", "set-option", "@ps_agent_kind", "grok"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "grok"] in calls
 
 
 def test_record_agent_kind_default_relaunch_clears_stale_profile():

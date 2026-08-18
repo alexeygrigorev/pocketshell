@@ -37,6 +37,10 @@ class ManualKindWriterTest {
             manualKindCommand("work", "opencode"),
             ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.OpenCode),
         )
+        assertEquals(
+            manualKindCommand("work", "grok"),
+            ManualKindWriter.buildSetOptionCommand("work", SessionAgentKind.Grok),
+        )
         // A manually-classified plain shell IS recordable (so it never
         // re-prompts as Unknown) — the one extra value over the wrapper.
         assertEquals(

@@ -415,7 +415,8 @@ internal class HostTreeModel {
     private fun SessionAgentKind.isForeignGuessExportable(): Boolean =
         this == SessionAgentKind.Claude ||
             this == SessionAgentKind.Codex ||
-            this == SessionAgentKind.OpenCode
+            this == SessionAgentKind.OpenCode ||
+            this == SessionAgentKind.Grok
 
     /**
      * Reconcile the held tree against a fresh authoritative probe snapshot
@@ -926,7 +927,8 @@ internal class HostTreeModel {
     private val SessionAgentKind.isAgent: Boolean
         get() = this == SessionAgentKind.Claude ||
             this == SessionAgentKind.Codex ||
-            this == SessionAgentKind.OpenCode
+            this == SessionAgentKind.OpenCode ||
+            this == SessionAgentKind.Grok
 
     /**
      * Issue #889: an AUTHORITATIVE host read of this session's classification —

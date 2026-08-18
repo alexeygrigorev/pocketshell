@@ -267,6 +267,7 @@ data class FlatSessionGroups(
             SessionAgentKind.Claude,
             SessionAgentKind.Codex,
             SessionAgentKind.OpenCode,
+            SessionAgentKind.Grok,
             SessionAgentKind.Probing,
             SessionAgentKind.Exited,
             -> true

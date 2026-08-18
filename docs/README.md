@@ -9,7 +9,7 @@ context; the README and current feature docs track released behavior.
 | [architecture.md](architecture.md) | Composition layout, tech stack, three load-bearing decisions |
 | [input-methods.md](input-methods.md) | Voice, key bar, snippets, and composer behaviour — the alternative-to-typing strategy |
 | [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
-| [agent-awareness.md](agent-awareness.md) | Detecting Claude Code, Codex, and OpenCode in a tmux pane and showing a clean conversation view |
+| [agent-awareness.md](agent-awareness.md) | Detecting Claude Code, Codex, OpenCode, and Grok Build in a tmux pane and showing a clean conversation view |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side `pocketshell usage` over SSH — zero credentials on the phone |
 | [diagnostics.md](diagnostics.md) | Shareable JSONL flight recorder for app, connection, network, and action events |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |

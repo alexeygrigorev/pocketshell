@@ -902,6 +902,7 @@ class TmuxSessionScreenTest {
         assertTrue(tmuxSessionRecordedAgentKind(SessionAgentKind.Claude))
         assertTrue(tmuxSessionRecordedAgentKind(SessionAgentKind.Codex))
         assertTrue(tmuxSessionRecordedAgentKind(SessionAgentKind.OpenCode))
+        assertTrue(tmuxSessionRecordedAgentKind(SessionAgentKind.Grok))
         assertTrue(!tmuxSessionRecordedAgentKind(SessionAgentKind.Shell))
         assertTrue(!tmuxSessionRecordedAgentKind(SessionAgentKind.Probing))
         assertTrue(!tmuxSessionRecordedAgentKind(SessionAgentKind.Exited))
@@ -1424,6 +1425,7 @@ class TmuxSessionScreenTest {
         assertEquals(AgentKind.ClaudeCode, tmuxComposerAgentKindFromToken("claude"))
         assertEquals(AgentKind.Codex, tmuxComposerAgentKindFromToken("codex"))
         assertEquals(AgentKind.OpenCode, tmuxComposerAgentKindFromToken("opencode"))
+        assertEquals(AgentKind.GrokBuild, tmuxComposerAgentKindFromToken("grok"))
     }
 
     @Test

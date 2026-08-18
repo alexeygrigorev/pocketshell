@@ -4,6 +4,7 @@ public enum class AgentKind(public val displayName: String) {
     ClaudeCode("Claude Code"),
     Codex("Codex"),
     OpenCode("OpenCode"),
+    GrokBuild("Grok Build"),
 }
 
 public enum class ConversationRole {

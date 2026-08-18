@@ -186,6 +186,7 @@ public class AgentDetector(
         AgentKind.ClaudeCode to listOf(".claude/projects/${encodeClaudeCwd(cwd)}"),
         AgentKind.Codex to listOf(".codex/sessions/"),
         AgentKind.OpenCode to listOf(".local/share/opencode/opencode.db"),
+        AgentKind.GrokBuild to listOf(".grok/sessions/${encodeGrokCwd(cwd)}"),
     )
 
     /**
@@ -207,6 +208,28 @@ public class AgentDetector(
     public fun encodeClaudeCwd(cwd: String): String =
         cwd.trim().replace('/', '-').replace('.', '-').ifBlank { "-" }
 
+    /**
+     * Percent-encodes a working directory the way Grok Build names the
+     * group under `~/.grok/sessions/<encoded-cwd>/`. `/home/me/proj` →
+     * `%2Fhome%2Fme%2Fproj` (RFC 3986 unreserved characters stay literal).
+     */
+    public fun encodeGrokCwd(cwd: String): String {
+        val trimmed = cwd.trim().ifBlank { "/" }
+        val bytes = trimmed.toByteArray(Charsets.UTF_8)
+        val out = StringBuilder(bytes.size * 3)
+        for (byte in bytes) {
+            val unsigned = byte.toInt() and 0xFF
+            val ch = unsigned.toChar()
+            if (ch.isLetterOrDigit() || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+                out.append(ch)
+            } else {
+                out.append('%')
+                out.append("%02X".format(unsigned))
+            }
+        }
+        return out.toString()
+    }
+
     private fun normalizeCwd(cwd: String): String =
         cwd.trim().trimEnd('/').ifBlank { "/" }
 
@@ -216,6 +239,7 @@ public class AgentDetector(
             AgentKind.ClaudeCode -> lower.containsCommandToken("claude(?:-?code)?")
             AgentKind.Codex -> lower.containsCommandToken("codex")
             AgentKind.OpenCode -> lower.containsCommandToken("open[-_]?code(?:[-_][a-z0-9]+)?")
+            AgentKind.GrokBuild -> lower.containsCommandToken("grok")
         }
     }
 

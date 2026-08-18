@@ -238,6 +238,7 @@ internal fun sessionKindPickerLabel(kind: SessionAgentKind): String = when (kind
     SessionAgentKind.Claude -> "Claude"
     SessionAgentKind.Codex -> "Codex"
     SessionAgentKind.OpenCode -> "OpenCode"
+    SessionAgentKind.Grok -> "Grok"
     SessionAgentKind.Shell -> "Shell"
     // Not user-pickable, but keep the `when` exhaustive.
     SessionAgentKind.Probing,

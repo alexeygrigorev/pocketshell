@@ -149,7 +149,7 @@ public class AgentKindRemoteSource @Inject constructor() {
      * Parse the CLI envelope
      * `{"results": [{"pane_id", "agent_kind", "scope", "evidence_pid"?}]}`.
      * One malformed row never sinks the batch. `agent_kind` is one of
-     * `claude` / `codex` / `opencode` / `none` / `unknown`.
+     * `claude` / `codex` / `opencode` / `grok` / `none` / `unknown`.
      */
     private fun parseEnvelope(stdout: String): Map<String, PaneKind> {
         val trimmed = stdout.trim().ifBlank { return emptyMap() }
@@ -164,6 +164,7 @@ public class AgentKindRemoteSource @Inject constructor() {
                 "claude" -> AgentKind.ClaudeCode
                 "codex" -> AgentKind.Codex
                 "opencode" -> AgentKind.OpenCode
+                "grok" -> AgentKind.GrokBuild
                 else -> null
             }
             out[paneId] = PaneKind(

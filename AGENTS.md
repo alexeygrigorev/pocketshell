@@ -784,10 +784,12 @@ those sections, not repeated here.)
   `~/git/.claude` dotfiles): Claude (`csp`) = `claude
   --dangerously-skip-permissions`; Codex (`cy`) = `codex
   --dangerously-bypass-approvals-and-sandbox`; OpenCode (`oc`) = `env -u <VAR> …
-  opencode` env-stripped of ~71 provider API-key vars. **OpenCode MUST be
+  opencode` env-stripped of ~71 provider API-key vars; Grok Build (`grok`) =
+  `grok --always-approve`. **OpenCode MUST be
   env-stripped** so it uses the maintainer's subscription auth, not an env API key
-  (otherwise it bills per-token = real money). Build explicit self-contained
-  commands, don't rely on remote shell aliases being sourced.
+  (otherwise it bills per-token = real money). `XAI_API_KEY` is already in that
+  strip list, so Grok also falls back to subscription auth. Build explicit
+  self-contained commands, don't rely on remote shell aliases being sourced.
 - **Disk cleanup hot spots** (dev box recurrently ~96%): biggest + safe =
   `~/git/pocketshell/.claude/worktrees/agent-*` (bulk-remove UNLOCKED ones only —
   git marks in-flight agent worktrees `locked`), `docker builder prune -f`,

@@ -125,6 +125,26 @@ def _opencode_root() -> Path:
     return Path.home() / ".local" / "share" / "opencode"
 
 
+def _grok_sessions_root() -> Path:
+    """Root directory for Grok Build session trees.
+
+    Honours ``GROK_HOME`` (default ``~/.grok``). Session files live at
+    ``<root>/sessions/<urlencoded-cwd>/<session-id>/updates.jsonl``.
+    """
+    override = os.environ.get("GROK_HOME")
+    if override:
+        return Path(override).expanduser() / "sessions"
+    return Path.home() / ".grok" / "sessions"
+
+
+def _encode_grok_cwd(cwd: str) -> str:
+    """Percent-encode a cwd the way Grok names session group directories."""
+    from urllib.parse import quote
+
+    trimmed = cwd.strip() or "/"
+    return quote(trimmed, safe="")
+
+
 def _encode_claude_cwd(cwd: str) -> str:
     """Mirror of ``AgentDetector.encodeClaudeCwd`` from core-agents.
 
@@ -232,6 +252,34 @@ def _resolve_codex_path(session: str) -> Optional[Path]:
     return None
 
 
+def _resolve_grok_path(session: str, cwd: Optional[str]) -> Optional[Path]:
+    """Resolve a Grok Build session to its ``updates.jsonl``.
+
+    ``session`` is the session-id directory name. When ``cwd`` is given the
+    lookup is ``$GROK_HOME/sessions/<urlencoded-cwd>/<session>/updates.jsonl``.
+    When omitted we scan every encoded-cwd directory for that session id.
+    """
+    session_id = session
+    if session.endswith("/updates.jsonl"):
+        session_id = Path(session).parent.name
+    elif session == "updates.jsonl":
+        session_id = session
+    root = _grok_sessions_root()
+    if cwd is not None:
+        candidate = root / _encode_grok_cwd(cwd) / session_id / "updates.jsonl"
+        return _contained_candidate(candidate, root)
+    if not root.is_dir():
+        return None
+    for project_dir in sorted(root.iterdir()):
+        if not project_dir.is_dir():
+            continue
+        candidate = project_dir / session_id / "updates.jsonl"
+        contained = _contained_candidate(candidate, root)
+        if contained is not None:
+            return contained
+    return None
+
+
 def _resolve_opencode_path(session: str) -> Optional[Path]:
     """Resolve an OpenCode session to its JSONL file.
 
@@ -261,6 +309,8 @@ def _resolve_log_path(
         return _resolve_codex_path(session)
     if engine == "opencode":
         return _resolve_opencode_path(session)
+    if engine == "grok":
+        return _resolve_grok_path(session, cwd)
     # Click's ``type=Choice`` rejects unknown engines before we ever get
     # here; guard anyway so the function is total.
     return None
@@ -469,6 +519,26 @@ def _opencode_messages_from_row(row: dict[str, Any]) -> List[HandoffMessage]:
     return [HandoffMessage(role=role, text=fallback)] if fallback else []
 
 
+def _grok_content_text(update: dict[str, Any]) -> Optional[str]:
+    content = update.get("content")
+    if isinstance(content, dict):
+        return _text_from_scalar(content.get("text"))
+    return _text_from_scalar(content)
+
+
+def _grok_messages_from_row(row: dict[str, Any]) -> List[HandoffMessage]:
+    params = row.get("params") if isinstance(row.get("params"), dict) else {}
+    update = params.get("update") if isinstance(params.get("update"), dict) else {}
+    kind = update.get("sessionUpdate")
+    if kind == "user_message_chunk":
+        text = _grok_content_text(update)
+        return [HandoffMessage(role="user", text=text)] if text else []
+    if kind == "agent_message_chunk":
+        text = _grok_content_text(update)
+        return [HandoffMessage(role="assistant", text=text)] if text else []
+    return []
+
+
 def _handoff_messages_from_lines(engine: str, lines: Iterable[str]) -> List[HandoffMessage]:
     """Extract user/assistant prose from raw agent JSONL rows."""
     messages: List[HandoffMessage] = []
@@ -482,6 +552,8 @@ def _handoff_messages_from_lines(engine: str, lines: Iterable[str]) -> List[Hand
             messages.extend(_codex_messages_from_row(row))
         elif engine == "opencode":
             messages.extend(_opencode_messages_from_row(row))
+        elif engine == "grok":
+            messages.extend(_grok_messages_from_row(row))
     return messages
 
 
@@ -635,7 +707,7 @@ def _emit_json(
     "-e",
     "engine",
     required=False,
-    type=click.Choice(["claude", "codex", "opencode"], case_sensitive=False),
+    type=click.Choice(["claude", "codex", "opencode", "grok"], case_sensitive=False),
     help="Which agent CLI's log to read.",
 )
 @click.option(
@@ -644,8 +716,8 @@ def _emit_json(
     type=str,
     default=None,
     help=(
-        "Working directory the agent was launched from. Only used for "
-        "Claude Code (to pick the right `~/.claude/projects/<encoded>/` "
+        "Working directory the agent was launched from. Used for "
+        "Claude Code and Grok Build (to pick the right encoded-cwd "
         "subdirectory). Ignored for codex and opencode."
     ),
 )
@@ -753,7 +825,7 @@ def agent_log_command(
     "-e",
     "engine",
     required=True,
-    type=click.Choice(["claude", "codex", "opencode"], case_sensitive=False),
+    type=click.Choice(["claude", "codex", "opencode", "grok"], case_sensitive=False),
     help="Which agent CLI's log to export.",
 )
 @click.option(
@@ -762,8 +834,8 @@ def agent_log_command(
     type=str,
     default=None,
     help=(
-        "Working directory the agent was launched from. Only used for "
-        "Claude Code; ignored for codex and opencode."
+        "Working directory the agent was launched from. Used for "
+        "Claude Code and Grok Build; ignored for codex and opencode."
     ),
 )
 @click.option(
@@ -849,4 +921,6 @@ def _search_root_for(engine: str) -> str:
         return str(_codex_sessions_root()) + os.sep + "<YYYY>/<MM>/<DD>" + os.sep
     if engine == "opencode":
         return str(_opencode_root()) + os.sep
+    if engine == "grok":
+        return str(_grok_sessions_root()) + os.sep + "<urlencoded-cwd>" + os.sep
     return "(unknown engine)"

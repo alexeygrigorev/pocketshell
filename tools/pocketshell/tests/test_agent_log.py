@@ -111,6 +111,7 @@ def test_agent_log_help_lists_engine_session_tail_json_flags() -> None:
     assert "claude" in lowered
     assert "codex" in lowered
     assert "opencode" in lowered
+    assert "grok" in lowered
 
 
 def test_agent_log_handoff_help_lists_export_bounds() -> None:
@@ -250,6 +251,75 @@ def test_opencode_session_reads_local_share_directory(fake_home: Path) -> None:
 
     runner = CliRunner()
     result = runner.invoke(agent_log_command, ["--engine", "opencode", "--session", session])
+
+    assert result.exit_code == 0, result.output
+    expected = "".join(json.dumps(e, sort_keys=True) + "\n" for e in events)
+    assert result.output == expected
+
+
+# ----- Grok resolution -----------------------------------------------
+
+
+def test_grok_session_with_cwd_reads_percent_encoded_directory(fake_home: Path) -> None:
+    cwd = "/home/alexey/git/pocketshell"
+    encoded = "%2Fhome%2Falexey%2Fgit%2Fpocketshell"
+    session = "01a015cd-780c-7ae0-befb-164bfe88c007"
+    events = _sample_events("grok")
+    log_path = (
+        fake_home / ".grok" / "sessions" / encoded / session / "updates.jsonl"
+    )
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["--engine", "grok", "--session", session, "--cwd", cwd],
+    )
+
+    assert result.exit_code == 0, result.output
+    expected = "".join(json.dumps(e, sort_keys=True) + "\n" for e in events)
+    assert result.output == expected
+
+
+def test_grok_session_without_cwd_scans_sessions_tree(fake_home: Path) -> None:
+    session = "sess-scan"
+    events = _sample_events("grok-scan")
+    log_path = (
+        fake_home
+        / ".grok"
+        / "sessions"
+        / "%2Ftmp"
+        / session
+        / "updates.jsonl"
+    )
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["--engine", "grok", "--session", session],
+    )
+
+    assert result.exit_code == 0, result.output
+    expected = "".join(json.dumps(e, sort_keys=True) + "\n" for e in events)
+    assert result.output == expected
+
+
+def test_grok_honors_grok_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    grok_home = tmp_path / "custom-grok"
+    monkeypatch.setenv("GROK_HOME", str(grok_home))
+    cwd = "/workspace/proj"
+    encoded = "%2Fworkspace%2Fproj"
+    session = "sess-home"
+    events = _sample_events("grok-home")
+    log_path = grok_home / "sessions" / encoded / session / "updates.jsonl"
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["--engine", "grok", "--session", session, "--cwd", cwd],
+    )
 
     assert result.exit_code == 0, result.output
     expected = "".join(json.dumps(e, sort_keys=True) + "\n" for e in events)

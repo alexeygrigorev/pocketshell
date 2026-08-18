@@ -259,6 +259,7 @@ class SessionAgentStateTest {
         assertEquals(true, SessionAgentKind.Claude.isLiveAgent())
         assertEquals(true, SessionAgentKind.Codex.isLiveAgent())
         assertEquals(true, SessionAgentKind.OpenCode.isLiveAgent())
+        assertEquals(true, SessionAgentKind.Grok.isLiveAgent())
         assertEquals(false, SessionAgentKind.Shell.isLiveAgent())
         assertEquals(false, SessionAgentKind.Probing.isLiveAgent())
         assertEquals(false, SessionAgentKind.Exited.isLiveAgent())

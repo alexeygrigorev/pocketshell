@@ -119,6 +119,19 @@ def _seed_opencode(host: _FakeHost) -> None:
     host.add_scope("tmuxctl-opencode-lab.scope", [3001, 3002])
 
 
+def _seed_grok(host: _FakeHost) -> None:
+    host.add_proc(
+        3501, scope="tmuxctl-grok.scope", comm="bash", cmdline="-bash"
+    )
+    host.add_proc(
+        3502,
+        scope="tmuxctl-grok.scope",
+        comm="grok",
+        cmdline="grok --always-approve",
+    )
+    host.add_scope("tmuxctl-grok.scope", [3501, 3502])
+
+
 def _seed_plain_shell(host: _FakeHost) -> None:
     """A pane that resolves to a scope but runs no agent -> ``none``."""
     host.add_proc(
@@ -177,6 +190,14 @@ def test_classifies_opencode(tmp_path: Path) -> None:
     _seed_opencode(host)
     out = _invoke([{"pane_id": "%3", "pane_pid": 3001}], host)
     assert out["results"][0]["agent_kind"] == "opencode"
+
+
+def test_classifies_grok(tmp_path: Path) -> None:
+    host = _FakeHost(tmp_path)
+    _seed_grok(host)
+    out = _invoke([{"pane_id": "%5", "pane_pid": 3501}], host)
+    assert out["results"][0]["agent_kind"] == "grok"
+    assert out["results"][0]["evidence_pid"] == 3502
 
 
 def test_plain_shell_resolves_to_none(tmp_path: Path) -> None:

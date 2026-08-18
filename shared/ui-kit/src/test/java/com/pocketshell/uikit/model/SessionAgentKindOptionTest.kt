@@ -18,6 +18,7 @@ class SessionAgentKindOptionTest {
         assertEquals("claude", SessionAgentKind.Claude.tmuxOptionValue())
         assertEquals("codex", SessionAgentKind.Codex.tmuxOptionValue())
         assertEquals("opencode", SessionAgentKind.OpenCode.tmuxOptionValue())
+        assertEquals("grok", SessionAgentKind.Grok.tmuxOptionValue())
         assertEquals("shell", SessionAgentKind.Shell.tmuxOptionValue())
     }
 
@@ -41,6 +42,7 @@ class SessionAgentKindOptionTest {
         assertEquals(SessionAgentKind.Claude, sessionAgentKindFromOption("CLAUDE"))
         assertEquals(SessionAgentKind.Codex, sessionAgentKindFromOption(" codex "))
         assertEquals(SessionAgentKind.OpenCode, sessionAgentKindFromOption("opencode"))
+        assertEquals(SessionAgentKind.Grok, sessionAgentKindFromOption("GROK"))
         assertEquals(SessionAgentKind.Shell, sessionAgentKindFromOption("shell"))
     }
 
@@ -61,6 +63,7 @@ class SessionAgentKindOptionTest {
                 SessionAgentKind.Claude,
                 SessionAgentKind.Codex,
                 SessionAgentKind.OpenCode,
+                SessionAgentKind.Grok,
                 SessionAgentKind.Shell,
             ),
             SessionAgentKind.pickable,

@@ -21,6 +21,7 @@ from pocketshell import cgroup_agents
 from pocketshell.cgroup_agents import (
     AGENT_CLAUDE,
     AGENT_CODEX,
+    AGENT_GROK,
     AGENT_NONE,
     AGENT_OPENCODE,
     AGENT_UNKNOWN,
@@ -129,6 +130,9 @@ def _classify(host: _FakeHost, pane_pid: int, pane_id: str = "%1"):
         ("opencode", AGENT_OPENCODE),
         ("open-code", AGENT_OPENCODE),
         ("opencode-tui", AGENT_OPENCODE),
+        ("grok", AGENT_GROK),
+        ("grok --always-approve", AGENT_GROK),
+        ("/home/alexey/.local/bin/grok --always-approve", AGENT_GROK),
         # Plain shells / unrelated processes name no agent.
         ("bash", None),
         ("/bin/bash -l", None),
@@ -137,6 +141,10 @@ def _classify(host: _FakeHost, pane_pid: int, pane_id: str = "%1"):
         # `codexicon` substring case is covered separately below.
         ("git commit && codex", AGENT_CODEX),
         ("", None),
+        # G6: a raw substring `grok` matcher must go red on these.
+        ("GROQ_API_KEY=secret", None),
+        ("/home/user/.grok/sessions/%2Ftmp/sess/updates.jsonl", None),
+        ("mygrokhelper", None),
     ],
 )
 def test_classify_token(text: str, expected: Optional[str]) -> None:
@@ -148,6 +156,9 @@ def test_classify_token_substring_does_not_false_positive() -> None:
     # guard (mirroring containsCommandToken) must NOT match it.
     assert classify_token("codexedit") is None
     assert classify_token("myclaudeproxy") is None
+    assert classify_token("GROQ_API_KEY=secret") is None
+    assert classify_token("/home/user/.grok/sessions/foo") is None
+    assert classify_token("mygrokhelper") is None
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +229,23 @@ def test_opencode_scope(host: _FakeHost) -> None:
     assert result.agent_kind == AGENT_OPENCODE
     assert result.scope == scope
     assert result.evidence_pid == 900002
+
+
+def test_grok_scope(host: _FakeHost) -> None:
+    scope = "tmuxctl-git-pocketshell.scope"
+    host.add_proc(910001, scope=scope, comm="bash", cmdline="/bin/bash -l")
+    host.add_proc(
+        910002,
+        scope=scope,
+        comm="grok",
+        cmdline="grok --always-approve",
+    )
+    host.set_scope_procs(scope, [910001, 910002])
+
+    result = _classify(host, 910001)
+    assert result.agent_kind == AGENT_GROK
+    assert result.scope == scope
+    assert result.evidence_pid == 910002
 
 
 def test_plain_shell_scope_is_none(host: _FakeHost) -> None:

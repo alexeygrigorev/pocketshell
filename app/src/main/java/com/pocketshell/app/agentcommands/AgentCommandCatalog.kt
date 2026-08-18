@@ -250,6 +250,31 @@ public object AgentCommandCatalog {
         ),
     )
 
+    private val grokBuild: List<AgentCommand> = listOf(
+        AgentCommand(
+            command = "/new",
+            label = "New conversation",
+            description = "Start a fresh conversation in this CLI session.",
+            destructive = true,
+        ),
+        AgentCommand(
+            command = "/compact",
+            label = "Compact context",
+            description = "Summarise the conversation to free up context.",
+            argument = compactArgument,
+        ),
+        AgentCommand(
+            command = "/export",
+            label = "Export",
+            description = "Export the current session.",
+        ),
+        AgentCommand(
+            command = "/context",
+            label = "Context",
+            description = "Show the current context usage.",
+        ),
+    )
+
     /**
      * The full ordered command list for [agent], curated-first then long
      * tail. Never null — every supported [AgentKind] has a catalog.
@@ -258,6 +283,7 @@ public object AgentCommandCatalog {
         AgentKind.ClaudeCode -> claudeCode
         AgentKind.Codex -> codex
         AgentKind.OpenCode -> openCode
+        AgentKind.GrokBuild -> grokBuild
     }
 
     /**
@@ -291,10 +317,15 @@ public object AgentCommandCatalog {
         "/models", "/sessions", "/themes", "/editor",
     )
 
+    private val grokTuiOnly: Set<String> = setOf(
+        "/resume", "/dashboard", "/rewind", "/model", "/login",
+    )
+
     private fun tuiOnlyRoots(agent: AgentKind): Set<String> = when (agent) {
         AgentKind.ClaudeCode -> claudeTuiOnly
         AgentKind.Codex -> codexTuiOnly
         AgentKind.OpenCode -> openCodeTuiOnly
+        AgentKind.GrokBuild -> grokTuiOnly
     }
 
     /**

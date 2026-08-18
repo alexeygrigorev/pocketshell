@@ -1,6 +1,6 @@
 # Agent Awareness
 
-PocketShell detects when Claude Code, Codex, or OpenCode is running in
+PocketShell detects when Claude Code, Codex, OpenCode, or Grok Build is running in
 the active tmux pane and surfaces a clean conversation view of *that
 session* — solving the "I can't see what the agent just asked me"
 scrollback problem.
@@ -27,7 +27,8 @@ Detection combines log candidates with pane/process evidence:
    candidate logs for the supported agents. Claude Code is cwd-encoded
    under `~/.claude/projects/`; Codex candidates are filtered by
    rollout `session_meta.cwd`; OpenCode candidates are filtered by
-   SQLite session directory / project worktree.
+   SQLite session directory / project worktree; Grok Build candidates
+   live under `$GROK_HOME/sessions/<urlencoded-cwd>/` (default `~/.grok`).
 2. Pane-scoped process scan. For tmux panes, PocketShell scopes `ps`
    output to the pane TTY and requires the matching agent command to be
    present before showing the Conversation tab.
@@ -41,6 +42,7 @@ If both miss → no Conversation tab. Silent.
 | Claude Code | `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` | Yes (append-only) |
 | Codex (OpenAI) | `~/.codex/sessions/**/*.jsonl` | Yes after the rollout JSONL flushes |
 | OpenCode | `~/.local/share/opencode/opencode.db` | Yes, polled from SQLite |
+| Grok Build | `$GROK_HOME/sessions/<urlencoded-cwd>/<session-id>/updates.jsonl` | Yes (ACP JSONL) |
 
 Codex and OpenCode use wider freshness windows than Claude Code. Codex
 flushes its rollout JSONL on turn completion, and OpenCode persists to a
@@ -49,6 +51,8 @@ but still requires cwd/session filtering and pane process evidence before
 attributing them to the visible pane.
 
 Encoded-cwd format for Claude Code: `/home/alexey/git/pocketshell` → `-home-alexey-git-pocketshell`.
+
+Encoded-cwd format for Grok Build: `/home/alexey/git/pocketshell` → `%2Fhome%2Falexey%2Fgit%2Fpocketshell` (percent-encoding, honouring `GROK_HOME`).
 
 ## UI
 
@@ -135,6 +139,7 @@ core-agents/
 ├── ClaudeCodeParser.kt     # JSONL -> ConversationEvent
 ├── CodexParser.kt          # JSONL -> ConversationEvent
 ├── OpenCodeReader.kt       # SQLite/JSON rows -> ConversationEvent
+├── GrokBuildParser.kt      # ACP updates.jsonl -> ConversationEvent
 ├── AgentDetector.kt        # path hints + freshness + process confirmation
 └── ConversationEvent.kt    # normalized model
 ```

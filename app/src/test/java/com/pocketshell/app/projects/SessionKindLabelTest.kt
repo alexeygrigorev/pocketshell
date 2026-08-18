@@ -61,6 +61,11 @@ class SessionKindLabelTest {
     }
 
     @Test
+    fun grokAgentRendersNameAndState() {
+        assertEquals("Grok · Idle", sessionKindLabel(entry(SessionAgentKind.Grok)))
+    }
+
+    @Test
     fun noAgentLabelIsEverBareIdle() {
         // The conflated-label bug surfaced as a row reading just "Idle". Assert
         // that any agent state word always travels with its agent identity.
@@ -68,6 +73,7 @@ class SessionKindLabelTest {
             SessionAgentKind.Claude,
             SessionAgentKind.Codex,
             SessionAgentKind.OpenCode,
+            SessionAgentKind.Grok,
         )
         agents.forEach { kind ->
             val label = sessionKindLabel(entry(kind))
@@ -98,6 +104,7 @@ class SessionKindLabelTest {
         assertEquals("Claude", sessionBadgeLabel(entry(SessionAgentKind.Claude)))
         assertEquals("Codex", sessionBadgeLabel(entry(SessionAgentKind.Codex)))
         assertEquals("OpenCode", sessionBadgeLabel(entry(SessionAgentKind.OpenCode)))
+        assertEquals("Grok", sessionBadgeLabel(entry(SessionAgentKind.Grok)))
     }
 
     @Test
@@ -126,6 +133,7 @@ class SessionKindLabelTest {
         assertEquals("CL", sessionBadgeMonogram(entry(SessionAgentKind.Claude)))
         assertEquals("CX", sessionBadgeMonogram(entry(SessionAgentKind.Codex)))
         assertEquals("OC", sessionBadgeMonogram(entry(SessionAgentKind.OpenCode)))
+        assertEquals("GK", sessionBadgeMonogram(entry(SessionAgentKind.Grok)))
     }
 
     @Test

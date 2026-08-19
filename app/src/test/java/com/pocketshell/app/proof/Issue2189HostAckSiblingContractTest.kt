@@ -43,13 +43,19 @@ class Issue2189HostAckSiblingContractTest : TmuxSessionViewModelTestBase() {
 
     @Test
     fun eachPinnedJourneyHasARecordedReplaceDecisionAndAHostAckSibling() {
+        val pin = source(
+            "app/src/androidTest/java/com/pocketshell/app/proof/OutboundDeliveryAuthorityPin.kt",
+        )
         DECISIONS.forEach { (legacyClass, siblingFile) ->
             val legacy = source("app/src/androidTest/java/com/pocketshell/app/proof/$legacyClass.kt")
             val sibling = source(siblingFile)
+            // The flap original sits 32 bytes under the 128 KiB cap; its
+            // REPLACE note lives on the pin helper so Static guards stay green.
             assertTrue(
                 "$legacyClass must record the #2189 REPLACE decision so #2125 cannot " +
                     "delete it as 'legacy' without a sibling",
-                legacy.contains("Issue #2189 decision: REPLACE"),
+                legacy.contains("Issue #2189 decision: REPLACE") ||
+                    pin.contains("Issue #2189 decision: REPLACE [$legacyClass]"),
             )
             assertTrue(
                 "$legacyClass must still pin TerminalInference until #2125",

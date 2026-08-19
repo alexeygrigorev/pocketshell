@@ -92,6 +92,17 @@ internal fun assertNoAcknowledgedSendsWereRecorded(context: String) {
 }
 
 /**
+ * Issue #2189 decision: REPLACE [OutboundExactlyOnceAcrossFlapE2eTest]
+ * the exactly-once-across-flap property; DROP the late-authority /
+ * unconfirmed / paste-ack-timeout / turnover tests with #2125 (they
+ * assert inference semantics the host ack deleted). The shipped-path
+ * sibling is [Issue2189HostAckExactlyOnceAcrossFlapE2eTest].
+ *
+ * Relocated here because the original is 32 bytes under the 128 KiB
+ * file-size cap on origin/main — a comment there fails Static guards.
+ */
+
+/**
  * Issue #2189 — the SHIPPED-path inverse of [assertNoAcknowledgedSendsWereRecorded].
  *
  * A HostAck sibling that never asserts this can pass vacuously: the send rode

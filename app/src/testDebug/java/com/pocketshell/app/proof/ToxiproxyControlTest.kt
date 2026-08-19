@@ -3,6 +3,7 @@ package com.pocketshell.app.proof
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ToxiproxyControlTest {
@@ -72,6 +73,39 @@ class ToxiproxyControlTest {
                 ),
             ),
             transport.requests.toSet(),
+        )
+    }
+
+    /**
+     * Issue #2127 / #1678. A blip-then-heal journey must NOT use the `timeout`
+     * toxic: DELETEing a `timeout` toxic closes every connection carrying it, so
+     * "blackhole then clear" is physically a stall followed by a real remote FIN.
+     * The heal-able stall is the streaming `bandwidth` toxic pinned to `rate = 0`
+     * on BOTH directions.
+     */
+    @Test
+    fun halfOpenStallUsesRateZeroBandwidthInBothDirectionsNotATimeoutToxic() {
+        val transport = RecordingTransport()
+        ToxiproxyControl(baseUrl = "http://unused", transport = transport).addHalfOpenStall()
+
+        assertEquals(
+            setOf(
+                RecordedRequest(
+                    "POST",
+                    "/proxies/agents_ssh/toxics",
+                    """{"name":"halfopen_stall_upstream","type":"bandwidth","stream":"upstream","toxicity":1.0,"attributes":{"rate":0}}""",
+                ),
+                RecordedRequest(
+                    "POST",
+                    "/proxies/agents_ssh/toxics",
+                    """{"name":"halfopen_stall_downstream","type":"bandwidth","stream":"downstream","toxicity":1.0,"attributes":{"rate":0}}""",
+                ),
+            ),
+            transport.requests.toSet(),
+        )
+        assertTrue(
+            "a heal-able half-open stall must never use the connection-closing `timeout` toxic",
+            transport.requests.none { it.body?.contains("\"type\":\"timeout\"") == true },
         )
     }
 
@@ -160,6 +194,8 @@ class ToxiproxyControlTest {
             setOf(
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/blackhole_upstream", null),
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/blackhole_downstream", null),
+                RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/halfopen_stall_upstream", null),
+                RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/halfopen_stall_downstream", null),
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/latency_upstream", null),
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/latency_downstream", null),
                 RecordedRequest("DELETE", "/proxies/agents_ssh/toxics/bandwidth_downstream", null),

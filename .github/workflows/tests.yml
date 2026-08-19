@@ -594,7 +594,14 @@ jobs:
       # 1 stays honestly refused. It also drives the REAL "Inspect first journey
       # summary" and classify step bodies out of this file so the one-shot stamp
       # is proven end to end (summary -> budget -> verdict token -> aggregate).
-      - name: CI journey cold-boot retry-budget guard (issues #1458, #1833)
+      #
+      # Issue #1850: the same harness redistributes a measured per-class fixture
+      # through the shipping selector at the matrix total from
+      # scripts/ci-journey-shard-count.sh and requires every leg's retry
+      # headroom to exceed one twice-failing class (~420s). A 3-way split of
+      # the current list must still miss that bar, so an overloaded matrix
+      # cannot stay green.
+      - name: CI journey cold-boot retry-budget guard (issues #1458, #1833, #1850)
         run: |
           chmod +x scripts/ci-journey-retry-budget.sh \
             scripts/ci-journey-warm-build-elapsed.sh \

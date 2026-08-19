@@ -89,7 +89,7 @@ EXEMPT_JOBS=(
 # C9: the #2063 coverage guards belong to `guards-test-selection`, never to a
 # Gradle test task. Matched against unit/instrumentation test sources and build
 # scripts — the two places from which a Gradle test could shell out to them.
-SELECTION_GUARD_SCRIPTS='select-test-areas\.sh|select-test-areas-selftest\.sh|check-test-execution-ledger\.sh|check-test-execution-ledger-selftest\.sh|dev-fast-gate-parity-selftest\.sh'
+SELECTION_GUARD_SCRIPTS='select-test-areas\.sh|select-test-areas-selftest\.sh|check-test-execution-ledger\.sh|check-test-execution-ledger-selftest\.sh|check-test-execution-ledger-wiring\.py|ci-record-test-execution-ledger\.sh|ci-nightly-execution-ledger\.sh|dev-fast-gate-parity-selftest\.sh'
 
 fail() {
   echo "FAIL: $*" >&2

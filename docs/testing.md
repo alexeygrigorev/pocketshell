@@ -868,35 +868,56 @@ for the bound are the always tier, the nightly full run, and the release gate.
 `check-executed-test-counts.sh` (#1646) proves a test *task* executed more than
 zero tests. That is one level too low to see this repo's recurring failure: a
 class that belongs to no suite, so nothing ever runs it, unnoticed for months
-(#1851's `ColdInstallE2eTest` / `EmulatorWorkflowE2eTest`, #1853's twelve dead
-harnesses, #1859's shard truncating at 98 of 226). All three were found
-*incidentally*. Area selection makes that class strictly more dangerous, because
-"this test did not run in this job" becomes normal and stops being suspicious.
+(#1851 *reported* `ColdInstallE2eTest` / `EmulatorWorkflowE2eTest` as unwired —
+nightly wholesale later proved they ran, but they were accounted incorrectly,
+#2082; #1853's twelve dead harnesses; #1859's shard truncating at 98 of 226).
+All three were found *incidentally*. Area selection makes that class strictly
+more dangerous, because "this test did not run in this job" becomes normal and
+stops being suspicious.
 
 ```bash
 # after any test tier, credit what actually executed
 scripts/check-test-execution-ledger.sh --record build/test-results --tier unit
 
+# current-run selected vs executed vs asserted (#2082 / #1859)
+# unit-debug = test + testDebug (the Debug job); unit-release is the mirror.
+scripts/check-test-execution-ledger.sh --attendance --results-root build/test-results \
+  --selected-from unit-debug --require-class com.pocketshell.app.proof.ColdInstallE2eTest
+
 # fail when any registered class is unmapped, never executed, or stale
 scripts/check-test-execution-ledger.sh --verify --max-age-days 7
 ```
 
+CI actually invokes those commands now (#2082): the Unit job records + verifies
+the variant that just ran (`--selected-from unit-debug` /
+`--source-set unit-debug` on `testDebugUnitTest`, `unit-release` on
+`testReleaseUnitTest`) against `*/build/test-results` and persists the TSV via
+`actions/cache`; nightly shards write per-shard attendance and the
+`execution-ledger` job unions them against `app/src/androidTest` minus
+`notClass`, pins `ColdInstallE2eTest` and `EmulatorWorkflowE2eTest` by FQCN
+from the real artifact, and records; the release gate records this run then
+`--verify`s the rolling 7-day ledger. An absent cache, empty XML set, or
+missing shard artifact is RED — it is not a pass.
+
 "Executed" means *appeared in a JUnit result as a testcase that was not
 skipped*. A class whose every case is `<skipped/>` is recorded as
 seen-but-skipped and does **not** satisfy the guard — an all-skipped class is
-the G3 vacuous pass, and the 72-entry
-`KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES` baseline currently invites exactly
-that mistake. A missing or empty ledger **fails**: a guard that passes with no
-evidence is decoration.
+the G3 vacuous pass. Nightly phase 1 still runs
+`:app:connectedDebugAndroidTest` wholesale minus `notClass` (#2065/#2078);
+attendance reuses that selected set (`app/src/androidTest` plus documented
+`nightly-connected` rows) rather than inventing a second reachability
+analyzer. Shared-module `androidTest` classes are a different Gradle task
+and are not in the phase-1 selected set. A missing or empty ledger **fails**:
+a guard that passes with no evidence is decoration.
 
-The ledger is a plain TSV (`<fqcn>\t<epoch>\t<tier>`); where it is persisted is
-the CI wiring's business, not the guard's. `--verify` resolves each registered
-class through **the same single resolver** the manifest guard uses. There used
-to be two — one keyed on tracked file paths, one on FQCNs against a hardcoded
-list of source roots that contained no `shared/*/src/test/java` — and the second
-reported 183 of 1047 classes as belonging to no area, so the guard was red on
-the real tree while its self-test (synthetic `app/src/test` trees only) was
-green. Seed a complete ledger from `--list-classes` if you need one:
+The ledger is a plain TSV (`<fqcn>\t<epoch>\t<tier>`); CI persists it with a
+rolling Actions-cache key (`test-execution-ledger-`). `--verify` resolves each
+registered class through **the same single resolver** the manifest guard uses.
+There used to be two — one keyed on tracked file paths, one on FQCNs against a
+hardcoded list of source roots that contained no `shared/*/src/test/java` — and
+the second reported 183 of 1047 classes as belonging to no area, so the guard
+was red on the real tree while its self-test (synthetic `app/src/test` trees
+only) was green. Seed a complete ledger from `--list-classes` if you need one:
 
 ```bash
 scripts/select-test-areas.sh --list-classes |
@@ -910,6 +931,7 @@ scripts/select-test-areas.sh --verify-manifest
 scripts/select-test-areas.sh --coverage-invariant
 scripts/select-test-areas-selftest.sh
 scripts/check-test-execution-ledger-selftest.sh
+scripts/check-test-execution-ledger-wiring.py --self-test
 scripts/dev-fast-gate-parity-selftest.sh
 ```
 

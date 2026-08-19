@@ -431,6 +431,46 @@ assert_exit 1 "C1 unjustified skip hard-fails the guard"
 # clean exit-0 with only advisory findings present.
 rm -f "$ANDROID_FIX_DIR/C1BadJourneyTest.kt"
 
+# C1 STALE (#2082): a baseline row whose file no longer has the smell must
+# hard-fail. Mutation: point C1_BASELINE at a planted file with no
+# assumeFalse(isRunningOnCi()). That is the EmulatorWorkflowE2eTest shape
+# after its stopgap was deleted.
+echo "[C1] stale baseline row (listed file has no remaining smell)"
+cat > "$ANDROID_FIX_DIR/C1StaleBaselineTest.kt" <<'KT'
+package com.pocketshell.app.validityselftest
+class C1StaleBaselineTest {
+    fun journey() { }
+}
+KT
+MUTATED_GUARD="$(mktemp "scripts/.check-test-validity-c1-stale.$$.XXXXXX.sh")"
+python3 - "$GUARD" "$MUTATED_GUARD" "$ANDROID_FIX_DIR/C1StaleBaselineTest.kt" <<'PY'
+import sys
+src, dest, row = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(src).read()
+anchor = "C1_BASELINE=(\n)"
+assert text.count(anchor) == 1, "C1_BASELINE empty-array anchor not unique"
+text = text.replace(anchor, f'C1_BASELINE=(\n  "{row}"\n)')
+open(dest, "w").write(text)
+PY
+chmod +x "$MUTATED_GUARD"
+if ! grep -q "C1StaleBaselineTest.kt" "$MUTATED_GUARD"; then
+  note_fail "C1 stale mutation did not apply"
+else
+  set +e
+  stale_out="$("$MUTATED_GUARD" 2>&1)"
+  stale_rc=$?
+  set -e
+  if [[ "$stale_rc" -eq 1 ]] && grep -q "C1 — STALE" <<<"$stale_out" && grep -q "C1StaleBaselineTest.kt" <<<"$stale_out"; then
+    note_pass "C1 stale baseline (no remaining smell) hard-fails, naming the file"
+  else
+    note_fail "C1 stale baseline did not hard-fail as STALE (rc=$stale_rc)
+$(printf '%s\n' "$stale_out" | grep -E 'C1 —|FAIL:|PASS:' | head)"
+  fi
+fi
+rm -f -- "$MUTATED_GUARD"
+MUTATED_GUARD=""
+rm -f "$ANDROID_FIX_DIR/C1StaleBaselineTest.kt"
+
 # --------------------------------------------------------------------------
 # J1 — androidTest E2e/Docker class missing ci-journey-suite coverage.
 # --------------------------------------------------------------------------

@@ -145,6 +145,28 @@ jobs:
             --newer-than "${RUNNER_TEMP}/unit-test-run-start" \
             --gradle-log "${RUNNER_TEMP}/unit-test-gradle.log"
 
+      # Issue #2082: restore the rolling executed-classes ledger, credit this
+      # run's JUnit XML, check current-run attendance, verify unit classes.
+      # Cache save is the post step of Restore; an absent ledger never looks
+      # like a passing verify (the wrapper fail-closes).
+      - name: Restore test-execution ledger (#2082)
+        if: always() && steps.unit_tests.conclusion != 'skipped'
+        uses: actions/cache@v5
+        with:
+          path: build/test-execution-ledger.tsv
+          key: test-execution-ledger-${{ runner.os }}-${{ github.sha }}-unit-${{ matrix.variant }}-${{ github.run_attempt }}
+          restore-keys: |
+            test-execution-ledger-${{ runner.os }}-
+
+      - name: Record and verify unit execution ledger (#2082)
+        if: always() && steps.unit_tests.conclusion != 'skipped'
+        run: |
+          chmod +x scripts/ci-record-test-execution-ledger.sh scripts/check-test-execution-ledger.sh
+          scripts/ci-record-test-execution-ledger.sh \
+            --tier "unit-${{ matrix.variant }}" \
+            --variant "${{ matrix.variant }}" \
+            --newer-than "${RUNNER_TEMP}/unit-test-run-start"
+
       # Issue #1646: upload ALWAYS, not just on failure. A green run's result XML
       # IS the evidence that the run was real; throwing it away and keeping only
       # failures is precisely why CI could not prove a green run executed
@@ -157,6 +179,8 @@ jobs:
           path: |
             **/build/reports/tests/
             **/build/test-results/
+            build/test-execution-ledger.tsv
+            build/test-execution-attendance.tsv
           # Issue #1809: a re-run of this job replaces its OWN attempt's upload
           # instead of hitting a duplicate-name failure; the previous attempt's
           # artifact is in a different scope and is left intact.

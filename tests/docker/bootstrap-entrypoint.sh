@@ -87,8 +87,13 @@ JSON
     touch /home/testuser/.pocketshell-fixture-hooks-enabled
     chown testuser:testuser /home/testuser/.pocketshell-fixture-hooks-enabled
     # Ensure hooks start UNINSTALLED so the app surfaces the "enable
-    # notifications" nudge before the install.
-    rm -f /home/testuser/.local/share/pocketshell/hooks/.installed
+    # notifications" nudge before the install. Clear both the current
+    # XDG-data marker and the pre-#267 cache-path leftover so a reused
+    # volume cannot report hooks already installed (#2114).
+    rm -f /home/testuser/.local/share/pocketshell/hooks/.installed \
+      /home/testuser/.cache/pocketshell/hooks/.installed \
+      /home/testuser/.local/share/pocketshell/hooks/claude_stop.py \
+      /home/testuser/.cache/pocketshell/hooks/claude_stop.py
     ;;
   *)
     printf 'unknown PocketShell bootstrap scenario: %s\n' "$scenario" >&2

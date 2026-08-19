@@ -304,11 +304,18 @@ class HostBootstrapScenarioSuiteTest {
         launchSeededHost()
         tapSeededHost()
 
-        // Precondition: the pre-existing foreign Claude Stop hook is present and
-        // our hook is NOT yet installed (silent host).
-        assertRemote("fixture must start with a pre-existing foreign hook and NO pocketshell hook") {
+        // Precondition: the pre-existing foreign Claude Stop hook is present,
+        // our hook is NOT in settings.json, AND `hooks status --json` reports
+        // every engine off. The app keys off that status probe (not a grep of
+        // settings.json); a leftover `.installed` marker that makes status
+        // report true is exactly the silent-host miss this scenario exists to
+        // catch. Mutation that reddens: leave ~/.cache or ~/.local/share
+        // pocketshell/hooks/.installed in place so status stays all-true.
+        assertRemote("fixture must start as a silent host: foreign hook present, our hook absent, hooks status reports not installed") {
             "/bin/sh -lc 'grep -q my-preexisting-stop-hook ~/.claude/settings.json && " +
-                "! grep -q claude_stop.py ~/.claude/settings.json'"
+                "! grep -q claude_stop.py ~/.claude/settings.json && " +
+                "/usr/local/bin/pocketshell hooks status --json | grep -q installed.:.false && " +
+                "! /usr/local/bin/pocketshell hooks status --json | grep -q installed.:.true'"
         }
 
         // A ready host with notifications off is diverted to the setup sheet
@@ -333,11 +340,16 @@ class HostBootstrapScenarioSuiteTest {
 
         // AC3 (G2 class-coverage): the hook files are present AND the install
         // MERGED non-destructively — BOTH our hook AND the pre-existing foreign
-        // hook survive in ~/.claude/settings.json.
+        // hook survive in ~/.claude/settings.json. `hooks status` is the same
+        // signal the app uses for "Notifications: on". Mutation that reddens:
+        // a destructive `hooks install` that overwrites settings.json (foreign
+        // hook gone) fails the my-preexisting-stop-hook grep.
         assertRemote("hooks install must merge non-destructively into the existing Claude config") {
             "/bin/sh -lc 'grep -q claude_stop.py ~/.claude/settings.json && " +
                 "grep -q my-preexisting-stop-hook ~/.claude/settings.json && " +
-                "test -f ~/.local/share/pocketshell/hooks/.installed'"
+                "test -f ~/.local/share/pocketshell/hooks/.installed && " +
+                "/usr/local/bin/pocketshell hooks status --json | grep -q installed.:.true && " +
+                "! /usr/local/bin/pocketshell hooks status --json | grep -q installed.:.false'"
         }
     } }
 
@@ -713,11 +725,21 @@ class HostBootstrapScenarioSuiteTest {
                 label = "notifications",
                 port = 2241,
                 resetCommand = { targetAppVersion ->
-                    "mkdir -p ~/.claude ~/.local/share/pocketshell/hooks; " +
+                    // Clear BOTH the current XDG-data marker (#267) AND the
+                    // pre-#267 cache-path leftover. A long-lived local
+                    // container that still has ~/.cache/pocketshell/hooks/.installed
+                    // makes `hooks status` report all-true even after settings.json
+                    // is rewound to the foreign-hook seed — the app then treats
+                    // the host as ready and this scenario times out waiting for
+                    // the bootstrap sheet (#2114).
+                    "mkdir -p ~/.claude ~/.local/share/pocketshell/hooks ~/.cache/pocketshell/hooks; " +
                         "printf '%s' " +
                         shellQuote(PREEXISTING_CLAUDE_SETTINGS) +
                         " > ~/.claude/settings.json; " +
-                        "rm -f ~/.local/share/pocketshell/hooks/.installed; " +
+                        "rm -f ~/.local/share/pocketshell/hooks/.installed " +
+                        "~/.cache/pocketshell/hooks/.installed " +
+                        "~/.local/share/pocketshell/hooks/claude_stop.py " +
+                        "~/.cache/pocketshell/hooks/claude_stop.py; " +
                         "touch ~/.pocketshell-fixture-hooks-enabled; " +
                         versionReset(targetAppVersion) +
                         "printf 'active enabled\\n' > $STATE_FILE"

@@ -485,7 +485,7 @@ fun FolderListScreen(
         // `tree` payload reports a host CLI older than this app build expects.
         cliVersionMismatch?.let { mismatch ->
             CliVersionMismatchBanner(
-                message = PayloadVersionCheck.outdatedHostPrompt(mismatch),
+                message = CliVersionBannerCopy.bannerMessage(mismatch, cliVersionUpdateState),
                 updateState = cliVersionUpdateState,
                 onUpdate = viewModel::runHostPocketshellUpgrade,
                 onDismiss = viewModel::dismissCliVersionMismatch,
@@ -1523,10 +1523,12 @@ internal fun CliVersionMismatchBanner(
         // Issue #947: the upgrade failure line (installer stderr / timeout /
         // no-installer), shown above the action row so the user can read it and
         // then Retry or Dismiss — the spinner never sticks.
-        failure?.let { fail ->
+        // Issue #2033: Unpublished / Capped already rewrite the banner body, so
+        // repeating that copy in red is noise (and a second "not on PyPI" node).
+        if (failure?.kind == FolderListViewModel.CliVersionUpdateState.Failure.Kind.Failed) {
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = fail.message,
+                text = failure.message,
                 color = PocketShellColors.Red,
                 style = PocketShellType.bodyDense,
                 modifier = Modifier
@@ -1554,16 +1556,22 @@ internal fun CliVersionMismatchBanner(
                     style = PocketShellType.bodyDense,
                 )
             } else {
-                PocketShellButton(
-                    // Issue #947: a no-op upgrade re-raises a failure, so offer
-                    // "Retry" once the first attempt failed.
-                    text = if (failure != null) "Retry" else "Update",
-                    onClick = onUpdate,
-                    modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_UPDATE_TAG),
-                    variant = ButtonVariant.Primary,
-                    compact = true,
-                )
-                Spacer(modifier = Modifier.width(8.dp))
+                // Issue #2033: Retry only where retrying can help (unpublished
+                // — wait for PyPI; failed — transient). A true date-cap will
+                // not change on Retry of the same already-uncapped command.
+                val showUpdate = failure == null || failure.offerRetry
+                if (showUpdate) {
+                    PocketShellButton(
+                        // Issue #947: a no-op upgrade re-raises a failure, so offer
+                        // "Retry" once the first attempt failed.
+                        text = if (failure != null) "Retry" else "Update",
+                        onClick = onUpdate,
+                        modifier = Modifier.testTag(FOLDER_LIST_CLI_VERSION_UPDATE_TAG),
+                        variant = ButtonVariant.Primary,
+                        compact = true,
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
                 PocketShellButton(
                     text = "Dismiss",
                     onClick = onDismiss,

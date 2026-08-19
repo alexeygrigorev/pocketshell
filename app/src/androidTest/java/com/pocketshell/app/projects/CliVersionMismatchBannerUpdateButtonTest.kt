@@ -15,6 +15,7 @@ import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -65,13 +66,13 @@ class CliVersionMismatchBannerUpdateButtonTest {
     // Derived from the PRODUCTION prompt builder so the banner copy (and its
     // embedded upgrade command) can never drift from the real one — issue #1492
     // widened that command to the global `--exclude-newer` cap override.
-    private val message =
-        PayloadVersionCheck.outdatedHostPrompt(
-            PayloadVersionCheck.Verdict.HostOutdated(
-                hostVersion = "0.4.14",
-                expectedVersion = "0.4.16",
-            ),
+    private val mismatchVerdict =
+        PayloadVersionCheck.Verdict.HostOutdated(
+            hostVersion = "0.4.14",
+            expectedVersion = "0.4.16",
         )
+
+    private val message = PayloadVersionCheck.outdatedHostPrompt(mismatchVerdict)
 
     @Test
     fun idleState_updateAndDismissPresentReachableNotClipped() {
@@ -109,6 +110,43 @@ class CliVersionMismatchBannerUpdateButtonTest {
     }
 
     @Test
+    fun unpublishedState_saysNotOnPypi_noFailingCommand_retryPresent() {
+        val unpublished = FolderListViewModel.CliVersionUpdateState.Failure(
+            message = "pocketshell 0.4.16 is not on PyPI yet (host still reports 0.4.14).",
+            kind = FolderListViewModel.CliVersionUpdateState.Failure.Kind.Unpublished,
+            offerRetry = true,
+        )
+        setBanner(unpublished, CliVersionBannerCopy.bannerMessage(mismatchVerdict, unpublished))
+
+        compose.onNodeWithText("not on PyPI", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("uv tool install", substring = true).assertDoesNotExist()
+        compose.onNodeWithTag(FOLDER_LIST_CLI_VERSION_UPDATE_ERROR_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(FOLDER_LIST_CLI_VERSION_UPDATE_TAG)
+            .assertIsDisplayed().assertIsEnabled().assertHasClickAction()
+        compose.onNodeWithTag(FOLDER_LIST_CLI_VERSION_DISMISS_TAG)
+            .assertIsDisplayed().assertIsEnabled().assertHasClickAction()
+        compose.assertNodeFullyWithinRoot(FOLDER_LIST_CLI_VERSION_UPDATE_TAG)
+        compose.assertNodeFullyWithinRoot(FOLDER_LIST_CLI_VERSION_DISMISS_TAG)
+        capture("issue-2033-banner-unpublished-retry-dismiss.png")
+    }
+
+    @Test
+    fun cappedState_hidesRetry_dismissPresent() {
+        val capped = FolderListViewModel.CliVersionUpdateState.Failure(
+            message = "The host installer is date-capped and could not resolve pocketshell 0.4.16.",
+            kind = FolderListViewModel.CliVersionUpdateState.Failure.Kind.Capped,
+            offerRetry = false,
+        )
+        setBanner(capped, CliVersionBannerCopy.bannerMessage(mismatchVerdict, capped))
+
+        compose.onNodeWithTag(FOLDER_LIST_CLI_VERSION_UPDATE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(FOLDER_LIST_CLI_VERSION_DISMISS_TAG)
+            .assertIsDisplayed().assertIsEnabled().assertHasClickAction()
+        compose.assertNodeFullyWithinRoot(FOLDER_LIST_CLI_VERSION_DISMISS_TAG)
+        capture("issue-2033-banner-capped-dismiss-only.png")
+    }
+
+    @Test
     fun failureState_errorAndRetryDismissPresentReachableNotClipped() {
         setBanner(
             FolderListViewModel.CliVersionUpdateState.Failure(
@@ -134,7 +172,10 @@ class CliVersionMismatchBannerUpdateButtonTest {
 
     // --- helpers ------------------------------------------------------------
 
-    private fun setBanner(state: FolderListViewModel.CliVersionUpdateState) {
+    private fun setBanner(
+        state: FolderListViewModel.CliVersionUpdateState,
+        bannerMessage: String = message,
+    ) {
         compose.setContent {
             PocketShellTheme {
                 Box(
@@ -146,7 +187,7 @@ class CliVersionMismatchBannerUpdateButtonTest {
                     // non-displacing overlay pinned to the bottom edge with the
                     // same 12dp padding the production call site uses.
                     CliVersionMismatchBanner(
-                        message = message,
+                        message = bannerMessage,
                         updateState = state,
                         onUpdate = {},
                         onDismiss = {},

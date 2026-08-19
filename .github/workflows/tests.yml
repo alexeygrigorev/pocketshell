@@ -736,6 +736,15 @@ jobs:
           chmod +x scripts/lib/nightly-fault-verdict.sh
           scripts/lib/nightly-fault-verdict.sh --self-test
 
+      # Issue #1924: bounded nightly failure-signature recurrence
+      # (count/first_seen/last_seen/streak) from small TSV artifacts.
+      # Cheap fixture proof, no emulator, no historical report download.
+      - name: "Nightly failure-recurrence guard (issue #1924)"
+        run: |
+          chmod +x scripts/nightly-failure-recurrence.py \
+            scripts/test-nightly-failure-recurrence.sh
+          scripts/test-nightly-failure-recurrence.sh
+
       # Issue #1581: gate the Build workflow's corrupted-NDK-download retry
       # wrapper (scripts/ci-assemble-with-ndk-retry.sh) so its clear-and-retry
       # logic cannot silently regress. Fast, JVM-free shell test (fake build cmd,

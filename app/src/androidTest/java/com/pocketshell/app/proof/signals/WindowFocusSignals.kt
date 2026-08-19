@@ -241,6 +241,25 @@ fun awaitActivityWindowFocus(
 }
 
 /**
+ * Issue #2021 leftover: an unfocused activity while OUR package still owns
+ * the accessibility window is the hosted splash-owner / in-app sheet stall
+ * (`active_window_pkg=<app> active_window_class=android.widget.FrameLayout`),
+ * not a foreign thief. Fail closed on `<unavailable>` or any other package.
+ *
+ * A framework Error/ANR is never app-owned: its window belongs to `android`
+ * (#1879) and [focusedFrameworkErrorPackage] names the subject.
+ */
+fun isAppOwnedUnfocusedDiagnosis(diagnosis: String): Boolean {
+    val appPackage = InstrumentationRegistry.getInstrumentation().targetContext.packageName
+    val pkg = diagnosis.substringAfter("active_window_pkg=", missingDelimiterValue = "")
+        .substringBefore(' ')
+    if (pkg.isBlank() || pkg == ACTIVE_WINDOW_UNAVAILABLE || pkg != appPackage) {
+        return false
+    }
+    return focusedFrameworkErrorPackage() == null
+}
+
+/**
  * Describe the window that currently owns the active (focused) accessibility
  * window: its owning package and root class. Used to name the real cause in a
  * failure message, and parsed by the CI classifier's foreignness gate.

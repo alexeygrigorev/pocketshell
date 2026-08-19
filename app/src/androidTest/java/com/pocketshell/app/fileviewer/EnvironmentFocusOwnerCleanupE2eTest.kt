@@ -4,6 +4,7 @@ import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
+import com.pocketshell.app.proof.signals.awaitHomePackageOwnsDisplay
 import com.pocketshell.app.proof.signals.executeFocusShellCommand
 import com.pocketshell.app.proof.signals.dismissFocusedLauncherFrameworkDialog
 import com.pocketshell.app.proof.signals.focusedFrameworkErrorPackage
@@ -66,7 +67,11 @@ class EnvironmentFocusOwnerCleanupE2eTest {
         try {
             executeFocusShellCommand("settings put global show_first_crash_dialog 1")
             executeFocusShellCommand("input keyevent HOME")
-            SystemClock.sleep(1_500)
+            assertTrue(
+                "the fixture must wait until HOME owns the display before crashing it; " +
+                    "home_package=$homePackage",
+                awaitHomePackageOwnsDisplay(homePackage, timeoutMs = 15_000),
+            )
             executeFocusShellCommand("am crash $homePackage")
         } finally {
             if (oldShowFirst == "null" || oldShowFirst.isBlank()) {
@@ -78,11 +83,17 @@ class EnvironmentFocusOwnerCleanupE2eTest {
             }
         }
 
-        val deadline = SystemClock.elapsedRealtime() + 5_000
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        val retryAt = SystemClock.elapsedRealtime() + 5_000
         var focusedPackage: String? = null
+        var retriedCrash = false
         while (SystemClock.elapsedRealtime() < deadline) {
             focusedPackage = focusedFrameworkErrorPackage()
             if (focusedPackage != null) break
+            if (!retriedCrash && SystemClock.elapsedRealtime() >= retryAt) {
+                executeFocusShellCommand("am crash $homePackage")
+                retriedCrash = true
+            }
             SystemClock.sleep(50)
         }
         assertEquals(

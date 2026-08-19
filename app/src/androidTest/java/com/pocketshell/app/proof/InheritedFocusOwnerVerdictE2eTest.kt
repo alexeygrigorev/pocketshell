@@ -12,11 +12,15 @@ import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
 import com.pocketshell.app.proof.signals.InheritedJourneyFocus
 import com.pocketshell.app.proof.signals.SyntheticFocusOwnerHarness
 import com.pocketshell.app.proof.signals.activityWindowFocused
+import com.pocketshell.app.proof.signals.describeActiveWindow
+import com.pocketshell.app.proof.signals.executeFocusShellCommand
+import com.pocketshell.app.proof.signals.parseHomePackage
 import com.pocketshell.app.proof.signals.recordJourneyEntryFocus
 import com.pocketshell.app.proof.signals.requireNoJourneyOwnedFocusRegression
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocusLost
 import com.pocketshell.app.proof.signals.waitForActivityWindowFocused
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -65,6 +69,13 @@ import org.junit.runner.RunWith
  * [aJourneyThatLeaksItsOwnSyntheticOwnerStillFails] is the anti-amnesty control:
  * relaxing the INHERITED case must not relax the OWNED one. Without it, "the
  * journey reached its body" could be bought by deleting the checks entirely.
+ *
+ * Leftover (Nightly 31147697950 / 31456819680, and the later
+ * EnvironmentFocusOwnerCleanup self-check flake): an APP-OWNED splash/sheet
+ * FrameLayout after a *focused* entry used to fail the exit boundary with the
+ * same `active_window_pkg=<app>` reading. That is now classified as splash-
+ * owner, not a journey regression. A genuine foreign package still fails
+ * ([theJourneyBoundaryStillFailsOnAForeignFocusOwner]).
  */
 @RunWith(AndroidJUnit4::class)
 class InheritedFocusOwnerVerdictE2eTest {
@@ -181,9 +192,10 @@ class InheritedFocusOwnerVerdictE2eTest {
     }
 
     /**
-     * The class-boundary sibling of the reproduction: an inherited unfocused
-     * reading is recorded and reported, never converted into this journey's
-     * verdict, while a focus regression THIS journey caused still fails.
+     * The class-boundary sibling of the leftover recurrence: an inherited
+     * unfocused reading stays quiet, AND an APP-OWNED splash/sheet owner that
+     * appears after a focused entry also stays quiet. A genuine foreign owner
+     * is covered by [theJourneyBoundaryStillFailsOnAForeignFocusOwner].
      */
     @Test
     fun theJourneyBoundaryFailsOnAnOwnedRegressionAndNotOnAnInheritedOne() {
@@ -212,30 +224,104 @@ class InheritedFocusOwnerVerdictE2eTest {
             timeoutMs = 2_000,
         )
 
-        // (b) owned: entry focused, then this journey loses focus -> exit fails.
+        // (b) leftover recurrence: entry WAS focused, then an APP-OWNED splash /
+        // sheet / FrameLayout owns the display (FileViewer teardown + both
+        // #1994 arms on Nightly 31456819680). That reading is the hosted
+        // splash-owner stall, not a foreign thief this journey leaked, so the
+        // exit boundary must stay quiet. RED on current main: the boundary
+        // still calls requirePocketShellFocusAtJourneyBoundary and throws
+        // FOREIGN_WINDOW_FOCUS_SIGNATURE with active_window_pkg=<our package>.
         dismissInheritedOwner()
-        val ownedEntry = recordJourneyEntryFocus(
+        val focusedEntry = recordJourneyEntryFocus(
             scenario = scenario,
-            context = "issue #2021 owned entry",
+            context = "issue #2021 splash-owner entry",
             timeoutMs = 10_000,
         )
-        assertTrue("the owned case needs a focused entry reading", ownedEntry.focused)
+        assertTrue("the splash-owner leftover needs a focused entry reading", focusedEntry.focused)
         inheritAppOwnedFocusWindow()
+        requireNoJourneyOwnedFocusRegression(
+            scenario = scenario,
+            entry = focusedEntry,
+            context = "issue #2021 splash-owner exit",
+            timeoutMs = 2_000,
+        )
+    }
+
+    /**
+     * Selectivity for the leftover: relaxing the APP-OWNED splash-owner case
+     * must not become blanket amnesty for a genuine foreign owner. A Settings
+     * window in front is the named-other-package reading the class boundary
+     * still exists to catch (#1985 / #1879).
+     */
+    @Test
+    fun theJourneyBoundaryStillFailsOnAForeignFocusOwner() {
+        val scenario = compose.activityRule.scenario
+        val focusedEntry = recordJourneyEntryFocus(
+            scenario = scenario,
+            context = "issue #2021 foreign-owner entry",
+            timeoutMs = 10_000,
+        )
+        assertTrue("the foreign-owner control needs a focused entry reading", focusedEntry.focused)
+
+        val targetPackage = InstrumentationRegistry.getInstrumentation()
+            .targetContext.packageName
+        executeFocusShellCommand("am start -a android.settings.SETTINGS")
+        assertTrue(
+            "the fixture must actually put a foreign package in front, otherwise this " +
+                "control proves nothing about the leftover classification",
+            waitForForeignPackageInFront(targetPackage),
+        )
         val regression = runCatching {
             requireNoJourneyOwnedFocusRegression(
                 scenario = scenario,
-                entry = ownedEntry,
-                context = "issue #2021 owned exit",
+                entry = focusedEntry,
+                context = "issue #2021 foreign-owner exit",
                 timeoutMs = 2_000,
             )
         }.exceptionOrNull()
+        bringScenarioBackToFront()
         assertNotNull(
-            "a focus regression this journey caused must still hard-fail at the boundary",
+            "a genuine foreign focus owner must still hard-fail at the boundary — " +
+                "excusing splash-owner must not become blanket amnesty",
             regression,
         )
         assertTrue(
             "the boundary failure must keep the #1879 signature, got: ${regression?.message}",
             regression?.message.orEmpty().contains(FOREIGN_WINDOW_FOCUS_SIGNATURE),
+        )
+        assertTrue(
+            "the foreign-owner failure must name a package that is not this app, got: " +
+                "${regression?.message}",
+            regression?.message.orEmpty().contains("active_window_pkg=") &&
+                !regression?.message.orEmpty().contains("active_window_pkg=$targetPackage"),
+        )
+    }
+
+    /**
+     * Issue #2021 leftover self-check flake: an empty HOME resolver output
+     * must not be treated as a package. Mutation: returning a hardcoded
+     * launcher package on blank input reddens the empty cases.
+     */
+    @Test
+    fun homePackageParserDoesNotInventALauncherWhenTheResolverIsEmpty() {
+        assertEquals(
+            "empty dumpsys/resolver output is not a HOME package",
+            "",
+            parseHomePackage(""),
+        )
+        assertEquals(
+            "a resolver miss is not a HOME package",
+            "",
+            parseHomePackage("No activity found"),
+        )
+        assertEquals(
+            "the last component/line is the HOME package",
+            "com.google.android.apps.nexuslauncher",
+            parseHomePackage(
+                "priority=0 preferredOrder=0 match=0x108000\n" +
+                    "com.google.android.apps.nexuslauncher/" +
+                    "com.google.android.apps.nexuslauncher.NexusLauncherActivity\n",
+            ),
         )
     }
 
@@ -283,5 +369,30 @@ class InheritedFocusOwnerVerdictE2eTest {
             SystemClock.sleep(50)
         }
         return dialog.window?.decorView?.hasWindowFocus() == true
+    }
+
+    private fun waitForForeignPackageInFront(appPackage: String): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val diagnosis = describeActiveWindow()
+            val pkg = diagnosis.substringAfter("active_window_pkg=", "")
+                .substringBefore(' ')
+            if (pkg.isNotBlank() && pkg != appPackage && pkg != "<unavailable>") {
+                return true
+            }
+            SystemClock.sleep(50)
+        }
+        return false
+    }
+
+    private fun bringScenarioBackToFront() {
+        compose.activityRule.scenario.onActivity { activity ->
+            activity.getSystemService(android.app.ActivityManager::class.java)
+                .appTasks
+                .firstOrNull { it.taskInfo.taskId == activity.taskId }
+                ?.moveToFront()
+        }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        waitForActivityWindowFocused(compose.activityRule.scenario, timeoutMs = 10_000)
     }
 }

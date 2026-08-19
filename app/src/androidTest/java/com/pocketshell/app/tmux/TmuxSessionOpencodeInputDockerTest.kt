@@ -171,6 +171,7 @@ class TmuxSessionOpencodeInputDockerTest {
         const val BACKSPACES: Int = 3
         const val ATTACH_TIMEOUT_MS: Long = 30_000
         const val VISIBLE_TIMEOUT_MS: Long = 20_000
+        const val ISSUE_2191_CONVERSATION_CHIP_SAMPLE_FRAMES: Int = 6
     }
 
     @get:Rule
@@ -1384,14 +1385,30 @@ class TmuxSessionOpencodeInputDockerTest {
             "#1979: the journey must own Conversation before classifying the missing Terminal-only keyboard chip",
             issue1977TerminalTabSelected() == false,
         )
-        val conversationKeyboardCount = compose
-            .onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
-            .fetchSemanticsNodes()
-            .size
+        // Issue #2191: sample the chip across successive frames AFTER the tab
+        // flip. Do not wait for the chip's absence — that would hide a real
+        // transient. The count on every Conversation frame must be able to fail.
+        val conversationKeyboardSamples = mutableListOf<Int>()
+        repeat(ISSUE_2191_CONVERSATION_CHIP_SAMPLE_FRAMES) {
+            conversationKeyboardSamples.add(
+                compose.onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .size,
+            )
+            compose.waitForIdle()
+        }
+        conversationKeyboardSamples.forEachIndexed { index, count ->
+            assertEquals(
+                "#2191/#1979: show-keyboard must be absent on Conversation frame $index " +
+                    "(samples=$conversationKeyboardSamples)",
+                0,
+                count,
+            )
+        }
         assertEquals(
             "#1979: show-keyboard is deliberately absent from Conversation",
             0,
-            conversationKeyboardCount,
+            conversationKeyboardSamples.last(),
         )
         captureFullFrame("issue1979-opencode-conversation-readiness-full")
 
@@ -1446,7 +1463,8 @@ class TmuxSessionOpencodeInputDockerTest {
             buildString {
                 appendLine("initial_terminal_tab_selected=$initialTerminalTabSelected")
                 appendLine("classified_visible_tab=conversation")
-                appendLine("conversation_show_keyboard_count=$conversationKeyboardCount")
+                appendLine("conversation_show_keyboard_samples=${conversationKeyboardSamples.joinToString(",")}")
+                appendLine("conversation_show_keyboard_count=${conversationKeyboardSamples.last()}")
                 appendLine("terminal_tab_selected=${issue1977TerminalTabSelected()}")
                 appendLine("show_keyboard_tap_count=1")
                 appendLine("app_window_focused_before_tap=${focus.focused}")

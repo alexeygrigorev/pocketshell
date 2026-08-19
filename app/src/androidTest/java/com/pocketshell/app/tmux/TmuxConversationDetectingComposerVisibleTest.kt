@@ -8,17 +8,20 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.app.proof.signals.productionWindowChromePadding
+import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.HOTKEYS_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_COMPOSER_LAUNCHER_TAG
@@ -29,6 +32,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -82,12 +86,10 @@ class TmuxConversationDetectingComposerVisibleTest {
     /**
      * Renders the production bottom-control call site the way [TmuxSessionScreen]
      * wires it on a presumed-agent Conversation tab, keyboard down, pinned to a
-     * fixed Pixel-7 width. The transcript/placeholder booleans are the raw screen
-     * inputs whose #805 derivation issue #808 exists to guard.
+     * fixed Pixel-7 width. Chrome follows the Conversation TAB (#805 / #2191).
      */
     private fun renderBottomControls(
-        showConversationTranscript: Boolean,
-        showConversationDetectingPlaceholder: Boolean,
+        selectedTab: SessionTab?,
     ) {
         compose.setContent {
             PocketShellTheme {
@@ -114,8 +116,7 @@ class TmuxConversationDetectingComposerVisibleTest {
                     ) {
                         TmuxSessionBottomControlsCallSite(
                             // Keyboard down — the maintainer's exact reported state.
-                            showConversationTranscript = showConversationTranscript,
-                            showConversationDetectingPlaceholder = showConversationDetectingPlaceholder,
+                            selectedTab = selectedTab,
                             sessionLive = true,
                             // Presumed-agent during detection (#716).
                             // The composer launcher: always wired non-null by the
@@ -162,14 +163,10 @@ class TmuxConversationDetectingComposerVisibleTest {
 
     @Test
     fun composerLauncherStaysOnScreenWhileDetectingAgentEngine() {
-        // The screen's #805 fix: the production call site maps the detecting
-        // placeholder to Conversation chrome, so the Terminal chips are dropped
-        // and the launcher fits. Reverting the call site to use only
-        // `showConversationTranscript` turns this test red.
-        renderBottomControls(
-            showConversationTranscript = false,
-            showConversationDetectingPlaceholder = true,
-        )
+        // The screen's #805 / #2191 fix: Conversation-tab chrome drops the
+        // Terminal chips so the launcher fits. Re-keying chrome off the
+        // content-area surface (the #2191 leak) turns this test red.
+        renderBottomControls(selectedTab = SessionTab.Conversation)
         // The fix DROPS the three Terminal-tab chips during detection — this is
         // the width-independent mechanism that stops the row overflowing and
         // pushing the launcher off-screen on a narrow (Pixel-7) device.
@@ -191,10 +188,7 @@ class TmuxConversationDetectingComposerVisibleTest {
     fun composerLauncherStaysOnScreenOnceTranscriptLoaded() {
         // The loaded-transcript Conversation state (already worked pre-#805):
         // assert the fix does not regress it.
-        renderBottomControls(
-            showConversationTranscript = true,
-            showConversationDetectingPlaceholder = false,
-        )
+        renderBottomControls(selectedTab = SessionTab.Conversation)
         assertLauncherWithinBand()
     }
 
@@ -210,14 +204,69 @@ class TmuxConversationDetectingComposerVisibleTest {
         // (see [composerLauncherStaysOnScreenWhileDetectingAgentEngine], which
         // asserts these same chips are GONE). Proves the fix is not vacuous: the
         // chips it removes are genuinely present in the pre-fix chrome.
-        renderBottomControls(
-            showConversationTranscript = false,
-            showConversationDetectingPlaceholder = false,
-        )
+        renderBottomControls(selectedTab = SessionTab.Terminal)
         compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertExists()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertExists()
         compose.onNodeWithTag(HOTKEYS_CHIP_TAG).assertExists()
     }
+
+    /**
+     * Issue #2191: sample the show-keyboard chip across successive frames
+     * after the Conversation tab is selected. A one-frame leak of the
+     * Terminal-only chip is a user-visible defect; waiting until the chip
+     * disappears would hide it. The count on every Conversation frame must
+     * be able to fail.
+     */
+    @Test
+    fun showKeyboardChipIsGoneOnEveryFrameAfterConversationTabIsSelected() {
+        val selectedTab = mutableStateOf<SessionTab?>(SessionTab.Terminal)
+        compose.mainClock.autoAdvance = false
+        compose.setContent {
+            PocketShellTheme {
+                TmuxSessionBottomBandPlacement(
+                    isImeVisible = false,
+                    onConversationTab = tmuxSessionBottomControlsShowsConversation(selectedTab.value),
+                ) {
+                    TmuxSessionBottomControlsCallSite(
+                        selectedTab = selectedTab.value,
+                        sessionLive = true,
+                        onDictateTap = {},
+                        onEnterTap = {},
+                        onShowKeyboardTap = {},
+                        onAddSnippetTap = {},
+                        onShowHotkeysTap = {},
+                    )
+                }
+            }
+        }
+        compose.mainClock.advanceTimeByFrame()
+        assertEquals(
+            "precondition: Terminal tab exposes the show-keyboard chip",
+            1,
+            showKeyboardChipCount(),
+        )
+
+        selectedTab.value = SessionTab.Conversation
+        val samples = mutableListOf<Int>()
+        repeat(CONVERSATION_CHIP_SAMPLE_FRAMES) {
+            compose.mainClock.advanceTimeByFrame()
+            samples.add(showKeyboardChipCount())
+        }
+        samples.forEachIndexed { index, count ->
+            assertEquals(
+                "#2191: show-keyboard must be absent on Conversation frame $index " +
+                    "(samples=$samples). A wait that outlasts a transient would " +
+                    "hide this leak.",
+                0,
+                count,
+            )
+        }
+    }
+
+    private fun showKeyboardChipCount(): Int =
+        compose.onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
 
     private fun artifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -249,6 +298,7 @@ class TmuxConversationDetectingComposerVisibleTest {
     private companion object {
         const val BAND_TAG = "issue805:bottom-controls-band"
         const val PIXEL_7_WIDTH_DP = 412
+        const val CONVERSATION_CHIP_SAMPLE_FRAMES = 6
         // Referenced so the snippet-chip wiring constants the screen passes are
         // explicit in this proof (parity with the real call site).
         @Suppress("unused")

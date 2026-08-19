@@ -19,6 +19,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.ConversationComposerLauncherRow
@@ -60,8 +61,7 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
  */
 @Composable
 internal fun TmuxSessionBottomControlsCallSite(
-    showConversationTranscript: Boolean,
-    showConversationDetectingPlaceholder: Boolean,
+    selectedTab: SessionTab?,
     sessionLive: Boolean,
     // Issue #1672: true while the terminal surface is HELD behind the "Attaching…"
     // loader (any non-`Live` [com.pocketshell.core.connection.SessionSurfaceState]
@@ -91,15 +91,10 @@ internal fun TmuxSessionBottomControlsCallSite(
     unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    // Issue #805 (regression of #744/#716): bottom-bar chrome follows the
-    // Conversation TAB, not only the detection-gated transcript. During
-    // agent-engine detection the transcript is absent but the placeholder is
-    // shown, so this must still drop the Terminal chips that can push the
-    // composer launcher off-screen.
-    val onConversationTab = tmuxSessionBottomControlsShowsConversation(
-        showConversationTranscript = showConversationTranscript,
-        showConversationDetectingPlaceholder = showConversationDetectingPlaceholder,
-    )
+    // Issue #805 / #2191: bottom-bar chrome follows the Conversation TAB,
+    // never the content-area surface. Detection-window placeholders and the
+    // #2191 Terminal-surface fallthrough must still drop the Terminal chips.
+    val onConversationTab = tmuxSessionBottomControlsShowsConversation(selectedTab)
     TmuxTerminalBottomControls(
         showConversation = onConversationTab,
         sessionLive = sessionLive,

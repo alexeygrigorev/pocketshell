@@ -1079,8 +1079,7 @@ class TmuxSessionScreenTest {
         // composer launcher off-screen (the #744 invariant break on v0.4.7).
         assertTrue(
             tmuxSessionBottomControlsShowsConversation(
-                showConversationTranscript = false,
-                showConversationDetectingPlaceholder = true,
+                selectedTab = SessionTab.Conversation,
             ),
         )
     }
@@ -1092,21 +1091,18 @@ class TmuxSessionScreenTest {
         // loaded state is not regressed by the detecting-state fix).
         assertTrue(
             tmuxSessionBottomControlsShowsConversation(
-                showConversationTranscript = true,
-                showConversationDetectingPlaceholder = false,
+                selectedTab = SessionTab.Conversation,
             ),
         )
     }
 
     @Test
     fun bottomControlsStayTerminalChromeOffTheConversationTab() {
-        // On the Terminal tab (no transcript, no conversation placeholder) the
-        // bar keeps its Terminal chrome — the fix must not steal Terminal chips
-        // from a genuine terminal/shell surface.
+        // On the Terminal tab the bar keeps its Terminal chrome — the fix must
+        // not steal Terminal chips from a genuine terminal/shell surface.
         assertTrue(
             !tmuxSessionBottomControlsShowsConversation(
-                showConversationTranscript = false,
-                showConversationDetectingPlaceholder = false,
+                selectedTab = SessionTab.Terminal,
             ),
         )
     }

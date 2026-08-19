@@ -1075,4 +1075,265 @@ grep -q 'JOURNEY_STEP_BUDGET_SECS:-4200}' "$SCRIPT_DIR/ci-journey-suite.sh" \
 pass "(w) job cap, suite budget, flat reserve, teardown, and both #1800 headrooms are untouched"
 
 echo
+echo "== #1850 per-shard load: the shipped matrix must leave >420s retry headroom =="
+
+# THE LOAD RATCHET. Cases (x)/(y)/(z) above pin the 3-shard world that denied
+# the cold-boot retry; they stay as historical evidence. This case is current
+# reality: redistribute a measured per-class fixture through the SHIPPING
+# selector at the matrix total scripts/ci-journey-shard-count.sh reads from
+# $WORKFLOW, drive the UNCHANGED production helper, and require every leg's
+# retry margin to exceed one twice-failing journey class (the issue's ~420s
+# AC2 bar). The 3-way split is the denial class — it must stay under that bar
+# so the fixture cannot pass vacuously if the matrix is still overloaded.
+#
+# Conservative fixed-cost inputs (worst observed in the #1850/#2060
+# derivation). They are fixture inputs to the production formula, NOT new
+# budget constants — case (w) above still pins those.
+LOAD_FIXTURE="$SCRIPT_DIR/fixtures/ci-journey-run-31961310072-class-seconds.tsv"
+LOAD_SELECTION_HELPER="$SCRIPT_DIR/ci-journey-class-selection-functions.sh"
+LOAD_CORE_HELPER="$SCRIPT_DIR/ci-journey-core-terminal-functions.sh"
+LOAD_SHARD_COUNT="$SCRIPT_DIR/ci-journey-shard-count.sh"
+LOAD_SUITE="$SCRIPT_DIR/ci-journey-suite.sh"
+TWICE_FAILING_CLASS_MS=420000
+LOAD_PRE_SUITE_MS=259046
+LOAD_BOOT_MS=59699
+LOAD_WARM_SECS=478
+[[ -f "$LOAD_FIXTURE" ]] || fail "(aa) missing measured class-seconds fixture: $LOAD_FIXTURE"
+[[ -f "$LOAD_SELECTION_HELPER" ]] || fail "(aa) missing class-selection helper: $LOAD_SELECTION_HELPER"
+[[ -f "$LOAD_CORE_HELPER" ]] || fail "(aa) missing core-terminal helper: $LOAD_CORE_HELPER"
+[[ -f "$LOAD_SHARD_COUNT" ]] || fail "(aa) missing shard-count helper: $LOAD_SHARD_COUNT"
+[[ -f "$LOAD_SUITE" ]] || fail "(aa) missing journey suite: $LOAD_SUITE"
+
+declare -A LOAD_COST_SECS=()
+load_fixture_rows=0
+while IFS=$'\t' read -r load_fqcn load_secs; do
+  [[ -z "$load_fqcn" || "$load_fqcn" == \#* ]] && continue
+  [[ "$load_secs" =~ ^[1-9][0-9]*$ ]] \
+    || fail "(aa) fixture row '$load_fqcn' has non-canonical seconds '$load_secs'"
+  [[ -z "${LOAD_COST_SECS[$load_fqcn]+x}" ]] \
+    || fail "(aa) fixture lists $load_fqcn twice"
+  LOAD_COST_SECS["$load_fqcn"]="$load_secs"
+  load_fixture_rows=$((load_fixture_rows + 1))
+done < "$LOAD_FIXTURE"
+(( load_fixture_rows >= 150 )) \
+  || fail "(aa) fixture has only $load_fixture_rows rows — a truncated TSV cannot constrain per-shard load"
+
+mapfile -t LOAD_SORTED_COSTS < <(printf '%s\n' "${LOAD_COST_SECS[@]}" | sort -n)
+LOAD_MEDIAN="${LOAD_SORTED_COSTS[$(( ${#LOAD_SORTED_COSTS[@]} / 2 ))]}"
+[[ "$LOAD_MEDIAN" =~ ^[1-9][0-9]*$ ]] \
+  || fail "(aa) could not derive a median from the fixture"
+
+# shellcheck source=scripts/ci-journey-class-selection-functions.sh
+source "$LOAD_SELECTION_HELPER"
+# shellcheck source=scripts/ci-journey-core-terminal-functions.sh
+source "$LOAD_CORE_HELPER"
+declare -F select_effective_journey_classes >/dev/null \
+  || fail "(aa) selection helper does not define select_effective_journey_classes"
+declare -F select_effective_core_terminal_proofs >/dev/null \
+  || fail "(aa) core-terminal helper does not define select_effective_core_terminal_proofs"
+
+mapfile -t LOAD_JOURNEY_CLASSES < <(
+  awk '
+    /^JOURNEY_CLASSES=\(/ { f = 1; next }
+    /^\)/                 { f = 0 }
+    f && match($0, /"[^"]+"/) {
+      s = substr($0, RSTART + 1, RLENGTH - 2)
+      gsub(/\$FQCN_PREFIX/, "com.pocketshell.app.proof", s)
+      print s
+    }
+  ' "$LOAD_SUITE"
+)
+(( ${#LOAD_JOURNEY_CLASSES[@]} >= 80 )) \
+  || fail "(aa) parsed only ${#LOAD_JOURNEY_CLASSES[@]} journey classes from the real suite"
+# The shipping selector partitions JOURNEY_CLASSES, not our local copy.
+JOURNEY_CLASSES=("${LOAD_JOURNEY_CLASSES[@]}")
+
+LOAD_CORE_SELECTORS=()
+for load_ct_entry in "${CORE_TERMINAL_PROOFS[@]}"; do
+  IFS='|' read -r _load_status_var load_class_var _load_label <<<"$load_ct_entry"
+  LOAD_CORE_SELECTORS+=("${!load_class_var}")
+done
+(( ${#LOAD_CORE_SELECTORS[@]} >= 9 )) \
+  || fail "(aa) parsed only ${#LOAD_CORE_SELECTORS[@]} core-terminal proofs from the registry"
+
+load_unknowns=()
+for load_fqcn in "${LOAD_JOURNEY_CLASSES[@]}" "${LOAD_CORE_SELECTORS[@]}"; do
+  [[ -n "${LOAD_COST_SECS[$load_fqcn]+x}" ]] && continue
+  load_unknowns+=("$load_fqcn")
+done
+if (( ${#load_unknowns[@]} > 0 )); then
+  echo "  (aa) ${#load_unknowns[@]} class(es) not in the fixture — costing each at the fixture median ${LOAD_MEDIAN}s:"
+  printf '    %s\n' "${load_unknowns[@]}"
+fi
+(( ${#load_unknowns[@]} <= 20 )) \
+  || fail "(aa) ${#load_unknowns[@]} classes have no fixture cost — the TSV is too stale to ratchet load; re-derive it from a real run"
+
+load_cost_of() {
+  local fqcn="$1"
+  printf '%s' "${LOAD_COST_SECS[$fqcn]:-$LOAD_MEDIAN}"
+}
+
+# instrumentation_secs <total> <idx> — journey + core-terminal seconds the
+# SHIPPING selectors actually assign to this leg. stdout of the selectors is
+# discarded; the property is which FQCNs they populate.
+load_instrumentation_secs() {
+  local total="$1" idx="$2" secs=0 fqcn entry status_var class_var _label
+  EFFECTIVE_JOURNEY_CLASSES=()
+  POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$total" \
+    POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$idx" \
+    select_effective_journey_classes >/dev/null
+  if (( ${#EFFECTIVE_JOURNEY_CLASSES[@]} > 0 )); then
+    for fqcn in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
+      secs=$((secs + $(load_cost_of "$fqcn")))
+    done
+  fi
+  EFFECTIVE_CORE_TERMINAL_PROOFS=()
+  POCKETSHELL_JOURNEY_CI_SHARD_TOTAL="$total" \
+    POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$idx" \
+    JOURNEY_CI_SHARD_TOTAL="$total" \
+    JOURNEY_CI_SHARD_INDEX="$idx" \
+    select_effective_core_terminal_proofs >/dev/null
+  if (( ${#EFFECTIVE_CORE_TERMINAL_PROOFS[@]} > 0 )); then
+    for entry in "${EFFECTIVE_CORE_TERMINAL_PROOFS[@]}"; do
+      IFS='|' read -r status_var class_var _label <<<"$entry"
+      secs=$((secs + $(load_cost_of "${!class_var}")))
+    done
+  fi
+  printf '%s' "$secs"
+}
+
+# Drive the production helper with this leg's modelled suite. Margin may be
+# negative — that is the denial-class signal.
+load_model_margin_ms() {
+  local total="$1" idx="$2" instr suite_secs now_ms attempt_start remaining required
+  instr="$(load_instrumentation_secs "$total" "$idx")"
+  suite_secs=$((instr + LOAD_WARM_SECS))
+  now_ms=$((fixture_job_start + LOAD_PRE_SUITE_MS + suite_secs * 1000))
+  attempt_start=$((now_ms - suite_secs * 1000 - LOAD_BOOT_MS))
+  run_budget "$fixture_job_start" "$now_ms" "$attempt_start" "$suite_secs" "$LOAD_WARM_SECS"
+  remaining="$(budget_field retry_remaining_ms)"
+  required="$(budget_field retry_required_ms)"
+  [[ "$remaining" =~ ^[0-9]+$ && "$required" =~ ^[0-9]+$ ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(aa) production helper did not emit remaining/required for total=$total shard=$idx"; }
+  printf '%s' "$((remaining - required))"
+}
+
+load_model_min_margin_ms() {
+  local total="$1" idx margin min=""
+  for (( idx = 0; idx < total; idx++ )); do
+    margin="$(load_model_margin_ms "$total" "$idx")"
+    if [[ -z "$min" ]] || (( margin < min )); then
+      min="$margin"
+    fi
+  done
+  printf '%s' "$min"
+}
+
+load_report_legs() {
+  local label="$1" total="$2" idx instr suite_secs margin
+  echo "  $label (total=$total):"
+  for (( idx = 0; idx < total; idx++ )); do
+    instr="$(load_instrumentation_secs "$total" "$idx")"
+    suite_secs=$((instr + LOAD_WARM_SECS))
+    margin="$(load_model_margin_ms "$total" "$idx")"
+    echo "    shard $idx: instrumentation ${instr}s suite ${suite_secs}s margin ${margin}ms"
+  done
+}
+
+# (aa1) THE DENIAL CLASS. A 3-way split of the current list, using the same
+# selector and formula as production. This is the issue's measured failure:
+# 3 shards no longer fit. Kept as a control so an all-median / all-cheap
+# fixture cannot report "the matrix is fine" while 3-way load still denies.
+load_report_legs "denial-class 3-way split" 3
+LOAD_MIN_THREE="$(load_model_min_margin_ms 3)"
+(( LOAD_MIN_THREE <= TWICE_FAILING_CLASS_MS )) \
+  || fail "(aa1) the 3-way split now has min margin ${LOAD_MIN_THREE}ms > ${TWICE_FAILING_CLASS_MS}ms — the denial-class control is not live; the fixture no longer reproduces #1850"
+pass "(aa1) a 3-way split of the current list still misses the ${TWICE_FAILING_CLASS_MS}ms bar (min margin ${LOAD_MIN_THREE}ms) — 3 shards no longer fit"
+
+# (aa2) SHIPPED MATRIX. Total is read from $WORKFLOW, never hardcoded, so
+# reverting the matrix to 3 legs reddens this assertion rather than the
+# denial-class control.
+LOAD_SHIPPED="$("$LOAD_SHARD_COUNT" "$WORKFLOW")" \
+  || fail "(aa2) ci-journey-shard-count.sh could not parse $WORKFLOW"
+[[ "$LOAD_SHIPPED" =~ ^[0-9]+$ && "$LOAD_SHIPPED" -ge 2 ]] \
+  || fail "(aa2) implausible shipped shard total '$LOAD_SHIPPED' from $WORKFLOW"
+load_report_legs "shipped matrix" "$LOAD_SHIPPED"
+LOAD_SHIPPED_MIN=""
+for (( load_idx = 0; load_idx < LOAD_SHIPPED; load_idx++ )); do
+  load_margin="$(load_model_margin_ms "$LOAD_SHIPPED" "$load_idx")"
+  (( load_margin > TWICE_FAILING_CLASS_MS )) \
+    || fail "(aa2) shipped total=$LOAD_SHIPPED shard $load_idx margin ${load_margin}ms is not > ${TWICE_FAILING_CLASS_MS}ms — this matrix still overloads a shard (issue #1850 AC2)"
+  if [[ -z "$LOAD_SHIPPED_MIN" ]] || (( load_margin < LOAD_SHIPPED_MIN )); then
+    LOAD_SHIPPED_MIN="$load_margin"
+  fi
+done
+pass "(aa2) shipped $LOAD_SHIPPED-shard matrix: every leg's retry margin > ${TWICE_FAILING_CLASS_MS}ms (tightest ${LOAD_SHIPPED_MIN}ms)"
+
+# (aa3) G6: the 3-way denial is a property of the MEASURED costs, not of
+# "any 3-way split". Flat 1s costs at total=3 clear the bar, so (aa1) would
+# go quiet if the fixture stopped carrying the heavy tail.
+load_saved_costs=()
+for load_fqcn in "${!LOAD_COST_SECS[@]}"; do
+  load_saved_costs+=("$load_fqcn" "${LOAD_COST_SECS[$load_fqcn]}")
+  LOAD_COST_SECS["$load_fqcn"]=1
+done
+LOAD_MEDIAN_SAVED="$LOAD_MEDIAN"
+LOAD_MEDIAN=1
+LOAD_FLAT_THREE="$(load_model_min_margin_ms 3)"
+LOAD_MEDIAN="$LOAD_MEDIAN_SAVED"
+for (( load_i = 0; load_i < ${#load_saved_costs[@]}; load_i += 2 )); do
+  LOAD_COST_SECS["${load_saved_costs[$load_i]}"]="${load_saved_costs[$((load_i + 1))]}"
+done
+(( LOAD_FLAT_THREE > TWICE_FAILING_CLASS_MS )) \
+  || fail "(aa3) G6 is not live: a 3-way split with every class costing 1s still misses the bar (min ${LOAD_FLAT_THREE}ms) — (aa1) would then be a tautology of shard count, not of load"
+pass "(aa3) G6: the same 3-way split with 1s classes clears the bar (min ${LOAD_FLAT_THREE}ms), so (aa1) is carried by the measured costs"
+
+# (aa4) G6: a selector that dumps every class onto shard 0 must redden (aa2).
+# If the assertion only counted classes or averaged load, this mutant would
+# still pass while one leg was overloaded.
+load_hash_saved="$(declare -f journey_class_shard_hash)"
+journey_class_shard_hash() { printf '0'; }
+LOAD_DEGEN="$(load_model_min_margin_ms "$LOAD_SHIPPED")"
+eval "$load_hash_saved"
+(( LOAD_DEGEN <= TWICE_FAILING_CLASS_MS )) \
+  || fail "(aa4) G6 is not live: putting every class on shard 0 still cleared AC2 (min ${LOAD_DEGEN}ms) — the shipped assertion is not measuring per-shard load"
+pass "(aa4) G6: a degenerate all-on-shard-0 partition reddens AC2 (min ${LOAD_DEGEN}ms)"
+
+# (aa5) G6: collapsing THIS workflow's emulator-journey matrix to the 3-way
+# denial class makes shard-count report 3, which is the same total (aa2)
+# would then use. If (aa2) hardcoded a passing total, this mutant would stay
+# green while the matrix was the overloaded 3-way split.
+load_mutant="$warm_ws/denial-class-workflow.yml"
+cp "$WORKFLOW" "$load_mutant"
+python3 - "$load_mutant" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+job = re.search(r"(?ms)^  emulator-journey:$.*?(?=^  [A-Za-z0-9_-]+:|\Z)", text)
+if job is None:
+    sys.exit("no emulator-journey job")
+block = job.group(0)
+new_block, n = re.subn(
+    r"^(\s+shard: )\[[^\]]+\]\s*$",
+    r"\1[0, 1, 2]",
+    block,
+    count=1,
+    flags=re.M,
+)
+if n != 1:
+    sys.exit("emulator-journey shard matrix not unique (replacements=%d)" % n)
+if new_block == block:
+    sys.exit("matrix mutation was a no-op")
+path.write_text(text[: job.start()] + new_block + text[job.end() :])
+PY
+LOAD_MUTANT_TOTAL="$("$LOAD_SHARD_COUNT" "$load_mutant")" \
+  || fail "(aa5) shard-count could not parse the collapsed workflow"
+[[ "$LOAD_MUTANT_TOTAL" == "3" ]] \
+  || fail "(aa5) collapsed matrix parsed as $LOAD_MUTANT_TOTAL, expected 3"
+LOAD_MUTANT_MIN="$(load_model_min_margin_ms "$LOAD_MUTANT_TOTAL")"
+(( LOAD_MUTANT_MIN <= TWICE_FAILING_CLASS_MS )) \
+  || fail "(aa5) G6 is not live: a tests.yml whose emulator-journey matrix is [0, 1, 2] still clears AC2 (min ${LOAD_MUTANT_MIN}ms) — (aa2) would not redden if the matrix still over-loaded a shard"
+pass "(aa5) G6: collapsing the workflow matrix to [0, 1, 2] makes shard-count return 3 and AC2 fail (min ${LOAD_MUTANT_MIN}ms)"
+
+echo
 echo "ALL TESTS PASSED: scripts/test-ci-journey-retry-budget.sh"

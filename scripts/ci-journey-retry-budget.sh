@@ -91,7 +91,10 @@
 # (#788 / #1819 / #1820), tracked as #1850. The scoreboard, the drift budgets and
 # the crossing-point band are all asserted in
 # scripts/test-ci-journey-retry-budget.sh cases (x), (x2), (y) and (z), so this
-# conclusion cannot quietly go stale.
+# conclusion cannot quietly go stale. The same file's #1850 load ratchet then
+# redistributes a measured per-class fixture through the shipping selector at
+# the matrix total from scripts/ci-journey-shard-count.sh, and requires every
+# leg's retry headroom to exceed one twice-failing class (~420s).
 #
 # Usage:
 #   ci-journey-retry-budget.sh JOB_START_EPOCH_MS NOW_EPOCH_MS \

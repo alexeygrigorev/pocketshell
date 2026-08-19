@@ -50,6 +50,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import com.pocketshell.app.composer.PromptComposerSendDispatcher
 import com.pocketshell.app.composer.ComposerSendResult
+import com.pocketshell.app.composer.withQueuedSidecarUploadProgress
 import com.pocketshell.app.conversation.ConversationImageViewModel
 import com.pocketshell.app.conversation.LocalConversationImageLoader
 import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
@@ -690,9 +691,11 @@ private fun TmuxSessionScreenEffects(
             },
         )
     }
-    DisposableEffect(promptComposerViewModel, viewModel) {
+    DisposableEffect(promptComposerViewModel, viewModel, queueTargetSessionKey) {
         promptComposerViewModel.setOutboundAttachmentSidecarUploader { refs ->
-            viewModel.uploadQueuedAttachmentSidecars(refs)
+            withQueuedSidecarUploadProgress(queueTargetSessionKey, refs) { pending ->
+                viewModel.uploadQueuedAttachmentSidecars(pending)
+            }
         }
         // Issue #1686: wire the WIRE-oracle probe so the failure taxonomy + drain gate
         // read the transport's own truth instead of the ConnectionStatus enum.

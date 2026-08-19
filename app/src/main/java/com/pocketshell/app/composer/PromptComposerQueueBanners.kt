@@ -18,6 +18,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -110,7 +112,11 @@ private fun OutboundQueueBanner(
     onResendAll: () -> Unit,
 ) {
     val collapsedRetryItem = if (expanded) null else retryableOutboundQueueItem(items)
-    val summary = outboundQueueSummary(items, connectionDegraded)
+    val queueProgress by AttachmentUploadProgressPort.queueProgress.collectAsState()
+    val uploadingProgress = items.singleOrNull()
+        ?.takeIf { item -> item.state == OutboundState.Uploading }
+        ?.let { item -> queueProgress[AttachmentUploadProgressKey(item.sessionKey, item.id)] }
+    val summary = outboundQueueSummary(items, connectionDegraded, uploadingProgress)
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -319,15 +325,25 @@ private fun OutboundQueueRow(
                     },
                 ),
         ) {
-            Text(
-                text = retryAction.status ?: outboundQueueStateLabel(item),
-                color = if (item.state == OutboundState.Failed) {
-                    PocketShellColors.Amber
-                } else {
-                    PocketShellColors.TextSecondary
-                },
-                style = PocketShellType.bodyDense,
-            )
+            val queueProgress by AttachmentUploadProgressPort.queueProgress.collectAsState()
+            val uploadProgress = queueProgress[AttachmentUploadProgressKey(item.sessionKey, item.id)]
+                .takeIf { item.state == OutboundState.Uploading }
+            if (uploadProgress != null && retryAction.status == null) {
+                AttachmentTransferProgressBlock(
+                    progress = uploadProgress,
+                    textColor = PocketShellColors.TextSecondary,
+                )
+            } else {
+                Text(
+                    text = retryAction.status ?: outboundQueueStateLabel(item, uploadProgress),
+                    color = if (item.state == OutboundState.Failed) {
+                        PocketShellColors.Amber
+                    } else {
+                        PocketShellColors.TextSecondary
+                    },
+                    style = PocketShellType.bodyDense,
+                )
+            }
         }
         if (item.cleanText.isNotBlank()) {
             Spacer(modifier = Modifier.height(4.dp))
@@ -606,6 +622,7 @@ internal data class OutboundQueueSummary(
 internal fun outboundQueueSummary(
     items: List<OutboundItem>,
     connectionDegraded: Boolean,
+    uploadProgress: AttachmentTransferProgress? = null,
 ): OutboundQueueSummary {
     val oldest = items.minByOrNull { it.createdAtMs } ?: return OutboundQueueSummary("")
     val previewText = oldest.cleanText.lineSequence()
@@ -623,7 +640,7 @@ internal fun outboundQueueSummary(
             } else {
                 "Queued — sending next"
             }
-            OutboundState.Uploading -> "Uploading attachments"
+            OutboundState.Uploading -> outboundUploadingLabel(uploadProgress)
             OutboundState.InFlight -> "Sending"
             OutboundState.Delivered -> "Delivered"
             OutboundState.Failed -> "Failed — tap Retry"
@@ -654,13 +671,16 @@ internal fun outboundQueueSummary(
     )
 }
 
-internal fun outboundQueueStateLabel(item: OutboundItem): String = if (
+internal fun outboundQueueStateLabel(
+    item: OutboundItem,
+    uploadProgress: AttachmentTransferProgress? = null,
+): String = if (
     item.isComposerQueueDeliveryUnconfirmed()
 ) {
     OUTBOUND_DELIVERY_UNCONFIRMED_MESSAGE
 } else when (item.state) {
     OutboundState.Queued -> PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE
-    OutboundState.Uploading -> "Uploading attachments"
+    OutboundState.Uploading -> outboundUploadingLabel(uploadProgress)
     OutboundState.InFlight -> "Sending"
     OutboundState.Delivered -> "Delivered"
     OutboundState.Failed -> item.lastError?.takeIf { it.isNotBlank() }?.let { "Failed — $it" } ?: "Failed"

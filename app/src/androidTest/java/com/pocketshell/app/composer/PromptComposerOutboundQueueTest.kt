@@ -31,6 +31,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellColors
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -406,6 +407,11 @@ class PromptComposerOutboundQueueTest {
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
+
+    @After
+    fun resetUploadProgress() {
+        AttachmentUploadProgressPort.resetForTest()
+    }
 
     @Test
     fun outboundQueueRendersExpandedRowsAndDeleteRetryCallbacks() {
@@ -854,6 +860,107 @@ class PromptComposerOutboundQueueTest {
         compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_RESEND_ALL_TAG).performScrollTo().performClick()
         compose.waitForIdle()
         assertEquals(1, resendAllCount)
+    }
+
+    @Test
+    fun attachTimeBannerShowsAdvancingBytesFromPort() {
+        // Issue #1563: a large attach-time upload must show live bytes/percent,
+        // not only the static "Uploading 1 attachment..." spinner. Driving the
+        // production port (0 -> mid) is the mutation that reddens this: a
+        // no-callback upload leaves the 2.5 / 5.0 MB oracle missing.
+        val total = 5_242_880L
+        AttachmentUploadProgressPort.beginAttach(
+            listOf(AttachmentFileSpec("a", "report.zip", total)),
+        )
+        AttachmentUploadProgressPort.onAttachFileProgress(0, 0L, total, force = true)
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(
+                        attachmentUpload = PromptComposerViewModel.AttachmentUploadState.Uploading(1),
+                    ),
+                    onClose = {},
+                    onDraftChange = {},
+                    onMicTap = {},
+                    onSend = {},
+                )
+            }
+        }
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_PROGRESS_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Uploading 0 B / 5.0 MB · 0%").assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_PROGRESS_BAR_TAG).assertIsDisplayed()
+
+        AttachmentUploadProgressPort.onAttachFileProgress(0, 2_621_440L, total, force = true)
+        compose.waitForIdle()
+        compose.onNodeWithText("Uploading 2.5 / 5.0 MB · 50%").assertIsDisplayed()
+        compose.onNodeWithText("Uploading 1 attachment...").assertDoesNotExist()
+    }
+
+    @Test
+    fun uploadingQueueRowShowsResumedProgressOnlyForMatchingKey() {
+        val rowA = OutboundItem(
+            id = "row-a",
+            sessionKey = "1/a",
+            cleanText = "large zip",
+            state = OutboundState.Uploading,
+            createdAtMs = 1L,
+        )
+        val rowB = OutboundItem(
+            id = "row-b",
+            sessionKey = "1/a",
+            cleanText = "other same session",
+            state = OutboundState.Uploading,
+            createdAtMs = 2L,
+        )
+        val rowC = OutboundItem(
+            id = "row-c",
+            sessionKey = "2/b",
+            cleanText = "other session",
+            state = OutboundState.Uploading,
+            createdAtMs = 3L,
+        )
+        AttachmentUploadProgressPort.beginQueueUpload(
+            sessionKey = rowA.sessionKey,
+            rowId = rowA.id,
+            files = listOf(AttachmentFileSpec("a", "report.zip", 52L * 1024L * 1024L)),
+        )
+        AttachmentUploadProgressPort.onSidecarProgress(
+            LocalAttachmentSidecarRef(
+                id = "a",
+                outboundItemId = rowA.id,
+                localPath = "/tmp/report.zip",
+                displayName = "report.zip",
+                mimeType = "application/zip",
+                byteSize = 52L * 1024L * 1024L,
+                createdAtMs = 1L,
+            ),
+            com.pocketshell.core.ssh.QueueSidecarUploadProgress(
+                checkpointPath = "/tmp/.part",
+                resumedFromBytes = 30L * 1024L * 1024L,
+                bytesTransferred = 30L * 1024L * 1024L,
+                totalBytes = 52L * 1024L * 1024L,
+            ),
+        )
+        compose.setContent {
+            PocketShellTheme {
+                SheetContent(
+                    state = PromptComposerViewModel.UiState(),
+                    onClose = {},
+                    onDraftChange = {},
+                    onMicTap = {},
+                    onSend = {},
+                    outboundQueueItems = listOf(rowA, rowB, rowC),
+                    outboundQueueExpanded = true,
+                )
+            }
+        }
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(rowA.id)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Uploading 30.0 / 52.0 MB · 57%").assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(rowB.id)).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag(composerOutboundQueueItemRowTestTag(rowC.id)).performScrollTo().assertIsDisplayed()
+        compose.onAllNodesWithText("Uploading attachments").fetchSemanticsNodes().let { nodes ->
+            assertEquals("rows B and C stay on static copy until they own progress", 2, nodes.size)
+        }
     }
 
 }

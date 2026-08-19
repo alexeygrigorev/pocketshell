@@ -1438,13 +1438,8 @@ internal class ShareViewModel internal constructor(
             }
         }
 
-        private fun formatRunningBytes(bytes: Long): String = when {
-            bytes < 1024L -> "$bytes B"
-            bytes < 1024L * 1024L -> String.format(java.util.Locale.US, "%.1f KB", bytes / 1024.0)
-            bytes < 1024L * 1024L * 1024L ->
-                String.format(java.util.Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
-            else -> String.format(java.util.Locale.US, "%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
-        }
+        private fun formatRunningBytes(bytes: Long): String =
+            com.pocketshell.app.composer.formatCompactBytes(bytes)
 
         /**
          * Live per-item upload detail (issue #1037). Unlike [runningDetail]'s

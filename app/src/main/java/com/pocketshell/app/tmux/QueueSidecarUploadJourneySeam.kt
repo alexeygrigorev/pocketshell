@@ -21,6 +21,7 @@ internal suspend fun SshSession.uploadQueuedSidecar(
         ),
         onProgress = { progress ->
             QueueSidecarUploadJourneySeam.onProgress?.invoke(ref, progress)
+            com.pocketshell.app.composer.AttachmentUploadProgressPort.onSidecarProgress(ref, progress)
         },
     ).also { result ->
         QueueSidecarUploadJourneySeam.onResult?.invoke(ref, result)

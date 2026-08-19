@@ -119,10 +119,26 @@ internal class PromptAttachmentStager(
         // and aggregated after the loop.
         val uploadedPaths = mutableListOf<String>()
         val uploadedAttachmentIndices = mutableListOf<Int>()
+        AttachmentUploadProgressPort.beginAttach(
+            preparedAttachments.map { prepared ->
+                AttachmentFileSpec(
+                    id = prepared.displayPath,
+                    fileName = prepared.displayPath.substringAfterLast('/'),
+                    byteSize = prepared.tempFile.length(),
+                )
+            },
+        )
         try {
-            preparedAttachments.forEach { prepared ->
+            preparedAttachments.forEachIndexed { index, prepared ->
                 try {
-                    session.uploadFile(prepared.tempFile, prepared.remotePath)
+                    session.uploadFile(prepared.tempFile, prepared.remotePath) { sshProgress ->
+                        AttachmentUploadProgressPort.onAttachFileProgress(
+                            fileIndex = index,
+                            bytesTransferred = sshProgress.bytesTransferred,
+                            totalBytes = sshProgress.totalBytes,
+                        )
+                    }
+                    AttachmentUploadProgressPort.completeAttachFile(index)
                     uploadedPaths += prepared.displayPath
                     uploadedAttachmentIndices += prepared.attachmentIndex
                 } catch (cancelled: CancellationException) {
@@ -141,6 +157,8 @@ internal class PromptAttachmentStager(
         } catch (cancelled: CancellationException) {
             preparedAttachments.forEach { it.tempFile.delete() }
             throw cancelled
+        } finally {
+            AttachmentUploadProgressPort.endAttach()
         }
 
         // Best-effort prune runs whenever at least one upload landed — the

@@ -104,6 +104,15 @@ class AgentSubmitAckJourneyE2eTest {
                 // legacy paste-ack oracle. The shipped default is now the
                 // acknowledged host-CLI path, so select the legacy authority
                 // by name instead of letting a default flip re-point the class.
+                //
+                // Issue #2189 decision: REPLACE. Keep this class as the
+                // inference-stack proof until #2125 deletes the pin target.
+                // The user-visible "Send actually submits, including a wrapped
+                // long prompt and a multi-line paste" property is re-proven on
+                // the shipped HostAck default by
+                // [Issue2189HostAckSubmitJourneyE2eTest]. The `agent_submit_ack`
+                // / collapsed-chip-as-ack-gate oracles are inference-specific
+                // and drop with #2125.
                 pinOutboundDeliveryAuthority(
                     com.pocketshell.app.settings.OutboundDeliveryAuthority.TerminalInference,
                 )

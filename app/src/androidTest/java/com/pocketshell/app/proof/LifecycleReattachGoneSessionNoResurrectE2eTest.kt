@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -18,12 +19,16 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.projects.STALE_SESSION_DIALOG_TAG
+import com.pocketshell.app.testaccess.TestAccessEntryPoint
+import com.pocketshell.app.tmux.TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -223,6 +228,117 @@ class LifecycleReattachGoneSessionNoResurrectE2eTest {
         Unit
     } }
 
+    /**
+     * Issue #2249: the real phone journey is a LOCAL Stop, immediate
+     * navigation to the tree, minimize, and reopen.  The target + keepalive
+     * fixture deliberately keeps the tmux server alive so a stale foreground
+     * replay would reach the session-gone dialog path instead of merely
+     * observing a dead server.
+     *
+     * Mutation that must redden this test: restore MainActivity's
+     * repeatOnLifecycle(STARTED) kill collector and remove the VM's lifetime
+     * killed-session collector.  The kill completes while the activity is
+     * below STARTED, onStop has already run, and the stale target then gets
+     * rearmed by the post-grace foreground detach/restore.
+     */
+    @Test
+    fun localStopThenBackgroundForegroundDoesNotRestoreKilledTarget() { runBlocking {
+        val key = fixtureKey
+
+        // ---- (1) Attach through the actual session screen.
+        waitForHostRowPresent(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(TARGET_SESSION, timeoutMs = 20_000)
+        compose.onNodeWithText(TARGET_SESSION).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- (2) The production Stop route: kebab -> Stop session -> Stop.
+        compose.onNodeWithContentDescription(
+            "More session actions",
+            useUnmergedTree = true,
+        ).performClick()
+        compose.onNodeWithText("Stop session", useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(
+            TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG,
+            useUnmergedTree = true,
+        ).performClick()
+
+        // The UI navigates back immediately, before the verified gateway kill
+        // completes.  Minimize at this exact boundary: this is the missed
+        // lifecycle-emission window from the phone report.
+        BackgroundGraceTestOverride.setForTest(POST_GRACE_MS)
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+
+        // The real gateway kill continues in the activity-scoped VM while the
+        // activity is stopped.  Wait for the authoritative remote result, not
+        // for a UI row that could be stale.
+        waitUntilRemoteGone(key, TARGET_SESSION)
+        assertTrue(
+            "the keepalive session must remain alive so the server-gone branch is not exercised",
+            sessionAlive(key, KEEPALIVE_SESSION),
+        )
+        delay(POST_GRACE_MS + LIFECYCLE_DRAIN_MS)
+
+        // ---- (3) Reopen the app.  The exact killed target must not be probed
+        // again and must not raise the stale-session recovery dialog.
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+        compose.waitUntil(timeoutMillis = RECONNECT_TIMEOUT_MS) {
+            droppedToSessionList() &&
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+        }
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val entryPoint = EntryPointAccessors
+            .fromApplication(context, TestAccessEntryPoint::class.java)
+        val hostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
+        val stored = entryPoint.lastSessionStore().read(maxAgeMillis = Long.MAX_VALUE)
+        val killedRecordRearmed = stored?.let {
+            it.hostId == hostId && it.sessionName == TARGET_SESSION
+        } == true
+        val targetAliveAfterResume = sessionAlive(key, TARGET_SESSION)
+        val keepaliveAliveAfterResume = sessionAlive(key, KEEPALIVE_SESSION)
+        writeText(
+            "issue2249-local-stop-restore.txt",
+            buildString {
+                appendLine("target_session=$TARGET_SESSION")
+                appendLine("keepalive_session=$KEEPALIVE_SESSION")
+                appendLine("target_alive_after_resume=$targetAliveAfterResume")
+                appendLine("keepalive_alive_after_resume=$keepaliveAliveAfterResume")
+                appendLine("stored_session=${stored?.sessionName}")
+                appendLine("killed_record_rearmed=$killedRecordRearmed")
+                appendLine("stale_dialog_visible=${!compose.onAllNodesWithTag(
+                    STALE_SESSION_DIALOG_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isEmpty()}")
+            },
+        )
+
+        assertFalse(
+            "REGRESSION (#2249): the locally stopped target must not be resurrected on reopen",
+            targetAliveAfterResume,
+        )
+        assertTrue(
+            "the unrelated live keepalive session must survive the local stop journey",
+            keepaliveAliveAfterResume,
+        )
+        assertFalse(
+            "REGRESSION (#2249): onStop must not re-arm the exact killed target",
+            killedRecordRearmed,
+        )
+        assertTrue(
+            "reopen must land on the session list without the stale-session dialog",
+            droppedToSessionList() && compose.onAllNodesWithTag(
+                STALE_SESSION_DIALOG_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+        writeTimings()
+        Unit
+    } }
+
     // ---------------------------------------------------------------- Helpers
 
     /**
@@ -327,6 +443,15 @@ class LifecycleReattachGoneSessionNoResurrectE2eTest {
             "tmux has-session -t ${shellQuote(session)} 2>/dev/null && echo ALIVE || echo GONE",
         )
         return exec?.stdout?.contains("ALIVE") == true
+    }
+
+    private suspend fun waitUntilRemoteGone(key: String, session: String) {
+        val deadline = SystemClock.elapsedRealtime() + RECONNECT_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (!sessionAlive(key, session)) return
+            delay(250L)
+        }
+        throw AssertionError("timed out waiting for remote session `$session` to be gone")
     }
 
     private suspend fun runScript(key: String, script: String) =

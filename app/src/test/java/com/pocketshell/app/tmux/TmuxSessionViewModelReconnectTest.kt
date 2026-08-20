@@ -118,6 +118,51 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
         assertEquals(0, connector.connectCount)
     }
 
+    /**
+     * Issue #2249: the in-session Stop action navigates away immediately, while
+     * its confirmed kill signal can arrive later.  Even when the app is then
+     * backgrounded before that signal is collected by a lifecycle-gated
+     * subscriber, the killed session must not be stashed as the foreground
+     * reattach target.
+     *
+     * Mutation that must redden this assertion: restore the old
+     * [onSessionScreenLeft] behavior (or remove the kill-signal cleanup) so the
+     * live client remains eligible for [onAppBackgrounded]'s pending reattach.
+     */
+    @Test
+    fun locallyKilledSessionCannotBeRearmedByBackgroundAfterScreenLeaves() = runTest(scheduler) {
+        val signals = SessionLifecycleSignals()
+        val vm = newVm(sessionLifecycleSignals = signals)
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+
+        // This is the production Stop-confirmation call.  MainActivity then
+        // immediately invokes onSessionScreenLeft() while the verified kill
+        // signal is still asynchronous in production.
+        vm.killCurrentSession()
+        vm.onSessionScreenLeft()
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+
+        assertFalse(
+            "a locally stopped session must not remain a pending foreground restore target",
+            vm.hasPendingReattachForTest(),
+        )
+        assertEquals(
+            "a locally stopped session must be removed from the VM's active restore state",
+            null,
+            vm.activeSessionNameForTest(),
+        )
+    }
+
     @Test
     fun networkReconnectEvictsConnectedIdleLeaseBeforeReattaching() = runTest(scheduler) {
         val registry = ActiveTmuxClients()

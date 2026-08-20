@@ -777,4 +777,4 @@ jobs:
         with:
           name: production-binding-mutations
           path: artifacts/production-binding-mutations/
-           if-no-files-found: error
+          if-no-files-found: error

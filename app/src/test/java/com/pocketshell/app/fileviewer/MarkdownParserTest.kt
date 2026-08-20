@@ -343,7 +343,7 @@ class MarkdownParserTest {
     fun `issue 1714 exact soft-wrapped article link keeps its target`() {
         val source = """
             This is how I built
-            [SQLiteSearch](https://alexeyondata.substack.com/p/how-i-built-sqlitesearch-a-lightweight),
+            [SQLiteSearch](https://aishippingblog.com/p/how-i-built-sqlitesearch-a-lightweight),
             a small SQLite-backed search library. First a long chat session to get
             the design straight, then I downloaded the `plan.md` file and started
             coding. That file had all five sections: what the library is, how it
@@ -698,7 +698,7 @@ class MarkdownParserTest {
 
     private companion object {
         const val ISSUE1714_LINK =
-            "https://alexeyondata.substack.com/p/how-i-built-sqlitesearch-a-lightweight"
+            "https://aishippingblog.com/p/how-i-built-sqlitesearch-a-lightweight"
         const val ISSUE1714_LINK_BODY =
             "This is how I built SQLiteSearch, a small SQLite-backed search library. " +
                 "First a long chat session to get the design straight, then I downloaded " +

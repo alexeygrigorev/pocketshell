@@ -1163,7 +1163,7 @@ class FileViewerDockerTest {
 
         const val MD_URL_TAG_FOR_TEST = "md_url"
         const val ISSUE1714_URL =
-            "https://alexeyondata.substack.com/p/how-i-built-sqlitesearch-a-lightweight"
+            "https://aishippingblog.com/p/how-i-built-sqlitesearch-a-lightweight"
         const val ISSUE1714_LINK_BODY =
             "This is how I built SQLiteSearch, a small SQLite-backed search library. " +
                 "First a long chat session to get the design straight, then I downloaded " +

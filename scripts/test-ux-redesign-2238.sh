@@ -17,13 +17,23 @@ fi
 [[ -n "$BROWSER" ]] || { echo "FAIL: Chromium/Chrome is required for the #2238 smoke check" >&2; exit 1; }
 
 DOM_FILE="$(mktemp)"
-trap 'rm -f "$DOM_FILE"' EXIT
+BROWSER_DATA_DIR="$(mktemp -d)"
+cleanup() {
+  rm -f "$DOM_FILE"
+  rm -rf "$BROWSER_DATA_DIR"
+}
+trap cleanup EXIT
 MOCKUP_URI="file://$MOCKUP?smoke=1"
-timeout 30 "$BROWSER" \
+env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS \
+  timeout 90 "$BROWSER" \
   --headless \
   --no-sandbox \
   --disable-gpu \
   --disable-dev-shm-usage \
+  --no-first-run \
+  --no-default-browser-check \
+  --disable-features=UseDBus \
+  --user-data-dir="$BROWSER_DATA_DIR" \
   --window-size=390,844 \
   --virtual-time-budget=5000 \
   --dump-dom "$MOCKUP_URI" >"$DOM_FILE"

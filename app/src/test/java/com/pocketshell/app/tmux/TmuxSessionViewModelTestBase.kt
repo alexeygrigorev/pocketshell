@@ -435,6 +435,24 @@ abstract class TmuxSessionViewModelTestBase {
             .toString()
     }
 
+    protected fun noteFeedJson(
+        session: String,
+        read: Boolean = false,
+    ): String {
+        val card = JSONObject()
+            .put("id", "note")
+            .put("type", SessionCardsRemoteSource.TYPE_NOTE)
+            .put("title", "Heads up")
+            .put("created_at", "2026-06-25T10:00:00Z")
+            .put("updated_at", "2026-06-25T10:00:00Z")
+            .put("body", JSONObject().put("text", "Deploy finished"))
+            .put("state", JSONObject().put("read", read))
+        return JSONObject()
+            .put("session", session)
+            .put("cards", JSONArray().put(card))
+            .toString()
+    }
+
     /**
      * Issue #640: the seed capture command. [TmuxClient.captureWithCursor] now
      * pairs this with the cursor query in ONE single-flight exchange, but the

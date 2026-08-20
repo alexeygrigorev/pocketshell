@@ -14,9 +14,9 @@ import javax.inject.Inject
 /**
  * Issue #859: Android client seam for the host-side typed-card feed.
  *
- * The host CLI owns persistence (`pocketshell push checklist|get|check`).
+ * The host CLI owns persistence (`pocketshell push checklist|note|get|check|read`).
  * This source only reads the current tmux session's cards and writes checklist
- * ticks back over the existing warm [SshSession] (D21: no new connection).
+ * ticks / note read-state back over the existing warm [SshSession] (D21).
  */
 public class SessionCardsRemoteSource @Inject constructor() {
     private var execReadTimeoutMs: Long = EXEC_READ_TIMEOUT_MS

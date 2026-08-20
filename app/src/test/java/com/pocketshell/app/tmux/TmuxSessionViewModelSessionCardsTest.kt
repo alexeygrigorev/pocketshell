@@ -214,10 +214,151 @@ class TmuxSessionViewModelSessionCardsTest : TmuxSessionViewModelTestBase() {
         assertEquals(TmuxSessionViewModel.SessionCardsUiState(), vm.sessionCards.value)
     }
 
+    @Test
+    fun productionScreenMarkReadCallbackWritesThroughViewModel() = runTest(scheduler) {
+        // G6: the remaining #859 gap was TmuxSessionScreen.onSetNoteRead = Unit.
+        // That callback now lives in tmuxSessionCardInteractions (the factory
+        // the screen remember()s). Stubbing it back to Unit issues no `push
+        // read` and this wait times out.
+        val session = CardsSshSession(
+            cardGetStdouts = listOf(noteFeedJson("work", read = true)),
+        )
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+
+        tmuxSessionCardInteractions(vm).onSetNoteRead(cardId = "note", read = true)
+        awaitCardsState(vm) { !it.loading && it.feed.cards.isNotEmpty() }
+
+        val readCommand = session.execCommands.single { it.contains("push read") }
+        assertTrue(readCommand.contains("--id 'note'"))
+        assertTrue(readCommand.contains("--read"))
+        assertTrue(readCommand.contains("--session 'work'"))
+        val card = vm.sessionCards.value.feed.cards.single() as SessionCardsRemoteSource.NoteCard
+        assertTrue(card.read)
+    }
+
+    @Test
+    fun setNoteReadWritesThenRefreshesFeedOnSuccess() = runTest(scheduler) {
+        // G6 mutation: make setNoteRead a no-op (or skip the host write) →
+        // no `push read` command is recorded and the feed stays unread.
+        val session = CardsSshSession(
+            cardGetStdouts = listOf(noteFeedJson("work", read = true)),
+        )
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+
+        assertTrue(vm.setNoteRead(cardId = "note", read = true))
+        awaitCardsState(vm) { !it.loading && it.feed.cards.isNotEmpty() }
+
+        val readCommand = session.execCommands.single { it.contains("push read") }
+        assertTrue(readCommand.contains("--id 'note'"))
+        assertTrue(readCommand.contains("--read"))
+        assertTrue(readCommand.contains("--session 'work'"))
+        val card = vm.sessionCards.value.feed.cards.single() as SessionCardsRemoteSource.NoteCard
+        assertTrue(card.read)
+    }
+
+    @Test
+    fun setNoteReadDropsPostWriteRefreshWhenHostChangesButSessionNameMatches() = runTest(scheduler) {
+        // G6 mutation: drop the sessionCardsTargetKey() guard after the write →
+        // the late refresh from the old host publishes into the new same-named
+        // session (the cross-session leak this guard exists to stop).
+        val gate = CompletableDeferred<Unit>()
+        val oldSession = CardsSshSession(
+            execGate = gate,
+            cardGetStdouts = listOf(noteFeedJson("work", read = true)),
+        )
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = oldSession,
+        )
+
+        assertTrue(vm.setNoteRead(cardId = "note", read = true))
+        awaitCondition { oldSession.execCommands.any { it.contains("push read") } }
+
+        vm.replaceClientForTest(
+            hostId = 2L,
+            hostName = "beta",
+            host = "beta.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/b",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = CardsSshSession(),
+        )
+        gate.complete(Unit)
+        runCurrent()
+        advanceUntilIdle()
+
+        assertTrue(oldSession.execCommands.none { it.contains("push get") })
+        assertTrue(
+            "post-write refresh from old host must not publish after switching to same-named session",
+            vm.sessionCards.value.feed.cards.isEmpty(),
+        )
+    }
+
+    @Test
+    fun setNoteReadDoesNotRefreshOnHostFailure() = runTest(scheduler) {
+        // G6 mutation: refresh the feed even when push read fails → a `push get`
+        // appears and the unread host state is painted as if the write landed.
+        val session = CardsSshSession(
+            cardGetStdouts = listOf(noteFeedJson("work", read = true)),
+            cardReadExitCode = 1,
+        )
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+
+        assertTrue(vm.setNoteRead(cardId = "note", read = false))
+        awaitCondition { session.execCommands.any { it.contains("push read") } }
+
+        assertTrue(session.execCommands.none { it.contains("push get") })
+        assertEquals(TmuxSessionViewModel.SessionCardsUiState(), vm.sessionCards.value)
+    }
+
     private class CardsSshSession(
         private val execGate: CompletableDeferred<Unit>? = null,
         private val cardGetStdouts: List<String> = emptyList(),
         private val cardCheckExitCode: Int = 0,
+        private val cardReadExitCode: Int = 0,
     ) : SshSession {
         val execCommands: MutableList<String> = java.util.concurrent.CopyOnWriteArrayList()
         private var cardGetIndex: Int = 0
@@ -237,6 +378,8 @@ class TmuxSessionViewModelSessionCardsTest : TmuxSessionViewModelTestBase() {
                 }
                 command.contains("push check") ->
                     ExecResult(stdout = "", stderr = "", exitCode = cardCheckExitCode)
+                command.contains("push read") ->
+                    ExecResult(stdout = "", stderr = "", exitCode = cardReadExitCode)
                 else ->
                     ExecResult(stdout = "", stderr = "", exitCode = 0)
             }

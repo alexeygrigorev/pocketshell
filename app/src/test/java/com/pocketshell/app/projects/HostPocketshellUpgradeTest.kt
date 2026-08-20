@@ -28,8 +28,23 @@ class HostPocketshellUpgradeTest {
             execDispatcher = UnconfinedTestDispatcher(testScheduler)
         }
         val result = upgrade.run(session)
-        assertEquals(HostPocketshellUpgrade.Result.Success, result)
+        assertTrue(result is HostPocketshellUpgrade.Result.Success)
         assertTrue("the bounded upgrade command must have run", session.ran)
+    }
+
+    @Test
+    fun run_withRequestedVersion_pinsEveryInstallerArm() = runTest {
+        val session = FakeSession { ExecResult("upgraded", "", 0) }
+        val upgrade = HostPocketshellUpgrade().apply {
+            execDispatcher = UnconfinedTestDispatcher(testScheduler)
+        }
+        val result = upgrade.run(session, requestedVersion = "0.4.40")
+        assertTrue(result is HostPocketshellUpgrade.Result.Success)
+        val command = session.lastCommand
+        assertTrue("must pin uv to 0.4.40 — was $command", command.contains("pocketshell==0.4.40"))
+        assertTrue(command.contains("pipx install --force pocketshell==0.4.40"))
+        assertTrue(command.contains("pip install -U pocketshell==0.4.40"))
+        assertTrue(command.contains("--exclude-newer 2099-12-31"))
     }
 
     @Test
@@ -99,10 +114,12 @@ class HostPocketshellUpgradeTest {
     ) : SshSession {
         @Volatile var ran: Boolean = false
         @Volatile var closed: Boolean = false
+        @Volatile var lastCommand: String = ""
         override val isConnected: Boolean = true
 
         override suspend fun exec(command: String): ExecResult {
             ran = true
+            lastCommand = command
             return onExec()
         }
 

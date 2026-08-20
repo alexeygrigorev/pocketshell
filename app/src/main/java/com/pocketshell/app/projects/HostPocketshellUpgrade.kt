@@ -59,15 +59,20 @@ public class HostPocketshellUpgrade {
 
     /** The outcome of a [run] call. */
     public sealed interface Result {
-        /** The upgrade command exited 0. */
-        public data object Success : Result
+        /** The upgrade command exited 0. [output] is installer stdout+stderr. */
+        public data class Success(val output: String = "") : Result
 
         /**
          * The upgrade did not succeed. [message] is a short, user-facing reason
          * built from the installer stderr/stdout (or a timeout / no-installer
-         * note), suitable for the banner's failure line.
+         * note), suitable for the banner's failure line. [rawOutput] / [exitCode]
+         * are the installer signal [HostCliUpgradeOutcome] classifies (#2033).
          */
-        public data class Failure(val message: String) : Result
+        public data class Failure(
+            val message: String,
+            val exitCode: Int? = null,
+            val rawOutput: String = "",
+        ) : Result
     }
 
     /**
@@ -75,10 +80,14 @@ public class HostPocketshellUpgrade {
      * throws except [CancellationException]; any transport/parse failure
      * degrades to a [Result.Failure] so the banner always leaves the running
      * state (no stuck spinner — #939).
+     *
+     * When [requestedVersion] is a dotted version the command pins
+     * `pocketshell==<requested>` so an unpublished release fails loudly
+     * instead of silently installing N−1 (#2033).
      */
-    public suspend fun run(session: SshSession): Result {
+    public suspend fun run(session: SshSession, requestedVersion: String = ""): Result {
         val result = try {
-            session.execBounded(UPGRADE_COMMAND)
+            session.execBounded(upgradeCommand(requestedVersion))
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -87,14 +96,21 @@ public class HostPocketshellUpgrade {
             ?: return Result.Failure(
                 "Update timed out after ${upgradeTimeoutMs / 1000}s. Try again, or run the command on the host.",
             )
-        if (result.exitCode == 0) return Result.Success
+        val output = "${result.stdout}\n${result.stderr}"
+        if (result.exitCode == 0) return Result.Success(output = output)
         if (result.exitCode == NO_INSTALLER_EXIT) {
             return Result.Failure(
-                "No uv / pipx / pip found on the host to upgrade pocketshell. " +
+                message = "No uv / pipx / pip found on the host to upgrade pocketshell. " +
                     "Install one, or run the command on the host.",
+                exitCode = result.exitCode,
+                rawOutput = output,
             )
         }
-        return Result.Failure(formatFailure(result))
+        return Result.Failure(
+            message = formatFailure(result),
+            exitCode = result.exitCode,
+            rawOutput = output,
+        )
     }
 
     private fun formatFailure(result: ExecResult): String {
@@ -146,30 +162,61 @@ public class HostPocketshellUpgrade {
          * (the global [UV_EXCLUDE_NEWER_FLAG], issue #779 widened by #1492) so the
          * upgrade is never silently capped by the host's global uv cutoff — for
          * pocketshell OR any of its pinned siblings.
+         *
+         * When [requestedVersion] is a dotted version, every installer arm pins
+         * `pocketshell==<requested>` so an unpublished release fails with a
+         * not-found signal instead of silently installing N−1 (#2033). The
+         * no-version form is the unpinned `--upgrade` used by existing flag
+         * tests and as the fallback when the app version cannot be read.
          */
-        internal val UPGRADE_COMMAND: String = buildString {
-            // PATH augmentation: same per-user bin dirs PocketshellCommand prepends
-            // so uv/pipx/pip shims under ~/.local/bin etc. are discoverable on a
-            // non-interactive exec.
-            append("export PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$HOME/.pixi/bin:")
-            append("\$HOME/bin:/usr/local/bin:\$PATH\"; ")
-            // uv: only if uv exists AND its tool list actually owns pocketshell —
-            // otherwise a host with uv-for-something-else but pipx-owned
-            // pocketshell would wrongly try uv.
-            append("if command -v uv >/dev/null 2>&1 && ")
-            append("uv tool list 2>/dev/null | grep -qi '^pocketshell\\b'; then ")
-            append("exec uv tool install --refresh --upgrade ")
-            append("$UV_EXCLUDE_NEWER_FLAG pocketshell; ")
-            // pipx next.
-            append("elif command -v pipx >/dev/null 2>&1; then ")
-            append("exec pipx upgrade pocketshell; ")
-            // pip / pip3 last.
-            append("elif command -v pip >/dev/null 2>&1; then ")
-            append("exec pip install -U pocketshell; ")
-            append("elif command -v pip3 >/dev/null 2>&1; then ")
-            append("exec pip3 install -U pocketshell; ")
-            // No installer at all.
-            append("else exit 127; fi")
+        internal fun upgradeCommand(requestedVersion: String = ""): String {
+            val spec = pinnedSpec(requestedVersion)
+            val pipxArm = if (requestedVersion.isBlank()) {
+                "exec pipx upgrade pocketshell; "
+            } else {
+                "exec pipx install --force $spec; "
+            }
+            return buildString {
+                // PATH augmentation: same per-user bin dirs PocketshellCommand prepends
+                // so uv/pipx/pip shims under ~/.local/bin etc. are discoverable on a
+                // non-interactive exec.
+                append("export PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$HOME/.pixi/bin:")
+                append("\$HOME/bin:/usr/local/bin:\$PATH\"; ")
+                // uv: only if uv exists AND its tool list actually owns pocketshell —
+                // otherwise a host with uv-for-something-else but pipx-owned
+                // pocketshell would wrongly try uv.
+                append("if command -v uv >/dev/null 2>&1 && ")
+                append("uv tool list 2>/dev/null | grep -qi '^pocketshell\\b'; then ")
+                append("exec uv tool install --refresh --upgrade ")
+                append("$UV_EXCLUDE_NEWER_FLAG $spec; ")
+                // pipx next.
+                append("elif command -v pipx >/dev/null 2>&1; then ")
+                append(pipxArm)
+                // pip / pip3 last.
+                append("elif command -v pip >/dev/null 2>&1; then ")
+                append("exec pip install -U $spec; ")
+                append("elif command -v pip3 >/dev/null 2>&1; then ")
+                append("exec pip3 install -U $spec; ")
+                // No installer at all.
+                append("else exit 127; fi")
+            }
+        }
+
+        /**
+         * Unpinned form (no `==version`). Kept so existing flag-coverage tests
+         * and [UPGRADE_COMMAND] readers keep working; production passes the
+         * app version through [upgradeCommand].
+         */
+        internal val UPGRADE_COMMAND: String = upgradeCommand("")
+
+        private fun pinnedSpec(requestedVersion: String): String {
+            val version = requestedVersion.trim()
+            if (version.isEmpty()) return "pocketshell"
+            // versionName is dotted-numeric from our own APK; still quote so a
+            // surprising character cannot break the /bin/sh -c wrapping.
+            val safe = version.filter { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' }
+            if (safe.isEmpty()) return "pocketshell"
+            return "pocketshell==$safe"
         }
     }
 }

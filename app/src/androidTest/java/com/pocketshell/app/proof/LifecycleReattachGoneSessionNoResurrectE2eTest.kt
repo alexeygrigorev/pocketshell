@@ -36,7 +36,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TestRule
+import org.junit.runner.Description
 import org.junit.runner.RunWith
+import org.junit.runners.model.Statement
 import java.io.File
 
 /**
@@ -90,10 +93,29 @@ class LifecycleReattachGoneSessionNoResurrectE2eTest {
 
     val compose = createAndroidComposeRule<MainActivity>()
 
+    /**
+     * Compose closes its ActivityScenario in its own rule teardown. Keep the
+     * process-scoped prompt reset after that close, so this class cannot carry
+     * a stale gone-session dialog from one journey into the next Activity.
+     */
+    private val cleanupAfterActivity = object : TestRule {
+        override fun apply(base: Statement, description: Description): Statement =
+            object : Statement() {
+                override fun evaluate() {
+                    try {
+                        base.evaluate()
+                    } finally {
+                        cleanupAfterActivityClosed()
+                    }
+                }
+            }
+    }
+
     @get:Rule
     val ruleChain: org.junit.rules.RuleChain = org.junit.rules.RuleChain
         .outerRule(PreGrantPermissionsRule())
         .around(SeedBeforeLaunchRule { seedBeforeLaunch() })
+        .around(cleanupAfterActivity)
         .around(compose)
 
     private lateinit var fixtureKey: String
@@ -103,6 +125,14 @@ class LifecycleReattachGoneSessionNoResurrectE2eTest {
     @After
     fun tearDown() {
         runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+    }
+
+    private fun cleanupAfterActivityClosed() {
+        // This runs outside the inner Compose rule, after ActivityScenario has
+        // closed the Activity. The prompt itself is intentionally process-scoped
+        // in production, but each connected-test method is an independent
+        // journey and must begin with no prompt left by its predecessor.
+        runCatching { clearProcessScopedStalePrompt() }
         BackgroundGraceTestOverride.setForTest(null)
         clearBackgroundGraceSetting()
         clearLastSessionPrefs()
@@ -115,6 +145,9 @@ class LifecycleReattachGoneSessionNoResurrectE2eTest {
     }
 
     private suspend fun seedBeforeLaunch() {
+        // Also clear before the Activity launches. This protects the class when
+        // another connected test left the app singleton holding a stale prompt.
+        clearProcessScopedStalePrompt()
         clearLastSessionPrefs()
         clearBackgroundGraceSetting()
         BackgroundGraceTestOverride.setForTest(null)
@@ -126,6 +159,14 @@ class LifecycleReattachGoneSessionNoResurrectE2eTest {
         assertTrue("seeded target session must be alive", sessionAlive(key, TARGET_SESSION))
         assertTrue("seeded keepalive session must be alive", sessionAlive(key, KEEPALIVE_SESSION))
         hostRowTag = seedDockerHost(key)
+    }
+
+    private fun clearProcessScopedStalePrompt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        EntryPointAccessors
+            .fromApplication(context, TestAccessEntryPoint::class.java)
+            .staleSessionPromptController()
+            .clear()
     }
 
     @Test

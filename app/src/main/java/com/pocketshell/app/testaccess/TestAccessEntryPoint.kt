@@ -6,6 +6,7 @@ import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.tmux.SessionLifecycleSignals
+import com.pocketshell.app.tmux.StaleSessionPromptController
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.SshKeyDao
 import dagger.hilt.EntryPoint
@@ -71,6 +72,14 @@ internal interface TestAccessEntryPoint {
      * last-session restore target — instead of constructing a throwaway one.
      */
     fun sessionLifecycleSignals(): SessionLifecycleSignals
+
+    /**
+     * Issue #2249: the process-scoped stale-session prompt must be reset by
+     * connected-test lifecycle cleanup. The prompt is intentionally retained
+     * across Activity recreation in production, so an instrumentation class
+     * that recreates MainActivity must clear it between independent journeys.
+     */
+    fun staleSessionPromptController(): StaleSessionPromptController
 
     /**
      * Issue #834: the singleton [LastSessionStore] so the connected test can

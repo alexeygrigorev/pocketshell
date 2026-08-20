@@ -661,3 +661,58 @@ jobs:
           name: nightly-failure-signatures
           path: artifacts/nightly-failure-signatures/
           if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Test-execution ledger (#2082 / remaining #1859 contract).
+  #
+  # Parallel shards cannot merge into an Actions cache without last-write-wins
+  # clobbering, so THIS job is the only writer: download every shard's JUnit
+  # + attendance reports, union them against the wholesale selected set, pin
+  # ColdInstallE2eTest and EmulatorWorkflowE2eTest, record into the rolling
+  # ledger, and fail closed on a missing shard artifact or a selected class
+  # with no result. Not continue-on-error: a truncated shard must not look
+  # like a passing attendance verdict.
+  # ---------------------------------------------------------------------------
+  execution-ledger:
+    name: Test-execution ledger (selected vs executed)
+    needs: [guard, extensive]
+    if: always() && needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Restore test-execution ledger
+        uses: actions/cache@v5
+        with:
+          path: build/test-execution-ledger.tsv
+          key: test-execution-ledger-${{ runner.os }}-${{ github.sha }}-nightly-${{ github.run_attempt }}
+          restore-keys: |
+            test-execution-ledger-${{ runner.os }}-
+
+      - name: Download nightly shard test reports
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: nightly-extensive-android-test-reports-shard-*
+          path: ledger-artifacts
+
+      - name: Merge attendance, pin FQCNs, record rolling ledger
+        env:
+          POCKETSHELL_LEDGER_IDENTITY_WORKFLOW: ${{ github.workflow }}
+          POCKETSHELL_LEDGER_IDENTITY_RUN: ${{ github.run_id }}
+          POCKETSHELL_LEDGER_IDENTITY_SHA: ${{ github.sha }}
+        run: |
+          chmod +x scripts/ci-nightly-execution-ledger.sh scripts/check-test-execution-ledger.sh scripts/nightly-extensive-suite.sh
+          scripts/ci-nightly-execution-ledger.sh --aggregate --artifact-root ledger-artifacts
+
+      - name: Upload merged attendance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-execution-ledger
+          path: |
+            build/test-execution-ledger.tsv
+            build/nightly-execution-attendance.tsv
+          if-no-files-found: error

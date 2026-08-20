@@ -52,6 +52,9 @@ chmod +x scripts/select-test-areas.sh \
          scripts/select-test-areas-selftest.sh \
          scripts/check-test-execution-ledger.sh \
          scripts/check-test-execution-ledger-selftest.sh \
+         scripts/check-test-execution-ledger-wiring.py \
+         scripts/ci-record-test-execution-ledger.sh \
+         scripts/ci-nightly-execution-ledger.sh \
          scripts/dev-fast-gate-parity-selftest.sh
 
 TIMINGS="$(mktemp)"
@@ -87,6 +90,14 @@ run_guard "select-test-areas-selftest" \
 # Execution-ledger guard reds, synthetic AND real-tree.
 run_guard "check-test-execution-ledger-selftest" \
   bash scripts/check-test-execution-ledger-selftest.sh
+
+# Issue #2082: workflows actually invoke --record/--verify/attendance against
+# real JUnit artifacts. A ledger nobody calls is decoration; the self-test
+# mutates the YAML and demands a RED.
+run_guard "check-test-execution-ledger-wiring-selftest" \
+  scripts/check-test-execution-ledger-wiring.py --self-test
+run_guard "check-test-execution-ledger-wiring" \
+  scripts/check-test-execution-ledger-wiring.py
 
 # dev-fast-gate's classifier still agrees with the shared manifest.
 run_guard "dev-fast-gate-parity-selftest" \

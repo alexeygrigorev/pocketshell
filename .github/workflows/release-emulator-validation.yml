@@ -161,6 +161,14 @@ jobs:
           fi
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
 
+      - name: Restore test-execution ledger (#2082)
+        uses: actions/cache@v5
+        with:
+          path: build/test-execution-ledger.tsv
+          key: test-execution-ledger-${{ runner.os }}-${{ github.sha }}-release-${{ github.run_attempt }}
+          restore-keys: |
+            test-execution-ledger-${{ runner.os }}-
+
       - name: Run emulator-only release validation
         uses: reactivecircus/android-emulator-runner@v2
         env:
@@ -196,6 +204,24 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           emulator-boot-timeout: 900
           script: scripts/release-emulator-validation.sh
+
+      - name: Record and verify execution ledger (#2082)
+        if: always()
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/release-ledger-results"
+          mkdir -p "$stage" build
+          find . \( -path '*/build/test-results/*' -o -path '*/build/outputs/androidTest-results/*' \) \
+            -type f -name '*.xml' -print0 |
+            xargs -0 -r -I{} cp {} "$stage/"
+          if ! find "$stage" -type f -name '*.xml' | grep -q .; then
+            echo "::error title=Test-execution ledger (issue #2082)::no JUnit XML from the release run — refusing to record or verify"
+            exit 1
+          fi
+          scripts/check-test-execution-ledger.sh --record "$stage" --tier release
+          # unit+androidTest: integrationTest has its own #2094 execution guard
+          # and is not produced by this run or the rolling unit/nightly cache.
+          scripts/check-test-execution-ledger.sh --verify --max-age-days 7 --source-set unit,androidTest
 
       - name: Publish validation summary
         if: always()

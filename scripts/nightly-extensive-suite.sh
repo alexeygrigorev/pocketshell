@@ -353,6 +353,15 @@ JOURNEY_EXCLUDED_CLASSES=(
   "$NOTIFICATION_PERMISSION_TEST_CLASS"
 )
 
+# Issue #2082: the current-run attendance selected set is this array's
+# complement against app/src/androidTest — the same notClass list phase 1
+# actually runs (`:app:connectedDebugAndroidTest`). Keep the printer next
+# to the array so the two cannot drift.
+if [[ "${1:-}" == "--print-phase1-exclusions" ]]; then
+  printf '%s\n' "${JOURNEY_EXCLUDED_CLASSES[@]}"
+  exit 0
+fi
+
 join_by() {
   local IFS="$1"
   shift
@@ -478,6 +487,24 @@ capture_nightly_device_boundary \
 JOURNEY_CLASSIFICATION="$(
   classify_nightly_phase "$JOURNEY_EXIT" "$PHASE_REPORTS_DIR/phase1-journey"
 )"
+
+# Issue #2082: current-run attendance for this shard. --shard --report does
+# not fail on classes assigned to other shards (method-level numShards);
+# empty XML still fails. The load-bearing selected-vs-union check lives in
+# the workflow's execution-ledger job.
+ATTENDANCE_EXIT=0
+if [[ -d "$PHASE_REPORTS_DIR/phase1-journey" ]]; then
+  chmod +x "$REPO_ROOT/scripts/ci-nightly-execution-ledger.sh" \
+           "$REPO_ROOT/scripts/check-test-execution-ledger.sh"
+  "$REPO_ROOT/scripts/ci-nightly-execution-ledger.sh" --shard \
+    --results-root "$PHASE_REPORTS_DIR/phase1-journey" \
+    --out "$ARTIFACT_DIR/phase1-attendance.tsv" \
+    || ATTENDANCE_EXIT=$?
+else
+  echo "phase-1 report dir missing; attendance cannot run (exit 1)"
+  ATTENDANCE_EXIT=1
+fi
+echo "phase 1 attendance exit code: $ATTENDANCE_EXIT"
 
 # Default the dedicated/aux phases to SKIPPED; only shard 0 owns them.
 NOTIFICATION_PERMISSION_EXIT=0
@@ -756,7 +783,8 @@ if [[ "$JOURNEY_EXIT" -ne 0 \
       || "$NOTIFICATION_PERMISSION_EXIT" -ne 0 \
       || "$NETWORK_FAULT_EXIT" -ne 0 \
       || "$BOOTSTRAP_EXIT" -ne 0 \
-      || "$REAL_AGENT_EXIT" -ne 0 ]]; then
+      || "$REAL_AGENT_EXIT" -ne 0 \
+      || "$ATTENDANCE_EXIT" -ne 0 ]]; then
   overall_status="FAIL"
 fi
 

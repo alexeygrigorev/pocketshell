@@ -267,14 +267,14 @@ A5_LITERAL_BASELINE=(
 )
 
 # --------------------------------------------------------------------------
-# BASELINE — C1 (#848/#850): the pre-existing `assumeFalse(isRunningOnCi())`
-# call sites. Each is a genuine opt-in fault / Docker-fixture skip (the fixture
-# is not started by tests.yml). They are baselined as KNOWN (advisory); any NEW
+# BASELINE — C1 (#848/#850): remaining `assumeFalse(isRunningOnCi())` call
+# sites that are genuine opt-in fault / Docker-fixture skips. Any NEW
 # unjustified `assumeFalse(isRunningOnCi())` outside this list hard-fails.
+# A row whose file no longer contains the smell is STALE and hard-fails
+# (#2082: EmulatorWorkflowE2eTest / AgentConversationReconnectDockerTest
+# had their stopgaps deleted and must not keep claiming they skip on CI).
 # --------------------------------------------------------------------------
 C1_BASELINE=(
-  "app/src/androidTest/java/com/pocketshell/app/tmux/AgentConversationReconnectDockerTest.kt"         # issue #495 local-only reconnect evidence
-  "app/src/androidTest/java/com/pocketshell/app/proof/EmulatorWorkflowE2eTest.kt"                     # issue #207/#470/#835 picker-enumeration CI stopgap
 )
 
 # --------------------------------------------------------------------------
@@ -718,6 +718,7 @@ scan_a4() {
 declare -a C1_NEW=()
 declare -a C1_KNOWN=()
 declare -a C1_JUSTIFIED=()
+declare -a C1_STALE_BASELINE=()
 
 c1_is_fixture_justified() {
   # The joined call text self-describes a genuine opt-in fault/Docker fixture.
@@ -766,6 +767,24 @@ scan_c1() {
       fi
     done < <(grep -nE '(^|[^.[:alnum:]])(assumeFalse|Assume\.assumeFalse)[[:space:]]*\(' "$file" | cut -d: -f1)
   done
+  # A baseline row whose file no longer has the smell is a lie: it tells
+  # reviewers the class still skips on CI. Hard-fail so the row is removed
+  # when the stopgap is deleted, not left as a stale "runs in no suite" claim.
+  local b known k
+  if [[ "${#C1_BASELINE[@]}" -gt 0 ]]; then
+    for b in "${C1_BASELINE[@]}"; do
+      [[ -z "$b" ]] && continue
+      known=0
+      if [[ "${#C1_KNOWN[@]}" -gt 0 ]]; then
+        for k in "${C1_KNOWN[@]}"; do
+          [[ "$k" == "$b":* ]] && known=1 && break
+        done
+      fi
+      if [[ "$known" -eq 0 ]]; then
+        C1_STALE_BASELINE+=("$b")
+      fi
+    done
+  fi
 }
 
 # --------------------------------------------------------------------------
@@ -1876,6 +1895,7 @@ print_list "A4/A2 — StandIn/Proxy in a smell-named proof file [advisory]" "${A
 print_list "C1 — NEW unjustified assumeFalse(isRunningOnCi()) self-skip outside fault classes [HARD FAIL]" "${C1_NEW[@]:-}"
 print_list "C1 — KNOWN baseline (opt-in fault/Docker fixture skip; #848) [advisory]" "${C1_KNOWN[@]:-}"
 print_list "C1 — JUSTIFIED (self-describing opt-in fixture or // JUSTIFIED:) [advisory]" "${C1_JUSTIFIED[@]:-}"
+print_list "C1 — STALE baseline (listed file no longer has assumeFalse(isRunningOnCi())) [HARD FAIL]" "${C1_STALE_BASELINE[@]:-}"
 print_list "FAKE1 — NEW connect-path test with an always-answering fake (no fault case) [advisory]" "${FAKE1_FINDINGS[@]:-}"
 print_list "FAKE1 — KNOWN baseline (always-answering connect fake; #847/#849) [advisory]" "${FAKE1_KNOWN[@]:-}"
 print_list "AWAIT1 — NEW unbounded connect-path RPC await (no withTimeout) [advisory]" "${AWAIT1_FINDINGS[@]:-}"
@@ -1952,6 +1972,7 @@ for x in \
   "${A5_LITERAL_STALE_BASELINE[@]:-}" \
   "${A5_LITERAL_BASELINE_ERRORS[@]:-}" \
   "${C1_NEW[@]:-}" \
+  "${C1_STALE_BASELINE[@]:-}" \
   "${J1_NEW[@]:-}" \
   "${J1_STALE_BASELINE[@]:-}" \
   "${J1_PARSER_FAILURE[@]:-}" \

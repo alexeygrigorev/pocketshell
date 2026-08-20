@@ -715,4 +715,66 @@ jobs:
           path: |
             build/test-execution-ledger.tsv
             build/nightly-execution-attendance.tsv
-          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Production-binding mutations (issue #1932, rolled up to #1671).
+  #
+  # Periodic, fail-closed, not a per-PR Unit mutant run. The cheap Unit half
+  # (--self-test + --check-sites in tests.yml) only proves the harness can
+  # still go red and that every curated target still exists. This job applies
+  # one deterministic binding mutant at a time and requires the named
+  # production-wired proof to fail. A surviving mutant, a stale/unregistered
+  # target, or a truncated/over-budget run is RED. Independent of the 24h
+  # emulator guard so attendance is visible even on an idle night.
+  # ---------------------------------------------------------------------------
+  binding-mutations:
+    name: Production-binding mutations (issue #1932)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew + harness executable
+        run: chmod +x ./gradlew scripts/check-production-binding-mutations.py
+
+      - name: Run curated production-binding mutants
+        run: scripts/check-production-binding-mutations.py --run
+
+      - name: Publish binding-mutation summary
+        if: always()
+        run: |
+          if [[ -f artifacts/production-binding-mutations/summary.md ]]; then
+            cat artifacts/production-binding-mutations/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# Production-binding mutations (#1932 / #1671)"
+              echo
+              echo "No summary was written (the harness aborted before evidence)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - name: Upload binding-mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: production-binding-mutations
+          path: artifacts/production-binding-mutations/
+           if-no-files-found: error

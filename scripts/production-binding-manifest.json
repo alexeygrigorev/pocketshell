@@ -1,0 +1,27 @@
+{
+  "issue": 1932,
+  "epic": 1671,
+  "max_runtime_seconds": 1800,
+  "max_artifact_bytes": 2097152,
+  "required_sites": [
+    {
+      "id": "outbound-budget-factory",
+      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreenStateHelpers.kt",
+      "needle": "budget = composer.outboundAttemptBudget"
+    }
+  ],
+  "bindings": [
+    {
+      "id": "outbound-budget-factory",
+      "binding": "OutboundQueueAutoFlushController.boundTo reads the composer's own outboundAttemptBudget",
+      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreenStateHelpers.kt",
+      "anchor": "            OutboundQueueAutoFlushController(budget = composer.outboundAttemptBudget, clock = clock)",
+      "mutation": "            OutboundQueueAutoFlushController(budget = OutboundAttemptBudgetTracker(), clock = clock)",
+      "proof": {
+        "type": "gradle",
+        "task": ":app:testDebugUnitTest",
+        "tests": "com.pocketshell.app.tmux.OutboundDeliveryWindowWiringTest.theOnlyControllerFactoryBindsTheComposersOwnBudget"
+      }
+    }
+  ]
+}

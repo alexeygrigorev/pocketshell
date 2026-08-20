@@ -610,6 +610,16 @@ that job's step summary and the `production-binding-mutations` artifact
 `scripts/check-production-binding-mutations.py --self-test` plus
 `--check-sites`: it does **not** apply the production mutants. A missing or
 `--self-test`-only nightly job is treated as decorative and fails closed.
+The artifact byte ledger includes `summary.md` and `summary.json` themselves:
+the summaries are rewritten to a stable final directory size, and that exact
+uploaded size is what the lane reports and enforces against the manifest cap.
+
+The manifest contains only bindings with an existing behavioral proof that is
+wired through the shipped production entry point. The controller display,
+controller network, and assistant shared-lease candidates from the #1660 audit
+are deferred until such a proof exists (or removed when the corresponding
+production choice becomes structurally impossible); an anchor-presence check is
+not accepted as a mutation killer.
 
 ### Force-full triggers (blast-radius escapes)
 

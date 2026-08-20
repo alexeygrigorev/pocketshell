@@ -5,87 +5,12 @@
   "max_artifact_bytes": 2097152,
   "required_sites": [
     {
-      "id": "controller-display-projection",
-      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt",
-      "needle": "onControllerTransition = { projectStatusFromController() }"
-    },
-    {
-      "id": "controller-network-boundary",
-      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt",
-      "needle": "connectionManager.observeNetworkChanged("
-    },
-    {
-      "id": "assistant-lease-capability",
-      "path": "app/src/main/java/com/pocketshell/app/assistant/AppAssistantActions.kt",
-      "needle": "SharedSshLeaseManager.get()"
-    },
-    {
       "id": "outbound-budget-factory",
       "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionScreenStateHelpers.kt",
       "needle": "budget = composer.outboundAttemptBudget"
     }
   ],
   "bindings": [
-    {
-      "id": "controller-display-projection",
-      "binding": "ConnectionEffectDriver onControllerTransition re-projects displayed status from the controller",
-      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt",
-      "anchor": "onControllerTransition = { projectStatusFromController() },",
-      "mutation": "onControllerTransition = { },",
-      "proof": {
-        "type": "command",
-        "argv": [
-          "{python}",
-          "{harness}",
-          "--root",
-          "{root}",
-          "--manifest",
-          "{manifest}",
-          "--prove",
-          "controller-display-projection"
-        ]
-      }
-    },
-    {
-      "id": "controller-network-boundary",
-      "binding": "onNetworkChanged feeds the controller through connectionManager.observeNetworkChanged",
-      "path": "app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt",
-      "anchor": "        connectionManager.observeNetworkChanged(\n            validatedHandoff = shouldReportValidatedHandoffToController(\n                change = change,\n                transportKeepAliveProvenAlive = { isTransportKeepAliveProvenAliveRecently() },\n            ),\n        )",
-      "mutation": "        Unit",
-      "proof": {
-        "type": "command",
-        "argv": [
-          "{python}",
-          "{harness}",
-          "--root",
-          "{root}",
-          "--manifest",
-          "{manifest}",
-          "--prove",
-          "controller-network-boundary"
-        ]
-      }
-    },
-    {
-      "id": "assistant-lease-capability",
-      "binding": "RealAssistantSshExecutor borrows the process-wide SharedSshLeaseManager singleton",
-      "path": "app/src/main/java/com/pocketshell/app/assistant/AppAssistantActions.kt",
-      "anchor": "    private val leaseManager: SshLeaseManager = SharedSshLeaseManager.get(),",
-      "mutation": "    private val leaseManager: SshLeaseManager = SshLeaseManager(connector = com.pocketshell.core.ssh.DefaultSshLeaseConnector()),",
-      "proof": {
-        "type": "command",
-        "argv": [
-          "{python}",
-          "{harness}",
-          "--root",
-          "{root}",
-          "--manifest",
-          "{manifest}",
-          "--prove",
-          "assistant-lease-capability"
-        ]
-      }
-    },
     {
       "id": "outbound-budget-factory",
       "binding": "OutboundQueueAutoFlushController.boundTo reads the composer's own outboundAttemptBudget",

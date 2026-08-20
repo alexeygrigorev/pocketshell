@@ -35,7 +35,6 @@ Usage
   scripts/check-production-binding-mutations.py --self-test
   scripts/check-production-binding-mutations.py --check-sites
   scripts/check-production-binding-mutations.py --run
-  scripts/check-production-binding-mutations.py --prove <id>
 """
 
 from __future__ import annotations
@@ -46,6 +45,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -64,7 +64,9 @@ DEFAULT_ARTIFACTS = DEFAULT_ROOT / "artifacts" / "production-binding-mutations"
 HARNESS_REL = "scripts/check-production-binding-mutations.py"
 RUN_INVOCATION = f"{HARNESS_REL} --run"
 SELFTEST_INVOCATION = f"{HARNESS_REL} --self-test"
-EXPECTED_SELFTEST_CHECKS = 21
+EXPECTED_SELFTEST_CHECKS = 24
+GLOBAL_TIMEOUT_SELFTEST_PROOF_MARGIN_SECONDS = 0.25
+GLOBAL_TIMEOUT_SELFTEST_WALL_MARGIN_SECONDS = 0.45
 PLACEHOLDER_RE = re.compile(r"\{([a-z_]+)\}")
 JOB_KEY = re.compile(r"^  ([A-Za-z0-9_-]+):[ \t]*(#.*)?$")
 COMMENT_LINE = re.compile(r"^[ \t]*#")
@@ -127,6 +129,8 @@ class ProofResult:
     output: str
     timed_out: bool
     truncated: bool
+    timeout_reason: str | None = None
+    elapsed_seconds: float = 0.0
 
     @property
     def completed(self) -> bool:
@@ -204,6 +208,11 @@ def parse_proof(payload: Mapping[str, Any], where: str) -> ProofSpec:
         argv = payload.get("argv")
         if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
             fail(f"{where}.proof.argv must be a non-empty argv list")
+        if any("check-production-binding-mutations.py" in item or item == "{harness}" for item in argv):
+            fail(
+                f"{where}.proof must not invoke the mutation harness itself; "
+                "name an independent production-wired behavioral proof"
+            )
         return ProofSpec(kind="command", argv=tuple(argv), timeout_seconds=timeout)
     fail(f"{where} must name one existing load-bearing proof")
 
@@ -432,35 +441,47 @@ def run_process(
     argv: list[str],
     *,
     cwd: Path,
-    timeout: int | None,
+    timeout: float | None,
+    timeout_reason: str | None = None,
     extra_env: Mapping[str, str] | None = None,
 ) -> ProofResult:
     env = os.environ.copy()
     if extra_env:
         env.update(extra_env)
+    started = time.monotonic()
+    process = subprocess.Popen(
+        argv,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=timeout,
-            env=env,
-            check=False,
+        output, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        output, _ = process.communicate()
+        return ProofResult(
+            returncode=124,
+            output=output or "",
+            timed_out=True,
+            truncated=False,
+            timeout_reason=timeout_reason,
+            elapsed_seconds=time.monotonic() - started,
         )
-    except subprocess.TimeoutExpired as error:
-        output = error.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", errors="replace")
-        return ProofResult(returncode=124, output=output, timed_out=True, truncated=False)
-    output = completed.stdout or ""
+    output = output or ""
     truncated = bool(output) and not output.endswith("\n") and len(output) > 0 and "\n" not in output[-200:]
     return ProofResult(
-        returncode=completed.returncode,
+        returncode=process.returncode,
         output=output,
         timed_out=False,
-        truncated=False if completed.returncode in (0, 1) else truncated,
+        truncated=False if process.returncode in (0, 1) else truncated,
+        elapsed_seconds=time.monotonic() - started,
     )
 
 
@@ -471,11 +492,17 @@ def run_proof(
     harness: Path,
     manifest_path: Path,
     rerun: bool,
+    lane_timeout_seconds: float,
     timeout_override: int | None = None,
 ) -> ProofResult:
-    timeout = timeout_override
-    if timeout is None:
-        timeout = binding.proof.timeout_seconds or None
+    configured_timeout = timeout_override
+    if configured_timeout is None:
+        configured_timeout = binding.proof.timeout_seconds or None
+    timeout: float = lane_timeout_seconds
+    timeout_reason = "global"
+    if configured_timeout is not None and configured_timeout < timeout:
+        timeout = configured_timeout
+        timeout_reason = "proof"
     if binding.proof.kind == "gradle":
         argv = gradle_argv(root, binding.proof, rerun=rerun)
     else:
@@ -490,7 +517,12 @@ def run_proof(
         )
         if argv[0] == "{python}":
             fail("proof argv placeholder was not expanded")
-    return run_process(argv, cwd=root, timeout=timeout)
+    return run_process(
+        argv,
+        cwd=root,
+        timeout=timeout,
+        timeout_reason=timeout_reason,
+    )
 
 
 def directory_size(path: Path) -> int:
@@ -536,6 +568,55 @@ def format_summary(
         )
     lines.append("")
     return "\n".join(lines)
+
+
+def write_artifact_ledger(
+    artifacts: Path,
+    manifest: Manifest,
+    evidence: list[BindingEvidence],
+    *,
+    runtime_seconds: float,
+    fatal: str | None,
+    selected: list[Binding],
+) -> tuple[str, int]:
+    """Write self-accounting summaries and return their stable final byte count."""
+    artifact_bytes = directory_size(artifacts)
+    for _ in range(20):
+        summary = format_summary(
+            manifest,
+            evidence,
+            runtime_seconds=runtime_seconds,
+            artifact_bytes=artifact_bytes,
+            status="FAIL" if fatal else "PASS",
+            expected=len(selected),
+        )
+        if fatal:
+            summary += f"\nFAIL: {fatal}\n"
+        write_text(artifacts / "summary.md", summary)
+        write_text(
+            artifacts / "summary.json",
+            json.dumps(
+                {
+                    "issue": manifest.issue,
+                    "epic": manifest.epic,
+                    "status": "FAIL" if fatal else "PASS",
+                    "runtime_seconds": runtime_seconds,
+                    "max_runtime_seconds": manifest.max_runtime_seconds,
+                    "artifact_bytes": artifact_bytes,
+                    "max_artifact_bytes": manifest.max_artifact_bytes,
+                    "bindings_expected": [item.ident for item in selected],
+                    "bindings_ran": [item.ident for item in evidence],
+                    "fatal": fatal,
+                },
+                indent=2,
+            )
+            + "\n",
+        )
+        final_bytes = directory_size(artifacts)
+        if final_bytes == artifact_bytes:
+            return summary, final_bytes
+        artifact_bytes = final_bytes
+    fail("artifact ledger byte count did not stabilize")
 
 
 def extract_job(workflow: str, job_name: str) -> str:
@@ -610,16 +691,6 @@ def validate_attendance(workflow: str) -> None:
         fail(f"nightly job {job_name!r} must append its summary to GITHUB_STEP_SUMMARY")
 
 
-def prove_binding(root: Path, manifest: Manifest, ident: str) -> int:
-    binding = manifest.binding(ident)
-    raw = read_source(root, binding.path)
-    if binding.anchor in code_only(raw):
-        print(f"PROOF PASS {ident}: production binding is present")
-        return 0
-    print(f"PROOF FAIL {ident}: production binding is absent", file=sys.stderr)
-    return 1
-
-
 def check_sites(root: Path, manifest: Manifest) -> None:
     validate_sites(root, manifest)
     print(f"PASS: {len(manifest.bindings)} production-binding targets are present and registered")
@@ -651,7 +722,7 @@ def run_lane(
     try:
         for binding in selected:
             elapsed = time.monotonic() - started
-            if elapsed > manifest.max_runtime_seconds:
+            if elapsed >= manifest.max_runtime_seconds:
                 fatal = (
                     f"runtime bound exceeded before {binding.ident}: "
                     f"{elapsed:.1f}s > {manifest.max_runtime_seconds}s "
@@ -666,27 +737,39 @@ def run_lane(
                 )
                 break
             source_path = resolve_source(root, binding.path)
+            baseline_elapsed = time.monotonic() - started
+            if baseline_elapsed >= manifest.max_runtime_seconds:
+                fatal = f"global runtime bound exceeded before {binding.ident} baseline"
+                break
             baseline = run_proof(
                 root,
                 binding,
                 harness=harness,
                 manifest_path=manifest_path,
                 rerun=True,
+                lane_timeout_seconds=manifest.max_runtime_seconds - baseline_elapsed,
                 timeout_override=proof_timeout,
             )
             write_text(artifacts / f"{binding.ident}.baseline.log", baseline.output)
             if not baseline.completed:
+                if baseline.timeout_reason == "global":
+                    detail = (
+                        f"global runtime bound exceeded during {binding.ident} baseline "
+                        f"(proof elapsed {baseline.elapsed_seconds:.3f}s)"
+                    )
+                else:
+                    detail = "baseline proof did not finish (timeout/truncate)"
                 item = BindingEvidence(
                     ident=binding.ident,
                     live=False,
                     killed=False,
                     restored=True,
                     baseline_passed=False,
-                    detail="baseline proof did not finish (timeout/truncate)",
+                    detail=detail,
                     log_name=f"{binding.ident}.baseline.log",
                 )
                 evidence.append(item)
-                fatal = f"{binding.ident}: baseline proof did not finish"
+                fatal = detail
                 break
             if not baseline.passed:
                 evidence.append(
@@ -710,22 +793,34 @@ def run_lane(
             try:
                 original = apply_mutation(source_path, binding)
                 live = True
-                mutant = run_proof(
-                    root,
-                    binding,
-                    harness=harness,
-                    manifest_path=manifest_path,
-                    rerun=False,
-                    timeout_override=proof_timeout,
-                )
-                write_text(artifacts / f"{binding.ident}.mutant.log", mutant.output)
-                if not mutant.completed:
-                    detail = "mutant proof did not finish (timeout/truncate is not a kill)"
-                elif mutant.passed:
-                    detail = "mutant SURVIVED (proof stayed green)"
+                mutant_elapsed = time.monotonic() - started
+                if mutant_elapsed >= manifest.max_runtime_seconds:
+                    detail = f"global runtime bound exceeded before {binding.ident} mutant"
+                    fatal = detail
                 else:
-                    killed = True
-                    detail = f"LIVE+KILLED (proof rc={mutant.returncode})"
+                    mutant = run_proof(
+                        root,
+                        binding,
+                        harness=harness,
+                        manifest_path=manifest_path,
+                        rerun=False,
+                        lane_timeout_seconds=manifest.max_runtime_seconds - mutant_elapsed,
+                        timeout_override=proof_timeout,
+                    )
+                    write_text(artifacts / f"{binding.ident}.mutant.log", mutant.output)
+                    if not mutant.completed:
+                        if mutant.timeout_reason == "global":
+                            detail = (
+                                f"global runtime bound exceeded during {binding.ident} mutant "
+                                f"(proof elapsed {mutant.elapsed_seconds:.3f}s)"
+                            )
+                        else:
+                            detail = "mutant proof did not finish (timeout/truncate is not a kill)"
+                    elif mutant.passed:
+                        detail = "mutant SURVIVED (proof stayed green)"
+                    else:
+                        killed = True
+                        detail = f"LIVE+KILLED (proof rc={mutant.returncode})"
             finally:
                 if original:
                     restore_source(source_path, original, binding.ident)
@@ -745,14 +840,13 @@ def run_lane(
                 )
             )
             if not (live and killed and restored):
-                fatal = f"{binding.ident}: {detail or 'mutant was not live and killed'}"
+                fatal = fatal or f"{binding.ident}: {detail or 'mutant was not live and killed'}"
                 break
     except HarnessFailure as error:
         fatal = str(error)
         status = "FAIL"
 
     runtime = time.monotonic() - started
-    artifact_bytes = directory_size(artifacts)
     if fatal:
         status = "FAIL"
     if runtime > manifest.max_runtime_seconds and status == "PASS":
@@ -760,44 +854,32 @@ def run_lane(
             f"runtime bound exceeded: {runtime:.1f}s > {manifest.max_runtime_seconds}s"
         )
         status = "FAIL"
-    if artifact_bytes > manifest.max_artifact_bytes:
-        fatal = (
-            f"artifact bound exceeded: {artifact_bytes} > {manifest.max_artifact_bytes}"
-        )
-        status = "FAIL"
     if len(evidence) != len(selected) and fatal is None:
         fatal = f"truncated: ran {len(evidence)} of {len(selected)} bindings"
         status = "FAIL"
-    summary = format_summary(
+    summary, artifact_bytes = write_artifact_ledger(
+        artifacts,
         manifest,
         evidence,
         runtime_seconds=runtime,
-        artifact_bytes=artifact_bytes,
-        status=status if fatal is None else "FAIL",
-        expected=len(selected),
+        fatal=fatal,
+        selected=selected,
     )
-    if fatal:
-        summary += f"\nFAIL: {fatal}\n"
-    write_text(artifacts / "summary.md", summary)
-    write_text(
-        artifacts / "summary.json",
-        json.dumps(
-            {
-                "issue": manifest.issue,
-                "epic": manifest.epic,
-                "status": "FAIL" if fatal else "PASS",
-                "runtime_seconds": runtime,
-                "max_runtime_seconds": manifest.max_runtime_seconds,
-                "artifact_bytes": artifact_bytes,
-                "max_artifact_bytes": manifest.max_artifact_bytes,
-                "bindings_expected": [item.ident for item in selected],
-                "bindings_ran": [item.ident for item in evidence],
-                "fatal": fatal,
-            },
-            indent=2,
+    if artifact_bytes > manifest.max_artifact_bytes:
+        artifact_failure = (
+            "artifact bound exceeded: final artifact directory exceeds "
+            f"{manifest.max_artifact_bytes} bytes"
         )
-        + "\n",
-    )
+        fatal = f"{fatal}; {artifact_failure}" if fatal else artifact_failure
+        status = "FAIL"
+        summary, artifact_bytes = write_artifact_ledger(
+            artifacts,
+            manifest,
+            evidence,
+            runtime_seconds=runtime,
+            fatal=fatal,
+            selected=selected,
+        )
     sys.stdout.write(summary)
     if fatal:
         print(f"FAIL: {fatal}", file=sys.stderr)
@@ -861,13 +943,62 @@ def write_fixture_tree(root: Path) -> dict[str, Path]:
     always_fail.write_text("#!/bin/sh\necho PROOF_DONE\nexit 1\n", encoding="utf-8")
     make_executable(always_fail)
     hang = proof_dir / "hang.sh"
-    hang.write_text("#!/bin/sh\nsleep 30\necho PROOF_DONE\nexit 1\n", encoding="utf-8")
+    hang.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
     make_executable(hang)
+    global_hang = proof_dir / "global-hang.py"
+    global_hang.write_text(
+        "#!/usr/bin/python3 -I\n"
+        "import subprocess\n"
+        "import sys\n"
+        "child = subprocess.Popen([\n"
+        "    sys.executable,\n"
+        "    '-I',\n"
+        "    '-c',\n"
+        "    'import os, pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)',\n"
+        "    sys.argv[1],\n"
+        "],\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "child.wait()\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    make_executable(global_hang)
+    global_mutant_hang = proof_dir / "global-mutant-hang.py"
+    global_mutant_hang.write_text(
+        "#!/usr/bin/python3 -I\n"
+        "import pathlib\n"
+        "import subprocess\n"
+        "import sys\n"
+        "source = pathlib.Path(sys.argv[2]).read_text()\n"
+        "if sys.argv[3] in source:\n"
+        "    print('PROOF_DONE')\n"
+        "    raise SystemExit(0)\n"
+        "child = subprocess.Popen([\n"
+        "    sys.executable,\n"
+        "    '-I',\n"
+        "    '-c',\n"
+        "    'import os, pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(30)',\n"
+        "    sys.argv[1],\n"
+        "],\n"
+        "    stdout=subprocess.DEVNULL,\n"
+        "    stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "child.wait()\n"
+        "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    make_executable(global_mutant_hang)
     return {
         "healthy": healthy,
         "always_pass": always_pass,
         "always_fail": always_fail,
         "hang": hang,
+        "global_hang": global_hang,
+        "global_mutant_hang": global_mutant_hang,
     }
 
 
@@ -1034,7 +1165,13 @@ def self_test() -> None:
             raise HarnessFailure(f"self-test accepted unsafe mutation: {name}")
         checks += 1
 
-    def run_rc(root: Path, manifest_path: Path, *args: str, workflow: Path | None = None) -> int:
+    def run_rc(
+        root: Path,
+        manifest_path: Path,
+        *args: str,
+        workflow: Path | None = None,
+        process_timeout_seconds: float = 20,
+    ) -> int:
         argv = [
             sys.executable,
             str(SCRIPT_PATH),
@@ -1050,10 +1187,80 @@ def self_test() -> None:
         else:
             argv.extend(["--workflow", str(root / "missing-workflow.yml")])
         argv.extend(args)
-        result = run_process(argv, cwd=root, timeout=20)
+        result = run_process(argv, cwd=root, timeout=process_timeout_seconds)
         if result.output:
             (root / "harness.out").write_text(result.output, encoding="utf-8")
         return result.returncode
+
+    def proof_child_stopped(pid_path: Path, phase: str) -> bool:
+        if not pid_path.is_file():
+            fail(f"global runtime {phase} self-test never started the proof's child process")
+        child_pid = int(pid_path.read_text(encoding="utf-8"))
+        reap_deadline = time.monotonic() + 1
+        while Path(f"/proc/{child_pid}").exists() and time.monotonic() < reap_deadline:
+            time.sleep(0.02)
+        if Path(f"/proc/{child_pid}").exists():
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            return False
+        return True
+
+    def assert_global_deadline(
+        root: Path,
+        manifest_path: Path,
+        workflow: Path,
+        *,
+        phase: str,
+        child_pid_path: Path,
+    ) -> None:
+        shutil.rmtree(root / "artifacts", ignore_errors=True)
+        started = time.monotonic()
+        rc = run_rc(
+            root,
+            manifest_path,
+            "--run",
+            workflow=workflow,
+            process_timeout_seconds=4,
+        )
+        elapsed = time.monotonic() - started
+        out = (root / "harness.out").read_text(encoding="utf-8")
+        child_stopped = proof_child_stopped(child_pid_path, phase)
+        fixture_cap = load_manifest(manifest_path).max_runtime_seconds
+        max_wall_elapsed = fixture_cap + GLOBAL_TIMEOUT_SELFTEST_WALL_MARGIN_SECONDS
+        if not child_stopped:
+            fail(f"global runtime bound left the {phase} proof's child process alive")
+        if rc == 0:
+            fail(f"self-test {phase} runtime bound was accepted")
+        expected = f"global runtime bound exceeded during controller-display-projection {phase}"
+        if expected not in out:
+            fail(f"global runtime bound was not applied to the active {phase} proof: {out}")
+        proof_elapsed_match = re.search(
+            rf"{re.escape(expected)} \(proof elapsed ([0-9]+\.[0-9]+)s\)",
+            out,
+        )
+        if proof_elapsed_match is None:
+            fail(f"global runtime {phase} proof elapsed time was not reported: {out}")
+        proof_elapsed = float(proof_elapsed_match.group(1))
+        max_proof_elapsed = fixture_cap + GLOBAL_TIMEOUT_SELFTEST_PROOF_MARGIN_SECONDS
+        if proof_elapsed > max_proof_elapsed:
+            fail(
+                f"global runtime {phase} proof deadline was bypassed: "
+                f"{proof_elapsed:.3f}s > {fixture_cap}s cap + "
+                f"{GLOBAL_TIMEOUT_SELFTEST_PROOF_MARGIN_SECONDS:.2f}s proof margin"
+            )
+        if elapsed > max_wall_elapsed:
+            fail(
+                f"global runtime {phase} wall deadline was bypassed: "
+                f"{elapsed:.2f}s > {fixture_cap}s cap + "
+                f"{GLOBAL_TIMEOUT_SELFTEST_WALL_MARGIN_SECONDS:.2f}s wall margin"
+            )
+        print(
+            f"PASS: global runtime {phase} deadline "
+            f"(proof {proof_elapsed:.3f}s, wall {elapsed:.2f}s, "
+            f"cap {fixture_cap}s; child stopped)"
+        )
 
     rejected(
         "missing nightly lane (current main)",
@@ -1098,6 +1305,18 @@ def self_test() -> None:
             "manifest missing binding prose",
             "binding",
             lambda: parse_manifest(incomplete),
+        )
+        self_referential = fixture_manifest(root, proofs)
+        self_referential["bindings"][0]["proof"]["argv"] = [
+            "{python}",
+            "{harness}",
+            "--prove",
+            "controller-display-projection",
+        ]
+        rejected(
+            "self-referential structural proof",
+            "must not invoke the mutation harness itself",
+            lambda: parse_manifest(self_referential),
         )
 
         stale = fixture_manifest(root, proofs)
@@ -1183,6 +1402,35 @@ def self_test() -> None:
         if "controller-display-projection" not in summary or "LIVE+KILLED" not in summary:
             fail("summary did not report per-binding kill evidence")
 
+        calibration_bytes = directory_size(root / "artifacts" / "production-binding-mutations")
+        near_cap = fixture_manifest(
+            root,
+            proofs,
+            max_artifact_bytes=calibration_bytes + 128,
+        )
+        near_cap_path = write_manifest(root / "near-cap.json", near_cap)
+        shutil.rmtree(root / "artifacts", ignore_errors=True)
+        rc = run_rc(root, near_cap_path, "--run", workflow=workflow)
+        if rc != 0:
+            fail(f"near-cap artifact fixture failed unexpectedly: {(root / 'harness.out').read_text()}")
+        artifact_dir = root / "artifacts" / "production-binding-mutations"
+        final_artifact_bytes = directory_size(artifact_dir)
+        ledger = json.loads((artifact_dir / "summary.json").read_text(encoding="utf-8"))
+        reported_artifact_bytes = ledger.get("artifact_bytes")
+        if reported_artifact_bytes != final_artifact_bytes:
+            fail(
+                "artifact ledger omitted produced summary bytes: "
+                f"reported {reported_artifact_bytes}, final directory {final_artifact_bytes}"
+            )
+        if final_artifact_bytes > near_cap["max_artifact_bytes"]:
+            fail(
+                "near-cap artifact fixture exceeded its enforced cap: "
+                f"{final_artifact_bytes} > {near_cap['max_artifact_bytes']}"
+            )
+        if near_cap["max_artifact_bytes"] - final_artifact_bytes > 256:
+            fail("artifact ledger fixture was not near its configured cap")
+        checks += 1
+
         surviving = fixture_manifest(root, proofs)
         surviving["bindings"][0]["proof"]["argv"] = [
             "sh",
@@ -1249,21 +1497,42 @@ def self_test() -> None:
 
         tiny_time = fixture_manifest(root, proofs)
         tiny_time["max_runtime_seconds"] = 1
+        proof_child_pid = root / "global-timeout-child.pid"
         tiny_time["bindings"][0]["proof"]["argv"] = [
-            "sh",
-            str(proofs["hang"]),
-            "unused",
-            "src/main/prod/Display.kt",
+            sys.executable,
+            str(proofs["global_hang"]),
+            str(proof_child_pid),
         ]
-        tiny_time["bindings"][0]["proof"]["timeout_seconds"] = 2
+        del tiny_time["bindings"][0]["proof"]["timeout_seconds"]
         time_path = write_manifest(root / "tiny-time.json", tiny_time)
-        shutil.rmtree(root / "artifacts", ignore_errors=True)
-        rc = run_rc(root, time_path, "--run", workflow=workflow)
-        if rc == 0:
-            fail("self-test runtime bound was accepted")
-        out = (root / "harness.out").read_text(encoding="utf-8")
-        if "runtime bound exceeded" not in out and "did not finish" not in out:
-            fail(f"runtime bound did not fail closed: {out}")
+        assert_global_deadline(
+            root,
+            time_path,
+            workflow,
+            phase="baseline",
+            child_pid_path=proof_child_pid,
+        )
+        checks += 1
+
+        mutant_time = fixture_manifest(root, proofs)
+        mutant_time["max_runtime_seconds"] = 1
+        mutant_child_pid = root / "global-timeout-mutant-child.pid"
+        mutant_time["bindings"][0]["proof"]["argv"] = [
+            sys.executable,
+            str(proofs["global_mutant_hang"]),
+            str(mutant_child_pid),
+            "src/main/prod/Display.kt",
+            "onControllerTransition { projectStatusFromController() }",
+        ]
+        del mutant_time["bindings"][0]["proof"]["timeout_seconds"]
+        mutant_time_path = write_manifest(root / "tiny-mutant-time.json", mutant_time)
+        assert_global_deadline(
+            root,
+            mutant_time_path,
+            workflow,
+            phase="mutant",
+            child_pid_path=mutant_child_pid,
+        )
         checks += 1
 
         accepted(
@@ -1288,7 +1557,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--check-sites", action="store_true")
     parser.add_argument("--run", action="store_true")
-    parser.add_argument("--prove", metavar="ID")
     return parser
 
 
@@ -1308,8 +1576,6 @@ def main(argv: list[str] | None = None) -> int:
     manifest_path = resolve_cli_path(args.manifest)
     try:
         manifest = load_manifest(manifest_path)
-        if args.prove:
-            return prove_binding(root, manifest, args.prove)
         if args.check_sites:
             check_sites(root, manifest)
             return 0
@@ -1330,7 +1596,7 @@ def main(argv: list[str] | None = None) -> int:
     except HarnessFailure as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return 1
-    parser.error("one of --self-test, --check-sites, --run, --prove is required")
+    parser.error("one of --self-test, --check-sites, --run is required")
     return 2
 
 

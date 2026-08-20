@@ -215,7 +215,12 @@ public fun TmuxSessionScreen(
     )
     val pagerState = rememberPagerState(pageCount = { unifiedPager.pages.size })
     // Issue #1685: the pager-relative pane selection in its own frame.
-    val panesSel = rememberTmuxSessionPaneSelection(conn, viewModel, pagerState)
+    val panesSel = rememberTmuxSessionPaneSelection(
+        conn = conn,
+        viewModel = viewModel,
+        pagerState = pagerState,
+        unifiedPagerPages = unifiedPager.pages,
+    )
     // Epic #821 Slice 1: the active session's RECORDED `@ps_agent_kind`.
     val currentSessionRecordedKind by viewModel.currentSessionRecordedKind.collectAsState()
     val recordedAgentRouteEvidence by viewModel.currentRecordedAgentRouteEvidence.collectAsState()
@@ -1606,7 +1611,12 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
     // Issue #810 (hard-cut, D22): the composer launcher is ALWAYS present.
     run {
         val pane = surfacePane
-        val controlsInputEnabled = sessionLive && pane != null
+        // Issue #2192: launcher open is local; only pane-bound writes stay gated.
+        val controlsEnablement = tmuxSessionBottomControlEnablement(
+            sessionLive = sessionLive,
+            panePresent = pane != null,
+        )
+        val controlsInputEnabled = controlsEnablement.paneBoundEnabled
         TmuxSessionBottomBandPlacement(
             isImeVisible = isImeVisible,
             onConversationTab = tmuxSessionBottomControlsShowsConversation(currentSelectedTab),

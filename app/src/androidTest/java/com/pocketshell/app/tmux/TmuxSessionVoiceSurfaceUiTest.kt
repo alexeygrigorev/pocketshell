@@ -30,6 +30,7 @@ import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.composer.COMPOSER_ATTACHMENT_CHIPS_TAG
 import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.ASSISTANT_CORRECTION_MIC_TAG
@@ -1068,6 +1069,102 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         compose.runOnIdle { retryableState.value = false }
         compose.onNodeWithTag(ASSISTANT_RETRY_TAG).assertDoesNotExist()
+    }
+
+    /**
+     * Issue #2192 Wedge A — live-looking Terminal (not held), raw status not
+     * `Connected`. Production folds that into `sessionLive = false` on the
+     * Controls branch, which used to disable the launcher itself. Opening the
+     * sheet is a local action (#1944) and must still fire; Enter stays gated.
+     */
+    @Test
+    fun issue2192_wedgeA_rawNotConnectedLiveLookingTerminal_launcherOpensEnterStaysGated() {
+        assertLauncherOpensAndEnterStaysGated(
+            sessionLive = false,
+            paneBoundCallbackPresent = true,
+        )
+    }
+
+    /**
+     * Issue #2192 Wedge B — live-looking Terminal after a re-seed left
+     * `surfacePane == null`. The production page-rebind identity proof lives in
+     * the JVM Issue #2192 test; this component check keeps the resulting
+     * bottom-controls contract explicit: the launcher must still open, while
+     * there is no pane-bound Enter to fire.
+     */
+    @Test
+    fun issue2192_wedgeB_surfacePaneNullAfterReseed_launcherOpensEnterAbsent() {
+        assertLauncherOpensAndEnterStaysGated(
+            sessionLive = false,
+            paneBoundCallbackPresent = false,
+        )
+    }
+
+    /**
+     * Issue #2192 AC3 — genuinely reconnecting / disconnected, Terminal tab
+     * still showing the live Controls band (display debounce has not flipped
+     * `terminalHeld`). A launcher tap must open, never silently no-op.
+     */
+    @Test
+    fun issue2192_offlineOrReconnectingLiveLookingTerminal_launcherOpens() {
+        assertLauncherOpensAndEnterStaysGated(
+            sessionLive = false,
+            paneBoundCallbackPresent = true,
+        )
+    }
+
+    private fun assertLauncherOpensAndEnterStaysGated(
+        sessionLive: Boolean,
+        paneBoundCallbackPresent: Boolean,
+    ) {
+        var opened = 0
+        var enter = 0
+        compose.setContent {
+            PocketShellTheme {
+                // Same wiring [TmuxSessionScreen] uses for the keyboard-down
+                // Terminal band: `controlsInputEnabled = sessionLive && pane != null`
+                // is passed as `sessionLive` here. Both wedges collapse to
+                // `sessionLive = false` at this call site.
+                TmuxSessionBottomControlsCallSite(
+                    selectedTab = SessionTab.Terminal,
+                    sessionLive = sessionLive,
+                    terminalHeld = false,
+                    onDictateTap = { opened += 1 },
+                    onEnterTap = if (paneBoundCallbackPresent) {
+                        { enter += 1 }
+                    } else {
+                        null
+                    },
+                    onShowKeyboardTap = if (paneBoundCallbackPresent) {{ }} else null,
+                    onAddSnippetTap = if (paneBoundCallbackPresent) {{ }} else null,
+                )
+            }
+        }
+
+        compose.assertNodeFullyWithinRoot(SESSION_COMPOSER_LAUNCHER_TAG)
+        compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG)
+            .assertHasClickAction()
+            .performClick()
+        assertEquals(
+            "issue #2192: launcher tap must open the composer sheet " +
+                "(sessionLive=$sessionLive paneBound=$paneBoundCallbackPresent)",
+            1,
+            opened,
+        )
+
+        if (paneBoundCallbackPresent) {
+            compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
+                .assertHasClickAction()
+                .performClick()
+            assertEquals(
+                "issue #2192: pane-bound Enter must stay gated while not live",
+                0,
+                enter,
+            )
+        } else {
+            compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG).assertDoesNotExist()
+            assertEquals(0, enter)
+        }
     }
 
     @Test

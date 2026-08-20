@@ -626,12 +626,10 @@ internal fun BottomChipControls(
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
     leadingContent: (@Composable () -> Unit)? = null,
-    // Issue #249: gate terminal input controls and optional composer launcher on whether
-    // the SSH/tmux session is live. While disconnected or reconnecting an
-    // input-control tap would write into a dead bridge and be silently dropped.
-    // We disable the controls, and when the launcher is
-    // present render it in its disabled state so the user
-    // sees that input is unavailable rather than losing a tap.
+    // Issue #249 / #2192: gate pane-bound input (Enter) on whether the
+    // SSH/tmux session is live — a tap would write into a dead bridge and be
+    // silently dropped. The composer launcher is a LOCAL sheet-open (#1944)
+    // and stays enabled so a reconnect / empty-pane wedge cannot swallow it.
     inputEnabled: Boolean = true,
     // Issue #1531 (audit RC1): the unsent-queue badge count + failure flag for the
     // docked launcher (see [ComposerLauncherButton]).
@@ -744,7 +742,7 @@ internal fun BottomChipControls(
                         contentAlignment = Alignment.CenterEnd,
                     ) {
                         ComposerLauncherButton(
-                            enabled = inputEnabled,
+                            enabled = true,
                             onClick = onDictateTap,
                             onHoldSwipeUp = onDictateHoldSwipeUp,
                             unsentCount = unsentCount,

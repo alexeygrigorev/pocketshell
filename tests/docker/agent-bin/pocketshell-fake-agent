@@ -38,6 +38,10 @@
 #     asserts this submitted marker appears AND the input box is left empty —
 #     proving the composer Send actually submitted the line (the maintainer's
 #     "when I click Send it's not really sending" symptom), not left it unsent.
+#   * Issue #1662: on an EMPTY prompt, two consecutive raw Ctrl-D / EOT bytes
+#     exit through the normal cleanup path. One EOT alone never exits; ordinary
+#     input or a non-empty prompt resets/does not arm the sequence. EOT bytes
+#     inside bracketed-paste bodies remain paste CONTENT, never control input.
 #
 # The DEFAULT mode deliberately does NOT use the alternate screen (no smcup):
 # keeping its transcript in the main buffer means `capture-pane -p` reads the
@@ -55,7 +59,7 @@ set -u
 
 PROMPT_PREFIX="> "
 SUBMIT_PREFIX="FAKE-AGENT SUBMITTED: "
-READY_MARKER="FAKE-AGENT-READY"
+READY_MARKER="${POCKETSHELL_FAKE_AGENT_READY_MARKER:-FAKE-AGENT-READY}"
 RENDER_MODE="${POCKETSHELL_FAKE_AGENT_RENDER_MODE:-default}"
 SUBMIT_LEDGER="${POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER:-}"
 TRANSCRIPT_PATH="${POCKETSHELL_FAKE_AGENT_TRANSCRIPT:-}"
@@ -220,6 +224,11 @@ DEL=$'\177'
 BS=$'\b'
 CU=$'\025'
 ESC=$'\033'
+EOT=$'\004'
+
+# Issue #1662: a lone Ctrl-D at an empty prompt is only the first half of the
+# deliberate doubled-EOF gesture. This state is reset by every non-EOT byte.
+empty_prompt_eot_pending=0
 
 # Read ONE byte. Returns it in REPLY (empty for a NUL / EOF). Uses bash `read`
 # rather than a per-byte `dd` so a long pasted prompt (hundreds of chars) is
@@ -315,6 +324,9 @@ handle_esc() {
 process_byte() {
   ch="$REPLY"
   [ -z "$ch" ] && return 0
+  if [ "$ch" != "$EOT" ]; then
+    empty_prompt_eot_pending=0
+  fi
   # Real ESC (0x1b). Also accept tmux 3.7c paste-buffer's vis-encoding of ESC
   # as the two-byte caret sequence `^[` (0x5e 0x5b) — issue #2205. Without
   # that, a framed `\e[200~`…`\e[201~` is typed, the embedded newline submits
@@ -336,6 +348,22 @@ process_byte() {
     return 0
   fi
   case "$ch" in
+    "$EOT")
+      if [ -z "$buffer" ] && [ -z "$submit_buffer" ]; then
+        if [ "$empty_prompt_eot_pending" = "1" ]; then
+          cleanup
+        fi
+        # First EOT: remain visibly alive at the same empty prompt.
+        empty_prompt_eot_pending=1
+        return 0
+      fi
+      # On a non-empty prompt preserve the previous generic-data behaviour,
+      # but never let that byte arm a later empty-prompt exit.
+      empty_prompt_eot_pending=0
+      buffer="$buffer$ch"
+      submit_buffer="$submit_buffer$ch"
+      dirty=1
+      ;;
     "$CR"|"$LF")
       # Submit: record the submitted line (shown by the next render) and clear
       # the input box, so `capture-pane` shows the SUBMITTED marker AND an empty

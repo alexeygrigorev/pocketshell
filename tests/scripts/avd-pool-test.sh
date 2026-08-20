@@ -113,10 +113,17 @@ ADB
   # Stub gradlew at the sandbox root: connected-test.sh invokes `./gradlew`
   # relative to ROOT_DIR (which it cd's into). Record args + a marker file so the
   # test can assert gradle actually ran, then exit with $STUB_GRADLEW_RC (default 0).
-  cat > "$sandbox/root/gradlew" <<'GRADLEW'
+cat > "$sandbox/root/gradlew" <<'GRADLEW'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$STUB_GRADLEW_ARGS_FILE"
 printf 'ran\n' > "$STUB_GRADLEW_MARKER"
+if [[ "${STUB_GRADLEW_RC:-0}" == "0" && -n "${POCKETSHELL_CONNECTED_TEST_REPORT_DIR:-}" ]]; then
+  mkdir -p "$POCKETSHELL_CONNECTED_TEST_REPORT_DIR"
+  cat > "$POCKETSHELL_CONNECTED_TEST_REPORT_DIR/TEST-stub.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="stub" tests="1" skipped="0" failures="0" errors="0"><testcase name="stub" classname="stub"/></testsuite>
+XML
+fi
 exit "${STUB_GRADLEW_RC:-0}"
 GRADLEW
   chmod +x "$sandbox/root/gradlew"

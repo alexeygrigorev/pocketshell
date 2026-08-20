@@ -456,6 +456,20 @@ fi
 rm -f "$FAKE_DEVICE_STATE/active-$package"
 printf '%s instrumentation-survived %s %s\n' "$FAKE_RUN_ID" "$serial" "$package" \
   >> "$FAKE_DEVICE_STATE/events"
+if [[ "${FAKE_GRADLE_RC:-0}" == "0" && -n "${POCKETSHELL_CONNECTED_TEST_REPORT_DIR:-}" ]]; then
+  mkdir -p "$POCKETSHELL_CONNECTED_TEST_REPORT_DIR"
+  if [[ "${FAKE_GRADLE_XML_RED_RUN_ID:-}" == "$FAKE_RUN_ID" ]]; then
+    cat > "$POCKETSHELL_CONNECTED_TEST_REPORT_DIR/TEST-stub.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="stub" tests="1" skipped="0" failures="1" errors="0"><testcase name="stub" classname="stub"><failure message="mutated authoritative result"/></testcase></testsuite>
+XML
+  else
+    cat > "$POCKETSHELL_CONNECTED_TEST_REPORT_DIR/TEST-stub.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="stub" tests="1" skipped="0" failures="0" errors="0"><testcase name="stub" classname="stub"/></testsuite>
+XML
+  fi
+fi
 exit "${FAKE_GRADLE_RC:-0}"
 GRADLEW
   chmod +x "$root/gradlew"
@@ -517,6 +531,7 @@ start_wrapper() {
     FAKE_DEVICE_STATE="$sandbox/device-state" \
     FAKE_RUN_ID="$run_id" \
     FAKE_GRADLE_RC="$gradle_rc" \
+    FAKE_GRADLE_XML_RED_RUN_ID="${FAKE_GRADLE_XML_RED_RUN_ID:-}" \
     FAKE_REAL_FLOCK="$REAL_FLOCK" \
     FAKE_PAUSE_FLOCK_PROBE_RUN_ID="${FAKE_PAUSE_FLOCK_PROBE_RUN_ID:-}" \
     FAKE_KILL_HOLDER_RUN_ID="${FAKE_KILL_HOLDER_RUN_ID:-}" \
@@ -1318,6 +1333,30 @@ term_after_lock_records_lifecycle_and_preserves_rc143() {
   fi
 }
 
+# Issue #1662 / G5: a green Gradle process is not a green journey when the
+# instrumentation runner's authoritative XML is red. This mutation keeps the
+# wrapper child at rc=0 while publishing failures=1; connected-test.sh must
+# reject the run from XML rather than laundering it through the wrapper status.
+authoritative_red_xml_fails_closed() {
+  local sandbox="$1" rc=0
+  make_sandbox "$sandbox"
+  FAKE_GRADLE_XML_RED_RUN_ID=redxml \
+    start_wrapper "$sandbox" legacy redxml i1662red \
+      emulator-5554 "" emulator-5554 8 0
+  local wrapper_pid="$WRAPPER_PID"
+  wait_for_file "$sandbox/device-state/redxml.started" 10 \
+    || { kill_group "$wrapper_pid"; fail "red XML mutation never reached fake Gradle"; }
+  touch "$sandbox/device-state/redxml.release"
+  wait "$wrapper_pid" || rc=$?
+  [[ "$rc" == "1" ]] \
+    || fail "Gradle-zero/red-XML mutation was not rejected (wrapper rc=$rc)"
+  grep -q 'CONNECTED_TEST_XML_FAILED: authoritative JUnit XML is red' \
+    "$sandbox/redxml.err" \
+    || fail "red XML mutation emitted no fail-closed verdict"
+  ! grep -q 'CONNECTED_TEST_XML_RESULT' "$sandbox/redxml.err" \
+    || fail "red XML mutation was also classified as green"
+}
+
 run_case() {
   local name="$1" sandbox
   sandbox="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-serial-owner.XXXXXX")"
@@ -1348,6 +1387,7 @@ CASES=(
   holder_loss_at_cleanup_boundary_escalates_term_ignoring_uninstall
   hard_killed_wrapper_leaves_no_descendant_flock
   controlled_inflight_probe_does_not_masquerade_as_inherited_flock
+  authoritative_red_xml_fails_closed
   hard_killed_pool_setup_leaves_no_descendant_flock
   hard_killed_agents_docker_up_leaves_no_descendant_flock
   hard_killed_agents_docker_health_leaves_no_descendant_flock
@@ -1357,7 +1397,7 @@ CASES=(
 # Issue #2113: the full-suite size, hardcoded so that DELETING an entry from the
 # CASES array above reddens this harness on its own — comparing the loop counter
 # with `${#CASES[@]}` would only ever compare the loop with itself.
-EXPECTED_FULL_CASES=17
+EXPECTED_FULL_CASES=18
 FILTERED=0
 if [[ $# -gt 0 ]]; then
   CASES=("$@")

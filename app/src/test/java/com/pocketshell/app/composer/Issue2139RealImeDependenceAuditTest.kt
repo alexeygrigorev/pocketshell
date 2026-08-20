@@ -155,6 +155,20 @@ class Issue2139RealImeDependenceAuditTest {
             occlusion.contains("FOREIGN_WINDOW_FOCUS_SIGNATURE"),
         )
         assertFalse(ASSUME_CALL.containsMatchIn(occlusion))
+
+        val hotkeys = locateAndroidTest(
+            "app/src/androidTest/java/com/pocketshell/app/proof/" +
+                "TmuxKeyBarCtrlComboE2eTest.kt",
+        )
+        assertTrue(
+            "The key-bar real-IME leg must distinguish foreign window focus.",
+            hotkeys.contains("FOREIGN_WINDOW_FOCUS_SIGNATURE"),
+        )
+        assertTrue(
+            "The key-bar real-IME leg must route failures through its diagnosis.",
+            hotkeys.contains("describeRealImeRaiseFailure"),
+        )
+        assertFalse(ASSUME_CALL.containsMatchIn(hotkeys))
     }
 
     @Test
@@ -238,6 +252,7 @@ class Issue2139RealImeDependenceAuditTest {
          */
         private val REMAINING_GENUINE_GATED = setOf(
             "ShowKeyboardChipE2eTest.kt",
+            "TmuxKeyBarCtrlComboE2eTest.kt",
             "TmuxSessionOpencodeInputDockerTest.kt",
             // Gated geometry + #1942 focus-thief diagnosis. The diagnosis
             // contract is "a real IME raise names FOREIGN_WINDOW_FOCUS_SIGNATURE";

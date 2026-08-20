@@ -1028,6 +1028,62 @@ notification_permission_validate_report() {
     "$NOTIFICATION_PERMISSION_TEST_CLASS" "$NOTIFICATION_PERMISSION_TEST_METHOD"
 }
 
+# Issue #1662 / G5: Gradle's connected-test task can return zero after the
+# instrumentation runner has written a red authoritative JUnit XML. Never let
+# that wrapper result launder a product assertion failure into a green journey.
+# The report directory is cleared immediately before this invocation, so every
+# XML found here belongs to the current run rather than a previous attempt.
+connected_test_report_dir() {
+  local module_path="${CONNECTED_TASK%:connectedDebugAndroidTest}"
+  module_path="${module_path#:}"
+  module_path="${module_path//:/\/}"
+  local build_dir="$ROOT_DIR/$module_path/build"
+  if [[ "$USE_POOL" == "1" && -n "$SUFFIX" ]]; then
+    build_dir="$build_dir/lane-$SUFFIX"
+  fi
+  printf '%s/outputs/androidTest-results/connected\n' "$build_dir"
+}
+
+connected_test_validate_report() {
+  local report_dir
+  report_dir="$(connected_test_report_dir)"
+  local xml line value
+  local xml_count=0 tests=0 skipped=0 failures=0 errors=0
+
+  while IFS= read -r -d '' xml; do
+    xml_count=$((xml_count + 1))
+    line="$(grep -m1 '<testsuite ' "$xml" 2>/dev/null || true)"
+    [[ -n "$line" ]] || continue
+    value="$(sed -n 's/.* tests="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    tests=$((tests + ${value:-0}))
+    value="$(sed -n 's/.* skipped="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    skipped=$((skipped + ${value:-0}))
+    value="$(sed -n 's/.* failures="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    failures=$((failures + ${value:-0}))
+    value="$(sed -n 's/.* errors="\([0-9][0-9]*\)".*/\1/p' <<< "$line")"
+    errors=$((errors + ${value:-0}))
+  done < <(find "$report_dir" -type f -name 'TEST-*.xml' -print0 2>/dev/null)
+
+  local executed=$((tests - skipped))
+  if (( xml_count == 0 )); then
+    printf 'CONNECTED_TEST_XML_FAILED: no authoritative JUnit XML under %s\n' \
+      "$report_dir" >&2
+    return 1
+  fi
+  if (( tests <= 0 || executed <= 0 )); then
+    printf 'CONNECTED_TEST_XML_FAILED: invocation executed no tests (xml=%s tests=%s skipped=%s)\n' \
+      "$xml_count" "$tests" "$skipped" >&2
+    return 1
+  fi
+  if (( failures != 0 || errors != 0 )); then
+    printf 'CONNECTED_TEST_XML_FAILED: authoritative JUnit XML is red (xml=%s tests=%s skipped=%s failures=%s errors=%s)\n' \
+      "$xml_count" "$tests" "$skipped" "$failures" "$errors" >&2
+    return 1
+  fi
+  printf 'CONNECTED_TEST_XML_RESULT executed=%s skipped=%s failures=%s errors=%s report=%s\n' \
+    "$executed" "$skipped" "$failures" "$errors" "$report_dir"
+}
+
 cleanup_suffixed_packages() {
   # Optional first arg:
   #   --include-base   ALSO uninstall the base com.pocketshell.app[.test] and
@@ -1405,6 +1461,12 @@ if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" ]]; then
 fi
 
 if (( rc == 0 )); then
+  connected_test_report_dir_path="$(connected_test_report_dir)"
+  rm -rf "$connected_test_report_dir_path"
+  # Expose the exact report root to the Gradle child as a convenience for
+  # hermetic wrapper fixtures. Real Gradle writes the same path through AGP;
+  # the authoritative verdict below still comes only from files found there.
+  export POCKETSHELL_CONNECTED_TEST_REPORT_DIR="$connected_test_report_dir_path"
   set +e
   pocketshell_run_guarded_mutation pocketshell_scope_run "$SCOPE_UNIT" \
     ./gradlew --no-daemon "$CONNECTED_TASK" \
@@ -1413,6 +1475,19 @@ if (( rc == 0 )); then
     "${GRADLE_ARGS[@]}"
   rc=$?
   set -e
+fi
+
+# A zero Gradle exit code is not sufficient: the instrumentation XML is the
+# authoritative test verdict. Validate it before the fixture classifier and
+# before the EXIT trap can publish a green wrapper result.
+if (( rc == 0 )); then
+  set +e
+  connected_test_validate_report
+  report_rc=$?
+  set -e
+  if (( report_rc != 0 )); then
+    rc="$report_rc"
+  fi
 fi
 
 if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" && "$rc" == "0" ]]; then

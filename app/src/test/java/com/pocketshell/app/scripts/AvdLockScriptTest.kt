@@ -86,7 +86,7 @@ class AvdLockScriptTest {
     fun connectedTestPoolAndLegacyWrappersCannotMutateOneSerialConcurrently() {
         runShellHarness(
             "tests/scripts/connected-test-serial-ownership-test.sh",
-            expectedPassLine = "PASS: connected-test per-serial ownership (issue #1737) (17 cases)",
+            expectedPassLine = "PASS: connected-test per-serial ownership (issue #1737) (18 cases)",
             timeoutSeconds = 180,
         )
     }

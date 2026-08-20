@@ -318,9 +318,16 @@ ADB
   cp "$ROOT_DIR"/scripts/lib/*.sh "$sandbox/root/scripts/lib/"
   chmod +x "$sandbox/root/scripts/connected-test.sh"
 
-  cat > "$sandbox/root/gradlew" <<'GRADLEW'
+cat > "$sandbox/root/gradlew" <<'GRADLEW'
 #!/usr/bin/env bash
 printf 'ran\n' > "$STUB_GRADLEW_MARKER"
+if [[ -n "${POCKETSHELL_CONNECTED_TEST_REPORT_DIR:-}" ]]; then
+  mkdir -p "$POCKETSHELL_CONNECTED_TEST_REPORT_DIR"
+  cat > "$POCKETSHELL_CONNECTED_TEST_REPORT_DIR/TEST-stub.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="stub" tests="1" skipped="0" failures="0" errors="0"><testcase name="stub" classname="stub"/></testsuite>
+XML
+fi
 exit 0
 GRADLEW
   chmod +x "$sandbox/root/gradlew"

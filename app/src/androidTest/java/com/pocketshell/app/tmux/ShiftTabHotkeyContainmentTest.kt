@@ -7,12 +7,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
-import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Rule
@@ -63,18 +60,13 @@ class ShiftTabHotkeyContainmentTest {
                         .testTag(HOST_TAG),
                 ) {
                     TerminalHotkeysPanel(
-                        sections = TmuxHotkeyPanelSections,
+                        sections = TmuxHotkeyMainSections,
                         onKey = {},
                         onClose = {},
                     )
                 }
             }
         }
-        compose.waitForIdle()
-
-        // Issue #1332: ⇧Tab now lives in the EXTENDED set behind the "Show more
-        // keys" expander, so reveal it before asserting containment.
-        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
         compose.waitForIdle()
 
         // (1) The new back-tab key is actually rendered in the production panel.

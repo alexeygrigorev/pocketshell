@@ -19,7 +19,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -139,7 +138,7 @@ class TmuxKeyboardPanLayoutTest {
         compose.setContent {
             PocketShellTheme {
                 TerminalHotkeysPanel(
-                    sections = TmuxHotkeyPanelSections,
+                    sections = TmuxHotkeyMainSections,
                     onKey = {},
                     onClose = {},
                     modifier = Modifier.testTag("hotkeys-panel-host"),
@@ -147,11 +146,6 @@ class TmuxKeyboardPanLayoutTest {
             }
         }
         compose.waitForIdle()
-        // Issue #1332: `^B` is in the EXTENDED CTRL COMBOS grid behind the "Show
-        // more keys" expander, so reveal it before measuring the key height.
-        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
-        compose.waitForIdle()
-
         val keyHeight = compose
             .onNodeWithText("^B")
             .fetchSemanticsNode()
@@ -159,8 +153,8 @@ class TmuxKeyboardPanLayoutTest {
             .height
 
         assertTrue(
-            "tmux hotkeys panel keys must stay visible and usable (>=44dp tap)",
-            keyHeight >= 40f,
+            "tmux hotkeys panel keys must stay visible and usable (>=48dp tap)",
+            keyHeight >= 48f,
         )
     }
 

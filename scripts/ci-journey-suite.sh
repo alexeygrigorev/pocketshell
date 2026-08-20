@@ -346,6 +346,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.diagnostics.ConnectionJournalHostPullJourneyDockerTest"  # #1710 Settings one-shot full journal over the held warm session; no-warm no-dial proof
   "com.pocketshell.app.env.EnvScreenE2eTest"  # #1094 #1092 durability for ): the env edit/add on-device journeys. The
   "com.pocketshell.app.tmux.TmuxResizeSessionE2eTest#cachedSizeReplayRestoresFullWindowAndAgentPaneIsNotCut"  # #1169 #285 Codex/agent pane rendered CUT: tmux window resized too small
+  "$FQCN_PREFIX.TmuxKeyBarCtrlComboE2eTest#hotkeysTwoPageFlowSendsExactShellAndAgentControlBytes"  # #1662 two-page flow + exact shell/agent bytes + atomic doubled controls
   "com.pocketshell.app.usage.UsageGlancePillE2eTest"  # #1241 #418 the landing app-bar usage GLANCE PILL on-device proof. The
   "com.pocketshell.app.usage.UsageThresholdNotificationE2eTest"  # #1618 both relative countdown + absolute reset time reach the real status-bar notification
   "com.pocketshell.app.usage.Usage1318StrictSchemaRenderE2eTest"  # #1318 on-device render acceptance for the quse-v0.0.9 strict-schem…

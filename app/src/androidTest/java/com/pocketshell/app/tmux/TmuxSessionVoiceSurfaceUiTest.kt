@@ -3,21 +3,27 @@ package com.pocketshell.app.tmux
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.assistant.AssistantAgentLoop
@@ -43,8 +49,10 @@ import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
-import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_CTRL_FLOW_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_BACK_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_CLOSE_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
@@ -60,6 +68,7 @@ import org.junit.runner.RunWith
  * accessory and agent-vs-shell prompt/command affordances.
  */
 @RunWith(AndroidJUnit4::class)
+@OptIn(ExperimentalMaterial3Api::class)
 class TmuxSessionVoiceSurfaceUiTest {
 
     @get:Rule
@@ -635,7 +644,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 TerminalHotkeysPanel(
-                    sections = TmuxHotkeyPanelSections,
+                    sections = TmuxHotkeyMainSections,
                     onKey = { taps += it.label },
                     onClose = {},
                 )
@@ -650,22 +659,14 @@ class TmuxSessionVoiceSurfaceUiTest {
 
     @Test
     fun tmuxHotkeysPanelExposesEmergencyKeysAndRestoredCtrlB() {
-        // Issue #784: Esc / ^C / ^D plus the restored ^B (tmux prefix) all show
-        // as direct, tappable buttons — no `…` overflow. (Issue #1091 added a
-        // sticky `Ctrl` MODIFIER for the general `Ctrl+<letter>` escape hatch; the
-        // direct combos below are unchanged and this test does not assert against
-        // the modifier.)
-        //
-        // Issue #1332: Esc / ^C / ^D are now in the COMMON (always-shown) set, so
-        // they are tapped while collapsed (a single node each). ^B (tmux prefix)
-        // lives in the EXTENDED CTRL COMBOS grid behind the "Show more keys"
-        // expander, so it is tapped after revealing the extended set. The taps
-        // still route through `onKey` unchanged — order/disclosure only.
+        // Issue #1662: Esc, ^B, ^C and ^D are all direct targets on the one-screen
+        // main page. Arbitrary chords live behind Ctrl+…; no expander or sticky
+        // modifier remains.
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
                 TerminalHotkeysPanel(
-                    sections = TmuxHotkeyPanelSections,
+                    sections = TmuxHotkeyMainSections,
                     onKey = { taps += it.label },
                     onClose = {},
                 )
@@ -676,12 +677,102 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("^C").assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText("^D").assertIsDisplayed().assertHasClickAction().performClick()
 
-        // Reveal the extended set, then tap the restored ^B (tmux prefix).
-        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
-        compose.waitForIdle()
         compose.onNodeWithText("^B").assertIsDisplayed().assertHasClickAction().performClick()
 
         assertEquals(listOf("Esc", "^C", "^D", "^B"), taps)
+    }
+
+    @Test
+    fun issue1662OpenSheetLiveTransitionDisablesNavigationAndReopenResetsMain() {
+        var shown by mutableStateOf(true)
+        var live by mutableStateOf(true)
+        val sent = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme {
+                if (shown) {
+                    TerminalHotkeysSheet(
+                        mainSections = TmuxHotkeyMainSections,
+                        ctrlSections = TmuxHotkeyCtrlSections,
+                        enabled = live,
+                        onKey = { sent += it.label },
+                        onDismiss = { shown = false },
+                    )
+                }
+            }
+        }
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_CTRL_FLOW_TAG).performClick()
+        compose.onNodeWithText("Ctrl + …").assertIsDisplayed()
+        val backByteBaseline = sent.toList()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_BACK_TAG).performClick()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_CTRL_FLOW_TAG).assertIsDisplayed()
+        assertEquals("Back must not dispatch a hotkey", backByteBaseline, sent)
+
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_CTRL_FLOW_TAG).performClick()
+        compose.runOnIdle { live = false }
+        compose.waitForIdle()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_BACK_TAG).assertIsNotEnabled()
+        compose.onNodeWithText("^Q").assertIsNotEnabled().performClick()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_BACK_TAG).performClick()
+        compose.onNodeWithText("Ctrl + …").assertIsDisplayed()
+        assertEquals("non-live Ctrl page must not dispatch bytes", backByteBaseline, sent)
+
+        val closeByteBaseline = sent.toList()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_CLOSE_TAG).performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_TAG).assertDoesNotExist()
+        assertEquals("Close must not dispatch a hotkey", closeByteBaseline, sent)
+
+        compose.runOnIdle {
+            live = true
+            shown = true
+        }
+        compose.waitForIdle()
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_CTRL_FLOW_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Ctrl + …").assertDoesNotExist()
+    }
+
+    @Test
+    fun issue1662SheetRoutesLongPressAndOrdinaryTwoTapFallbacksExactly() {
+        val sent = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme {
+                TerminalHotkeysSheet(
+                    mainSections = TmuxHotkeyMainSections,
+                    ctrlSections = TmuxHotkeyCtrlSections,
+                    onKey = { sent += it.label },
+                    onDismiss = {},
+                )
+            }
+        }
+        compose.waitForIdle()
+
+        val ctrlC = compose.onNodeWithText("^C")
+        val ctrlD = compose.onNodeWithText("^D")
+        assertEquals(
+            "Send Ctrl-C twice",
+            ctrlC.fetchSemanticsNode().config
+                .getOrNull(SemanticsActions.OnLongClick)
+                ?.label,
+        )
+        assertEquals(
+            "Send Ctrl-D twice",
+            ctrlD.fetchSemanticsNode().config
+                .getOrNull(SemanticsActions.OnLongClick)
+                ?.label,
+        )
+        ctrlC.performTouchInput { longClick() }
+        ctrlD.performTouchInput { longClick() }
+        compose.onNodeWithText("^C").performClick()
+        compose.onNodeWithText("^C").performClick()
+        compose.onNodeWithText("^D").performClick()
+        compose.onNodeWithText("^D").performClick()
+
+        assertEquals(
+            listOf("^C×2", "^D×2", "^C", "^C", "^D", "^D"),
+            sent,
+        )
     }
 
     @Test

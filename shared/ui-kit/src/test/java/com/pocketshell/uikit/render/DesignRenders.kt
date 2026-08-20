@@ -104,32 +104,16 @@ import org.robolectric.annotation.GraphicsMode
 @Config(qualifiers = "w412dp-h915dp-night-xxhdpi")
 class DesignRenders {
 
-    /**
-     * Issue #784: the dedicated terminal-hotkeys PANEL — its own bottom-sheet
-     * surface (NOT inside the composer, NOT part of the soft keyboard). Shows
-     * EVERY key at once in a tidy multi-row grid: no `…` overflow, no horizontal
-     * scroll, no duplicate `/`. `^B` (tmux prefix) is restored and every `^X`
-     * label is the byte it sends. Arrows use clean `← ↑ ↓ →` glyphs. Issue #1091
-     * adds the filled nano control keys, the sticky `Ctrl` MODIFIER (rendered
-     * ARMED here so its accent treatment is visually checked), and the a–z
-     * LETTERS grid for `Ctrl+<any letter>`. This is the fast JVM-level visual
-     * check that the whole grid lays out cleanly; the emulator panel +
-     * keyboard-up composer screenshots are the acceptance.
-     */
+    /** Issue #1662 common hotkeys page, including the visible hold cues. */
     @Test
     fun terminalHotkeysPanel() = render("terminal-hotkeys-panel") {
         TerminalHotkeysPanelRender()
     }
 
-    /**
-     * Issue #1332: the DEFAULT (collapsed) hotkeys panel — the compact COMMON
-     * set the maintainer sees on open: ARROWS at the TOP, then the everyday
-     * `Esc`/`Tab`/`Enter`/`^C`/`^D` row, and the "Show more keys" expander. The
-     * full CTRL/letters grids are hidden until expanded.
-     */
+    /** Issue #1662 modal Ctrl picker with the five-column QWERTY layout. */
     @Test
-    fun terminalHotkeysPanelCollapsed() = render("terminal-hotkeys-panel-collapsed") {
-        TerminalHotkeysPanelCollapsedRender()
+    fun terminalHotkeysCtrlPage() = render("terminal-hotkeys-ctrl-page") {
+        TerminalHotkeysCtrlPageRender()
     }
 
     /** Issue #1487 fast visual check for single/multiple/restoring pill states. */

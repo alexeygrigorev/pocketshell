@@ -43,7 +43,6 @@ import com.pocketshell.app.projects.ManualKindWriter
 import com.pocketshell.app.projects.ProfilesResult
 import com.pocketshell.app.projects.RemoteProfile
 import com.pocketshell.app.projects.SessionNamePolicy
-import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import com.pocketshell.app.share.FilenameSanitiser
@@ -16483,37 +16482,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * choose the cursor-key encoding is more correct than us baking
      * ESC[A in here.
      */
-    /**
-     * Issue #1091: the sticky `Ctrl` modifier state, surfaced so the hotkeys
-     * panel can render the active (accent) treatment. `Off` -> not armed;
-     * `OneShot` -> the next composable key is sent as a control char then the
-     * modifier auto-releases; `Locked` -> stays armed until tapped off.
-     */
-    private val _ctrlModifier = MutableStateFlow(KeyModifierState.Off)
-    public val ctrlModifier: StateFlow<KeyModifierState> = _ctrlModifier.asStateFlow()
-
-    /**
-     * Issue #1091: cycle the sticky `Ctrl` modifier on each tap of the `Ctrl`
-     * key — `Off -> OneShot -> Locked -> Off`. A single tap arms it for the
-     * next key; a second consecutive tap (the "double tap") locks it on; a
-     * third tap releases it. Matches the `docs/input-methods.md` key-bar
-     * modifier spec.
-     */
-    public fun onCtrlModifierTap() {
-        _ctrlModifier.value = when (_ctrlModifier.value) {
-            KeyModifierState.Off -> KeyModifierState.OneShot
-            KeyModifierState.OneShot -> KeyModifierState.Locked
-            KeyModifierState.Locked -> KeyModifierState.Off
-        }
-    }
-
     public fun onKeyBarKey(paneId: String, label: String) {
-        // Issue #1091: the lone-`Ctrl` modifier is BACK (it was removed in #784)
-        // — but now as a real sticky modifier that composes with the panel's
-        // LETTERS section so the maintainer can send `Ctrl+<any key>` (the
-        // `nano`-trapped report). Direct one-tap control buttons (incl. the
-        // newly-filled `^X`/`^O`/`^K`/…) stay too; both routes go through the
-        // same `send-keys -H` overlay below — no new transport.
         DiagnosticEvents.record(
             "action",
             "shortcut_sent",
@@ -16522,28 +16491,14 @@ public class TmuxSessionViewModel @Inject constructor(
             "key" to label,
         )
 
-        // Issue #1091: tapping the `Ctrl` modifier only cycles the sticky state
-        // (no byte is sent — it decorates the NEXT key), like the key-bar spec.
-        if (label == TmuxHotkeyCtrlModifierLabel) {
-            onCtrlModifierTap()
-            return
-        }
-
-        // Issue #1091: a single composable char (the LETTERS section, a–z and
-        // the caret-range symbols). With `Ctrl` armed it is sent as its control
-        // byte (`Ctrl+<letter>`); with `Ctrl` off it is typed literally. A
-        // OneShot modifier auto-releases after the key; Locked persists.
-        val composable = singleControlComposableChar(label)
-        if (composable != null) {
-            val armed = _ctrlModifier.value
-            if (armed != KeyModifierState.Off) {
-                controlByteForChar(composable)?.let { sendControlInputToPane(paneId, it) }
-                if (armed == KeyModifierState.OneShot) {
-                    _ctrlModifier.value = KeyModifierState.Off
-                }
-            } else {
-                writeInputToPane(paneId, composable.toString().toByteArray(Charsets.UTF_8))
-            }
+        // Issue #1662: every Ctrl-page label has one syntax and one mapping.
+        // `^Q` therefore reaches 0x11 and `^\` reaches 0x1c without another
+        // curated when-arm. The page itself is the visible mode; no sticky VM
+        // state survives between taps or sheet opens.
+        val controlChar = label.takeIf { it.length == 2 && it[0] == '^' }?.get(1)
+        val controlByte = controlChar?.let(::controlByteForChar)
+        if (controlByte != null) {
+            sendControlInputToPane(paneId, controlByte)
             return
         }
 
@@ -16562,31 +16517,6 @@ public class TmuxSessionViewModel @Inject constructor(
             // the tmux named `Enter` key on the `send-keys` control channel
             // — no terminal resize or redraw, like Esc/Tab.
             "⏎", "Enter" -> "Enter"
-            // Curated one-tap control combos (issue #458 / #784). Each maps
-            // directly to its control byte via the `send-keys -H` overlay
-            // path — no resize, no redraw. Every `^X` label is audited here so
-            // the visible label equals the byte sent (no dupes / mislabels):
-            //   ^A=0x01  ^B=0x02  ^C=0x03  ^D=0x04  ^E=0x05
-            //   ^L=0x0C  ^R=0x12  ^O=0x0F  ^X=0x18  ^Z=0x1A
-            "^A", "Ctrl-A" -> {
-                sendControlInputToPane(paneId, CtrlAByte)
-                null
-            }
-            // Issue #677/#784: `^B` (tmux prefix / Claude Code "ctrl-b ctrl-b
-            // to background"). Raw 0x02 straight through the control channel —
-            // in `-CC` mode it is NOT consumed as an outer-tmux prefix.
-            "^B", "Ctrl-B" -> {
-                sendControlInputToPane(paneId, CtrlBByteValue)
-                null
-            }
-            "^C", "Ctrl-C" -> {
-                sendControlInputToPane(paneId, CtrlCByte)
-                null
-            }
-            "^D", "Ctrl-D" -> {
-                sendControlInputToPane(paneId, CtrlDByte)
-                null
-            }
             // Issue #787 (re-home from the deleted `/ commands` palette,
             // originally #453/#543): the DOUBLED interrupt/EOF chords. These are
             // distinct from a single `^C`/`^D` — Claude Code (and many REPLs)
@@ -16600,61 +16530,6 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             TmuxHotkeyEofX2Label -> {
                 sendControlInputToPane(paneId, CtrlDByte, repeatCount = 2)
-                null
-            }
-            "^E", "Ctrl-E" -> {
-                sendControlInputToPane(paneId, CtrlEByte)
-                null
-            }
-            "^L", "Ctrl-L" -> {
-                sendControlInputToPane(paneId, CtrlLByte)
-                null
-            }
-            "^R", "Ctrl-R" -> {
-                sendControlInputToPane(paneId, CtrlRByte)
-                null
-            }
-            "^Z", "Ctrl-Z" -> {
-                sendControlInputToPane(paneId, CtrlZByte)
-                null
-            }
-            "^O", "Ctrl-O" -> {
-                sendControlInputToPane(paneId, CtrlOByte)
-                null
-            }
-            "^X", "Ctrl-X" -> {
-                sendControlInputToPane(paneId, CtrlXByte)
-                null
-            }
-            // Issue #1091: the control keys nano (and many TUIs) need that were
-            // missing — `^G` `^J` `^K` `^T` `^U` `^W` `^\`. Direct one-tap
-            // buttons routed through the same `send-keys -H` overlay path.
-            "^G", "Ctrl-G" -> {
-                sendControlInputToPane(paneId, CtrlGByte)
-                null
-            }
-            "^J", "Ctrl-J" -> {
-                sendControlInputToPane(paneId, CtrlJByte)
-                null
-            }
-            "^K", "Ctrl-K" -> {
-                sendControlInputToPane(paneId, CtrlKByte)
-                null
-            }
-            "^T", "Ctrl-T" -> {
-                sendControlInputToPane(paneId, CtrlTByte)
-                null
-            }
-            "^U", "Ctrl-U" -> {
-                sendControlInputToPane(paneId, CtrlUByte)
-                null
-            }
-            "^W", "Ctrl-W" -> {
-                sendControlInputToPane(paneId, CtrlWByte)
-                null
-            }
-            "^\\", "Ctrl-\\" -> {
-                sendControlInputToPane(paneId, CtrlBackslashByte)
                 null
             }
             // Issue #784: clean arrow glyphs (← ↑ ↓ →) replace the old

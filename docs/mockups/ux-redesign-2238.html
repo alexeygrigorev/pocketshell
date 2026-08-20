@@ -1,0 +1,824 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PocketShell · Work-first UX redesign · #2238</title>
+  <style>
+    :root {
+      --bg: #080c12;
+      --surface: #111821;
+      --surface-2: #17212c;
+      --surface-3: #1d2a37;
+      --line: #2a3948;
+      --text: #e8f0f6;
+      --muted: #9aabb9;
+      --faint: #6f8190;
+      --cyan: #31d6ef;
+      --cyan-dim: #123744;
+      --green: #45d88b;
+      --amber: #f6b73c;
+      --red: #ff6b63;
+      --violet: #b79bff;
+      --radius: 15px;
+      --space: 12px;
+      --motion: 180ms;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; }
+    body {
+      background: #05070a;
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.35;
+      overflow-x: hidden;
+    }
+    button, textarea { font: inherit; }
+    button {
+      min-height: 48px;
+      color: inherit;
+      cursor: pointer;
+      touch-action: manipulation;
+    }
+    button:focus-visible, textarea:focus-visible {
+      outline: 3px solid var(--cyan);
+      outline-offset: 2px;
+    }
+    [hidden] { display: none !important; }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 330px minmax(390px, 412px);
+      gap: 32px;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 28px;
+    }
+    .control-panel {
+      align-self: center;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: #0c1219;
+    }
+    .control-panel h1 { margin: 0; font-size: 22px; }
+    .control-panel p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+    .eyebrow {
+      margin: 22px 0 8px;
+      color: var(--faint);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .control-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .control-button {
+      min-height: 48px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      text-align: left;
+    }
+    .control-button.active {
+      border-color: var(--cyan);
+      background: var(--cyan-dim);
+      color: var(--cyan);
+      font-weight: 800;
+    }
+    .control-button.wide { width: 100%; margin-top: 8px; }
+    .variant-copy { min-height: 42px; }
+
+    .device {
+      position: relative;
+      width: 412px;
+      min-height: 915px;
+      overflow: hidden;
+      border: 8px solid #141b23;
+      border-radius: 38px;
+      background: var(--bg);
+      box-shadow: 0 28px 90px #000b;
+    }
+    .status-bar {
+      display: flex;
+      height: 31px;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      background: var(--bg);
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .app { position: relative; min-height: 876px; overflow: hidden; }
+    .screen {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(10px);
+      transition: opacity var(--motion) ease, transform var(--motion) ease;
+    }
+    .screen.active {
+      opacity: 1;
+      pointer-events: auto;
+      transform: none;
+    }
+    .top-bar {
+      display: flex;
+      min-height: 70px;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #0c1219f2;
+    }
+    .back {
+      width: 48px;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 32px;
+      line-height: 1;
+    }
+    .grow { min-width: 0; flex: 1; }
+    .title, .subtitle, .name, .meta, .link-action { display: block; }
+    .title { font-size: 19px; font-weight: 850; }
+    .subtitle { margin-top: 3px; color: var(--muted); font-size: 12px; }
+    .top-action, .state-pill {
+      min-height: 48px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface-2);
+      white-space: nowrap;
+    }
+    .state-pill { display: inline-flex; align-items: center; color: var(--amber); font-size: 12px; }
+    .session-screen.disconnected .connection-dot { background: var(--red); }
+    .session-screen.disconnected .state-pill { color: var(--red); }
+    .session-screen.disconnected .terminal-frame { opacity: .56; }
+    .session-screen.disconnected .reconnect-strip { border-color: #7c302b; background: #211313; color: #ffc2bd; }
+    .top-action { color: var(--cyan); font-weight: 800; }
+    .tabs, .session-tabs {
+      display: flex;
+      gap: 7px;
+      padding: 9px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .tab {
+      flex: 1;
+      min-height: 48px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--muted);
+      font-weight: 700;
+    }
+    .tab.active {
+      border-color: var(--cyan);
+      background: var(--cyan);
+      color: #041118;
+    }
+    .scroll {
+      min-height: 0;
+      overflow: auto;
+      padding: 13px 14px 104px;
+      scrollbar-width: none;
+    }
+    .scroll::-webkit-scrollbar { display: none; }
+    .section-label {
+      margin: 16px 2px 8px;
+      color: var(--faint);
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    .card, .row, .banner {
+      margin-bottom: var(--space);
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+    .row {
+      display: flex;
+      min-height: 64px;
+      align-items: center;
+      gap: 11px;
+    }
+    .row.compact { min-height: 52px; }
+    .row:last-child, .card:last-child { margin-bottom: 0; }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--faint);
+    }
+    .status-dot.green { background: var(--green); }
+    .status-dot.amber { background: var(--amber); }
+    .status-dot.red { background: var(--red); }
+    .status-dot.violet { background: var(--violet); }
+    .name { font-size: 14px; font-weight: 800; overflow-wrap: anywhere; }
+    .meta { margin-top: 3px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+    .right { margin-left: auto; flex: 0 0 auto; text-align: right; }
+    .link-action { color: var(--cyan); font-size: 13px; font-weight: 850; }
+    .signal-row.waiting { border-color: #80631d; background: #211b10; }
+    .signal-row.failed { border-color: #7c302b; background: #211313; }
+    .signal-row.working { border-color: #245e44; background: #102019; }
+    .banner { background: #121c23; }
+    .banner .name { font-size: 13px; }
+
+    .fab {
+      position: absolute;
+      right: 18px;
+      bottom: 22px;
+      width: 58px;
+      min-height: 58px;
+      border: 0;
+      border-radius: 50%;
+      background: var(--cyan);
+      color: #031219;
+      font-size: 27px;
+      font-weight: 900;
+    }
+    .host-tabs { padding-bottom: 4px; }
+    .host-pane { min-height: 0; flex: 1; }
+    .project-title { font-weight: 850; overflow-wrap: anywhere; }
+    .session-row { margin-left: 18px; }
+    .tool-row { min-height: 62px; }
+
+    .session-screen .top-bar { min-height: 66px; }
+    .connection-dot { background: var(--green); }
+    .session-screen.reconnecting .connection-dot { background: var(--amber); }
+    .reconnect-strip {
+      display: flex;
+      min-height: 54px;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 12px;
+      border-bottom: 1px solid #76551d;
+      background: #2a210f;
+      color: #ffe1a0;
+      font-size: 12px;
+    }
+    .terminal-frame {
+      min-height: 0;
+      flex: 1;
+      overflow: auto;
+      padding: 15px 14px;
+      background: #020509;
+      color: #d2dbe2;
+      font: 13px/1.55 var(--mono);
+      transition: opacity var(--motion) ease;
+    }
+    .session-screen.reconnecting .terminal-frame { opacity: .56; }
+    .term-muted { color: #8293a0; }
+    .term-cyan { color: var(--cyan); }
+    .term-green { color: var(--green); }
+    .conversation {
+      min-height: 0;
+      flex: 1;
+      overflow: auto;
+      padding: 14px;
+      background: #0b1117;
+    }
+    .conversation .message {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      margin-bottom: 11px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      background: var(--surface);
+    }
+    .conversation .message.user { background: #102833; }
+    .session-dock {
+      display: flex;
+      min-height: 74px;
+      align-items: center;
+      gap: 6px;
+      padding: 9px 8px;
+      border-top: 1px solid var(--line);
+      background: var(--bg);
+    }
+    .dock-button {
+      min-width: 48px;
+      padding: 0 10px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--muted);
+      font-size: 11px;
+    }
+    .dock-button.primary {
+      min-width: 142px;
+      margin-left: auto;
+      border-color: var(--cyan);
+      background: var(--cyan-dim);
+      color: var(--cyan);
+      font-weight: 850;
+    }
+    .recovery-dock .dock-button.primary {
+      border-color: var(--amber);
+      background: #3a2a10;
+      color: #ffe1a0;
+    }
+    .voice-hint {
+      position: absolute;
+      right: 10px;
+      bottom: 83px;
+      z-index: 4;
+      max-width: 270px;
+      padding: 10px 12px;
+      border: 1px solid var(--cyan);
+      border-radius: 12px;
+      background: #102a35;
+      color: var(--text);
+      font-size: 12px;
+      box-shadow: 0 8px 30px #0009;
+    }
+    .voice-hint::after {
+      position: absolute;
+      right: 30px;
+      bottom: -8px;
+      width: 14px;
+      height: 14px;
+      border-right: 1px solid var(--cyan);
+      border-bottom: 1px solid var(--cyan);
+      background: #102a35;
+      content: "";
+      transform: rotate(45deg);
+    }
+
+    .usage-card .usage-bar {
+      height: 8px;
+      margin: 11px 0 8px;
+      overflow: hidden;
+      border-radius: 99px;
+      background: #26313b;
+    }
+    .usage-bar > i { display: block; height: 100%; background: var(--amber); }
+    .usage-bar > i.danger { background: var(--red); }
+    .usage-bar > i.ok { background: var(--green); }
+
+    .scrim {
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      background: #000b;
+    }
+    .sheet {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      z-index: 11;
+      padding: 18px 16px 16px;
+      border-top: 1px solid var(--line);
+      border-radius: 22px 22px 0 0;
+      background: #17212c;
+      box-shadow: 0 -18px 60px #000b;
+      transform: translateY(105%);
+      transition: transform var(--motion) ease;
+    }
+    .sheet.open { transform: none; }
+    .sheet textarea {
+      width: 100%;
+      min-height: 92px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #0b1117;
+      color: var(--text);
+      resize: vertical;
+    }
+    .sheet-toolbar, .outcome-row { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+    .sheet-button, .outcome-button {
+      min-height: 48px;
+      padding: 0 11px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .outcome-button.active { border-color: var(--cyan); color: var(--cyan); }
+    .sheet-button.send { margin-left: auto; background: var(--cyan); color: #031219; font-weight: 900; }
+    .sheet-button.send[data-state="failed"] { background: var(--red); color: #210807; }
+    .sheet-button.send[data-state="queued"], .sheet-button.send[data-state="checking"] { background: var(--amber); color: #231704; }
+    .send-state { min-height: 22px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+    .send-state[data-state="sent"] { color: var(--green); }
+    .send-state[data-state="failed"] { color: var(--red); }
+    .send-state[data-state="queued"], .send-state[data-state="checking"] { color: var(--amber); }
+
+    .modal {
+      position: absolute;
+      inset: 15% 14px auto;
+      z-index: 13;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: #17212c;
+      box-shadow: 0 18px 60px #000d;
+    }
+    .hotkey-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 7px; margin-top: 14px; }
+    .key {
+      display: grid;
+      min-height: 52px;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      background: var(--surface);
+      font: 12px var(--mono);
+    }
+
+    /* The four directions intentionally change hierarchy, not information. */
+    body[data-variant="calm"] { --radius: 18px; --space: 14px; }
+    body[data-variant="calm"] .section-label { letter-spacing: .13em; }
+    body[data-variant="operator"] { --radius: 7px; --space: 7px; --cyan: #56e3f5; }
+    body[data-variant="operator"] .name, body[data-variant="operator"] .title { font-family: var(--mono); }
+    body[data-variant="operator"] .card, body[data-variant="operator"] .row { border-radius: 7px; }
+    body[data-variant="signal"] { --cyan: #46eaff; --radius: 11px; }
+    body[data-variant="signal"] .signal-row { border-width: 2px; }
+    body[data-variant="native"] { --radius: 21px; --space: 14px; }
+    body[data-variant="native"] .card, body[data-variant="native"] .row { box-shadow: 0 2px 0 #0006; }
+    body[data-text-size="large"] { font-size: 19px; }
+    body[data-text-size="large"] .device { min-height: 915px; }
+    body[data-text-size="large"] .meta, body[data-text-size="large"] .subtitle { font-size: 13px; }
+    body[data-text-size="large"] .control-panel { font-size: 16px; }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0ms !important; animation-duration: 0ms !important; }
+    }
+    @media (max-width: 820px) {
+      .layout { display: block; padding: 0; }
+      .control-panel { display: none; }
+      .device { width: 100%; min-height: 100vh; border: 0; border-radius: 0; box-shadow: none; }
+      .app { min-height: calc(100vh - 31px); }
+    }
+    @media (max-width: 420px) {
+      .top-bar { padding-inline: 10px; }
+      .scroll, .conversation { padding-inline: 10px; }
+      .dock-button.primary { min-width: 118px; padding-inline: 7px; }
+      .name { font-size: 13px; }
+    }
+  </style>
+</head>
+<body data-variant="calm" data-text-size="normal">
+  <div class="layout">
+    <aside class="control-panel" aria-label="Prototype controls">
+      <h1>PocketShell redesign</h1>
+      <p>Issue #2238 · compare one work-first information architecture across four visual directions.</p>
+
+      <div class="eyebrow">Style direction</div>
+      <div class="control-grid">
+        <button class="control-button active" type="button" data-style="calm">Calm</button>
+        <button class="control-button" type="button" data-style="operator">Operator</button>
+        <button class="control-button" type="button" data-style="signal">Signal</button>
+        <button class="control-button" type="button" data-style="native">Native</button>
+      </div>
+      <p class="variant-copy" id="variant-copy">Softer hierarchy, restrained status treatment, comfortable density.</p>
+
+      <div class="eyebrow">Screens</div>
+      <div class="control-grid">
+        <button class="control-button" type="button" data-nav="activity">Activity</button>
+        <button class="control-button" type="button" data-nav="hosts">Hosts</button>
+        <button class="control-button" type="button" data-nav="host">Host workspace</button>
+        <button class="control-button" type="button" data-nav="session">Session</button>
+        <button class="control-button" type="button" data-nav="usage">Usage</button>
+      </div>
+
+      <div class="eyebrow">Journeys</div>
+      <button class="control-button wide" type="button" data-demo="reconnect">Retained-frame reconnect</button>
+      <button class="control-button wide" type="button" data-demo="disconnected">Disconnected recovery</button>
+      <button class="control-button wide" type="button" data-demo="composer">Prompt composer outcomes</button>
+      <button class="control-button wide" type="button" data-modal="hotkeys">Hotkeys</button>
+
+      <div class="eyebrow">Containment</div>
+      <div class="control-grid">
+        <button class="control-button active" type="button" data-text-size="normal">Normal text</button>
+        <button class="control-button" type="button" data-text-size="large">Large text</button>
+      </div>
+    </aside>
+
+    <main class="device" aria-label="PocketShell Pixel 7 interactive redesign prototype">
+      <div class="status-bar" aria-label="Android status bar"><span>09:41</span><span aria-label="network and battery">▮▮▮ ◉ ▰</span></div>
+      <div class="app">
+        <section class="screen active" id="activity" data-screen="activity" aria-labelledby="activity-title">
+          <header class="top-bar">
+            <div class="grow"><div class="title" id="activity-title">PocketShell</div><div class="subtitle">Your active development work</div></div>
+            <button class="top-action" type="button" data-nav="usage"><span class="status-dot red" aria-hidden="true"></span> Limits 4</button>
+            <button class="top-action" type="button" aria-label="Settings">⚙</button>
+          </header>
+          <nav class="tabs" aria-label="Primary navigation">
+            <button class="tab active" type="button" aria-current="page">Activity</button>
+            <button class="tab" type="button" data-nav="hosts">Hosts</button>
+          </nav>
+          <div class="scroll">
+            <div class="section-label">Continue</div>
+            <button class="card" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;text-align:left">
+              <span class="row" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot green" aria-label="paused session"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">Claude · hetzner · paused 12m</span></span><span class="link-action">Resume</span></span>
+            </button>
+            <div class="banner" role="status"><div class="row" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot red" aria-hidden="true"></span><span class="grow"><span class="name">1 provider blocked · 3 near limit</span><span class="meta">Next reset in 2h 24m</span></span><button class="link-action" type="button" data-nav="usage" style="border:0;background:transparent">View</button></div></div>
+
+            <div class="section-label">Needs you · 2</div>
+            <button class="row signal-row waiting" type="button" data-nav="session" data-session-target="dtc" style="width:100%;text-align:left"><span class="status-dot amber" aria-label="waiting for input"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">dtc-website · Claude · waiting 2m</span></span><span class="right"><span class="link-action">Open</span><span class="meta">Waiting</span></span></button>
+            <button class="row signal-row failed" type="button" data-nav="session" data-session-target="dataops" style="width:100%;text-align:left"><span class="status-dot red" aria-label="send failed"></span><span class="grow"><span class="name">git-dataops</span><span class="meta">dataops · Codex · send failed</span></span><span class="link-action">Review</span></button>
+
+            <div class="section-label">Working · 3</div>
+            <button class="row signal-row working" type="button" data-nav="session" data-session-target="ai" style="width:100%;text-align:left"><span class="status-dot green" aria-label="working"></span><span class="grow"><span class="name">git-ai-engineering-field-guide</span><span class="meta">Claude · running tool · 4m</span></span><span class="meta">Working</span></button>
+            <button class="row signal-row working" type="button" data-nav="session" data-session-target="dataqna" style="width:100%;text-align:left"><span class="status-dot green" aria-label="working"></span><span class="grow"><span class="name">git-dataqna</span><span class="meta">Claude · thinking · 7m</span></span><span class="meta">Working</span></button>
+
+            <div class="section-label">Recent</div>
+            <div class="row"><span class="status-dot" aria-label="idle"></span><span class="grow"><span class="name">au-tomator-lambda</span><span class="meta">Shell · 26m</span></span><span class="meta">Idle</span></div>
+          </div>
+        </section>
+
+        <section class="screen" id="hosts" data-screen="hosts" aria-labelledby="hosts-title">
+          <header class="top-bar"><div class="grow"><div class="title" id="hosts-title">PocketShell</div><div class="subtitle">Hosts and infrastructure</div></div><button class="top-action" type="button" data-nav="usage">Limits 4</button><button class="top-action" type="button" aria-label="Settings">⚙</button></header>
+          <nav class="tabs" aria-label="Primary navigation"><button class="tab" type="button" data-nav="activity">Activity</button><button class="tab active" type="button" aria-current="page">Hosts</button></nav>
+          <div class="scroll"><div class="section-label">Hosts · 1</div>
+            <div class="card"><button class="row" type="button" data-nav="host" style="width:100%;margin:0;border:0;background:transparent;text-align:left"><span class="status-dot green" aria-label="connected"></span><span class="grow"><span class="name">hetzner</span><span class="meta">alexey@135.181.114.20 · 8 sessions</span></span><span class="meta">Connected</span></button><button class="row compact" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;margin:10px 0 0;background:var(--surface-2);text-align:left"><span class="grow"><span class="meta">Continue</span><span class="name">git-pocketshell</span></span><span class="link-action">Resume</span></button></div>
+          </div>
+          <button class="fab" type="button" aria-label="Create new session">+</button>
+        </section>
+
+        <section class="screen" id="host" data-screen="host" aria-labelledby="host-title">
+          <header class="top-bar"><button class="back" type="button" data-back aria-label="Back">‹</button><span class="status-dot green" aria-label="connected"></span><span class="grow"><span class="title" id="host-title">hetzner</span><span class="subtitle">7 active · 1 idle · 8 sessions</span></span><button class="top-action" type="button" aria-label="Host menu">⋮</button></header>
+          <nav class="tabs host-tabs" aria-label="Host workspace modes"><button class="tab active" type="button" data-pane="active">Active 8</button><button class="tab" type="button" data-pane="projects">Projects 84</button><button class="tab" type="button" data-pane="tools">Tools</button></nav>
+          <div class="scroll host-pane" data-hostpane="active"><div class="section-label">Needs you</div><button class="row signal-row waiting" type="button" data-nav="session" data-session-target="dtc" style="width:100%;text-align:left"><span class="status-dot amber"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">dtc-website · Claude · waiting 2m</span></span><span class="link-action">Open</span></button><div class="section-label">Working</div><button class="row signal-row working" type="button" data-nav="session" data-session-target="dataops" style="width:100%;text-align:left"><span class="status-dot green"></span><span class="grow"><span class="name">git-dataops</span><span class="meta">Codex · working 5m</span></span><span class="meta">Working</span></button><button class="row signal-row working" type="button" data-nav="session" data-session-target="ai" style="width:100%;text-align:left"><span class="status-dot green"></span><span class="grow"><span class="name">git-ai-engineering-field-guide</span><span class="meta">Claude · working 4m</span></span><span class="meta">Working</span></button><div class="section-label">Idle / recent</div><button class="row" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;text-align:left"><span class="status-dot"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">Claude · idle 12m</span></span><span class="link-action">Resume</span></button></div>
+          <div class="scroll host-pane" data-hostpane="projects" hidden><div class="section-label">Recent projects</div><div class="card"><div class="project-title">▾ dtc-website <span class="meta">· 2 sessions</span></div><div class="row session-row"><span class="status-dot green"></span><span class="grow"><span class="name">git-dtc-website-luna</span><span class="meta">Codex</span></span><span class="meta">Idle</span></div><div class="row session-row"><span class="status-dot amber"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">Claude</span></span><span class="meta">Waiting</span></div></div><div class="card"><div class="project-title">▾ pocketshell <span class="meta">· 1 session</span></div><div class="row session-row"><span class="status-dot green"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">Claude</span></span><span class="meta">Idle</span></div></div><div class="section-label">All projects · 84</div><div class="row"><span class="grow"><span class="name">Search projects…</span><span class="meta">Filter active, recent, Claude, Codex</span></span></div></div>
+          <div class="scroll host-pane" data-hostpane="tools" hidden><div class="section-label">Work</div><div class="row tool-row"><span class="grow"><span class="name">Files</span><span class="meta">Browse remote files</span></span><span class="link-action">›</span></div><div class="row tool-row"><span class="grow"><span class="name">Repositories</span><span class="meta">Browse git repos</span></span><span class="link-action">›</span></div><div class="row tool-row"><span class="grow"><span class="name">Port forwarding</span><span class="meta">40 discovered ports</span></span><span class="link-action">›</span></div><div class="section-label">Host</div><button class="row tool-row" type="button" data-nav="usage" style="width:100%;text-align:left"><span class="grow"><span class="name">Usage and provider limits</span><span class="meta">1 blocked · 3 near limit</span></span><span class="link-action">›</span></button><div class="row tool-row"><span class="grow"><span class="name">Host settings</span></span><span class="link-action">›</span></div><div class="row tool-row"><span class="grow"><span class="name">Watched folders</span></span><span class="link-action">›</span></div><div class="section-label">Support</div><div class="row tool-row"><span class="grow"><span class="name">Host assistant & diagnostics</span></span><span class="link-action">›</span></div></div>
+          <button class="fab" type="button" aria-label="Create new session">+</button>
+        </section>
+
+        <section class="screen session-screen" id="session" data-screen="session" aria-labelledby="session-title">
+          <header class="top-bar"><button class="back" type="button" data-back aria-label="Back">‹</button><span class="status-dot connection-dot" aria-label="connected"></span><span class="grow"><span class="title" id="session-title">dtc-website · Luna</span><span class="subtitle" id="session-subtitle">Claude · hetzner</span></span><span class="state-pill" id="session-state">Waiting</span><button class="top-action" type="button" aria-label="Session menu">⋮</button></header>
+          <nav class="session-tabs" aria-label="Session views"><button class="tab active" type="button" data-session-pane="terminal">Terminal</button><button class="tab" type="button" data-session-pane="conversation">Conversation</button></nav>
+          <div class="reconnect-strip" id="reconnect-strip" hidden role="status" aria-live="polite"><span class="grow" id="reconnect-copy">Reconnecting · attempt 2 · terminal frame retained</span><button class="link-action" type="button" data-action="reconnect">Retry now</button></div>
+          <div class="terminal-frame" data-session-view="terminal" aria-label="Retained terminal frame"><span class="term-muted">$ git push origin HEAD:main</span><br /><span class="term-green">✓ pushed 7d8b041 → main</span><br /><br />• CI run 32319487869 is in progress.<br />• Classification, screenshots, and the production container gate passed.<br />• Django/quality and Playwright are still running.<br /><br /><span class="term-muted">Finished waiting · Status: OPEN</span><br /><br />› <span class="term-cyan">Find and fix a bug in @filename</span></div>
+          <div class="conversation" data-session-view="conversation" hidden><div class="message"><span class="status-dot violet"></span><span><span class="name">Claude</span><span class="meta">The promotion run is healthy so far. Classification, screenshots, and the production container gate have passed.</span></span></div><div class="message user"><span class="status-dot"></span><span><span class="name">You</span><span class="meta">Keep watching and tell me when deploy finishes.</span></span></div></div>
+          <div class="session-dock dock-default" id="dock-default"><button class="dock-button" type="button" data-modal="hotkeys">Keys</button><button class="dock-button" type="button">Keyboard</button><button class="dock-button" type="button">Snippets</button><button class="dock-button primary compose-launcher" type="button" data-action="compose" aria-label="Compose prompt; swipe up to dictate">&gt;_ Compose</button></div>
+          <div class="session-dock recovery-dock" id="recovery-dock" hidden><button class="dock-button primary" type="button" data-action="reconnect">Reconnect</button><button class="dock-button" type="button" data-action="details">Details</button><span class="meta">Useful frame stays visible</span></div>
+          <div class="voice-hint" id="voice-hint" role="status">Tap <strong>Compose</strong> to write · swipe up to dictate <button class="link-action" type="button" data-action="dismiss-hint" style="border:0;background:transparent">Got it</button></div>
+        </section>
+
+        <section class="screen" id="usage" data-screen="usage" aria-labelledby="usage-title">
+          <header class="top-bar"><button class="back" type="button" data-back aria-label="Back">‹</button><span class="grow"><span class="title" id="usage-title">Usage</span><span class="subtitle">5 providers · sorted by urgency</span></span></header>
+          <div class="scroll"><div class="usage-card card"><div class="row compact" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot red"></span><span class="grow"><span class="name">Grok</span><span class="meta">Quota exceeded</span></span><strong>100%</strong></div><div class="usage-bar"><i class="danger" style="width:100%"></i></div><span class="meta">Reset in 13h 54m · Thu 16:59</span></div><div class="usage-card card"><div class="row compact" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot amber"></span><span class="grow"><span class="name">Codex</span><span class="meta">Critical</span></span><strong>99%</strong></div><div class="usage-bar"><i style="width:99%"></i></div><span class="meta">Reset in 2h 24m · Thu 05:30</span></div><div class="usage-card card"><div class="row compact" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot amber"></span><span class="grow"><span class="name">Claude Code</span><span class="meta">7-day window</span></span><strong>96%</strong></div><div class="usage-bar"><i style="width:96%"></i></div><span class="meta">Reset in 13h 54m</span></div><div class="usage-card card"><div class="row compact" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot green"></span><span class="grow"><span class="name">GitHub Copilot</span><span class="meta">Healthy</span></span><strong>0%</strong></div><div class="usage-bar"><i class="ok" style="width:2%"></i></div></div></div>
+        </section>
+
+        <div class="scrim" id="scrim" hidden></div>
+        <section class="sheet" id="composer" aria-labelledby="composer-title" aria-hidden="true">
+          <div class="row" style="margin:0;padding:0;border:0;background:transparent"><span class="grow"><span class="title" id="composer-title">Prompt Composer</span><span class="subtitle">To: Claude · git-dtc-website-design2</span></span><button class="top-action" type="button" data-action="close-composer" aria-label="Close composer">×</button></div>
+          <textarea id="prompt" aria-label="Prompt" placeholder="What should the agent do?"></textarea>
+          <div class="meta" style="margin-top:8px">Attach files or use Snippets · <strong>Mic: swipe up on Compose</strong></div>
+          <div class="eyebrow" style="margin-top:12px">Preview delivery outcome</div>
+          <div class="outcome-row" aria-label="Delivery outcome preview"><button class="outcome-button" type="button" data-outcome="sending">Sending</button><button class="outcome-button" type="button" data-outcome="queued">Queued</button><button class="outcome-button active" type="button" data-outcome="sent">Sent</button><button class="outcome-button" type="button" data-outcome="failed">Failed</button><button class="outcome-button" type="button" data-outcome="checking">Checking</button></div>
+          <div class="send-state" id="send-state" data-state="draft" aria-live="polite">Draft ready · Send waits for an explicit acknowledgement.</div>
+          <div class="sheet-toolbar"><button class="sheet-button" type="button">Attach</button><button class="sheet-button" type="button">Snippets</button><button class="sheet-button" type="button" data-action="voice">🎙 Mic</button><button class="sheet-button" type="button">Insert</button><button class="sheet-button send" id="send-button" type="button" data-state="draft">Send</button></div>
+        </section>
+
+        <section class="modal" id="hotkeys" hidden role="dialog" aria-modal="true" aria-labelledby="hotkeys-title"><div class="row" style="margin:0;padding:0;border:0;background:transparent"><span class="grow"><span class="title" id="hotkeys-title">Quick hotkeys</span><span class="subtitle">Favorites stay one tap away; the full flow remains available.</span></span><button class="top-action" type="button" data-action="close-hotkeys" aria-label="Close hotkeys">×</button></div><div class="hotkey-grid"><span class="key">Esc</span><span class="key">^C</span><span class="key">Tab</span><span class="key">↑</span><span class="key">↓</span></div><p class="meta">Every key remains reachable from the full Keys sheet. Escape closes this panel.</p></section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    (() => {
+      const page = document.body;
+      const screens = [...document.querySelectorAll('[data-screen]')];
+      const history = ['activity'];
+      const variantCopy = {
+        calm: 'Softer hierarchy, restrained status treatment, comfortable density.',
+        operator: 'Dense control-console treatment with sharper geometry and more monospace.',
+        signal: 'Stronger semantic status contrast for fast situational awareness.',
+        native: 'Friendlier grouped surfaces with larger rounded shapes and familiar cues.'
+      };
+      const outcomeCopy = {
+        sending: ['Sending…', 'Sending to the exact pane…'],
+        queued: ['Queued', 'Offline · queued for git-dtc-website-design2.'],
+        sent: ['Sent', 'Delivered to Claude · composer can close safely.'],
+        failed: ['Retry', 'Delivery failed · draft and attachments are preserved.'],
+        checking: ['Checking…', 'Checking delivery outcome · do not blind-retry yet.']
+      };
+      const sessionTargets = {
+        pocketshell: { title: 'git-pocketshell', subtitle: 'Claude · hetzner', state: 'Paused' },
+        dtc: { title: 'dtc-website · Luna', subtitle: 'Claude · hetzner', state: 'Waiting' },
+        dataops: { title: 'git-dataops', subtitle: 'Codex · hetzner', state: 'Failed' },
+        ai: { title: 'git-ai-engineering-field-guide', subtitle: 'Claude · hetzner', state: 'Working' },
+        dataqna: { title: 'git-dataqna', subtitle: 'Claude · hetzner', state: 'Working' }
+      };
+      let selectedOutcome = 'sent';
+      let pressY = null;
+      let currentSessionTarget = 'dtc';
+
+      function showScreen(id, push = true) {
+        const target = document.querySelector(`[data-screen="${id}"]`);
+        if (!target) return;
+        if (push && history.at(-1) !== id) history.push(id);
+        screens.forEach(screen => screen.classList.toggle('active', screen === target));
+      }
+      function showSession(targetId = 'dtc') {
+        const target = sessionTargets[targetId] || sessionTargets.dtc;
+        currentSessionTarget = sessionTargets[targetId] ? targetId : 'dtc';
+        document.querySelector('#session-title').textContent = target.title;
+        document.querySelector('#session-subtitle').textContent = target.subtitle;
+        document.querySelector('#session-state').textContent = target.state;
+        showScreen('session');
+      }
+      function goBack() {
+        if (history.length > 1) history.pop();
+        showScreen(history.at(-1) || 'activity', false);
+      }
+      function setHostPane(pane, button) {
+        document.querySelectorAll('[data-pane]').forEach(tab => tab.classList.toggle('active', tab === button));
+        document.querySelectorAll('[data-hostpane]').forEach(view => { view.hidden = view.dataset.hostpane !== pane; });
+      }
+      function setSessionPane(pane, button) {
+        document.querySelectorAll('[data-session-pane]').forEach(tab => tab.classList.toggle('active', tab === button));
+        document.querySelectorAll('[data-session-view]').forEach(view => { view.hidden = view.dataset.sessionView !== pane; });
+      }
+      function setConnectionState(state) {
+        const session = document.querySelector('#session');
+        const reconnecting = state === 'reconnecting';
+        const disconnected = state === 'disconnected';
+        session.classList.toggle('reconnecting', reconnecting);
+        session.classList.toggle('disconnected', disconnected);
+        document.querySelector('#reconnect-strip').hidden = state === 'connected';
+        document.querySelector('#reconnect-copy').textContent = reconnecting
+          ? 'Reconnecting · attempt 2 · terminal frame retained'
+          : 'Disconnected · last terminal frame retained';
+        document.querySelector('#dock-default').hidden = state !== 'connected';
+        document.querySelector('#recovery-dock').hidden = state === 'connected';
+        document.querySelector('.connection-dot').setAttribute('aria-label', state);
+        document.querySelector('#session-state').textContent = disconnected ? 'Disconnected' : reconnecting ? 'Reconnecting' : sessionTargets[currentSessionTarget].state;
+      }
+      function setReconnecting(reconnecting) {
+        setConnectionState(reconnecting ? 'reconnecting' : 'connected');
+      }
+      function setDisconnected(disconnected) {
+        setConnectionState(disconnected ? 'disconnected' : 'connected');
+      }
+      function openComposer() {
+        document.querySelector('#scrim').hidden = false;
+        document.querySelector('#composer').classList.add('open');
+        document.querySelector('#composer').setAttribute('aria-hidden', 'false');
+      }
+      function closeComposer() {
+        document.querySelector('#scrim').hidden = true;
+        document.querySelector('#composer').classList.remove('open');
+        document.querySelector('#composer').setAttribute('aria-hidden', 'true');
+      }
+      function setOutcome(outcome, remember = true) {
+        if (remember) selectedOutcome = outcome;
+        const [label, copy] = outcomeCopy[outcome];
+        const state = document.querySelector('#send-state');
+        const send = document.querySelector('#send-button');
+        state.textContent = copy;
+        state.dataset.state = outcome;
+        send.textContent = label;
+        send.dataset.state = outcome;
+        document.querySelectorAll('[data-outcome]').forEach(button => button.classList.toggle('active', button.dataset.outcome === outcome));
+      }
+      function sendPrompt() {
+        const finalOutcome = selectedOutcome;
+        setOutcome('sending', false);
+        window.setTimeout(() => setOutcome(finalOutcome, false), 420);
+      }
+      function setVariant(variant) {
+        page.dataset.variant = variant;
+        document.querySelector('#variant-copy').textContent = variantCopy[variant];
+        document.querySelectorAll('[data-style]').forEach(button => button.classList.toggle('active', button.dataset.style === variant));
+      }
+      function setTextSize(size) {
+        page.dataset.textSize = size;
+        document.querySelectorAll('[data-text-size]').forEach(button => button.classList.toggle('active', button.dataset.textSize === size));
+      }
+      function showHotkeys() { document.querySelector('#hotkeys').hidden = false; }
+      function closeHotkeys() { document.querySelector('#hotkeys').hidden = true; }
+
+      document.addEventListener('click', event => {
+        const nav = event.target.closest('[data-nav]');
+        if (nav) nav.dataset.nav === 'session' ? showSession(nav.dataset.sessionTarget) : showScreen(nav.dataset.nav);
+        const back = event.target.closest('[data-back]');
+        if (back) goBack();
+        const style = event.target.closest('[data-style]');
+        if (style) setVariant(style.dataset.style);
+        const size = event.target.closest('[data-text-size]');
+        if (size) setTextSize(size.dataset.textSize);
+        const pane = event.target.closest('[data-pane]');
+        if (pane) setHostPane(pane.dataset.pane, pane);
+        const sessionPane = event.target.closest('[data-session-pane]');
+        if (sessionPane) setSessionPane(sessionPane.dataset.sessionPane, sessionPane);
+        const outcome = event.target.closest('[data-outcome]');
+        if (outcome) setOutcome(outcome.dataset.outcome);
+        const demo = event.target.closest('[data-demo]');
+        if (demo) {
+          if (demo.dataset.demo === 'reconnect') { showSession('dtc'); setReconnecting(true); }
+          if (demo.dataset.demo === 'disconnected') { showSession('dataops'); setDisconnected(true); }
+          if (demo.dataset.demo === 'composer') { showSession('dtc'); openComposer(); }
+        }
+        const modal = event.target.closest('[data-modal]');
+        if (modal && modal.dataset.modal === 'hotkeys') showHotkeys();
+        const action = event.target.closest('[data-action]');
+        if (action) {
+          if (action.dataset.action === 'compose') openComposer();
+          if (action.dataset.action === 'close-composer') closeComposer();
+          if (action.dataset.action === 'reconnect') setReconnecting(false);
+          if (action.dataset.action === 'details') showHotkeys();
+          if (action.dataset.action === 'dismiss-hint') document.querySelector('#voice-hint').hidden = true;
+          if (action.dataset.action === 'voice') { openComposer(); document.querySelector('#send-state').textContent = 'Dictation ready · speak, then review before Send.'; }
+          if (action.dataset.action === 'close-hotkeys') closeHotkeys();
+        }
+        if (event.target.id === 'scrim') closeComposer();
+        if (event.target.id === 'send-button') sendPrompt();
+      });
+      document.querySelector('.compose-launcher').addEventListener('pointerdown', event => { pressY = event.clientY; });
+      document.querySelector('.compose-launcher').addEventListener('pointerup', event => {
+        if (pressY !== null && pressY - event.clientY > 30) {
+          openComposer();
+          document.querySelector('#send-state').textContent = 'Dictation ready · speak, then review before Send.';
+        }
+        pressY = null;
+      });
+      document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeComposer(); closeHotkeys(); } });
+
+      window.pocketshellPrototype = { showScreen, setReconnecting, openComposer, closeComposer, setOutcome, setVariant, setTextSize };
+
+      async function smoke() {
+        const check = (condition, message) => { if (!condition) throw new Error(message); };
+        const visible = selector => [...document.querySelectorAll(selector)].find(element => element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0);
+        check(document.querySelectorAll('[data-style]').length === 4, 'four style directions');
+        visible('[data-nav="hosts"]').click();
+        check(document.querySelector('#hosts').classList.contains('active'), 'Activity to Hosts');
+        visible('[data-nav="host"]').click();
+        check(document.querySelector('#host').classList.contains('active'), 'Hosts to host workspace');
+        document.querySelector('[data-pane="projects"]').click();
+        check(!document.querySelector('[data-hostpane="projects"]').hidden, 'Projects pane');
+        document.querySelector('[data-pane="tools"]').click();
+        check(!document.querySelector('[data-hostpane="tools"]').hidden, 'Tools pane');
+        showScreen('activity', false);
+        visible('[data-nav="session"][data-session-target="pocketshell"]').click();
+        check(document.querySelector('#session-title').textContent === 'git-pocketshell', 'Continue preserves target identity');
+        showScreen('activity', false);
+        visible('[data-nav="session"][data-session-target="dataqna"]').click();
+        check(document.querySelector('#session-title').textContent === 'git-dataqna', 'Working row preserves target identity');
+        document.querySelector('[data-session-pane="conversation"]').click();
+        check(!document.querySelector('[data-session-view="conversation"]').hidden, 'Conversation pane');
+        document.querySelector('[data-session-pane="terminal"]').click();
+        setReconnecting(true);
+        check(document.querySelector('#session').classList.contains('reconnecting') && !document.querySelector('[data-session-view="terminal"]').hidden, 'retained-frame reconnect');
+        setReconnecting(false);
+        setDisconnected(true);
+        check(document.querySelector('#session-state').textContent === 'Disconnected' && !document.querySelector('#recovery-dock').hidden, 'Disconnected recovery state');
+        setDisconnected(false);
+        openComposer();
+        for (const outcome of ['sending', 'queued', 'sent', 'failed', 'checking']) {
+          setOutcome(outcome);
+          check(document.querySelector('#send-state').dataset.state === outcome, `${outcome} outcome`);
+        }
+        for (const outcome of ['queued', 'sent', 'failed', 'checking']) {
+          setOutcome(outcome);
+          document.querySelector('#send-button').click();
+          check(document.querySelector('#send-state').dataset.state === 'sending', `Send enters Sending for ${outcome}`);
+          await new Promise(resolve => window.setTimeout(resolve, 450));
+          check(document.querySelector('#send-state').dataset.state === outcome, `Send resolves to ${outcome}`);
+        }
+        closeComposer();
+        setVariant('operator');
+        check(document.body.dataset.variant === 'operator', 'Operator variant');
+        setVariant('signal');
+        check(document.body.dataset.variant === 'signal', 'Signal variant');
+        setVariant('native');
+        check(document.body.dataset.variant === 'native', 'Native variant');
+        setVariant('calm');
+        setTextSize('large');
+        check(document.body.dataset.textSize === 'large' && getComputedStyle(document.body).fontSize === '19px', 'large text containment mode');
+        const visibleButtons = [...document.querySelectorAll('button')].filter(button => getComputedStyle(button).display !== 'none' && button.getBoundingClientRect().width > 0);
+        const shortButtons = visibleButtons.filter(button => button.getBoundingClientRect().height < 47.5);
+        check(shortButtons.length === 0, `48px hit targets: ${shortButtons.map(button => `${button.textContent.trim()}=${button.getBoundingClientRect().height}`).join(', ')}`);
+        check(document.documentElement.scrollWidth <= document.documentElement.clientWidth, 'narrow viewport containment');
+        document.querySelector('#smoke-result').dataset.smoke = 'pass';
+        document.querySelector('#smoke-result').textContent = 'PASS';
+      }
+      const smokeResult = document.createElement('output');
+      smokeResult.id = 'smoke-result';
+      smokeResult.dataset.smoke = 'pending';
+      smokeResult.hidden = true;
+      document.body.append(smokeResult);
+      if (new URLSearchParams(location.search).has('smoke')) smoke().catch(error => { smokeResult.dataset.smoke = 'fail'; smokeResult.textContent = error.message; console.error(error); });
+    })();
+  </script>
+</body>
+</html>

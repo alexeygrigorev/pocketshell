@@ -28,6 +28,22 @@ class PromptComposerSheetQueueHelperTest {
             outboundQueueSummary(listOf(item("uploading", OutboundState.Uploading, 1L)), false),
         )
         assertEquals(
+            OutboundQueueSummary("Uploading 2.5 / 5.0 MB · 50%", "“uploading”"),
+            outboundQueueSummary(
+                listOf(item("uploading", OutboundState.Uploading, 1L)),
+                false,
+                AttachmentTransferProgress(
+                    fileIndex = 1,
+                    fileCount = 1,
+                    fileName = "report.zip",
+                    bytesTransferred = 2_621_440L,
+                    totalBytes = 5_242_880L,
+                    batchBytesTransferred = 2_621_440L,
+                    batchTotalBytes = 5_242_880L,
+                ),
+            ),
+        )
+        assertEquals(
             OutboundQueueSummary("Sending", "“in flight”"),
             outboundQueueSummary(listOf(item("in flight", OutboundState.InFlight, 1L)), false),
         )

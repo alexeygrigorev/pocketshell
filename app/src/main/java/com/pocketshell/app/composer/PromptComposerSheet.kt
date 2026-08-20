@@ -1173,28 +1173,12 @@ internal fun SheetContent(
                 Spacer(modifier = Modifier.height(8.dp))
             }
 
+            val transferProgress by AttachmentUploadProgressPort.attachProgress.collectAsState()
             attachmentUploading?.let { upload ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(
-                            color = PocketShellColors.SurfaceElev,
-                            shape = RoundedCornerShape(8.dp),
-                        )
-                        .border(
-                            width = 1.dp,
-                            color = PocketShellColors.BorderSoft,
-                            shape = RoundedCornerShape(8.dp),
-                        )
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .testTag(COMPOSER_ATTACHMENT_PROGRESS_TAG),
-                ) {
-                    Text(
-                        text = "Uploading ${upload.count} attachment${if (upload.count == 1) "" else "s"}...",
-                        color = PocketShellColors.Text,
-                        fontSize = 12.sp,
-                    )
-                }
+                AttachmentUploadProgressBanner(
+                    count = upload.count,
+                    progress = transferProgress,
+                )
                 Spacer(modifier = Modifier.height(8.dp))
             }
 

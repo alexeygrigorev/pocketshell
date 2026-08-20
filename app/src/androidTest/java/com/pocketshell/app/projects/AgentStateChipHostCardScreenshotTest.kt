@@ -97,12 +97,12 @@ class AgentStateChipHostCardScreenshotTest {
 
         // On-device icon presence for the three known states. The full words
         // remain accessible descriptions, never width-consuming visible text.
-        compose.onNodeWithContentDescription("Waiting").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Waiting for input").assertIsDisplayed()
         compose.onNodeWithContentDescription("Working").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Idle").assertIsDisplayed()
-        compose.onNodeWithText("Waiting").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Idle (finished)").assertIsDisplayed()
+        compose.onNodeWithText("Waiting for input").assertDoesNotExist()
         compose.onNodeWithText("Working").assertDoesNotExist()
-        compose.onNodeWithText("Idle").assertDoesNotExist()
+        compose.onNodeWithText("Idle (finished)").assertDoesNotExist()
         // "absent, not wrong": the quiet host is rendered but shows NO chip —
         // there is no state description or visible fallback on that card.
         compose.onNodeWithText("quiet-host").assertIsDisplayed()

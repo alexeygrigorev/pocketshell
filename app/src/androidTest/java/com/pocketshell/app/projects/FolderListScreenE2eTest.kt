@@ -1398,7 +1398,7 @@ class FolderListScreenE2eTest {
 
         // #1701: the REAL production list exposes every compact state glyph via
         // its full accessibility label, with no width-consuming status words.
-        listOf("Working", "Waiting", "Idle").forEach { label ->
+        listOf("Working", "Waiting for input", "Idle (finished)").forEach { label ->
             assertTrue(
                 "$label state icon must expose its full content description",
                 compose.onAllNodes(hasContentDescription(label), useUnmergedTree = true)

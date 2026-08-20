@@ -1974,6 +1974,28 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
 }
 
 /**
+ * Production session-screen card-feed callbacks (#859).
+ *
+ * The session screen must not inline a no-op `onSetNoteRead`. Tests drive this
+ * same factory so stubbing it back to `Unit` reddens the mark-as-read path.
+ */
+internal fun tmuxSessionCardInteractions(
+    viewModel: TmuxSessionViewModel,
+): SessionCardInteractions = object : SessionCardInteractions {
+    override fun onToggleChecklistItem(cardId: String, itemId: String, checked: Boolean) {
+        viewModel.toggleChecklistItem(
+            cardId = cardId,
+            itemId = itemId,
+            checked = checked,
+        )
+    }
+
+    override fun onSetNoteRead(cardId: String, read: Boolean) {
+        viewModel.setNoteRead(cardId, read)
+    }
+}
+
+/**
  * Issue #1685: the shared unified composer / snippet / card-feed / hotkeys sheets
  * plus the send handler + send dispatcher, in their own frame.
  */
@@ -2001,17 +2023,7 @@ private fun TmuxSessionSheetsRegion(
     val presumedAgentKind = agent.presumedAgentKind
     val composerQueueSessionKey = outboundQueueBinding.targetKey
     val sessionCardInteractions = remember(viewModel) {
-        object : SessionCardInteractions {
-            override fun onToggleChecklistItem(cardId: String, itemId: String, checked: Boolean) {
-                viewModel.toggleChecklistItem(
-                    cardId = cardId,
-                    itemId = itemId,
-                    checked = checked,
-                )
-            }
-
-            override fun onSetNoteRead(cardId: String, read: Boolean) = Unit
-        }
+        tmuxSessionCardInteractions(viewModel)
     }
 
     val composerSendHandler: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult = { request ->

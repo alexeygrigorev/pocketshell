@@ -607,7 +607,11 @@ case "${1:-}" in
     #       --session S` -> ticks/unticks one item in `state.checked` (the app's
     #     toggle path), like cards.py `apply_interaction`. Unknown id/item -> 65.
     #   * `pocketshell push status [--json] --session S` -> the agent's read-back
-    #     of the human's ticks (cards.py `push status`).
+    #     of the human's ticks / note read-state (cards.py `push status`).
+    #   * `pocketshell push note --session S [--title T] [--id ID] --text T`
+    #     -> writes/replaces a note card (`body.text`, `state.read=false`).
+    #   * `pocketshell push read --id ID --read|--unread --session S` -> flips
+    #     `state.read` on that note (the app's mark-as-read write-back).
     #
     # The store is per-session JSON under
     # `${POCKETSHELL_CARDS_DIR:-$HOME/.pocketshell/cards}/<session>.json`,
@@ -1046,8 +1050,198 @@ case "${1:-}" in
         fi
         exit 0
         ;;
+      note)
+        push_title=""
+        push_card_id="note"
+        push_session_arg=""
+        push_text=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --title) push_title="${2:-}"; shift 2 ;;
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --text) push_text="${2:-}"; shift 2 ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        if [ -z "$push_text" ] && [ ! -t 0 ]; then
+          push_text="$(cat)"
+        fi
+        push_text="$(printf '%s' "$push_text" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          exit 64
+        }
+        if [ -z "$push_text" ]; then
+          printf 'empty note: pass --text or pipe the message on stdin.\n' >&2
+          exit 64
+        fi
+        push_file="$(push_session_file "$push_session")"
+        push_title_json=""
+        if [ -n "$push_title" ]; then
+          push_title_json="\"title\":\"$(push_json_escape "$push_title")\","
+        fi
+        push_card="{\"id\":\"$(push_json_escape "$push_card_id")\",\"type\":\"note\",\"created_at\":\"${push_now}\",\"updated_at\":\"${push_now}\",${push_title_json}\"body\":{\"text\":\"$(push_json_escape "$push_text")\"},\"state\":{\"read\":false,\"read_at\":null}}"
+        push_other_cards="$(
+          if [ -f "$push_file" ]; then
+            awk -v want="$push_card_id" '
+              BEGIN { }
+              { line=line $0 "\n" }
+              END {
+                s=line; n=length(s)
+                idx=index(s, "\"cards\":[")
+                if (idx == 0) { printf ""; exit }
+                i=idx + length("\"cards\":[")
+                collecting=0; obj=""; objdepth=0; res=""
+                while (i <= n) {
+                  c=substr(s, i, 1)
+                  if (collecting == 0) {
+                    if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                    else if (c == "]") { break }
+                  } else {
+                    obj=obj c
+                    if (c == "{") objdepth++
+                    else if (c == "}") {
+                      objdepth--
+                      if (objdepth == 0) {
+                        cid=""
+                        if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                          frag=substr(obj, RSTART, RLENGTH)
+                          sub(/"id"[ ]*:[ ]*"/, "", frag)
+                          sub(/".*/, "", frag)
+                          cid=frag
+                        }
+                        if (cid != want) {
+                          if (res != "") res=res ","
+                          res=res obj
+                        }
+                        collecting=0; obj=""
+                      }
+                    }
+                  }
+                  i++
+                }
+                printf "%s", res
+              }
+            ' "$push_file"
+          fi
+        )"
+        push_all_cards="$push_card"
+        if [ -n "$push_other_cards" ]; then
+          push_all_cards="${push_other_cards},${push_card}"
+        fi
+        mkdir -p "$push_cards_dir" 2>/dev/null || true
+        chmod 700 "$push_cards_dir" 2>/dev/null || true
+        push_tmp="${push_file}.tmp.$$"
+        printf '{"session":"%s","cards":[%s]}\n' "$(push_json_escape "$push_session")" "$push_all_cards" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        printf "note '%s' -> session '%s' (%s)\n" "$push_card_id" "$push_session" "$push_file"
+        exit 0
+        ;;
+      read)
+        push_card_id=""
+        push_read=1
+        push_session_arg=""
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --id) push_card_id="${2:-}"; shift 2 ;;
+            --read) push_read=1; shift ;;
+            --unread) push_read=0; shift ;;
+            --session) push_session_arg="${2:-}"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        push_session="$(push_detect_session "$push_session_arg")" || {
+          printf 'could not determine the tmux session: pass --session or run inside tmux.\n' >&2
+          exit 64
+        }
+        if [ -z "$push_card_id" ]; then
+          printf 'push read requires --id.\n' >&2
+          exit 64
+        fi
+        push_file="$(push_session_file "$push_session")"
+        if [ ! -f "$push_file" ]; then
+          printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+          exit 65
+        fi
+        push_new="$(
+          awk -v want="$push_card_id" -v readflag="$push_read" -v now="$push_now" '
+            BEGIN { found_card=0; found_note=0 }
+            { line=line $0 "\n" }
+            END {
+              s=line; n=length(s)
+              idx=index(s, "\"cards\":[")
+              if (idx == 0) { printf "%s", s; exit }
+              prefix=substr(s, 1, idx + length("\"cards\":[") - 1)
+              i=idx + length("\"cards\":[")
+              collecting=0; obj=""; objdepth=0; cards=""; suffix=""
+              while (i <= n) {
+                c=substr(s, i, 1)
+                if (collecting == 0) {
+                  if (c == "{") { collecting=1; objdepth=1; obj="{" }
+                  else if (c == "]") { suffix=substr(s, i); break }
+                } else {
+                  obj=obj c
+                  if (c == "{") objdepth++
+                  else if (c == "}") {
+                    objdepth--
+                    if (objdepth == 0) {
+                      cid=""; ctype=""
+                      if (match(obj, /"id"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"id"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); cid=f
+                      }
+                      if (match(obj, /"type"[ ]*:[ ]*"[^"]*"/)) {
+                        f=substr(obj, RSTART, RLENGTH); sub(/"type"[ ]*:[ ]*"/, "", f); sub(/".*/, "", f); ctype=f
+                      }
+                      if (cid == want) {
+                        found_card=1
+                        if (ctype == "note") {
+                          found_note=1
+                          sp=index(obj, "\"state\":")
+                          head=substr(obj, 1, sp - 1)
+                          if (readflag == "1") {
+                            obj=head "\"state\":{\"read\":true,\"read_at\":\"" now "\"}}"
+                          } else {
+                            obj=head "\"state\":{\"read\":false,\"read_at\":null}}"
+                          }
+                        }
+                      }
+                      if (cards != "") cards=cards ","
+                      cards=cards obj
+                      collecting=0; obj=""
+                    }
+                  }
+                }
+                i++
+              }
+              if (found_card == 0) { printf "__NO_CARD__"; exit }
+              if (found_note == 0) { printf "__NOT_NOTE__"; exit }
+              printf "%s%s%s", prefix, cards, suffix
+            }
+          ' "$push_file"
+        )"
+        case "$push_new" in
+          __NO_CARD__)
+            printf "no card with id '%s' in session '%s'\n" "$push_card_id" "$push_session" >&2
+            exit 65 ;;
+          __NOT_NOTE__)
+            printf "card '%s' is not a note\n" "$push_card_id" >&2
+            exit 65 ;;
+        esac
+        push_tmp="${push_file}.tmp.$$"
+        printf '%s' "$push_new" > "$push_tmp"
+        chmod 600 "$push_tmp" 2>/dev/null || true
+        mv -f "$push_tmp" "$push_file"
+        if [ "$push_read" -eq 1 ]; then
+          printf "%s: note: read\n" "$push_card_id"
+        else
+          printf "%s: note: unread\n" "$push_card_id"
+        fi
+        exit 0
+        ;;
       *)
-        printf 'pocketshell push fixture supports: checklist|get|status|check\n' >&2
+        printf 'pocketshell push fixture supports: checklist|get|status|check|note|read\n' >&2
         exit 64
         ;;
     esac

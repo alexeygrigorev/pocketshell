@@ -16383,32 +16383,32 @@ public class TmuxSessionViewModel @Inject constructor(
         cardId: String,
         itemId: String,
         checked: Boolean,
+    ): Boolean = writeActiveSessionCard { session, target ->
+        sessionCardsRemoteSource.setChecklistItemChecked(
+            session, target, cardId, itemId, checked,
+        )
+    }
+
+    public fun setNoteRead(cardId: String, read: Boolean): Boolean =
+        writeActiveSessionCard { session, target ->
+            sessionCardsRemoteSource.setNoteRead(session, target, cardId, read)
+        }
+
+    private fun writeActiveSessionCard(
+        write: suspend (SshSession, String) -> Boolean,
     ): Boolean {
         val active = activeTarget ?: return false
         val target = active.sessionName.trim().takeIf { it.isNotEmpty() } ?: return false
         val targetKey = active.sessionCardsTargetKey()
         val session = sessionRef?.takeIf { it.isConnected } ?: return false
         bridgeScope.launch {
-            val ok = withContext(sessionCardsDispatcher) {
-                sessionCardsRemoteSource.setChecklistItemChecked(
-                    session = session,
-                    tmuxSessionName = target,
-                    cardId = cardId,
-                    itemId = itemId,
-                    checked = checked,
-                )
-            }
+            val ok = withContext(sessionCardsDispatcher) { write(session, target) }
             if (ok && activeTarget?.sessionCardsTargetKey() == targetKey) {
                 val feed = withContext(sessionCardsDispatcher) {
                     sessionCardsRemoteSource.getCards(session, target)
                 }
                 if (activeTarget?.sessionCardsTargetKey() == targetKey) {
-                    _sessionCards.value = SessionCardsUiState(
-                        sessionName = target,
-                        targetKey = targetKey,
-                        loading = false,
-                        feed = feed,
-                    )
+                    _sessionCards.value = SessionCardsUiState(target, targetKey, false, feed)
                 }
             }
         }

@@ -18,14 +18,29 @@ fi
 
 DOM_FILE="$(mktemp)"
 BROWSER_DATA_DIR="$(mktemp -d)"
+BROWSER_PID=""
+BROWSER_PGID=""
+stop_browser() {
+  [[ "$BROWSER_PGID" =~ ^[1-9][0-9]*$ ]] || return
+  kill -TERM -- "-$BROWSER_PGID" 2>/dev/null || true
+  for _ in {1..20}; do
+    kill -0 -- "-$BROWSER_PGID" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL -- "-$BROWSER_PGID" 2>/dev/null || true
+  wait "$BROWSER_PID" 2>/dev/null || true
+  BROWSER_PID=""
+  BROWSER_PGID=""
+}
 cleanup() {
+  stop_browser
   rm -f "$DOM_FILE"
   rm -rf "$BROWSER_DATA_DIR"
 }
 trap cleanup EXIT
 MOCKUP_URI="file://$MOCKUP?smoke=1"
-env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS \
-  timeout 90 "$BROWSER" \
+setsid env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS \
+  "$BROWSER" \
   --headless \
   --no-sandbox \
   --disable-gpu \
@@ -44,7 +59,18 @@ env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS \
   --user-data-dir="$BROWSER_DATA_DIR" \
   --window-size=390,844 \
   --virtual-time-budget=5000 \
-  --dump-dom "$MOCKUP_URI" >"$DOM_FILE"
+  --dump-dom "$MOCKUP_URI" >"$DOM_FILE" &
+BROWSER_PID=$!
+BROWSER_PGID=$BROWSER_PID
+
+deadline=$((SECONDS + 30))
+while ! grep -q 'id="smoke-result" data-smoke="pass"' "$DOM_FILE"; do
+  kill -0 "$BROWSER_PID" 2>/dev/null || break
+  (( SECONDS < deadline )) || break
+  sleep 0.1
+done
+
+stop_browser
 
 grep -q 'id="smoke-result" data-smoke="pass"' "$DOM_FILE" \
   || { echo "FAIL: browser interaction smoke test did not pass" >&2; grep 'smoke-result' "$DOM_FILE" >&2 || true; exit 1; }

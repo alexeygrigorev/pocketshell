@@ -78,7 +78,15 @@ internal fun buildTmuxPaneListingCommand(sessionName: String?): String = buildSt
     // Issue #1944: pane ids can be reused after a tmux server restart. Carry
     // the tmux generation beside every pane so queued sends cannot be rebound
     // to a same-name successor merely because its `%N` happens to match.
-    append("#{session_created}'")
+    append("#{session_created}")
+    append(LIST_PANES_FIELD_SEPARATOR)
+    // Issue #2155: the host CLI mints a fresh `@ps_agent_source_generation` on
+    // every launch. Folding it into this already-running reconcile is what
+    // lets a same-pane relaunch (cwd/command/tty unchanged — the maintainer
+    // types `claude` or `/new`) retrigger detection without an extra SSH
+    // round-trip or a poll (D21). Hex uuid — no TAB, no #2160 locale risk.
+    // Appended LAST so every earlier field keeps its historical index.
+    append("#{@ps_agent_source_generation}'")
 }
 
 private fun escapePaneListingSingleQuoted(input: String): String =

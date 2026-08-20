@@ -160,6 +160,8 @@ class Issue2155StaleConversationSourceTest : TmuxSessionViewModelTestBase() {
                     append("\n$GENERATION_SENTINEL\n")
                     append(sourceOption.trim())
                 }
+                command.contains("show-options -v") && command.contains("@ps_agent_source_generation") ->
+                    generation
                 command.contains("show-options -v") && command.contains("@ps_agent_kind") ->
                     recordedKind
                 command.contains("@@PS_WINDOW@@") ->
@@ -217,6 +219,7 @@ class Issue2155StaleConversationSourceTest : TmuxSessionViewModelTestBase() {
         windowId: String = "@0",
         currentCommand: String = "claude",
         tty: String = TTY,
+        sourceGeneration: String = "",
     ): TmuxSessionViewModel.ParsedPane = TmuxSessionViewModel.ParsedPane(
         paneId = paneId,
         windowId = windowId,
@@ -227,6 +230,7 @@ class Issue2155StaleConversationSourceTest : TmuxSessionViewModelTestBase() {
         currentCommand = currentCommand,
         paneTty = tty,
         panePid = 4242L,
+        sourceGeneration = sourceGeneration,
         sessionName = "work",
     )
 
@@ -311,6 +315,126 @@ class Issue2155StaleConversationSourceTest : TmuxSessionViewModelTestBase() {
                     "binding the busier sibling ($BUSIER_SIBLING) means the live " +
                     "@ps_agent_source was not honoured at all. " +
                     "execs=${host.execCommands.size}",
+                SECOND,
+                boundSource(vm, "%0"),
+            )
+        }
+
+    /**
+     * THE REMAINING ON-DEVICE HOLE (STEP 3 of the parked journey, #2160-unblocked).
+     *
+     * The first-round fix re-reads `@ps_agent_source` whenever detection RUNS.
+     * Detection only re-runs when `(cwd, command, tty)` changes. The maintainer
+     * types `claude` or `/new` in a pane that is ALREADY running that agent, so
+     * the input triple is unchanged, the running tail stays in `paneAgentJobs`,
+     * and `startAgentDetectionForPane` returns before the live option is ever
+     * consulted. The host's `@ps_agent_source` is correct; the Conversation
+     * stays on the previous transcript.
+     *
+     * The production signal that DOES change is `@ps_agent_source_generation`,
+     * now folded into the existing `list-panes` reconcile. This test drives that
+     * field and deliberately does NOT change command/tty/cwd — a command-change
+     * fixture would stay green with the hole still present (G6).
+     */
+    @Test
+    fun conversationRebindsWhenOnlyTheSourceGenerationBumps() =
+        runTest(scheduler) {
+            val host = TmuxOptionHost(
+                generation = "gen-1",
+                sourceOption = "gen-1\t$FIRST",
+                candidates = candidateRow(FIRST, ageSeconds = 120),
+            )
+            val vm = newVm()
+            vm.connectWith(host)
+            vm.applyParsedPanesForTest(listOf(pane("%0", sourceGeneration = "gen-1")))
+            advanceUntilIdle()
+            assertEquals(
+                "precondition: the first agent's recorded transcript binds",
+                FIRST,
+                boundSource(vm, "%0"),
+            )
+            // On device the JSONL follow-tail occupies paneAgentJobs and stays
+            // active for the life of the agent. That is what makes the
+            // (cwd, command, tty) dedup skip every later reconcile. The JVM
+            // open path's tail can already have completed by advanceUntilIdle,
+            // so pin a live one — without it this assertion is green with the
+            // hole still present (G6).
+            val live = vm.agentConversations.value["%0"]?.detection
+                ?: error("fixture drift: first bind produced no detection")
+            val tail = vm.startAgentTailForTest("%0", host, live, fromLineExclusive = 0L)
+            assertTrue(
+                "precondition: an active follow-tail must occupy paneAgentJobs " +
+                    "(the on-device state that skips re-detection)",
+                tail?.isActive == true,
+            )
+
+            host.relaunchAgent(
+                newGeneration = "gen-2",
+                newSource = SECOND,
+                candidateRows = listOf(
+                    candidateRow(FIRST, ageSeconds = 120),
+                    candidateRow(SECOND, ageSeconds = 90),
+                    candidateRow(BUSIER_SIBLING, ageSeconds = 1),
+                ).joinToString("\n"),
+            )
+            // SAME command, SAME tty, SAME cwd. Only the generation the
+            // reconcile just read has changed — that is the on-device case.
+            vm.applyParsedPanesForTest(listOf(pane("%0", sourceGeneration = "gen-2")))
+            advanceUntilIdle()
+
+            assertEquals(
+                "#2155 (STEP 3): a generation bump with an UNCHANGED " +
+                    "(cwd, command, tty) must rebind the Conversation to the NEW " +
+                    "transcript. Staying on $FIRST is the reported on-device " +
+                    "symptom (detection never re-ran). Binding $BUSIER_SIBLING " +
+                    "means the live @ps_agent_source was not honoured. " +
+                    "execs=${host.execCommands.size}",
+                SECOND,
+                boundSource(vm, "%0"),
+            )
+        }
+
+    /**
+     * On-device, sitting on Conversation, there is NO structural tmux event
+     * after `record_agent_source` — list-panes does not re-run. The generation
+     * peek rides the existing liveness cadence. This drives that seam directly
+     * (liveness is off under Robolectric).
+     */
+    @Test
+    fun conversationRebindsWhenLivenessObservesAGenerationBump() =
+        runTest(scheduler) {
+            val host = TmuxOptionHost(
+                generation = "gen-1",
+                sourceOption = "gen-1\t$FIRST",
+                candidates = candidateRow(FIRST, ageSeconds = 120),
+            )
+            val vm = newVm()
+            vm.connectWith(host)
+            vm.applyParsedPanesForTest(listOf(pane("%0", sourceGeneration = "gen-1")))
+            advanceUntilIdle()
+            assertEquals(FIRST, boundSource(vm, "%0"))
+            val live = vm.agentConversations.value["%0"]?.detection
+                ?: error("fixture drift: first bind produced no detection")
+            val tail = vm.startAgentTailForTest("%0", host, live, fromLineExclusive = 0L)
+            assertTrue(tail?.isActive == true)
+
+            host.relaunchAgent(
+                newGeneration = "gen-2",
+                newSource = SECOND,
+                candidateRows = listOf(
+                    candidateRow(FIRST, ageSeconds = 120),
+                    candidateRow(SECOND, ageSeconds = 90),
+                    candidateRow(BUSIER_SIBLING, ageSeconds = 1),
+                ).joinToString("\n"),
+            )
+            // SAME panes row — no applyParsedPanes. Only the liveness peek.
+            vm.recheckSourceGenerationForTest()
+            advanceUntilIdle()
+
+            assertEquals(
+                "#2155: the liveness-cadence generation peek must rebind the " +
+                    "Conversation when the user is sitting on the session and no " +
+                    "structural list-panes event fires. bound=${boundSource(vm, "%0")}",
                 SECOND,
                 boundSource(vm, "%0"),
             )

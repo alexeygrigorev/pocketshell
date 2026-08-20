@@ -614,6 +614,27 @@ public class AgentConversationRepository internal constructor(
     }
 
     /**
+     * Issue #2155: the live `@ps_agent_source_generation` for [sessionTarget].
+     * Rides the existing liveness cadence (not a new poll) so a same-command
+     * in-session relaunch is observed even when no structural `list-panes`
+     * event fires. Hex uuid — no TAB, no #2160 locale risk. Blank/absent
+     * degrades to null.
+     */
+    suspend fun readRecordedSourceGeneration(
+        session: SshSession,
+        sessionTarget: String,
+    ): String? {
+        val target = sessionTarget.trim().ifBlank { return null }
+        val raw = runCatching {
+            session.exec(
+                "${TmuxRead.CLIENT} show-options -v -t ${shellQuote(TmuxTarget.pane(target))} " +
+                    "@ps_agent_source_generation 2>/dev/null || true",
+            ).stdout
+        }.getOrNull() ?: return null
+        return raw.trim().takeIf { it.isNotEmpty() }
+    }
+
+    /**
      * Issue #2155: resolve the raw `@ps_agent_source` option value against the
      * CURRENT [generation].
      *

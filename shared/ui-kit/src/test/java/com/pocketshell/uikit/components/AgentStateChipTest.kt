@@ -13,6 +13,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.model.SessionAgentState
 import com.pocketshell.uikit.theme.PocketShellTheme
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -35,12 +37,29 @@ class AgentStateChipTest {
 
     @Test
     fun waitingRendersAccessibleCompactIcon() {
-        assertAccessibleCompactIcon(SessionAgentState.WaitingForInput, "Waiting")
+        assertAccessibleCompactIcon(SessionAgentState.WaitingForInput, "Waiting for input")
     }
 
     @Test
     fun idleRendersAccessibleCompactIcon() {
-        assertAccessibleCompactIcon(SessionAgentState.Idle, "Idle")
+        assertAccessibleCompactIcon(SessionAgentState.Idle, "Idle (finished)")
+    }
+
+    @Test
+    fun stateDescriptionsDistinguishFinishedFromWorkingAndWaiting() {
+        composeRule.setContent {
+            PocketShellTheme {
+                AgentStateChip(state = SessionAgentState.Idle)
+                AgentStateChip(state = SessionAgentState.Working)
+                AgentStateChip(state = SessionAgentState.WaitingForInput)
+            }
+        }
+
+        // The idle glyph must communicate a finished/resting agent, not a
+        // paused control. Working and waiting remain separate states.
+        composeRule.onNodeWithContentDescription("Idle (finished)").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Working").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Waiting for input").assertIsDisplayed()
     }
 
     @Test
@@ -77,5 +96,19 @@ class AgentStateChipTest {
             .assertWidthIsEqualTo(18.dp)
             .assertHeightIsEqualTo(18.dp)
         composeRule.onNodeWithText(label).assertDoesNotExist()
+    }
+
+    @Test
+    fun stateIconsKeepWorkingAndFinishedDistinctFromWaiting() {
+        assertTrue(agentStateIconFor(SessionAgentState.Idle)?.name.orEmpty().endsWith("CheckCircle"))
+        assertTrue(agentStateIconFor(SessionAgentState.Working)?.name.orEmpty().endsWith("Autorenew"))
+        assertTrue(
+            agentStateIconFor(SessionAgentState.WaitingForInput)?.name.orEmpty().endsWith("HourglassEmpty"),
+        )
+        assertNotEquals(
+            "working must not be represented by the finished/idle icon",
+            agentStateIconFor(SessionAgentState.Working),
+            agentStateIconFor(SessionAgentState.Idle),
+        )
     }
 }

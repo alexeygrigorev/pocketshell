@@ -2077,7 +2077,6 @@ private fun TmuxSessionSheetsRegion(
         binding = outboundQueueBinding,
     )
 
-    val ctrlModifierState by viewModel.ctrlModifier.collectAsState()
     TmuxSessionSheets(
         showMicSheet = overlay.showMicSheet,
         promptComposerViewModel = promptComposerViewModel,
@@ -2186,16 +2185,8 @@ private fun TmuxSessionSheetsRegion(
         showHotkeysPanel = overlay.showHotkeysPanel,
         hotkeysPaneId = surfacePane?.paneId,
         sessionLive = sessionLive,
-        ctrlModifierState = ctrlModifierState,
         onHotkey = { paneId, binding ->
             if (sessionLive) {
-                DiagnosticEvents.record(
-                    "action",
-                    "shortcut_sent",
-                    "mode" to "tmux",
-                    "paneId" to paneId,
-                    "key" to binding.label,
-                )
                 viewModel.onKeyBarKey(paneId, binding.label)
             }
         },

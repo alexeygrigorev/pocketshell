@@ -107,42 +107,43 @@ Composer remains the preferred surface for prose and longer agent prompts.
 The terminal control keys live in a dedicated **hotkeys panel** — its own
 bottom-sheet surface opened from the Terminal tab's `⌨` launcher (NOT crammed
 above the soft keyboard; #784/#789 hard-cut the old in-keyboard bar). The panel
-shows every key at once in a tidy grid and stays open after a tap so you can
-fire several keys in a row. It routes every tap through
+opens on one screenful of common controls and stays open after a tap so you can
+fire several keys in a row. It routes every key through
 `TmuxSessionViewModel.onKeyBarKey`, which maps the visible label to its control
 byte (`send-keys -H` overlay) or tmux named key — no terminal resize / redraw.
 
-Sections:
+Main page:
 
 ```
-KEYS             Esc  Tab  ⇧Tab  Enter
-CTRL COMBOS      ^A ^B ^C ^D ^E ^G ^J ^K ^L ^O ^R ^T ^U ^W ^X ^Z ^\
-INTERRUPT/EOF    ^C×2  ^D×2
-CTRL + LETTER    [Ctrl]                         ← sticky modifier
-LETTERS          a b c d e f g … x y z
 ARROWS           ←  ↑  ↓  →
+KEYS             Esc  Tab  ⇧Tab  Enter
+CTRL             ^B  ^C  ^D  ^Q  ^X
+                 [Ctrl+…]
 ```
 
-- **CTRL COMBOS** are one-tap direct buttons — the curated common chords plus
-  the keys nano (and many TUIs) need: `^G` Help, `^J` Justify, `^K` Cut, `^O`
-  Write Out, `^T` Execute, `^U` cut-to-start, `^W` Where-Is, `^X` Exit, `^\`
-  Replace. So you can save-and-exit `nano` (`^O`,Enter then `^X`) entirely from
-  PocketShell, no modifier dance (issue #1091).
-- **CTRL + LETTER** is the general escape hatch: tap the sticky **`Ctrl`**
-  modifier, then any letter in the **LETTERS** grid → that letter's control byte
-  (`Ctrl+A`=0x01 … `Ctrl+Z`=0x1A), so `Ctrl+<any key>` is reachable, not just
-  the curated subset.
+`Ctrl+…` opens a dedicated Ctrl page. Its 48dp-or-larger targets preserve
+keyboard muscle memory in five-column QWERTY rows:
 
-Modifier interactions (the `Ctrl` key):
-- Single tap → armed for the **next** key (one-shot), then auto-releases.
-- Double tap → **locked** sticky: stays on until tapped again, so you can fire
-  several `Ctrl+<letter>` combos in a row.
-- Active `Ctrl` lights up in the accent colour (accent-soft fill, accent-dim
-  border).
-- With `Ctrl` off, a LETTERS tap types that letter literally.
-- The doubled `^C×2`/`^D×2` send the byte twice (the "press again to
-  interrupt/exit" chord many REPLs/agents need; #787) — distinct from a single
-  `^C`/`^D`.
+```
+Q W E R T
+Y U I O P
+A S D F G
+H J K L
+Z X C V B
+N M \
+```
+
+Each tap immediately sends that key's control byte and leaves the page open,
+so sequences such as `^B ^B` need no re-entry. `^Q` is XON (`0x11`) and `^\`
+is SIGQUIT (`0x1c`). Back returns to common keys; Back again, close, or a scrim
+tap dismisses. Reopening always starts on the main page. There is no hidden
+sticky-modifier state, and literal letters belong to the system IME.
+
+The main-page `^C` and `^D` keycaps show a persistent `hold ×2` cue. A normal
+tap sends one byte; holding sends the existing atomic two-byte sequence (`03
+03` / `04 04`) without also firing the single tap. Two ordinary taps remain the
+accessible fallback. The same sheet and byte path are used for shell and agent
+Terminal panes; controls are disabled when the pane is not live.
 
 ---
 

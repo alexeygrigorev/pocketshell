@@ -3,22 +3,37 @@ package com.pocketshell.app.tmux
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.width
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsConfiguration
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.components.HotkeyLabelTruncatedKey
-import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
+import com.pocketshell.uikit.components.HotkeyLongPressAction
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_CTRL_FLOW_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_BACK_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_CLOSE_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
+import com.pocketshell.uikit.components.TerminalHotkeysPage
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 
 /**
  * Issue #755 (reopened) — durable, class-covering regression for the original
@@ -65,6 +80,7 @@ class TerminalHotkeysPanelNoTruncationTest {
 
     @Test
     fun everyHotkeyPanelKeyIsFullyVisibleNoTruncationOnNarrowPhone() {
+        var page by mutableStateOf(TerminalHotkeysPage.Main)
         compose.setContent {
             PocketShellTheme {
                 // Constrain to a narrow small-phone width so the test guards the
@@ -80,19 +96,18 @@ class TerminalHotkeysPanelNoTruncationTest {
                         // The PRODUCTION key set — every section, every label
                         // the user actually sees. Asserting on this (not a
                         // convenient subset) is what makes the guard class-covering.
-                        sections = TmuxHotkeyPanelSections,
+                        sections = if (page == TerminalHotkeysPage.Main) {
+                            TmuxHotkeyMainSections
+                        } else {
+                            TmuxHotkeyCtrlSections
+                        },
+                        page = page,
                         onKey = {},
                         onClose = {},
                     )
                 }
             }
         }
-        compose.waitForIdle()
-
-        // Issue #1332: the extended sections (CTRL COMBOS / letters / doubled
-        // chords / ⇧Tab / sticky Ctrl) sit behind the "Show more keys" expander,
-        // so expand the panel to render EVERY key before the truncation sweep.
-        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
         compose.waitForIdle()
 
         // Walk every label in the production key set. For each key:
@@ -103,28 +118,29 @@ class TerminalHotkeysPanelNoTruncationTest {
         //      truncation signal (a `boundsInRoot` containment check is vacuous
         //      here: Compose clamps a node's rect to its slot, so an overflowing
         //      label still reports as "contained").
-        val allLabels = TmuxHotkeyPanelSections.flatMap { section -> section.keys.map { it.label } }
-        require(allLabels.isNotEmpty()) { "production hotkey set must not be empty" }
-
         val offenders = mutableListOf<String>()
-        for (label in allLabels) {
-            // Match all nodes carrying this label text (the merged slot exposes
-            // the label); there should be exactly one per label in the panel.
-            val nodes = compose.onAllNodesWithText(label).fetchSemanticsNodes()
-            if (nodes.isEmpty()) {
-                offenders += "MISSING '$label' (not rendered in the panel)"
-                continue
-            }
-            for (node in nodes) {
-                val truncated = node.config.readTruncatedFlag()
-                if (truncated == null) {
-                    offenders += "'$label' slot did not publish the truncation flag " +
-                        "(panel wiring regression)"
-                } else if (truncated) {
-                    offenders += "'$label' is TRUNCATED (label glyph clipped in its slot)"
+        fun inspect(labels: List<String>) {
+            for (label in labels) {
+                val nodes = compose.onAllNodesWithText(label).fetchSemanticsNodes()
+                if (nodes.isEmpty()) {
+                    offenders += "MISSING '$label' (not rendered in the panel)"
+                    continue
+                }
+                for (node in nodes) {
+                    val truncated = node.config.readTruncatedFlag()
+                    if (truncated == null) {
+                        offenders += "'$label' slot did not publish the truncation flag " +
+                            "(panel wiring regression)"
+                    } else if (truncated) {
+                        offenders += "'$label' is TRUNCATED (label glyph clipped in its slot)"
+                    }
                 }
             }
         }
+        inspect(TmuxHotkeyMainSections.flatMap { it.keys }.map { it.label })
+        compose.runOnIdle { page = TerminalHotkeysPage.Ctrl }
+        compose.waitForIdle()
+        inspect(TmuxHotkeyCtrlSections.flatMap { it.keys }.map { it.label })
 
         if (offenders.isNotEmpty()) {
             throw AssertionError(
@@ -136,6 +152,134 @@ class TerminalHotkeysPanelNoTruncationTest {
         }
     }
 
+    @Test
+    fun issue1662EveryProductionTargetIsContainedAt320DpLargeFont() {
+        assertIssue1662LargeFontGeometry(widthDp = 320)
+    }
+
+    @Test
+    fun issue1662EveryProductionTargetIsContainedAtPixel7LargeFont() {
+        assertIssue1662LargeFontGeometry(widthDp = 411)
+    }
+
+    private fun assertIssue1662LargeFontGeometry(widthDp: Int) {
+        var page by mutableStateOf(TerminalHotkeysPage.Main)
+        compose.setContent {
+            val baseDensity = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = baseDensity.density,
+                    fontScale = LARGE_FONT_SCALE,
+                ),
+            ) {
+                PocketShellTheme {
+                    Box(
+                        modifier = Modifier
+                            .width(widthDp.dp)
+                            .fillMaxHeight()
+                            .testTag(ISSUE_1662_HOST_TAG),
+                    ) {
+                        TerminalHotkeysPanel(
+                            sections = if (page == TerminalHotkeysPage.Main) {
+                                TmuxHotkeyMainSections
+                            } else {
+                                TmuxHotkeyCtrlSections
+                            },
+                            page = page,
+                            onKey = {},
+                            onOpenCtrlPage = { page = TerminalHotkeysPage.Ctrl },
+                            onBackToMain = { page = TerminalHotkeysPage.Main },
+                            onClose = {},
+                            longPressActions = if (page == TerminalHotkeysPage.Main) {
+                                mapOf(
+                                    "^C" to HotkeyLongPressAction(
+                                        "hold ×2",
+                                        "Send Ctrl-C twice",
+                                    ),
+                                    "^D" to HotkeyLongPressAction(
+                                        "hold ×2",
+                                        "Send Ctrl-D twice",
+                                    ),
+                                )
+                            } else {
+                                emptyMap()
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        compose.waitForIdle()
+
+        assertEveryTarget(
+            labels = TmuxHotkeyMainSections.flatMap { it.keys }.map { it.label },
+            includeBack = false,
+            includeCtrlFlow = true,
+        )
+        compose.runOnIdle { page = TerminalHotkeysPage.Ctrl }
+        compose.waitForIdle()
+        assertEveryTarget(
+            labels = TmuxHotkeyCtrlSections.flatMap { it.keys }.map { it.label },
+            includeBack = true,
+            includeCtrlFlow = false,
+        )
+    }
+
+    private fun assertEveryTarget(
+        labels: List<String>,
+        includeBack: Boolean,
+        includeCtrlFlow: Boolean,
+    ) {
+        val hostBounds = compose.onNodeWithTag(ISSUE_1662_HOST_TAG)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val targets = labels.map { label ->
+            label to compose.onNode(
+                hasText(label)
+                    .and(hasClickAction())
+                    .and(hasAnyAncestor(hasTestTag(ISSUE_1662_HOST_TAG))),
+            ).fetchSemanticsNode()
+        }.toMutableList()
+        targets += "close" to compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_CLOSE_TAG)
+            .fetchSemanticsNode()
+        if (includeBack) {
+            targets += "back" to compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_BACK_TAG)
+                .fetchSemanticsNode()
+        }
+        if (includeCtrlFlow) {
+            targets += "Ctrl+…" to compose.onNodeWithTag(TERMINAL_HOTKEYS_CTRL_FLOW_TAG)
+                .fetchSemanticsNode()
+        }
+
+        val minTargetPx = 48f * compose.density.density
+        val slopPx = compose.density.density
+        targets.forEach { (label, node) ->
+            val bounds = node.boundsInRoot
+            assertTrue(
+                "$label target width must remain >=48dp at large font; bounds=$bounds",
+                bounds.width + slopPx >= minTargetPx,
+            )
+            assertTrue(
+                "$label target height must remain >=48dp at large font; bounds=$bounds",
+                bounds.height + slopPx >= minTargetPx,
+            )
+            assertTrue(
+                "$label must remain fully contained at large font; target=$bounds host=$hostBounds",
+                bounds.left + slopPx >= hostBounds.left &&
+                    bounds.right <= hostBounds.right + slopPx &&
+                    bounds.top + slopPx >= hostBounds.top &&
+                    bounds.bottom <= hostBounds.bottom + slopPx,
+            )
+            if (label.startsWith("^")) {
+                assertEquals(
+                    "$label must not truncate at large font",
+                    false,
+                    node.config.readTruncatedFlag(),
+                )
+            }
+        }
+    }
+
     private fun SemanticsConfiguration.readTruncatedFlag(): Boolean? =
         if (contains(HotkeyLabelTruncatedKey)) get(HotkeyLabelTruncatedKey) else null
 
@@ -144,5 +288,7 @@ class TerminalHotkeysPanelNoTruncationTest {
         // Smaller than a Pixel 7 (~411dp) so the guard fails the moment a future
         // change re-crowds a section past a small phone — the #755 symptom.
         const val NARROW_PHONE_WIDTH_DP = 320f
+        const val LARGE_FONT_SCALE = 1.3f
+        const val ISSUE_1662_HOST_TAG = "issue1662:hotkeys-large-font-host"
     }
 }

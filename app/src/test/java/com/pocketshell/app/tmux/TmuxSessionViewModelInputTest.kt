@@ -545,42 +545,27 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
-    fun hotkeyPanelSectionsAreDeDupedAndCarryTheAuditedSet() {
-        val labels = TmuxHotkeyPanelSections.flatMap { it.keys }.map { it.label }
+    fun hotkeyPanelCatalogCarriesTheIssue1662TwoPageSet() {
+        val mainLabels = TmuxHotkeyMainSections.flatMap { it.keys }.map { it.label }
+        val ctrlLabels = TmuxHotkeyCtrlSections.flatMap { it.keys }.map { it.label }
         assertEquals(
             listOf(
                 "←", "↑", "↓", "→",
-                "Esc", "Tab", "Enter", "^C", "^D",
-                "^A", "^B", "^C", "^D", "^E", "^G", "^J", "^K", "^L", "^O",
-                "^R", "^T", "^U", "^W", "^X", "^Z", "^\\",
-                "⇧Tab",
-                TmuxHotkeyInterruptX2Label, TmuxHotkeyEofX2Label,
-                TmuxHotkeyCtrlModifierLabel,
-                "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-                "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+                "Esc", "Tab", "⇧Tab", "Enter",
+                "^B", "^C", "^D", "^Q", "^X",
             ),
-            labels,
+            mainLabels,
         )
-        assertTrue(labels.contains("⇧Tab"))
-        val duplicated = labels.groupingBy { it }.eachCount().filterValues { it > 1 }.keys
-        assertEquals(setOf("^C", "^D"), duplicated)
-        assertTrue(labels.contains(TmuxHotkeyCtrlModifierLabel))
-        val ctrlKey = TmuxHotkeyPanelSections.flatMap { it.keys }
-            .single { it.label == TmuxHotkeyCtrlModifierLabel }
-        assertEquals(KeyKind.Modifier, ctrlKey.kind)
-        assertFalse(labels.contains("/"))
-        assertTrue(labels.contains("^B"))
-        listOf("^G", "^J", "^K", "^O", "^T", "^U", "^W", "^X", "^\\").forEach {
-            assertTrue("CTRL COMBOS must offer the filled key $it", labels.contains(it))
-        }
-        ('a'..'z').forEach { c ->
-            assertTrue("LETTERS must offer '$c'", labels.contains(c.toString()))
-        }
-        assertTrue(labels.contains(TmuxHotkeyInterruptX2Label))
-        assertTrue(labels.contains(TmuxHotkeyEofX2Label))
-        assertTrue(labels.contains("^C"))
-        assertTrue(labels.contains("^D"))
-        val arrows = TmuxHotkeyPanelSections.first().keys
+        assertEquals(
+            listOf("QWERT", "YUIOP", "ASDFG", "HJKL", "ZXCVB", "NM\\")
+                .flatMap { row -> row.map { "^$it" } },
+            ctrlLabels,
+        )
+        assertFalse(mainLabels.contains(TmuxHotkeyInterruptX2Label))
+        assertFalse(mainLabels.contains(TmuxHotkeyEofX2Label))
+        assertFalse(mainLabels.contains("Ctrl"))
+        assertFalse(mainLabels.contains("a"))
+        val arrows = TmuxHotkeyMainSections.first().keys
         assertEquals(listOf("←", "↑", "↓", "→"), arrows.map { it.label })
         assertTrue(arrows.all { it.kind == KeyKind.Arrow })
     }

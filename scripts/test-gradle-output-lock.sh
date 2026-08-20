@@ -165,6 +165,21 @@ wait_for_marker() {
   return 0
 }
 
+# A successful connected-test.sh wrapper run is now required to publish an
+# authoritative JUnit report. Keep that contract in this fake Gradle lane so
+# this lock harness exercises the same green path as the real wrapper. The
+# full-gate-style lane does not set POCKETSHELL_CONNECTED_TEST_REPORT_DIR, so it
+# remains a plain Gradle/build fixture and does not publish connected results.
+write_authoritative_report() {
+  local report_dir="${POCKETSHELL_CONNECTED_TEST_REPORT_DIR:-}"
+  [[ -n "$report_dir" ]] || return 0
+  mkdir -p "$report_dir"
+  cat > "$report_dir/TEST-gradle-output-lock.xml" <<'XML'
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="gradle-output-lock-stub" tests="1" skipped="0" failures="0" errors="0"><testcase name="connected-wrapper-contract" classname="gradle-output-lock-stub"/></testsuite>
+XML
+}
+
 bump 1
 rc=0
 case "$role" in
@@ -203,6 +218,9 @@ case "$role" in
 esac
 bump -1
 printf '%s %s exit=%s\n' "$(date +%s.%N)" "$role" "$rc" >> "$state/gradlew.log"
+if (( rc == 0 )); then
+  write_authoritative_report
+fi
 exit "$rc"
 GRADLEW_STUB
   chmod +x "$root/gradlew"
@@ -1237,6 +1255,68 @@ both_canonical_wrappers_take_the_lock_before_gradle() {
 }
 
 # --------------------------------------------------------------------------
+# 11. Report-contract regression. The fake Gradle lanes above are successful
+#    connected-test.sh invocations, so they must publish the authoritative XML
+#    that the wrapper now requires. Mutate only the report call in a private
+#    fixture copy and prove a real no-XML connected run remains hard-red after
+#    Gradle actually ran; otherwise this harness could go green vacuously while
+#    its fake lane stopped exercising the fail-closed wrapper contract.
+# --------------------------------------------------------------------------
+no_xml_connected_run_fails_closed() {
+  local tmp="$1"
+  local wt="$tmp/wt-no-xml"
+  local state="$tmp/state-no-xml"
+  local log="$tmp/no-xml-connected.log"
+  make_worktree "$wt"
+  new_state_dir "$state"
+
+  local stub="$wt/gradlew"
+  local call_anchor='  write_authoritative_report'
+  local before_hash after_hash
+  before_hash="$(sha256sum "$stub" | awk '{print $1}')"
+  if ! grep -qF "$call_anchor" "$stub"; then
+    fail "the fake Gradle stub has no authoritative-report call to mutate; no-XML proof would be vacuous"
+    return 1
+  fi
+  # Keep the surrounding `if` syntactically valid: replace the call with a
+  # no-op rather than deleting the only command in that block.
+  sed -i 's/^  write_authoritative_report$/  : # mutated: omit authoritative report/' "$stub"
+  after_hash="$(sha256sum "$stub" | awk '{print $1}')"
+  if [[ "$before_hash" == "$after_hash" ]]; then
+    fail "the no-XML mutation did not change the private fake Gradle stub"
+    return 1
+  fi
+  if grep -qF "$call_anchor" "$stub"; then
+    fail "the no-XML mutation left the authoritative-report call in place"
+    return 1
+  fi
+
+  start_connected_lane "$wt" consume i1662xml "$state" "$log" emulator-5554
+  local lane_pid="$LANE_PID"
+  local lane_rc
+  wait_pid "$lane_pid"
+  lane_rc="$WAIT_RC"
+
+  if [[ "$lane_rc" != "1" ]]; then
+    fail "a real no-XML connected wrapper did not fail closed with rc=1 (rc=$lane_rc). Lane log:\n$(tail -n 30 "$log" | sed 's/^/      /')\nGradle log:\n$(tail -n 30 "$state/gradlew.log" | sed 's/^/      /')"
+    return 1
+  fi
+  if ! grep -q 'CONNECTED_TEST_XML_FAILED: no authoritative JUnit XML' "$log"; then
+    fail "the no-XML connected wrapper emitted no authoritative fail-closed diagnostic"
+    return 1
+  fi
+  local invocations
+  invocations="$(grep -c ' invoked$' "$state/gradlew.log" 2>/dev/null || printf '0')"
+  if [[ "$invocations" != "1" ]]; then
+    fail "the no-XML proof did not execute exactly one fake Gradle invocation (invocations=$invocations)"
+    return 1
+  fi
+  printf '  mutation: no-XML connected lane was live (stub %s -> %s; gradle invocations=%s)\n' \
+    "$before_hash" "$after_hash" "$invocations"
+  pass "a real no-XML connected run remains fail-closed and non-vacuous"
+}
+
+# --------------------------------------------------------------------------
 
 main() {
   # Deliberately NOT `local`: the EXIT trap fires after main's frame is gone.
@@ -1271,6 +1351,7 @@ main() {
   a_queued_lane_that_allocates_its_own_serial_holds_none "$tmp" || true
   the_avd_lock_stays_a_separate_concern "$tmp" || true
   both_canonical_wrappers_take_the_lock_before_gradle || true
+  no_xml_connected_run_fails_closed "$tmp" || true
 
   if (( FAILURES > 0 )); then
     printf '\ngradle output-tree lock: %s FAILING check(s)\n' "$FAILURES" >&2

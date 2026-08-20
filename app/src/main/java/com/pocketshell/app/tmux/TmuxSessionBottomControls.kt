@@ -381,58 +381,24 @@ internal fun tmuxTerminalHiddenImeSurface(
     else -> TmuxTerminalHiddenImeSurface.Controls
 }
 
-/**
- * Issue #784: the dedicated terminal-hotkeys panel key set.
- *
- * This replaces the cramped, `…`-overflowing in-composer key bar (#458/#755,
- * hard-cut per D22). Issue #1332 adds progressive disclosure: the panel opens
- * COMPACT showing only the COMMON set (ARROWS first — the most-used keys — then
- * `Esc`/`Tab`/`Enter`/`^C`/`^D`), with a "Show more keys" expander revealing the
- * EXTENDED set (the full `CTRL COMBOS` grid, `⇧Tab`, doubled interrupt/EOF, the
- * `Ctrl` sticky modifier, and the a–z `LETTERS` grid). No horizontal scroll, no
- * lone `Ctrl` modifier, no duplicate `/`. Each label is audited so the visible
- * glyph equals the byte sent ([TmuxSessionViewModel.onKeyBarKey]) — #1332 only
- * reordered and split the catalog; no routing/byte changed:
- *
- *  - Keys section: `Esc` (0x1B), `Tab`, `Enter` (#527).
- *  - Ctrl combos section: the useful chords as DIRECT buttons (no modifier to
- *    arm first) — `^A`(0x01) `^B`(0x02, tmux prefix / Claude "ctrl-b ctrl-b",
- *    #677) `^C`(0x03) `^D`(0x04) `^E`(0x05) `^L`(0x0C) `^R`(0x12) `^Z`(0x1A).
- *    `^[` (0x1B) is intentionally omitted: it equals `Esc`, which is already in
- *    the Keys section — exposing both would re-introduce the duplicate the
- *    maintainer flagged.
- *  - Arrows section: `←` `↑` `↓` `→` with clean, legible glyphs (replacing the
- *    old hard-to-read `‹ ⌃ ⌄ ›`).
- *
- * Every key routes through [TmuxSessionViewModel.onKeyBarKey], which maps the
- * label to its control byte (`send-keys -H` overlay) or tmux named key — no
- * terminal resize/redraw.
- */
+/** Issue #1662: visible label for the dedicated Ctrl-picker action. */
+internal const val TmuxHotkeyCtrlFlowLabel: String = "Ctrl+…"
+
 internal const val TmuxHotkeyEnterLabel: String = "Enter"
 
-// Issue #1091: the sticky `Ctrl` modifier label. Tapping it cycles the
-// modifier (Off -> OneShot -> Locked -> Off) via
-// [TmuxSessionViewModel.onCtrlModifierTap]; the next key from the LETTERS
-// section is then sent as its control char so `Ctrl+<any letter>` (and the
-// caret-range symbols) is reachable — the general escape hatch beyond the
-// curated direct buttons. The maintainer was trapped in `nano` because the
-// old fixed subset could not send arbitrary control combos.
-internal const val TmuxHotkeyCtrlModifierLabel: String = "Ctrl"
-
-// Issue #787: the DOUBLED interrupt/EOF controls, re-homed into the hotkeys
-// panel from the deleted `/ commands` palette (where they were the only home —
-// originally #453/#543). The double-press is a DISTINCT sequence from the single
-// `^C`/`^D` above: Claude Code (and many REPLs) treat the first `^C`/`^D` as
-// "press again to interrupt / exit", so the doubled byte is what actually stops
-// the running agent / sends EOF. `onKeyBarKey` maps these two labels to
-// `sendControlInputToPane(..., repeatCount = 2)`.
+// These wire-only labels are not rendered as tiles. The canonical ^C/^D keys
+// invoke them on long press so the existing atomic two-byte path stays intact.
 internal const val TmuxHotkeyInterruptX2Label: String = "^C×2"
 internal const val TmuxHotkeyEofX2Label: String = "^D×2"
 
-internal val TmuxHotkeyPanelSections: List<HotkeySection> = listOf(
-    // Issue #1332: ARROWS is now the FIRST/top section (was last). Arrows are the
-    // most-used navigation keys, so they sit at the very top, immediately
-    // reachable. Part of the COMMON set (always shown, `extended = false`).
+/**
+ * Issue #1662 main page: a one-screenful catalog with only common controls.
+ *
+ * The old CTRL COMBOS, visible doubled tiles, sticky modifier, literal-letter
+ * grid, and expander are deliberately gone. Arbitrary control chords live on
+ * [TmuxHotkeyCtrlSections].
+ */
+internal val TmuxHotkeyMainSections: List<HotkeySection> = listOf(
     HotkeySection(
         title = "ARROWS",
         keys = listOf(
@@ -443,106 +409,44 @@ internal val TmuxHotkeyPanelSections: List<HotkeySection> = listOf(
         ),
         columns = 4,
     ),
-    // Issue #1332: the everyday essentials, shown by default alongside the
-    // arrows — `Esc`, `Tab`, `Enter`, and the single `^C` / `^D` (interrupt /
-    // EOF). One compact row of five. `^C` / `^D` also remain in the full CTRL
-    // COMBOS grid behind the expander; surfacing them here is intentional (the
-    // most-reached-for control keys). Every label still routes through
-    // [TmuxSessionViewModel.onKeyBarKey] exactly as before — order/disclosure
-    // only, no byte change.
     HotkeySection(
-        title = "COMMON",
+        title = "KEYS",
         keys = listOf(
             KeyBinding(label = "Esc", kind = KeyKind.Regular),
             KeyBinding(label = "Tab", kind = KeyKind.Regular),
+            KeyBinding(label = "⇧Tab", kind = KeyKind.Regular),
             KeyBinding(label = TmuxHotkeyEnterLabel, kind = KeyKind.Regular),
-            KeyBinding(label = "^C", kind = KeyKind.Regular),
-            KeyBinding(label = "^D", kind = KeyKind.Regular),
         ),
-        columns = 5,
+        columns = 4,
     ),
-    // Issue #1091: the curated one-tap control combos — the existing 8 plus the
-    // control keys nano (and many TUIs) need that were missing: `^G` Help, `^J`
-    // Justify, `^K` Cut, `^O` Write Out, `^T` Execute, `^U` cut-to-start, `^W`
-    // Where-Is, `^X` Exit, `^\` Replace. Ordered by control byte so the grid
-    // reads predictably. Each routes to its byte via [onKeyBarKey].
-    // Issue #1332: EXTENDED — behind the "Show more keys" expander.
     HotkeySection(
-        title = "CTRL COMBOS",
+        title = "CTRL",
         keys = listOf(
-            KeyBinding(label = "^A", kind = KeyKind.Regular),
             KeyBinding(label = "^B", kind = KeyKind.Regular),
             KeyBinding(label = "^C", kind = KeyKind.Regular),
             KeyBinding(label = "^D", kind = KeyKind.Regular),
-            KeyBinding(label = "^E", kind = KeyKind.Regular),
-            KeyBinding(label = "^G", kind = KeyKind.Regular),
-            KeyBinding(label = "^J", kind = KeyKind.Regular),
-            KeyBinding(label = "^K", kind = KeyKind.Regular),
-            KeyBinding(label = "^L", kind = KeyKind.Regular),
-            KeyBinding(label = "^O", kind = KeyKind.Regular),
-            KeyBinding(label = "^R", kind = KeyKind.Regular),
-            KeyBinding(label = "^T", kind = KeyKind.Regular),
-            KeyBinding(label = "^U", kind = KeyKind.Regular),
-            KeyBinding(label = "^W", kind = KeyKind.Regular),
+            KeyBinding(label = "^Q", kind = KeyKind.Regular),
             KeyBinding(label = "^X", kind = KeyKind.Regular),
-            KeyBinding(label = "^Z", kind = KeyKind.Regular),
-            KeyBinding(label = "^\\", kind = KeyKind.Regular),
         ),
-        columns = 4,
-        extended = true,
-    ),
-    // Issue #893: ⇧Tab (back-tab / Shift+Tab) sends tmux's `BTab` named key
-    // (ESC [ Z) so the maintainer can cycle Claude Code's permission/plan mode
-    // from the phone. Issue #1332: EXTENDED — it moved out of the common KEYS
-    // row into the expander (the common set is arrows + Esc/Tab/Enter/^C/^D).
-    HotkeySection(
-        title = "MORE KEYS",
-        keys = listOf(
-            KeyBinding(label = "⇧Tab", kind = KeyKind.Regular),
-        ),
-        columns = 4,
-        extended = true,
-    ),
-    // Issue #787: interrupt / EOF doubled chords (re-homed from the deleted
-    // palette). Distinct from the single `^C`/`^D` above — these send the byte
-    // TWICE so they actually stop the running agent / exit the REPL.
-    // Issue #1332: EXTENDED — behind the "Show more keys" expander.
-    HotkeySection(
-        title = "INTERRUPT / EOF",
-        keys = listOf(
-            KeyBinding(label = TmuxHotkeyInterruptX2Label, kind = KeyKind.Regular),
-            KeyBinding(label = TmuxHotkeyEofX2Label, kind = KeyKind.Regular),
-        ),
-        columns = 2,
-        extended = true,
-    ),
-    // Issue #1091: the general `Ctrl + <any letter>` escape hatch. Tap `Ctrl`
-    // (a sticky modifier — single tap = one-shot, double tap = locked, accent
-    // when active) then a letter to send that letter's control byte. With
-    // `Ctrl` off a letter types literally. Covers every `Ctrl+<a–z>` combo, not
-    // just the curated subset above — so no TUI key is ever unreachable.
-    // Issue #1332: EXTENDED — behind the "Show more keys" expander.
-    HotkeySection(
-        title = "CTRL + LETTER",
-        keys = listOf(
-            KeyBinding(label = TmuxHotkeyCtrlModifierLabel, kind = KeyKind.Modifier),
-        ),
-        columns = 4,
-        extended = true,
-    ),
-    HotkeySection(
-        title = "LETTERS",
-        keys = ('a'..'z').map { KeyBinding(label = it.toString(), kind = KeyKind.Regular) },
-        columns = 7,
-        extended = true,
+        columns = 5,
     ),
 )
 
-// Issue #454: the agent-pane bottom band is decluttered to the composer
-// launcher plus primary controls. Slash commands are no longer part of the
-// scrollable chip list — and as of #787 the standalone slash palette + bottom
-// `/ commands` chip are gone entirely (the only slash entry now lives in the
-// composer: its `/` button + type-`/` autocomplete). The former `Ctrl-C ×2` /
-// `Ctrl-D ×2` interrupt/EOF chips' function is preserved in the hotkeys panel's
-// "INTERRUPT / EOF" section (see [TmuxHotkeyInterruptX2Label] /
-// [TmuxHotkeyEofX2Label] and [onKeyBarKey]).
+/**
+ * Issue #1662 Ctrl page: every control chord the old sheet exposed, arranged
+ * by QWERTY muscle memory in five columns. Labels include the caret so the same
+ * generic `^<char>` parser handles both pages.
+ */
+internal val TmuxHotkeyCtrlSections: List<HotkeySection> = listOf(
+    HotkeySection(
+        title = "CTRL + KEY",
+        keys = listOf("QWERT", "YUIOP", "ASDFG", "HJKL", "ZXCVB", "NM\\")
+            .flatMap(::controlBindings),
+        columns = 5,
+        rows = listOf("QWERT", "YUIOP", "ASDFG", "HJKL", "ZXCVB", "NM\\")
+            .map(::controlBindings),
+    ),
+)
+
+private fun controlBindings(keys: String): List<KeyBinding> =
+    keys.map { key -> KeyBinding("^$key", KeyKind.Regular) }

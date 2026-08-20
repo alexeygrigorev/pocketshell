@@ -27,8 +27,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.insets.dispatchSyntheticWindowInsets
-import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_EXPAND_TAG
+import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_CTRL_FLOW_TAG
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
+import com.pocketshell.uikit.components.TerminalHotkeysPage
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
@@ -67,6 +68,7 @@ class TerminalHotkeysPanelScreenshotHarness {
 
     @Test
     fun redesignedHotkeysPanelScreenshot() {
+        val page = mutableStateOf(TerminalHotkeysPage.Main)
         compose.setContent {
             PocketShellTheme {
                 Box(
@@ -81,8 +83,15 @@ class TerminalHotkeysPanelScreenshotHarness {
                             .testTag(PANEL_TAG),
                     ) {
                         TerminalHotkeysPanel(
-                            sections = TmuxHotkeyPanelSections,
+                            sections = if (page.value == TerminalHotkeysPage.Main) {
+                                TmuxHotkeyMainSections
+                            } else {
+                                TmuxHotkeyCtrlSections
+                            },
+                            page = page.value,
                             onKey = {},
+                            onOpenCtrlPage = { page.value = TerminalHotkeysPage.Ctrl },
+                            onBackToMain = { page.value = TerminalHotkeysPage.Main },
                             onClose = {},
                             modifier = Modifier.fillMaxWidth(),
                         )
@@ -91,12 +100,14 @@ class TerminalHotkeysPanelScreenshotHarness {
             }
         }
         compose.waitForIdle()
-        // Issue #1332: reveal the extended sections so the full grid is captured.
-        compose.onNodeWithTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG).performClick()
-        compose.waitForIdle()
-        // Sanity: the redesigned panel really rendered its keys before capture.
         compose.onNodeWithText("^B").assertExists()
-        save(PANEL_TAG, "issue755-hotkeys-panel.png")
+        save(PANEL_TAG, "issue1662-hotkeys-main-page.png")
+
+        compose.onNodeWithTag(TERMINAL_HOTKEYS_CTRL_FLOW_TAG).performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Ctrl + …").assertExists()
+        compose.onNodeWithText("^\\").assertExists()
+        save(PANEL_TAG, "issue1662-hotkeys-ctrl-page.png")
     }
 
     @Test

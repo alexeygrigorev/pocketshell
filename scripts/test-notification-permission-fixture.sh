@@ -6,6 +6,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REAL_CONNECTED="$SCRIPT_DIR/connected-test.sh"
+REAL_CONNECTED="${NOTIFICATION_FIXTURE_CONNECTED_SOURCE:-$REAL_CONNECTED}"
 REAL_BUDGET_HELPER="$SCRIPT_DIR/ci-journey-budget-functions.sh"
 REAL_NIGHTLY="$SCRIPT_DIR/nightly-extensive-suite.sh"
 NOTIFICATION_CLASS="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
@@ -762,6 +763,42 @@ case "$fault_call" in
     ;;
 esac
 pass "nightly bulk/order isolation, non-vacuous report/count, and verdict split are pinned"
+
+# Issue #1662 follow-up: the generic XML validator runs before the dedicated
+# notification validator. Its failure must not suppress the notification
+# validator's actionable zero-test diagnostic. Mutate only that handoff in a
+# private wrapper copy and run this guard again; the guard must go red at its
+# diagnostic assertion rather than accepting the generic message as a substitute.
+if [[ "${NOTIFICATION_FIXTURE_MUTATION_RUN:-0}" != "1" ]]; then
+  echo "== Mutation: generic XML failure must not bypass notification diagnostics =="
+  mutation_source="$FIXTURE_ROOT/connected-test-mutant.sh"
+  cp "$REAL_CONNECTED" "$mutation_source"
+  mutation_anchor=' || "$connected_test_report_rc" != "0"'
+  mutation_text="$(<"$mutation_source")"
+  [[ "$mutation_text" == *"$mutation_anchor"* ]] \
+    || fail "notification handoff mutation anchor was not found exactly"
+  mutation_text="${mutation_text/"$mutation_anchor"/}"
+  printf '%s\n' "$mutation_text" > "$mutation_source"
+  [[ "$mutation_text" != *"$mutation_anchor"* ]] \
+    || fail "notification handoff mutation did not remove its anchor"
+
+  mutation_log="$FIXTURE_ROOT/notification-mutant.log"
+  set +e
+  NOTIFICATION_FIXTURE_CONNECTED_SOURCE="$mutation_source" \
+    NOTIFICATION_FIXTURE_MUTATION_RUN=1 \
+    bash "$SCRIPT_DIR/test-notification-permission-fixture.sh" \
+    > "$mutation_log" 2>&1
+  mutation_rc=$?
+  set -e
+  (( mutation_rc != 0 )) \
+    || fail "bypassing notification diagnostics left the full guard green"
+  grep -q 'zero-test failure did not explain its non-vacuous verdict' \
+    "$mutation_log" \
+    || { cat "$mutation_log"; fail "notification diagnostic mutation failed for an unrelated reason"; }
+  ! grep -q 'ALL NOTIFICATION PERMISSION FIXTURE TESTS PASSED' "$mutation_log" \
+    || fail "notification diagnostic mutation reported a false all-green verdict"
+  pass "bypassing notification diagnostics is live and hard-red (rc=$mutation_rc)"
+fi
 
 echo
 echo "ALL NOTIFICATION PERMISSION FIXTURE TESTS PASSED"

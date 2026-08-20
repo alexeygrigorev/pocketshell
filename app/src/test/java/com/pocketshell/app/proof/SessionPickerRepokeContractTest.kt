@@ -276,7 +276,7 @@ class SessionPickerRepokeContractTest {
             "app/src/androidTest/java/com/pocketshell/app/proof/ProjectSwitcherDropdownE2eTest.kt" to 1,
             "app/src/androidTest/java/com/pocketshell/app/proof/SwitchStaleCaptureSessionBodyJourneyE2eTest.kt" to 3,
             "app/src/androidTest/java/com/pocketshell/app/proof/SystemBackForegroundE2eTest.kt" to 1,
-            "app/src/androidTest/java/com/pocketshell/app/proof/TmuxKeyBarCtrlComboE2eTest.kt" to 1,
+            "app/src/androidTest/java/com/pocketshell/app/proof/TmuxKeyBarCtrlComboE2eTest.kt" to 2,
             "app/src/androidTest/java/com/pocketshell/app/proof/TmuxSessionSwitchE2eTest.kt" to 1,
             "app/src/androidTest/java/com/pocketshell/app/proof/TmuxSessionSwitchSameHostReusesSshE2eTest.kt" to 1,
             "app/src/androidTest/java/com/pocketshell/app/tmux/Issue887TerminalFixedUnderImeE2eTest.kt" to 1,

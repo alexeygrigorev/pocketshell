@@ -345,7 +345,6 @@ J1_UNWIRED_ANDROID_E2E_DOCKER_BASELINE=(
   "com.pocketshell.app.proof.TmuxBracketedPasteDictationE2eTest"
   "com.pocketshell.app.proof.TmuxDetachOnBackgroundE2eTest"
   "com.pocketshell.app.proof.TmuxExternalUpdateDockerTest"
-  "com.pocketshell.app.proof.TmuxKeyBarCtrlComboE2eTest"
   "com.pocketshell.app.proof.TmuxOrphanClientCleanupE2eTest"
   "com.pocketshell.app.proof.TmuxSessionSwitchE2eTest"
   "com.pocketshell.app.proof.TmuxSessionSwitchSameHostReusesSshE2eTest"

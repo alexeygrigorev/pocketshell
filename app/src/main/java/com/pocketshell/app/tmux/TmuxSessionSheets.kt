@@ -14,7 +14,6 @@ import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.model.KeyBinding
-import com.pocketshell.uikit.model.KeyModifierState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,7 +41,6 @@ internal fun TmuxSessionSheets(
     showHotkeysPanel: Boolean,
     hotkeysPaneId: String?,
     sessionLive: Boolean,
-    ctrlModifierState: KeyModifierState,
     onHotkey: (paneId: String, binding: KeyBinding) -> Unit,
     onDismissHotkeys: () -> Unit,
 ) {
@@ -85,9 +83,9 @@ internal fun TmuxSessionSheets(
     val paneId = hotkeysPaneId
     if (showHotkeysPanel && paneId != null) {
         TerminalHotkeysSheet(
-            sections = TmuxHotkeyPanelSections,
+            mainSections = TmuxHotkeyMainSections,
+            ctrlSections = TmuxHotkeyCtrlSections,
             enabled = sessionLive,
-            ctrlModifierState = ctrlModifierState,
             onKey = { binding -> onHotkey(paneId, binding) },
             onDismiss = onDismissHotkeys,
         )

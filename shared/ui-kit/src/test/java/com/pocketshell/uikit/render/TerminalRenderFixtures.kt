@@ -23,14 +23,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.components.ButtonVariant
+import com.pocketshell.uikit.components.HotkeyLongPressAction
 import com.pocketshell.uikit.components.HotkeySection
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.components.TerminalHotkeysPanel
+import com.pocketshell.uikit.components.TerminalHotkeysPage
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
-import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
@@ -39,28 +40,32 @@ import com.pocketshell.uikit.theme.PocketShellType
 internal fun TerminalHotkeysPanelRender() {
     Surface(color = PocketShellColors.Surface) {
         TerminalHotkeysPanel(
-            sections = sampleHotkeySections(),
+            sections = sampleMainHotkeySections(),
+            page = TerminalHotkeysPage.Main,
             onKey = {},
+            onLongKey = {},
+            onOpenCtrlPage = {},
+            onBackToMain = {},
             onClose = {},
-            // Issue #1091: render the sticky `Ctrl` modifier ARMED so the
-            // accent treatment on the `Ctrl` key is visually checked.
-            modifierState = KeyModifierState.OneShot,
-            // Issue #1332: default-collapsed render shows the compact COMMON
-            // set only (ARROWS first, then Esc/Tab/Enter/^C/^D) + the "Show
-            // more keys" expander.
-            initiallyExpanded = true,
+            longPressActions = mapOf(
+                "^C" to HotkeyLongPressAction("hold ×2", "Send Ctrl-C twice"),
+                "^D" to HotkeyLongPressAction("hold ×2", "Send Ctrl-D twice"),
+            ),
         )
     }
 }
 
 @Composable
-internal fun TerminalHotkeysPanelCollapsedRender() {
+internal fun TerminalHotkeysCtrlPageRender() {
     Surface(color = PocketShellColors.Surface) {
         TerminalHotkeysPanel(
-            sections = sampleHotkeySections(),
+            sections = sampleCtrlHotkeySections(),
+            page = TerminalHotkeysPage.Ctrl,
             onKey = {},
+            onLongKey = {},
+            onOpenCtrlPage = {},
+            onBackToMain = {},
             onClose = {},
-            initiallyExpanded = false,
         )
     }
 }
@@ -179,15 +184,9 @@ internal fun TmuxSurfaceReconnectAffordanceRender() {
     }
 }
 
-/**
- * Issue #1091 + #1332: the EXPANDED hotkeys panel — `CTRL COMBOS` filled with
- * the nano keys (`^G`/`^J`/`^K`/`^O`/`^T`/`^U`/`^W`/`^X`/`^\`), the sticky
- * `Ctrl` modifier, and the a–z LETTERS grid — all revealed behind the
- * expander, with ARROWS still pinned at the top.
- */
-private fun sampleHotkeySections(): List<HotkeySection> =
+/** Issue #1662 main hotkeys page: common controls plus the dedicated Ctrl-flow action. */
+private fun sampleMainHotkeySections(): List<HotkeySection> =
     listOf(
-        // Issue #1332: ARROWS first (common, always shown).
         HotkeySection(
             title = "ARROWS",
             keys = listOf(
@@ -198,70 +197,36 @@ private fun sampleHotkeySections(): List<HotkeySection> =
             ),
             columns = 4,
         ),
-        // Issue #1332: the compact COMMON essentials row (always shown).
         HotkeySection(
-            title = "COMMON",
+            title = "KEYS",
             keys = listOf(
                 KeyBinding("Esc", KeyKind.Regular),
                 KeyBinding("Tab", KeyKind.Regular),
+                KeyBinding("⇧Tab", KeyKind.Regular),
                 KeyBinding("Enter", KeyKind.Regular),
-                KeyBinding("^C", KeyKind.Regular),
-                KeyBinding("^D", KeyKind.Regular),
             ),
+            columns = 4,
+        ),
+        HotkeySection(
+            title = "CTRL",
+            keys = listOf("^B", "^C", "^D", "^Q", "^X")
+                .map { KeyBinding(it, KeyKind.Regular) },
             columns = 5,
         ),
+    )
+
+private fun sampleCtrlHotkeySections(): List<HotkeySection> {
+    val rows = listOf("QWERT", "YUIOP", "ASDFG", "HJKL", "ZXCVB", "NM\\")
+        .map { row -> row.map { KeyBinding("^$it", KeyKind.Regular) } }
+    return listOf(
         HotkeySection(
-            title = "CTRL COMBOS",
-            keys = listOf(
-                KeyBinding("^A", KeyKind.Regular),
-                KeyBinding("^B", KeyKind.Regular),
-                KeyBinding("^C", KeyKind.Regular),
-                KeyBinding("^D", KeyKind.Regular),
-                KeyBinding("^E", KeyKind.Regular),
-                KeyBinding("^G", KeyKind.Regular),
-                KeyBinding("^J", KeyKind.Regular),
-                KeyBinding("^K", KeyKind.Regular),
-                KeyBinding("^L", KeyKind.Regular),
-                KeyBinding("^O", KeyKind.Regular),
-                KeyBinding("^R", KeyKind.Regular),
-                KeyBinding("^T", KeyKind.Regular),
-                KeyBinding("^U", KeyKind.Regular),
-                KeyBinding("^W", KeyKind.Regular),
-                KeyBinding("^X", KeyKind.Regular),
-                KeyBinding("^Z", KeyKind.Regular),
-                KeyBinding("^\\", KeyKind.Regular),
-            ),
-            columns = 4,
-            extended = true,
-        ),
-        HotkeySection(
-            title = "MORE KEYS",
-            keys = listOf(KeyBinding("⇧Tab", KeyKind.Regular)),
-            columns = 4,
-            extended = true,
-        ),
-        HotkeySection(
-            title = "INTERRUPT / EOF",
-            keys = listOf(
-                KeyBinding("^C×2", KeyKind.Regular),
-                KeyBinding("^D×2", KeyKind.Regular),
-            ),
-            columns = 2,
-            extended = true,
-        ),
-        HotkeySection(
-            title = "CTRL + LETTER",
-            keys = listOf(KeyBinding("Ctrl", KeyKind.Modifier)),
-            columns = 4,
-            extended = true,
-        ),
-        HotkeySection(
-            title = "LETTERS",
-            keys = ('a'..'z').map { KeyBinding(it.toString(), KeyKind.Regular) },
-            columns = 7,
-            extended = true,
+            title = "CTRL + KEY",
+            keys = rows.flatten(),
+            columns = 5,
+            rows = rows,
         ),
     )
+}
 
 @Composable
 private fun TerminalLoadingLabel(text: String) {

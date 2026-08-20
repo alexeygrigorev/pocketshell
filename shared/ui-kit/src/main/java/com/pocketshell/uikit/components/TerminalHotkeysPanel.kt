@@ -1,19 +1,20 @@
 package com.pocketshell.uikit.components
 
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -25,8 +26,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsPropertyKey
@@ -39,223 +41,213 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
-import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
 
 /**
- * Dedicated terminal-hotkeys panel (issue #784).
+ * A labelled group of hotkeys.
  *
- * Replaces the cramped, `…`-overflowing key bar that #755 had wedged into the
- * Prompt Composer. This is its OWN surface — toggled from the terminal view,
- * NOT part of the soft keyboard and NOT inside the composer. It shows EVERY key
- * at once in a tidy multi-row grid with NO `…` overflow and NO horizontal
- * scroll: keys flow row-by-row, each row a fixed count of equal-flex slots, so
- * a short row is left-aligned and never stretched into giant keys.
- *
- * The panel is a pure renderer. It emits exactly one [onKey] callback per tap,
- * carrying the tapped [KeyBinding]; the host screen owns the wire mapping
- * (control byte / named key) so the ui-kit stays render-only — the same
- * contract [KeyBar] used.
- *
- * Layout (top → bottom):
- *  - A title row ("Terminal hotkeys") + a close affordance.
- *  - One or more labelled [HotkeySection]s, each a header + a grid of keys.
- *
- * Visual recipe mirrors the existing [KeyBar] key slot (SurfaceElev fill, 1dp
- * Border, 8dp radius, mono label) so the two read as one vocabulary, but here
- * every key is laid out at full size — nothing is hidden behind an expander.
+ * [rows] normally follows [columns], while the Ctrl picker supplies explicit
+ * QWERTY rows so `HJKL` and `NM\` do not flow into neighbouring rows.
  */
 data class HotkeySection(
     val title: String,
     val keys: List<KeyBinding>,
-    /**
-     * How many equal-width columns this section's grid uses. The key set is
-     * curated so each section fits a phone width at this column count without
-     * clipping; a section with fewer keys than [columns] simply leaves the
-     * trailing slots empty (keys stay full-size, never stretched).
-     */
     val columns: Int,
-    /**
-     * Issue #1332 — progressive disclosure. `false` (default) => this section is
-     * part of the COMMON set, always shown. `true` => this section lives behind
-     * the "Show more keys" expander and is only rendered when the panel is
-     * expanded. The catalog puts the everyday keys (arrows + Esc/Tab/Enter/^C/^D)
-     * in the common set and the full CTRL-combos / letters / doubled-chord grids
-     * behind the expander so the panel opens compact.
-     */
-    val extended: Boolean = false,
+    val rows: List<List<KeyBinding>> = keys.chunked(columns),
+)
+
+/** Transient page selected inside the terminal-hotkeys sheet. */
+enum class TerminalHotkeysPage {
+    Main,
+    Ctrl,
+}
+
+/** A discoverable alternate action attached to one key target. */
+data class HotkeyLongPressAction(
+    val cue: String,
+    val accessibilityLabel: String,
 )
 
 const val TERMINAL_HOTKEYS_PANEL_TAG: String = "terminal:hotkeys-panel"
 const val TERMINAL_HOTKEYS_PANEL_CLOSE_TAG: String = "terminal:hotkeys-panel-close"
+const val TERMINAL_HOTKEYS_PANEL_BACK_TAG: String = "terminal:hotkeys-panel-back"
+const val TERMINAL_HOTKEYS_CTRL_FLOW_TAG: String = "terminal:hotkeys-ctrl-flow"
 
 /**
- * Issue #1332: test tag on the "Show more / Show fewer keys" expander row that
- * toggles the extended sections. Only rendered when the panel actually has
- * [HotkeySection.extended] sections to reveal.
- */
-const val TERMINAL_HOTKEYS_PANEL_EXPAND_TAG: String = "terminal:hotkeys-panel-expand"
-
-/**
- * Test-only semantics flag (issue #755): `true` on a key slot whose label
- * visually overflowed its slot, i.e. the glyph was **truncated** — the exact
- * "keys cut off / `…`" symptom the maintainer reported. The panel sets this from
- * the slot `Text`'s `onTextLayout` (`hasVisualOverflow`). A regression test reads
- * it to hard-fail on truncation, which a `boundsInRoot` containment check cannot
- * catch (Compose clamps a node's reported rect to its slot, so an overflowing
- * label still reports as "contained"). Render-only; no behavioural effect.
+ * Test-readable overflow signal. Compose otherwise clips a label while its
+ * semantics bounds still appear contained.
  */
 val HotkeyLabelTruncatedKey: SemanticsPropertyKey<Boolean> =
     SemanticsPropertyKey("HotkeyLabelTruncated")
 var SemanticsPropertyReceiver.hotkeyLabelTruncated: Boolean by HotkeyLabelTruncatedKey
 
 /**
- * Issue #1091: test-readable flag, `true` on a `KeyKind.Modifier` slot that is
- * currently armed (one-shot OR locked) — i.e. rendering the active accent
- * treatment. A connected test reads it off the `Ctrl` key node to assert the
- * sticky modifier's active state is visible. Render-only; no behaviour.
+ * Issue #1662 two-page hotkey renderer.
+ *
+ * Page state deliberately lives in the sheet host. This renderer has no sticky
+ * modifier or expander state: a Ctrl-page key sends immediately, and the page
+ * remains visible until Back/close/dismiss.
  */
-val HotkeyModifierActiveKey: SemanticsPropertyKey<Boolean> =
-    SemanticsPropertyKey("HotkeyModifierActive")
-var SemanticsPropertyReceiver.hotkeyModifierActive: Boolean by HotkeyModifierActiveKey
-
-/**
- * Issue #1332: test-readable flag on the expander row — `true` when the panel is
- * expanded (extended sections shown), `false` when collapsed (common set only).
- * A JVM Compose test reads it to assert the progressive-disclosure state without
- * relying on layout timing. Render-only; no behaviour.
- */
-val HotkeyPanelExpandedKey: SemanticsPropertyKey<Boolean> =
-    SemanticsPropertyKey("HotkeyPanelExpanded")
-var SemanticsPropertyReceiver.hotkeyPanelExpanded: Boolean by HotkeyPanelExpandedKey
-
 @Composable
 fun TerminalHotkeysPanel(
     sections: List<HotkeySection>,
+    page: TerminalHotkeysPage = TerminalHotkeysPage.Main,
     onKey: (KeyBinding) -> Unit,
+    onLongKey: (KeyBinding) -> Unit = {},
+    onOpenCtrlPage: () -> Unit = {},
+    onBackToMain: () -> Unit = {},
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    // Issue #1091: the sticky `Ctrl` modifier state. A `KeyKind.Modifier` slot
-    // renders the active (accent) treatment when this is not `Off`, mirroring
-    // the [KeyBar] modifier visual. The single shared state is enough because
-    // the panel has exactly one modifier (`Ctrl`).
-    modifierState: KeyModifierState = KeyModifierState.Off,
-    // Issue #1332: seed the collapsed/expanded state. Defaults to `false` so the
-    // panel opens COLLAPSED every time it is shown (no persistence — the sheet
-    // re-enters composition on each open, resetting the remembered state). It is
-    // overridable ONLY so the JVM render harness can snapshot the expanded state
-    // (a captured render cannot tap the expander); production callers never pass
-    // it.
-    initiallyExpanded: Boolean = false,
+    ctrlFlowLabel: String = "Ctrl+…",
+    longPressActions: Map<String, HotkeyLongPressAction> = emptyMap(),
 ) {
-    // Issue #1332: progressive disclosure. The COMMON sections (arrows first,
-    // then the everyday keys) are always shown; the EXTENDED sections (the full
-    // CTRL combos / letters / doubled chords) hide behind the expander so the
-    // panel opens compact.
-    val commonSections = sections.filterNot { it.extended }
-    val extendedSections = sections.filter { it.extended }
-    var expanded by remember { mutableStateOf(initiallyExpanded) }
-
     Column(
         modifier = modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface)
-            // Issue #1091: the key set grew (filled CTRL COMBOS + the a–z
-            // LETTERS grid for the sticky Ctrl), so scroll the panel body — on a
-            // short device the modal sheet would otherwise clip the lower
-            // sections (ARROWS / LETTERS) and leave keys unreachable.
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 18.dp)
             .padding(bottom = 8.dp)
-            .semantics { contentDescription = "Terminal hotkeys" },
+            .semantics {
+                contentDescription = if (page == TerminalHotkeysPage.Ctrl) {
+                    "Ctrl + key picker"
+                } else {
+                    "Terminal hotkeys"
+                }
+            },
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        SheetHeader(
-            title = "Terminal hotkeys",
+        HotkeysHeader(
+            page = page,
+            enabled = enabled,
+            onBackToMain = onBackToMain,
             onClose = onClose,
-            closeContentDescription = "Close terminal hotkeys",
-            closeTestTag = TERMINAL_HOTKEYS_PANEL_CLOSE_TAG,
             modifier = Modifier.padding(top = 6.dp),
         )
 
-        commonSections.forEach { section ->
+        sections.forEach { section ->
             HotkeySectionGrid(
                 section = section,
                 onKey = onKey,
+                onLongKey = onLongKey,
+                longPressActions = longPressActions,
                 enabled = enabled,
-                modifierState = modifierState,
             )
         }
 
-        if (extendedSections.isNotEmpty()) {
-            HotkeyExpandToggle(
-                expanded = expanded,
+        if (page == TerminalHotkeysPage.Main) {
+            HotkeyPageAction(
+                label = ctrlFlowLabel,
                 enabled = enabled,
-                onToggle = { expanded = !expanded },
+                onClick = onOpenCtrlPage,
             )
-            // Smooth reveal/collapse: the extended block fades + expands in and
-            // shrinks + fades out. When collapsed the extended sections are NOT
-            // composed at all, so their keys genuinely aren't in the tree.
-            AnimatedVisibility(visible = expanded) {
-                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                    extendedSections.forEach { section ->
-                        HotkeySectionGrid(
-                            section = section,
-                            onKey = onKey,
-                            enabled = enabled,
-                            modifierState = modifierState,
-                        )
-                    }
-                }
-            }
         }
     }
 }
 
-/**
- * Issue #1332: the "Show more keys" / "Show fewer keys" expander that toggles the
- * extended sections. A full-width, bordered, accent-labelled row with a chevron
- * that flips with the state. Publishes [hotkeyPanelExpanded] for tests.
- */
 @Composable
-private fun HotkeyExpandToggle(
-    expanded: Boolean,
+private fun HotkeysHeader(
+    page: TerminalHotkeysPage,
     enabled: Boolean,
-    onToggle: () -> Unit,
+    onBackToMain: () -> Unit,
+    onClose: () -> Unit,
+    modifier: Modifier,
 ) {
-    val label = if (expanded) "Show fewer keys" else "Show more keys"
     Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (page == TerminalHotkeysPage.Ctrl) {
+            Box(
+                modifier = Modifier
+                    .heightIn(min = PocketShellDensity.tapTargetMin)
+                    .widthIn(min = PocketShellDensity.tapTargetMin)
+                    .combinedClickable(
+                        enabled = enabled,
+                        role = Role.Button,
+                        onClickLabel = "Back to common keys",
+                        onClick = onBackToMain,
+                    )
+                    .testTag(TERMINAL_HOTKEYS_PANEL_BACK_TAG)
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Text(
+                    text = "‹ keys",
+                    color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+        }
+
+        Text(
+            text = if (page == TerminalHotkeysPage.Ctrl) "Ctrl + …" else "Terminal hotkeys",
+            color = PocketShellColors.Text,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+        )
+
+        Box(
+            modifier = Modifier
+                .size(PocketShellDensity.tapTargetMin)
+                .combinedClickable(
+                    role = Role.Button,
+                    onClickLabel = "Close terminal hotkeys",
+                    onClick = onClose,
+                )
+                .testTag(TERMINAL_HOTKEYS_PANEL_CLOSE_TAG)
+                .semantics { contentDescription = "Close terminal hotkeys" },
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "×",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+@Composable
+private fun HotkeyPageAction(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
+            .heightIn(min = PocketShellDensity.tapTargetMin)
+            .background(PocketShellColors.AccentSoft, RoundedCornerShape(8.dp))
             .border(
-                border = BorderStroke(1.dp, PocketShellColors.Border),
-                shape = RoundedCornerShape(8.dp),
+                BorderStroke(1.dp, PocketShellColors.AccentDim),
+                RoundedCornerShape(8.dp),
             )
-            .let { if (enabled) it.clickable(role = Role.Button, onClick = onToggle) else it }
-            .testTag(TERMINAL_HOTKEYS_PANEL_EXPAND_TAG)
-            .semantics(mergeDescendants = true) {
-                hotkeyPanelExpanded = expanded
-                contentDescription = label
-            }
-            .padding(vertical = 10.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
+            .combinedClickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onClick()
+                },
+            )
+            .testTag(TERMINAL_HOTKEYS_CTRL_FLOW_TAG),
+        contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
+            fontFamily = JetBrainsMonoFamily,
             fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = if (expanded) "▴" else "▾",
-            color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
+            fontWeight = FontWeight.SemiBold,
         )
     }
 }
@@ -264,8 +256,9 @@ private fun HotkeyExpandToggle(
 private fun HotkeySectionGrid(
     section: HotkeySection,
     onKey: (KeyBinding) -> Unit,
+    onLongKey: (KeyBinding) -> Unit,
+    longPressActions: Map<String, HotkeyLongPressAction>,
     enabled: Boolean,
-    modifierState: KeyModifierState,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(
@@ -275,7 +268,7 @@ private fun HotkeySectionGrid(
             letterSpacing = 0.4.sp,
             color = PocketShellColors.TextMuted,
         )
-        section.keys.chunked(section.columns).forEach { rowKeys ->
+        section.rows.forEach { rowKeys ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -284,18 +277,13 @@ private fun HotkeySectionGrid(
                     HotkeySlot(
                         binding = binding,
                         enabled = enabled,
-                        // Issue #1091: a modifier slot (the sticky `Ctrl`)
-                        // renders active when armed; non-modifier keys never do.
-                        isActive = binding.kind == KeyKind.Modifier &&
-                            modifierState != KeyModifierState.Off,
+                        longPressAction = longPressActions[binding.label],
                         onTap = { onKey(binding) },
+                        onLongPress = { onLongKey(binding) },
                         modifier = Modifier.weight(1f),
                     )
                 }
-                // Pad the final short row so keys keep their natural width
-                // instead of stretching to fill the row.
-                val padding = section.columns - rowKeys.size
-                repeat(padding) {
+                repeat(section.columns - rowKeys.size) {
                     Box(modifier = Modifier.weight(1f))
                 }
             }
@@ -307,63 +295,69 @@ private fun HotkeySectionGrid(
 private fun HotkeySlot(
     binding: KeyBinding,
     enabled: Boolean,
-    isActive: Boolean,
+    longPressAction: HotkeyLongPressAction?,
     onTap: () -> Unit,
+    onLongPress: () -> Unit,
     modifier: Modifier,
 ) {
-    // Issue #1091: an armed sticky modifier (`Ctrl`) renders the accent
-    // treatment — accent foreground, accent-soft fill, accent-dim border —
-    // exactly like the [KeyBar] active modifier, so the active state is
-    // visible.
+    val haptics = LocalHapticFeedback.current
     val textColor: Color = when {
         !enabled -> PocketShellColors.TextMuted
-        isActive -> PocketShellColors.Accent
         binding.kind == KeyKind.Arrow -> PocketShellColors.TextSecondary
         else -> PocketShellColors.Text
     }
-    val backgroundColor: Color =
-        if (isActive) PocketShellColors.AccentSoft else PocketShellColors.SurfaceElev
-    val borderColor: Color =
-        if (isActive) PocketShellColors.AccentDim else PocketShellColors.Border
-    // Tracks whether this key's label was truncated (glyph clipped) at the slot's
-    // measured width — exposed via [hotkeyLabelTruncated] for the #755 regression
-    // guard. Render-only.
     var labelTruncated by remember { mutableStateOf(false) }
     Box(
         modifier = modifier
-            .height(44.dp)
-            .background(backgroundColor, RoundedCornerShape(8.dp))
+            .heightIn(min = PocketShellDensity.tapTargetMin)
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
             .border(
-                border = BorderStroke(1.dp, borderColor),
+                border = BorderStroke(1.dp, PocketShellColors.Border),
                 shape = RoundedCornerShape(8.dp),
             )
-            .let { if (enabled) it.clickable(role = Role.Button, onClick = onTap) else it }
-            // Merge the label Text into this clickable node so a test can match
-            // a key by "label text + click action" (disambiguating the panel key
-            // from identically-labelled terminal content). Also publish the
-            // truncation flag so the #755 guard can read it off this node, and
-            // the modifier-active flag (#1091) for the sticky-Ctrl accent guard.
+            .combinedClickable(
+                enabled = enabled,
+                role = Role.Button,
+                onClick = {
+                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                    onTap()
+                },
+                onLongClickLabel = longPressAction?.accessibilityLabel,
+                onLongClick = longPressAction?.let {
+                    {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onLongPress()
+                    }
+                },
+            )
             .semantics(mergeDescendants = true) {
                 hotkeyLabelTruncated = labelTruncated
-                if (binding.kind == KeyKind.Modifier) {
-                    hotkeyModifierActive = isActive
-                }
             }
-            .padding(horizontal = 4.dp),
+            .padding(horizontal = 4.dp, vertical = 4.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = binding.label,
-            color = textColor,
-            fontFamily = if (binding.kind == KeyKind.Arrow) null else JetBrainsMonoFamily,
-            fontSize = if (binding.kind == KeyKind.Arrow) 18.sp else 13.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            softWrap = false,
-            // `Clip` (the default for a single line) silently cuts the glyph;
-            // capture that as the truncation signal the #755 guard asserts on.
-            overflow = TextOverflow.Clip,
-            onTextLayout = { result -> labelTruncated = result.hasVisualOverflow },
-        )
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = binding.label,
+                color = textColor,
+                fontFamily = if (binding.kind == KeyKind.Arrow) null else JetBrainsMonoFamily,
+                fontSize = if (binding.kind == KeyKind.Arrow) 18.sp else 13.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip,
+                onTextLayout = { result -> labelTruncated = result.hasVisualOverflow },
+            )
+            if (longPressAction != null) {
+                Text(
+                    text = longPressAction.cue,
+                    color = if (enabled) PocketShellColors.TextMuted else PocketShellColors.Border,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontSize = 8.sp,
+                    maxLines = 1,
+                    softWrap = false,
+                )
+            }
+        }
     }
 }

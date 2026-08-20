@@ -672,19 +672,23 @@ class MainActivity : FragmentActivity() {
      */
     private fun observeKilledSessionsForLastSession() {
         lifecycleScope.launch {
-            // Collect across STARTED so a kill broadcast while the activity is
-            // foregrounded (the dominant case — Stop is tapped from a visible
-            // tree/session screen) reaches the store before the user can
-            // background and trigger a restore.
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                sessionLifecycleSignals.killedSessions.collect { killed ->
-                    Log.i(
-                        "MainActivity",
-                        "issue834-killed-session-clear hostId=${killed.hostId} " +
-                            "session=${killed.sessionName}",
-                    )
-                    lastSessionStore.onSessionKilled(killed.hostId, killed.sessionName)
-                }
+            // This is an event sink, not a foreground UI collector.  The
+            // in-session Stop action navigates to the tree immediately while
+            // its verified gateway kill finishes asynchronously; collecting
+            // only inside repeatOnLifecycle(STARTED) loses that event when the
+            // user minimizes during the gap, allowing onStop to re-arm the
+            // dead destination.  lifecycleScope remains alive while this
+            // activity is stopped, so the event is still handled during the
+            // app's background grace window.  A process death also destroys
+            // the VM and its in-memory target, so there is no stale event to
+            // replay into a new process.
+            sessionLifecycleSignals.killedSessions.collect { killed ->
+                Log.i(
+                    "MainActivity",
+                    "issue834-killed-session-clear hostId=${killed.hostId} " +
+                        "session=${killed.sessionName}",
+                )
+                lastSessionStore.onSessionKilled(killed.hostId, killed.sessionName)
             }
         }
     }

@@ -284,7 +284,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // this screen tells the folder/session tree to drop the dead row.
     // Nullable default keeps the existing unit-test constructors working
     // without supplying the singleton.
-    private val sessionLifecycleSignals: SessionLifecycleSignals? = null,
+    internal val sessionLifecycleSignals: SessionLifecycleSignals? = null,
     // Issue #526: source of the user-configurable agent-submit Enter delay.
     // The composer/agent send path types the message text, waits this delay,
     // then sends the submit Enter as a separate `send-keys` so a fast Enter
@@ -1549,6 +1549,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     init {
         driveRevealStateMachine()
+        observeKilledSessionsForRestore()
     }
 
     private fun navigateRevealTo(target: ConnectionTarget) {
@@ -1973,10 +1974,10 @@ public class TmuxSessionViewModel @Inject constructor(
     // VM truly goes away and the hook must be removed too.
     private var lifecycleHookRegistration: ActiveTmuxClients.LifecycleRegistration? = null
     private var lifecycleHookHostId: Long? = null
-    private var activeTarget: ConnectionTarget? = null
-    private var connectingTarget: ConnectionTarget? = null
-    private var connectJob: Job? = null
-    private var autoReconnectJob: Job? = null
+    internal var activeTarget: ConnectionTarget? = null
+    internal var connectingTarget: ConnectionTarget? = null
+    internal var connectJob: Job? = null
+    internal var autoReconnectJob: Job? = null
 
     /**
      * Issue #1072 — the in-flight attachment-upload coroutine, OWNED by the VM so
@@ -2478,7 +2479,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // preserved by construction. The handler's sole job is to stop a
     // teardown-time throw from killing the process — not to suppress lifecycle
     // signals.
-    private fun launchContainedTeardown(
+    internal fun launchContainedTeardown(
         block: suspend kotlinx.coroutines.CoroutineScope.() -> Unit,
     ): Job =
         viewModelScope.launch(bridgeExceptionHandler) {
@@ -3308,7 +3309,7 @@ public class TmuxSessionViewModel @Inject constructor(
         this.keepaliveDeathQuietResetMs = keepaliveDeathQuietResetMs
     }
 
-    private fun refreshReconnectAvailability() {
+    internal fun refreshReconnectAvailability() {
         // Issue #1574: a once-opened session ([latestConnectIntent]) stays reconnectable.
         _canReconnect.value =
             activeTarget != null || connectingTarget != null || latestConnectIntent != null
@@ -3359,9 +3360,9 @@ public class TmuxSessionViewModel @Inject constructor(
     // we stash the [activeTarget] so [onAppForegrounded] knows what to
     // re-attach to. Going through [activeTarget] for the reconnect path
     // would not work because [closeCurrentConnectionAndJoin] clears it.
-    private var pendingReattach: PendingReattach? = null
-    private var pausedAutoReconnect: PausedAutoReconnect? = null
-    private var backgroundDetachJob: Job? = null
+    internal var pendingReattach: PendingReattach? = null
+    internal var pausedAutoReconnect: PausedAutoReconnect? = null
+    internal var backgroundDetachJob: Job? = null
     private var lastSuppressedDropDiagnostic: SuppressedDropDiagnostic? = null
 
     // #754/#1954: bounded release of the one typed claim shared by status, reveal, and liveness.
@@ -3373,7 +3374,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // value must be read at the same instant the old inline launch read it (before
     // any rapid foreground mutates `connectingTarget`), so the field captures it on
     // the background-decision turn rather than re-deriving it in the driver effect.
-    private var pendingBackgroundDetachPreserveTarget: ConnectionTarget? = null
+    internal var pendingBackgroundDetachPreserveTarget: ConnectionTarget? = null
     private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
     // EPIC #792 Slice B: the `foregroundReattachReseedForTest` /
@@ -3381,7 +3382,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // were never set (always null → always fell through to the real body), and the grace
     // IO is now dispatched through the single [graceEffects] owner (no dual-write, D22).
     private var processForegroundForClearedOverrideForTest: Boolean? = null
-    private var latestConnectIntent: ConnectIntent? = null
+    internal var latestConnectIntent: ConnectIntent? = null
     private var connectGeneration: Long = 0L
 
     // Issue #257: the in-flight fire-and-forget `detach-client` of the
@@ -16948,7 +16949,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * exception-propagation policy the caller needs (the production caller
      * wraps this in `NonCancellable`; tests may not need to).
      */
-    private suspend fun closeCurrentConnectionAndJoin(
+    internal suspend fun closeCurrentConnectionAndJoin(
         preserveConnectingTarget: ConnectionTarget? = null,
         cacheEviction: RuntimeCacheEviction = RuntimeCacheEviction.HostWide,
     ) {

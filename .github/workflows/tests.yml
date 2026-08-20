@@ -231,7 +231,11 @@ jobs:
       # include stateful interactions that a static link check cannot cover.
       - name: Work-first UX mockup smoke test (issue #2238)
         run: |
-          chmod +x scripts/test-ux-redesign-2238.sh
+          chmod +x \
+            scripts/test-ux-redesign-2238.sh \
+            scripts/test-ux-redesign-2238-fake-browser.py \
+            scripts/test-ux-redesign-2238-timeouts-selftest.sh
+          scripts/test-ux-redesign-2238-timeouts-selftest.sh
           scripts/test-ux-redesign-2238.sh
 
       # Issue #657/#1857 (F4): test-validity guard. Flags the highest-signal

@@ -251,6 +251,43 @@ internal fun tmuxSessionSurfacePane(
 ): TmuxPaneState? = if (switchHidesTerminal) null else visibleUnifiedPane
 
 /**
+ * Issue #2192 Wedge B: after a reconnect re-seed, [pages] can shrink while the
+ * pager's [currentPage] is still the old (now out-of-bounds) index.
+ *
+ * A numeric page is only meaningful inside the pager snapshot that produced
+ * it. If that snapshot has been replaced, falling back to [List.firstOrNull]
+ * can bind the surface to a cached *other* session because [unifiedPanes]
+ * spans all sessions. Rebind only to a page owned by the current target
+ * session; returning null is safer than painting or routing a foreign pane.
+ * An empty list, or a list without the target, still returns null.
+ */
+internal fun tmuxSessionVisibleUnifiedPane(
+    pages: List<UnifiedPagerPage>,
+    currentPage: Int,
+    targetSessionId: com.pocketshell.core.connection.SessionId,
+): TmuxPaneState? = pages.getOrNull(currentPage)?.pane
+    ?: pages.firstOrNull { it.owner.sessionId == targetSessionId }?.pane
+
+/**
+ * Issue #2192: launcher open is a LOCAL action (#1944). [sessionLive] and pane
+ * presence may gate only pane-bound writes (Enter, keyboard, control bytes),
+ * never the composer sheet. Both post-reconnect wedges used to fold into
+ * `sessionLive && panePresent` and silently disable the launcher.
+ */
+internal data class TmuxSessionBottomControlEnablement(
+    val launcherOpenEnabled: Boolean,
+    val paneBoundEnabled: Boolean,
+)
+
+internal fun tmuxSessionBottomControlEnablement(
+    sessionLive: Boolean,
+    panePresent: Boolean,
+): TmuxSessionBottomControlEnablement = TmuxSessionBottomControlEnablement(
+    launcherOpenEnabled = true,
+    paneBoundEnabled = sessionLive && panePresent,
+)
+
+/**
  * Issue #797 (promotion-on-settle): decide whether a unified-pager settle that
  * came to rest on a CACHED (non-active) pane should trigger a warm switch
  * (pane-promotion) so input routing + agent detection are RESTORED for the

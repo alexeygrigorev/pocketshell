@@ -157,9 +157,16 @@ internal fun rememberTmuxSessionPaneSelection(
     conn: TmuxSessionConnectionRuntime,
     viewModel: TmuxSessionViewModel,
     pagerState: PagerState,
+    unifiedPagerPages: List<UnifiedPagerPage>,
 ): TmuxSessionPaneSelection {
     // Issue #626: the unified pager shows panes from all sessions.
-    val currentUnifiedPane = conn.unifiedPanes.getOrNull(pagerState.currentPage)
+    // Issue #2192: when a reconnect re-seed invalidates the numeric page, use
+    // the page owner's target identity rather than a cross-session first pane.
+    val currentUnifiedPane = tmuxSessionVisibleUnifiedPane(
+        pages = unifiedPagerPages,
+        currentPage = pagerState.currentPage,
+        targetSessionId = conn.targetSessionId,
+    )
     val isActiveSessionPane = currentUnifiedPane?.let { viewModel.isActiveSessionPane(it) } ?: true
     val currentPane = if (isActiveSessionPane) currentUnifiedPane else null
     val activeSessionPane = conn.panes.firstOrNull()

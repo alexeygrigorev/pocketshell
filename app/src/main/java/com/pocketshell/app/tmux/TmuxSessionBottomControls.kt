@@ -208,6 +208,9 @@ internal fun TmuxTerminalBottomControls(
                         // follow-up — see #123 notes on per-pane cwd /
                         // project-root wiring.
                         onProjectNavigationTap = null,
+                        // Issue #2192: sessionLive gates pane-bound writes (Enter)
+                        // only. The launcher is a local sheet-open (#1944) and
+                        // must stay enabled through reconnect / empty-pane wedges.
                         inputEnabled = sessionLive,
                         unsentCount = unsentCount,
                         unsentHasFailure = unsentHasFailure,

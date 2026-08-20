@@ -228,6 +228,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.tmux.Issue796ComposerOpenTerminalScopeProofTest"  # #796 #638 #657 H3): the composer-open - terminal-relayout collision regress…
   "com.pocketshell.app.tmux.Issue1085RecompositionScopeProofTest"  # #1085 #638 #657 F3): the voice-first recomposition-jank scope proof. The mai…
   "$FQCN_PREFIX.ComposerAlwaysPresentSwitchJourneyE2eTest"  # #810 #657 #638 the composer-launcher ALWAYS-PRESENT switch journey. The mai…
+  "$FQCN_PREFIX.Issue2192ComposerLauncherAfterReconnectE2eTest"  # #2192 D33/G10: after a real sshd-kill reconnect the composer launcher must open the sheet (never a silent no-op); records Wedge A/B from production semantics and keeps pane-bound Enter gated
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#conversationTapIsHonouredBeforeDetectionLands"  # #778 #848 /): tapping Conversation while live detection is still null
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#agentOpensOnDefaultViewAndIsNotYankedMidSessionShellGetsNoConversationRow"  # #818 #815 #878 #807 //): an agent pane must OPEN on the user's
   "com.pocketshell.app.tmux.AgentConversationReconnectDockerTest#reconciledPresumedAgentWithDroppedRowReseedsConversationPlaceholderOnDevice"  # #874 #878 #894 #975 residual black-screen, conversation-source area — sibling of…
@@ -247,6 +248,9 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.tmux.ComposerUnsentBadgeContainmentProofTest"  # #1531 RC1: the docked-launcher UNSENT badge is present + fully within the window (containment, not assertIsDisplayed) on both the chip-cluster and conversation launchers, pending + failed states — a stuck send is SEEN, not silently dropped
   "com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#heldTerminalHidesQuickCommandBand_keepsComposerLauncher"  # #1672 the maintainer's Reconnecting/Attaching report: while the terminal is HELD the quick-command band (git status/tmux ls/…) + primary cluster are ABSENT (hidden, not disabled); the composer launcher stays present (#810)
   "com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#liveTerminalShowsRetainedPrimaryControlsWithoutGenericLiterals"  # #1672/#1754 Live returns only retained primary controls; generic command literals stay hard-deleted
+  "com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_wedgeA_rawNotConnectedLiveLookingTerminal_launcherOpensEnterStaysGated"  # #2192 Wedge A: live-looking Terminal + raw not-Connected — launcher opens, Enter stays gated
+  "com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_wedgeB_surfacePaneNullAfterReseed_launcherOpensEnterAbsent"  # #2192 Wedge B: live-looking Terminal + surfacePane null (folded to sessionLive=false) — launcher opens
+  "com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_offlineOrReconnectingLiveLookingTerminal_launcherOpens"  # #2192 AC3: disconnected/reconnecting live-looking Terminal band — launcher opens, never a dead tap
   "com.pocketshell.app.conversation.ConversationShowAllJourneyTest"  # #1889 capped messages retain a lazy in-app full-text route
 
   "com.pocketshell.app.tmux.TmuxChromeConversationTogglePresentTest"  # #1320 #962 #975 #1057 the Terminal/Conversation TOGGLE-CLIP regression guard — the…

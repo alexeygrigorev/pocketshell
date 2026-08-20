@@ -1427,6 +1427,8 @@ trap 'forward_signal TERM' TERM
 # copy closed. Helper death is monitored until the mutation process exits.
 rc=0
 cleanup_rc=0
+connected_test_report_rc=0
+notification_report_rc=0
 notification_report_dir=""
 if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" ]]; then
   NOTIFICATION_PERMISSION_SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-notification-permission.XXXXXX")"
@@ -1483,18 +1485,26 @@ fi
 if (( rc == 0 )); then
   set +e
   connected_test_validate_report
-  report_rc=$?
+  connected_test_report_rc=$?
   set -e
-  if (( report_rc != 0 )); then
-    rc="$report_rc"
+  if (( connected_test_report_rc != 0 )); then
+    rc="$connected_test_report_rc"
   fi
 fi
 
-if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" && "$rc" == "0" ]]; then
+# The generic report verdict remains primary, but the notification fixture has
+# an additional identity/count contract whose diagnostic must survive a generic
+# XML failure. Run that validator when it was the generic validator that made
+# the invocation red, while never replacing an already-nonzero primary status.
+if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" \
+      && ( "$rc" == "0" || "$connected_test_report_rc" != "0" ) ]]; then
   set +e
   notification_permission_validate_report "$notification_report_dir"
-  rc=$?
+  notification_report_rc=$?
   set -e
+  if (( rc == 0 && notification_report_rc != 0 )); then
+    rc="$notification_report_rc"
+  fi
 fi
 
 if [[ "$DENY_NOTIFICATIONS_BEFORE_INSTRUMENTATION" == "1" \

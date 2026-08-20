@@ -20,7 +20,9 @@ fi
 # These are deliberately separate so a slow hosted runner reports which phase
 # exhausted its bounded wait instead of looking like a missing DOM result.
 SERVER_START_TIMEOUT_SECONDS="${POCKETSHELL_BROWSER_SMOKE_SERVER_START_TIMEOUT_SECONDS:-30}"
-BROWSER_LOAD_TIMEOUT_SECONDS="${POCKETSHELL_BROWSER_SMOKE_BROWSER_LOAD_TIMEOUT_SECONDS:-30}"
+# Hosted Chromium startup has exceeded 30s (issue #2260). Keep this bounded,
+# but give process startup/page load its own 60s window before the result clock.
+BROWSER_LOAD_TIMEOUT_SECONDS="${POCKETSHELL_BROWSER_SMOKE_BROWSER_LOAD_TIMEOUT_SECONDS:-60}"
 SMOKE_RESULT_TIMEOUT_SECONDS="${POCKETSHELL_BROWSER_SMOKE_RESULT_TIMEOUT_SECONDS:-30}"
 for timeout_value in \
   "$SERVER_START_TIMEOUT_SECONDS" \
@@ -83,6 +85,19 @@ cleanup() {
 trap cleanup EXIT
 
 print_diagnostics() {
+  local phase="${1:-unknown}"
+  local page_request_seen="no"
+  local smoke_result_seen="no"
+  [[ -s "$PAGE_REQUEST_FILE" ]] && page_request_seen="yes"
+  [[ -s "$SMOKE_RESULT_FILE" ]] && smoke_result_seen="yes"
+  echo "--- browser smoke diagnostics ---" >&2
+  echo "phase=$phase" >&2
+  echo "server_port=${SERVER_PORT:-unassigned}" >&2
+  echo "page_request_seen=$page_request_seen" >&2
+  echo "smoke_result_seen=$smoke_result_seen" >&2
+  echo "server_start_timeout_seconds=$SERVER_START_TIMEOUT_SECONDS" >&2
+  echo "browser_load_timeout_seconds=$BROWSER_LOAD_TIMEOUT_SECONDS" >&2
+  echo "smoke_result_timeout_seconds=$SMOKE_RESULT_TIMEOUT_SECONDS" >&2
   echo "--- browser diagnostics ---" >&2
   if [[ -s "$BROWSER_LOG" ]]; then
     tail -n 80 "$BROWSER_LOG" >&2
@@ -186,7 +201,7 @@ done
 [[ -s "$SERVER_PORT_FILE" ]] \
   || {
     echo "FAIL: browser smoke server did not start within ${SERVER_START_TIMEOUT_SECONDS}s" >&2
-    print_diagnostics
+    print_diagnostics "server-start"
     exit 1
   }
 
@@ -194,7 +209,7 @@ SERVER_PORT="$(<"$SERVER_PORT_FILE")"
 [[ "$SERVER_PORT" =~ ^[1-9][0-9]*$ ]] \
   || {
     echo "FAIL: browser smoke server returned an invalid port" >&2
-    print_diagnostics
+    print_diagnostics "server-port"
     exit 1
   }
 SMOKE_QUERY="smoke=1"
@@ -240,7 +255,7 @@ if [[ ! -s "$PAGE_REQUEST_FILE" ]]; then
   stop_browser
   stop_server
   echo "FAIL: browser did not load the smoke page within ${BROWSER_LOAD_TIMEOUT_SECONDS}s" >&2
-  print_diagnostics
+  print_diagnostics "browser-load"
   exit 1
 fi
 
@@ -258,7 +273,7 @@ stop_server
 [[ -s "$SMOKE_RESULT_FILE" ]] \
   || {
     echo "FAIL: browser interaction smoke test did not report a result within ${SMOKE_RESULT_TIMEOUT_SECONDS}s after page load" >&2
-    print_diagnostics
+    print_diagnostics "smoke-result"
     exit 1
   }
 IFS= read -r SMOKE_RESULT <"$SMOKE_RESULT_FILE"
@@ -266,7 +281,7 @@ IFS= read -r SMOKE_RESULT <"$SMOKE_RESULT_FILE"
   || {
     echo "FAIL: browser interaction smoke test reported data-smoke=\"$SMOKE_RESULT\"" >&2
     tail -n +2 "$SMOKE_RESULT_FILE" >&2
-    print_diagnostics
+    print_diagnostics "smoke-result-value"
     exit 1
   }
 

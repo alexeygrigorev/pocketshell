@@ -16,10 +16,11 @@ fail() {
 }
 
 run_case() {
-  local log_path="$1"
-  shift
+  local timeout_seconds="$1"
+  local log_path="$2"
+  shift 2
   set +e
-  timeout 10s "$@" >"$log_path" 2>&1
+  timeout "${timeout_seconds}s" "$@" >"$log_path" 2>&1
   CASE_RC=$?
   set -e
 }
@@ -45,16 +46,26 @@ common_env=(
   env
   "POCKETSHELL_BROWSER=$FAKE_BROWSER"
   "POCKETSHELL_BROWSER_SMOKE_SERVER_START_TIMEOUT_SECONDS=5"
-  "POCKETSHELL_BROWSER_SMOKE_BROWSER_LOAD_TIMEOUT_SECONDS=5"
   "POCKETSHELL_BROWSER_SMOKE_RESULT_TIMEOUT_SECONDS=1"
   "POCKETSHELL_FAKE_BROWSER_RESULT_DELAY_SECONDS=0.25"
 )
 
+# Hosted-shaped regression: the observed runner needed more than the old 30s
+# browser-load window before it requested the page. The default 60s budget must
+# absorb that startup while retaining the one-second result budget.
+run_case 75 "$SANDBOX/hosted-start.log" \
+  "${common_env[@]}" \
+  POCKETSHELL_FAKE_BROWSER_STARTUP_SECONDS=31 \
+  POCKETSHELL_FAKE_BROWSER_MODE=report \
+  "$SMOKE_SCRIPT"
+assert_reported_result "hosted-shaped browser startup" "$SANDBOX/hosted-start.log"
+
 # A two-second fake browser startup is longer than the one-second result
 # budget. It must still pass because the result clock starts only after the
 # server has served the smoke page.
-run_case "$SANDBOX/delayed-start.log" \
+run_case 10 "$SANDBOX/delayed-start.log" \
   "${common_env[@]}" \
+  POCKETSHELL_BROWSER_SMOKE_BROWSER_LOAD_TIMEOUT_SECONDS=5 \
   POCKETSHELL_FAKE_BROWSER_STARTUP_SECONDS=2 \
   POCKETSHELL_FAKE_BROWSER_MODE=report \
   "$SMOKE_SCRIPT"
@@ -75,8 +86,9 @@ grep -Fq "$MUTANT_DEADLINE_LINE" "$MUTANT_SCRIPT" \
 grep -Fq "$MUTANT_RESULT_LINE" "$MUTANT_SCRIPT" \
   || fail "shared-deadline mutation did not replace the result deadline"
 
-run_case "$SANDBOX/shared-deadline-mutant.log" \
+run_case 10 "$SANDBOX/shared-deadline-mutant.log" \
   "${common_env[@]}" \
+  POCKETSHELL_BROWSER_SMOKE_BROWSER_LOAD_TIMEOUT_SECONDS=5 \
   POCKETSHELL_FAKE_BROWSER_STARTUP_SECONDS=2 \
   POCKETSHELL_FAKE_BROWSER_MODE=report \
   "$MUTANT_SCRIPT"
@@ -84,8 +96,9 @@ assert_missing_result_failure "shared-deadline mutation" "$SANDBOX/shared-deadli
 
 # A real missing result must remain a bounded hard failure after the page has
 # loaded. The one-second result budget keeps this self-test fast and selective.
-run_case "$SANDBOX/missing-result.log" \
+run_case 10 "$SANDBOX/missing-result.log" \
   "${common_env[@]}" \
+  POCKETSHELL_BROWSER_SMOKE_BROWSER_LOAD_TIMEOUT_SECONDS=5 \
   POCKETSHELL_FAKE_BROWSER_STARTUP_SECONDS=0 \
   POCKETSHELL_FAKE_BROWSER_MODE=missing \
   "$SMOKE_SCRIPT"

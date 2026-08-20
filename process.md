@@ -1038,6 +1038,14 @@ a named run when the built-in launcher cannot honor High; record that exception
 in the live handoff and still verify the child's actual model/effort before
 work.
 
+The normal dispatch call deliberately omits a model override: the child
+inherits the orchestrator's live model setting. Every handoff must make that
+source explicit (for example, “default agent; inherits `gpt-5.6-sol` / High”)
+and name the role being launched (implementer, reviewer, researcher, or
+on-call). If an override or maintainer-authorized exception is used, record the
+requested and observed model/effort in the handoff instead of describing it as
+the default.
+
 Set the persistent local defaults in `~/.codex/config.toml`:
 
 ```toml

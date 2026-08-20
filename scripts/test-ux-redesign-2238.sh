@@ -32,6 +32,14 @@ env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS \
   --disable-dev-shm-usage \
   --no-first-run \
   --no-default-browser-check \
+  --disable-background-networking \
+  --disable-component-update \
+  --disable-sync \
+  --disable-extensions \
+  --disable-default-apps \
+  --disable-metrics \
+  --no-pings \
+  --disable-domain-reliability \
   --disable-features=UseDBus \
   --user-data-dir="$BROWSER_DATA_DIR" \
   --window-size=390,844 \

@@ -3,9 +3,13 @@ package com.pocketshell.app
 import android.content.Intent
 import android.net.Uri
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import com.pocketshell.core.storage.entity.HostEntity
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -215,6 +219,55 @@ class MainActivityDeepLinkTest {
         val intent = Intent().putExtra(MainActivity.EXTRA_OPEN_USAGE, true)
 
         assertEquals(AppDestination.Usage, initialDestinationFromIntent(intent))
+    }
+
+    @Test
+    fun decodeActivityRoute_routesUsageOnceAndRemovesOnlyItsRetainedExtra() {
+        val importUri = Uri.parse("pocketshell://import?payload=still-present")
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            data = importUri
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(MainActivity.EXTRA_OPEN_USAGE, true)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED, true)
+            putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_SESSION, "claude-main")
+        }
+
+        val decoded = decodeActivityRoute(intent)
+
+        assertEquals(AppDestination.Usage, decoded.destination)
+        val retained = requireNotNull(decoded.retainedIntent)
+        assertFalse(retained.hasExtra(MainActivity.EXTRA_OPEN_USAGE))
+        assertEquals(Intent.ACTION_VIEW, retained.action)
+        assertEquals(importUri, retained.data)
+        assertEquals(intent.flags, retained.flags)
+        assertTrue(retained.getBooleanExtra(MainActivity.EXTRA_OPEN_SESSION_FEED, false))
+        assertEquals(
+            "claude-main",
+            retained.getStringExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_SESSION),
+        )
+        assertTrue("sanitization must not mutate the delivered intent", intent.hasExtra(
+            MainActivity.EXTRA_OPEN_USAGE,
+        ))
+    }
+
+    @Test
+    fun decodeActivityRoute_leavesAdjacentTransientRoutesUntouched() {
+        val adjacentRoutes = listOf(
+            Intent().putExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, true),
+            shareSessionIntent(),
+            Intent(Intent.ACTION_VIEW).apply {
+                data = Uri.parse("pocketshell://import?payload=host")
+            },
+            Intent().apply {
+                putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED, true)
+                putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_SESSION, "claude-main")
+                putExtra(MainActivity.EXTRA_OPEN_SESSION_FEED_HOST, "hetzner")
+            },
+        )
+
+        adjacentRoutes.forEach { incoming ->
+            assertSame(incoming, decodeActivityRoute(incoming).retainedIntent)
+        }
     }
 
     @Test

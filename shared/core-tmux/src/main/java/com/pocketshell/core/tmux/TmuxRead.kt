@@ -1,9 +1,9 @@
 package com.pocketshell.core.tmux
 
 /**
- * Issue #2160: build the tmux invocation used to **read** anything whose bytes
- * PocketShell parses — a user option, a `-F` format listing, a `display-message
- * -p` expansion.
+ * Issue #2160 / #2174: build the tmux invocation used to **read** anything
+ * whose bytes PocketShell parses — a user option, a `-F` format listing, a
+ * `display-message -p` expansion, or a `capture-pane` grid.
  *
  * ## Why a bare `tmux` is unsafe for reads
  *
@@ -58,8 +58,6 @@ package com.pocketshell.core.tmux
  *    reads (blocked on the lane that owns that file).
  *  - **#2175** — the `-CC` control-mode leg; the flag would have to move to the
  *    `tmux -CC` attach line itself, which is connection-core surface.
- *  - **#2174** — the `capture-pane` / `display-message -p` heal lanes, i.e.
- *    terminal CONTENT capture rather than user-option reads.
  */
 public object TmuxRead {
 

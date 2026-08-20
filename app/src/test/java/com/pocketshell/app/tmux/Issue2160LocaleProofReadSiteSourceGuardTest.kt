@@ -111,32 +111,6 @@ class Issue2160LocaleProofReadSiteSourceGuardTest {
                     "one is a live (cosmetic) instance of the class.",
                 issue = "#2177",
             ),
-            Exemption(
-                pathSuffix = "shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt",
-                marker = "display-message -p -t ",
-                reason = "captureWithCursor's exec heal lane (cursor position + pane grid). " +
-                    "Terminal CONTENT capture, not a user-option read; the #796/#803 heal " +
-                    "lane is hot and is being changed under its own issue.",
-                issue = "#2174",
-            ),
-            Exemption(
-                pathSuffix = "shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt",
-                marker = "capture-pane -p -e -S -",
-                reason = "captureWithCursor's exec heal-lane grid capture. See above.",
-                issue = "#2174",
-            ),
-            Exemption(
-                pathSuffix = "shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt",
-                marker = "capture-pane -p -S -",
-                reason = "capturePaneTextViaExec's scrollback text capture. See above.",
-                issue = "#2174",
-            ),
-            Exemption(
-                pathSuffix = "shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt",
-                marker = "capture-pane -p -t ",
-                reason = "capturePaneTextViaExec's visible-only text capture. See above.",
-                issue = "#2174",
-            ),
         )
 
         /**
@@ -150,6 +124,7 @@ class Issue2160LocaleProofReadSiteSourceGuardTest {
             "app/src/main/java/com/pocketshell/app/session/AgentConversationRepository.kt",
             "app/src/main/java/com/pocketshell/app/projects/FolderListGateway.kt",
             "app/src/main/java/com/pocketshell/app/sessions/HostTmuxSessionsGateway.kt",
+            "shared/core-tmux/src/main/java/com/pocketshell/core/tmux/TmuxClient.kt",
         )
 
         const val TMUX_CLIENT_PATH: String =

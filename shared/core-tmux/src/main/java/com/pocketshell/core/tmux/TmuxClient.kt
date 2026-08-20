@@ -1152,12 +1152,18 @@ internal class RealTmuxClient(
         // then the (multi-line) capture LAST. Splitting on the FIRST sentinel
         // occurrence means capture content that happens to contain the sentinel
         // token cannot corrupt the split (it lands after the split point).
+        // Issue #2174: `-u` on BOTH reads — see [TmuxRead]. A tmux client
+        // without a UTF-8 locale (an SSH exec on a host whose sshd exports
+        // none) sanitises format expansions (`display-message -p` of
+        // `ПРИВЕТ` → `______`). Cursor coordinates are ASCII today, but
+        // display-message is still a read. capture-pane is the other half
+        // of this exec and uses the same client for class coverage.
         val command = buildString {
-            append("tmux display-message -p -t ")
+            append("${TmuxRead.CLIENT} display-message -p -t ")
             append(quotedPane)
             append(" '#{cursor_x},#{cursor_y}'; printf '%s\\n' '")
             append(HEAL_CAPTURE_SPLIT_MARKER)
-            append("'; tmux capture-pane -p -e -S -")
+            append("'; ${TmuxRead.CLIENT} capture-pane -p -e -S -")
             append(scrollbackLines)
             append(" -t ")
             append(quotedPane)
@@ -1198,8 +1204,12 @@ internal class RealTmuxClient(
         val effectiveTimeoutMs = timeoutMs?.coerceIn(1L, commandTimeoutMs) ?: commandTimeoutMs
         val quotedPane = "'${escapeSingleQuoted(paneId)}'"
         // Issue #1587 (H2): bounded scrollback (`-S -N`) for verify.
-        val command = if (scrollbackLines > 0) "tmux capture-pane -p -S -$scrollbackLines -t $quotedPane"
-        else "tmux capture-pane -p -t $quotedPane"
+        // Issue #2174: `-u` — see [TmuxRead] and [captureWithCursor].
+        val command = if (scrollbackLines > 0) {
+            "${TmuxRead.CLIENT} capture-pane -p -S -$scrollbackLines -t $quotedPane"
+        } else {
+            "${TmuxRead.CLIENT} capture-pane -p -t $quotedPane"
+        }
         val execResult =
             try {
                 // Issue #1516: a REAL caller deadline (see [runBoundedExecLane]).

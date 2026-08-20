@@ -432,6 +432,15 @@ jobs:
           scripts/check-production-binding-mutations.py --self-test
           scripts/check-production-binding-mutations.py --check-sites
 
+      # Issue #2252: an invalid nightly workflow can create a failed push run
+      # with zero jobs and no log. Keep the YAML, trigger contract, and
+      # release-gating fault-verdict wiring under the per-push static guard.
+      - name: "Nightly workflow integrity guard (issue #2252)"
+        run: |
+          chmod +x scripts/check-nightly-workflow.sh
+          scripts/check-nightly-workflow.sh --self-test
+          scripts/check-nightly-workflow.sh
+
       # #2067 keeps unit-gate's needs/result lists aligned; the final grep keeps
       # #1956's executable lifecycle harness wired into guards-harness.
       - name: "Unit-gate wiring guard (issue #2067)"

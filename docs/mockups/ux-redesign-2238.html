@@ -238,6 +238,78 @@
     .banner { background: #121c23; }
     .banner .name { font-size: 13px; }
 
+    /* Provider identity is icon-first in compact rows. Each mark has a
+       different silhouette so color is an accent, never the only cue. */
+    .provider-mark {
+      display: inline-grid;
+      width: 42px;
+      height: 42px;
+      flex: 0 0 42px;
+      place-items: center;
+      border: 1px solid #587080;
+      border-radius: 12px;
+      background: #0c151d;
+      color: var(--text);
+    }
+    .provider-mark svg { width: 27px; height: 27px; overflow: visible; }
+    .provider-mark[data-provider-mark="codex"] { color: #f3f6f8; }
+    .provider-mark[data-provider-mark="claude"] { color: #e4b8ff; }
+    .provider-mark[data-provider-mark="zai"] { color: #7ee8ff; border-radius: 9px; }
+    .provider-mark[data-provider-mark="generic"] {
+      border-color: var(--cyan);
+      border-radius: 10px;
+      background: var(--cyan-dim);
+      color: var(--cyan);
+    }
+    .provider-mark[data-provider-mark="generic"] svg { width: 31px; height: 31px; }
+    .provider-fallback {
+      display: inline-flex;
+      min-height: 32px;
+      align-items: center;
+      padding: 0 10px;
+      border: 1px dashed #718290;
+      border-radius: 9px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .provider-compact { min-height: 64px; }
+    .provider-compact.active { border-color: var(--cyan); background: var(--cyan-dim); }
+    .provider-compact .grow { min-width: 0; }
+    .provider-compact .meta { white-space: normal; }
+    .provider-identity-entry .identity-glyph {
+      display: inline-grid;
+      width: 42px;
+      height: 42px;
+      flex: 0 0 42px;
+      place-items: center;
+      border: 1px solid var(--cyan);
+      border-radius: 12px;
+      background: var(--cyan-dim);
+      color: var(--cyan);
+      font-size: 22px;
+      font-weight: 900;
+    }
+    .identity-detail {
+      padding: 15px;
+      border-color: #3f5666;
+      background: #101d26;
+    }
+    .identity-detail-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
+    .identity-detail-heading .title { font-size: 18px; }
+    .identity-detail-copy { margin: 12px 0 0; }
+    .identity-detail-a11y {
+      margin-top: 8px;
+      padding: 9px 10px;
+      border-left: 3px solid var(--cyan);
+      background: #0b141b;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .identity-detail-a11y strong { color: var(--text); }
+    .provider-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
     .fab {
       position: absolute;
       right: 18px;
@@ -460,6 +532,15 @@
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0ms !important; animation-duration: 0ms !important; }
     }
+    @media (forced-colors: active) {
+      .provider-mark[data-provider-mark] {
+        border-color: CanvasText !important;
+        background: Canvas !important;
+        color: CanvasText !important;
+        forced-color-adjust: none;
+      }
+      .provider-fallback { border-color: CanvasText; color: CanvasText; }
+    }
     @media (max-width: 820px) {
       .layout { display: block; padding: 0; }
       .control-panel { display: none; }
@@ -475,6 +556,25 @@
   </style>
 </head>
 <body data-variant="calm" data-text-size="normal">
+  <!-- Deterministic inline vector marks; no network or raster asset is needed. -->
+  <svg class="provider-sprite" aria-hidden="true" focusable="false">
+    <symbol id="provider-codex" viewBox="0 0 24 24">
+      <path d="M12 2.75 19.15 6.9v8.2L12 19.25 4.85 15.1V6.9z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
+      <path d="m7.05 7.8 4.95 2.85 4.95-2.85M7.05 16.2 12 13.35l4.95 2.85M12 10.65v5.7" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+    </symbol>
+    <symbol id="provider-claude" viewBox="0 0 24 24">
+      <path d="m12 2.75 1.85 6.95 6.55 2.3-6.55 1.3L12 21.25l-1.85-7.95-6.55-1.3 6.55-2.3z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" />
+      <circle cx="12" cy="12" r="2.1" fill="currentColor" />
+    </symbol>
+    <symbol id="provider-zai" viewBox="0 0 24 24">
+      <path d="M3.8 6.5h12.1L4.2 17.5h12.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+      <path d="M17.15 17.45v-6.1m0-2.7v-.1M19.1 14.25c.7-1.9 3.05-1.65 3.05.25v2.95" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" />
+    </symbol>
+    <symbol id="provider-generic" viewBox="0 0 24 24">
+      <rect x="1.8" y="1.8" width="20.4" height="20.4" rx="5" fill="none" stroke="currentColor" stroke-width="1.6" />
+      <path d="m5.5 17.5 3.25-10h1.8l3.3 10m-7.2-3.1h5.9M16.3 7.5v10" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" />
+    </symbol>
+  </svg>
   <div class="layout">
     <aside class="control-panel" aria-label="Prototype controls">
       <h1>PocketShell redesign</h1>
@@ -496,6 +596,7 @@
         <button class="control-button" type="button" data-nav="host">Host workspace</button>
         <button class="control-button" type="button" data-nav="session">Session</button>
         <button class="control-button" type="button" data-nav="usage">Usage</button>
+        <button class="control-button" type="button" data-nav="identity">Provider identity</button>
       </div>
 
       <div class="eyebrow">Journeys</div>
@@ -527,17 +628,19 @@
           <div class="scroll">
             <div class="section-label">Continue</div>
             <button class="card" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;text-align:left">
-              <span class="row" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot green" aria-label="paused session"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">Claude · hetzner · paused 12m</span></span><span class="link-action">Resume</span></span>
+              <span class="row" style="margin:0;padding:0;border:0;background:transparent"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot green" aria-label="paused session"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">hetzner · paused 12m</span></span><span class="link-action">Resume</span></span>
             </button>
             <div class="banner" role="status"><div class="row" style="margin:0;padding:0;border:0;background:transparent"><span class="status-dot red" aria-hidden="true"></span><span class="grow"><span class="name">1 provider blocked · 3 near limit</span><span class="meta">Next reset in 2h 24m</span></span><button class="link-action" type="button" data-nav="usage" style="border:0;background:transparent">View</button></div></div>
 
+            <button class="row compact provider-identity-entry" type="button" data-nav="identity" style="width:100%;text-align:left"><span class="identity-glyph" aria-hidden="true">✦</span><span class="grow"><span class="name">Provider identity</span><span class="meta">Compact marks · accessible detail labels</span></span><span class="link-action">Inspect</span></button>
+
             <div class="section-label">Needs you · 2</div>
-            <button class="row signal-row waiting" type="button" data-nav="session" data-session-target="dtc" style="width:100%;text-align:left"><span class="status-dot amber" aria-label="waiting for input"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">dtc-website · Claude · waiting 2m</span></span><span class="right"><span class="link-action">Open</span><span class="meta">Waiting</span></span></button>
-            <button class="row signal-row failed" type="button" data-nav="session" data-session-target="dataops" style="width:100%;text-align:left"><span class="status-dot red" aria-label="send failed"></span><span class="grow"><span class="name">git-dataops</span><span class="meta">dataops · Codex · send failed</span></span><span class="link-action">Review</span></button>
+            <button class="row signal-row waiting" type="button" data-nav="session" data-session-target="dtc" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot amber" aria-label="waiting for input"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">dtc-website · waiting 2m</span></span><span class="right"><span class="link-action">Open</span><span class="meta">Waiting</span></span></button>
+            <button class="row signal-row failed" type="button" data-nav="session" data-session-target="dataops" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="codex" data-non-color-fallback="true" role="img" aria-label="Codex"><svg aria-hidden="true" focusable="false"><use href="#provider-codex"></use></svg></span><span class="status-dot red" aria-label="send failed"></span><span class="grow"><span class="name">git-dataops</span><span class="meta">dataops · send failed</span></span><span class="link-action">Review</span></button>
 
             <div class="section-label">Working · 3</div>
-            <button class="row signal-row working" type="button" data-nav="session" data-session-target="ai" style="width:100%;text-align:left"><span class="status-dot green" aria-label="working"></span><span class="grow"><span class="name">git-ai-engineering-field-guide</span><span class="meta">Claude · running tool · 4m</span></span><span class="meta">Working</span></button>
-            <button class="row signal-row working" type="button" data-nav="session" data-session-target="dataqna" style="width:100%;text-align:left"><span class="status-dot green" aria-label="working"></span><span class="grow"><span class="name">git-dataqna</span><span class="meta">Claude · thinking · 7m</span></span><span class="meta">Working</span></button>
+            <button class="row signal-row working" type="button" data-nav="session" data-session-target="ai" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot green" aria-label="working"></span><span class="grow"><span class="name">git-ai-engineering-field-guide</span><span class="meta">running tool · 4m</span></span><span class="meta">Working</span></button>
+            <button class="row signal-row working" type="button" data-nav="session" data-session-target="dataqna" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot green" aria-label="working"></span><span class="grow"><span class="name">git-dataqna</span><span class="meta">thinking · 7m</span></span><span class="meta">Working</span></button>
 
             <div class="section-label">Recent</div>
             <div class="row"><span class="status-dot" aria-label="idle"></span><span class="grow"><span class="name">au-tomator-lambda</span><span class="meta">Shell · 26m</span></span><span class="meta">Idle</span></div>
@@ -548,7 +651,7 @@
           <header class="top-bar"><div class="grow"><div class="title" id="hosts-title">PocketShell</div><div class="subtitle">Hosts and infrastructure</div></div><button class="top-action" type="button" data-nav="usage">Limits 4</button><button class="top-action" type="button" aria-label="Settings">⚙</button></header>
           <nav class="tabs" aria-label="Primary navigation"><button class="tab" type="button" data-nav="activity">Activity</button><button class="tab active" type="button" aria-current="page">Hosts</button></nav>
           <div class="scroll"><div class="section-label">Hosts · 1</div>
-            <div class="card"><button class="row" type="button" data-nav="host" style="width:100%;margin:0;border:0;background:transparent;text-align:left"><span class="status-dot green" aria-label="connected"></span><span class="grow"><span class="name">hetzner</span><span class="meta">alexey@135.181.114.20 · 8 sessions</span></span><span class="meta">Connected</span></button><button class="row compact" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;margin:10px 0 0;background:var(--surface-2);text-align:left"><span class="grow"><span class="meta">Continue</span><span class="name">git-pocketshell</span></span><span class="link-action">Resume</span></button></div>
+            <div class="card"><button class="row" type="button" data-nav="host" style="width:100%;margin:0;border:0;background:transparent;text-align:left"><span class="status-dot green" aria-label="connected"></span><span class="grow"><span class="name">hetzner</span><span class="meta">alexey@135.181.114.20 · 8 sessions</span></span><span class="meta">Connected</span></button><button class="row compact" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;margin:10px 0 0;background:var(--surface-2);text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="grow"><span class="meta">Continue · hetzner</span><span class="name">git-pocketshell</span></span><span class="link-action">Resume</span></button></div>
           </div>
           <button class="fab" type="button" aria-label="Create new session">+</button>
         </section>
@@ -556,10 +659,30 @@
         <section class="screen" id="host" data-screen="host" aria-labelledby="host-title">
           <header class="top-bar"><button class="back" type="button" data-back aria-label="Back">‹</button><span class="status-dot green" aria-label="connected"></span><span class="grow"><span class="title" id="host-title">hetzner</span><span class="subtitle">7 active · 1 idle · 8 sessions</span></span><button class="top-action" type="button" aria-label="Host menu">⋮</button></header>
           <nav class="tabs host-tabs" aria-label="Host workspace modes"><button class="tab active" type="button" data-pane="active">Active 8</button><button class="tab" type="button" data-pane="projects">Projects 84</button><button class="tab" type="button" data-pane="tools">Tools</button></nav>
-          <div class="scroll host-pane" data-hostpane="active"><div class="section-label">Needs you</div><button class="row signal-row waiting" type="button" data-nav="session" data-session-target="dtc" style="width:100%;text-align:left"><span class="status-dot amber"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">dtc-website · Claude · waiting 2m</span></span><span class="link-action">Open</span></button><div class="section-label">Working</div><button class="row signal-row working" type="button" data-nav="session" data-session-target="dataops" style="width:100%;text-align:left"><span class="status-dot green"></span><span class="grow"><span class="name">git-dataops</span><span class="meta">Codex · working 5m</span></span><span class="meta">Working</span></button><button class="row signal-row working" type="button" data-nav="session" data-session-target="ai" style="width:100%;text-align:left"><span class="status-dot green"></span><span class="grow"><span class="name">git-ai-engineering-field-guide</span><span class="meta">Claude · working 4m</span></span><span class="meta">Working</span></button><div class="section-label">Idle / recent</div><button class="row" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;text-align:left"><span class="status-dot"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">Claude · idle 12m</span></span><span class="link-action">Resume</span></button></div>
-          <div class="scroll host-pane" data-hostpane="projects" hidden><div class="section-label">Recent projects</div><div class="card"><div class="project-title">▾ dtc-website <span class="meta">· 2 sessions</span></div><div class="row session-row"><span class="status-dot green"></span><span class="grow"><span class="name">git-dtc-website-luna</span><span class="meta">Codex</span></span><span class="meta">Idle</span></div><div class="row session-row"><span class="status-dot amber"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">Claude</span></span><span class="meta">Waiting</span></div></div><div class="card"><div class="project-title">▾ pocketshell <span class="meta">· 1 session</span></div><div class="row session-row"><span class="status-dot green"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">Claude</span></span><span class="meta">Idle</span></div></div><div class="section-label">All projects · 84</div><div class="row"><span class="grow"><span class="name">Search projects…</span><span class="meta">Filter active, recent, Claude, Codex</span></span></div></div>
+          <div class="scroll host-pane" data-hostpane="active"><div class="section-label">Needs you</div><button class="row signal-row waiting" type="button" data-nav="session" data-session-target="dtc" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot amber"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">dtc-website · waiting 2m</span></span><span class="link-action">Open</span></button><div class="section-label">Working</div><button class="row signal-row working" type="button" data-nav="session" data-session-target="dataops" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="codex" data-non-color-fallback="true" role="img" aria-label="Codex"><svg aria-hidden="true" focusable="false"><use href="#provider-codex"></use></svg></span><span class="status-dot green"></span><span class="grow"><span class="name">git-dataops</span><span class="meta">working 5m</span></span><span class="meta">Working</span></button><button class="row signal-row working" type="button" data-nav="session" data-session-target="ai" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot green"></span><span class="grow"><span class="name">git-ai-engineering-field-guide</span><span class="meta">working 4m</span></span><span class="meta">Working</span></button><div class="section-label">Idle / recent</div><button class="row" type="button" data-nav="session" data-session-target="pocketshell" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">idle 12m</span></span><span class="link-action">Resume</span></button></div>
+          <div class="scroll host-pane" data-hostpane="projects" hidden><div class="section-label">Recent projects</div><div class="card"><div class="project-title">▾ dtc-website <span class="meta">· 2 sessions</span></div><div class="row session-row"><span class="provider-mark" data-provider-mark="codex" data-non-color-fallback="true" role="img" aria-label="Codex"><svg aria-hidden="true" focusable="false"><use href="#provider-codex"></use></svg></span><span class="status-dot green"></span><span class="grow"><span class="name">git-dtc-website-luna</span><span class="meta">idle</span></span><span class="meta">Idle</span></div><div class="row session-row"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot amber"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">waiting</span></span><span class="meta">Waiting</span></div></div><div class="card"><div class="project-title">▾ pocketshell <span class="meta">· 1 session</span></div><div class="row session-row"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot green"></span><span class="grow"><span class="name">git-pocketshell</span><span class="meta">idle</span></span><span class="meta">Idle</span></div></div><div class="section-label">All projects · 84</div><div class="row"><span class="grow"><span class="name">Search projects…</span><span class="meta">Filter active, recent, provider</span></span></div></div>
           <div class="scroll host-pane" data-hostpane="tools" hidden><div class="section-label">Work</div><div class="row tool-row"><span class="grow"><span class="name">Files</span><span class="meta">Browse remote files</span></span><span class="link-action">›</span></div><div class="row tool-row"><span class="grow"><span class="name">Repositories</span><span class="meta">Browse git repos</span></span><span class="link-action">›</span></div><div class="row tool-row"><span class="grow"><span class="name">Port forwarding</span><span class="meta">40 discovered ports</span></span><span class="link-action">›</span></div><div class="section-label">Host</div><button class="row tool-row" type="button" data-nav="usage" style="width:100%;text-align:left"><span class="grow"><span class="name">Usage and provider limits</span><span class="meta">1 blocked · 3 near limit</span></span><span class="link-action">›</span></button><div class="row tool-row"><span class="grow"><span class="name">Host settings</span></span><span class="link-action">›</span></div><div class="row tool-row"><span class="grow"><span class="name">Watched folders</span></span><span class="link-action">›</span></div><div class="section-label">Support</div><div class="row tool-row"><span class="grow"><span class="name">Host assistant & diagnostics</span></span><span class="link-action">›</span></div></div>
           <button class="fab" type="button" aria-label="Create new session">+</button>
+        </section>
+
+        <section class="screen" id="identity" data-screen="identity" aria-labelledby="identity-title">
+          <header class="top-bar"><button class="back" type="button" data-back aria-label="Back">‹</button><span class="grow"><span class="title" id="identity-title">Provider identity</span><span class="subtitle">Compact marks · accessible detail labels</span></span></header>
+          <div class="scroll">
+            <div class="section-label">Compact session rows</div>
+            <button class="row provider-compact" type="button" role="button" data-provider-compact="codex" data-provider-variant="codex" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="codex" data-non-color-fallback="true" role="img" aria-label="Codex"><svg aria-hidden="true" focusable="false"><use href="#provider-codex"></use></svg></span><span class="status-dot red" aria-hidden="true"></span><span class="grow"><span class="name">git-dataops</span><span class="meta">send failed · 2m</span></span><span class="link-action">Review</span></button>
+            <button class="row provider-compact" type="button" role="button" data-provider-compact="claude" data-provider-variant="claude" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="claude" data-non-color-fallback="true" role="img" aria-label="Claude"><svg aria-hidden="true" focusable="false"><use href="#provider-claude"></use></svg></span><span class="status-dot amber" aria-hidden="true"></span><span class="grow"><span class="name">git-dtc-website-design2</span><span class="meta">waiting for input · 2m</span></span><span class="link-action">Open</span></button>
+            <button class="row provider-compact" type="button" role="button" data-provider-compact="zodex" data-provider-variant="zodex" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="zai" data-non-color-fallback="true" role="img" aria-label="Zodex"><svg aria-hidden="true" focusable="false"><use href="#provider-zai"></use></svg></span><span class="status-dot green" aria-hidden="true"></span><span class="grow"><span class="name">zeta-build</span><span class="meta">working · 3m</span></span><span class="link-action">Open</span></button>
+            <button class="row provider-compact" type="button" role="button" data-provider-compact="zlaude" data-provider-variant="zlaude" style="width:100%;text-align:left"><span class="provider-mark" data-provider-mark="zai" data-non-color-fallback="true" role="img" aria-label="Zlaude"><svg aria-hidden="true" focusable="false"><use href="#provider-zai"></use></svg></span><span class="status-dot amber" aria-hidden="true"></span><span class="grow"><span class="name">design-review</span><span class="meta">waiting · 2m</span></span><span class="link-action">Open</span></button>
+            <button class="row provider-compact" type="button" role="button" data-provider-compact="generic" data-provider-variant="generic" style="width:100%;text-align:left"><span class="provider-mark generic-ai-badge" data-provider-mark="generic" data-generic-ai-badge="true" data-non-color-fallback="true" role="img" aria-label="Generic AI"><svg aria-hidden="true" focusable="false"><use href="#provider-generic"></use></svg></span><span class="status-dot" aria-hidden="true"></span><span class="grow"><span class="name">local-helper</span><span class="meta">idle · 26m</span></span><span class="link-action">Open</span></button>
+            <button class="row provider-compact" type="button" role="button" data-provider-compact="unknown" data-provider-variant="unknown" style="width:100%;text-align:left"><span class="provider-fallback" aria-label="Unknown provider">Unknown provider</span><span class="status-dot" aria-hidden="true"></span><span class="grow"><span class="name">legacy-session</span><span class="meta">idle · 41m</span></span><span class="link-action">Details</span></button>
+
+            <div class="section-label">Selected detail</div>
+            <div class="identity-detail card" id="identity-detail" data-provider="codex" data-provider-variant="codex" aria-live="polite">
+              <div class="identity-detail-heading"><span class="provider-mark" id="identity-detail-mark" data-provider-mark="codex" data-non-color-fallback="true" role="img" aria-label="Codex"><svg aria-hidden="true" focusable="false"><use id="identity-detail-use" href="#provider-codex"></use></svg></span><span class="grow"><span class="meta">Provider label</span><span class="title" id="identity-detail-label">Codex</span></span></div>
+              <p class="meta identity-detail-copy" id="identity-detail-copy">Codex keeps its mark in the compact row and its full name here.</p>
+              <div class="identity-detail-a11y"><strong>TalkBack/content description:</strong> <span id="identity-detail-a11y-label">Codex</span></div>
+            </div>
+          </div>
         </section>
 
         <section class="screen session-screen" id="session" data-screen="session" aria-labelledby="session-title">
@@ -619,6 +742,14 @@
         ai: { title: 'git-ai-engineering-field-guide', subtitle: 'Claude · hetzner', state: 'Working' },
         dataqna: { title: 'git-dataqna', subtitle: 'Claude · hetzner', state: 'Working' }
       };
+      const providerDetails = {
+        codex: { label: 'Codex', icon: 'provider-codex', copy: 'Codex keeps its mark in the compact row and its full name here.' },
+        claude: { label: 'Claude', icon: 'provider-claude', copy: 'Claude keeps its mark in the compact row and its full name here.' },
+        zodex: { label: 'Zodex', icon: 'provider-zai', copy: 'Zodex uses the z.ai mark; the option name remains available on detail surfaces.' },
+        zlaude: { label: 'Zlaude', icon: 'provider-zai', copy: 'Zlaude uses the z.ai mark; the option name remains available on detail surfaces.' },
+        generic: { label: 'Generic AI', icon: 'provider-generic', copy: 'Generic AI is the variant badge; no provider-specific name is invented.' },
+        unknown: { label: 'Unknown provider', icon: null, copy: 'Unknown providers retain a text fallback instead of receiving a guessed mark.' }
+      };
       let selectedOutcome = 'sent';
       let pressY = null;
       let currentSessionTarget = 'dtc';
@@ -644,6 +775,37 @@
       function setHostPane(pane, button) {
         document.querySelectorAll('[data-pane]').forEach(tab => tab.classList.toggle('active', tab === button));
         document.querySelectorAll('[data-hostpane]').forEach(view => { view.hidden = view.dataset.hostpane !== pane; });
+      }
+      function setProviderDetail(variant) {
+        const detail = document.querySelector('#identity-detail');
+        const mark = document.querySelector('#identity-detail-mark');
+        const use = document.querySelector('#identity-detail-use');
+        const spec = providerDetails[variant] || providerDetails.unknown;
+        const selectedVariant = providerDetails[variant] ? variant : 'unknown';
+        detail.dataset.provider = selectedVariant;
+        detail.dataset.providerVariant = selectedVariant;
+        document.querySelector('#identity-detail-label').textContent = spec.label;
+        document.querySelector('#identity-detail-copy').textContent = spec.copy;
+        document.querySelector('#identity-detail-a11y-label').textContent = spec.label;
+        document.querySelectorAll('[data-provider-compact]').forEach(row => row.classList.toggle('active', row.dataset.providerCompact === selectedVariant));
+        mark.setAttribute('aria-label', spec.label);
+        if (spec.icon) {
+          mark.hidden = false;
+          mark.dataset.providerMark = spec.icon === 'provider-generic' ? 'generic' : spec.icon.replace('provider-', '');
+          mark.dataset.nonColorFallback = 'true';
+          use.setAttribute('href', `#${spec.icon}`);
+        } else {
+          mark.hidden = true;
+          mark.removeAttribute('data-provider-mark');
+          mark.removeAttribute('data-non-color-fallback');
+        }
+        if (selectedVariant === 'generic') {
+          mark.dataset.genericAiBadge = 'true';
+          mark.classList.add('generic-ai-badge');
+        } else {
+          delete mark.dataset.genericAiBadge;
+          mark.classList.remove('generic-ai-badge');
+        }
       }
       function setSessionPane(pane, button) {
         document.querySelectorAll('[data-session-pane]').forEach(tab => tab.classList.toggle('active', tab === button));
@@ -719,6 +881,8 @@
         if (size) setTextSize(size.dataset.textSize);
         const pane = event.target.closest('[data-pane]');
         if (pane) setHostPane(pane.dataset.pane, pane);
+        const providerCompact = event.target.closest('[data-provider-compact]');
+        if (providerCompact) setProviderDetail(providerCompact.dataset.providerCompact);
         const sessionPane = event.target.closest('[data-session-pane]');
         if (sessionPane) setSessionPane(sessionPane.dataset.sessionPane, sessionPane);
         const outcome = event.target.closest('[data-outcome]');
@@ -753,13 +917,81 @@
         pressY = null;
       });
       document.addEventListener('keydown', event => { if (event.key === 'Escape') { closeComposer(); closeHotkeys(); } });
+      setProviderDetail('codex');
 
-      window.pocketshellPrototype = { showScreen, setReconnecting, openComposer, closeComposer, setOutcome, setVariant, setTextSize };
+      window.pocketshellPrototype = { showScreen, setReconnecting, openComposer, closeComposer, setOutcome, setVariant, setTextSize, setProviderDetail };
 
       async function smoke() {
         const check = (condition, message) => { if (!condition) throw new Error(message); };
         const visible = selector => [...document.querySelectorAll(selector)].find(element => element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0);
         check(document.querySelectorAll('[data-style]').length === 4, 'four style directions');
+        const providerCases = [
+          ['codex', 'Codex', 'codex', 'Codex'],
+          ['claude', 'Claude', 'claude', 'Claude'],
+          ['zodex', 'Zodex', 'zai', 'Zodex'],
+          ['zlaude', 'Zlaude', 'zai', 'Zlaude'],
+          ['generic', 'Generic AI', 'generic', 'Generic AI'],
+          ['unknown', 'Unknown provider', null, 'Unknown provider']
+        ];
+        const forcedColorsRequested = new URLSearchParams(location.search).has('forced-colors');
+        const forcedColorsActive = window.matchMedia('(forced-colors: active)').matches;
+        check(!forcedColorsRequested || forcedColorsActive, 'forced-colors emulation is active');
+        const assertForcedColorProviderMarks = () => {
+          if (!forcedColorsActive) return;
+          const palette = document.createElement('span');
+          palette.style.cssText = 'position:fixed;left:-9999px;width:1px;height:1px;color:CanvasText;background:Canvas;border:1px solid CanvasText;forced-color-adjust:none;';
+          document.body.append(palette);
+          const expected = getComputedStyle(palette);
+          const providerMarks = [...document.querySelectorAll('.provider-mark[data-provider-mark]')];
+          check(providerMarks.length >= 4, 'forced-colors provider marks are present');
+          for (const providerMark of providerMarks) {
+            const actual = getComputedStyle(providerMark);
+            const provider = providerMark.dataset.providerMark;
+            check(actual.color === expected.color, `${provider} forced text color uses CanvasText`);
+            check(actual.backgroundColor === expected.backgroundColor, `${provider} forced background uses Canvas`);
+            check(actual.borderTopColor === expected.borderTopColor, `${provider} forced border uses CanvasText`);
+            check(actual.forcedColorAdjust === 'none', `${provider} opts out of UA color replacement`);
+          }
+          palette.remove();
+        };
+        visible('[data-nav="identity"]').click();
+        check(document.querySelector('#identity').classList.contains('active'), 'Provider identity screen');
+        check(document.querySelectorAll('[data-provider-compact]').length === providerCases.length, 'all provider compact cases');
+        check(document.querySelectorAll('[data-generic-ai-badge]').length === 1, 'generic AI badge is singular');
+        for (const [variant, label, mark, detailLabel] of providerCases) {
+          const compact = document.querySelector(`[data-provider-compact="${variant}"]`);
+          check(compact, `${variant} compact provider case`);
+          check(compact.getAttribute('role') === 'button', `${variant} compact case is interactive`);
+          const compactText = compact.textContent.replace(/\s+/g, ' ').trim();
+          if (variant === 'unknown') {
+            check(compactText.includes('Unknown provider'), 'unknown provider text fallback');
+          } else {
+            check(!compactText.includes(label), `${variant} compact row avoids redundant provider text`);
+          }
+          if (mark) {
+            const providerMark = compact.querySelector(`[data-provider-mark="${mark}"]`);
+            check(providerMark, `${variant} uses the expected provider mark`);
+            check(providerMark.getAttribute('role') === 'img', `${variant} mark has image semantics`);
+            check(providerMark.getAttribute('aria-label') === label, `${variant} mark has TalkBack label`);
+            check(providerMark.dataset.nonColorFallback === 'true', `${variant} mark has a non-color fallback`);
+          } else {
+            check(!compact.querySelector('[data-provider-mark]'), 'unknown provider does not invent a mark');
+          }
+          compact.click();
+          check(document.querySelector('#identity-detail').dataset.provider === variant, `${variant} detail selection`);
+          check(document.querySelector('#identity-detail-label').textContent.trim() === detailLabel, `${variant} detail label`);
+          if (variant === 'generic') {
+            check(document.querySelector('#identity-detail [data-generic-ai-badge]'), 'generic detail keeps the generic AI badge');
+          } else {
+            check(!document.querySelector('#identity-detail [data-generic-ai-badge]'), `${variant} detail does not show generic AI badge`);
+          }
+        }
+        check(document.querySelectorAll('[data-provider-mark="zai"]').length === 2, 'zodex and zlaude share the z.ai mark');
+        assertForcedColorProviderMarks();
+        showScreen('activity', false);
+        visible('[data-nav="session"][data-session-target="dtc"]').click();
+        check(document.querySelector('#session-subtitle').textContent.includes('Claude'), 'session detail keeps the provider text label');
+        showScreen('activity', false);
         visible('[data-nav="hosts"]').click();
         check(document.querySelector('#hosts').classList.contains('active'), 'Activity to Hosts');
         visible('[data-nav="host"]').click();
@@ -784,6 +1016,7 @@
         check(document.querySelector('#session-state').textContent === 'Disconnected' && !document.querySelector('#recovery-dock').hidden, 'Disconnected recovery state');
         setDisconnected(false);
         openComposer();
+        check(document.querySelector('#composer .subtitle').textContent.includes('Claude'), 'composer detail keeps the provider text label');
         for (const outcome of ['sending', 'queued', 'sent', 'failed', 'checking']) {
           setOutcome(outcome);
           check(document.querySelector('#send-state').dataset.state === outcome, `${outcome} outcome`);
@@ -805,6 +1038,14 @@
         setVariant('calm');
         setTextSize('large');
         check(document.body.dataset.textSize === 'large' && getComputedStyle(document.body).fontSize === '19px', 'large text containment mode');
+        showScreen('identity', false);
+        for (const row of document.querySelectorAll('[data-provider-compact]')) {
+          const bounds = row.getBoundingClientRect();
+          check(bounds.height >= 47.5, `${row.dataset.providerCompact} compact row keeps a 48px target`);
+          check(bounds.left >= -0.5 && bounds.right <= document.documentElement.clientWidth + 0.5, `${row.dataset.providerCompact} large-text row is contained`);
+        }
+        check(document.documentElement.scrollWidth <= document.documentElement.clientWidth, 'provider identity large-text containment');
+        showScreen('activity', false);
         const visibleButtons = [...document.querySelectorAll('button')].filter(button => getComputedStyle(button).display !== 'none' && button.getBoundingClientRect().width > 0);
         const shortButtons = visibleButtons.filter(button => button.getBoundingClientRect().height < 47.5);
         check(shortButtons.length === 0, `48px hit targets: ${shortButtons.map(button => `${button.textContent.trim()}=${button.getBoundingClientRect().height}`).join(', ')}`);
@@ -817,6 +1058,8 @@
       smokeResult.dataset.smoke = 'pending';
       smokeResult.hidden = true;
       document.body.append(smokeResult);
+      const initialScreen = new URLSearchParams(location.search).get('screen');
+      if (initialScreen && document.querySelector(`[data-screen="${initialScreen}"]`)) showScreen(initialScreen, false);
       if (new URLSearchParams(location.search).has('smoke')) smoke().catch(error => { smokeResult.dataset.smoke = 'fail'; smokeResult.textContent = error.message; console.error(error); });
     })();
   </script>

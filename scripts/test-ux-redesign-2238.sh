@@ -16,6 +16,11 @@ if [[ -z "$BROWSER" ]]; then
 fi
 [[ -n "$BROWSER" ]] || { echo "FAIL: Chromium/Chrome is required for the #2238 smoke check" >&2; exit 1; }
 
+BROWSER_MODE_FLAGS=()
+if [[ "${POCKETSHELL_FORCE_COLORS:-0}" == "1" ]]; then
+  BROWSER_MODE_FLAGS+=(--force-high-contrast)
+fi
+
 BROWSER_DATA_DIR="$(mktemp -d)"
 SERVER_PORT_FILE="$(mktemp)"
 SMOKE_RESULT_FILE="$(mktemp)"
@@ -138,7 +143,11 @@ done
 SERVER_PORT="$(<"$SERVER_PORT_FILE")"
 [[ "$SERVER_PORT" =~ ^[1-9][0-9]*$ ]] \
   || { echo "FAIL: browser smoke server returned an invalid port" >&2; cat "$SERVER_LOG" >&2; exit 1; }
-MOCKUP_URI="http://127.0.0.1:$SERVER_PORT/ux-redesign-2238.html?smoke=1"
+SMOKE_QUERY="smoke=1"
+if [[ "${POCKETSHELL_FORCE_COLORS:-0}" == "1" ]]; then
+  SMOKE_QUERY+="&forced-colors=1"
+fi
+MOCKUP_URI="http://127.0.0.1:$SERVER_PORT/ux-redesign-2238.html?$SMOKE_QUERY"
 setsid env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS \
   "$BROWSER" \
   --headless \
@@ -156,6 +165,7 @@ setsid env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS \
   --no-pings \
   --disable-domain-reliability \
   --disable-features=UseDBus \
+  "${BROWSER_MODE_FLAGS[@]}" \
   --user-data-dir="$BROWSER_DATA_DIR" \
   --window-size=390,844 \
   --virtual-time-budget=5000 \

@@ -580,6 +580,7 @@ PIN_WORKFLOW="com.pocketshell.app.proof.EmulatorWorkflowE2eTest"
 SHARED_ANDROIDTEST="com.pocketshell.uikit.components.UiKitPrimitivesTest"
 RELEASE_ONLY="com.pocketshell.core.connection.ConnectionControllerConfinementDefaultReleaseTest"
 DEBUG_ONLY="com.pocketshell.core.connection.ConnectionControllerConfinementDefaultDebugTest"
+REAL_LLM_ONLY="com.pocketshell.app.assistant.AssistantAgentLoopRealLlmTest"
 
 write_junit_from_list() {
   local dest="$1" list="$2" n
@@ -699,7 +700,8 @@ fi
 # is NOT acceptance. testDebugUnitTest cannot emit the testRelease class.
 DEBUG_LIST="$SANDBOX/unit-debug-classes.txt"
 bash "$SELECT" --list-classes 2>/dev/null |
-  awk -F'\t' '$4=="test" || $4=="testDebug" {print $1}' |
+  awk -F'\t' -v opt_in="$REAL_LLM_ONLY" \
+    '($4=="test" || $4=="testDebug") && $1 != opt_in {print $1}' |
   LC_ALL=C sort -u > "$DEBUG_LIST"
 DEBUG_XML_DIR="$SANDBOX/unit-debug-xml"
 mkdir -p "$DEBUG_XML_DIR"
@@ -713,27 +715,34 @@ else
   bad "26 unscoped unit vs Debug XML failed for the wrong reason:\n$out"
 fi
 
-# CASE 27 — the same Debug-shaped XML + --selected-from unit-debug PASSES.
-# The Release-only FQCN is not in the selected set.
+# CASE 27 — an independently Gradle-shaped Debug artifact +
+# --selected-from unit-debug PASSES. The artifact list above deliberately
+# models app/build.gradle.kts's ordinary-task RealLlmTest exclusion instead of
+# being copied from this guard's selected set. Both the Release-only and the
+# opt-in real-LLM FQCN must therefore be absent from the selected set.
 if ! bash "$GUARD" --print-selected --selected-from unit-debug \
       > "$SANDBOX/unit-debug-selected.txt" 2>"$SANDBOX/unit-debug-sel.err"; then
   bad "27 --print-selected unit-debug failed:\n$(cat "$SANDBOX/unit-debug-sel.err")"
 elif grep -qxF "$RELEASE_ONLY" "$SANDBOX/unit-debug-selected.txt"; then
   bad "27 unit-debug selected set still contains $RELEASE_ONLY"
+elif grep -qxF "$REAL_LLM_ONLY" "$SANDBOX/unit-debug-selected.txt"; then
+  bad "27 unit-debug selected set still contains opt-in-only $REAL_LLM_ONLY"
 elif ! grep -qxF "$DEBUG_ONLY" "$SANDBOX/unit-debug-selected.txt"; then
   bad "27 unit-debug selected set dropped $DEBUG_ONLY"
 elif out="$(bash "$GUARD" --attendance --results-root "$DEBUG_XML_DIR" \
             --selected-from unit-debug 2>&1)"; then
-  ok "27 variant-scoped unit-debug attendance passes Debug without the Release-only FQCN"
+  ok "27 unit-debug attendance matches an independent Gradle-shaped artifact (no Release-only or opt-in real-LLM FQCN)"
 else
   bad "27 unit-debug attendance against a complete Debug-shaped list should pass:\n$out"
 fi
 
-# CASE 28 — Release-scoped selected set includes the testRelease class;
-# dropping it from a Release-shaped artifact REDS.
+# CASE 28 — Release-scoped selected set includes the testRelease class but not
+# the opt-in real-LLM class; dropping the ordinary testRelease class from the
+# independently Gradle-shaped artifact still REDS.
 RELEASE_LIST="$SANDBOX/unit-release-classes.txt"
 bash "$SELECT" --list-classes 2>/dev/null |
-  awk -F'\t' '$4=="test" || $4=="testRelease" {print $1}' |
+  awk -F'\t' -v opt_in="$REAL_LLM_ONLY" \
+    '($4=="test" || $4=="testRelease") && $1 != opt_in {print $1}' |
   LC_ALL=C sort -u > "$RELEASE_LIST"
 if ! bash "$GUARD" --print-selected --selected-from unit-release \
       > "$SANDBOX/unit-release-selected.txt" 2>"$SANDBOX/unit-release-sel.err"; then
@@ -742,6 +751,8 @@ elif ! grep -qxF "$RELEASE_ONLY" "$SANDBOX/unit-release-selected.txt"; then
   bad "28 unit-release selected set dropped $RELEASE_ONLY"
 elif grep -qxF "$DEBUG_ONLY" "$SANDBOX/unit-release-selected.txt"; then
   bad "28 unit-release selected set still contains $DEBUG_ONLY"
+elif grep -qxF "$REAL_LLM_ONLY" "$SANDBOX/unit-release-selected.txt"; then
+  bad "28 unit-release selected set still contains opt-in-only $REAL_LLM_ONLY"
 else
   RELEASE_XML_DIR="$SANDBOX/unit-release-xml"
   mkdir -p "$RELEASE_XML_DIR"
@@ -761,6 +772,185 @@ else
       bad "28 Release-scoped drop failed for the wrong reason:\n$out"
     fi
   fi
+fi
+
+# CASE 29 — preserving the opt-in lane means excluding RealLlmTest only from
+# ordinary attendance, not deleting it from the taxonomy or its dedicated
+# Gradle task. This pins both halves of that contract.
+UNIT_SELECTED="$SANDBOX/unit-selected.txt"
+if ! bash "$GUARD" --print-selected --selected-from unit > "$UNIT_SELECTED"; then
+  bad "29 unscoped ordinary-unit selected set could not be produced"
+elif ! grep -qF "${REAL_LLM_ONLY}"$'\t' "$REAL_LEDGER"; then
+  bad "29 opt-in real-LLM class disappeared from the registered taxonomy"
+elif ! grep -qF 'test.exclude("**/*RealLlmTest.class")' "$SCRIPT_DIR/../app/build.gradle.kts"; then
+  bad "29 app ordinary Gradle tasks no longer exclude RealLlmTest"
+elif ! grep -qF 'include("**/*RealLlmTest.class")' "$SCRIPT_DIR/../app/build.gradle.kts"; then
+  bad "29 :app:realLlmTest no longer includes RealLlmTest"
+elif grep -qxF "$REAL_LLM_ONLY" "$UNIT_SELECTED"; then
+  bad "29 unscoped ordinary-unit selected set still contains $REAL_LLM_ONLY"
+else
+  grep -v "^${REAL_LLM_ONLY}"$'\t' "$REAL_LEDGER" > "$SANDBOX/real-ledger-minus-real-llm.tsv"
+  if out="$(bash "$GUARD" --verify \
+            --ledger "$SANDBOX/real-ledger-minus-real-llm.tsv" \
+            --source-set unit --now "$REAL_NOW" 2>&1)"; then
+    bad "29 generic unit ledger verification stopped requiring opt-in $REAL_LLM_ONLY:\n$out"
+  elif grep -q 'NEVER executed' <<<"$out" && grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
+    ok "29 RealLlmTest remains registered in generic rolling verification and opt-in while ordinary variants exclude it"
+  else
+    bad "29 generic unit rolling-ledger registration failed for the wrong reason:\n$out"
+  fi
+fi
+
+# CASE 30 — LIVE selector mutation: remove the shipped exclusion and run the
+# independently Gradle-shaped Debug artifact. Attendance must RED on exactly
+# the opt-in class. This is the defect from PR #2230's Debug/Release jobs, and
+# proves case 27 would not stay green if the production selector regressed.
+UNIT_MUT_DIR="$SANDBOX/mut-unit-selector"
+mkdir -p "$UNIT_MUT_DIR/lib"
+cp "$GUARD" "$UNIT_MUT_DIR/check-test-execution-ledger.sh"
+cp "$SCRIPT_DIR/lib/test-areas.sh" "$UNIT_MUT_DIR/lib/test-areas.sh"
+clean_guard_md5="$(md5sum "$UNIT_MUT_DIR/check-test-execution-ledger.sh" | cut -d' ' -f1)"
+python3 - "$UNIT_MUT_DIR/check-test-execution-ledger.sh" <<'PY'
+import sys
+
+p = sys.argv[1]
+s = open(p).read()
+anchor = '    ordinary_unit_class_selected "$fqcn" || continue\n'
+assert s.count(anchor) == 1, "ordinary RealLlmTest exclusion anchor not unique"
+s = s.replace(anchor, '    : # MUTANT 30: ordinary selector re-includes RealLlmTest\n')
+open(p, "w").write(s)
+PY
+mut_guard_md5="$(md5sum "$UNIT_MUT_DIR/check-test-execution-ledger.sh" | cut -d' ' -f1)"
+if [[ "$clean_guard_md5" == "$mut_guard_md5" ]] ||
+   ! grep -q 'MUTANT 30' "$UNIT_MUT_DIR/check-test-execution-ledger.sh"; then
+  bad "30 MUTATION DID NOT APPLY — the ordinary-selector mutant is not live"
+else
+  out="$(POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
+          POCKETSHELL_TEST_AREAS_MANIFEST="$SCRIPT_DIR/test-areas.txt" \
+          bash "$UNIT_MUT_DIR/check-test-execution-ledger.sh" \
+            --attendance --results-root "$DEBUG_XML_DIR" \
+            --selected-from unit-debug 2>&1)"
+  if grep -q 'FAIL: 1 selected class(es) produced NO result' <<<"$out" &&
+     grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
+    ok "30 live re-inclusion mutant reddens Debug attendance on exactly $REAL_LLM_ONLY"
+  else
+    bad "30 live re-inclusion mutant failed for the wrong reason:\n$out"
+  fi
+fi
+
+# CASE 31 — selectivity in the other direction: excluding the opt-in class
+# must not make attendance tolerant of an ordinary selected class disappearing.
+GENERAL_UNIT="com.pocketshell.core.ssh.SshLeaseManagerTest"
+DEBUG_MINUS_GENERAL="$SANDBOX/unit-debug-minus-general.txt"
+if ! grep -qxF "$GENERAL_UNIT" "$DEBUG_LIST"; then
+  bad "31 independent Debug artifact does not contain $GENERAL_UNIT; missing-class mutation cannot run"
+else
+  grep -vxF "$GENERAL_UNIT" "$DEBUG_LIST" > "$DEBUG_MINUS_GENERAL"
+  write_junit_from_list "$DEBUG_XML_DIR/TEST-debug.xml" "$DEBUG_MINUS_GENERAL"
+  if out="$(bash "$GUARD" --attendance --results-root "$DEBUG_XML_DIR" \
+            --selected-from unit-debug 2>&1)"; then
+    bad "31 dropping ordinary selected class $GENERAL_UNIT did NOT redden attendance:\n$out"
+  elif grep -q 'FAIL: 1 selected class(es) produced NO result' <<<"$out" &&
+       grep -qF "$GENERAL_UNIT" <<<"$out"; then
+    ok "31 a generally missing ordinary selected class still reddens attendance, naming only that class"
+  else
+    bad "31 ordinary missing-class mutation failed for the wrong reason:\n$out"
+  fi
+fi
+
+run_unit_wrapper_sequence() {
+  local guard="$1" results="$2" selected_from="$3" source_set="$4" ledger="$5"
+  POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
+    POCKETSHELL_TEST_AREAS_MANIFEST="$SCRIPT_DIR/test-areas.txt" \
+    bash "$guard" --record "$results" --ledger "$ledger" \
+      --tier unit --now "$REAL_NOW" &&
+  POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
+    POCKETSHELL_TEST_AREAS_MANIFEST="$SCRIPT_DIR/test-areas.txt" \
+    bash "$guard" --attendance --results-root "$results" \
+      --selected-from "$selected_from" &&
+  POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
+    POCKETSHELL_TEST_AREAS_MANIFEST="$SCRIPT_DIR/test-areas.txt" \
+    bash "$guard" --verify --ledger "$ledger" \
+      --source-set "$source_set" --now "$REAL_NOW"
+}
+
+# CASES 32-33 — artifact-shaped proof of the ENTIRE ordinary-unit wrapper
+# sequence, not only attendance. Rebuild the complete independent artifacts
+# because cases 28 and 31 deliberately removed one ordinary class from each.
+# The final --verify is the command the round-4 review proved was still red.
+write_junit_from_list "$DEBUG_XML_DIR/TEST-debug.xml" "$DEBUG_LIST"
+DEBUG_WRAPPER_LEDGER="$SANDBOX/unit-debug-wrapper-ledger.tsv"
+if out="$(run_unit_wrapper_sequence "$GUARD" "$DEBUG_XML_DIR" unit-debug \
+          unit-debug "$DEBUG_WRAPPER_LEDGER" 2>&1)"; then
+  ok "32 Debug artifact passes the real record -> attendance -> variant verify sequence"
+else
+  bad "32 complete Debug artifact failed the real wrapper sequence:\n$out"
+fi
+
+write_junit_from_list "$RELEASE_XML_DIR/TEST-release.xml" "$RELEASE_LIST"
+RELEASE_WRAPPER_LEDGER="$SANDBOX/unit-release-wrapper-ledger.tsv"
+if out="$(run_unit_wrapper_sequence "$GUARD" "$RELEASE_XML_DIR" unit-release \
+          unit-release "$RELEASE_WRAPPER_LEDGER" 2>&1)"; then
+  ok "33 Release artifact passes the real record -> attendance -> variant verify sequence"
+else
+  bad "33 complete Release artifact failed the real wrapper sequence:\n$out"
+fi
+
+# CASE 34 — LIVE verify-path mutation. Keep selected_from_unit() intact so
+# attendance stays green, but bypass the ordinary-task exclusion only in the
+# final --verify source-set filter. The whole sequence must then RED on exactly
+# the opt-in class, proving cases 32-33 constrain the reviewer's actual seam.
+VERIFY_MUT_DIR="$SANDBOX/mut-unit-verify"
+mkdir -p "$VERIFY_MUT_DIR/lib"
+cp "$GUARD" "$VERIFY_MUT_DIR/check-test-execution-ledger.sh"
+cp "$SCRIPT_DIR/lib/test-areas.sh" "$VERIFY_MUT_DIR/lib/test-areas.sh"
+clean_verify_md5="$(md5sum "$VERIFY_MUT_DIR/check-test-execution-ledger.sh" | cut -d' ' -f1)"
+python3 - "$VERIFY_MUT_DIR/check-test-execution-ledger.sh" <<'PY'
+import sys
+
+p = sys.argv[1]
+s = open(p).read()
+anchor = '      unit-debug) is_unit_debug_source_set "$srcset" && ordinary_unit_class_selected "$fqcn" && return 0 ;;\n'
+assert s.count(anchor) == 1, "variant verify exclusion anchor not unique"
+s = s.replace(
+    anchor,
+    '      unit-debug) is_unit_debug_source_set "$srcset" && return 0 ;; # MUTANT 34: verify re-includes RealLlmTest\n',
+)
+open(p, "w").write(s)
+PY
+mut_verify_md5="$(md5sum "$VERIFY_MUT_DIR/check-test-execution-ledger.sh" | cut -d' ' -f1)"
+VERIFY_MUT_LEDGER="$SANDBOX/unit-debug-verify-mutant-ledger.tsv"
+if [[ "$clean_verify_md5" == "$mut_verify_md5" ]] ||
+   ! grep -q 'MUTANT 34' "$VERIFY_MUT_DIR/check-test-execution-ledger.sh"; then
+  bad "34 MUTATION DID NOT APPLY — the variant-verify mutant is not live"
+else
+  out="$(run_unit_wrapper_sequence \
+          "$VERIFY_MUT_DIR/check-test-execution-ledger.sh" \
+          "$DEBUG_XML_DIR" unit-debug unit-debug "$VERIFY_MUT_LEDGER" 2>&1)"
+  if grep -q 'PASS: every selected class produced a result' <<<"$out" &&
+     grep -q 'FAIL: 1 registered class(es) have NEVER executed' <<<"$out" &&
+     grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
+    ok "34 live verify-only drift mutant reddens after green attendance on exactly $REAL_LLM_ONLY"
+  else
+    bad "34 live verify-only drift mutant failed for the wrong reason:\n$out"
+  fi
+fi
+
+# CASE 35 — generic missing-class failure remains load-bearing for the full
+# wrapper path. With the shipped exclusion intact, remove one ordinary class
+# from the independent artifact and require the attendance command to stop the
+# sequence on exactly that class.
+write_junit_from_list "$DEBUG_XML_DIR/TEST-debug.xml" "$DEBUG_MINUS_GENERAL"
+MISSING_WRAPPER_LEDGER="$SANDBOX/unit-debug-missing-wrapper-ledger.tsv"
+if out="$(run_unit_wrapper_sequence "$GUARD" "$DEBUG_XML_DIR" unit-debug \
+          unit-debug "$MISSING_WRAPPER_LEDGER" 2>&1)"; then
+  bad "35 wrapper sequence tolerated missing ordinary class $GENERAL_UNIT:\n$out"
+elif grep -q 'FAIL: 1 selected class(es) produced NO result' <<<"$out" &&
+     grep -qF "$GENERAL_UNIT" <<<"$out" &&
+     ! grep -qF "$REAL_LLM_ONLY" <<<"$out"; then
+  ok "35 full wrapper sequence still reddens on exactly one missing ordinary selected class"
+else
+  bad "35 wrapper missing-class mutation failed for the wrong reason:\n$out"
 fi
 
 echo

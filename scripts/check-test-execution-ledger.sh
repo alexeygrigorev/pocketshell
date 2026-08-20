@@ -69,7 +69,9 @@
 #                     :app:connectedDebugAndroidTest can actually emit.
 #                     unit-debug / unit-release match the Gradle variant
 #                     that produced the XML (testDebugUnitTest cannot emit
-#                     src/testRelease).
+#                     src/testRelease) and mirror ordinary-task exclusions;
+#                     opt-in RealLlmTest classes remain ledger-registered but
+#                     are selected only by :app:realLlmTest.
 #   --print-selected  print the selected FQCNs (one per line) and exit.
 #                     Requires --selected-from or --selected-file.
 #   --require-class C attendance: FQCN that must be asserted/load-bearing
@@ -245,15 +247,23 @@ is_unit_release_source_set() {
   case "$1" in test|testRelease) return 0 ;; *) return 1 ;; esac
 }
 
+ordinary_unit_class_selected() {
+  # Keep the ordinary Gradle tasks' explicit exclusion in one predicate shared
+  # by current-run attendance and variant-scoped rolling-ledger verification.
+  # Generic `all` / `unit` verification intentionally still registers the
+  # opt-in lane, whose :app:realLlmTest artifact can credit this class.
+  [[ "$1" != *RealLlmTest ]]
+}
+
 source_set_included() {
-  local srcset="$1" tok
+  local fqcn="$1" srcset="$2" tok
   local IFS=','
   for tok in $SOURCE_SET; do
     case "$tok" in
       all) return 0 ;;
       unit) is_unit_source_set "$srcset" && return 0 ;;
-      unit-debug) is_unit_debug_source_set "$srcset" && return 0 ;;
-      unit-release) is_unit_release_source_set "$srcset" && return 0 ;;
+      unit-debug) is_unit_debug_source_set "$srcset" && ordinary_unit_class_selected "$fqcn" && return 0 ;;
+      unit-release) is_unit_release_source_set "$srcset" && ordinary_unit_class_selected "$fqcn" && return 0 ;;
       androidTest) [[ "$srcset" == "androidTest" ]] && return 0 ;;
     esac
   done
@@ -302,6 +312,10 @@ selected_from_unit() {
       release) is_unit_release_source_set "$srcset" || continue ;;
       *) is_unit_source_set "$srcset" || continue ;;
     esac
+    # Real-provider tests stay registered in the taxonomy/rolling ledger, but
+    # testDebugUnitTest and testReleaseUnitTest explicitly exclude them; only
+    # the opt-in :app:realLlmTest task can emit their JUnit artifact.
+    ordinary_unit_class_selected "$fqcn" || continue
     printf '%s\n' "$fqcn"
   done
 }
@@ -531,7 +545,7 @@ do_verify() {
     # the all-classes verify. --source-set unit/androidTest drops them unless
     # the index mapped them.
     if [[ "$SOURCE_SET" != "all" ]]; then
-      source_set_included "$srcset" || continue
+      source_set_included "$cls" "$srcset" || continue
     fi
     seen_registered["$cls"]=1
     total=$((total + 1))

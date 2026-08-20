@@ -320,9 +320,11 @@ class MainActivity : FragmentActivity() {
         // The recency cap inside [LastSessionStore.read] is the second guard:
         // even on a genuine process-death resume, a snapshot older than 24h
         // is not restored.
-        val intentDestination = initialDestinationFromIntent(intent)
+        val incomingIntent = intent
+        val incomingRoute = decodeActivityRoute(incomingIntent)
+        val intentDestination = incomingRoute.destination
         val resumingFromProcessDeath = savedInstanceState != null
-        val importPayload = importPayloadFromIntent(intent)
+        val importPayload = importPayloadFromIntent(incomingIntent)
         // Issue #859 (Slice D): an agent-card push deep-links to the card's
         // session feed. We capture the request synchronously here, but resolve
         // the right host + route to it OFF the Main thread (see
@@ -330,11 +332,12 @@ class MainActivity : FragmentActivity() {
         // a key-file stat that must never block launch (the #951 off-Main
         // mandate). A no/ambiguous host match leaves the user on the host list,
         // never the wrong host.
-        val agentCardFeedRequest = agentCardFeedRequestFromIntent(intent)
+        val agentCardFeedRequest = agentCardFeedRequestFromIntent(incomingIntent)
         // Issue #560: a share-into-session launch carries the staged remote
         // attachment path(s); seed them into the session composer as #544
         // chips once the navigator reaches the tmux destination.
-        pendingComposerAttachments = composerAttachmentsFromIntent(intent)
+        pendingComposerAttachments = composerAttachmentsFromIntent(incomingIntent)
+        incomingRoute.retainedIntent?.let(::setIntent)
         StartupTiming.mark(
             "main-initial-route-input",
             "savedInstanceState" to resumingFromProcessDeath,
@@ -736,8 +739,9 @@ class MainActivity : FragmentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        setIntent(intent)
-        requestedDestination = initialDestinationFromIntent(intent)
+        val incomingRoute = decodeActivityRoute(intent)
+        setIntent(incomingRoute.retainedIntent ?: intent)
+        requestedDestination = incomingRoute.destination
         StartupTiming.mark(
             "main-new-intent",
             "requestedDestination" to requestedDestination.timingName(),
@@ -952,6 +956,14 @@ private fun AppNavigator(
             "current" to current.timingName(),
         )
         if (requestedDestination == AppDestination.PortForwardChooser && current != requestedDestination) {
+            backStack += current
+            setCurrentDestination(requestedDestination)
+        }
+        // Issue #2256: a Usage notification can be delivered to this existing
+        // Activity through onNewIntent. Treat that late request like the other
+        // explicit panel deep link above so it routes once through the normal
+        // navigator and Back returns to the screen that was already showing.
+        if (requestedDestination == AppDestination.Usage && current != requestedDestination) {
             backStack += current
             setCurrentDestination(requestedDestination)
         }
@@ -2067,6 +2079,29 @@ internal fun initialDestinationFromIntent(intent: Intent?): AppDestination {
     shareSessionDestinationFromIntent(intent)?.let { return it }
     return AppDestination.HostList
 }
+
+/**
+ * Decodes an Activity route once and returns the intent that Android may retain
+ * for a later Activity recreation. Usage notifications are transient commands,
+ * so their route extra is removed only after it has selected [AppDestination.Usage].
+ * Every adjacent route keeps its existing raw intent and restoration behavior.
+ */
+internal fun decodeActivityRoute(intent: Intent?): DecodedActivityRoute {
+    val destination = initialDestinationFromIntent(intent)
+    val retainedIntent = if (
+        intent?.getBooleanExtra(MainActivity.EXTRA_OPEN_USAGE, false) == true
+    ) {
+        Intent(intent).apply { removeExtra(MainActivity.EXTRA_OPEN_USAGE) }
+    } else {
+        intent
+    }
+    return DecodedActivityRoute(destination, retainedIntent)
+}
+
+internal data class DecodedActivityRoute(
+    val destination: AppDestination,
+    val retainedIntent: Intent?,
+)
 
 /**
  * Issue #560: build a [AppDestination.TmuxSession] from a share-into-session

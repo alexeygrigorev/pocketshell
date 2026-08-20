@@ -5,6 +5,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.lifecycle.Lifecycle
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -30,6 +31,7 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -74,9 +76,11 @@ import java.io.File
  * Each must land Back on the host's SESSION list ([FOLDER_LIST_SCREEN_TAG]),
  * not the host list ([HOST_LIST_CONTENT_TAG]).
  *
- * A fifth test pins the paths whose host-list fallback is CORRECT and must not
- * change: the usage-notification launch (`EXTRA_OPEN_USAGE`) still goes Back to
- * the host list.
+ * The Usage tests pin the path whose host-list fallback is CORRECT and must not
+ * change: a usage-notification launch (`EXTRA_OPEN_USAGE`) goes Back to the host
+ * list, consumes that transient route before Activity recreation, and has the
+ * same one-shot contract when delivered to a warm Activity through
+ * `onNewIntent` (#2256).
  *
  * ## Harness note
  *
@@ -193,7 +197,7 @@ class Issue1831SessionEntryPathBackE2eTest {
      * there, not to some host's session list.
      */
     @Test
-    fun usageNotificationLaunchBackStillLandsOnHostList() {
+    fun usageNotificationLaunchBackRecreateDoesNotReplayUsage() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         launchedActivity = ActivityScenario.launch(
             Intent(context, MainActivity::class.java)
@@ -214,6 +218,68 @@ class Issue1831SessionEntryPathBackE2eTest {
         assertFalse(
             "Back from Usage must NOT land on a host's session list",
             onFolderList(),
+        )
+
+        recreateStoppedActivity()
+        val routeAfterRecreate = waitForHostListOrUsage()
+        record("02-after-recreate")
+        writeTrail("usage-back-recreate-trail.txt")
+        assertEquals(
+            "ISSUE 2256: the consumed Usage notification route must not replay after Back + " +
+                "Activity recreation. Route=$routeAfterRecreate. Observed: " +
+                trail.joinToString(" | "),
+            PostRecreateRoute.HOST_LIST,
+            routeAfterRecreate,
+        )
+        assertFalse(
+            "ISSUE 2256: EXTRA_OPEN_USAGE must be absent from the Activity's retained intent",
+            retainedActivityIntentHasUsageExtra(),
+        )
+    }
+
+    /** The same one-shot contract when a live Activity receives `onNewIntent`. */
+    @Test
+    fun warmUsageIntentBackRecreateDoesNotReplayUsage() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        launchedActivity = ActivityScenario.launch(Intent(context, MainActivity::class.java))
+        assertTrue("warm-delivery precondition must start on the host list", waitFor("host list") {
+            onHostList()
+        })
+
+        launchedActivity?.onActivity { activity ->
+            activity.startActivity(
+                Intent(activity, MainActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    .putExtra(MainActivity.EXTRA_OPEN_USAGE, true),
+            )
+        }
+        assertTrue(
+            "warm onNewIntent delivery must route to Usage once",
+            waitFor("usage screen after warm intent") { nodesWithTag(USAGE_OVERFLOW_TAG) },
+        )
+        record("00-warm-usage")
+
+        pressSystemBack()
+        assertTrue(
+            "Back from warm-delivered Usage must land on the host list",
+            waitFor("host list after warm Usage Back") { onHostList() },
+        )
+        record("01-warm-after-back")
+
+        recreateStoppedActivity()
+        val routeAfterRecreate = waitForHostListOrUsage()
+        record("02-warm-after-recreate")
+        writeTrail("usage-warm-back-recreate-trail.txt")
+        assertEquals(
+            "ISSUE 2256: a warm-delivered consumed Usage route must not replay after Back + " +
+                "Activity recreation. Route=$routeAfterRecreate. Observed: " +
+                trail.joinToString(" | "),
+            PostRecreateRoute.HOST_LIST,
+            routeAfterRecreate,
+        )
+        assertFalse(
+            "ISSUE 2256: warm delivery must retain an intent without EXTRA_OPEN_USAGE",
+            retainedActivityIntentHasUsageExtra(),
         )
     }
 
@@ -272,6 +338,32 @@ class Issue1831SessionEntryPathBackE2eTest {
         return false
     }
 
+    /** Distinguishes a #2256 Usage replay from a generic screen-settle timeout. */
+    private fun waitForHostListOrUsage(): PostRecreateRoute {
+        val deadline = SystemClock.elapsedRealtime() + SCREEN_SETTLE_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (nodesWithTag(USAGE_OVERFLOW_TAG)) return PostRecreateRoute.USAGE
+            if (onHostList()) return PostRecreateRoute.HOST_LIST
+            SystemClock.sleep(100)
+        }
+        return PostRecreateRoute.TIMEOUT
+    }
+
+    private fun recreateStoppedActivity() {
+        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        launchedActivity?.recreate()
+        launchedActivity?.moveToState(Lifecycle.State.RESUMED)
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
+    private fun retainedActivityIntentHasUsageExtra(): Boolean {
+        var retained = false
+        launchedActivity?.onActivity { activity ->
+            retained = activity.intent.hasExtra(MainActivity.EXTRA_OPEN_USAGE)
+        }
+        return retained
+    }
+
     private fun waitFor(label: String, condition: () -> Boolean): Boolean {
         val deadline = SystemClock.elapsedRealtime() + SCREEN_SETTLE_MS
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -297,7 +389,7 @@ class Issue1831SessionEntryPathBackE2eTest {
 
     private fun record(label: String) {
         val line = "$label => session=${onSessionScreen()} folderList=${onFolderList()} " +
-            "hostList=${onHostList()}"
+            "hostList=${onHostList()} usage=${nodesWithTag(USAGE_OVERFLOW_TAG)}"
         trail += line
         Log.i(LOG_TAG, "ISSUE1831_ENTRY_TRAIL $line")
         println("ISSUE1831_ENTRY_TRAIL $line")
@@ -420,6 +512,12 @@ class Issue1831SessionEntryPathBackE2eTest {
             "could not create artifact directory ${dir.absolutePath}"
         }
         File(dir, name).writeText(trail.joinToString(separator = "\n", postfix = "\n"))
+    }
+
+    private enum class PostRecreateRoute {
+        HOST_LIST,
+        USAGE,
+        TIMEOUT,
     }
 
     private companion object {

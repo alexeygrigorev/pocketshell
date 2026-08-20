@@ -1044,7 +1044,9 @@ source explicit (for example, “default agent; inherits `gpt-5.6-sol` / High”
 and name the role being launched (implementer, reviewer, researcher, or
 on-call). If an override or maintainer-authorized exception is used, record the
 requested and observed model/effort in the handoff instead of describing it as
-the default.
+the default. The same rule applies when a maintainer explicitly chooses a
+different model for an active run: record the exception rather than implying
+that the policy default was effective.
 
 Set the persistent local defaults in `~/.codex/config.toml`:
 

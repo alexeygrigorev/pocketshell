@@ -259,16 +259,20 @@ class FolderListViewModel internal constructor(
      * `null` on match, on a versionless payload (old CLI), or when the host is
      * NEWER (the app-behind case — see [PayloadVersionCheck.Verdict.AppOutdated]).
      */
-    private val _cliVersionMismatch: MutableStateFlow<PayloadVersionCheck.Verdict.HostOutdated?> =
-        MutableStateFlow(null)
+    private val cliVersionBanner = CliVersionBannerCoordinator(
+        expectedVersion = { expectedPocketshellVersion() },
+        hostId = { bound?.hostId },
+        dismissStore = CliVersionBannerDismissStore.from(applicationContext),
+    )
     val cliVersionMismatch: StateFlow<PayloadVersionCheck.Verdict.HostOutdated?> =
-        _cliVersionMismatch.asStateFlow()
+        cliVersionBanner.mismatch
 
-    /** Dismiss the passive CLI-version update prompt (issue #885). */
-    fun dismissCliVersionMismatch() {
-        _cliVersionMismatch.value = null
-        _cliVersionUpdateState.value = CliVersionUpdateState.Idle
-    }
+    @androidx.annotation.VisibleForTesting
+    internal fun setCliVersionBannerDismissStoreForTest(store: CliVersionBannerDismissStore) =
+        cliVersionBanner.setDismissStoreForTest(store)
+
+    /** Dismiss the passive CLI-version update prompt (issue #885 / #2033). */
+    fun dismissCliVersionMismatch() = cliVersionBanner.dismiss()
 
     /** Issue #1509: THE single session-tree setup coordinator (relocation + dedup, D22). */
     private val sessionTreeSetup = SessionTreeSetupCoordinator(notificationPermissionNeeded)
@@ -290,13 +294,17 @@ class FolderListViewModel internal constructor(
     public sealed interface CliVersionUpdateState {
         public data object Idle : CliVersionUpdateState
         public data object Running : CliVersionUpdateState
-        public data class Failure(val message: String) : CliVersionUpdateState
+        public data class Failure(
+            val message: String,
+            val kind: Kind = Kind.Failed,
+            val offerRetry: Boolean = true,
+        ) : CliVersionUpdateState {
+            public enum class Kind { Unpublished, Capped, Failed }
+        }
     }
 
-    private val _cliVersionUpdateState: MutableStateFlow<CliVersionUpdateState> =
-        MutableStateFlow(CliVersionUpdateState.Idle)
     val cliVersionUpdateState: StateFlow<CliVersionUpdateState> =
-        _cliVersionUpdateState.asStateFlow()
+        cliVersionBanner.updateState
 
     /**
      * Issue #947: the host-upgrade seam. Runs `pocketshell`'s installer upgrade
@@ -323,7 +331,7 @@ class FolderListViewModel internal constructor(
      * a double tap (a second call while one is in flight is ignored).
      */
     fun runHostPocketshellUpgrade() {
-        if (_cliVersionUpdateState.value is CliVersionUpdateState.Running) return
+        if (cliVersionBanner.updateState.value is CliVersionUpdateState.Running) return
         val params = bound
         if (params == null) {
             // Issue #1157: with NO bound host there is genuinely no "the host" to
@@ -331,12 +339,13 @@ class FolderListViewModel internal constructor(
             // host (see [observePayloadCliVersion]), so this is a defensive edge.
             // Do NOT claim a false connection failure ("Not connected — reconnect"),
             // which contradicts a connected tray/tree; say what is actually true.
-            _cliVersionUpdateState.value =
-                CliVersionUpdateState.Failure("No host is selected — reopen the host and try again.")
+            cliVersionBanner.setUpdateState(
+                CliVersionUpdateState.Failure("No host is selected — reopen the host and try again."),
+            )
             return
         }
         hostUpgradeJob?.cancel()
-        _cliVersionUpdateState.value = CliVersionUpdateState.Running
+        cliVersionBanner.setUpdateState(CliVersionUpdateState.Running)
         hostUpgradeJob = viewModelScope.launch {
             // Issue #1157: robustly (re)acquire a live session on demand rather than
             // dead-ending on a possibly-absent/expired warm lease. [acquireUpgradeSession]
@@ -347,22 +356,29 @@ class FolderListViewModel internal constructor(
             // that contradicted a connected tree + tray. Null ONLY when unreachable.
             val session = acquireUpgradeSession(params)
             if (session == null || bound != params) {
-                _cliVersionUpdateState.value =
+                cliVersionBanner.setUpdateState(
                     CliVersionUpdateState.Failure(
                         "Couldn't reach the host to run the update — reconnect and try again.",
-                    )
+                    ),
+                )
                 return@launch
             }
-            when (val result = hostPocketshellUpgrade.run(session)) {
+            when (val result = hostPocketshellUpgrade.run(session, expectedPocketshellVersion())) {
                 is HostPocketshellUpgrade.Result.Success -> {
                     // Re-check the host version from a fresh payload. A SUCCESSFUL
                     // upgrade should now report the matching version, clearing the
-                    // banner; a no-op upgrade (already-newest / capped) re-raises
-                    // a failure so the user isn't left thinking it worked.
-                    recheckHostVersionAfterUpgrade(params, session)
+                    // banner; a no-op upgrade (already-newest / unpublished) is
+                    // classified from requested vs resolved (#2033), not guessed
+                    // as a cap.
+                    recheckHostVersionAfterUpgrade(params, session, result.output)
                 }
                 is HostPocketshellUpgrade.Result.Failure -> {
-                    _cliVersionUpdateState.value = CliVersionUpdateState.Failure(result.message)
+                    cliVersionBanner.classifyAndApply(
+                        requestedVersion = expectedPocketshellVersion(),
+                        resolvedVersion = cliVersionBanner.mismatch.value?.hostVersion,
+                        exitCode = result.exitCode ?: 1,
+                        output = result.rawOutput.ifBlank { result.message },
+                    )
                 }
             }
         }
@@ -375,13 +391,16 @@ class FolderListViewModel internal constructor(
      * a still-outdated read (a silent no-op upgrade) surfaces a failure so the
      * spinner never sticks and the user can retry/dismiss.
      */
-    private suspend fun recheckHostVersionAfterUpgrade(params: BoundParams, session: SshSession) {
+    private suspend fun recheckHostVersionAfterUpgrade(
+        params: BoundParams,
+        session: SshSession,
+        installerOutput: String,
+    ) {
         val source = treeRemoteSource
         if (source == null) {
             // No durable source (some unit paths): trust the exit-0 success and
             // clear the banner so the spinner doesn't stick.
-            _cliVersionMismatch.value = null
-            _cliVersionUpdateState.value = CliVersionUpdateState.Idle
+            cliVersionBanner.clearAfterTrustedSuccess()
             return
         }
         // `getTree` is itself bounded (TreeRemoteSource.execTreeRpcBounded), but
@@ -396,41 +415,15 @@ class FolderListViewModel internal constructor(
             // empty payload). The upgrade exec itself exited 0, so trust that
             // success and clear the banner rather than raising a false
             // "still outdated" — and never leave the spinner stuck.
-            _cliVersionMismatch.value = null
-            _cliVersionUpdateState.value = CliVersionUpdateState.Idle
+            cliVersionBanner.clearAfterTrustedSuccess()
             return
         }
-        observePayloadCliVersion(treeResult.cliVersion)
-        if (_cliVersionMismatch.value == null) {
-            _cliVersionUpdateState.value = CliVersionUpdateState.Idle
-        } else {
-            // The re-read reported a CONCRETE version that is STILL older — the
-            // upgrade was a silent no-op (e.g. capped). Don't pretend it worked.
-            _cliVersionUpdateState.value = CliVersionUpdateState.Failure(
-                "Update ran but the host still reports " +
-                    "${_cliVersionMismatch.value?.hostVersion ?: "an older version"}. " +
-                    "It may be capped — try the command on the host.",
-            )
-        }
+        cliVersionBanner.applyRecheck(treeResult.cliVersion, installerOutput)
     }
 
-    /**
-     * Issue #885: feed a payload-carried [hostCliVersion] through
-     * [PayloadVersionCheck] and raise the passive update prompt when the host CLI
-     * is older than this app build. A null/blank/unparseable version or a NEWER
-     * host CLI is "no signal" and never raises a false prompt. Visible for test.
-     */
-    internal fun observePayloadCliVersion(hostCliVersion: String?) {
-        if (hostCliVersion.isNullOrBlank()) return
-        when (val verdict = PayloadVersionCheck.evaluate(hostCliVersion, expectedPocketshellVersion())) {
-            is PayloadVersionCheck.Verdict.HostOutdated -> _cliVersionMismatch.value = verdict
-            else -> {
-                // Match / AppOutdated: clear any stale prompt (e.g. the host was
-                // updated since the last open).
-                _cliVersionMismatch.value = null
-            }
-        }
-    }
+    /** Issue #885: raise the passive update prompt from a payload-carried version. */
+    internal fun observePayloadCliVersion(hostCliVersion: String?) =
+        cliVersionBanner.observePayloadCliVersion(hostCliVersion)
 
     /**
      * The `pocketshell` version this app build expects on the host, via

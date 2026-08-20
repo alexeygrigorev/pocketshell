@@ -69,6 +69,13 @@ ARTIFACT_DIR="$REPO_ROOT/artifacts/nightly-extensive"
 mkdir -p "$ARTIFACT_DIR"
 SUMMARY="$ARTIFACT_DIR/summary.md"
 
+# Issue #2090: extra-runner last-completed-class heartbeat. Nightly has no
+# per-class bash loop, so phase-1 Gradle output is parsed via observe-stream.
+CI_JOURNEY_PROGRESS_HELPER="${CI_JOURNEY_PROGRESS_HELPER:-$REPO_ROOT/scripts/ci-journey-progress-telemetry.sh}"
+if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+  bash "$CI_JOURNEY_PROGRESS_HELPER" start || true
+fi
+
 GRADLEW="$REPO_ROOT/gradlew"
 
 # The Toxiproxy-backed proofs. This is primarily the NetworkFaultProofBase
@@ -432,6 +439,16 @@ if [[ "$SHARDING" == "yes" && "${SHARD_INDEX:-0}" -ne 0 ]]; then
   RUN_AUX_PHASES="no"
 fi
 
+# Choose the observer outside the phase-1 block. select-test-areas.sh slices
+# `/phase 1: journey\/E2E/,/^JOURNEY_EXIT=/` and requires wholesale-minus-notClass
+# with JOURNEY_EXIT= at column 0; indenting the assignment widens the slice into
+# later class= phases and falsely flags phase 1 as an allowlist.
+if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+  PHASE1_OBSERVER=(bash "$CI_JOURNEY_PROGRESS_HELPER" observe-stream)
+else
+  PHASE1_OBSERVER=(cat)
+fi
+
 echo "=========================================================="
 echo "Nightly Extensive Tests — phase 1: journey/E2E (pocketshellCi=true)"
 echo "Excluded classes: $JOURNEY_NOTCLASS_ARG"
@@ -446,8 +463,8 @@ echo "=========================================================="
   -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true \
   -Pandroid.testInstrumentationRunnerArguments.notClass="$JOURNEY_NOTCLASS_ARG" \
   "${JOURNEY_SHARD_ARGS[@]}" \
-  --stacktrace
-JOURNEY_EXIT=$?
+  --stacktrace 2>&1 | "${PHASE1_OBSERVER[@]}"
+JOURNEY_EXIT=${PIPESTATUS[0]}
 echo "phase 1 (journey/E2E) exit code: $JOURNEY_EXIT"
 
 # Snapshot phase 1's report BEFORE the phase-2 gradle invocation overwrites it
@@ -815,6 +832,10 @@ fi
 echo "----------------------------------------------------------"
 cat "$SUMMARY"
 echo "----------------------------------------------------------"
+
+if [[ -f "${CI_JOURNEY_PROGRESS_HELPER:-}" ]]; then
+  bash "$CI_JOURNEY_PROGRESS_HELPER" suite-completed "$overall_status" || true
+fi
 
 if [[ "$overall_status" == "FAIL" ]]; then
   exit 1

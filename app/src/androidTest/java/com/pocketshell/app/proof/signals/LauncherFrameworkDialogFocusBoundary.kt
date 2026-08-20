@@ -26,16 +26,61 @@ private val FRAMEWORK_ERROR_FOCUS_PATTERN = Regex(
  * (SyntheticFocusOwnerHarness.kt), which call the primitives below.
  */
 
-internal fun resolveHomePackage(): String {
-    val component = executeShellCommand(
-        "cmd package resolve-activity --brief " +
-            "-a android.intent.action.MAIN -c android.intent.category.HOME",
-    ).lineSequence().lastOrNull { '/' in it }.orEmpty().trim()
-    val pkg = component.substringBefore('/')
-    if (pkg.isBlank()) {
-        throw AssertionError("issue #1985 could not resolve the device HOME package: '$component'")
+internal fun parseHomePackage(resolveActivityOutput: String): String {
+    val component = resolveActivityOutput.lineSequence()
+        .lastOrNull { '/' in it }
+        .orEmpty()
+        .trim()
+    return component.substringBefore('/')
+}
+
+internal fun tryResolveHomePackage(): String? {
+    val pkg = parseHomePackage(
+        executeShellCommand(
+            "cmd package resolve-activity --brief " +
+                "-a android.intent.action.MAIN -c android.intent.category.HOME",
+        ),
+    )
+    return pkg.takeIf { it.isNotBlank() }
+}
+
+/**
+ * Issue #2021 leftover self-check: on a cold AVD the HOME resolver can return
+ * empty for a beat. Wait, then throw — never proceed with a null launcher
+ * package (that voided EnvironmentFocusOwnerCleanup's arrange step).
+ */
+internal fun resolveHomePackage(
+    timeoutMs: Long = 15_000L,
+): String {
+    val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+    var last = ""
+    while (android.os.SystemClock.elapsedRealtime() < deadline) {
+        last = tryResolveHomePackage().orEmpty()
+        if (last.isNotBlank()) return last
+        android.os.SystemClock.sleep(50)
     }
-    return pkg
+    throw AssertionError("issue #1985 could not resolve the device HOME package: '$last'")
+}
+
+/** Wait until [homePackage] owns the focused window (HOME keyevent settled). */
+internal fun awaitHomePackageOwnsDisplay(
+    homePackage: String,
+    timeoutMs: Long = 15_000L,
+): Boolean {
+    val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs
+    while (android.os.SystemClock.elapsedRealtime() < deadline) {
+        val dump = executeShellCommand("dumpsys window")
+        val currentFocus = dump.lineSequence()
+            .firstOrNull { it.contains("mCurrentFocus") }
+            .orEmpty()
+        if (currentFocus.contains(homePackage)) return true
+        android.os.SystemClock.sleep(50)
+    }
+    return executeShellCommand("dumpsys window")
+        .lineSequence()
+        .firstOrNull { it.contains("mCurrentFocus") }
+        .orEmpty()
+        .contains(homePackage)
 }
 
 internal fun focusedFrameworkErrorPackage(): String? = FRAMEWORK_ERROR_FOCUS_PATTERN

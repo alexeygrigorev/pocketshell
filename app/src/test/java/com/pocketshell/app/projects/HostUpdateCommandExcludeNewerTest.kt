@@ -77,6 +77,8 @@ class HostUpdateCommandExcludeNewerTest {
         "HostBootstrapper.uvToolInstallCommand(install)" to
             uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = false),
         "HostPocketshellUpgrade.UPGRADE_COMMAND (uv arm)" to HostPocketshellUpgrade.UPGRADE_COMMAND,
+        "HostPocketshellUpgrade.upgradeCommand(pinned)" to
+            HostPocketshellUpgrade.upgradeCommand(targetVersion),
     )
 
     // --- Load-bearing assertion (GREEN only with the whole-resolution fix) ----

@@ -61,25 +61,28 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
  * Issue #1744 D33/G10 proof for the real Material3 anchor failure exposed by
- * #1743. The production [PromptComposerSheet] remains mounted while the
- * deterministic methods dispatch an exact synthetic IME inset to the modal
- * root only, with the physical input-method window hard-asserted absent.
+ * #1743. The production [PromptComposerSheet] remains mounted while every
+ * method dispatches an exact synthetic IME inset to the modal root only
+ * (the #780 model). Issue #2139 hard-cut the real-system-IME raise: a
+ * contended CI AVD cannot be the load-bearing keyboard.
  *
  * A long durable draft plus the real queued-Sending banner saturates
  * [SheetContent]. On the base implementation Material3 creates a half-height
  * [SheetValue.PartiallyExpanded] anchor for the total Surface (including its
  * drag handle), and that Surface plus sticky Send crosses the same-root
  * keyboard boundary. The production fix must move only that overlapping modal
- * to [SheetValue.Expanded]. A separate method then drives the real system IME
- * and captures a full-device visual artifact; synthetic geometry and a physical
- * keyboard are deliberately never mixed in one proof.
+ * to [SheetValue.Expanded].
+ *
+ * Residual unfocused `TYPE_INPUT_METHOD` windows (leftover from an earlier
+ * class on a shared emulator) are dismissed best-effort and do not block
+ * synthetic dispatch. A serving (active or focused) physical IME still
+ * hard-fails, so a synthetic boundary is never mixed with a live keyboard.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @RunWith(AndroidJUnit4::class)
@@ -154,7 +157,13 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 }
             }
         }
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "saturated sheet mounted for target $targetKey",
+            details = { sheetWaitDetails(vm, sheetStateRef, visible.value) },
+            unsatisfiableWhen = { visible.value.not() },
+            unsatisfiableReason = { "the sheet was dismissed before it mounted" },
+        ) {
             vm.composerTarget == targetKey &&
                 sheetStateRef.get()?.currentValue != null &&
                 sheetStateRef.get()?.currentValue != SheetValue.Hidden
@@ -164,12 +173,24 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performClick()
             .performTextInput("prompt A")
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A committed to draft + durable store",
+            details = { draftWaitDetails(vm, drafts, targetKey, "prompt A") },
+        ) {
             vm.uiState.value.draft == "prompt A" && drafts.load(targetKey) == "prompt A"
         }
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .performClick()
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A entered the queued Sending banner",
+            details = {
+                "reductionEntered=${reductionEntered.isCompleted} " +
+                    "sendInFlight=${vm.uiState.value.sendInFlight} " +
+                    "queueRows=${queue.itemsFor(targetKey).size}"
+            },
+        ) {
             reductionEntered.isCompleted &&
                 vm.uiState.value.sendInFlight &&
                 queue.itemsFor(targetKey).size == 1
@@ -179,12 +200,25 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performClick()
             .performTextInput(LONG_DRAFT_B)
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "draft B committed while prompt A is sending",
+            details = { draftWaitDetails(vm, drafts, targetKey, LONG_DRAFT_B) },
+        ) {
             vm.uiState.value.draft == LONG_DRAFT_B &&
                 drafts.load(targetKey) == LONG_DRAFT_B
         }
         reductionGate.complete(Unit)
-        compose.waitUntil(5_000) { sendEntered.isCompleted }
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A send entered after draft B took the sheet",
+            details = {
+                "sendEntered=${sendEntered.isCompleted} visible=${visible.value} " +
+                    "draft=${vm.uiState.value.draft.take(48)}"
+            },
+            unsatisfiableWhen = { visible.value.not() },
+            unsatisfiableReason = { "the saturated sheet dismissed before send entered" },
+        ) { sendEntered.isCompleted }
         assertTrue("draft B must retain ownership of the saturated sheet", visible.value)
         assertPromptAExactlyOnce(queue, targetKey)
         hideRealImeAndAssertHidden(
@@ -211,7 +245,11 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         val editedDraft = "$LONG_DRAFT_B$POST_IME_SUFFIX"
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performTextInput(POST_IME_SUFFIX)
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "post-inset suffix committed to draft + durable store",
+            details = { draftWaitDetails(vm, drafts, targetKey, editedDraft) },
+        ) {
             vm.uiState.value.draft == editedDraft &&
                 drafts.load(targetKey) == editedDraft
         }
@@ -222,7 +260,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             .assertIsDisplayed()
             .assertIsEnabled()
         assertPromptAExactlyOnce(queue, targetKey)
-        assertNoPhysicalImeWindow(
+        assertNoServingPhysicalImeWindow(
             "Post-inset semantics input must not summon LatinIME in the synthetic proof.",
         )
 
@@ -241,7 +279,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 "${queue.itemsFor(targetKey).size} state=" +
                 "${sheetState.currentValue}/${sheetState.targetValue}",
         )
-        assertNoPhysicalImeWindow(
+        assertNoServingPhysicalImeWindow(
             "Synthetic saturated screenshot must not contain a physical keyboard.",
         )
         WalkthroughScreenshotArtifacts.capture("issue-1744-saturated-ime-state")
@@ -292,7 +330,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             imeBottomPx = 0,
             sheetState = sheetState,
         )
-        assertNoPhysicalImeWindow(
+        assertNoServingPhysicalImeWindow(
             "Resetting the synthetic inset must leave the physical keyboard absent.",
         )
         val returnSlopPx = RETURN_GEOMETRY_SLOP_DP * displayDensity()
@@ -321,7 +359,11 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         WalkthroughScreenshotArtifacts.capture("issue-1744-ime-hidden-draft-preserved")
 
         deliveryGate.complete(Unit)
-        compose.waitUntil(5_000) { !vm.uiState.value.sendInFlight }
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A delivery finished after IME restore",
+            details = { "sendInFlight=${vm.uiState.value.sendInFlight}" },
+        ) { !vm.uiState.value.sendInFlight }
         assertEquals(editedDraft, vm.uiState.value.draft)
         assertEquals(editedDraft, drafts.load(targetKey))
         assertTrue(queue.itemsFor(targetKey).isEmpty())
@@ -368,7 +410,11 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 }
             }
         }
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "short composer sheet mounted for target $targetKey",
+            details = { sheetWaitDetails(vm, sheetStateRef, visible = true) },
+        ) {
             vm.composerTarget == targetKey &&
                 sheetStateRef.get()?.currentValue != null &&
                 sheetStateRef.get()?.currentValue != SheetValue.Hidden
@@ -422,7 +468,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             "ISSUE1744_SHORT_NON_OVERLAP keyboardDown=$keyboardDown " +
                 "keyboardUp=$keyboardUp expandedRequests=$expandedRequestsBeforeIme",
         )
-        assertNoPhysicalImeWindow(
+        assertNoServingPhysicalImeWindow(
             "Synthetic short-draft screenshot must not contain a physical keyboard.",
         )
         WalkthroughScreenshotArtifacts.capture("issue-1744-short-ime-non-overlap")
@@ -435,32 +481,27 @@ class PromptComposerSaturatedImeAnchorE2eTest {
     }
 
     /**
-     * Issue #1800: the synthetic-inset MIRROR of
-     * [saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide].
+     * Issue #1800 / #2139: reachability of draft/send/attach/mic inside the
+     * measured modal root and above the exact keyboard boundary, keyboard-up
+     * editability + draft durability, and keyboard-down geometry restoration.
      *
-     * The real-IME method's load-bearing properties are reachability
-     * (containment of draft/send/attach/mic inside the measured modal root and
-     * above the exact keyboard boundary), keyboard-up editability + draft
-     * durability, and keyboard-down geometry restoration. Every one of those is
-     * a property of the composer's anchor policy, NOT of the physical
-     * input-method window — but on the CI swiftshader AVD the real IME never
-     * becomes visible, so the real-IME method cannot assert them there and the
-     * shard classifier types that precondition as INFRA.
+     * Every one of those is a property of the composer's anchor policy, NOT of
+     * the physical input-method window. Issue #2139 hard-cut the real-IME twin:
+     * the CI swiftshader AVD cannot raise a system keyboard under contention,
+     * and a leftover unfocused IME window from an earlier class is itself a
+     * real-IME dependence. This method is now the only reachability proof. It
+     * asserts the property set with a HARD failure, driven by the deterministic
+     * synthetic `Type.ime()` inset (the #780 model).
      *
-     * This method asserts the SAME property set with a HARD failure, driven by
-     * the deterministic synthetic `Type.ime()` inset (the #780 model), so no
-     * protection is lost on an environment without a real IME. It deliberately
-     * uses the SATURATED fixture — a durable long draft plus the real queued
-     * `Sending` banner — because that is the state whose Material
-     * [SheetValue.PartiallyExpanded] anchor crosses the keyboard boundary; it
-     * is therefore sensitive to a regression of the production anchor policy,
-     * which a non-saturated fixture would not be. It also mounts the production
-     * attachment-availability contract so Attach is enabled and can be asserted
-     * reachable alongside Mic.
+     * It deliberately uses the SATURATED fixture — a durable long draft plus
+     * the real queued `Sending` banner — because that is the state whose
+     * Material [SheetValue.PartiallyExpanded] anchor crosses the keyboard
+     * boundary. It also mounts the production attachment-availability contract
+     * so Attach is enabled and can be asserted reachable alongside Mic.
      *
-     * The physical keyboard is hard-asserted ABSENT throughout, so this method
-     * behaves identically on a dev-box AVD and on a CI AVD that cannot raise a
-     * real IME.
+     * A serving (active/focused) physical keyboard is hard-asserted ABSENT
+     * throughout. Residual unfocused IME windows are dismissed best-effort
+     * and do not fail the dispatch precondition.
      */
     @Test
     fun saturatedDraftAndAllActionsStayReachableWithSyntheticImeThenRestoreAfterHide() {
@@ -504,9 +545,9 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                             sendTargetSnapshotProvider = {
                                 PromptComposerViewModel.SendTargetSnapshot(sessionKey = targetKey)
                             },
-                            // Same production availability contract the real-IME
-                            // method mounts: a non-null callback enables Attach
-                            // without opening the picker or touching geometry.
+                            // Production availability contract: a non-null
+                            // callback enables Attach without opening the
+                            // picker or touching geometry.
                             onStageAttachments = { uris ->
                                 Result.success(
                                     uris.mapIndexed { index, uri ->
@@ -524,7 +565,13 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 }
             }
         }
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "synthetic reachability sheet mounted for target $targetKey",
+            details = { sheetWaitDetails(vm, sheetStateRef, visible.value) },
+            unsatisfiableWhen = { visible.value.not() },
+            unsatisfiableReason = { "the sheet was dismissed before it mounted" },
+        ) {
             vm.composerTarget == targetKey &&
                 sheetStateRef.get()?.currentValue != null &&
                 sheetStateRef.get()?.currentValue != SheetValue.Hidden
@@ -536,12 +583,24 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performClick()
             .performTextInput("prompt A")
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A committed before synthetic reachability inset",
+            details = { draftWaitDetails(vm, drafts, targetKey, "prompt A") },
+        ) {
             vm.uiState.value.draft == "prompt A" && drafts.load(targetKey) == "prompt A"
         }
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true)
             .performClick()
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A entered the queued Sending banner",
+            details = {
+                "reductionEntered=${reductionEntered.isCompleted} " +
+                    "sendInFlight=${vm.uiState.value.sendInFlight} " +
+                    "queueRows=${queue.itemsFor(targetKey).size}"
+            },
+        ) {
             reductionEntered.isCompleted &&
                 vm.uiState.value.sendInFlight &&
                 queue.itemsFor(targetKey).size == 1
@@ -550,12 +609,25 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performClick()
             .performTextInput(LONG_DRAFT_B)
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "draft B committed while prompt A is sending",
+            details = { draftWaitDetails(vm, drafts, targetKey, LONG_DRAFT_B) },
+        ) {
             vm.uiState.value.draft == LONG_DRAFT_B &&
                 drafts.load(targetKey) == LONG_DRAFT_B
         }
         reductionGate.complete(Unit)
-        compose.waitUntil(5_000) { sendEntered.isCompleted }
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A send entered after draft B took the sheet",
+            details = {
+                "sendEntered=${sendEntered.isCompleted} visible=${visible.value} " +
+                    "draft=${vm.uiState.value.draft.take(48)}"
+            },
+            unsatisfiableWhen = { visible.value.not() },
+            unsatisfiableReason = { "the saturated sheet dismissed before send entered" },
+        ) { sendEntered.isCompleted }
         assertTrue("draft B must retain ownership of the saturated sheet", visible.value)
         assertPromptAExactlyOnce(queue, targetKey)
         hideRealImeAndAssertHidden(
@@ -580,16 +652,19 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         )
         assertEquals(expectedIme, keyboardUpBeforeEdit.observedImeBottomPx)
 
-        // Keyboard-up editability + durability (mirrors the real method's
-        // performTextReplacement while the physical keyboard is visible).
+        // Keyboard-up editability + durability while the synthetic boundary is up.
         val editedDraft = "$LONG_DRAFT_B$SYNTHETIC_REACH_SUFFIX"
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
             .performTextReplacement(editedDraft)
-        compose.waitUntil(5_000) {
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "synthetic-reach suffix committed to draft + durable store",
+            details = { draftWaitDetails(vm, drafts, targetKey, editedDraft) },
+        ) {
             vm.uiState.value.draft == editedDraft &&
                 drafts.load(targetKey) == editedDraft
         }
-        assertNoPhysicalImeWindow(
+        assertNoServingPhysicalImeWindow(
             "Post-inset semantics input must not summon LatinIME in the synthetic mirror.",
         )
 
@@ -603,17 +678,25 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 "modal root. geometry=$keyboardUp",
             keyboardUp.observedImeBottomPx > 0,
         )
-        // Mirrors the real-IME method's settle gate: reachability is asserted on
-        // a settled anchor, never mid-animation.
-        compose.waitUntil(REAL_IME_TIMEOUT_MS) {
+        // Reachability is asserted on a settled anchor, never mid-animation.
+        waitUntilNamed(
+            timeoutMs = REAL_IME_TIMEOUT_MS,
+            label = "synthetic keyboard-up anchor settled",
+            details = {
+                "current=${sheetState.currentValue} target=${sheetState.targetValue} " +
+                    "visible=${visible.value}"
+            },
+            unsatisfiableWhen = { visible.value.not() || sheetState.currentValue == SheetValue.Hidden },
+            unsatisfiableReason = { "the sheet dismissed before the keyboard-up anchor settled" },
+        ) {
             sheetState.currentValue == sheetState.targetValue
         }
         assertEquals(sheetState.targetValue, sheetState.currentValue)
 
-        // THE load-bearing mirror of the real-IME reachability contract: every
-        // action the maintainer must be able to see and tap stays inside the
-        // measured modal root AND above the exact same-root keyboard boundary.
-        // Containment (all four edges), never a bare assertIsDisplayed().
+        // Load-bearing reachability: every action the maintainer must be able
+        // to see and tap stays inside the measured modal root AND above the
+        // exact same-root keyboard boundary. Containment (all four edges),
+        // never a bare assertIsDisplayed().
         REAL_IME_REACHABLE_TAGS.forEach { tag ->
             compose.onNodeWithTag(tag, useUnmergedTree = true)
                 .assertIsDisplayed()
@@ -643,16 +726,25 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 "physicalImeWindows=${visiblePhysicalImeWindows()} " +
                 "state=${sheetState.currentValue}/${sheetState.targetValue}",
         )
-        assertNoPhysicalImeWindow(
+        assertNoServingPhysicalImeWindow(
             "Synthetic reachability screenshot must not contain a physical keyboard.",
         )
         WalkthroughScreenshotArtifacts.capture(
             "issue-1800-synthetic-ime-all-actions-reachable",
         )
 
-        // Keyboard-down restoration (mirrors the real method's actual-hide leg).
+        // Keyboard-down restoration after the synthetic inset is cleared.
         applyInsetsAndReadGeometry(imeBottomPx = 0, sheetState = sheetState)
-        compose.waitUntil(REAL_IME_TIMEOUT_MS) {
+        waitUntilNamed(
+            timeoutMs = REAL_IME_TIMEOUT_MS,
+            label = "synthetic keyboard-down anchor settled",
+            details = {
+                "current=${sheetState.currentValue} target=${sheetState.targetValue} " +
+                    "visible=${visible.value}"
+            },
+            unsatisfiableWhen = { visible.value.not() || sheetState.currentValue == SheetValue.Hidden },
+            unsatisfiableReason = { "the sheet dismissed before the keyboard-down anchor settled" },
+        ) {
             sheetState.currentValue == sheetState.targetValue
         }
         assertEquals(sheetState.targetValue, sheetState.currentValue)
@@ -689,7 +781,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 "draftDurable=${drafts.load(targetKey) == editedDraft} " +
                 "state=${sheetState.currentValue}/${sheetState.targetValue}",
         )
-        assertNoPhysicalImeWindow(
+        assertNoServingPhysicalImeWindow(
             "The restored synthetic screenshot must not contain the system keyboard.",
         )
         WalkthroughScreenshotArtifacts.capture(
@@ -697,171 +789,13 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         )
 
         deliveryGate.complete(Unit)
-        compose.waitUntil(5_000) { !vm.uiState.value.sendInFlight }
+        waitUntilNamed(
+            timeoutMs = 5_000,
+            label = "prompt A delivery finished after synthetic restore",
+            details = { "sendInFlight=${vm.uiState.value.sendInFlight}" },
+        ) { !vm.uiState.value.sendInFlight }
         assertEquals(editedDraft, vm.uiState.value.draft)
         assertEquals(editedDraft, drafts.load(targetKey))
-    }
-
-    @Test
-    fun saturatedDraftAndAllActionsStayReachableWithRealImeThenRestoreAfterActualHide() {
-        val drafts = InMemoryComposerDraftStore()
-        val queue = InMemoryOutboundQueueStore()
-        val targetKey = "1/issue-1744-real-ime"
-        drafts.save(targetKey, LONG_DRAFT_B)
-        val vm = newViewModel(drafts, queue)
-        val visible = mutableStateOf(true)
-        val sheetStateRef = AtomicReference<SheetState?>()
-
-        prepareActivityWindow()
-        compose.setContent {
-            PocketShellTheme {
-                Box(Modifier.fillMaxSize().background(PocketShellColors.Background)) {
-                    if (visible.value) {
-                        val sheetState =
-                            rememberModalBottomSheetState(skipPartiallyExpanded = false)
-                        SideEffect { sheetStateRef.set(sheetState) }
-                        PromptComposerSheet(
-                            onDismiss = { visible.value = false },
-                            onSend = { com.pocketshell.app.composer.ComposerSendResult.Delivered },
-                            composerTargetKey = targetKey,
-                            // Mount the real production availability contract:
-                            // a selected URI deterministically yields one staged
-                            // remote path. This proof never opens the picker, so
-                            // the callback enables Attach without mutating draft,
-                            // queue, filesystem, or IME geometry.
-                            onStageAttachments = { uris ->
-                                Result.success(
-                                    uris.mapIndexed { index, uri ->
-                                        "/tmp/issue-1744-" +
-                                            (uri.lastPathSegment ?: "attachment-$index")
-                                    },
-                                )
-                            },
-                            modifier = Modifier.observeProductionSheetIme(),
-                            sheetState = sheetState,
-                            viewModel = vm,
-                        )
-                    }
-                }
-            }
-        }
-        compose.waitUntil(5_000) {
-            vm.composerTarget == targetKey &&
-                vm.uiState.value.draft == LONG_DRAFT_B &&
-                sheetStateRef.get()?.currentValue != null &&
-                sheetStateRef.get()?.currentValue != SheetValue.Hidden
-        }
-        val sheetState = checkNotNull(sheetStateRef.get())
-        val keyboardDown = readMountedGeometry(sheetState)
-        assertEquals(0, keyboardDown.observedImeBottomPx)
-        hideRealImeAndAssertHidden(
-            "Real-IME proof must begin from a keyboard-hidden baseline.",
-        )
-
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-            .performClick()
-        requestRealImeAndAssertVisible()
-        compose.waitUntil(REAL_IME_TIMEOUT_MS) {
-            runCatching {
-                val node = compose.onNodeWithTag(
-                    PRODUCTION_SHEET_TAG,
-                    useUnmergedTree = true,
-                ).fetchSemanticsNode()
-                val observedIme =
-                    node.config.getOrNull(PRODUCTION_SHEET_IME_BOTTOM_PX) ?: 0
-                observedIme > 0 &&
-                    sheetState.currentValue == sheetState.targetValue
-            }.getOrDefault(false)
-        }
-
-        val editedDraft = "$LONG_DRAFT_B$REAL_IME_SUFFIX"
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true)
-            .performTextReplacement(editedDraft)
-        compose.waitUntil(5_000) {
-            vm.uiState.value.draft == editedDraft &&
-                drafts.load(targetKey) == editedDraft
-        }
-        val keyboardUp = readMountedGeometry(sheetState)
-        val keyboardTopPx = keyboardUp.rootBottomPx - keyboardUp.observedImeBottomPx
-        assertTrue(
-            "The real IME must expose a positive inset on the production modal root. " +
-                "geometry=$keyboardUp",
-            keyboardUp.observedImeBottomPx > 0,
-        )
-        assertPhysicalImeWindowVisible(
-            "The real-IME artifact requires the system input-method window to be visible.",
-        )
-
-        // Issue #1800: the SAME tag set the synthetic mirror asserts, shared so
-        // the two paths cannot silently drift apart.
-        REAL_IME_REACHABLE_TAGS.forEach { tag ->
-            compose.onNodeWithTag(tag, useUnmergedTree = true)
-                .assertIsDisplayed()
-                .assertIsEnabled()
-            assertNodeBelongsToMeasuredModalAndIsReachable(
-                tag = tag,
-                geometry = keyboardUp,
-                keyboardTopPx = keyboardTopPx,
-            )
-        }
-        assertEquals(editedDraft, vm.uiState.value.draft)
-        assertEquals(editedDraft, drafts.load(targetKey))
-        assertTrue(visible.value)
-        assertNotEquals(SheetValue.Hidden, sheetState.currentValue)
-        println(
-            "ISSUE1744_REAL_IME_VISIBLE keyboardDown=$keyboardDown " +
-                "keyboardUp=$keyboardUp keyboardTopPx=$keyboardTopPx " +
-                "physicalImeWindows=${visiblePhysicalImeWindows()} " +
-                "state=${sheetState.currentValue}/${sheetState.targetValue}",
-        )
-        WalkthroughScreenshotArtifacts.capture(
-            "issue-1744-real-ime-visible-all-actions-reachable",
-        )
-        assertPhysicalImeWindowVisible(
-            "The keyboard must still be visible in the captured real-IME frame.",
-        )
-
-        hideRealImeAndAssertHidden(
-            "The real IME must report visibility=false after the explicit hide.",
-        )
-        compose.waitUntil(REAL_IME_TIMEOUT_MS) {
-            runCatching {
-                val node = compose.onNodeWithTag(
-                    PRODUCTION_SHEET_TAG,
-                    useUnmergedTree = true,
-                ).fetchSemanticsNode()
-                node.config.getOrNull(PRODUCTION_SHEET_IME_BOTTOM_PX) == 0 &&
-                    sheetState.currentValue == sheetState.targetValue
-            }.getOrDefault(false)
-        }
-        val restored = readMountedGeometry(sheetState)
-        val returnSlopPx = RETURN_GEOMETRY_SLOP_DP * displayDensity()
-        assertEquals(0, restored.observedImeBottomPx)
-        assertTrue(visible.value)
-        assertNotEquals(SheetValue.Hidden, sheetState.currentValue)
-        assertEquals(editedDraft, vm.uiState.value.draft)
-        assertEquals(editedDraft, drafts.load(targetKey))
-        assertTrue(
-            "Actual IME hide must restore the stable keyboard-down sheet geometry. " +
-                "before=$keyboardDown restored=$restored slopPx=$returnSlopPx",
-            abs(restored.surfaceTopPx - keyboardDown.surfaceTopPx) <= returnSlopPx &&
-                abs(
-                    restored.displayedSurfaceBottomPx -
-                        keyboardDown.displayedSurfaceBottomPx,
-                ) <= returnSlopPx,
-        )
-        println(
-            "ISSUE1744_REAL_IME_HIDDEN restored=$restored " +
-                "physicalImeWindows=${visiblePhysicalImeWindows()} " +
-                "draftDurable=${drafts.load(targetKey) == editedDraft} " +
-                "state=${sheetState.currentValue}/${sheetState.targetValue}",
-        )
-        WalkthroughScreenshotArtifacts.capture(
-            "issue-1744-real-ime-hidden-draft-restored",
-        )
-        assertNoPhysicalImeWindow(
-            "The restored screenshot must not contain the system keyboard.",
-        )
     }
 
     private fun newViewModel(
@@ -882,6 +816,66 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         composerDraftStore = drafts,
         outboundQueueStore = queue,
     ).also { viewModel = it }
+
+    /**
+     * Issue #2139: a named wait with an optional unsatisfiable fast-fail.
+     * The #2126 lesson — a wait that can never succeed is indistinguishable
+     * from slowness if the timeout message has no condition name or state.
+     */
+    private fun waitUntilNamed(
+        timeoutMs: Long,
+        label: String,
+        details: () -> String = { "" },
+        unsatisfiableWhen: () -> Boolean = { false },
+        unsatisfiableReason: () -> String = { "" },
+        condition: () -> Boolean,
+    ) {
+        var lastDetails = ""
+        var unsatisfiable = false
+        val startedAt = SystemClock.elapsedRealtime()
+        val satisfied = runCatching {
+            compose.waitUntil(timeoutMs) {
+                lastDetails = details()
+                if (condition()) return@waitUntil true
+                unsatisfiable = unsatisfiableWhen()
+                unsatisfiable
+            }
+            true
+        }.getOrDefault(false)
+        if (unsatisfiable && !condition()) {
+            throw AssertionError(
+                "Condition '$label' can no longer become true: " +
+                    "${unsatisfiableReason()}. Aborted after " +
+                    "${SystemClock.elapsedRealtime() - startedAt}ms of a " +
+                    "${timeoutMs}ms budget. $lastDetails",
+            )
+        }
+        assertTrue(
+            "Condition '$label' still not satisfied after ${timeoutMs}ms. $lastDetails",
+            satisfied && condition(),
+        )
+    }
+
+    private fun sheetWaitDetails(
+        vm: PromptComposerViewModel,
+        sheetStateRef: AtomicReference<SheetState?>,
+        visible: Boolean,
+    ): String =
+        "composerTarget=${vm.composerTarget} visible=$visible " +
+            "sheet=${sheetStateRef.get()?.currentValue} " +
+            "draftLen=${vm.uiState.value.draft.length}"
+
+    private fun draftWaitDetails(
+        vm: PromptComposerViewModel,
+        drafts: ComposerDraftStore,
+        targetKey: String,
+        expected: String,
+    ): String =
+        "uiDraftLen=${vm.uiState.value.draft.length} " +
+            "durableLen=${drafts.load(targetKey)?.length ?: -1} " +
+            "expectedLen=${expected.length} " +
+            "uiMatches=${vm.uiState.value.draft == expected} " +
+            "durableMatches=${drafts.load(targetKey) == expected}"
 
     private fun prepareActivityWindow() {
         compose.activityRule.scenario.onActivity { activity ->
@@ -1033,8 +1027,12 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             "Issue #1744 modal-root proof requires API 29+ WindowInspector; " +
                 "deviceApi=${Build.VERSION.SDK_INT}"
         }
-        assertNoPhysicalImeWindow(
-            "Synthetic #1744 proof cannot dispatch while a physical IME is visible.",
+        // Issue #2139: leftover unfocused IME windows from an earlier class on
+        // the shared emulator used to fail this precondition. Hide first, then
+        // only refuse dispatch when a SERVING keyboard remains.
+        hideRealImeBestEffort()
+        assertNoServingPhysicalImeWindow(
+            "Synthetic #1744 proof cannot dispatch while a serving physical IME is visible.",
         )
         val insets = WindowInsetsCompat.Builder()
             .setInsets(WindowInsetsCompat.Type.ime(), Insets.of(0, 0, 0, imeBottomPx))
@@ -1086,69 +1084,13 @@ class PromptComposerSaturatedImeAnchorE2eTest {
             }
             .toList()
 
-    private fun requestRealImeAndAssertVisible() {
-        if (!waitForAppWindowFocus()) {
-            fail(realImeFailure("before_show"))
-        }
-        compose.activityRule.scenario.onActivity { activity ->
-            val roots = activeAppWindowRoots(activity)
-            val focusedView = roots.asReversed()
-                .firstNotNullOfOrNull { it.findFocus() }
-                ?: error("The production composer editor must own focus before showing IME.")
-            val inputMethodManager =
-                activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            ViewCompat.getWindowInsetsController(focusedView.rootView)
-                ?.show(WindowInsetsCompat.Type.ime())
-            inputMethodManager.showSoftInput(focusedView, InputMethodManager.SHOW_IMPLICIT)
-        }
-        if (!waitForPhysicalImeWindow(expected = true)) {
-            fail(realImeFailure("after_show_timeout"))
-        }
-        assertTrue(
-            "The real IME never supplied a positive visible inset to an app window.",
-            waitForAnyAppRootImeVisible(expected = true),
-        )
-    }
-
-    /**
-     * Issue #1882: the #1800 sentence alone is app-influenceable. Establish
-     * window focus before asking the framework to show the IME, then include
-     * the active-window owner in either hard failure. The CI classifier may
-     * downgrade only a resolved non-PocketShell owner; app-owned, missing, and
-     * framework `android` owners stay loud.
-     */
-    private fun waitForAppWindowFocus(): Boolean =
-        waitForWallClock(WINDOW_FOCUS_TIMEOUT_MS) { appWindowHasFocus() }
-
-    private fun appWindowHasFocus(): Boolean {
-        var focused = false
-        compose.activityRule.scenario.onActivity { activity ->
-            focused = activeAppWindowRoots(activity).any { it.hasWindowFocus() }
-        }
-        return focused
-    }
-
-    private fun realImeFailure(stage: String): String {
-        val appFocused = appWindowHasFocus()
-        val activeWindowPackage =
-            InstrumentationRegistry.getInstrumentation()
-                .uiAutomation
-                .rootInActiveWindow
-                ?.packageName
-                ?.toString()
-                ?: ACTIVE_WINDOW_UNAVAILABLE
-        return "The real system input-method window never became visible. " +
-            "stage=$stage app_window_focused=$appFocused " +
-            "active_window_pkg=$activeWindowPackage " +
-            "physicalImeWindows=${visiblePhysicalImeWindows()}"
-    }
-
     private fun hideRealImeAndAssertHidden(message: String) {
         hideRealImeBestEffort()
         assertTrue(
-            "$message Physical input-method window remained visible: " +
-                visiblePhysicalImeWindows(),
-            waitForPhysicalImeWindow(expected = false),
+            "$message A serving physical input-method window remained visible: " +
+                "serving=${servingPhysicalImeWindows()} " +
+                "residual=${visiblePhysicalImeWindows()}",
+            waitForServingPhysicalImeWindow(expected = false),
         )
         assertTrue(
             "$message An app root still reports a visible positive real-IME inset.",
@@ -1165,7 +1107,7 @@ class PromptComposerSaturatedImeAnchorE2eTest {
                 timeoutMs = REAL_IME_TIMEOUT_MS,
             ),
         )
-        assertNoPhysicalImeWindow(message)
+        assertNoServingPhysicalImeWindow(message)
     }
 
     private fun hideRealImeBestEffort() {
@@ -1186,28 +1128,37 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         }
     }
 
-    private fun assertNoPhysicalImeWindow(message: String) {
+    private fun assertNoServingPhysicalImeWindow(message: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val deadline =
             SystemClock.elapsedRealtime() + PHYSICAL_IME_ABSENCE_STABILITY_MS
         while (SystemClock.elapsedRealtime() < deadline) {
             instrumentation.waitForIdleSync()
-            val windows = visiblePhysicalImeWindows()
-            assertTrue("$message visibleImeWindows=$windows", windows.isEmpty())
+            val serving = servingPhysicalImeWindows()
+            val residual = visiblePhysicalImeWindows()
+            assertTrue(
+                "$message servingImeWindows=$serving residualImeWindows=$residual",
+                serving.isEmpty(),
+            )
             SystemClock.sleep(50)
         }
     }
 
-    private fun assertPhysicalImeWindowVisible(message: String) {
-        val windows = visiblePhysicalImeWindows()
-        assertTrue("$message visibleImeWindows=$windows", windows.isNotEmpty())
-    }
+    /**
+     * A leftover `TYPE_INPUT_METHOD` window that is neither active nor focused
+     * is ambient emulator residue (issue #2139 inverse signature). Only a
+     * serving keyboard can mix with the synthetic boundary.
+     */
+    private fun servingPhysicalImeWindows(): List<String> =
+        visiblePhysicalImeWindows().filter { description ->
+            description.contains("active=true") || description.contains("focused=true")
+        }
 
-    private fun waitForPhysicalImeWindow(
+    private fun waitForServingPhysicalImeWindow(
         expected: Boolean,
         timeoutMs: Long = REAL_IME_TIMEOUT_MS,
     ): Boolean = waitForWallClock(timeoutMs) {
-        visiblePhysicalImeWindows().isNotEmpty() == expected
+        servingPhysicalImeWindows().isNotEmpty() == expected
     }
 
     private fun waitForAnyAppRootImeVisible(
@@ -1310,22 +1261,17 @@ class PromptComposerSaturatedImeAnchorE2eTest {
         const val RETURN_GEOMETRY_SLOP_DP = 2f
         const val MINIMUM_TERMINAL_FRACTION = 0.25f
         const val REAL_IME_TIMEOUT_MS = 30_000L
-        const val WINDOW_FOCUS_TIMEOUT_MS = 10_000L
         const val PHYSICAL_IME_ABSENCE_STABILITY_MS = 500L
-        const val ACTIVE_WINDOW_UNAVAILABLE = "<unavailable>"
         const val PRODUCTION_SHEET_TAG = "issue1744-production-composer-sheet"
         const val TERMINAL_MARKER_TAG = "issue1744-terminal-marker"
         const val TERMINAL_MARKER = "agent output remains visible above the composer"
         const val POST_IME_SUFFIX = " remains editable above the keyboard"
-        const val REAL_IME_SUFFIX = " edited while the real keyboard is visible"
         const val SYNTHETIC_REACH_SUFFIX =
             " edited while the synthetic keyboard boundary is up"
 
         /**
-         * Issue #1800: the controls whose keyboard-up reachability is the
-         * load-bearing property. Shared by the real-IME journey and its
-         * synthetic mirror so the CI-runnable path can never assert less than
-         * the dev-box path.
+         * Issue #1800 / #2139: the controls whose keyboard-up reachability is
+         * the load-bearing property of the synthetic-inset journey.
          */
         val REAL_IME_REACHABLE_TAGS = listOf(
             COMPOSER_DRAFT_TAG,

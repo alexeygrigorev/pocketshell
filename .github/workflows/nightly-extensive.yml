@@ -77,6 +77,16 @@ jobs:
           scripts/lib/nightly-fault-verdict.sh --self-test
           scripts/check-nightly-fault-run.sh --self-test
 
+      # Issue #1924: cheap emulator-free proof that bounded recurrence
+      # (count/first_seen/last_seen/streak) is computed from small TSV
+      # artifacts only. Runs here so a broken reporter is caught before
+      # an AVD is spent. Does not touch the #1201 fault verdict.
+      - name: "Self-test nightly failure recurrence (issue #1924)"
+        run: |
+          chmod +x scripts/nightly-failure-recurrence.py \
+            scripts/test-nightly-failure-recurrence.sh
+          scripts/test-nightly-failure-recurrence.sh
+
       - name: Decide whether to run the extensive suite
         id: decide
         env:
@@ -132,6 +142,10 @@ jobs:
     needs: guard
     if: needs.guard.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+      checks: write
     # SHARD (issue #835 follow-up): the full connected suite is ~680 tests and
     # could NOT finish serially on ONE swiftshader AVD inside this ceiling
     # (a triage run reached only 544/683 at the 150-min timeout, so phases 2 & 3
@@ -432,6 +446,10 @@ jobs:
             artifacts/nightly-extensive/
           if-no-files-found: ignore
 
+      - name: "Mark journey progress artifacts-uploaded (issue #2090)"
+        if: always()
+        run: scripts/ci-journey-progress-telemetry.sh artifacts-uploaded || true
+
       - name: Upload Docker logs
         if: always()
         uses: actions/upload-artifact@v7
@@ -451,6 +469,29 @@ jobs:
         with:
           name: nightly-extensive-fault-verdict
           path: artifacts/nightly-extensive/fault-verdict.txt
+          if-no-files-found: ignore
+
+      # Issue #1924: emit the small per-shard Class#method TSV from preserved
+      # phase XML. continue-on-error so a reporter bug cannot flip emulator
+      # phase execution or the #1201 fault verdict.
+      - name: "Emit current-run failure signatures (issue #1924)"
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 scripts/nightly-failure-recurrence.py emit \
+            --xml-root artifacts/nightly-extensive \
+            --out artifacts/nightly-extensive/failure-signatures.tsv \
+            --sha "${{ github.sha }}" \
+            --date "$(date -u +%F)" \
+            --run-id "${{ github.run_id }}"
+
+      - name: "Upload failure-signature verdict (issue #1924)"
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-failure-signatures-shard-${{ matrix.shard }}
+          path: artifacts/nightly-extensive/failure-signatures.tsv
           if-no-files-found: ignore
 
       - name: Stop Docker fixtures
@@ -555,3 +596,68 @@ jobs:
           fi
           echo "BLOCK: fault_verdict=$verdict — a fault-injection safety phase failed on this HEAD."
           exit 1
+
+  # ---------------------------------------------------------------------------
+  # Nightly failure recurrence (issue #1924) — longitudinal count/age/streak.
+  #
+  # Sibling of `fault-verdict`, never an input to it. Queries a bounded window
+  # (14 completed nightly runs) for the small `nightly-failure-signatures`
+  # artifact only. Missing pre-rollout artifacts are `history unavailable`,
+  # never zero occurrences. Does not download historical Android reports.
+  # ---------------------------------------------------------------------------
+  failure-history:
+    name: Nightly failure recurrence
+    needs: [guard, extensive]
+    if: always() && needs.guard.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download current-run shard signatures
+        uses: actions/download-artifact@v5
+        continue-on-error: true
+        with:
+          pattern: nightly-failure-signatures-shard-*
+          path: failure-signatures-current
+
+      - name: Merge current-run signatures and summarize history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/nightly-failure-signatures history
+          python3 scripts/nightly-failure-recurrence.py emit-merge \
+            --inputs failure-signatures-current \
+            --out artifacts/nightly-failure-signatures/failure-signatures.tsv \
+            --sha "${{ github.sha }}" \
+            --date "$(date -u +%F)" \
+            --run-id "${{ github.run_id }}"
+          if ! python3 scripts/nightly-failure-recurrence.py fetch \
+            --out-dir history \
+            --window 14 \
+            --exclude-run-id "${{ github.run_id }}"; then
+            echo "history lookup failed; summarizing current-run only as history unavailable"
+            mkdir -p history/lookup-failed
+            printf '# date=1970-01-01\n# run_id=lookup-failed\n' \
+              > history/lookup-failed/HISTORY_UNAVAILABLE
+          fi
+          python3 scripts/nightly-failure-recurrence.py summarize \
+            --history-dir history \
+            --current artifacts/nightly-failure-signatures/failure-signatures.tsv \
+            --window 14 \
+            --out artifacts/nightly-failure-signatures/recurrence.tsv \
+            --markdown "${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+
+      - name: Upload this run's small verdict artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-failure-signatures
+          path: artifacts/nightly-failure-signatures/
+          if-no-files-found: ignore

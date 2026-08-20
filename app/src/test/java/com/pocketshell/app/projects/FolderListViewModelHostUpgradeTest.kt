@@ -125,14 +125,161 @@ class FolderListViewModelHostUpgradeTest {
             "a failing upgrade must end in Failure, not a stuck spinner — was $state",
             state is FolderListViewModel.CliVersionUpdateState.Failure,
         )
+        val failure = state as FolderListViewModel.CliVersionUpdateState.Failure
         assertTrue(
             "the failure message must surface the installer stderr — was $state",
-            (state as FolderListViewModel.CliVersionUpdateState.Failure).message.contains("network unreachable"),
+            failure.message.contains("network unreachable"),
         )
+        assertEquals(
+            FolderListViewModel.CliVersionUpdateState.Failure.Kind.Failed,
+            failure.kind,
+        )
+        assertTrue("a transient installer error must keep Retry", failure.offerRetry)
         assertTrue(
             "the mismatch banner must stay up so the user can retry/dismiss",
             vm.cliVersionMismatch.value != null,
         )
+    }
+
+    @Test
+    fun update_appAtN_pypiAtNMinus1_doesNotClaimCapOrOfferFailingCommand() = runTest {
+        // Issue #2033 reproduce-first (G10): the exact on-device state.
+        // App is 0.4.40; the host (and PyPI) still have 0.4.39. The in-app
+        // unpinned `--upgrade` exits 0 ("Nothing to upgrade") because 0.4.40
+        // is unpublished — Retry of the same command cannot install it, and
+        // `--exclude-newer 2099-12-31` already defeated the cap. Current
+        // main blames the cap and tells the user to run that failing command.
+        val session = UpgradableSession(
+            initialVersion = "0.4.39",
+            upgradedVersion = "0.4.39",
+            upgradeResult = ExecResult("Nothing to upgrade", "", 0),
+        )
+        val vm = newViewModel(session, expectedVersion = "0.4.40")
+        bind(vm)
+        advanceUntilIdle()
+        assertEquals("0.4.39", vm.cliVersionMismatch.value?.hostVersion)
+        assertEquals("0.4.40", vm.cliVersionMismatch.value?.expectedVersion)
+
+        vm.runHostPocketshellUpgrade()
+        advanceUntilIdle()
+
+        val state = vm.cliVersionUpdateState.value
+        assertTrue(
+            "the unpublished N vs N−1 upgrade must end in Failure — was $state",
+            state is FolderListViewModel.CliVersionUpdateState.Failure,
+        )
+        val failure = state as FolderListViewModel.CliVersionUpdateState.Failure
+        val banner = CliVersionBannerCopy.bannerMessage(
+            mismatch = vm.cliVersionMismatch.value!!,
+            updateState = failure,
+        )
+        assertFalse(
+            "app=0.4.40 / PyPI=0.4.39 must NOT blame the exclude-newer cap " +
+                "(the command already passes --exclude-newer 2099-12-31) — " +
+                "failure=${failure.message} banner=$banner",
+            failure.message.contains("capped", ignoreCase = true) ||
+                banner.contains("capped", ignoreCase = true),
+        )
+        assertTrue(
+            "must say the newer package is not published yet — " +
+                "failure=${failure.message} banner=$banner",
+            banner.contains("not on PyPI") || failure.message.contains("not on PyPI"),
+        )
+        assertFalse(
+            "must not tell the user to run uv/pipx/pip — that command will fail " +
+                "while 0.4.40 is unpublished — banner=$banner",
+            banner.contains("uv tool install") ||
+                banner.contains("pipx upgrade") ||
+                banner.contains("pip install"),
+        )
+        assertEquals(
+            "resolved 0.4.39 vs requested 0.4.40 is Unpublished, not a guess",
+            FolderListViewModel.CliVersionUpdateState.Failure.Kind.Unpublished,
+            failure.kind,
+        )
+        assertTrue(
+            "Retry can help once PyPI publishes — offer it",
+            failure.offerRetry,
+        )
+    }
+
+    @Test
+    fun dismiss_unpublishedTriple_survivesNewViewModel() = runTest {
+        // Issue #2033: dismissing the unpublished nag must not re-raise on
+        // the next launch while host+app versions are unchanged.
+        val store = CliVersionBannerDismissStore()
+        val session = UpgradableSession(
+            initialVersion = "0.4.39",
+            upgradedVersion = "0.4.39",
+            upgradeResult = ExecResult("Nothing to upgrade", "", 0),
+        )
+        val first = newViewModel(session, expectedVersion = "0.4.40", dismissStore = store)
+        bind(first)
+        advanceUntilIdle()
+        assertTrue(first.cliVersionMismatch.value != null)
+        first.dismissCliVersionMismatch()
+        assertNull(first.cliVersionMismatch.value)
+
+        val second = newViewModel(session, expectedVersion = "0.4.40", dismissStore = store)
+        bind(second)
+        advanceUntilIdle()
+        assertNull(
+            "the same unpublished triple must stay dismissed on a new VM / launch",
+            second.cliVersionMismatch.value,
+        )
+    }
+
+    @Test
+    fun dismiss_newExpectedVersion_reRaises() = runTest {
+        val store = CliVersionBannerDismissStore()
+        val session = UpgradableSession(
+            initialVersion = "0.4.39",
+            upgradedVersion = "0.4.39",
+            upgradeResult = ExecResult("Nothing to upgrade", "", 0),
+        )
+        val first = newViewModel(session, expectedVersion = "0.4.40", dismissStore = store)
+        bind(first)
+        advanceUntilIdle()
+        first.dismissCliVersionMismatch()
+
+        val second = newViewModel(session, expectedVersion = "0.4.41", dismissStore = store)
+        bind(second)
+        advanceUntilIdle()
+        assertTrue(
+            "an app bump must re-raise the banner even if the previous triple was dismissed",
+            second.cliVersionMismatch.value != null,
+        )
+        assertEquals("0.4.41", second.cliVersionMismatch.value?.expectedVersion)
+    }
+
+    @Test
+    fun update_excludeNewerOutput_isCapped_hidesRetry() = runTest {
+        val session = UpgradableSession(
+            initialVersion = "0.4.39",
+            upgradedVersion = "0.4.39",
+            upgradeResult = ExecResult(
+                "",
+                "No solution found because exclude-newer is set to 2026-07-05",
+                1,
+            ),
+        )
+        val vm = newViewModel(session, expectedVersion = "0.4.40")
+        bind(vm)
+        advanceUntilIdle()
+
+        vm.runHostPocketshellUpgrade()
+        advanceUntilIdle()
+
+        val state = vm.cliVersionUpdateState.value
+        assertTrue(state is FolderListViewModel.CliVersionUpdateState.Failure)
+        val failure = state as FolderListViewModel.CliVersionUpdateState.Failure
+        assertEquals(
+            FolderListViewModel.CliVersionUpdateState.Failure.Kind.Capped,
+            failure.kind,
+        )
+        assertFalse("Retry cannot help a remaining date cap", failure.offerRetry)
+        val banner = CliVersionBannerCopy.bannerMessage(vm.cliVersionMismatch.value!!, failure)
+        assertFalse(banner.contains("uv tool install"))
     }
 
     @Test
@@ -213,6 +360,19 @@ class FolderListViewModelHostUpgradeTest {
         assertTrue("must fall back to pipx", cmd.contains("pipx upgrade pocketshell"))
         assertTrue("must fall back to pip", cmd.contains("pip install -U pocketshell"))
         assertTrue("must exit 127 when no installer is found", cmd.contains("exit 127"))
+
+        val pinned = HostPocketshellUpgrade.upgradeCommand("0.4.40")
+        assertTrue(
+            "pinned uv arm must request pocketshell==0.4.40 so unpublished fails loudly",
+            pinned.contains("pocketshell==0.4.40"),
+        )
+        assertTrue(pinned.contains("--exclude-newer 2099-12-31"))
+        assertTrue(pinned.contains("--refresh"))
+        assertTrue(
+            "pinned pipx arm must force-install the requested spec (upgrade cannot pin)",
+            pinned.contains("pipx install --force pocketshell==0.4.40"),
+        )
+        assertTrue(pinned.contains("pip install -U pocketshell==0.4.40"))
     }
 
     // --- Issue #1157: no false "Not connected" while the host is connected ---
@@ -455,6 +615,7 @@ class FolderListViewModelHostUpgradeTest {
     private fun TestScope.newViewModel(
         session: SshSession,
         expectedVersion: String,
+        dismissStore: CliVersionBannerDismissStore? = null,
     ): FolderListViewModel {
         val dispatcher = UnconfinedTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
@@ -482,6 +643,9 @@ class FolderListViewModelHostUpgradeTest {
             it.setHostPocketshellUpgradeForTest(
                 HostPocketshellUpgrade().apply { execDispatcher = dispatcher },
             )
+            if (dismissStore != null) {
+                it.setCliVersionBannerDismissStoreForTest(dismissStore)
+            }
             it.setProcessStartedForTest(true)
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }
@@ -517,7 +681,9 @@ class FolderListViewModelHostUpgradeTest {
         override suspend fun exec(command: String): ExecResult {
             return when {
                 // The upgrade probe-and-run command (issue #947).
-                command.contains("pipx upgrade pocketshell") -> {
+                command.contains("pipx upgrade pocketshell") ||
+                    command.contains("pipx install --force") ||
+                    command.contains("uv tool list") -> {
                     upgradeRan = true
                     if (wedgeUpgrade) {
                         kotlinx.coroutines.awaitCancellation()

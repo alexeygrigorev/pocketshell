@@ -410,4 +410,53 @@ class PromptComposerAttachmentTest {
         // Clean up the never-resolving stage so the VM teardown doesn't leak it.
         vm.discardDraft()
     }
+
+    @Test
+    fun attachFilesShowsAdvancingPortProgressThenExistingSuccessState() = runTest {
+        // Issue #1563: fake uploader emits 0 -> mid -> total on the real
+        // progress port. The VM keeps Uploading(count) (durable busy flag);
+        // live bytes live on the port. A no-callback mutant leaves the
+        // advancing oracle red while still succeeding.
+        AttachmentUploadProgressPort.resetForTest()
+        val vm = newVm()
+        val midGate = CompletableDeferred<Unit>()
+        val finishGate = CompletableDeferred<Unit>()
+        val total = 5_242_880L
+        vm.attachFiles(count = 1) {
+            AttachmentUploadProgressPort.beginAttach(
+                listOf(AttachmentFileSpec("a", "report.zip", total)),
+            )
+            AttachmentUploadProgressPort.onAttachFileProgress(0, 0L, total, force = true)
+            midGate.await()
+            AttachmentUploadProgressPort.onAttachFileProgress(0, 2_621_440L, total, force = true)
+            finishGate.await()
+            AttachmentUploadProgressPort.onAttachFileProgress(0, total, total, force = true)
+            AttachmentUploadProgressPort.endAttach()
+            Result.success(listOf("~/.pocketshell/attachments/host-1/report.zip"))
+        }
+        runCurrent()
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Uploading(1),
+            vm.uiState.value.attachmentUpload,
+        )
+        assertEquals(0L, AttachmentUploadProgressPort.attachProgress.value?.bytesTransferred)
+        assertEquals(
+            "Uploading 0 B / 5.0 MB · 0%",
+            attachmentUploadBannerText(1, AttachmentUploadProgressPort.attachProgress.value),
+        )
+        midGate.complete(Unit)
+        runCurrent()
+        val mid = requireNotNull(AttachmentUploadProgressPort.attachProgress.value)
+        assertEquals(2_621_440L, mid.bytesTransferred)
+        assertEquals("Uploading 2.5 / 5.0 MB · 50%", formatAttachmentTransferLabel(mid))
+        finishGate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Idle,
+            vm.uiState.value.attachmentUpload,
+        )
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertNull(AttachmentUploadProgressPort.attachProgress.value)
+        AttachmentUploadProgressPort.resetForTest()
+    }
 }

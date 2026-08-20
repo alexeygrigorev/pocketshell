@@ -37,6 +37,7 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.signals.activityWindowFocused
+import com.pocketshell.app.proof.signals.FOREIGN_WINDOW_FOCUS_SIGNATURE
 import com.pocketshell.app.proof.signals.awaitActivityWindowFocus
 import com.pocketshell.app.proof.signals.dismissFocusedLauncherFrameworkDialog
 import com.pocketshell.app.proof.signals.focusedFrameworkErrorPackage
@@ -171,6 +172,7 @@ class TmuxSessionOpencodeInputDockerTest {
         const val BACKSPACES: Int = 3
         const val ATTACH_TIMEOUT_MS: Long = 30_000
         const val VISIBLE_TIMEOUT_MS: Long = 20_000
+        const val ISSUE_2191_CONVERSATION_CHIP_SAMPLE_FRAMES: Int = 6
     }
 
     @get:Rule
@@ -590,10 +592,14 @@ class TmuxSessionOpencodeInputDockerTest {
                     appendLine("ime_visible_after_one_tap=$imeVisibleAfterTap")
                 },
             )
-            assertTrue(
-                "#1977: one real show-keyboard tap must raise the IME on OpenCode",
-                imeVisibleAfterTap,
-            )
+            if (!imeVisibleAfterTap) {
+                throw AssertionError(
+                    describeRealImeRaiseFailure(
+                        scenario = scenario,
+                        context = "#1977: one real show-keyboard tap must raise the IME on OpenCode",
+                    ),
+                )
+            }
             compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
                 .assertIsDisplayed()
             captureFullFrame("issue1977-opencode-toolbar-after-keyboard-tap-full")
@@ -1384,14 +1390,30 @@ class TmuxSessionOpencodeInputDockerTest {
             "#1979: the journey must own Conversation before classifying the missing Terminal-only keyboard chip",
             issue1977TerminalTabSelected() == false,
         )
-        val conversationKeyboardCount = compose
-            .onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
-            .fetchSemanticsNodes()
-            .size
+        // Issue #2191: sample the chip across successive frames AFTER the tab
+        // flip. Do not wait for the chip's absence — that would hide a real
+        // transient. The count on every Conversation frame must be able to fail.
+        val conversationKeyboardSamples = mutableListOf<Int>()
+        repeat(ISSUE_2191_CONVERSATION_CHIP_SAMPLE_FRAMES) {
+            conversationKeyboardSamples.add(
+                compose.onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .size,
+            )
+            compose.waitForIdle()
+        }
+        conversationKeyboardSamples.forEachIndexed { index, count ->
+            assertEquals(
+                "#2191/#1979: show-keyboard must be absent on Conversation frame $index " +
+                    "(samples=$conversationKeyboardSamples)",
+                0,
+                count,
+            )
+        }
         assertEquals(
             "#1979: show-keyboard is deliberately absent from Conversation",
             0,
-            conversationKeyboardCount,
+            conversationKeyboardSamples.last(),
         )
         captureFullFrame("issue1979-opencode-conversation-readiness-full")
 
@@ -1429,10 +1451,14 @@ class TmuxSessionOpencodeInputDockerTest {
             "issue1979_show_keyboard_tap_to_ime_visible_ms",
             SystemClock.elapsedRealtime() - tapAt,
         )
-        assertTrue(
-            "#1979: exactly one show-keyboard tap must raise the real IME",
-            imeVisibleAfterTap,
-        )
+        if (!imeVisibleAfterTap) {
+            throw AssertionError(
+                describeRealImeRaiseFailure(
+                    scenario = scenario,
+                    context = "#1979: exactly one show-keyboard tap must raise the real IME",
+                ),
+            )
+        }
         captureFullFrame("issue1979-opencode-after-keyboard-tap-full")
 
         compose.onNodeWithTag(TERMINAL_HOTKEYS_LAUNCHER_TAG, useUnmergedTree = true)
@@ -1446,7 +1472,8 @@ class TmuxSessionOpencodeInputDockerTest {
             buildString {
                 appendLine("initial_terminal_tab_selected=$initialTerminalTabSelected")
                 appendLine("classified_visible_tab=conversation")
-                appendLine("conversation_show_keyboard_count=$conversationKeyboardCount")
+                appendLine("conversation_show_keyboard_samples=${conversationKeyboardSamples.joinToString(",")}")
+                appendLine("conversation_show_keyboard_count=${conversationKeyboardSamples.last()}")
                 appendLine("terminal_tab_selected=${issue1977TerminalTabSelected()}")
                 appendLine("show_keyboard_tap_count=1")
                 appendLine("app_window_focused_before_tap=${focus.focused}")
@@ -1486,6 +1513,27 @@ class TmuxSessionOpencodeInputDockerTest {
             "issue1979-opencode-hotkeys-$stage.txt",
             "stage=$stage\nhotkeys_panel_visible=true\nctrl_c_label=^C\nctrl_d_label=^D\n",
         )
+    }
+
+    /**
+     * Issue #2139 AC3: a real-IME raise that never happens is three worlds
+     * (focus stolen, IME service down, chip broken). Name the one we observed
+     * instead of a bare "IME did not appear".
+     */
+    private fun describeRealImeRaiseFailure(
+        scenario: ActivityScenario<MainActivity>,
+        context: String,
+    ): String {
+        val lateFocus = awaitActivityWindowFocus(scenario, timeoutMs = 0L)
+        val prefix = if (!lateFocus.focused) {
+            "$FOREIGN_WINDOW_FOCUS_SIGNATURE "
+        } else {
+            ""
+        }
+        return prefix + context +
+            ". This is the environment (focus / IME service), not a chip " +
+            "geometry failure, unless the app window is focused and the IME " +
+            "service is healthy. ${lateFocus.diagnosis}"
     }
 
     /**

@@ -50,6 +50,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.currentStateAsState
 import com.pocketshell.app.composer.PromptComposerSendDispatcher
 import com.pocketshell.app.composer.ComposerSendResult
+import com.pocketshell.app.composer.withQueuedSidecarUploadProgress
 import com.pocketshell.app.conversation.ConversationImageViewModel
 import com.pocketshell.app.conversation.LocalConversationImageLoader
 import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
@@ -690,9 +691,11 @@ private fun TmuxSessionScreenEffects(
             },
         )
     }
-    DisposableEffect(promptComposerViewModel, viewModel) {
+    DisposableEffect(promptComposerViewModel, viewModel, queueTargetSessionKey) {
         promptComposerViewModel.setOutboundAttachmentSidecarUploader { refs ->
-            viewModel.uploadQueuedAttachmentSidecars(refs)
+            withQueuedSidecarUploadProgress(queueTargetSessionKey, refs) { pending ->
+                viewModel.uploadQueuedAttachmentSidecars(pending)
+            }
         }
         // Issue #1686: wire the WIRE-oracle probe so the failure taxonomy + drain gate
         // read the transport's own truth instead of the ConnectionStatus enum.
@@ -1606,12 +1609,11 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
         val controlsInputEnabled = sessionLive && pane != null
         TmuxSessionBottomBandPlacement(
             isImeVisible = isImeVisible,
-            onConversationTab = showConversation || showConversationPlaceholder,
+            onConversationTab = tmuxSessionBottomControlsShowsConversation(currentSelectedTab),
             modifier = Modifier.fillMaxWidth(),
         ) {
                 TmuxSessionBottomControlsCallSite(
-                    showConversationTranscript = showConversation,
-                    showConversationDetectingPlaceholder = showConversationPlaceholder,
+                    selectedTab = currentSelectedTab,
                     sessionLive = controlsInputEnabled,
                     terminalHeld = terminalHeld,
                     onDictateTap = {
@@ -1974,6 +1976,28 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
 }
 
 /**
+ * Production session-screen card-feed callbacks (#859).
+ *
+ * The session screen must not inline a no-op `onSetNoteRead`. Tests drive this
+ * same factory so stubbing it back to `Unit` reddens the mark-as-read path.
+ */
+internal fun tmuxSessionCardInteractions(
+    viewModel: TmuxSessionViewModel,
+): SessionCardInteractions = object : SessionCardInteractions {
+    override fun onToggleChecklistItem(cardId: String, itemId: String, checked: Boolean) {
+        viewModel.toggleChecklistItem(
+            cardId = cardId,
+            itemId = itemId,
+            checked = checked,
+        )
+    }
+
+    override fun onSetNoteRead(cardId: String, read: Boolean) {
+        viewModel.setNoteRead(cardId, read)
+    }
+}
+
+/**
  * Issue #1685: the shared unified composer / snippet / card-feed / hotkeys sheets
  * plus the send handler + send dispatcher, in their own frame.
  */
@@ -2001,17 +2025,7 @@ private fun TmuxSessionSheetsRegion(
     val presumedAgentKind = agent.presumedAgentKind
     val composerQueueSessionKey = outboundQueueBinding.targetKey
     val sessionCardInteractions = remember(viewModel) {
-        object : SessionCardInteractions {
-            override fun onToggleChecklistItem(cardId: String, itemId: String, checked: Boolean) {
-                viewModel.toggleChecklistItem(
-                    cardId = cardId,
-                    itemId = itemId,
-                    checked = checked,
-                )
-            }
-
-            override fun onSetNoteRead(cardId: String, read: Boolean) = Unit
-        }
+        tmuxSessionCardInteractions(viewModel)
     }
 
     val composerSendHandler: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult = { request ->

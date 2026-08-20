@@ -82,7 +82,13 @@ PY
   fi
 
   if [ "${2:-}" = "status" ]; then
-    if [ -f "$hooks_installed_marker" ]; then
+    # Match production (hooks.py): installed iff the handler marker exists
+    # AND our command is actually in the engine config. A leftover
+    # `.installed` marker with settings.json rewound to a foreign-only
+    # seed must report false, or the app treats the silent host as ready
+    # and skips the enable sheet (#2114).
+    if [ -f "$hooks_installed_marker" ] &&
+      grep -q claude_stop.py "$claude_settings" 2>/dev/null; then
       installed=true
     else
       installed=false

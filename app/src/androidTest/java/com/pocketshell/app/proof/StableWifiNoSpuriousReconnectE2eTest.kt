@@ -16,6 +16,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.App
+import com.pocketshell.app.connectivity.NetworkHandoffTerminalDecision
 import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.diagnostics.DiagnosticEvents
@@ -137,6 +139,15 @@ class StableWifiNoSpuriousReconnectE2eTest {
     fun setUp() {
         clearLastSessionPrefs()
         diagnostics = RecordingDiagnosticSink().also { DiagnosticEvents.install(it) }
+        // Issue #2001: Nightly shards reuse one Application process. A previous
+        // test's within-grace resume can leave the App lifecycle gate's
+        // post-resume window armed, swallowing a CURRENT synthetic WIFI→CELLULAR
+        // flip so the VM never emits `network_reconnect_skip` (7s timeout while
+        // diagnostics show `change_suppressed_within_grace` + port-forward
+        // `network_ride_through`). Expire that leftover window before either
+        // proof drives a snapshot. Mutation: deleting this call must make the
+        // #981 waiter fail-fast on AppGateSwallowed when the window is armed.
+        expirePostResumeNetworkSuppressionOnMain()
     }
 
     @After
@@ -272,6 +283,10 @@ class StableWifiNoSpuriousReconnectE2eTest {
         // synthetic inject (#780) — no skip — so the gate is exercised on CI too.
         vm.forceTransportProvenAliveForTest = true
         try {
+            // Issue #2001: expire again on Main immediately before the synthetic
+            // flip so a lifecycle cycle during attach cannot re-arm the post-resume
+            // window and swallow the CURRENT WIFI→CELLULAR change (Nightly leftover).
+            expirePostResumeNetworkSuppressionOnMain()
             // Seed a baseline pure-WIFI identity so the next snapshot is a genuine
             // transport-CHANGING flip (different identity → emits past #875).
             observer.emitSyntheticSnapshotForTest(
@@ -595,10 +610,18 @@ class StableWifiNoSpuriousReconnectE2eTest {
         }
     }
 
+    private fun expirePostResumeNetworkSuppressionOnMain() {
+        compose.activityRule.scenario.onActivity { activity ->
+            (activity.application as App).expirePostResumeNetworkSuppressionForTest()
+        }
+    }
+
     /**
-     * Issue #1767: production gives the asynchronous answered probe five seconds.
-     * Wait for the reason-bound terminal decision for that full budget plus a small
-     * scheduling margin, checking the authoritative reconnect signal every 100ms.
+     * Issue #1767 / #2001: production gives the asynchronous answered probe five
+     * seconds. Wait for the reason-bound VM terminal decision for that full budget
+     * plus a small scheduling margin. An App-gate swallow (`change_suppressed_within_grace`)
+     * or a reconnect is a completed decision and fails immediately — an absent
+     * `network_reconnect_skip` must never hang for 7s as if nothing happened (G6).
      */
     private fun waitForProvenAliveHandoffDecision(
         label: String,
@@ -606,16 +629,41 @@ class StableWifiNoSpuriousReconnectE2eTest {
     ): RecordedDiagnosticEvent {
         val deadline = SystemClock.elapsedRealtime() + HANDOFF_DECISION_TIMEOUT_MS
         while (SystemClock.elapsedRealtime() < deadline) {
-            assertNoReconnectDiagnostics(label)
-            val matches = diagnostics!!.eventsNamed("network_reconnect_skip")
-                .filter { it.fields["reason"] == reason }
-            assertTrue(
-                "expected at most one terminal handoff decision for reason=$reason; " +
-                    "matches=$matches",
-                matches.size <= 1,
-            )
-            matches.singleOrNull()?.let { return it }
-            SystemClock.sleep(100)
+            when (
+                val observation = NetworkHandoffTerminalDecision.observe(
+                    events = diagnostics!!.events.map { event ->
+                        NetworkHandoffTerminalDecision.NamedDiagnosticFields(
+                            name = event.name,
+                            fields = event.fields,
+                        )
+                    },
+                    reason = reason,
+                )
+            ) {
+                is NetworkHandoffTerminalDecision.Observation.ReconnectStarted -> {
+                    assertNoReconnectDiagnostics(label)
+                    error("unreachable: reconnect should have failed the assertion above")
+                }
+                is NetworkHandoffTerminalDecision.Observation.AppGateSwallowed -> {
+                    throw AssertionError(
+                        "App lifecycle gate swallowed the validated handoff " +
+                            "(${NetworkHandoffTerminalDecision.APP_GATE_SUPPRESS_EVENT}) " +
+                            "before the VM could emit " +
+                            "${NetworkHandoffTerminalDecision.SKIP_EVENT} " +
+                            "(#2001 Nightly shape). This is NOT the #981 proven-alive " +
+                            "terminal decision — the answered probe never ran. " +
+                            "gate=${observation.event.fields} events=${diagnostics!!.events}",
+                    )
+                }
+                is NetworkHandoffTerminalDecision.Observation.ProvenAliveSkip -> {
+                    return diagnostics!!.eventsNamed(NetworkHandoffTerminalDecision.SKIP_EVENT)
+                        .single { it.fields["reason"] == reason }
+                }
+                NetworkHandoffTerminalDecision.Observation.Pending -> {
+                    assertNoReconnectDiagnostics(label)
+                    SystemClock.sleep(100)
+                }
+            }
         }
         assertTrue(
             "timed out after ${HANDOFF_DECISION_TIMEOUT_MS}ms waiting for the terminal " +

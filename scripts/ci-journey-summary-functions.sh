@@ -313,5 +313,13 @@ finish_ci_journey_suite() {
   cat "$SUMMARY"
   echo "----------------------------------------------------------"
 
+  # Issue #2090: suite-completed is how classify() tells "process died mid-
+  # class" from "suite finished but the artifact upload never landed".
+  if [[ -n "${CI_JOURNEY_PROGRESS_HELPER:-}" && -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+    bash "$CI_JOURNEY_PROGRESS_HELPER" suite-completed "$journey_status" || true
+  elif [[ -n "${REPO_ROOT:-}" && -f "$REPO_ROOT/scripts/ci-journey-progress-telemetry.sh" ]]; then
+    bash "$REPO_ROOT/scripts/ci-journey-progress-telemetry.sh" suite-completed "$journey_status" || true
+  fi
+
   exit "$JOURNEY_EXIT"
 }

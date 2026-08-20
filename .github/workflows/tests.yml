@@ -594,7 +594,14 @@ jobs:
       # 1 stays honestly refused. It also drives the REAL "Inspect first journey
       # summary" and classify step bodies out of this file so the one-shot stamp
       # is proven end to end (summary -> budget -> verdict token -> aggregate).
-      - name: CI journey cold-boot retry-budget guard (issues #1458, #1833)
+      #
+      # Issue #1850: the same harness redistributes a measured per-class fixture
+      # through the shipping selector at the matrix total from
+      # scripts/ci-journey-shard-count.sh and requires every leg's retry
+      # headroom to exceed one twice-failing class (~420s). A 3-way split of
+      # the current list must still miss that bar, so an overloaded matrix
+      # cannot stay green.
+      - name: CI journey cold-boot retry-budget guard (issues #1458, #1833, #1850)
         run: |
           chmod +x scripts/ci-journey-retry-budget.sh \
             scripts/ci-journey-warm-build-elapsed.sh \
@@ -679,6 +686,16 @@ jobs:
       - name: CI journey cold-boot canonical artifact guard (issue #2093)
         run: scripts/test-ci-journey-canonical-artifacts.sh
 
+      # Issue #2090: extra-runner last-completed-class telemetry. Proves a
+      # simulated hosted-runner death still leaves last-completed-class + job
+      # metadata, a missing shard never aggregates CLEAN, and a successful
+      # shard keeps its existing verdict/artifact contract. Cheap, no emulator.
+      - name: "Journey shard progress-telemetry guard (issue #2090)"
+        run: |
+          chmod +x scripts/ci-journey-progress-telemetry.sh \
+            scripts/test-ci-journey-progress-telemetry.sh
+          scripts/test-ci-journey-progress-telemetry.sh
+
       # Issue #1827: every condition that turns the journey suite RED must leave
       # evidence the classify step can read. The suite's red condition and the
       # summary's failed-BOTH-attempts section used to be two hand-maintained
@@ -725,6 +742,15 @@ jobs:
         run: |
           chmod +x scripts/lib/nightly-fault-verdict.sh
           scripts/lib/nightly-fault-verdict.sh --self-test
+
+      # Issue #1924: bounded nightly failure-signature recurrence
+      # (count/first_seen/last_seen/streak) from small TSV artifacts.
+      # Cheap fixture proof, no emulator, no historical report download.
+      - name: "Nightly failure-recurrence guard (issue #1924)"
+        run: |
+          chmod +x scripts/nightly-failure-recurrence.py \
+            scripts/test-nightly-failure-recurrence.sh
+          scripts/test-nightly-failure-recurrence.sh
 
       # Issue #1581: gate the Build workflow's corrupted-NDK-download retry
       # wrapper (scripts/ci-assemble-with-ndk-retry.sh) so its clear-and-retry
@@ -1067,6 +1093,13 @@ jobs:
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
     if: github.event_name != 'pull_request'
+    # Issue #2090: Checks-API publisher for last-completed-class telemetry.
+    # actions: write keeps the existing artifact uploads working once this job
+    # names its token scopes.
+    permissions:
+      contents: read
+      actions: write
+      checks: write
     # Issue #2060 (CI Phase A) — THE ACTIONS-BUDGET DECISION, recorded here
     # because this one line owned ~37 of `main`'s ~99-minute wall clock. It was
     # `needs: [unit, python, integration]`, so the shards could not start until
@@ -1946,6 +1979,10 @@ jobs:
           overwrite: true
           if-no-files-found: warn
 
+      - name: "Mark journey progress artifacts-uploaded (issue #2090)"
+        if: always()
+        run: scripts/ci-journey-progress-telemetry.sh artifacts-uploaded || true
+
       - name: Stop Docker fixture
         if: always()
         run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
@@ -1986,6 +2023,10 @@ jobs:
     needs: emulator-journey
     if: ${{ !cancelled() && github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -1996,6 +2037,14 @@ jobs:
           pattern: emulator-journey-verdict-shard-*
           path: artifacts/ci-journey-verdicts
         continue-on-error: true
+
+      - name: "Collect surviving journey-progress telemetry (issue #2090)"
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p artifacts/ci-journey-progress
+          scripts/ci-journey-progress-telemetry.sh collect-from-github artifacts/ci-journey-progress || true
 
       - name: Aggregate the per-shard verdicts into ONE verdict
         env:
@@ -2008,6 +2057,7 @@ jobs:
           # lost a commit-bound failure. Genuine typed INFRA shards finish green,
           # so their matrix result is success and remains neutral RE-RUN.
           UPSTREAM_MATRIX_RESULT: ${{ needs.emulator-journey.result }}
+          CI_JOURNEY_PROGRESS_DIR: artifacts/ci-journey-progress
         run: |
           chmod +x scripts/ci-journey-aggregate-verdict.sh
           scripts/ci-journey-aggregate-verdict.sh artifacts/ci-journey-verdicts

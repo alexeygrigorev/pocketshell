@@ -9,9 +9,11 @@ import com.pocketshell.core.ssh.SshFileNotFoundException
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import com.pocketshell.core.ssh.SshUploadProgress
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -58,6 +60,12 @@ class PromptAttachmentStagerTest {
             it.mkdirs()
             it
         }
+        AttachmentUploadProgressPort.resetForTest()
+    }
+
+    @After
+    fun tearDown() {
+        AttachmentUploadProgressPort.resetForTest()
     }
 
     private fun tempImageUri(name: String, bytes: ByteArray = ByteArray(64) { it.toByte() }): Uri {
@@ -92,6 +100,72 @@ class PromptAttachmentStagerTest {
             "drain temp dir must be empty after upload",
             File(cacheDir, "prompt-attachments").listFiles().orEmpty().isEmpty(),
         )
+    }
+
+    @Test
+    fun largeFileUploadSurfacesAdvancingByteProgressFromUploadCallback() = runTest {
+        // Issue #1563 reproduce-first: a ≥5 MB attach-time upload currently
+        // calls the 2-arg `uploadFile` (no listener), so the composer can only
+        // show a static "Uploading N attachment(s)..." spinner. The 3-arg
+        // override below records ticks ONLY when production asks for them —
+        // suppressing that callback (the G6 mutant) leaves this oracle red
+        // while the bytes still land.
+        val session = FakeStagingSshSession()
+        val payload = ByteArray(5 * 1024 * 1024) { 1 }
+        val result = newStager().stage(
+            session,
+            "host-7",
+            listOf(tempImageUri("report.zip", payload)),
+        )
+
+        assertTrue("upload itself must still succeed", result.isSuccess)
+        assertEquals(1, session.uploadedRemotePaths.size)
+        assertTrue(
+            "large upload must invoke the bytes-transferred callback; static spinner is the reported defect",
+            session.progressTicks.size >= 2,
+        )
+        assertTrue(
+            "progress must advance as bytes transfer",
+            session.progressTicks.last().bytesTransferred > session.progressTicks.first().bytesTransferred,
+        )
+        assertEquals(payload.size.toLong(), session.progressTicks.last().bytesTransferred)
+    }
+
+    @Test
+    fun suppressedProgressCallbackStillUploadsButLeavesProgressOracleRed() = runTest {
+        // G6 mutant: bytes still succeed when the core/port callback is
+        // suppressed; the advancing-progress oracle must stay red.
+        val session = FakeStagingSshSession(emitProgress = false)
+        val payload = ByteArray(5 * 1024 * 1024) { 2 }
+        val result = newStager().stage(
+            session,
+            "host-7",
+            listOf(tempImageUri("report.zip", payload)),
+        )
+        assertTrue(result.isSuccess)
+        assertEquals(1, session.uploadedRemotePaths.size)
+        assertTrue(
+            "suppressing the upload callback must leave the progress oracle empty",
+            session.progressTicks.isEmpty(),
+        )
+    }
+
+    @Test
+    fun multiFileStageForwardsPerFileProgressCallbacks() = runTest {
+        val session = FakeStagingSshSession()
+        val result = newStager().stage(
+            session,
+            "host-7",
+            listOf(
+                tempImageUri("one.bin", ByteArray(64) { 1 }),
+                tempImageUri("two.bin", ByteArray(128) { 2 }),
+            ),
+        )
+        assertTrue(result.isSuccess)
+        assertEquals(2, session.uploadedRemotePaths.size)
+        assertEquals(6, session.progressTicks.size)
+        assertTrue(session.progressTicks[2].bytesTransferred >= session.progressTicks[0].bytesTransferred)
+        assertTrue(session.progressTicks[5].bytesTransferred >= session.progressTicks[3].bytesTransferred)
     }
 
     @Test
@@ -178,8 +252,10 @@ class PromptAttachmentStagerTest {
     private class FakeStagingSshSession(
         private val failOnUploadIndex: Int = Int.MIN_VALUE,
         private val onExec: () -> Unit = {},
+        private val emitProgress: Boolean = true,
     ) : SshSession {
         val uploadedRemotePaths = mutableListOf<String>()
+        val progressTicks = mutableListOf<SshUploadProgress>()
         private var uploadCalls = 0
         var closed: Boolean = false
 
@@ -209,6 +285,26 @@ class PromptAttachmentStagerTest {
             file.readBytes()
             uploadedRemotePaths += remotePath
             return remotePath
+        }
+
+        override suspend fun uploadFile(
+            file: File,
+            remotePath: String,
+            onProgress: ((SshUploadProgress) -> Unit)?,
+        ): String {
+            val total = file.length()
+            if (emitProgress) {
+                val ticks = listOf(
+                    SshUploadProgress(0L, total),
+                    SshUploadProgress(total / 2, total),
+                    SshUploadProgress(total, total),
+                )
+                ticks.forEach { tick ->
+                    onProgress?.invoke(tick)
+                    if (onProgress != null) progressTicks += tick
+                }
+            }
+            return uploadFile(file, remotePath)
         }
 
         override suspend fun uploadStream(

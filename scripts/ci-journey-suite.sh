@@ -169,12 +169,13 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerDegradedSendE2eTest"  # #745 #638 #691 composer Send feedback on a DEGRADED connection. The maintai…
   "com.pocketshell.app.composer.PromptComposerDraftLossOnFinalizeE2eTest"  # #1616/#1620: real-sheet prompt-B preservation plus one status-led queue progress owner with keyboard up
   "com.pocketshell.app.composer.AttachmentStagerRealUploadDockerTest"  # #2036: production OpenMultipleDocuments picker -> editable tile -> Send performs one real SSH upload
-  "com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"  # #1744: isolated synthetic anchor oracle plus real-IME full-device reachability/hide restoration
+  "com.pocketshell.app.composer.PromptComposerSaturatedImeAnchorE2eTest"  # #1744 #2139: isolated synthetic-inset anchor + reachability/hide restoration (#780 model; real-IME path hard-cut)
   "com.pocketshell.app.composer.PromptComposerSendPipeliningE2eTest"  # #1621 real-sheet A-active/B-queued FIFO, once-only completion, queue-empty and quiescent-close proof
   "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest"  # #1108 #694 #872 #971 the composer send/dismiss + ATTACHMENT-on-failed-send journe…
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"  # #848 #900 audit / ): the foreground outbound queue surface was
   "com.pocketshell.app.tmux.Issue1686QueueDrainWireOracleDockerTest"  # #1686 D33/G4 the composer-queue clog fix on the REAL wire: a false not-Connected label (inline enum Reconnecting + drain-gate sessionLive=false) while the -CC transport is writable — the queued prompt must DRAIN to the real tmux pane (capture-pane), and the transport-alive edge un-parks the storm-stranded backlog
   "$FQCN_PREFIX.OutboundExactlyOnceAcrossFlapE2eTest"  # #1963/#1526 D31/D32: full-class fixture isolation plus delivery-level exactly-once across a mid-send flap (server capture-pane occurrence == 1, composer + keystroke lanes)
+  "$FQCN_PREFIX.Issue2189HostAckExactlyOnceAcrossFlapE2eTest"  # #2189: the #1526 exactly-once-across-flap property on the SHIPPED HostAck default (same-token retry after a real transport drop; capture-pane occurrence == 1; HostAckSendProbe live)
   "$FQCN_PREFIX.Issue2124HostAckDeliveryJourneyE2eTest"  # #2124 (epic #2121) D33/G10: the host-CLI ack is the SOLE delivery authority — a send to a WORKING agent (the framed surface no oracle can read) still reaches Delivered with ZERO legacy-stack calls, and the agents-old-cli:2238 fixture without `send` fails CLOSED to a bounded retryable Failed naming the upgrade, never a hang and never a new unknown row state
   "com.pocketshell.app.settings.Issue2124OutboundAuthorityVisibleInSettingsE2eTest"  # #2124 AC8 / G9: deleting the whole "Outbound delivery confirmation" block left 107 settings tests green. The real Settings screen must NAME the authority actually in effect (seeded to the NON-default legacy path, and following the repository when it moves underneath the screen), and tapping either row must flip both the visible Active line and the persisted preference. No Docker fixture, ~15s.
   "$FQCN_PREFIX.OutboundAttachmentOffsetResumeJourneyE2eTest"  # #1733 durable queued sidecar: real app-worker death preserves checkpoint N, fresh session sends total-N, atomic SHA-identical promotion and once-only prompt+Enter
@@ -211,6 +212,7 @@ JOURNEY_CLASSES=(
   "$FQCN_PREFIX.MostlyEmptyModelHealsAtRevealJourneyE2eTest"  # #1214 #1208 mostly-empty-model reveal-time leg of the fragments-over-bla…
   "$FQCN_PREFIX.IdleClaudeFragmentsOverBlackRecoveryJourneyE2eTest"  # #1302 #1208 #780 #1297 / — the COMPOSITE recovery journey, the campaign's acceptanc…
   "$FQCN_PREFIX.SendWithAttachmentStaysVisibleE2eTest"  # #1153 #941 send-with-attachment half-black, v0.4.21 dogfood): a compose…
+  "$FQCN_PREFIX.Issue2189HostAckSendHealJourneyE2eTest"  # #2189: the #1153 half-black send-heal on the SHIPPED HostAck default (onDelivered → ReconcileReason.Send; HostAckSendProbe live)
   "$FQCN_PREFIX.PreExistingMultiWindowSeedE2eTest"  # #782 #662 #638 #691 D30 / D28(3)): the pre-existing multi-window `[wN]` switcher…
   "com.pocketshell.app.projects.FolderListWindowCloseAfterStopPollingDockerTest"  # #783 #657 epic / F-wiring): the project-tree torn-down prune journey…
   "com.pocketshell.app.projects.FolderListKillWindowDockerTest"  # #883 window-aware Stop session. The tree shows each tmux WINDOW
@@ -234,9 +236,11 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.tmux.ConversationTuiCommandJourneyDockerTest"  # #1207 #975 #894 reviewer BLOCKED-G4 residual, D33/G10): the composer-send IN…
   "com.pocketshell.app.tmux.Issue2160RecordedSourceLocaleProofDockerTest"  # #2160 D33/G10 real-path: the `agents` fixture's sshd exports NO locale, so tmux utf8_sanitize() turned the TAB in @ps_agent_source into '_' ON READ and exact-source binding silently died (the #819/#825 wrong-source class restored). Asserts the non-UTF-8 precondition (no self-skip), the bare-vs-`tmux -u` byte difference measured on the host, and that the production resolveRecordedSessionOpen binds the RECORDED transcript rather than the busier same-cwd sibling.
   "com.pocketshell.app.tmux.Issue2174LocaleProofPaneCaptureDockerTest"  # #2174 D33/G10 real-path: same non-UTF-8 agents fixture. display-message -p (the heal-lane verb inside captureWithCursor) sanitises ПРИВЕТ to ______; capture-pane itself does not (measured 3.4/3.6b). Asserts empty-locale + live display-message mangling (non-vacuity) and that production captureWithCursor + capturePaneTextViaExec still return the grid.
+  "com.pocketshell.app.tmux.Issue2185UnreadableTranscriptDockerTest"  # #2185 D33/G10: a session whose Codex transcript cannot be read (non-empty source, no agent-log envelope) must not render as a confident Live feed with zero events — the missing Docker journey for the #2159 client half
   "com.pocketshell.app.tmux.TmuxComposerLauncherNarrowFontClipProofTest"  # #813 the composer-launcher NARROW / LARGE-FONT clip proof. The ma…
   "com.pocketshell.app.tmux.TmuxSessionOpencodeInputDockerTest#issue1977OpenCodeKeyboardChipIsContainedAndHitTestable"  # #1977 real OpenCode identity: held->Live band ownership settles, then keyboard chip + composer + tabs are fully contained and the keyboard chip has a real hit target
-  "com.pocketshell.app.tmux.TmuxSessionOpencodeInputDockerTest#keyBarCtrlCAndCtrlDExitRunningAgentOnTmuxSessionScreen"  # #1979 real recorded-OpenCode default Conversation -> Terminal -> one keyboard tap raises IME -> dedicated hotkeys sheet -> ^C/^D exit delivery
+  "com.pocketshell.app.tmux.TmuxSessionOpencodeInputDockerTest#keyBarCtrlCAndCtrlDExitRunningAgentOnTmuxSessionScreen"  # #1979/#2191 real recorded-OpenCode default Conversation -> Terminal -> one keyboard tap raises IME -> dedicated hotkeys sheet -> ^C/^D exit delivery; Conversation frames must never expose show-keyboard
+  "com.pocketshell.app.tmux.TmuxConversationDetectingComposerVisibleTest#showKeyboardChipIsGoneOnEveryFrameAfterConversationTabIsSelected"  # #2191 sample the Terminal-only show-keyboard chip across successive frames after the Conversation tab flip; a one-frame leak must fail the count, not be waited out
   "com.pocketshell.app.tmux.TmuxShellComposerOcclusionE2eTest#shellComposerControlsAreVisibleAndReachableInBothKeyboardStates"  # #1754 hard-cut generic literals while preserving exact-once saved Command snippets and #641/#813/#1794 geometry
   "com.pocketshell.app.session.ShowKeyboardChipE2eTest"  # #1846 #131 the show-keyboard chip CAUSAL proof: keyboard verifiably DOWN, ONE tap, keyboard UP (twice). Was dead behind assumeTrue(false) citing a ShowKeyboardChipDockerTest that never existed; the neighbouring IME journeys only tap the chip as a mechanism and never establish the keyboard was down first
   "com.pocketshell.app.tmux.ComposerUnsentBadgeContainmentProofTest"  # #1531 RC1: the docked-launcher UNSENT badge is present + fully within the window (containment, not assertIsDisplayed) on both the chip-cluster and conversation launchers, pending + failed states — a stuck send is SEEN, not silently dropped
@@ -306,6 +310,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.projects.FolderListScaleAnrStrictModeDockerTest"  # #965 the SCALE ANR proof — the folder list at
   "com.pocketshell.app.projects.FolderListDurableTreeDaemonDockerTest"  # #839 #821 #837 epic workstream C — the durable-tree daemon journey): the
   "$FQCN_PREFIX.AgentSubmitAckJourneyE2eTest"  # #869 the composer-Send ACK-GATE on-device submit JOURNEY — the lo…
+  "$FQCN_PREFIX.Issue2189HostAckSubmitJourneyE2eTest"  # #2189: the #869/#1687 submit property on the SHIPPED HostAck default (short + wrapped + multi-line actually SUBMIT; HostAckSendProbe live)
   "com.pocketshell.app.projects.FolderListScreenE2eTest#profiledSessionsShowProfileChipDefaultSessionsDoNot"  # #881 #858 follow-up to — D32 G9): the agent-PROFILE on-device journeys
   "com.pocketshell.app.projects.SessionKindPickerUiTest"
   "com.pocketshell.app.projects.SessionTypePickerNameFieldUiTest"  # #1184 D32 G9): the new-session picker's editable Session name fiel…
@@ -328,6 +333,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.bootstrap.AppUpdateDismissSelectorTest"  # #1958 D32 G9: two visible Dismiss actions; app-update ancestor selector removes only its banner
   "$FQCN_PREFIX.StrictModeMainThreadIoDetectorE2eTest"  # #933 #928 #931 #926 ============================================================…
   "com.pocketshell.app.cards.SessionChecklistPushJourneyDockerTest"  # #949 #859 ============================================================…
+  "com.pocketshell.app.cards.SessionNotePushJourneyDockerTest"  # #859 note write-back: push note → render → mark-read → host status read:true
   "com.pocketshell.app.insets.NestedImePaddingInSheetGeometryTest"  # #1872/#1821: ten real ModalBottomSheet geometry cases pin the five inline navigationBarsPadding sites as inert
   "com.pocketshell.app.insets.StandaloneContentImePaddingLivenessTest"  # #1872/#1821: four extracted contents must keep live standalone IME + navigation-bar clearance
   "com.pocketshell.app.projects.CliVersionMismatchBannerUpdateButtonTest"  # #947 #641 #567 #657 the host-version-mismatch banner's one-tap Update button — t…
@@ -358,6 +364,14 @@ source "$CI_JOURNEY_CLASS_SELECTION_HELPER"
 
 select_effective_journey_classes
 print_journey_class_selection
+
+# Issue #2090: start extra-runner last-completed-class telemetry before the
+# first class so a runner loss mid-shard still names how far this leg got.
+CI_JOURNEY_PROGRESS_HELPER="${CI_JOURNEY_PROGRESS_HELPER:-$REPO_ROOT/scripts/ci-journey-progress-telemetry.sh}"
+if [[ -f "$CI_JOURNEY_PROGRESS_HELPER" ]]; then
+  CI_JOURNEY_PROGRESS_CLASSES_SELECTED="${#EFFECTIVE_JOURNEY_CLASSES[@]}" \
+    bash "$CI_JOURNEY_PROGRESS_HELPER" start || true
+fi
 
 # Issue #691 (S2 defense-in-depth): pass AndroidJUnitRunner's per-test
 # `timeout_msec` so a wedged test is interrupted and FAILS FAST (~5 min) instead

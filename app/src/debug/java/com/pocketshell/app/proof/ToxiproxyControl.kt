@@ -39,6 +39,38 @@ class ToxiproxyControl(
         )
     }
 
+    /**
+     * Issue #2127 / #1678 — a half-open stall that the SAME socket actually SURVIVES.
+     *
+     * [addBlackhole] is the right fixture for a wedge that is never healed (NAT
+     * idle death, background socket death): the `timeout=0` toxic holds bytes with
+     * no FIN for as long as it is installed. It is the WRONG fixture for a
+     * blip-then-heal journey, because **Toxiproxy CLOSES every connection carrying
+     * a `timeout` toxic when that toxic is REMOVED**. So "blackhole then clear"
+     * is physically a stall followed by a genuine remote FIN — and an SSH client
+     * is CORRECT to report `reader_exception`/`eof` and recover.
+     *
+     * The `bandwidth` toxic at `rate = 0` produces the same symmetric no-byte
+     * starvation and is a plain streaming toxic, so removing it resumes the SAME
+     * connection instead of tearing it down. Use this for any "brief interruption
+     * the connection must ride through" journey; keep [addBlackhole] for
+     * permanent-wedge journeys.
+     */
+    fun addHalfOpenStall() {
+        addToxic(
+            name = "halfopen_stall_upstream",
+            type = "bandwidth",
+            stream = "upstream",
+            attributesJson = """{"rate":0}""",
+        )
+        addToxic(
+            name = "halfopen_stall_downstream",
+            type = "bandwidth",
+            stream = "downstream",
+            attributesJson = """{"rate":0}""",
+        )
+    }
+
     fun addLatencyModel() {
         addToxic(
             name = "latency_upstream",
@@ -265,6 +297,8 @@ class ToxiproxyControl(
         private val KNOWN_TOXICS: List<String> = listOf(
             "blackhole_upstream",
             "blackhole_downstream",
+            "halfopen_stall_upstream",
+            "halfopen_stall_downstream",
             "latency_upstream",
             "latency_downstream",
             "bandwidth_downstream",

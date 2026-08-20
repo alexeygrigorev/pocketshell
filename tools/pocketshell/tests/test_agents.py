@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 
 import click
@@ -498,15 +499,18 @@ def test_record_agent_kind_sets_session_option_inside_tmux(kind):
     calls = []
     ok = agents.record_agent_kind(
         kind,
-        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: calls.append((argv, kw)),
+        # Issue #2185: the write names an explicit session target so it never
+        # depends on ambient `$TMUX_PANE` inference.
+        resolve_target=lambda env: "$1",
     )
     assert ok is True
     # No profile passed -> the kind is set (session-scoped, no -g), and the
     # @ps_agent_profile option is reconciled away by an unset (issue #889).
     argvs = [argv for argv, _kw in calls]
-    assert ["tmux", "set-option", "@ps_agent_kind", kind] in argvs
-    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in argvs
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", kind] in argvs
+    assert ["tmux", "set-option", "-t", "$1", "-uq", "@ps_agent_profile"] in argvs
 
 
 def test_record_agent_kind_noop_when_not_in_tmux():
@@ -538,8 +542,9 @@ def test_record_agent_kind_swallows_runner_failure():
     # A failure to record must never propagate (the agent must still launch).
     ok = agents.record_agent_kind(
         "codex",
-        env={"TMUX": "x"},
+        env={"TMUX": "x", "TMUX_PANE": "%1"},
         runner=boom,
+        resolve_target=lambda env: "$1",
     )
     assert ok is False
 
@@ -834,15 +839,16 @@ def test_record_agent_kind_writes_profile_option_when_profile_set():
     calls = []
     ok = agents.record_agent_kind(
         "claude",
-        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: calls.append(argv),
         profile="Claude (Z.AI)",
+        resolve_target=lambda env: "$1",
     )
     assert ok is True
-    # Kind FIRST, profile SECOND — both session-scoped (no -g).
+    # Kind FIRST, profile SECOND — both session-scoped (no -g) and targeted.
     assert calls == [
-        ["tmux", "set-option", "@ps_agent_kind", "claude"],
-        ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"],
+        ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "claude"],
+        ["tmux", "set-option", "-t", "$1", "@ps_agent_profile", "Claude (Z.AI)"],
     ]
 
 
@@ -855,14 +861,15 @@ def test_record_agent_kind_no_profile_clears_profile_option():
     calls = []
     ok = agents.record_agent_kind(
         "claude",
-        env={"TMUX": "x"},
+        env={"TMUX": "x", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: calls.append(argv),
         profile=None,
+        resolve_target=lambda env: "$1",
     )
     assert ok is True
     assert calls == [
-        ["tmux", "set-option", "@ps_agent_kind", "claude"],
-        ["tmux", "set-option", "-uq", "@ps_agent_profile"],
+        ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "claude"],
+        ["tmux", "set-option", "-t", "$1", "-uq", "@ps_agent_profile"],
     ]
 
 
@@ -872,13 +879,14 @@ def test_record_agent_kind_empty_profile_clears_profile_option():
     calls = []
     agents.record_agent_kind(
         "codex",
-        env={"TMUX": "x"},
+        env={"TMUX": "x", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: calls.append(argv),
         profile="",
+        resolve_target=lambda env: "$1",
     )
     assert calls == [
-        ["tmux", "set-option", "@ps_agent_kind", "codex"],
-        ["tmux", "set-option", "-uq", "@ps_agent_profile"],
+        ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "codex"],
+        ["tmux", "set-option", "-t", "$1", "-uq", "@ps_agent_profile"],
     ]
 
 
@@ -886,11 +894,15 @@ def test_record_agent_kind_writes_grok():
     calls = []
     ok = agents.record_agent_kind(
         "grok",
-        env={"TMUX": "x"},
+        env={"TMUX": "x", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: calls.append(argv),
+        # Issue #2185: the write names an explicit session target so it never
+        # depends on ambient `$TMUX_PANE` inference. Grok is a first-class
+        # kind (#2193) and uses the same targeted contract as the others.
+        resolve_target=lambda env: "$1",
     )
     assert ok is True
-    assert ["tmux", "set-option", "@ps_agent_kind", "grok"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "grok"] in calls
 
 
 def test_record_agent_kind_default_relaunch_clears_stale_profile():
@@ -905,22 +917,24 @@ def test_record_agent_kind_default_relaunch_clears_stale_profile():
     zai_calls = []
     agents.record_agent_kind(
         "claude",
-        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: zai_calls.append(argv),
         profile="Claude (Z.AI)",
+        resolve_target=lambda env: "$1",
     )
-    assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in zai_calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_profile", "Claude (Z.AI)"] in zai_calls
 
     # Launch 2: default relaunch in the same session. It MUST issue the unset
     # so the previously-set @ps_agent_profile is reconciled away.
     default_calls = []
     agents.record_agent_kind(
         "claude",
-        env={"TMUX": "/tmp/tmux-1000/default,1234,0"},
+        env={"TMUX": "/tmp/tmux-1000/default,1234,0", "TMUX_PANE": "%1"},
         runner=lambda argv, **kw: default_calls.append(argv),
         profile=None,
+        resolve_target=lambda env: "$1",
     )
-    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in default_calls
+    assert ["tmux", "set-option", "-t", "$1", "-uq", "@ps_agent_profile"] in default_calls
     # And it must NOT re-set a profile value.
     assert not any(
         argv[:3] == ["tmux", "set-option", "@ps_agent_profile"]
@@ -952,6 +966,23 @@ def test_launch_agent_records_profile_before_exec(tmp_path, monkeypatch):
     assert recorded == {"kind": "claude", "profile": "Claude (Z.AI)"}
 
 
+def _fake_tmux_run(calls):
+    """Capture argv and answer the #2185 target-resolver ``display-message``."""
+
+    def run(argv, **kw):
+        calls.append(argv)
+        if "display-message" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="$1\n")
+        return subprocess.CompletedProcess(argv, 0, stdout="")
+
+    return run
+
+
+def _stub_popen(monkeypatch):
+    """Do not spawn the detached source watcher from CLI-shape tests."""
+    monkeypatch.setattr(agents.subprocess, "Popen", lambda *a, **kw: object())
+
+
 def test_cli_agent_named_profile_records_profile_option(tmp_path, monkeypatch):
     """End-to-end #858: launching claude via the z.ai profile inside tmux
     writes BOTH @ps_agent_kind=claude AND @ps_agent_profile=<name> before
@@ -960,8 +991,10 @@ def test_cli_agent_named_profile_records_profile_option(tmp_path, monkeypatch):
     workdir = tmp_path / "work"
     workdir.mkdir()
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%1")
     calls = []
-    monkeypatch.setattr(agents.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(agents.subprocess, "run", _fake_tmux_run(calls))
+    _stub_popen(monkeypatch)
     monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
     rc = main(
         [
@@ -974,8 +1007,8 @@ def test_cli_agent_named_profile_records_profile_option(tmp_path, monkeypatch):
         ]
     )
     assert rc == 0
-    assert ["tmux", "set-option", "@ps_agent_kind", "claude"] in calls
-    assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "claude"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_profile", "Claude (Z.AI)"] in calls
 
 
 def test_cli_agent_default_profile_clears_profile_option(tmp_path, monkeypatch):
@@ -986,17 +1019,19 @@ def test_cli_agent_default_profile_clears_profile_option(tmp_path, monkeypatch):
     workdir = tmp_path / "work"
     workdir.mkdir()
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%1")
     calls = []
-    monkeypatch.setattr(agents.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(agents.subprocess, "run", _fake_tmux_run(calls))
+    _stub_popen(monkeypatch)
     monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
     rc = main(
         ["agent", "claude", "--dir", str(workdir), "--profile", "Claude"]
     )
     assert rc == 0
-    assert ["tmux", "set-option", "@ps_agent_kind", "claude"] in calls
-    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "claude"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "-uq", "@ps_agent_profile"] in calls
     assert not any(
-        argv[:3] == ["tmux", "set-option", "@ps_agent_profile"] for argv in calls
+        "@ps_agent_profile" in argv and "-uq" not in argv for argv in calls
     )
 
 
@@ -1007,15 +1042,17 @@ def test_cli_agent_no_profile_clears_profile_option(tmp_path, monkeypatch):
     workdir.mkdir()
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%1")
     calls = []
-    monkeypatch.setattr(agents.subprocess, "run", lambda argv, **kw: calls.append(argv))
+    monkeypatch.setattr(agents.subprocess, "run", _fake_tmux_run(calls))
+    _stub_popen(monkeypatch)
     monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
     rc = main(["agent", "codex", "--dir", str(workdir)])
     assert rc == 0
-    assert ["tmux", "set-option", "@ps_agent_kind", "codex"] in calls
-    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_kind", "codex"] in calls
+    assert ["tmux", "set-option", "-t", "$1", "-uq", "@ps_agent_profile"] in calls
     assert not any(
-        argv[:3] == ["tmux", "set-option", "@ps_agent_profile"] for argv in calls
+        "@ps_agent_profile" in argv and "-uq" not in argv for argv in calls
     )
 
 
@@ -1027,21 +1064,19 @@ def test_cli_agent_default_then_zai_relaunch_sets_profile(tmp_path, monkeypatch)
     workdir = tmp_path / "work"
     workdir.mkdir()
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1234,0")
+    monkeypatch.setenv("TMUX_PANE", "%1")
     monkeypatch.setattr(agents.os, "execvpe", lambda f, a, e: None)
+    _stub_popen(monkeypatch)
 
     # Launch 1: default -> unset.
     default_calls = []
-    monkeypatch.setattr(
-        agents.subprocess, "run", lambda argv, **kw: default_calls.append(argv)
-    )
+    monkeypatch.setattr(agents.subprocess, "run", _fake_tmux_run(default_calls))
     assert main(["agent", "claude", "--dir", str(workdir), "--profile", "Claude"]) == 0
-    assert ["tmux", "set-option", "-uq", "@ps_agent_profile"] in default_calls
+    assert ["tmux", "set-option", "-t", "$1", "-uq", "@ps_agent_profile"] in default_calls
 
     # Launch 2: z.ai relaunch in the same session -> sets the label.
     zai_calls = []
-    monkeypatch.setattr(
-        agents.subprocess, "run", lambda argv, **kw: zai_calls.append(argv)
-    )
+    monkeypatch.setattr(agents.subprocess, "run", _fake_tmux_run(zai_calls))
     assert (
         main(
             [
@@ -1055,10 +1090,9 @@ def test_cli_agent_default_then_zai_relaunch_sets_profile(tmp_path, monkeypatch)
         )
         == 0
     )
-    assert ["tmux", "set-option", "@ps_agent_profile", "Claude (Z.AI)"] in zai_calls
+    assert ["tmux", "set-option", "-t", "$1", "@ps_agent_profile", "Claude (Z.AI)"] in zai_calls
     assert not any(
-        argv[:4] == ["tmux", "set-option", "-uq", "@ps_agent_profile"]
-        for argv in zai_calls
+        "@ps_agent_profile" in argv and "-uq" in argv for argv in zai_calls
     )
 
 

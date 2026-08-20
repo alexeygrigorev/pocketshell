@@ -375,6 +375,7 @@ def record_agent_kind(
     env: Optional[dict[str, str]] = None,
     runner=None,
     profile: Optional[str] = None,
+    resolve_target=None,
 ) -> bool:
     """Record the launched agent ``kind`` as a per-session tmux user option.
 
@@ -396,26 +397,44 @@ def record_agent_kind(
     per-session ``@ps_agent_profile`` user option alongside ``@ps_agent_kind``.
     A default / no-profile launch passes ``None`` and the option is
     RECONCILED to the current launch by UNSETTING it
-    (``tmux set-option -uq @ps_agent_profile``), so a session previously
-    launched with a non-default profile and then relaunched as a default
-    agent in the SAME tmux session does not keep the stale profile label
-    (issue #889). ``@ps_agent_kind`` is always overwritten on every launch
-    so it has no equivalent stale hazard.
+    (``tmux set-option -uq -t <target> @ps_agent_profile``), so a session
+    previously launched with a non-default profile and then relaunched as a
+    default agent in the SAME tmux session does not keep the stale profile
+    label (issue #889). ``@ps_agent_kind`` is always overwritten on every
+    launch so it has no equivalent stale hazard.
 
-    The options are session-scoped (not global): ``tmux set-option`` without
-    ``-g`` sets it on the current session, which is the session the agent
-    was launched into. tmux session options persist for the life of the
-    session, so the recorded kind/profile survives reconnect / app restart /
-    app-kill / reinstall — exactly the durability the epic requires.
+    The options are session-scoped (not global) and **explicitly targeted**
+    (issue #2185, the same construction #2159 applied to the source watcher).
+    ``tmux set-option`` without ``-t`` infers "the current session" from
+    ambient ``$TMUX_PANE``; when that variable is absent tmux silently
+    resolves the **most-recently-used session on the server**. That is how a
+    write of the sole kind authority could mislabel an unrelated session
+    with no error surfaced. The target is therefore resolved HERE, in the
+    launching process where ``$TMUX_PANE`` is authoritative, and named on
+    every write. When the target cannot be resolved there is no safe write,
+    so this returns ``False`` rather than guessing (D22 — no ambient-
+    inference fallback).
+
+    Issue #2185 open thread: the *trigger* that left the maintainer's
+    session with a foreign MRU session on 2026-08-15 is still unproven.
+    The untargeted-write fix is correct regardless, but if a session-scoped
+    option is ever again observed landing on the wrong session, treat this
+    as that recurrence rather than starting a fresh issue.
+
+    tmux session options persist for the life of the session, so the
+    recorded kind/profile survives reconnect / app restart / app-kill /
+    reinstall — exactly the durability the epic requires.
 
     No-op (returns ``False``) when not running inside tmux (``$TMUX``
     unset) — e.g. a bare SSH ``pocketshell agent`` invocation — or when the
-    kind is unknown. A failure of the ``tmux`` call is swallowed: recording
-    the kind must never prevent the agent from launching.
+    kind is unknown, or when the session target cannot be resolved. A
+    failure of the ``tmux`` call is swallowed: recording the kind must
+    never prevent the agent from launching.
 
     ``runner`` is injected so tests can assert the exact ``tmux`` argv
     without spawning a real process; production passes ``None`` and it
-    resolves to :func:`subprocess.run`.
+    resolves to :func:`subprocess.run`. ``resolve_target`` is the same
+    seam :func:`record_agent_source` uses.
     """
     if not kind:
         return False
@@ -425,15 +444,24 @@ def record_agent_kind(
         return False
     if runner is None:
         runner = subprocess.run
+    if resolve_target is None:
+        resolve_target = _resolve_tmux_session_target
     try:
+        # Issue #2185: resolve the tmux target HERE, in the launching
+        # process, where `$TMUX_PANE` is authoritative — then name it
+        # explicitly on every option write. Nothing on this path relies
+        # on tmux's ambient "current session" inference any more.
+        target = resolve_target(dict(source_env))
+        if not target:
+            return False
         runner(
-            ["tmux", "set-option", "@ps_agent_kind", kind],
+            ["tmux", "set-option", "-t", target, "@ps_agent_kind", kind],
             check=False,
         )
         if profile:
             # A non-default profile is recorded so the tree shows its label.
             runner(
-                ["tmux", "set-option", "@ps_agent_profile", profile],
+                ["tmux", "set-option", "-t", target, "@ps_agent_profile", profile],
                 check=False,
             )
         else:
@@ -448,7 +476,7 @@ def record_agent_kind(
             # clean). The kind itself (set above) is always overwritten, so it
             # has no equivalent stale hazard.
             runner(
-                ["tmux", "set-option", "-uq", "@ps_agent_profile"],
+                ["tmux", "set-option", "-t", target, "-uq", "@ps_agent_profile"],
                 check=False,
             )
     except Exception:

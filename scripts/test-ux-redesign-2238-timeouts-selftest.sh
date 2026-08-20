@@ -52,17 +52,20 @@ common_env=(
 
 # Hosted-shaped regression: the observed runner needed more than the old 30s
 # browser-load window before it requested the page. The default 60s budget must
-# absorb that startup while retaining the one-second result budget.
+# absorb that startup. Once the page is loaded, use a realistic five-second
+# result budget for this hosted-shaped callback; the focused timing cases below
+# deliberately retain the strict one-second result budget.
 run_case 75 "$SANDBOX/hosted-start.log" \
   "${common_env[@]}" \
+  POCKETSHELL_BROWSER_SMOKE_RESULT_TIMEOUT_SECONDS=5 \
   POCKETSHELL_FAKE_BROWSER_STARTUP_SECONDS=31 \
   POCKETSHELL_FAKE_BROWSER_MODE=report \
   "$SMOKE_SCRIPT"
 assert_reported_result "hosted-shaped browser startup" "$SANDBOX/hosted-start.log"
 
-# A two-second fake browser startup is longer than the one-second result
-# budget. It must still pass because the result clock starts only after the
-# server has served the smoke page.
+# Keep the one-second result budget here. A two-second fake browser startup is
+# longer than that budget, but it must still pass because the result clock
+# starts only after the server has served the smoke page.
 run_case 10 "$SANDBOX/delayed-start.log" \
   "${common_env[@]}" \
   POCKETSHELL_BROWSER_SMOKE_BROWSER_LOAD_TIMEOUT_SECONDS=5 \

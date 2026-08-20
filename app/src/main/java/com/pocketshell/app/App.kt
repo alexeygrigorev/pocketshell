@@ -3,6 +3,7 @@ package com.pocketshell.app
 import android.app.Application
 import android.os.SystemClock
 import android.util.Log
+import androidx.annotation.VisibleForTesting
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
@@ -192,6 +193,18 @@ class App : Application() {
         // tests keep the System.nanoTime default (android.jar stub).
         nowMillis = { SystemClock.elapsedRealtime() },
     )
+
+    /**
+     * Issue #2001: connected proofs share one Application process across a
+     * Nightly shard. A previous test's within-grace resume can leave the
+     * post-resume attribution window armed, swallowing a CURRENT synthetic
+     * validated handoff so the VM never emits `network_reconnect_skip`.
+     * Isolation-only; production never calls this.
+     */
+    @VisibleForTesting
+    internal fun expirePostResumeNetworkSuppressionForTest() {
+        terminalNetworkLifecycleGate.expirePostResumeNetworkSuppressionForTest()
+    }
 
     /**
      * Issue #450: scope that runs the bounded grace-window timer. Uses
@@ -838,6 +851,22 @@ internal class TerminalNetworkLifecycleGate(
                 hasLiveTerminalRuntime = hasLiveTerminalRuntime,
             ),
         )
+    }
+
+    /**
+     * Issue #2001 test seam — drop leftover post-resume suppression so a
+     * CURRENT validated handoff dispatches. Nightly shards share one
+     * Application process; a previous test's within-grace resume can leave
+     * this window armed for the rest of the original 60s grace, swallowing
+     * the journey's synthetic WIFI→CELLULAR flip before the VM emits
+     * `network_reconnect_skip`. Isolation-only; production never calls this.
+     */
+    @VisibleForTesting
+    fun expirePostResumeNetworkSuppressionForTest() {
+        postResumeNetworkSuppression = null
+        processForeground = true
+        foregroundResumePending = false
+        pendingTerminalNetworkChange = null
     }
 
     fun onNetworkChange(

@@ -93,8 +93,10 @@ import java.io.File
  *   print the marker on its own line (the command RAN) and must never show
  *   `not found`.
  * - **Phase 2** — the sibling class, on `bash`: a genuinely multi-line commit
- *   (a real paste, no trailing submit) must arrive with EXACTLY one pair of
- *   paste markers, i.e. no literal `[200~` may appear in the pane text.
+ *   (a real paste, no trailing submit) must arrive without either bracketed-paste
+ *   marker becoming literal pane text. This is the user-facing backstop for the
+ *   already-framed transport boundary; the dedicated #2266 integration test
+ *   drives the same bytes through a real tmux 3.7c fixture.
  */
 // CI_JOURNEY_SUITE_JUSTIFIED: the implementer brief for #1854 explicitly ruled
 // scripts/ci-journey-suite.sh out of scope for this change — #1846 is approved
@@ -221,8 +223,9 @@ class Issue1854TypedNewlineCommitReachesPaneDockerTest {
             pastedLines.any { it.contains(p2a) },
         )
         assertTrue(
-            "the multi-line paste was framed TWICE — the inner paste markers landed " +
-                "in the pane as literal content (issue #1854).\n  lines: $pastedLines",
+            "literal bracketed-paste markers reached the pane; the already-framed " +
+                "input was not preserved at the terminal/tmux boundary " +
+                "(#1854/#2266).\n  lines: $pastedLines",
             pastedLines.none { it.contains("[200~") || it.contains("[201~") },
         )
     } }

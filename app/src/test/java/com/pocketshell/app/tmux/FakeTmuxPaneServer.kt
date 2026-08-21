@@ -18,7 +18,7 @@ import com.pocketshell.core.tmux.CommandResponse
  * assertable directly: [submittedPrompts] is the exact byte sequence the agent
  * received, so a test can say `assertEquals(payload, submitted.single())`.
  *
- * ## The model (documented tmux semantics, verified against tmux 3.4)
+ * ## The model (documented tmux semantics; ordinary path verified against tmux 3.4)
  *
  * The command set the paste path can emit, and what a real tmux server does with
  * each — deliberately including the flags whose LOSS would corrupt the payload,
@@ -35,6 +35,9 @@ import com.pocketshell.core.tmux.CommandResponse
  *    would tear a multi-line prompt into one prompt per line). WITH `-p` tmux
  *    wraps the paste in its OWN bracketed-paste markers (which would double the
  *    markers we already framed in). `-d` deletes the buffer after pasting.
+ *    The issue-specific [tmux37cVisualEscapesPasteBuffer] switch additionally
+ *    models the 3.7c regression under audit; it is disabled for the ordinary
+ *    semantics tests and is never presented as a general tmux-version model.
  *
  * The pane models a readline-style agent input box: bracketed-paste markers are
  * consumed, everything else accumulates, and a `\r` submits the box's contents
@@ -53,6 +56,17 @@ import com.pocketshell.core.tmux.CommandResponse
  * is what makes the #1636 reproduction red on base and green with the fix.
  */
 internal class FakeTmuxPaneServer : FakeTmuxClient() {
+
+    /**
+     * Opt-in model of the tmux 3.7c `paste-buffer -r` ESC transformation.
+     *
+     * The default remains byte-preserving so the older paste-buffer tests keep
+     * documenting ordinary tmux semantics. The #2266 tests enable this switch
+     * explicitly to make the transport defect observable: a framed block sent
+     * through paste-buffer becomes `^[[200~...^[[201~`, while a `send-keys -H`
+     * command bypasses this transformation.
+     */
+    var tmux37cVisualEscapesPasteBuffer: Boolean = false
 
     /** Bytes currently sitting in each pane's agent input box. */
     private val inputBoxes: MutableMap<String, StringBuilder> = mutableMapOf()
@@ -165,6 +179,12 @@ internal class FakeTmuxPaneServer : FakeTmuxClient() {
         if (!flags.contains("r")) data = data.replace('\n', '\r')
         // Real tmux: -p wraps the paste in tmux's OWN bracketed-paste markers.
         if (flags.contains("p")) data = "$PASTE_START$data$PASTE_END"
+        // tmux 3.7c's paste-buffer path vis-encodes ESC as the two bytes `^[`.
+        // This is deliberately opt-in: it is the issue-specific server model,
+        // not a claim that every tmux version has this behaviour.
+        if (tmux37cVisualEscapesPasteBuffer && flags.contains("r")) {
+            data = data.replace("\u001B", "^[")
+        }
         if (flags.contains("d")) buffers.remove(name)
         writeToPane(paneId, data)
         return null

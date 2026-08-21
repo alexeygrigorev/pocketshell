@@ -367,7 +367,8 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
     }
 
     /**
-     * Issue #1854 — the regression this pins on the received bytes.
+     * Issues #1854/#2266 — the regression this pins on the received bytes and
+     * on the tmux command boundary.
      *
      * `TerminalView` frames a multi-line IME commit before it reaches the pane
      * input sink (the raw-SSH terminal surface has no other framer). The tmux
@@ -377,11 +378,18 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
      * content — and busybox `ash` (the `agents` fixture shell) discards a fixed
      * 16-byte keycode buffer on that unrecognised escape run, which is exactly
      * two 6-byte markers plus FOUR payload bytes: the reported `printf` -> `tf`.
+     * On tmux 3.7c, even one correct frame is corrupted if it is sent through
+     * `paste-buffer -r` (#2266), so the already-framed branch must use one
+     * exact raw-byte command while newly framed composer payloads retain the
+     * atomic buffer route. The fake server's opt-in 3.7c model makes the old
+     * route visibly fail instead of letting this remain a command-count proxy.
      */
     @Test
     fun alreadyFramedPasteBlockIsDeliveredWithoutASecondFrame() = runTest(scheduler) {
         val vm = newVm()
-        val client = FakeTmuxPaneServer()
+        val client = FakeTmuxPaneServer().apply {
+            tmux37cVisualEscapesPasteBuffer = true
+        }
         vm.attachClientForTest(client)
 
         val framed = BracketedPaste.frame("first\nsecond".toByteArray(Charsets.UTF_8))
@@ -390,11 +398,53 @@ class TmuxSessionViewModelInputTest : TmuxSessionViewModelTestBase() {
 
         assertEquals(
             "an already-framed paste block must reach the pane byte-exact " +
-                "(issue #1854); inputBox=" + client.inputBox("%0"),
+                "(issues #1854/#2266); inputBox=" + client.inputBox("%0"),
             "first\nsecond",
             client.inputBox("%0"),
         )
+        assertEquals(
+            "the already-framed block must cross tmux in one exact raw-byte command",
+            1,
+            client.sentCommands.count { it.startsWith("send-keys -H -t %0 ") },
+        )
+        assertEquals(
+            "the raw command must carry the complete framed byte sequence as hex",
+            "send-keys -H -t %0 ${BracketedPaste.hex(framed)}",
+            client.sentCommands.single { it.startsWith("send-keys -H -t %0 ") },
+        )
+        assertTrue(
+            "the already-framed branch must not use tmux's paste-buffer path",
+            client.sentCommands.none {
+                it.startsWith("set-buffer ") || it.startsWith("paste-buffer ")
+            },
+        )
     }
+
+    /**
+     * Keep the issue-specific fake honest: if the production branch is mutated
+     * back to [sendPasteBlock], this model must expose the caret-ESC bytes that
+     * tmux 3.7c would deliver, rather than silently normalising them away.
+     */
+    @Test
+    fun tmux37cPasteBufferModelExposesCaretEscapesForAnAlreadyFramedBlock() =
+        runTest(scheduler) {
+            val client = FakeTmuxPaneServer().apply {
+                tmux37cVisualEscapesPasteBuffer = true
+            }
+            val framed = BracketedPaste.frame("first\nsecond".toByteArray(Charsets.UTF_8))
+
+            sendPasteBlock(client, "%0", framed)
+
+            assertTrue(
+                "the injected tmux 3.7c mutation must be observable in the pane model",
+                client.inputBox("%0").contains("^[[200~") &&
+                    client.inputBox("%0").contains("^[[201~"),
+            )
+            assertTrue(
+                "the mutated paste-buffer route must not look byte-exact",
+                client.inputBox("%0") != "first\nsecond",
+            )
+        }
 
     @Test
     fun terminalStateInputRoutesThroughTmuxSendKeys() = runTest(scheduler) {

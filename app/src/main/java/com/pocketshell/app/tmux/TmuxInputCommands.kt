@@ -52,7 +52,11 @@ internal suspend fun sendRawInputBytes(
     if (hex.isEmpty()) return
     // Issue #1460: the `-H` raw-byte injection rides the interactive send exec
     // lane, not the shared `-CC` channel, so it does not head-of-line-block
-    // behind a live agent `%output` burst.
+    // behind a live agent `%output` burst. One command carries the complete
+    // byte sequence, preserving the single commit boundary for this route.
+    // Issue #2266: tmux 3.7c's `paste-buffer -r` visual-encodes ESC as `^[`;
+    // already-framed terminal input must therefore stay on this exact raw-byte
+    // route instead of going through a tmux paste buffer.
     // Issue #1586 (H1a): surface a tmux `%error` (dead/closed pane) as a real
     // failure instead of swallowing it, so a control-byte / terminal-response
     // send to a dead pane fails visibly (agent-lane parity).
@@ -135,16 +139,12 @@ internal suspend fun sendBracketedPaste(
 }
 
 /**
- * Issue #1854: deliver an ALREADY-framed bracketed-paste block byte-exact.
+ * Issue #1636: atomically fill and commit a bracketed-paste block.
  *
- * [sendBracketedPaste] frames its payload; this is the same atomic
- * fill-then-commit delivery for a block whose producer already applied the
- * `\e[200~`/`\e[201~` markers. `TerminalView` is such a producer (the raw-SSH
- * terminal surface has no other framer, so the view must frame there), and
- * framing that block a SECOND time on the way to tmux put the inner markers
- * into the receiving program as literal content — visible on `bash` as a
- * `^[[200~` prefix on the command line, and on busybox `ash` as a swallowed
- * 16-byte run that ate the command's leading characters (issue #1854).
+ * [sendBracketedPaste] frames its payload before calling this function. An
+ * already-framed block produced by `TerminalView` does NOT use this function:
+ * tmux 3.7c rewrites ESC bytes during `paste-buffer -r`, so that path uses
+ * [sendRawInputBytes] in [deliverPaneInputBytes] instead (issue #2266).
  */
 internal suspend fun sendPasteBlock(
     client: TmuxClient,
@@ -355,14 +355,12 @@ internal suspend fun deliverPaneInputBytes(
     // BSpace) keep round-tripping as named keys — bracketed paste
     // would just confuse the receiving program for a one-liner.
     //
-    // Issue #1854: DELIVER an already-framed block instead of framing it
-    // again. `TerminalView` frames a multi-line IME commit before it reaches
-    // this sink (the raw-SSH surface has no other framer), so re-framing
-    // here leaked the inner markers into the receiving program as literal
-    // content and made busybox `ash` discard a 16-byte keycode buffer on the
-    // doubled escape run, eating the command's leading bytes.
+    // Issue #1854: TerminalView has already classified and framed this block;
+    // do not apply a second application-level frame. Issue #2266 adds the
+    // transport boundary: tmux 3.7c's paste-buffer path is not byte-exact for
+    // embedded ESC, so preserve the existing frame with one raw-byte command.
     if (BracketedPaste.isFramed(bytes)) {
-        sendPasteBlock(client, paneId, bytes)
+        sendRawInputBytes(client, paneId, bytes)
         return
     }
     if (BracketedPaste.containsLineBreak(bytes)) {

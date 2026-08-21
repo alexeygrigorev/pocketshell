@@ -46,6 +46,7 @@ internal class RealSshPortForward(
     override val remoteHost: String,
     override val remotePort: Int,
     override val localPort: Int,
+    private val activePairs: MutableSet<Pair<Socket, DirectConnection>> = CopyOnWriteArraySet(),
 ) : SshPortForward {
 
     private val serverSocket: ServerSocket =
@@ -57,23 +58,23 @@ internal class RealSshPortForward(
     private val activeConnectionSlots = AtomicInteger(0)
 
     /**
+     * Serialises pair ownership and copy-thread registration with close().
+     * Once [running] is false, no new copy thread may be registered. This
+     * makes the snapshots used by close() complete: a thread cannot appear
+     * after close has taken its join set.
+     */
+    private val lifecycleLock = Any()
+
+    /**
      * Live copy threads (one per direction, per accepted connection). We
      * track these so [close] can `join` them deterministically rather than
      * relying on daemon-thread auto-cleanup, which would leak file
      * descriptors briefly after teardown and produce flaky tests.
-     * `CopyOnWriteArraySet` is a fine fit — writes are rare (only on
-     * connection open/close), reads happen in [close].
+     * Mutations are serialised by [lifecycleLock]. A live thread is never
+     * removed by [close] merely because its join budget expired; its finally
+     * block owns removal when it actually exits.
      */
     private val copyThreads: CopyOnWriteArraySet<Thread> = CopyOnWriteArraySet()
-
-    /**
-     * Currently-open accepted-connection pairs. [close] iterates and
-     * closes each one, which unblocks the per-direction copy threads
-     * (they're stuck on `read()` on one of these streams, not on the
-     * `running` flag — that's only checked between iterations).
-     */
-    private val activePairs: CopyOnWriteArraySet<Pair<Socket, DirectConnection>> =
-        CopyOnWriteArraySet()
 
     /** Daemon thread that accepts incoming local connections. */
     private val acceptThread: Thread = Thread(::acceptLoop, "ssh-portfwd-accept-$localPort").apply {
@@ -142,12 +143,15 @@ internal class RealSshPortForward(
         }
 
         val pair = local to channel
-        activePairs.add(pair)
-        // Re-check `running` AFTER adding to the set: close() may have
-        // raced past us and already swept activePairs (without seeing
-        // ours). In that case we close eagerly and skip the copy threads.
-        if (!running.get()) {
-            activePairs.remove(pair)
+        val pairRegistered = synchronized(lifecycleLock) {
+            if (!running.get()) {
+                false
+            } else {
+                activePairs.add(pair)
+                true
+            }
+        }
+        if (!pairRegistered) {
             try {
                 closePair(local, channel)
             } finally {
@@ -177,7 +181,8 @@ internal class RealSshPortForward(
     }
 
     private fun closePairAndUntrack(pair: Pair<Socket, DirectConnection>) {
-        if (activePairs.remove(pair)) {
+        val owned = synchronized(lifecycleLock) { activePairs.remove(pair) }
+        if (owned) {
             try {
                 closePair(pair.first, pair.second)
             } finally {
@@ -209,11 +214,16 @@ internal class RealSshPortForward(
             try {
                 body()
             } finally {
-                copyThreads.remove(Thread.currentThread())
+                synchronized(lifecycleLock) {
+                    copyThreads.remove(Thread.currentThread())
+                }
             }
         }, name).apply { isDaemon = true }
-        copyThreads.add(thread)
-        thread.start()
+        synchronized(lifecycleLock) {
+            if (!running.get()) return
+            copyThreads.add(thread)
+            thread.start()
+        }
     }
 
     private fun copy(src: InputStream, dst: OutputStream, counter: AtomicLong) {
@@ -239,23 +249,35 @@ internal class RealSshPortForward(
         channels.closeChannel(channel)
     }
 
+    /**
+     * Stops accepting connections and tears down owned pairs.
+     *
+     * The lifecycle lock seals pair/thread registration before the snapshots
+     * are taken. A close that cannot prove every copy thread terminated within
+     * the aggregate join budget interrupts the remaining threads and throws a
+     * diagnostic; it never silently detaches a live thread from [copyThreads].
+     */
     override fun close() {
-        // `compareAndSet` gives us a single-shot guarantee: the first
-        // caller wins and runs the teardown, every subsequent (including
-        // concurrent) close() returns immediately. This is what makes
-        // double-close + concurrent close + stop-during-copy safe — there
-        // is exactly one writer to serverSocket.close(), and copy threads
-        // observe `running` going false on their next iteration.
-        if (!running.compareAndSet(true, false)) return
+        // Seal the lifecycle transition and pair snapshot together. A copy
+        // callback that reaches closePairAndUntrack concurrently must either
+        // claim the pair before this block or observe that close() owns it;
+        // it cannot mutate activePairs between the snapshot and clear.
+        val pairs = synchronized(lifecycleLock) {
+            // `running` is written under the same lock that serialises every
+            // activePairs mutation and snapshot. This also makes the
+            // post-close startCopyThread check a single lifecycle decision.
+            if (!running.compareAndSet(true, false)) return
+            val snapshot = ArrayList(activePairs)
+            activePairs.clear()
+            snapshot
+        }
         runCatching { serverSocket.close() }
         // Close every accepted-connection pair we still own. Copy
         // threads block on `src.read(buf)` inside [copy], which doesn't
         // check `running` until between iterations — so closing the
-        // underlying sockets is what actually unblocks them (`read`
-        // throws IOException, which the loop catches as normal
+        // underlying socket and channel is what actually unblocks them
+        // (`read` throws IOException, which the loop catches as normal
         // termination).
-        val pairs = activePairs.toList()
-        activePairs.clear()
         for ((local, channel) in pairs) {
             try {
                 closePair(local, channel)
@@ -269,19 +291,65 @@ internal class RealSshPortForward(
         // calling close() — unusual but cheap to guard).
         val self = Thread.currentThread()
         val deadlineNanos = System.nanoTime() + CLOSE_JOIN_TIMEOUT_MS * NANOS_PER_MILLI
-        for (t in copyThreads) {
+        val threadsToJoin = synchronized(lifecycleLock) { ArrayList(copyThreads) }
+        for (t in threadsToJoin) {
             if (t === self) continue
             val remainingMillis = (deadlineNanos - System.nanoTime()) / NANOS_PER_MILLI
             if (remainingMillis <= 0L) break
             try {
                 t.join(remainingMillis)
             } catch (_: InterruptedException) {
-                // Preserve interrupt status; stop joining the rest — they
-                // are daemon threads and will eventually exit on their
-                // own as the sockets/channels are closed.
+                // Preserve interrupt status and stop joining. The final
+                // live-thread check below turns an incomplete join into an
+                // explicit close failure instead of silently detaching it.
                 Thread.currentThread().interrupt()
                 break
             }
+        }
+        // The join budget is aggregate and deliberately bounded. A callback
+        // that ignores the closed streams remains registered and makes the
+        // close fail explicitly; it is never detached while still alive.
+        val lingeringThreads = threadsToJoin.filter { it !== self && it.isAlive }
+        if (lingeringThreads.isNotEmpty()) {
+            lingeringThreads.forEach(Thread::interrupt)
+            // Interruptible callbacks can need a small scheduling window to
+            // unwind their finally blocks. Give them that window before
+            // declaring close failed; the first join remains the aggregate
+            // cleanup budget, and this is only the short interrupt response
+            // grace period.
+            var interrupted = false
+            if (Thread.interrupted()) interrupted = true
+            val interruptDeadlineNanos =
+                System.nanoTime() + POST_INTERRUPT_JOIN_TIMEOUT_MS * NANOS_PER_MILLI
+            for (thread in lingeringThreads) {
+                val remainingMillis =
+                    (interruptDeadlineNanos - System.nanoTime()) / NANOS_PER_MILLI
+                if (remainingMillis <= 0L) break
+                try {
+                    thread.join(remainingMillis)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                    break
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt()
+
+            // Check the actual Thread handles captured before teardown. A
+            // callback removes itself from copyThreads in finally, slightly
+            // before Thread.run() returns; registry emptiness alone would
+            // therefore be an unsound close-success oracle.
+            val stillAlive = lingeringThreads.filter(Thread::isAlive)
+            synchronized(lifecycleLock) {
+                copyThreads.filter { !it.isAlive }.forEach(copyThreads::remove)
+            }
+            if (stillAlive.isEmpty()) return
+            val details = stillAlive.joinToString { thread ->
+                "${thread.name}(${thread.state})"
+            }
+            throw IllegalStateException(
+                "Port forward 127.0.0.1:$localPort close timed out after " +
+                    "$CLOSE_JOIN_TIMEOUT_MS ms; live copy threads: $details",
+            )
         }
         // Don't join the accept thread — it's a daemon and the SocketException
         // wakeup is immediate. Joining would deadlock if close() is called
@@ -304,6 +372,7 @@ internal class RealSshPortForward(
         // have already been closed, so this is only a deterministic cleanup
         // window, not a per-thread multiplier.
         const val CLOSE_JOIN_TIMEOUT_MS = 1_000L
+        const val POST_INTERRUPT_JOIN_TIMEOUT_MS = 100L
         const val NANOS_PER_MILLI = 1_000_000L
     }
 }

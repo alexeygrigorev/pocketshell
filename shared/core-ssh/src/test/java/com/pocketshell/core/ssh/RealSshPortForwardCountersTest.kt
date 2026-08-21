@@ -15,6 +15,8 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.lang.reflect.Proxy
+import java.util.AbstractSet
+import java.util.LinkedHashSet
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -130,31 +132,245 @@ class RealSshPortForwardCountersTest {
             Function0::class.java,
         )
         startCopyThread.isAccessible = true
+        val finished = CountDownLatch(4)
         repeat(4) { index ->
             startCopyThread.invoke(
                 forward,
                 "test-copy-$index",
                 {
                     started.countDown()
-                    release.await(5, TimeUnit.SECONDS)
+                    try {
+                        release.await(5, TimeUnit.SECONDS)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    } finally {
+                        finished.countDown()
+                    }
                     Unit
                 } as Function0<Unit>,
             )
         }
-        assertTrue("test copy threads should be running", started.await(2, TimeUnit.SECONDS))
-
-        val startedAt = System.nanoTime()
         try {
+            assertTrue("test copy threads should be running", started.await(2, TimeUnit.SECONDS))
+
+            val startedAt = System.nanoTime()
             forward.close()
+            val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+
+            assertTrue(
+                "close should spend one aggregate join budget, not one timeout per copy thread; " +
+                    "elapsed=$elapsedMs ms",
+                elapsedMs < 1_800L,
+            )
+            assertTrue(
+                "an interruptible callback must finish before close returns",
+                finished.await(2, TimeUnit.SECONDS),
+            )
         } finally {
             release.countDown()
+            assertTrue(
+                "all aggregate-budget callbacks must be released and awaited during cleanup",
+                finished.await(2, TimeUnit.SECONDS),
+            )
+            forward.close()
         }
-        val elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAt)
+    }
 
-        assertTrue(
-            "close should spend one aggregate join budget, not one timeout per copy thread; elapsed=$elapsedMs ms",
-            elapsedMs < 1_800L,
+    @Test
+    fun `close leaves no live copy-thread registrations after its bounded cleanup`() {
+        val localPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            .use { it.localPort }
+        val forward = RealSshPortForward(
+            channels = object : PortForwardChannelTransport {
+                override fun openChannel(remoteHost: String, remotePort: Int): DirectConnection =
+                    error("test does not accept local connections")
+
+                override fun closeChannel(channel: DirectConnection) = Unit
+            },
+            remoteHost = "remote.example",
+            remotePort = 5432,
+            localPort = localPort,
         )
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val startCopyThread = RealSshPortForward::class.java.getDeclaredMethod(
+            "startCopyThread",
+            String::class.java,
+            Function0::class.java,
+        ).apply { isAccessible = true }
+        val copyThreadsField = RealSshPortForward::class.java.getDeclaredField("copyThreads")
+            .apply { isAccessible = true }
+        var copyThread: Thread? = null
+
+        try {
+            startCopyThread.invoke(
+                forward,
+                "test-copy-lifecycle",
+                {
+                    started.countDown()
+                    try {
+                        release.await(5, TimeUnit.SECONDS)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                    } finally {
+                        finished.countDown()
+                    }
+                    Unit
+                } as Function0<Unit>,
+            )
+            assertTrue("test copy thread should be running", started.await(2, TimeUnit.SECONDS))
+
+            @Suppress("UNCHECKED_CAST")
+            val registered = copyThreadsField.get(forward) as Set<Thread>
+            copyThread = registered.singleOrNull { it.name == "test-copy-lifecycle" }
+            assertTrue("the running callback must be present in copyThreads", copyThread != null)
+            assertTrue("the captured copy thread should be alive", copyThread!!.isAlive)
+
+            forward.close()
+
+            assertTrue(
+                "close must wait for the callback's finally block",
+                finished.await(2, TimeUnit.SECONDS),
+            )
+            assertTrue(
+                "the actual copy thread captured before close must no longer be alive",
+                !copyThread!!.isAlive,
+            )
+        } finally {
+            release.countDown()
+            assertTrue(
+                "the live-thread callback must always be released and awaited during cleanup",
+                finished.await(2, TimeUnit.SECONDS),
+            )
+            copyThread?.join(2_000L)
+            forward.close()
+        }
+    }
+
+    @Test
+    fun `close reports a copy callback that stays alive after interrupt`() {
+        val localPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            .use { it.localPort }
+        val forward = RealSshPortForward(
+            channels = object : PortForwardChannelTransport {
+                override fun openChannel(remoteHost: String, remotePort: Int): DirectConnection =
+                    error("test does not accept local connections")
+
+                override fun closeChannel(channel: DirectConnection) = Unit
+            },
+            remoteHost = "remote.example",
+            remotePort = 5432,
+            localPort = localPort,
+        )
+        val started = CountDownLatch(1)
+        val stop = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+        val startCopyThread = RealSshPortForward::class.java.getDeclaredMethod(
+            "startCopyThread",
+            String::class.java,
+            Function0::class.java,
+        ).apply { isAccessible = true }
+        val copyThreadsField = RealSshPortForward::class.java.getDeclaredField("copyThreads")
+            .apply { isAccessible = true }
+        var copyThread: Thread? = null
+
+        try {
+            startCopyThread.invoke(
+                forward,
+                "test-copy-non-terminating",
+                {
+                    started.countDown()
+                    try {
+                        while (stop.count > 0L) {
+                            try {
+                                stop.await(25, TimeUnit.MILLISECONDS)
+                            } catch (_: InterruptedException) {
+                                // Deliberately ignore close()'s interrupt: this
+                                // callback is the non-terminating close case.
+                            }
+                        }
+                    } finally {
+                        finished.countDown()
+                    }
+                    Unit
+                } as Function0<Unit>,
+            )
+            assertTrue("test callback should be running", started.await(2, TimeUnit.SECONDS))
+
+            @Suppress("UNCHECKED_CAST")
+            val registered = copyThreadsField.get(forward) as Set<Thread>
+            copyThread = registered.singleOrNull { it.name == "test-copy-non-terminating" }
+            assertTrue("the non-terminating callback must be registered", copyThread != null)
+
+            var failure: IllegalStateException? = null
+            try {
+                forward.close()
+            } catch (e: IllegalStateException) {
+                failure = e
+            }
+            assertTrue("a still-live callback must make close fail explicitly", failure != null)
+            assertTrue(
+                "the failure must identify the live copy thread",
+                failure!!.message.orEmpty().contains("live copy threads"),
+            )
+            assertTrue("the deliberately non-terminating callback should still be alive", copyThread!!.isAlive)
+        } finally {
+            stop.countDown()
+            copyThread?.interrupt()
+            assertTrue(
+                "the non-terminating callback must be released and awaited during cleanup",
+                finished.await(2, TimeUnit.SECONDS),
+            )
+            copyThread?.join(2_000L)
+            forward.close()
+        }
+    }
+
+    @Test
+    fun `close snapshots injected active pairs under its lifecycle lock`() {
+        val localPort = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+            .use { it.localPort }
+        val raceSet = LockAwareSnapshotRaceSet<Pair<Socket, DirectConnection>>()
+        raceSet.add(Socket() to TestDirectConnection())
+        val forward = RealSshPortForward(
+            channels = object : PortForwardChannelTransport {
+                override fun openChannel(remoteHost: String, remotePort: Int): DirectConnection =
+                    error("test does not accept local connections")
+
+                override fun closeChannel(channel: DirectConnection) = Unit
+            },
+            remoteHost = "remote.example",
+            remotePort = 5432,
+            localPort = localPort,
+            activePairs = raceSet,
+        )
+        val lifecycleLock = requireNotNull(
+            RealSshPortForward::class.java.getDeclaredField("lifecycleLock")
+                .apply { isAccessible = true }
+                .get(forward),
+        )
+        raceSet.attachLifecycleLock(lifecycleLock)
+
+        try {
+            raceSet.startMutator()
+            forward.close()
+            assertTrue(
+                "the snapshot must execute while lifecycleLock is held",
+                raceSet.snapshotObservedUnderLock,
+            )
+            assertTrue(
+                "the injected mutation must always be released and awaited",
+                raceSet.mutationFinished.await(2, TimeUnit.SECONDS),
+            )
+        } finally {
+            raceSet.releaseMutator()
+            assertTrue(
+                "the injected race fixture must not leave its mutator behind",
+                raceSet.mutationFinished.await(2, TimeUnit.SECONDS),
+            )
+            forward.close()
+        }
     }
 
     private class SingleReadInputStream(
@@ -216,6 +432,73 @@ class RealSshPortForwardCountersTest {
                 Thread.currentThread().interrupt()
                 throw IOException(e)
             }
+        }
+    }
+
+    /**
+     * A one-element set that makes an unlocked snapshot deterministic: it
+     * reports its pre-race size, lets a mutator clear the set, and then lets
+     * the old one-element `toList()` call `iterator().next()` on an empty set,
+     * which throws NoSuchElementException. The production ArrayList snapshot
+     * runs under lifecycleLock, so the mutator waits until the copy is made.
+     */
+    private class LockAwareSnapshotRaceSet<T> : AbstractSet<T>() {
+        private val values = LinkedHashSet<T>()
+        private val snapshotEntered = CountDownLatch(1)
+        val mutationFinished = CountDownLatch(1)
+        @Volatile
+        var snapshotObservedUnderLock: Boolean = false
+            private set
+
+        private var lifecycleLock: Any? = null
+        private var mutator: Thread? = null
+
+        override val size: Int
+            get() {
+                val observedSize = values.size
+                val lock = requireNotNull(lifecycleLock) { "lifecycle lock not attached" }
+                snapshotObservedUnderLock = Thread.holdsLock(lock)
+                snapshotEntered.countDown()
+                if (!snapshotObservedUnderLock) {
+                    check(mutationFinished.await(2, TimeUnit.SECONDS)) {
+                        "race mutator did not clear the unlocked snapshot"
+                    }
+                }
+                return observedSize
+            }
+
+        override fun iterator(): MutableIterator<T> = values.iterator()
+
+        override fun add(element: T): Boolean = values.add(element)
+
+        override fun clear() {
+            values.clear()
+        }
+
+        fun attachLifecycleLock(lock: Any) {
+            lifecycleLock = lock
+        }
+
+        fun startMutator() {
+            val lock = requireNotNull(lifecycleLock) { "lifecycle lock not attached" }
+            mutator = Thread({
+                try {
+                    snapshotEntered.await(2, TimeUnit.SECONDS)
+                    synchronized(lock) {
+                        values.clear()
+                    }
+                } finally {
+                    mutationFinished.countDown()
+                }
+            }, "test-active-pairs-mutator").apply {
+                isDaemon = true
+                start()
+            }
+        }
+
+        fun releaseMutator() {
+            snapshotEntered.countDown()
+            mutator?.join(2_000L)
         }
     }
 

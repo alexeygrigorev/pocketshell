@@ -463,8 +463,8 @@ Two consequences, stated so nobody has to re-derive them:
   Kotlin: `+6.1 min on every Unit job and nothing faster`, which over the last
   104 `main` commits exactly cancelled the scoped saving. Note the cost grew as
   the guards got stricter (~100 s → ~137 s when the B9 vocabulary mutations were
-  added, → ~155–205 s once the receiver-agnostic registrar census and the round-6
-  non-registrar-attribute case were added — a range that is mostly box load, see
+  added, → ~155–205 s once the live Click import and its mutation cases were
+  added — a range that is mostly box load, see
   below), which is the other reason these belong in a cheap job that runs ONCE
   rather than inside a test task that runs per variant. **Never move them back
   into a Gradle test task**; if a new guard needs a home, add a step to that job.
@@ -729,125 +729,39 @@ of these holds, each derived mechanically:
 |---|---|---|
 | **producer** | a file in it invokes the CLI (`PocketshellCommand`, literal `pocketshell …`) | `app.usage`, `app.projects`, `app.tmux` … (15 packages) |
 | **consumer** | an *invoking file* imports it — one hop; the invoker hands the reply to something, and that something is in its import set | `core.usage` (the parser), `core.storage.entity` (the CLI lockstep version columns), `uikit.model` (`HostSetupState`) … (21) |
-| **vocabulary** | a file in it names a real subcommand, where the list is read out of the producer's own top-level registrations — **every** form, through Python's `ast` | `app.settings`, which parses the `pocketshell qr-share` payload although nothing in the app ever invokes it — the payload arrives by QR scan, so no import edge exists to follow (20) |
+| **vocabulary** | a file in it names a real subcommand, where the list comes from the producer's live Click Group | `app.settings`, which parses the `pocketshell qr-share` payload although nothing in the app ever invokes it — the payload arrives by QR scan, so no import edge exists to follow (20) |
 
-**Why the vocabulary is read with a parser and not a grep (finding B9).** That
-list used to come from one grep for `cli.add_command(…, name="…")` — *one* of
-the forms click offers. `cli.py` already registers `daemon` as
-`@cli.group(name="daemon")`, so the reader was under-reading the producer on the
-shipped tree while the guard printed a healthy-looking "16 subcommands".
-Converting four more registrations to the form `daemon` already used dropped
-`usage`, `tree`, `agents` and `qr-share` from the vocabulary, took
-`com.pocketshell.app.settings` — the one package this end exists for — **off the
-seam**, cut unit selection 570 → 560, and left **every floor green**. A floor
-cannot see that: under-reading produces a plausible number. So the reader is now
-`ast` over `cli.py` (the producer's own grammar), and it is fail-closed twice
-over: it counts registration **sites** independently of the names it resolves
-and check 7 asserts **names == sites**, and anything it cannot decode — a
-registration inside a loop or function, a `name=` behind a constant, an omitted
-name, a bare `@cli.group`, an unparseable `cli.py`, a missing `python3`, or a
-sibling module taking the group object so a registration could live outside
-`cli.py` — is reported by name and fails the guard. `python3` is therefore a
-hard dependency of `--verify-manifest`; it is already one for
-`scripts/check-ci-unit-forced-execution.py` in the same job.
+**Why the vocabulary uses a live Click Group instead of source parsing.** The
+producer's command table is a runtime object. A source reader can miss aliases,
+dictionary writes, sibling registration, or a custom Group whose
+`list_commands()` synthesizes commands; each omission produces a plausible
+smaller vocabulary. The guard therefore imports `cli.py`, verifies that its
+`cli` export is a `click.Group`, and asks that object for
+`list_commands()`. The returned names are the vocabulary used to find the
+host-CLI seam.
 
-**Why detection is receiver-agnostic, and not a list of recognised shapes.**
-Equality is only worth what the reader can *see*, and for five rounds the reader
-saw a registration only when its receiver was the literal name `cli`. Anything
-reached through a different binding — `_g = cli; _g.add_command(…)`, or a helper
-that takes the group as a parameter — was neither a SITE nor a NAME, so
-`names == sites` held vacuously at 13 == 13 while four subcommands vanished, the
-seam dropped from 32 packages / 820 classes to 31 / 809, and the guard printed
-a healthy-looking "13 subcommands read from 13 registration sites". Six rounds
-closed six spellings one at a time, which does not converge: the ways to name an
-object are unbounded.
+The live reader is fail-closed:
 
-The reader therefore takes a **census**. It collects every `add_command` /
-`group` / `command` call node in `cli.py` whatever the receiver, resolves each
-receiver through a module-level binding environment, and gives each node exactly
-one verdict: it registers on the root group (must yield a literal name), it
-registers on a provably different object (a sub-group such as `daemon_group`, or
-the `@click.group` that defines the root — neither adds a top-level word), or the
-receiver does not resolve at all — which is UNREADABLE, because that call might
-be adding a top-level subcommand. The shipped tree reads **22 registrar calls =
-17 top-level sites + 5 non-root + 0 unresolved**, and check 7 asserts that
-identity so a node cannot silently fall out of the census. An alias is now *read
-correctly* rather than refused: reddening on it would only force the producer
-into one writing style, and the property we need is a complete vocabulary.
+- Import failures, a missing/incorrect `cli` export, a failing
+  `list_commands()`, invalid or duplicate command names, and a missing reader
+  terminator are errors. Partial output is discarded before the seam is marked.
+- There is no AST fallback or static registration census. The guard floors the
+  live command count and independently rejects any import/runtime error, so
+  under-reading cannot look like a successful check.
+- The reader prepends the checkout's `tools/pocketshell/src` to the import path
+  so it inspects the source under test. The guard job installs only the
+  import-time dependency `click>=8.2.0`; it does not install the complete
+  package, because the pinned `quse` backend is a runtime subprocess dependency
+  and is not needed to import `cli.py`.
 
-Two escapes remain once the file itself is fully censused, and both are closed
-because the group **object** can leave `cli.py`: by import (any sibling module
-that binds this module or the root name, including `from pocketshell import cli`,
-`from .cli import *` and a run-time `importlib` — an `ast` walk, because the
-round-4 regex over import lines let all three through), and **as a value** handed
-to a helper. The second is not hypothetical: `cli.py` already does
-`register_push_card_commands(push_group)`, whose body in `cards.py` runs
-`@push_group.command("checklist")`, so passing the *root* group the same way is
-one character away. The scope is deliberate — a whole-package receiver-agnostic
-scan is unsound in the other direction, since nine `re.Match.group(…)` calls in
-this package have local receivers that no environment can resolve, and each would
-become a permanent false red. Exhaustive over the module that owns the group,
-plus a hard trip the moment the group can leave it, is the narrowest sound rule.
+The focused self-test keeps the failure modes load-bearing. It mutates the
+real `cli.py` into a custom `DynGroup` whose `list_commands()` adds
+`synthetic-live` (red on the old AST reader, green on the live reader), adds
+a missing import (explicit import error), and replaces the interpreter with a
+nonzero shim (missing terminator). Each mutation is checked before its verdict
+is read.
 
-**Round 6 corrected a false claim in that "exhaustive" premise, and the
-correction is the reason the rule is now stated as an inversion.** The census
-covers registrar *calls*, and round 5 additionally waved through every attribute
-access on the root binding on the grounds that "registrar attributes are already
-in the census". That is true of `add_command`/`group`/`command` and false of
-every other attribute — and `click.Group.commands` is a **plain dict**
-(`add_command` is literally `self.commands[name] = cmd`), so
-`cli.commands["x"] = cmd` and `cli.commands.update({…})` register a top-level
-subcommand through a path that is not a registrar call at all. Neither entered
-the census; the identity balanced over a smaller file (18 = 13 + 5 + 0) with zero
-UNREADABLE, `com.pocketshell.app.settings` fell off the seam again (32 -> 31
-packages, 820 -> 809 classes, unit selection 570 -> 560), and `--verify-manifest`
-returned rc=0. The group never left `cli.py`, so no escape check could see it.
 
-The fix applies the same inversion the receiver resolution already uses: the
-reader allows only the four attributes it can *prove* inert — `add_command`,
-`group` and `command`, each of which the census collects as an `ast.Attribute`
-node whether or not it is called, plus `main`, click's invocation entry — and
-reports **every other attribute read of the root by name**, including ones nobody
-has thought of. Adding `commands` to the registrar list was rejected: that is one
-more entry on a list of recognised spellings, which is the pattern that produced
-seven of them. Case 16g-l pins it, with `result_callback` alongside the four
-`commands` forms so the case fails if the check ever narrows back to one name.
-
-Correspondingly, the guard's OK line no longer claims it read *all* registration
-sites. It says it read the sites **it could see**, which is the claim the reader
-can actually support; the completeness argument lives in the census identity,
-the non-registrar-attribute trip, the value-escape trip and the cross-module
-trip, each of which is separately asserted and separately self-tested.
-
-**Known limits — four spellings that are still silent, measured not assumed.**
-Round 6 searched for an eighth spelling instead of waiting for one, and found
-four, all reproducing the same signature as the seventh (census 18 = 13 + 5 + 0,
-zero UNREADABLE, `com.pocketshell.app.settings` off the seam, 820 -> 809 classes,
-unit selection 570 -> 560, `--verify-manifest` rc=0). They are NOT closed, on
-purpose: the spelling-by-spelling game does not converge, and the honest move is
-to state the bound rather than buy another round.
-
-- `sys.modules[__name__].cli.commands["x"] = cmd`
-- `importlib.import_module(__name__).cli.commands["x"] = cmd`
-- `globals()["cli"].commands["x"] = cmd`
-- `@click.group(cls=DynGroup)` where the subclass's `list_commands` /
-  `get_command` synthesise entries that are never stored in `commands` at all
-
-The first three share one axis the reader cannot reach by construction: every
-check from step 1b onward is anchored on a module-level *binding*, so an
-expression that reaches the group object without ever producing an `ast.Name`
-that resolves to the root is invisible to all of them. The fourth is a different
-axis again — there is no registration to see, static or otherwise, because the
-command table is computed at run time.
-
-Closing either axis properly means the reader stops being a static reader:
-importing `cli.py` and asking the live `Group` object for `list_commands()` would
-cover all four at once, and would make the census, the escape checks and the
-cross-module scan largely redundant. That is a different design, not a patch, and
-it costs a Python import of the package inside a shell guard. Until someone makes
-that call, treat the vocabulary end as sound against every spelling that names
-the group and unsound against the four above, and read the guard's own OK line
-literally: it read the sites **it could see**.
 
 The one hop is deliberately unfiltered: it also marks collaborators that are not
 wire consumers (theme tokens imported by an invoking Composable). That
@@ -858,18 +772,15 @@ journeys and 570 of 659 unit classes**, i.e. effectively a full run. That is the
 right answer for this class of change.
 
 `--verify-manifest` check 7 floors **each end separately** — producer ≥ 12,
-consumer ≥ 15, vocabulary ≥ 14, registration sites ≥ 12, seam packages under
-`shared/` ≥ 8, host-CLI-coupled classes ≥ 600 — plus the four non-floor
-assertions the vocabulary end needs (`names == sites`, `undecodable == 0`,
-`unresolved receivers == 0`, and the census identity
-`scanned == sites + non-root + unresolved`),
-because a floor is the wrong instrument for under-reading and the site floor's
-only remaining job is catching a *totally dead* reader, where the equality is
-vacuous at 0 == 0. A total-only floor is
-exactly what hid the missing end (15 packages looked healthy at zero shared
-reach), and a `>= 1` floor detects only a *totally dead* mechanism: dropping the
-two string-literal alternatives from the invoke marker used to cut the seam 15→9
-packages / 569→210 classes with nothing noticing.
+consumer ≥ 15, vocabulary ≥ 14, live Click commands ≥ 12, seam packages under
+`shared/` ≥ 8, host-CLI-coupled classes ≥ 600 — and rejects every live-reader
+import/runtime error. The command-count floor catches a totally dead reader,
+while the independent error check catches a broken import or a partial read;
+neither failure can be mistaken for a smaller-but-valid vocabulary. A total-only
+floor is exactly what hid the missing end (15 packages looked healthy at zero
+shared reach), and a `>= 1` floor detects only a *totally dead* mechanism:
+dropping the two string-literal alternatives from the invoke marker used to cut
+the seam 15→9 packages / 569→210 classes with nothing noticing.
 `--coverage-invariant`'s **I9** pins both journeys
 (`FolderListHostOutdatedTreeVersionDaemonDockerTest` #1509 G10,
 `FolderListOldCliHydrateDockerTest`) **and unit consumers**

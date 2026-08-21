@@ -519,8 +519,8 @@ pocketshell_test_area_classify() {
 #
 #   (c) VOCABULARY end — a production package whose source NAMES a real host-CLI
 #       subcommand (`pocketshell <subcommand>`), where the subcommand vocabulary
-#       is extracted from the PRODUCER ITSELF: the top-level registrations on the
-#       `click` group in `tools/pocketshell/src/pocketshell/cli.py`.
+#       is read from the live Click group in
+#       `tools/pocketshell/src/pocketshell/cli.py`.
 #
 #       (b) cannot be the whole consumer rule because a wire contract does not
 #       need an in-app invoker at all. `com.pocketshell.app.settings` parses the
@@ -532,38 +532,14 @@ pocketshell_test_area_classify() {
 #       DataStore file name) and "the `pocketshell` daemon registry" (prose) are
 #       not subcommands and do not match.
 #
-#       ROUND-3 FINDING B9 — WHY THIS READS THE PRODUCER'S GRAMMAR, NOT ITS TEXT.
-#       This extraction used to be one grep for `add_command(…, name="…")`, i.e.
-#       ONE of the registration forms click offers. `cli.py` already uses a
-#       second one — `daemon` is `@cli.group(name="daemon")` — so the extractor
-#       under-read the producer *on the shipped tree* while the guard printed
-#       "16 subcommands" as though that were the producer's list. Converting four
-#       more registrations to the form `daemon` already uses dropped `usage`,
-#       `tree`, `agents` and `qr-share` from the vocabulary, took
-#       `com.pocketshell.app.settings` — the ONE package this end exists to
-#       catch — off the seam, cut unit selection 570 -> 560, and left every floor
-#       green. That is the #847 class wearing its fourth spelling, and a floor
-#       cannot see it: a floor detects a SMALLER number, and under-reading
-#       produces a number that looks fine.
-#
-#       So the reader is `python3 -c ast` over `cli.py` — the producer's own
-#       grammar — and it is FAIL-CLOSED on two axes:
-#
-#         * it counts registration SITES (`cli.add_command(...)`, `@cli.group(…)`,
-#           `@cli.command(…)`, in any shape, anywhere in the module) and the
-#           NAMES it could resolve, and `--verify-manifest` check 7 asserts
-#           names == sites. Equality is the instrument a floor could not be:
-#           a form the reader cannot decode raises the site count without
-#           raising the name count, so it is LOUD instead of silently narrowing.
-#         * anything it cannot decode — a registration inside a loop / function /
-#           conditional (the shape `agents.py:880` already uses one level down),
-#           a `name=` that is a constant rather than a literal, an omitted name,
-#           a bare `@cli.group`, a `cli.py` it cannot parse, a missing `python3` —
-#           is reported as UNREADABLE and check 7 fails on it by name.
-#
-#       The floor on the site count stays, with a narrower job than before: it
-#       is the only thing that can catch a TOTALLY dead reader, because the
-#       equality check is vacuous at 0 == 0.
+#       The reader imports `cli.py`, verifies that its exported `cli` is a live
+#       `click.Group`, and asks that object for `list_commands()`. This is the
+#       producer's runtime contract, so decorator aliases, sibling registration,
+#       command-table writes, and dynamically synthesized commands all have one
+#       source of truth. Import-time failures are UNREADABLE and fail the guard;
+#       a missing terminator (including a missing interpreter or killed reader)
+#       is also unreadable. There is no AST fallback: an incomplete import must
+#       never become a smaller-but-plausible vocabulary.
 #
 # A package on the seam by ANY of the three contributes `host-cli` to the
 # dependency set of every test that imports it or sits in it.
@@ -574,11 +550,12 @@ pocketshell_test_area_classify() {
 # / 569 classes while the shared reach was zero.
 POCKETSHELL_TA_HOSTCLI_MARKER="${POCKETSHELL_TA_HOSTCLI_MARKER:-PocketshellCommand|\"pocketshell |pocketshell --}"
 # The producer-side source of the subcommand vocabulary for end (c). Overridable
-# only so the self-test can kill it, or point it at a mutated `cli.py`, and watch
-# the guard redden. An absolute path is used as-is; a relative one is resolved
-# against the repo root, so a self-test mutant can live in its own sandbox
-# instead of inside the tree it is measuring.
+# only so the self-test can point the live reader at a mutation. An absolute path
+# is used as-is; a relative one is resolved against the repo root. The package
+# source root is kept separate so a self-test can import a mutated `cli.py` while
+# resolving its normal `pocketshell.*` dependencies from the checkout.
 POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="${POCKETSHELL_TA_HOSTCLI_CLI_SOURCE:-tools/pocketshell/src/pocketshell/cli.py}"
+POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="${POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT:-}"
 
 declare -A POCKETSHELL_TA_PROD_PKG_AREA=()      # production package -> area
 declare -A POCKETSHELL_TA_PROD_PKG_HOSTCLI=()   # production package -> 1 when on the CLI wire seam
@@ -606,10 +583,6 @@ POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS=0
 POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS=0
 POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS=0
 POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS=0
-POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES=0
-POCKETSHELL_TA_INDEX_HOSTCLI_CLI_NONROOT=0
-POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED=0
-POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SCANNED=0
 POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE=0
 POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG=""
 
@@ -656,549 +629,118 @@ _pocketshell_hostcli_recount() {
 #
 # $1 = absolute path to `cli.py`. Emits a line-oriented protocol on stdout:
 #
-#   SCANNED <n>          every registrar call node in the file, ANY receiver
-#   SITES <n>            of those, registrations on the TOP-LEVEL group
-#   NONROOT <n>          of those, registrations PROVEN to be on something else
-#   UNCLASSIFIED <n>     of those, ones whose receiver could not be resolved
-#   NAME <subcommand>    one per SITE whose name the reader could resolve
-#   UNREADABLE <reason>  one per site (or condition) it could NOT decode
+#   NAME <subcommand>    one name returned by the live Click Group
+#   UNREADABLE <reason>  an import, type, command-name, or list_commands failure
 #   END                  the reader ran to completion
 #
-# `SCANNED == SITES + NONROOT + UNCLASSIFIED` is an accounting identity the
-# caller re-checks: no registrar call in the file can fall out of the census.
-#
 # The caller treats a MISSING `END` as unreadable, which is what makes "python3
-# is not installed", "python3 crashed" and "the reader was killed" fail the same
-# closed way as a registration form it does not understand. Nothing here ever
-# returns a smaller-but-plausible vocabulary: under-reading is an ERROR, because
-# a smaller number is exactly what a floor cannot distinguish from normal drift.
+# is not installed", "python3 crashed" and "the reader was killed" fail closed.
+# Nothing here ever returns a smaller-but-plausible vocabulary: an import or
+# runtime failure is an ERROR, because a smaller number is exactly what a floor
+# cannot distinguish from normal drift.
 _pocketshell_hostcli_read_cli_vocabulary() {
   local src="$1"
+  local package_root="${POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT:-}"
+  local repo_root="${POCKETSHELL_TA_REPO_ROOT:-}"
+
   if [[ ! -f "$src" ]]; then
-    printf 'UNREADABLE no such CLI source: %s\nSITES 0\nEND\n' "$src"
+    printf 'UNREADABLE no such CLI source: %s\nEND\n' "$src"
     return 0
   fi
-  python3 - "$src" 2>/dev/null <<'PY'
-import ast
+  if [[ -z "$package_root" ]]; then
+    if [[ -n "$repo_root" ]]; then
+      package_root="$repo_root/tools/pocketshell/src"
+    elif [[ "$src" == */pocketshell/cli.py ]]; then
+      package_root="${src%/pocketshell/cli.py}"
+    else
+      package_root="$(pwd)"
+    fi
+  fi
+  if [[ "$package_root" != /* ]]; then
+    package_root="${repo_root:-.}/$package_root"
+  fi
+  if [[ ! -d "$package_root" ]]; then
+    printf 'UNREADABLE cannot import %s: package source root does not exist: %s\nEND\n' \
+      "$src" "$package_root"
+    return 0
+  fi
+
+  POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="$package_root" \
+    python3 - "$src" "$package_root" 2>/dev/null <<'PY'
+import importlib.util
 import os
 import re
 import sys
 
-path = sys.argv[1]
-# A subcommand token the vocabulary regex can safely carry. Anything else is
-# reported UNREADABLE rather than dropped: a name with regex metacharacters
-# would either corrupt the seam scan or silently shrink the vocabulary, and
-# "silently shrink" is the whole defect this reader exists to end.
-SUBCOMMAND_TOKEN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-names = []
-unreadable = []
-sites = 0
-nonroot = 0
-unclassified = 0
-scanned = 0
+path = os.path.abspath(sys.argv[1])
+package_root = os.path.abspath(sys.argv[2])
+subcommand_token = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 
-def emit_and_exit():
-    for line in unreadable:
-        print("UNREADABLE " + line.replace("\n", " "))
-    for n in names:
-        print("NAME " + n)
-    print("SITES %d" % sites)
-    print("NONROOT %d" % nonroot)
-    print("UNCLASSIFIED %d" % unclassified)
-    print("SCANNED %d" % scanned)
+def unreadable(reason):
+    print("UNREADABLE " + str(reason).replace("\n", " "))
     print("END")
     raise SystemExit(0)
 
 
 try:
-    tree = ast.parse(open(path, encoding="utf-8").read(), filename=path)
-except Exception as exc:  # noqa: BLE001 - any parse problem must fail closed
-    unreadable.append("cannot parse %s: %s: %s" % (path, type(exc).__name__, exc))
-    emit_and_exit()
-
-
-def string_literal(node):
-    """The plain string a node denotes, or None when it is not a literal."""
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    return None
-
-
-def decorator_target(dec):
-    return dec.func if isinstance(dec, ast.Call) else dec
-
-
-# 1. Identify the ONE top-level click group. Everything below is anchored on its
-#    binding name, so a rename cannot leave the reader silently reading nothing.
-roots = []
-for node in tree.body:
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        for dec in node.decorator_list:
-            target = decorator_target(dec)
-            if (
-                isinstance(target, ast.Attribute)
-                and target.attr == "group"
-                and isinstance(target.value, ast.Name)
-                and target.value.id == "click"
-            ):
-                roots.append(node.name)
-if len(roots) != 1:
-    unreadable.append(
-        "expected exactly one module-level @click.group in %s, found %d"
-        % (path, len(roots))
-    )
-    emit_and_exit()
-root = roots[0]
-
-REGISTRARS = ("add_command", "group", "command")
-accounted = set()
-
-# ---------------------------------------------------------------------------
-# 1b. Resolve every module-level BINDING in this file to one of three kinds:
-#
-#       "root"    — provably the top-level group object: the decorated def
-#                   itself, and anything transitively assigned from it
-#                   (`_g = cli`, `_h = _g`).
-#       "nonroot" — provably a DIFFERENT object: an imported module or name, an
-#                   undecorated def/class, or a def whose decorators are all
-#                   click's own factories (which return a fresh Group/Command
-#                   or the fresh function itself, never some other object).
-#       "unknown" — everything else, INCLUDING every name bound inside a
-#                   function (parameters, locals, loop targets, comprehension
-#                   variables) and every name bound by a top-level for/if/with.
-#
-# This is what makes the reader receiver-AGNOSTIC, and it is the round-5 fix.
-# Rounds 1-5 keyed detection on the receiver being the literal name `cli`, so a
-# registration reached through ANY other binding was neither a SITE nor a NAME:
-# `names == sites` held vacuously and the vocabulary shrank in silence. Five
-# spellings were closed one at a time and a sixth (`_g = cli; _g.add_command(…)`,
-# and a helper taking the group as a parameter) was still silent, because the
-# space of ways to name an object is unbounded and cannot be enumerated.
-#
-# So the reader no longer recognises a list of shapes. It looks at EVERY
-# registrar call in this file, whatever the receiver, and each one must either
-# resolve to the root group (and then to a literal name) or be proven to be
-# something else. Anything it cannot place is UNREADABLE — loud, never absent.
-# ---------------------------------------------------------------------------
-CLICK_FACTORY_ATTRS = ("group", "command")
-env = {}
-root_rebound = []
-star_imports = []
-
-
-def decorator_is_binding_safe(dec):
-    """True when a decorator cannot make its target BE the root group object.
-
-    click's `@click.*` decorators and `@<group>.group` / `@<group>.command`
-    factories return either a fresh Group/Command or the fresh function they
-    were handed. An unrecognised decorator could return anything at all —
-    including `cli` itself — so it leaves the binding "unknown" rather than
-    letting the reader guess.
-    """
-    target = decorator_target(dec)
-    if not isinstance(target, ast.Attribute) or not isinstance(target.value, ast.Name):
-        return False
-    if target.value.id == "click":
-        return True
-    return target.attr in CLICK_FACTORY_ATTRS and env.get(target.value.id) in (
-        "root",
-        "nonroot",
+    import click
+except BaseException as exc:  # noqa: BLE001 - missing import-time dependency is a guard error
+    unreadable(
+        "cannot import %s: %s: %s"
+        % (path, type(exc).__name__, exc)
     )
 
+try:
+    sys.path.insert(0, package_root)
+    spec = importlib.util.spec_from_file_location("_pocketshell_live_cli", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("no import loader for %s" % path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+except BaseException as exc:  # noqa: BLE001 - cli.py must be safe to import
+    unreadable(
+        "cannot import %s: %s: %s"
+        % (path, type(exc).__name__, exc)
+    )
 
-def bind(name, kind, lineno):
-    if name == root and kind != "root":
-        root_rebound.append(lineno)
-    env[name] = kind
+group = getattr(module, "cli", None)
+if not isinstance(group, click.Group):
+    unreadable(
+        "%s does not export cli as click.Group (got %s)"
+        % (path, type(group).__name__)
+    )
 
+try:
+    context = click.Context(group)
+    live_names = list(group.list_commands(context))
+except BaseException as exc:  # noqa: BLE001 - list_commands is the live oracle
+    unreadable(
+        "cannot read live commands from %s: %s: %s"
+        % (path, type(exc).__name__, exc)
+    )
 
-def value_kind(node):
-    # Only a bare Name propagates a known kind. A call, attribute, subscript or
-    # literal is "unknown": the reader will not guess that `click.Group()` or
-    # `_make_group()` is not the root group, it will say so.
-    if isinstance(node, ast.Name):
-        return env.get(node.id, "unknown")
-    return "unknown"
-
-
-def bind_targets(target, kind, lineno):
-    if isinstance(target, ast.Name):
-        bind(target.id, kind, lineno)
-    elif isinstance(target, (ast.Tuple, ast.List)):
-        for elt in target.elts:
-            bind_targets(elt, "unknown", lineno)
-    elif isinstance(target, ast.Starred):
-        bind_targets(target.value, "unknown", lineno)
-    # Attribute/Subscript targets bind no module-level name.
-
-
-for node in tree.body:
-    if isinstance(node, ast.Import):
-        for alias in node.names:
-            bind(alias.asname or alias.name.split(".")[0], "nonroot", node.lineno)
-    elif isinstance(node, ast.ImportFrom):
-        for alias in node.names:
-            if alias.name == "*":
-                star_imports.append(node.lineno)
-            else:
-                bind(alias.asname or alias.name, "nonroot", node.lineno)
-    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-        if node.name == root:
-            env[node.name] = "root"
-        elif all(decorator_is_binding_safe(d) for d in node.decorator_list):
-            bind(node.name, "nonroot", node.lineno)
-        else:
-            bind(node.name, "unknown", node.lineno)
-    elif isinstance(node, ast.Assign):
-        kind = value_kind(node.value)
-        for target in node.targets:
-            bind_targets(target, kind, node.lineno)
-    elif isinstance(node, ast.AnnAssign):
-        bind_targets(
-            node.target,
-            value_kind(node.value) if node.value is not None else "unknown",
-            node.lineno,
+seen = set()
+for name in live_names:
+    if not isinstance(name, str):
+        unreadable(
+            "live command name from %s is not a string (%s)"
+            % (path, type(name).__name__)
         )
-    elif isinstance(node, ast.AugAssign):
-        bind_targets(node.target, "unknown", node.lineno)
-    else:
-        # A top-level for/if/with/try can bind names too, and the reader trusts
-        # none of them: every name they store becomes "unknown", so registering
-        # through one is UNREADABLE rather than invisible.
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store):
-                bind(sub.id, "unknown", getattr(sub, "lineno", node.lineno))
-
-# A `global` inside a function can rebind a module-level name after import time.
-for sub in ast.walk(tree):
-    if isinstance(sub, ast.Global):
-        for nm in sub.names:
-            if nm == root:
-                unreadable.append(
-                    "the root binding %r is declared `global` at line %d, so a "
-                    "function can point it at another object" % (root, sub.lineno)
-                )
-            else:
-                env[nm] = "unknown"
-for line in sorted(set(root_rebound)):
-    unreadable.append(
-        "the root binding %r is reassigned at line %d, so which object the "
-        "registrations below land on is not decidable from the source" % (root, line)
-    )
-for line in sorted(set(star_imports)):
-    unreadable.append(
-        "%s does a star import at line %d, which can bind arbitrary names this "
-        "reader cannot resolve" % (os.path.basename(path), line)
-    )
-
-
-def receiver_of(node):
-    """(kind, human description) of the object a registrar is invoked on."""
-    recv = node.value
-    if isinstance(recv, ast.Name):
-        return env.get(recv.id, "unknown"), recv.id
-    return "unknown", "<%s expression>" % type(recv).__name__
-
-
-def accept(where, value):
-    if not SUBCOMMAND_TOKEN.match(value):
-        unreadable.append("%s: %r is not a plain subcommand token" % (where, value))
-    else:
-        names.append(value)
-
-
-def take_name(where, kwargs, positional, index):
-    """Resolve one site's subcommand name, or record why it cannot be resolved."""
-    global sites
-    sites += 1
-    for kw in kwargs:
-        if kw.arg == "name":
-            value = string_literal(kw.value)
-            if value is None:
-                unreadable.append(
-                    "%s: name= is not a plain string literal (%s)"
-                    % (where, type(kw.value).__name__)
-                )
-            else:
-                accept(where, value)
-            return
-        if kw.arg is None:
-            unreadable.append("%s: **kwargs registration cannot be read" % where)
-            return
-    if len(positional) > index:
-        value = string_literal(positional[index])
-        if value is None:
-            unreadable.append(
-                "%s: positional name is not a plain string literal (%s)"
-                % (where, type(positional[index]).__name__)
-            )
-        else:
-            accept(where, value)
-        return
-    unreadable.append(
-        "%s: no explicit name — click would derive it from the decorated object, "
-        "which this reader deliberately does not guess" % where
-    )
-
-
-# 2. THE CENSUS. Every registrar call node in the file, whatever its receiver.
-#    Nothing below filters by receiver name; the receiver is RESOLVED instead.
-registrar_nodes = [
-    n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr in REGISTRARS
-]
-scanned = len(registrar_nodes)
-
-# 3. The two forms the reader can fully decode, both at module top level and
-#    both anchored on a receiver that RESOLVES to the root group — so an alias
-#    (`_g = cli`) is read correctly rather than vanishing.
-for node in tree.body:
-    # (i) `<root>.add_command(cmd, name="x")`
-    if (
-        isinstance(node, ast.Expr)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Attribute)
-        and node.value.func.attr == "add_command"
-    ):
-        kind, who = receiver_of(node.value.func)
-        if kind == "root":
-            accounted.add(id(node.value.func))
-            take_name(
-                "%s.add_command line %d" % (who, node.lineno),
-                node.value.keywords,
-                node.value.args,
-                1,
-            )
-        continue
-    # (ii) `@<root>.group(name="x")` / `@<root>.command("x")` on a top-level def
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        for dec in node.decorator_list:
-            target = decorator_target(dec)
-            if not isinstance(target, ast.Attribute) or target.attr not in (
-                "group",
-                "command",
-            ):
-                continue
-            kind, who = receiver_of(target)
-            if kind != "root":
-                continue
-            accounted.add(id(target))
-            where = "@%s.%s line %d" % (who, target.attr, dec.lineno)
-            if isinstance(dec, ast.Call):
-                take_name(where, dec.keywords, dec.args, 0)
-            else:
-                sites += 1
-                unreadable.append(
-                    "%s: bare decorator with no name — click would derive it from "
-                    "the function name, which this reader deliberately does not guess"
-                    % where
-                )
-
-# 4. Every remaining node in the census gets a verdict. There are exactly three,
-#    and together with step 3 they partition the census — see the identity below.
-#
-#      root      -> the receiver resolves to the top-level group, but the call
-#                   is not in a form step 3 can place: a module-level loop or
-#                   conditional, a nested def, a comprehension, or a function
-#                   body that names the group through its module-level binding.
-#                   Counts as a SITE and is UNREADABLE, so both the equality
-#                   check and the decode check fire on it.
-#                   (A function that receives the group as a PARAMETER is not
-#                   this case — its receiver does not resolve at all, so it
-#                   lands in `unknown` below. Round 4's comment claimed step 3
-#                   caught "inside a function"; for the parameter form that was
-#                   false, and the silence was the round-5 blocker.)
-#      nonroot   -> it registers on a provably different object: a sub-group
-#                   (`@daemon_group.command`, 4 of these ship today), or it is
-#                   the `@click.group` that DEFINES the root. Neither puts a word
-#                   in the TOP-LEVEL vocabulary, so there is no name to owe.
-#      unknown   -> the receiver could not be resolved (a parameter, a local, a
-#                   subscript, a call result). This is the round-5 blocker: such
-#                   a call might be adding a top-level subcommand, and the reader
-#                   says so instead of leaving it out of both counters.
-for node in registrar_nodes:
-    if id(node) in accounted:
-        continue
-    kind, who = receiver_of(node)
-    line = getattr(node, "lineno", 0)
-    if kind == "root":
-        sites += 1
-        unreadable.append(
-            "%s.%s at line %d registers on the top-level group but is not a "
-            "module-top-level registration this reader can decode" % (who, node.attr, line)
+    if not subcommand_token.fullmatch(name):
+        unreadable(
+            "live command name from %s is not a plain subcommand token: %r"
+            % (path, name)
         )
-    elif kind == "nonroot":
-        nonroot += 1
-    else:
-        unclassified += 1
-        unreadable.append(
-            "%s.%s at line %d: the receiver %r resolves to neither the top-level "
-            "group nor a provably different object, so this reader cannot tell "
-            "whether it registers a top-level subcommand (bind the group to a "
-            "module-level name so it can)" % (who, node.attr, line, who)
-        )
+    if name in seen:
+        unreadable("live command list from %s contains duplicate %r" % (path, name))
+    seen.add(name)
 
-# The partition must be exact, or a registrar node fell out of the census and
-# the equality check above it would be measuring less than the whole file.
-if scanned != sites + nonroot + unclassified:
-    unreadable.append(
-        "internal accounting error in %s: %d registrar nodes scanned but "
-        "%d site + %d non-root + %d unresolved classified"
-        % (path, scanned, sites, nonroot, unclassified)
-    )
-
-# 4b. The census above is total over THIS file, so the only way a registration
-#     can still hide is for the group OBJECT to leave the file. Step 5 catches
-#     it leaving by import; this catches it leaving as a VALUE — handed to a
-#     helper, returned, stashed in a container. That is not hypothetical: this
-#     package already does exactly that one level down
-#     (`register_push_card_commands(push_group)` in cli.py, whose body in
-#     cards.py runs `@push_group.command("checklist")`), so `…(cli)` is one
-#     character away from registering a top-level subcommand out of sight.
-#
-#     Round 5 allowed EVERY attribute access on the root binding, on the claim
-#     that "registrar attrs are already in the census". That claim was false for
-#     a NON-registrar attribute, and it was the round-5 blocker (the SEVENTH
-#     spelling): `click.Group.commands` is a plain dict — `add_command` is
-#     literally `self.commands[name] = cmd` — so `cli.commands["x"] = cmd` and
-#     `cli.commands.update({…})` register a top-level subcommand through a path
-#     that is not a registrar CALL at all. They never entered the census, the
-#     identity balanced over a smaller file (18 = 13 + 5 + 0), and the guard
-#     printed PASS while `com.pocketshell.app.settings` fell off the seam.
-#
-#     So this step is INVERTED, the same way step 1b inverted receiver
-#     detection: instead of naming the shapes that are forbidden, it names the
-#     four attributes that are PROVEN unable to hide a registration and reports
-#     every other one — including attributes nobody has thought of yet.
-#
-#       add_command / group / command — the census at step 2 collects EVERY
-#           `ast.Attribute` node with these names, called or not, and step 3/4
-#           give each one a verdict. Nothing can hide behind them; a bare
-#           `_add = cli.add_command` is already a SITE with no name, so the
-#           equality check fires on it.
-#       main — click's invocation entry (`BaseCommand.main`). It parses argv and
-#           runs the CLI; it does not mutate the command table.
-#
-#     The remaining two allowances are unchanged and are not attribute reads:
-#     the root as the function being CALLED, and as the right-hand side of a
-#     module-level assignment (the alias, which the environment tracks).
-#     Anything else — attribute or not — is UNREADABLE.
-#
-#     Deliberately NOT the fix: adding `commands` to REGISTRARS. That is one
-#     more entry on a list of recognised spellings, which is the pattern that
-#     produced seven of them.
-parents = {}
-for n in ast.walk(tree):
-    for c in ast.iter_child_nodes(n):
-        parents[id(c)] = n
-alias_rhs = set()
-for st in tree.body:
-    if isinstance(st, ast.Assign):
-        alias_rhs.add(id(st.value))
-    elif isinstance(st, ast.AnnAssign) and st.value is not None:
-        alias_rhs.add(id(st.value))
-for n in ast.walk(tree):
-    if not (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
-        continue
-    if env.get(n.id) != "root":
-        continue
-    par = parents.get(id(n))
-    if isinstance(par, ast.Attribute):
-        if par.attr in REGISTRARS or par.attr == "main":
-            continue
-        unreadable.append(
-            "the top-level group %r is read through the non-registrar attribute "
-            "%r at line %d; click's Group.commands is a plain dict, so an "
-            "attribute this reader has not proven inert can add a top-level "
-            "subcommand the census never sees"
-            % (n.id, par.attr, getattr(n, "lineno", 0))
-        )
-        continue
-    if isinstance(par, ast.Call) and par.func is n:
-        continue
-    if id(n) in alias_rhs:
-        continue
-    unreadable.append(
-        "the top-level group %r escapes as a value at line %d (inside %s); it "
-        "could be registered on anywhere, so this reader cannot claim to have "
-        "seen every top-level subcommand"
-        % (n.id, getattr(n, "lineno", 0), type(par).__name__ if par else "module")
-    )
-
-# 5. CROSS-MODULE. Steps 1b-4 are exhaustive over THIS file, and that is enough
-#    for the whole package only because the root group object cannot be NAMED in
-#    a sibling module without being imported from here. This step is what makes
-#    that premise true rather than assumed: any sibling that so much as gains
-#    access to this module or to the root binding trips, so no registration can
-#    happen out of the census's sight. Nothing does it today — `__main__.py`
-#    imports `main`, the entry function, not the group.
-#
-#    It is an AST scan, not a text scan, for the same reason step 4 stopped
-#    matching receivers by name: a regex over import lines recognises the import
-#    spellings someone thought of. `from pocketshell import cli`,
-#    `from .cli import *` and `importlib.import_module("pocketshell.cli")` all
-#    slipped past the round-4 regex. The AST sees every form at once.
-#
-#    (A module OUTSIDE this package could still import the group. That is not
-#    reachable here — the package is self-contained and its entry point is
-#    `cli:main` — and would need the reader to be pointed at a wider tree.)
-package_dir = os.path.dirname(os.path.abspath(path))
-self_name = os.path.basename(path)
-module_stem = os.path.splitext(self_name)[0]
-
-
-def targets_this_module(mod):
-    return mod == module_stem or mod.endswith("." + module_stem)
-
-
-def trip(entry, why):
-    unreadable.append(
-        "%s takes the top-level group object from %s (%s); a registration there "
-        "would be invisible to this reader" % (entry, self_name, why)
-    )
-
-
-for entry in sorted(os.listdir(package_dir)):
-    if not entry.endswith(".py") or entry == self_name:
-        continue
-    sibling = os.path.join(package_dir, entry)
-    try:
-        sib = ast.parse(open(sibling, encoding="utf-8").read(), filename=sibling)
-    except Exception as exc:  # noqa: BLE001 - an unreadable sibling fails closed
-        unreadable.append(
-            "cannot read sibling module %s: %s: %s" % (entry, type(exc).__name__, exc)
-        )
-        continue
-    reason = None
-    for node in ast.walk(sib):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if targets_this_module(alias.name):
-                    reason = "imports the %s module" % module_stem
-                elif alias.name == "importlib" or alias.name.startswith("importlib."):
-                    reason = "can import by name at run time (importlib)"
-        elif isinstance(node, ast.ImportFrom):
-            mod = node.module or ""
-            for alias in node.names:
-                if alias.name == "*" and targets_this_module(mod):
-                    reason = "star-imports everything from %s" % self_name
-                elif alias.name in (root, module_stem):
-                    reason = "binds the name %r" % alias.name
-                elif mod == "importlib" and alias.name == "import_module":
-                    reason = "can import by name at run time (importlib)"
-        elif isinstance(node, ast.Name) and node.id == "__import__":
-            reason = "can import by name at run time (__import__)"
-        elif isinstance(node, ast.Attribute) and node.attr == "import_module":
-            reason = "can import by name at run time (importlib)"
-        if reason is not None:
-            break
-    if reason is not None:
-        trip(entry, reason)
-
-emit_and_exit()
+for name in sorted(live_names):
+    print("NAME " + name)
+print("END")
 PY
 }
-
 # Build (once) the whole index. Idempotent; call it before any FQCN lookup.
 pocketshell_test_areas_build_index() {
   [[ "$POCKETSHELL_TA_INDEX_BUILT" -eq 1 ]] && return 0
@@ -1268,15 +810,9 @@ pocketshell_test_areas_build_index() {
   fi
 
   # (c) VOCABULARY end: packages naming a real subcommand, where "real" comes
-  #     from the producer's own registration sites, read through the producer's
-  #     own grammar (finding B9 — see the block comment above for why a grep for
-  #     ONE registration form was already under-reading the shipped `cli.py`).
+  #     from the live Click Group exported by the producer's `cli.py`.
   local cli_src="$POCKETSHELL_TA_HOSTCLI_CLI_SOURCE"
   [[ "$cli_src" == /* ]] || cli_src="$root/$cli_src"
-  POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES=0
-  POCKETSHELL_TA_INDEX_HOSTCLI_CLI_NONROOT=0
-  POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED=0
-  POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SCANNED=0
   POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE=0
   POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG=""
   local -a subcommands=() vocab_lines=()
@@ -1285,10 +821,6 @@ pocketshell_test_areas_build_index() {
   for vline in "${vocab_lines[@]}"; do
     case "$vline" in
       END) saw_end=1 ;;
-      "SITES "*)        POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES="${vline#SITES }" ;;
-      "NONROOT "*)      POCKETSHELL_TA_INDEX_HOSTCLI_CLI_NONROOT="${vline#NONROOT }" ;;
-      "UNCLASSIFIED "*) POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED="${vline#UNCLASSIFIED }" ;;
-      "SCANNED "*)      POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SCANNED="${vline#SCANNED }" ;;
       "NAME "*)       subcommands+=("${vline#NAME }") ;;
       "UNREADABLE "*)
         POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE=$((POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE + 1))
@@ -1302,15 +834,12 @@ pocketshell_test_areas_build_index() {
     # half a vocabulary: a partial read is the exact failure this end exists to
     # make loud.
     subcommands=()
-    POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES=0
-    POCKETSHELL_TA_INDEX_HOSTCLI_CLI_NONROOT=0
-    POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED=0
-    POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SCANNED=0
     POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE=$((POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE + 1))
     POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG="${POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG:+$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG; }the vocabulary reader did not finish for $cli_src (python3 missing, crashed, or killed)"
   fi
-  # Counted BEFORE dedup so it can be compared with the site count: two sites
-  # registering the same name is a producer bug, not a reason to under-report.
+  # Count the live Group's returned names before the grep regex deduplicates
+  # them. Duplicate names are rejected by the reader, so this is the complete
+  # runtime vocabulary rather than a static registration-site estimate.
   POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS="${#subcommands[@]}"
   if [[ "${#subcommands[@]}" -gt 0 && "${#prod_files[@]}" -gt 0 ]]; then
     # Longest-first so `agent-log` cannot be shadowed by `agent`.

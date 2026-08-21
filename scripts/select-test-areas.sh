@@ -742,35 +742,11 @@ verify_manifest() {
   [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS" -ge 12 ]] || index_fail+=("host-CLI wire-seam PRODUCER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS (< 12) — the invoke marker /$POCKETSHELL_TA_HOSTCLI_MARKER/ has narrowed (#847 lockstep coupling)")
   [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS" -ge 15 ]] || index_fail+=("host-CLI wire-seam CONSUMER packages = $POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS (< 15) — the reply end of the wire has narrowed (finding B6)")
   [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS" -ge 14 ]] || index_fail+=("host-CLI wire-seam VOCABULARY packages = $POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS (< 14) — packages naming a real subcommand have narrowed")
-  # ROUND-3 FINDING B9. A floor on the extracted count cannot see the failure
-  # that actually happened: the extractor read ONE of the registration forms
-  # `cli.py` uses, so it under-read the producer on the shipped tree while
-  # printing a healthy-looking 16. Four more registrations moved to the form
-  # `daemon` already used would have dropped `usage`/`tree`/`agents`/`qr-share`
-  # from the vocabulary, taken `com.pocketshell.app.settings` off the seam and
-  # cut unit selection 570 -> 560 with every floor still green. Under-reading
-  # produces a plausible number, and no floor distinguishes a plausible number
-  # from the right one. EQUALITY does: the reader counts registration SITES
-  # independently of the names it resolves, so a form it cannot decode raises
-  # one and not the other.
-  #
-  # The site floor survives with a narrower job — it is the only thing that
-  # catches a totally dead reader, because `names == sites` is vacuous at 0 == 0.
-  #
-  # ROUND-5 FINDING. Equality was still satisfiable vacuously by a whole class of
-  # registration: the reader keyed detection on the receiver being the literal
-  # name `cli`, so `_g = cli; _g.add_command(…)` — or a helper taking the group
-  # as a parameter — was neither a SITE nor a NAME. Six rounds closed six
-  # spellings one at a time; the space of ways to name an object is unbounded, so
-  # the reader is now receiver-AGNOSTIC: it takes a CENSUS of every registrar call
-  # in the file and each one must resolve to the root group, be proven to be on a
-  # different object, or be reported unresolved. This identity is what says the
-  # census is total — if it holds, no registrar call escaped all three counters.
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SCANNED" -eq $((POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES + POCKETSHELL_TA_INDEX_HOSTCLI_CLI_NONROOT + POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED)) ]] || index_fail+=("host-CLI registrar census in $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE does not balance: $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SCANNED calls scanned but $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES top-level + $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_NONROOT non-root + $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED unresolved classified — a registration fell out of the census, which is how under-reading stays silent")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED" -eq 0 ]] || index_fail+=("host-CLI vocabulary reader could not resolve the receiver of $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED registrar call(s) in $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE — each one might be registering a top-level subcommand the seam cannot see")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES" -ge 12 ]] || index_fail+=("host-CLI registration SITES found in $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE = $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES (< 12) — the producer-side vocabulary reader is dead, so the vocabulary end of the seam is blind")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS" -eq "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES" ]] || index_fail+=("host-CLI subcommand names read = $POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS but registration SITES in $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE = $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES — the reader is UNDER-READING the producer (finding B9), so part of the wire vocabulary is invisible to the seam")
-  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE" -eq 0 ]] || index_fail+=("host-CLI vocabulary reader could not decode $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE registration(s) in $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE: $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG")
+  # The live command count has a floor so a dead/empty reader cannot satisfy
+  # the guard at zero. Import and runtime failures are a separate fail-closed
+  # condition; they must never be laundered into a smaller vocabulary.
+  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS" -ge 12 ]] || index_fail+=("host-CLI live Click commands read = $POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS (< 12) — the live vocabulary reader is dead or empty")
+  [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNREADABLE" -eq 0 ]] || index_fail+=("host-CLI live vocabulary reader could not import/read $POCKETSHELL_TA_HOSTCLI_CLI_SOURCE: $POCKETSHELL_TA_INDEX_HOSTCLI_CLI_DIAG")
   [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS" -ge 8 ]] || index_fail+=("host-CLI wire-seam packages under shared/ = $POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS (< 8) — this is EXACTLY the B6 defect: it was 0 while the total looked healthy, and :shared:core-usage:test (the strict parser of \`pocketshell usage --json\`) did not run on a host-CLI change")
   [[ "$POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES" -ge 600 ]] || index_fail+=("test classes depending on the host CLI = $POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES (< 600) — #1509 / the usage parser would stop running on a tools/pocketshell change")
   if [[ "${#index_fail[@]}" -gt 0 ]]; then
@@ -778,7 +754,7 @@ verify_manifest() {
     printf '  %s\n' "${index_fail[@]}"
     failures=$((failures + 1))
   else
-    echo "OK: dependency index populated (${POCKETSHELL_TA_INDEX_CLASSES} classes, ${POCKETSHELL_TA_INDEX_PROD_PKGS} production packages, ${POCKETSHELL_TA_INDEX_IMPORT_LINES} imports, ${POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES} cross-area, ${POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES} host-CLI-dependent via ${POCKETSHELL_TA_INDEX_HOSTCLI_PKGS} wire-seam packages = ${POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS} producer / ${POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS} consumer / ${POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS} vocabulary over ${POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS} subcommands read from the ${POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SITES} top-level registration sites this reader could see in ${POCKETSHELL_TA_HOSTCLI_CLI_SOURCE} — a census of ${POCKETSHELL_TA_INDEX_HOSTCLI_CLI_SCANNED} registrar calls, ${POCKETSHELL_TA_INDEX_HOSTCLI_CLI_NONROOT} of them resolved to a non-root receiver and ${POCKETSHELL_TA_INDEX_HOSTCLI_CLI_UNCLASSIFIED} unresolved — ${POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS} of them under shared/)"
+    echo "OK: dependency index populated (${POCKETSHELL_TA_INDEX_CLASSES} classes, ${POCKETSHELL_TA_INDEX_PROD_PKGS} production packages, ${POCKETSHELL_TA_INDEX_IMPORT_LINES} imports, ${POCKETSHELL_TA_INDEX_CROSS_AREA_CLASSES} cross-area, ${POCKETSHELL_TA_INDEX_HOSTCLI_CLASSES} host-CLI-dependent via ${POCKETSHELL_TA_INDEX_HOSTCLI_PKGS} wire-seam packages = ${POCKETSHELL_TA_INDEX_HOSTCLI_INVOKER_PKGS} producer / ${POCKETSHELL_TA_INDEX_HOSTCLI_CONSUMER_PKGS} consumer / ${POCKETSHELL_TA_INDEX_HOSTCLI_VOCAB_PKGS} vocabulary over ${POCKETSHELL_TA_INDEX_HOSTCLI_SUBCOMMANDS} live Click commands read from ${POCKETSHELL_TA_HOSTCLI_CLI_SOURCE} — ${POCKETSHELL_TA_INDEX_HOSTCLI_SHARED_PKGS} of them under shared/)"
   fi
 
   # 8. Every Gradle test task the planner can emit is a real Gradle project.

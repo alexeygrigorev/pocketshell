@@ -564,23 +564,10 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# CASE 16g (B9) — the VOCABULARY end reads EVERY registration form `cli.py`
-# uses, and anything it cannot decode is loud instead of a smaller number.
-#
-# Round 3 extracted the vocabulary with one grep for `cli.add_command(…,
-# name="…")`. `cli.py` already registers `daemon` as `@cli.group(name="daemon")`,
-# so that reader was UNDER-READING the producer on the shipped tree while the
-# guard printed a healthy-looking "16 subcommands". Converting four more
-# registrations to the form `daemon` already used dropped `usage`, `tree`,
-# `agents` and `qr-share` from the vocabulary, took `com.pocketshell.app.settings`
-# — the ONE package that end exists to catch — OFF the seam, cut unit selection
-# 570 -> 560, and left every floor GREEN. A floor cannot catch under-reading:
-# under-reading yields a plausible number.
-#
-# 16g-a is that exact refactor and must now be a NO-OP for the seam.
-# 16g-b/c/d are forms the reader cannot decode and must be RED.
-# 16g-e re-inlines the round-3 single-form reader and must be RED, so a revert
-# to a text heuristic cannot land quietly.
+# CASE 16g/16h — the VOCABULARY end asks the live Click Group for its
+# command names. The old AST census was defeated by runtime command shapes; these
+# cases now prove the live shape is observed and that import/interpreter failures
+# stay loud instead of becoming a smaller vocabulary.
 # ---------------------------------------------------------------------------
 CLIDIR="$SANDBOX/cli"
 mkdir -p "$CLIDIR"
@@ -592,412 +579,173 @@ import sys
 src = pathlib.Path(sys.argv[1]).read_text()
 out = pathlib.Path(sys.argv[2])
 
-# (a) the reviewer's exact B9 refactor: four registrations moved to the
-#     `@cli.group(name=...)` decorator form `daemon` already uses.
-a = src
-for sub, obj in (
-    ("usage", "usage_command"),
-    ("tree", "tree_group"),
-    ("agents", "agents_group"),
-    ("qr-share", "qr_share_command"),
-):
-    old = 'cli.add_command(%s, name="%s")' % (obj, sub)
-    assert a.count(old) == 1, "anchor missing: " + old
-    a = a.replace(
-        old,
-        '@cli.group(name="%s")\ndef _%s_shim() -> None:\n    """decorator-form registration"""\n'
-        % (sub, sub.replace("-", "_")),
-    )
-(out / "decorators.py").write_text(a)
-
-# (b) registration through a module-level loop — the shape `agents.py:880`
-#     already uses one level down.
-block = "\n".join(
-    'cli.add_command(%s, name="%s")' % (o, n)
-    for o, n in (("usage_command", "usage"), ("agent_group", "agent"))
-)
-assert src.count(block) == 1, "loop anchor missing"
-(out / "loop.py").write_text(
-    src.replace(
-        block,
-        "for _cmd, _name in ((usage_command, \"usage\"), (agent_group, \"agent\")):\n"
-        "    cli.add_command(_cmd, name=_name)",
-    )
-)
-
-# (c) name omitted — click derives it from the command object.
-c = src.replace('cli.add_command(tree_group, name="tree")', "cli.add_command(tree_group)")
-assert c != src, "noname anchor missing"
-(out / "noname.py").write_text(c)
-
-# (d) name behind a module constant.
-d = src.replace(
-    'cli.add_command(usage_command, name="usage")',
-    '_USAGE_NAME = "usage"\ncli.add_command(usage_command, name=_USAGE_NAME)',
-)
-assert d != src, "constant anchor missing"
-(out / "constant.py").write_text(d)
-
-# ---------------------------------------------------------------------------
-# ROUND-5 (the SIXTH spelling): the reader used to key detection on the
-# receiver being the literal name `cli`, so a registration reached through any
-# other binding was neither a SITE nor a NAME and `names == sites` held
-# vacuously. These three mutants are the shapes that were silent.
-# ---------------------------------------------------------------------------
-SET = (
-    ("usage", "usage_command"),
-    ("tree", "tree_group"),
-    ("agents", "agents_group"),
-    ("qr-share", "qr_share_command"),
-)
-FIRST = 'cli.add_command(usage_command, name="usage")'
-
-# (e) ALIAS — the reviewer's exact reproduction. This one must be READ, not
-#     merely refused: the vocabulary stays 18 and the seam does not move.
-e = src.replace(FIRST, "_g = cli\n" + FIRST, 1)
-for sub, obj in SET:
-    old = 'cli.add_command(%s, name="%s")' % (obj, sub)
-    assert e.count(old) == 1, "alias anchor missing: " + old
-    e = e.replace(old, '_g.add_command(%s, name="%s")' % (obj, sub))
-(out / "alias.py").write_text(e)
-
-# (f) THREE receivers that cannot be resolved, in one file so one index build
-#     covers the class: a function PARAMETER, a subscript, and a loop variable.
-#     Each must be reported by name; none may be silently absent.
-u = src.replace(
-    FIRST,
-    "def _register(group, cmd, name):\n    group.add_command(cmd, name=name)\n\n\n"
-    '_GROUPS = {"root": cli}\n' + FIRST,
+# LIVE-IMPORT REGRESSION — a Click Group may synthesize a command from its
+# runtime list_commands() implementation without storing a registration node
+# in cli.py. The AST census cannot see this command, but a live Group can.
+dynamic = src.replace(
+    "@click.group(\n",
+    "class DynGroup(click.Group):\n"
+    "    def list_commands(self, ctx):\n"
+    "        return [*super().list_commands(ctx), \"synthetic-live\"]\n\n"
+    "@click.group(\n",
     1,
 )
-u = u.replace(
-    'cli.add_command(usage_command, name="usage")',
-    '_register(cli, usage_command, "usage")',
-)
-u = u.replace(
-    'cli.add_command(tree_group, name="tree")',
-    '_GROUPS["root"].add_command(tree_group, name="tree")',
-)
-u = u.replace(
-    'cli.add_command(agents_group, name="agents")',
-    'for _grp in (cli,):\n    _grp.add_command(agents_group, name="agents")',
-)
-for probe in ("group.add_command", '_GROUPS["root"].add_command', "_grp.add_command"):
-    assert probe in u, "unresolved anchor missing: " + probe
-(out / "unresolved.py").write_text(u)
+dynamic = dynamic.replace("@click.group(\n", "@click.group(\n    cls=DynGroup,\n", 1)
+(out / "dynamic.py").write_text(dynamic)
 
-# (g) The group ESCAPING as a value. `cli.py` already hands a group to a helper
-#     in a sibling module (`register_push_card_commands(push_group)`, whose body
-#     in cards.py does `@push_group.command(...)`), so passing the ROOT group the
-#     same way is one character away and would register out of the census's sight.
-g = src.replace(FIRST, "register_more_commands(cli)\n" + FIRST, 1)
-assert g != src, "escape anchor missing"
-(out / "escape.py").write_text(g)
-
-# ---------------------------------------------------------------------------
-# ROUND-6 (the SEVENTH spelling): `click.Group.commands` is a plain dict —
-# `add_command` is literally `self.commands[name] = cmd` — so mutating it
-# registers a top-level subcommand through a path that is NOT a registrar call
-# and therefore never entered the census at all. Five forms in ONE file so the
-# whole class costs one index build: two writes (subscript, `.update`), a read,
-# a loop, and one attribute nobody has thought of (`result_callback`, a real
-# click API) which proves the check closes the CLASS rather than the spelling.
-# ---------------------------------------------------------------------------
-h = src.replace(
-    FIRST,
-    "_cb = cli.result_callback\n_TABLE = cli.commands\nfor _k in cli.commands:\n    pass\n" + FIRST,
+# IMPORT-FAILURE MUTATION — a source file that cannot import must be loud.
+broken = src.replace(
+    "import click\n",
+    "import click\nimport pocketshell_issue_2070_missing\n",
     1,
 )
-for sub, obj, form in (
-    ("usage", "usage_command", "item"),
-    ("agents", "agents_group", "item"),
-    ("tree", "tree_group", "update"),
-    ("qr-share", "qr_share_command", "update"),
-):
-    old = 'cli.add_command(%s, name="%s")' % (obj, sub)
-    assert h.count(old) == 1, "commands-table anchor missing: " + old
-    h = h.replace(
-        old,
-        'cli.commands["%s"] = %s' % (sub, obj)
-        if form == "item"
-        else 'cli.commands.update({"%s": %s})' % (sub, obj),
-    )
-(out / "commands_table.py").write_text(h)
+(out / "broken-import.py").write_text(broken)
 PY
 then
   # Every mutant is grep-verified LIVE before any verdict is read (#1641).
-  for _m in 'decorators:@cli.group(name="qr-share")' 'loop:for _cmd, _name in' \
-            'noname:cli.add_command(tree_group)' 'constant:name=_USAGE_NAME' \
-            'alias:_g.add_command(qr_share_command' 'unresolved:group.add_command(cmd, name=name)' \
-            'escape:register_more_commands(cli)' 'commands_table:cli.commands.update({"qr-share"'; do
+  for _m in 'dynamic:synthetic-live' 'broken-import:pocketshell_issue_2070_missing'; do
     if ! grep -qF "${_m#*:}" "$CLIDIR/${_m%%:*}.py"; then
       bad "16g MUTANT ${_m%%:*} DID NOT APPLY — its verdict would be meaningless"
     fi
   done
 
-  cli_probe() {  # $1 = cli source (absolute) -> "<settings-on-seam?> <unit-class-count>"
-    local on_seam count
-    on_seam="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$1" bash -c '
-      source "'"$SCRIPT_DIR"'/lib/test-areas.sh"
-      POCKETSHELL_TA_REPO_ROOT="'"$SCRIPT_DIR"'/.."
-      pocketshell_test_areas_load "'"$SCRIPT_DIR"'/test-areas.txt" >/dev/null
-      pocketshell_test_areas_build_index
-      [[ -n "${POCKETSHELL_TA_PROD_PKG_HOSTCLI[com.pocketshell.app.settings]:-}" ]] &&
-        echo ON-SEAM || echo OFF-SEAM')"
-    count="$(printf 'tools/pocketshell/src/pocketshell/qr_share.py\n' |
-      POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$1" bash "$SELECT" --changed-stdin --print-plan-only 2>/dev/null |
-      sed -n 's/^UNIT_GRADLE_FILTERS=//p' | wc -w)"
-    printf '%s %s\n' "$on_seam" "$count"
-  }
-  real_probe="$(cli_probe "$REAL_CLI")"
-  deco_probe="$(cli_probe "$CLIDIR/decorators.py")"
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/decorators.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if [[ "$deco_probe" == "$real_probe" ]] && [[ "$deco_probe" == ON-SEAM\ * ]] &&
-     grep -q '^PASS: manifest verified' <<<"$out"; then
-    ok "16g-a the decorator-form refactor is a NO-OP for the seam ($deco_probe, unchanged) — round 3 dropped app.settings OFF the seam here and stayed green"
+  # 16h — a live Click Group may synthesize a command from list_commands()
+  # without a corresponding source registration. This is the red→green
+  # regression for the AST reader replacement.
+  live_vocab="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="${SCRIPT_DIR}/../tools/pocketshell/src" \
+    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="${CLIDIR}/dynamic.py" bash -c '
+    source "$1/lib/test-areas.sh"
+    _pocketshell_hostcli_read_cli_vocabulary "$2"
+  ' bash "${SCRIPT_DIR}" "${CLIDIR}/dynamic.py" 2>&1)"
+  if grep -qx 'NAME synthetic-live' <<<"$live_vocab" &&
+     grep -qx 'END' <<<"$live_vocab" &&
+     ! grep -q '^UNREADABLE ' <<<"$live_vocab"; then
+    ok "16h the live Click reader observes a command synthesized by list_commands()"
   else
-    bad "16g-a the decorator-form refactor still moves the seam: real=[$real_probe] decorators=[$deco_probe]\n$out"
+    bad "16h the live reader missed synthetic-live or reported an error:
+$live_vocab"
   fi
 
-  # 16g-h (ROUND 5, the SIXTH spelling) — a registration reached through an
-  # ALIAS of the root group. `is_root_registrar` used to require the receiver to
-  # be the literal name `cli`, so `_g = cli; _g.add_command(…)` was neither a
-  # SITE nor a NAME: `names == sites` held vacuously at 13 == 13, the guard
-  # printed "read from all 13 registration sites", and the seam quietly lost
-  # `com.pocketshell.app.settings` (32 -> 31 packages, 820 -> 809 classes, unit
-  # selection 570 -> 560) — byte-for-byte the B9 symptom.
-  #
-  # The right answer is to READ it, not to refuse it: an alias is unambiguous,
-  # and reddening on it would just force the producer into one writing style.
-  # So the assertion here is a NO-OP, exactly like 16g-a. 16g-k below is the
-  # paired proof that this assertion is load-bearing rather than decorative:
-  # revert the resolver to receiver-keyed detection and this probe moves.
-  alias_probe="$(cli_probe "$CLIDIR/alias.py")"
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/alias.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if [[ "$alias_probe" == "$real_probe" ]] && [[ "$alias_probe" == ON-SEAM\ * ]] &&
-     grep -q '^PASS: manifest verified' <<<"$out" &&
-     grep -q 'over 18 subcommands read from the 18 top-level registration sites this reader could see' <<<"$out"; then
-    ok "16g-h a registration through an ALIAS of the root group is READ correctly, and is a NO-OP for the seam ($alias_probe, unchanged) — receiver-keyed detection dropped 4 subcommands here and stayed green"
+  # 16i — importing a CLI with a missing dependency must fail closed and name
+  # the import failure; no partial NAME output may seed the vocabulary.
+  broken_vocab="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="${SCRIPT_DIR}/../tools/pocketshell/src" \
+    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="${CLIDIR}/broken-import.py" bash -c '
+    source "$1/lib/test-areas.sh"
+    _pocketshell_hostcli_read_cli_vocabulary "$2"
+  ' bash "${SCRIPT_DIR}" "${CLIDIR}/broken-import.py" 2>&1)"
+  if grep -q 'UNREADABLE cannot import .*ModuleNotFoundError' <<<"$broken_vocab" &&
+     grep -qx 'END' <<<"$broken_vocab" &&
+     ! grep -q '^NAME ' <<<"$broken_vocab"; then
+    ok "16i a missing import dependency is explicit and fail-closed"
   else
-    bad "16g-h the aliased registration moves the seam or is not read: real=[$real_probe] alias=[$alias_probe]\n$out"
+    bad "16i a missing import dependency was not fail-closed:
+$broken_vocab"
   fi
 
-  # 16g-i — three receivers the reader CANNOT resolve, in one file: a function
-  # parameter (the reviewer's P6), a subscript, and a loop variable. None of
-  # them may be silently absent; each must be named. This is the half of the
-  # receiver-agnostic census that fails CLOSED, and it is why the reader no
-  # longer needs to recognise a list of shapes.
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/unresolved.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if grep -q 'could not resolve the receiver of 3 registrar call(s)' <<<"$out" &&
-     grep -qF "the receiver 'group' resolves to neither" <<<"$out" &&
-     grep -qF "the receiver '<Subscript expression>' resolves to neither" <<<"$out" &&
-     grep -qF "the receiver '_grp' resolves to neither" <<<"$out"; then
-    ok "16g-i all three unresolvable receivers (function parameter, subscript, loop variable) redden --verify-manifest BY NAME — an unrecognised way of naming the group is loud, not absent"
+  # 16k — the live-reader mutants must also travel through the selector's
+  # actual index build. Directly calling the helper above proves its protocol,
+  # but would stay green if --verify-manifest stopped consuming that protocol.
+  # Keep the package root explicit: the mutated source lives outside the
+  # checkout while its normal pocketshell.* imports come from the checkout.
+  real_guard="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="$SCRIPT_DIR/../tools/pocketshell/src" \
+    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$REAL_CLI" \
+    bash "$SELECT" --verify-manifest 2>&1)"
+  real_guard_rc=$?
+  real_live_count="$(sed -n 's/.*over \([0-9][0-9]*\) live Click commands read.*/\1/p' <<<"$real_guard")"
+
+  dynamic_guard="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="$SCRIPT_DIR/../tools/pocketshell/src" \
+    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/dynamic.py" \
+    bash "$SELECT" --verify-manifest 2>&1)"
+  dynamic_guard_rc=$?
+  dynamic_live_count="$(sed -n 's/.*over \([0-9][0-9]*\) live Click commands read.*/\1/p' <<<"$dynamic_guard")"
+  if [[ "$real_guard_rc" -eq 0 && "$dynamic_guard_rc" -eq 0 ]] &&
+     grep -q '^PASS: manifest verified' <<<"$dynamic_guard" &&
+     [[ "$real_live_count" =~ ^[0-9]+$ && "$dynamic_live_count" =~ ^[0-9]+$ ]] &&
+     (( dynamic_live_count == real_live_count + 1 )) &&
+     ! grep -q 'UNREADABLE\|live vocabulary reader could not import/read' <<<"$dynamic_guard"; then
+    ok "16k the real --verify-manifest index sees synthetic-live ($real_live_count -> $dynamic_live_count commands) with no unreadable diagnostic"
   else
-    bad "16g-i an unresolvable registrar receiver was not reported by name:\n$out"
+    bad "16k the real --verify-manifest dynamic CLI run was not a clean baseline+1 verification (baseline rc=$real_guard_rc count='$real_live_count'; dynamic rc=$dynamic_guard_rc count='$dynamic_live_count'):
+$dynamic_guard"
   fi
 
-  # 16g-j — the group ESCAPING this file as a value. The census is total over
-  # cli.py, so the remaining hole is the object leaving; 16g-f covers it leaving
-  # by import, this covers it being handed to a helper. The package already does
-  # exactly this one level down (`register_push_card_commands(push_group)`).
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/escape.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if grep -q "escapes as a value at line" <<<"$out"; then
-    ok "16g-j handing the root group to a helper reddens --verify-manifest — the reader will not claim a complete vocabulary once the object can be registered on elsewhere"
+  broken_guard="$(POCKETSHELL_TA_HOSTCLI_PACKAGE_ROOT="$SCRIPT_DIR/../tools/pocketshell/src" \
+    POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/broken-import.py" \
+    bash "$SELECT" --verify-manifest 2>&1)"
+  broken_guard_rc=$?
+  if [[ "$broken_guard_rc" -ne 0 ]] &&
+     grep -qF 'host-CLI live vocabulary reader could not import/read' <<<"$broken_guard" &&
+     grep -qF "ModuleNotFoundError: No module named 'pocketshell_issue_2070_missing'" <<<"$broken_guard" &&
+     grep -qF 'host-CLI wire-seam VOCABULARY packages = 0 (< 14)' <<<"$broken_guard" &&
+     grep -qF 'host-CLI live Click commands read = 0 (< 12)' <<<"$broken_guard" &&
+     ! grep -q '^PASS: manifest verified' <<<"$broken_guard"; then
+    ok "16k-b the real --verify-manifest broken-import run is nonzero and names the unreadable import plus both vocabulary under-floor diagnostics"
   else
-    bad "16g-j the root group escaping as a call argument is invisible to the guard:\n$out"
+    bad "16k-b the real --verify-manifest broken-import run did not fail with the named diagnostics (rc=$broken_guard_rc):
+$broken_guard"
   fi
 
-  # 16g-l (ROUND 6, the SEVENTH spelling) — `click.Group.commands` is a plain
-  # dict (`add_command` is literally `self.commands[name] = cmd`), so mutating
-  # it registers a top-level subcommand through a path that is NOT a registrar
-  # CALL and never entered the census at all. Round 5 waved every attribute
-  # access on the root through on the false claim that "registrar attrs are
-  # already in the census"; the measured consequence on the SAME four
-  # subcommands was byte-for-byte the round-3/round-4 symptom — census
-  # 22 = 17 + 5 + 0 collapsing to 18 = 13 + 5 + 0 over a smaller file, zero
-  # UNREADABLE, zero UNCLASSIFIED, `com.pocketshell.app.settings` OFF the seam
-  # (32 -> 31 packages, 820 -> 809 classes), UNIT_SELECTED_UNIT_CLASSES
-  # 570 -> 560, and `--verify-manifest` rc=0 whose OK line positively claimed
-  # it had read every registration site.
-  #
-  # The fix is round 5's own inversion applied to that allow-list: only the
-  # four attributes proven unable to hide a registration pass, everything else
-  # is reported. So this one file carries the whole class in one index build:
-  # four writes (two `commands["x"] = cmd`, two `commands.update({…})`), a bare
-  # read, a loop, and `result_callback` — a real click attribute nobody has
-  # thought of — seven diagnostics, each named with its line.
-  # `result_callback` is the load-bearing one:
-  # it is what distinguishes closing the CLASS from adding `commands` to
-  # REGISTRARS, which is the list-of-spellings pattern that produced seven of
-  # them and is explicitly NOT the fix.
-  #
-  # The control is 16g-h/16g-a above: the real cli.py and the aliased copy stay
-  # ON-SEAM at 17/17 and PASS through this same check, because the shipped file
-  # touches the root through exactly `add_command`, `group` and `main`.
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/commands_table.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if grep -q 'could not decode 7 registration(s)' <<<"$out" &&
-     [[ "$(grep -o "non-registrar attribute 'commands' at line" <<<"$out" | wc -l)" -eq 6 ]] &&
-     grep -qF "non-registrar attribute 'result_callback' at line" <<<"$out" &&
-     ! grep -q '^PASS: manifest verified' <<<"$out"; then
-    ok "16g-l mutating the root group's \`commands\` dict — the SEVENTH spelling, and not a registrar call at all — reddens --verify-manifest BY NAME on all six write/read/loop reads, and an unrelated non-registrar attribute (result_callback) reddens too, so the check closes the CLASS rather than the spelling"
+  # 16l — mutate the ACTUAL mapfile consumer, not the helper and not a direct
+  # probe. An END-only stream is a readable but empty vocabulary, so this must
+  # trip the live-command floor without laundering itself into an import error.
+  LIVE_FLOOR_DIR="$(mut_copy mut-live-vocabulary-floor)"
+  clean_live_floor="$(run_copy "$LIVE_FLOOR_DIR" --verify-manifest)"
+  clean_live_floor_rc=$?
+  if [[ "$clean_live_floor_rc" -eq 0 ]] &&
+     grep -q '^PASS: manifest verified' <<<"$clean_live_floor"; then
+    : # the private copy is a green control before the mapfile mutation
   else
-    bad "16g-l a non-registrar attribute on the root group did not redden the guard by name (this is the 18 = 13 + 5 + 0 silent under-read):\n$out"
+    bad "16l the unmutated private selector/index copy is not a green control (rc=$clean_live_floor_rc):
+$clean_live_floor"
   fi
+  python3 - "$LIVE_FLOOR_DIR/lib/test-areas.sh" <<'PY'
+import sys
 
-  for _case in loop:'not a module-top-level registration' \
-               noname:'no explicit name' \
-               constant:'name= is not a plain string literal'; do
-    out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/${_case%%:*}.py" bash "$SELECT" --verify-manifest 2>&1)"
-    if grep -q 'the reader is UNDER-READING the producer' <<<"$out" &&
-       grep -qF "${_case#*:}" <<<"$out"; then
-      ok "16g-b/${_case%%:*} a registration form the reader cannot decode reddens --verify-manifest by name (fail-closed, not a smaller vocabulary)"
+p = sys.argv[1]
+s = open(p).read()
+anchor = '  mapfile -t vocab_lines < <(_pocketshell_hostcli_read_cli_vocabulary "$cli_src")'
+assert s.count(anchor) == 1, "16l mapfile anchor not unique"
+s = s.replace(anchor, """  mapfile -t vocab_lines < <(  # MUTANT 16l: actual consumer emits only END
+    printf '%s\\n' END
+  )""")
+open(p, "w").write(s)
+PY
+  if ! grep -qF 'MUTANT 16l: actual consumer emits only END' "$LIVE_FLOOR_DIR/lib/test-areas.sh"; then
+    bad "16l MUTATION DID NOT APPLY — the private copy still calls the live vocabulary reader"
+  else
+    if out="$(run_copy "$LIVE_FLOOR_DIR" --verify-manifest)"; then
+      bad "16l the END-only actual mapfile consumer still passed --verify-manifest:
+$out"
+    elif grep -qF 'host-CLI live Click commands read = 0 (< 12)' <<<"$out" &&
+         [[ "$(grep -Fc 'host-CLI live Click commands read =' <<<"$out")" -eq 1 ]] &&
+         ! grep -qF 'live vocabulary reader could not import/read' <<<"$out" &&
+         ! grep -q '^PASS: manifest verified' <<<"$out"; then
+      ok "16l mutating the actual mapfile consumer to END-only reddens the named live-vocabulary floor (readable empty stream, selective failure)"
     else
-      bad "16g-b/${_case%%:*} an undecodable registration form did NOT redden the guard:\n$out"
+      bad "16l the END-only actual mapfile mutation did not trip the named live-vocabulary floor selectively:
+$out"
     fi
-  done
-
-  # 16g-f — the FIFTH spelling the implementer went looking for: the reader
-  # reads ONE file, so a top-level registration made from a SIBLING module would
-  # keep names == sites and stay silent. Nothing does that today, so the reader
-  # trips on a sibling merely taking the group object.
-  mkdir -p "$CLIDIR/pkg"
-  cp "$REAL_CLI" "$CLIDIR/pkg/cli.py"
-  printf 'from pocketshell.cli import cli\n\ncli.add_command(None, name="ghost")\n' > "$CLIDIR/pkg/ghost.py"
-  if ! grep -q 'from pocketshell.cli import cli' "$CLIDIR/pkg/ghost.py"; then
-    bad "16g-f MUTANT DID NOT APPLY"
   fi
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/pkg/cli.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if grep -q 'takes the top-level group object from cli.py' <<<"$out"; then
-    ok "16g-f a SIBLING module taking the top-level group reddens --verify-manifest — a registration outside cli.py cannot be silently invisible"
-  else
-    bad "16g-f a sibling module holding the group object is invisible to the guard:\n$out"
-  fi
-  # ...and the unmutated copy of the same file, in a directory with no such
-  # sibling, is green — so 16g-f is measuring the sibling, not the copy.
-  rm -f "$CLIDIR/pkg/ghost.py"
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/pkg/cli.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if grep -q '^PASS: manifest verified' <<<"$out"; then
-    ok "16g-f2 ...and the same cli.py without that sibling is GREEN (16g-f measures the sibling, not the copy)"
-  else
-    bad "16g-f2 the unmutated cli.py copy is red, so 16g-f proves nothing:\n$out"
-  fi
-
-  # 16g-f3 (ROUND 5) — three MORE import spellings, all of which the round-4
-  # regex sibling scan let through: an absolute `from pocketshell import cli`,
-  # a star import, and a run-time `importlib` import. The scan is an AST walk
-  # now for the same reason the receiver check stopped matching names: a regex
-  # recognises the spellings someone thought of. All three ghosts live in one
-  # package dir so a single index build covers the class.
-  printf 'from pocketshell import cli\n\ncli.add_command(None, name="a")\n' > "$CLIDIR/pkg/ghost_abs.py"
-  printf 'from .cli import *\n\ncli.add_command(None, name="b")\n'          > "$CLIDIR/pkg/ghost_star.py"
-  printf 'import importlib\n\nimportlib.import_module("pocketshell.cli")\n' > "$CLIDIR/pkg/ghost_dyn.py"
-  for _g in abs:'from pocketshell import cli' star:'from .cli import *' dyn:'import importlib'; do
-    if ! grep -qF "${_g#*:}" "$CLIDIR/pkg/ghost_${_g%%:*}.py"; then
-      bad "16g-f3 MUTANT ghost_${_g%%:*} DID NOT APPLY"
-    fi
-  done
-  out="$(POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/pkg/cli.py" bash "$SELECT" --verify-manifest 2>&1)"
-  if grep -qF "ghost_abs.py takes the top-level group object from cli.py (binds the name 'cli')" <<<"$out" &&
-     grep -qF "ghost_star.py takes the top-level group object from cli.py (star-imports everything from cli.py)" <<<"$out" &&
-     grep -qF "ghost_dyn.py takes the top-level group object from cli.py (can import by name at run time (importlib))" <<<"$out"; then
-    ok "16g-f3 the absolute, star and importlib import spellings ALL redden --verify-manifest by name (the round-4 regex scan passed on all three)"
-  else
-    bad "16g-f3 a sibling import spelling is invisible to the guard:\n$out"
-  fi
-  # The control for 16g-f3 is 16g-f2 above: it ran the same copy in the same
-  # directory with no sibling present and was GREEN, so the three ghosts are the
-  # whole delta. Restore that state rather than paying for a second index build.
-  rm -f "$CLIDIR/pkg/ghost_abs.py" "$CLIDIR/pkg/ghost_star.py" "$CLIDIR/pkg/ghost_dyn.py"
-
-  # 16g-g — the reader itself not finishing (no python3, a crash, a kill). A
-  # half-read vocabulary must be an ERROR, never a smaller-but-plausible one.
+  # Restore the private copy before later cases, even though cleanup also
+  # removes the sandbox. This keeps the mutation local to 16l if the script is
+  # extended with more cases after it.
+  cp "$SCRIPT_DIR/lib/test-areas.sh" "$LIVE_FLOOR_DIR/lib/test-areas.sh"
+  # 16j — a missing/crashed interpreter must not leave a partial vocabulary
+  # looking healthy. The missing END is the fail-closed boundary.
   mkdir -p "$SANDBOX/nopy"
   printf '#!/bin/sh\nexit 127\n' > "$SANDBOX/nopy/python3"
   chmod +x "$SANDBOX/nopy/python3"
   if ! "$SANDBOX/nopy/python3"; then : ; fi   # shim confirmed non-functional
   out="$(PATH="$SANDBOX/nopy:$PATH" bash "$SELECT" --verify-manifest 2>&1)"
   if grep -q 'the vocabulary reader did not finish' <<<"$out" &&
-     grep -q 'registration SITES found in' <<<"$out"; then
-    ok "16g-g a vocabulary reader that cannot run at all reddens --verify-manifest (missing/crashed python3 is an error, not a smaller vocabulary)"
+     grep -q 'live vocabulary reader could not import/read' <<<"$out"; then
+    ok "16j a crashed/missing interpreter leaves no partial live vocabulary"
   else
-    bad "16g-g a dead vocabulary reader did not redden the guard:\n$out"
-  fi
-
-  # 16g-e — re-inline the round-3 single-form reader. A revert to a text
-  # heuristic that reports no site count must be RED, or B9 comes back.
-  B9DIR="$(mut_copy mut-b9-oneform)"
-  python3 - "$B9DIR/lib/test-areas.sh" <<'PY'
-import sys
-
-p = sys.argv[1]
-s = open(p).read()
-anchor = '  mapfile -t vocab_lines < <(_pocketshell_hostcli_read_cli_vocabulary "$cli_src")'
-assert s.count(anchor) == 1, "16g-e anchor not unique"
-s = s.replace(anchor, """  mapfile -t vocab_lines < <(  # MUTANT 16g-e: round-3 add_command-only reader
-    grep -oE 'add_command\\\\([^)]*name="[a-z0-9][a-z0-9-]*"' "$cli_src" 2>/dev/null |
-      grep -oE 'name="[a-z0-9][a-z0-9-]*"' | sed 's/name="//; s/"$//' | LC_ALL=C sort -u |
-      sed 's/^/NAME /'
-    printf 'END\\\\n'
-  )""")
-open(p, "w").write(s)
-PY
-  if ! grep -q 'MUTANT 16g-e' "$B9DIR/lib/test-areas.sh"; then
-    bad "16g-e MUTATION DID NOT APPLY"
-  fi
-  out="$(run_copy "$B9DIR" --verify-manifest)"
-  if grep -q 'the import-dependency index looks broken' <<<"$out" &&
-     grep -q 'registration SITES found in' <<<"$out"; then
-    ok "16g-e reverting the vocabulary reader to the round-3 single-form grep reddens --verify-manifest (it reports no registration sites, so the equality check has nothing to stand on)"
-  else
-    bad "16g-e the round-3 single-form reader is STILL green — B9 can come back:\n$out"
-  fi
-
-  # 16g-k (ROUND 5) — the paired proof that 16g-h is load-bearing. Revert the
-  # receiver resolution to round 4's receiver-keyed form (only the literal name
-  # `cli` is the root; anything else is treated as some other object) and run it
-  # against the SAME aliased cli.py. It must under-read: 18 subcommands become
-  # 14 while the guard still says PASS. That is precisely the silent failure the
-  # equality check cannot see, and 16g-h is the assertion that catches it — so
-  # if someone reverts the resolver, 16g-h goes red and this case explains why.
-  R5DIR="$(mut_copy mut-r5-receiver-keyed)"
-  python3 - "$R5DIR/lib/test-areas.sh" <<'PY'
-import sys
-
-p = sys.argv[1]
-s = open(p).read()
-anchor = '''def receiver_of(node):
-    """(kind, human description) of the object a registrar is invoked on."""
-    recv = node.value
-    if isinstance(recv, ast.Name):
-        return env.get(recv.id, "unknown"), recv.id
-    return "unknown", "<%s expression>" % type(recv).__name__'''
-assert s.count(anchor) == 1, "16g-k anchor not unique"
-s = s.replace(anchor, '''def receiver_of(node):  # MUTANT 16g-k: round-4 receiver-keyed detection
-    recv = node.value
-    if isinstance(recv, ast.Name) and recv.id == root:
-        return "root", recv.id
-    return "nonroot", "mutant"''')
-open(p, "w").write(s)
-PY
-  if ! grep -q 'MUTANT 16g-k' "$R5DIR/lib/test-areas.sh"; then
-    bad "16g-k MUTATION DID NOT APPLY"
-  fi
-  # Not `run_copy`: a variable prefix on a shell FUNCTION is not exported to the
-  # child process, so the mutant copy would silently read the real cli.py.
-  out="$(POCKETSHELL_TEST_AREAS_REPO_ROOT="$SCRIPT_DIR/.." \
-         POCKETSHELL_TEST_AREAS_MANIFEST="$R5DIR/test-areas.txt" \
-         POCKETSHELL_TEST_AREAS_JOURNEY_SUITE="$R5DIR/ci-journey-suite.sh" \
-         POCKETSHELL_TA_HOSTCLI_CLI_SOURCE="$CLIDIR/alias.py" \
-         bash "$R5DIR/select-test-areas.sh" --verify-manifest 2>&1)"
-  if grep -q '^PASS: manifest verified' <<<"$out" &&
-     grep -q 'over 14 subcommands read from the 14 top-level registration sites this reader could see' <<<"$out"; then
-    ok "16g-k receiver-keyed detection silently under-reads the SAME aliased cli.py (18 -> 14 subcommands, still PASS) — so 16g-h's no-op assertion is the thing standing between us and the sixth spelling"
-  else
-    bad "16g-k could not reproduce the receiver-keyed under-read, so 16g-h's no-op assertion is unproven:\n$out"
+    bad "16j a dead live reader did not redden the guard:
+$out"
   fi
 else
-  bad "16g could not build the cli.py mutants from $REAL_CLI — the B9 cases did not run, so their silence proves nothing"
+  bad "16g could not build the live cli.py mutants, so the live-reader cases did not run"
 fi
 
 # ---------------------------------------------------------------------------

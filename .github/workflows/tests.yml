@@ -837,6 +837,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Issue #2070: the host-CLI vocabulary guard imports cli.py and asks its
+      # live Click Group for list_commands(). Install only the dependency needed
+      # at import time; the pinned quse backend is invoked later at runtime and
+      # is deliberately not part of this filesystem-only guard job.
+      - name: Set up Python 3.11 (issue #2070)
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install live Click reader dependency (issue #2070)
+        run: python3 -m pip install --disable-pip-version-check "click>=8.2.0"
+
       - name: "Run the #2063 test-area coverage guards"
         run: |
           chmod +x scripts/ci-test-selection-guards.sh

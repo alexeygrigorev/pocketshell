@@ -193,6 +193,8 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerRecordingRowFitProofTest"  # #1152 #780 #657 the recording-not-locked composer bottom row overflowed its…
   "com.pocketshell.app.composer.PromptComposerRecordingNoLockJourneyTest"  # #1245 the hands-free lock was REMOVED from the composer entirely
   "com.pocketshell.app.voice.ComposerLauncherHoldSwipeUpJourneyTest"  # #585 the TRUE desired behavior): the ENTRY gesture on the
+  "com.pocketshell.app.voice.VoiceGestureCoachmarkLauncherProofTest"  # #1753 one-time swipe-up discoverability + enabled-only TalkBack action
+  "com.pocketshell.app.proof.VoiceGestureCoachmarkMainActivityDockerTest"  # #1753 real MainActivity -> Docker session -> production composer/accessibility backstop
   "com.pocketshell.app.composer.ComposerDraftDurabilityE2eTest"  # #832 #638 #691 durable per-session composer draft store): a draft authored…
   "com.pocketshell.app.tmux.TmuxUnifiedPagerCoordinatorComposeTest"  # #1778 real Foundation pager drag + republish and initial-window single-owner proof
   "$FQCN_PREFIX.SwitchStaleCaptureSessionBodyJourneyE2eTest"  # #687 #686 #658 epic Phase 1 / P1 — the device-truth gate

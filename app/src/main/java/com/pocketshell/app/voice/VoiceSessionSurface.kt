@@ -35,10 +35,16 @@ import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.hideFromAccessibility
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -637,7 +643,14 @@ internal fun BottomChipControls(
     unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    Column(modifier = modifier) {
+    VoiceGestureCoachmarkHost(
+        eligible = onDictateTap != null && onDictateHoldSwipeUp != null,
+        // The terminal launcher is a local composer entry point and remains
+        // enabled through reconnect/empty-pane states (#2192). Pane-bound
+        // controls still use [inputEnabled] below.
+        launcherEnabled = true,
+        modifier = modifier,
+    ) {
         // Issue #813 (clean rework — D22): the composer launcher RESERVES its
         // width FIRST and is NEVER the element that overflows. We compute the
         // available row width with [BoxWithConstraints] and hand the chip area
@@ -787,24 +800,30 @@ internal fun ConversationComposerLauncherRow(
     unsentCount: Int = 0,
     unsentHasFailure: Boolean = false,
 ) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .heightIn(min = SessionBottomControlsMinHeight)
-            .padding(
-                top = PocketShellSpacing.sm,
-                bottom = PocketShellSpacing.sm,
-                end = PocketShellSpacing.sm,
-            ),
-        contentAlignment = Alignment.CenterEnd,
+    VoiceGestureCoachmarkHost(
+        eligible = onDictateHoldSwipeUp != null,
+        launcherEnabled = inputEnabled,
+        modifier = modifier,
     ) {
-        ComposerLauncherButton(
-            enabled = inputEnabled,
-            onClick = onDictateTap,
-            onHoldSwipeUp = onDictateHoldSwipeUp,
-            unsentCount = unsentCount,
-            unsentHasFailure = unsentHasFailure,
-        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = SessionBottomControlsMinHeight)
+                .padding(
+                    top = PocketShellSpacing.sm,
+                    bottom = PocketShellSpacing.sm,
+                    end = PocketShellSpacing.sm,
+                ),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            ComposerLauncherButton(
+                enabled = inputEnabled,
+                onClick = onDictateTap,
+                onHoldSwipeUp = onDictateHoldSwipeUp,
+                unsentCount = unsentCount,
+                unsentHasFailure = unsentHasFailure,
+            )
+        }
     }
 }
 
@@ -841,6 +860,18 @@ private fun ComposerLauncherButton(
     }
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnHoldSwipeUp by rememberUpdatedState(onHoldSwipeUp)
+    val reportLauncherPlaced = LocalVoiceGestureLauncherPlaced.current
+    val dismissCoachmark = LocalVoiceGestureLauncherActivated.current
+
+    val onLauncherTap = {
+        dismissCoachmark()
+        currentOnClick()
+    }
+    val onLauncherDictation = {
+        dismissCoachmark()
+        currentOnHoldSwipeUp?.invoke()
+        Unit
+    }
 
     // Issue #585: the launcher's tap and hold+swipe-up ENTRY gesture are detected
     // in ONE pointer handler that OWNS the pointer (consumes the down + moves),
@@ -855,14 +886,35 @@ private fun ComposerLauncherButton(
     Box(
         modifier = modifier
             .size(PocketShellDensity.tapTargetMin)
+            .onGloballyPositioned { coordinates ->
+                if (coordinates.isAttached &&
+                    coordinates.size.width > 0 &&
+                    coordinates.size.height > 0
+                ) {
+                    reportLauncherPlaced()
+                }
+            }
             .then(
                 if (useEntryGesture) {
                     Modifier
+                        // Keep a real clickable semantics producer on the
+                        // gesture branch. The pointer detector below still
+                        // owns the physical down/move/up sequence (#585), but
+                        // Android's accessibility bridge needs the standard
+                        // clickable node to export ACTION_CLICK to TalkBack.
+                        // The detector consumes the down in Initial, so this
+                        // companion pointer handler cannot double-fire taps.
+                        .clickable(
+                            enabled = enabled,
+                            role = Role.Button,
+                            onClickLabel = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION,
+                            onClick = onLauncherTap,
+                        )
                         .composerLauncherTapOrHoldSwipeUpGesture(
                             thresholdPx = swipeThresholdPx,
                             enabled = { enabled },
-                            onTap = { currentOnClick() },
-                            onHoldSwipeUp = { currentOnHoldSwipeUp?.invoke() },
+                            onTap = onLauncherTap,
+                            onHoldSwipeUp = onLauncherDictation,
                         )
                         // Keep the control accessible: TalkBack "double-tap to
                         // activate" and test `performClick()` route through this
@@ -870,23 +922,68 @@ private fun ComposerLauncherButton(
                         // consume-the-down otherwise hides from `clickable`.
                         .semantics(mergeDescendants = true) {
                             role = Role.Button
+                            contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
+                            // The sibling AndroidView below is the single
+                            // platform accessibility node. Keep this merged
+                            // node available to Compose assertions, but do
+                            // not expose a second, action-less virtual node
+                            // to TalkBack/UIAutomator.
+                            hideFromAccessibility()
+                            if (!enabled) disabled()
                             onClick(label = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION) {
                                 if (enabled) {
-                                    onClick()
+                                    onLauncherTap()
                                     true
                                 } else {
                                     false
                                 }
                             }
+                            customActions = if (enabled) {
+                                listOf(
+                                    CustomAccessibilityAction(
+                                        label = VOICE_GESTURE_DICTATION_ACTION_LABEL,
+                                        action = {
+                                            val callback = currentOnHoldSwipeUp
+                                            if (callback == null || !enabled) {
+                                                false
+                                            } else {
+                                                onLauncherDictation()
+                                                true
+                                            }
+                                        },
+                                    ),
+                                )
+                            } else {
+                                emptyList()
+                            }
                         }
                 } else {
-                    Modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+                    // Tap-only callers do not enter the merged swipe branch;
+                    // keep their historical description alongside clickable's
+                    // normal compose OnClick semantics.
+                    Modifier
+                        .clickable(enabled = enabled, role = Role.Button, onClick = onLauncherTap)
+                        .semantics {
+                            contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
+                        }
                 },
             )
-            .semantics { contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION }
             .testTag(SESSION_COMPOSER_LAUNCHER_TAG),
         contentAlignment = Alignment.Center,
     ) {
+        if (useEntryGesture) {
+            VoiceGestureAccessibilityProxy(
+                enabled = enabled,
+                onClick = onLauncherTap,
+                onDictation = onLauncherDictation,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
+        // Keep one value as the source for both the painter and the proof
+        // identity. A test-visible semantics value derived from a separate
+        // constant would let a future icon swap pass while the oracle still
+        // claimed the Pocket Terminal mark was rendered.
+        val launcherIcon = ComposerLauncherIcon
         Box(
             modifier = Modifier
                 .size(PocketShellDensity.tapTargetMin - PocketShellSpacing.md)
@@ -895,10 +992,15 @@ private fun ComposerLauncherButton(
             contentAlignment = Alignment.Center,
         ) {
             Icon(
-                imageVector = ComposerLauncherIcon,
+                imageVector = launcherIcon,
                 contentDescription = null,
                 tint = glyphColor,
-                modifier = Modifier.size(PocketShellDensity.treeIndent),
+                modifier = Modifier
+                    .size(PocketShellDensity.treeIndent)
+                    .testTag(SESSION_COMPOSER_LAUNCHER_ICON_TAG)
+                    .semantics {
+                        this[ComposerLauncherIconSemanticsKey] = launcherIcon
+                    },
             )
         }
         // Issue #1531 (audit RC1): the unsent-queue badge, pinned to the launcher's
@@ -1097,6 +1199,19 @@ internal const val SESSION_ENTER_CHIP_TAG: String = "session:enter-chip"
  * attached even if the launcher visual is swapped for a different component.
  */
 internal const val SESSION_COMPOSER_LAUNCHER_TAG: String = "session:composer-launcher"
+
+/** Stable unmerged-tree target for the launcher's actual [ImageVector]. */
+internal const val SESSION_COMPOSER_LAUNCHER_ICON_TAG: String =
+    "session:composer-launcher-icon"
+
+/**
+ * The identity of the vector passed to the launcher's [Icon]. This is a
+ * semantics value rather than an accent-colour/screenshot oracle: the
+ * production composable assigns it from the same local value it passes to
+ * [Icon], and proofs compare the object identity with [ComposerLauncherIcon].
+ */
+internal val ComposerLauncherIconSemanticsKey: SemanticsPropertyKey<ImageVector> =
+    SemanticsPropertyKey("PocketShellComposerLauncherIcon")
 
 internal const val SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION: String = "Open prompt composer"
 

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.navigationBarsIgnoringVisibility
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.Layout
@@ -24,6 +25,7 @@ import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.ConversationComposerLauncherRow
 import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
+import com.pocketshell.app.voice.LocalVoiceGestureBandPlaced
 import com.pocketshell.app.voice.HotkeysChipIcon
 import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.uikit.components.CommandChip
@@ -272,14 +274,21 @@ internal fun ReservedTmuxTerminalBottomBand(
 ) {
     Layout(
         content = {
-            Box(
-                modifier = if (isImeVisible) {
-                    Modifier.clearAndSetSemantics {}
-                } else {
-                    Modifier
-                },
+            CompositionLocalProvider(
+                // The terminal band is still measured while the IME is up,
+                // but its child is intentionally not placed. A measured copy
+                // must never claim the one-time voice education.
+                LocalVoiceGestureBandPlaced provides !isImeVisible,
             ) {
-                content()
+                Box(
+                    modifier = if (isImeVisible) {
+                        Modifier.clearAndSetSemantics {}
+                    } else {
+                        Modifier
+                    },
+                ) {
+                    content()
+                }
             }
         },
         modifier = modifier.windowInsetsPadding(

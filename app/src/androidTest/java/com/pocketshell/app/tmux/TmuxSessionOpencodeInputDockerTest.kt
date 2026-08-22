@@ -1,6 +1,9 @@
 package com.pocketshell.app.tmux
 
+import android.app.Activity
 import android.app.ActivityManager
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -8,21 +11,30 @@ import android.graphics.Rect
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.ComposeView
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsNode
+import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.room.Room
@@ -33,7 +45,6 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
-import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.proof.signals.activityWindowFocused
@@ -58,6 +69,7 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_TAG
 import com.pocketshell.uikit.components.TERMINAL_HOTKEYS_PANEL_CLOSE_TAG
+import com.pocketshell.uikit.model.SessionAgentKind
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -173,6 +185,7 @@ class TmuxSessionOpencodeInputDockerTest {
         const val ATTACH_TIMEOUT_MS: Long = 30_000
         const val VISIBLE_TIMEOUT_MS: Long = 20_000
         const val ISSUE_2191_CONVERSATION_CHIP_SAMPLE_FRAMES: Int = 6
+        const val ISSUE_2087_FOREIGN_ROOT_TAG: String = "issue2087:foreign-compose-root"
     }
 
     @get:Rule
@@ -399,17 +412,35 @@ class TmuxSessionOpencodeInputDockerTest {
         waitForSshFixtureReady(sshKey, port = sshPort)
         killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
         killTmuxSession(sshKey, sshPort, ISSUE_303_PLAIN_SESSION_NAME)
-        seedIssue303AgentSession(sshKey, sshPort)
+        seedIssue303AgentSession(sshKey, sshPort, recordOwnedKind = true)
         seedIssue303PlainSession(sshKey, sshPort)
+        clearIssue2087LastSessionState(appContext)
 
+        var issue2087ForeignRoot: Issue2087ForeignRootFixture? = null
         try {
             val agentHostRowTag = persistHost(appContext, key, sshPort)
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            attachToSeededSession(
-                hostRowTag = agentHostRowTag,
-                sessionName = ISSUE_303_AGENT_SESSION_NAME,
-            )
+            try {
+                attachToSeededSession(
+                    hostRowTag = agentHostRowTag,
+                    sessionName = ISSUE_303_AGENT_SESSION_NAME,
+                )
+            } catch (failure: Throwable) {
+                writeIssue303AttachFailureDiagnostics(
+                    sshKey = sshKey,
+                    sshPort = sshPort,
+                    sessionName = ISSUE_303_AGENT_SESSION_NAME,
+                    failure = failure,
+                )
+                throw failure
+            }
             val agentAttachAt = SystemClock.elapsedRealtime()
+            // The recorded fixture follows the production default and may open
+            // directly on Conversation. Own Terminal explicitly before waiting
+            // on its Android view; waiting for Terminal first made the fixture's
+            // intended recorded-identity path race the default-tab policy.
+            waitForTabsPill()
+            selectIssue1977TerminalTab()
             waitForTerminalSessionAttached()
             waitForVisibleTerminalText("issue303-agent-ready", VISIBLE_TIMEOUT_MS) {
                 "issue303-agent-terminal-ready" in it
@@ -429,21 +460,106 @@ class TmuxSessionOpencodeInputDockerTest {
             // / key bar for raw keys).
             compose.onNodeWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true)
                 .assertIsDisplayed()
+            // Issue #2087: Nightly reached this exact production state with two
+            // registered Compose roots. Recreate that cardinality when the
+            // focused run starts clean, then persist typed Android ownership
+            // for both roots before the old global onRoot() call reproduces
+            // the ambiguity. The fixture is a one-pixel, non-focusable sibling
+            // Compose root in the same activity window; it never replaces or
+            // stands in for the production session screen.
+            issue2087ForeignRoot = ensureIssue2087TwoRootState()
+            recordIssue2087ComposeRootOwnership("issue303-live-before-geometry")
+            assertIssue2087RootSelectionIsOrderIndependent()
+            assertIssue2087AmbiguousTargetFailsClosed(issue2087ForeignRoot)
             assertIssue1977TerminalControlGeometry("issue303-live-after-tabs")
+            // Keep the unrelated root mounted through the Conversation oracle:
+            // the geometry and content proofs must both resolve the production
+            // root instead of making the Nightly two-root state disappear.
             captureArtifact("issue303-01-agent-terminal")
             captureFullFrame("issue303-01-agent-terminal-full")
 
             val conversationTapAt = SystemClock.elapsedRealtime()
             compose.onNodeWithText("Conversation", useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
-                findTerminalView() == null &&
-                    compose.onAllNodesWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty() &&
-                    compose.onAllNodesWithText("issue303 live Conversation pane proof", useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
+            try {
+                compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+                    // #810 intentionally keeps TerminalView mounted below the
+                    // opaque Conversation surface. The selected-tab semantic is
+                    // the active-surface oracle: exact index 1 is Conversation;
+                    // index 0 would mean the raw Terminal surface is active.
+                    issue2087SelectedTabIndex() == 1 &&
+                        compose.onAllNodesWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
+                            .fetchSemanticsNodes()
+                            .isNotEmpty() &&
+                        compose.onAllNodesWithText("issue303 live Conversation pane proof", useUnmergedTree = true)
+                            .fetchSemanticsNodes()
+                            .isNotEmpty()
+                }
+            } catch (failure: Throwable) {
+                writeText(
+                    "issue2087-conversation-oracle-timeout.txt",
+                    buildString {
+                        appendLine("failure_type=${failure::class.java.name}")
+                        appendLine("terminal_view_mounted=${findTerminalView() != null}")
+                        appendLine("selected_tab_index=${issue2087SelectedTabIndex()}")
+                        appendLine(
+                            "conversation_pane_count=" +
+                                compose.onAllNodesWithTag(
+                                    TMUX_CONVERSATION_PANE_TAG,
+                                    useUnmergedTree = true,
+                                ).fetchSemanticsNodes().size,
+                        )
+                        appendLine(
+                            "conversation_proof_text_count=" +
+                                compose.onAllNodesWithText(
+                                    "issue303 live Conversation pane proof",
+                                    useUnmergedTree = true,
+                                ).fetchSemanticsNodes().size,
+                        )
+                        appendLine(
+                            "conversation_load_failed_count=" +
+                                compose.onAllNodesWithTag(
+                                    TMUX_CONVERSATION_LOAD_FAILED_TAG,
+                                    useUnmergedTree = true,
+                                ).fetchSemanticsNodes().size,
+                        )
+                        appendLine(
+                            "conversation_load_empty_count=" +
+                                compose.onAllNodesWithTag(
+                                    TMUX_CONVERSATION_LOAD_EMPTY_TAG,
+                                    useUnmergedTree = true,
+                                ).fetchSemanticsNodes().size,
+                        )
+                    },
+                )
+                recordIssue2087ComposeRootOwnership("issue303-conversation-timeout")
+                captureFullFrame("issue2087-conversation-oracle-timeout-full")
+                throw failure
             }
+            assertEquals(
+                "#2087: Conversation click must select the Conversation tab, not merely " +
+                    "leave a stale transcript mounted",
+                1,
+                issue2087SelectedTabIndex(),
+            )
+            val conversationOwnership = requireIssue2087TmuxContentRoot("conversation-oracle")
+            val conversationPaneNode = compose
+                .onNodeWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
+                .fetchSemanticsNode()
+            val conversationProofNode = compose
+                .onNodeWithText("issue303 live Conversation pane proof", useUnmergedTree = true)
+                .fetchSemanticsNode()
+            assertTrue(
+                "#2087: Conversation pane must be owned by the production Compose root",
+                conversationPaneNode.root === conversationOwnership.rootNode.root,
+            )
+            assertTrue(
+                "#2087: Conversation proof text must be owned by the production Compose root",
+                conversationProofNode.root === conversationOwnership.rootNode.root,
+            )
+            compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG, useUnmergedTree = true)
+                .assertIsDisplayed()
+            compose.onNodeWithText("issue303 live Conversation pane proof", useUnmergedTree = true)
+                .assertIsDisplayed()
             recordTiming(
                 "issue303_conversation_tap_to_conversation_visible_ms",
                 SystemClock.elapsedRealtime() - conversationTapAt,
@@ -461,9 +577,36 @@ class TmuxSessionOpencodeInputDockerTest {
                 .assertIsDisplayed()
             compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
                 .assertDoesNotExist()
-            compose.onAllNodesWithText("Esc", useUnmergedTree = true)
+            val escNodes = compose.onAllNodesWithText("Esc", useUnmergedTree = true)
                 .fetchSemanticsNodes()
-                .let { assertEquals("key bar must NOT appear in Conversation (#459)", 0, it.size) }
+            assertEquals("key bar must NOT appear in Conversation (#459)", 0, escNodes.size)
+            val selectedTabIndex = issue2087SelectedTabIndex()
+            val terminalOnlyChipCount = compose
+                .onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+            val contentOwnsTargetRoot = conversationPaneNode.root === conversationOwnership.rootNode.root &&
+                conversationProofNode.root === conversationOwnership.rootNode.root
+            writeText(
+                "issue2087-conversation-oracle.txt",
+                buildString {
+                    appendLine("selected_tab_index=$selectedTabIndex")
+                    appendLine("conversation_pane_count=1")
+                    appendLine("conversation_proof_text_count=1")
+                    appendLine("conversation_pane_displayed=true")
+                    appendLine("conversation_proof_displayed=true")
+                    appendLine("conversation_content_owns_target_root=$contentOwnsTargetRoot")
+                    appendLine(
+                        "conversation_content_root_identity=" +
+                            System.identityHashCode(conversationOwnership.rootNode.root),
+                    )
+                    appendLine("target_root_count=${conversationOwnership.snapshot.roots.size}")
+                    appendLine("terminal_view_mounted=${findTerminalView() != null}")
+                    appendLine("raw_terminal_surface_active=${selectedTabIndex == 0}")
+                    appendLine("terminal_only_show_keyboard_chip_count=$terminalOnlyChipCount")
+                    appendLine("terminal_only_esc_count=${escNodes.size}")
+                },
+            )
             captureFullFrame("issue303-02-agent-conversation-full")
 
             val terminalTapAt = SystemClock.elapsedRealtime()
@@ -479,8 +622,16 @@ class TmuxSessionOpencodeInputDockerTest {
             assertTabsInsideToolbar("issue303_agent_returned")
             captureArtifact("issue303-03-agent-returned-terminal")
             captureFullFrame("issue303-03-agent-returned-terminal-full")
+            removeIssue2087ForeignRoot(issue2087ForeignRoot)
+            issue2087ForeignRoot = null
             launchedActivity?.close()
             launchedActivity = null
+            // MainActivity.onStop() records the just-closed agent destination
+            // by design. Clear only this test's persisted restore snapshot
+            // before launching the second ActivityScenario, so its production
+            // host-tap -> folder-list -> exact-row journey cannot be hijacked
+            // by a prior-session restore.
+            clearIssue2087LastSessionState(appContext)
 
             val plainHostRowTag = persistHost(appContext, key, sshPort)
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
@@ -492,6 +643,47 @@ class TmuxSessionOpencodeInputDockerTest {
             waitForVisibleTerminalText("issue303-plain-ready", VISIBLE_TIMEOUT_MS) {
                 "issue303-plain-terminal-ready" in it
             }
+            val plainViewModel = issue2087CurrentViewModelOrFail()
+            val plainTabsBeforeConfirmedShell = compose
+                .onAllNodesWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+            assertTrue(
+                "#2087: plain control must reach production's confirmed-shell route " +
+                    "before the no-tabs control; recordedKind=" +
+                    plainViewModel.currentSessionRecordedKind.value +
+                    " confirmedShellPaneIds=" + plainViewModel.confirmedShellPaneIds.value,
+                waitForIssue2087ConfirmedShell(plainViewModel),
+            )
+            val plainSessionLabels = issue2087SessionHeaderLabels()
+            val plainTabsCount = compose
+                .onAllNodesWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+            val plainRemoteIdentity = readIssue2087RemoteSessionIdentity(
+                sshKey = sshKey,
+                sshPort = sshPort,
+                sessionName = ISSUE_303_PLAIN_SESSION_NAME,
+            )
+            writeText(
+                "issue2087-plain-session-identity.txt",
+                buildString {
+                    appendLine("expected_session=$ISSUE_303_PLAIN_SESSION_NAME")
+                    appendLine("header_session_labels=$plainSessionLabels")
+                    appendLine("recorded_kind=${plainViewModel.currentSessionRecordedKind.value}")
+                    appendLine("confirmed_shell_pane_ids=${plainViewModel.confirmedShellPaneIds.value}")
+                    appendLine("tmux_tabs_count_before_confirmed_shell=$plainTabsBeforeConfirmedShell")
+                    appendLine("tmux_tabs_count=$plainTabsCount")
+                    appendLine("remote_identity:")
+                    appendLine(plainRemoteIdentity)
+                },
+            )
+            assertEquals(
+                "#2087: plain control must be on the exact seeded plain session, " +
+                    "not a restored prior agent destination",
+                listOf(ISSUE_303_PLAIN_SESSION_NAME),
+                plainSessionLabels,
+            )
             compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertDoesNotExist()
             captureArtifact("issue303-04-plain-terminal")
             captureFullFrame("issue303-04-plain-terminal-full")
@@ -499,6 +691,7 @@ class TmuxSessionOpencodeInputDockerTest {
             writeTimings()
             writeIssue303Summary()
         } finally {
+            removeIssue2087ForeignRoot(issue2087ForeignRoot)
             launchedActivity?.close()
             launchedActivity = null
             runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME) } }
@@ -729,13 +922,6 @@ class TmuxSessionOpencodeInputDockerTest {
 
     // ============================================================ Test helpers
 
-    private fun resolveSshPort(): Int {
-        return InstrumentationRegistry.getArguments()
-            .getString("terminalWorkbenchSshPort")
-            ?.toIntOrNull()
-            ?: DEFAULT_PORT
-    }
-
     private suspend fun killStaleTmuxSession(sshKey: SshKey.Pem, sshPort: Int) {
         killTmuxSession(sshKey, sshPort, SESSION_NAME)
     }
@@ -832,17 +1018,37 @@ class TmuxSessionOpencodeInputDockerTest {
         }.getOrThrow()
     }
 
-    private suspend fun seedIssue303AgentSession(sshKey: SshKey.Pem, sshPort: Int) {
+    private suspend fun seedIssue303AgentSession(
+        sshKey: SshKey.Pem,
+        sshPort: Int,
+        recordOwnedKind: Boolean = false,
+    ) {
+        val recordedKindCommands = if (recordOwnedKind) {
+            """
+                # This is a PocketShell-owned agent fixture, not a foreign session.
+                # Record its kind exactly as the production launcher does so #303's
+                # unchanged Conversation oracle exercises the intended source-bound
+                # path instead of the one-shot foreign classifier.
+                tmux set-option -t '$ISSUE_303_AGENT_SESSION_NAME' @ps_agent_kind claude
+                tmux show-options -v -t '$ISSUE_303_AGENT_SESSION_NAME' @ps_agent_kind | grep -qx claude
+            """.trimIndent().prependIndent("            ")
+        } else {
+            ""
+        }
         val script = """
             set -eu
             rm -rf /tmp/issue303-agent
             mkdir -p /tmp/issue303-agent
             cat > /tmp/issue303-agent/claude <<'SH'
             #!/bin/sh
+            set -eu
             printf 'issue303-agent-terminal-ready\r\n'
-            while true; do sleep 60; done
+            printf 'issue303-agent-live pid=%s\n' "$$" >> /tmp/issue303-agent/lifecycle.log
+            trap 'printf "issue303-agent-trap=%s pid=%s\n" "$1" "$$" >> /tmp/issue303-agent/lifecycle.log; exit 0' HUP INT TERM
+            while :; do sleep 3600; done
             SH
             chmod +x /tmp/issue303-agent/claude
+            : > /tmp/issue303-agent/lifecycle.log
             mkdir -p '$ISSUE_303_REMOTE_CWD'
             mkdir -p '${ISSUE_303_CLAUDE_PATH.substringBeforeLast('/')}'
             cat > '$ISSUE_303_CLAUDE_PATH' <<'JSONL'
@@ -851,6 +1057,10 @@ class TmuxSessionOpencodeInputDockerTest {
             JSONL
             touch '$ISSUE_303_CLAUDE_PATH'
             tmux new-session -d -s '$ISSUE_303_AGENT_SESSION_NAME' -c '$ISSUE_303_REMOTE_CWD' /tmp/issue303-agent/claude
+            $recordedKindCommands
+            test -x /tmp/issue303-agent/claude
+            test "$(sed -n '1p' /tmp/issue303-agent/claude)" = '#!/bin/sh'
+            tmux has-session -t '$ISSUE_303_AGENT_SESSION_NAME'
             tmux list-panes -t '$ISSUE_303_AGENT_SESSION_NAME' -F '#{session_name} #{window_index} #{pane_id} #{pane_tty} #{pane_current_command} #{pane_current_path}'
         """.trimIndent()
         SshConnection.connect(
@@ -874,6 +1084,12 @@ class TmuxSessionOpencodeInputDockerTest {
         val script = """
             set -eu
             tmux new-session -d -s '$ISSUE_303_PLAIN_SESSION_NAME' -c /tmp "printf 'issue303-plain-terminal-ready\r\n'; exec sh"
+            # A plain shell is a confirmed shell in production only after its
+            # durable kind is recorded. Keep the real shell process/attach
+            # journey, but make that identity explicit so the no-tabs control
+            # exercises the same production routing as a user-classified shell.
+            tmux set-option -t '$ISSUE_303_PLAIN_SESSION_NAME' @ps_agent_kind shell
+            tmux show-options -v -t '$ISSUE_303_PLAIN_SESSION_NAME' @ps_agent_kind | grep -qx shell
             tmux list-panes -t '$ISSUE_303_PLAIN_SESSION_NAME' -F '#{session_name} #{window_index} #{pane_id} #{pane_tty} #{pane_current_command}'
         """.trimIndent()
         SshConnection.connect(
@@ -942,6 +1158,88 @@ class TmuxSessionOpencodeInputDockerTest {
         }
         compose.onNodeWithText(sessionName, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    /**
+     * Failure-only evidence for the #303 fixture boundary. This runs before
+     * the test's finally block kills the seeded sessions, so it distinguishes
+     * "the seed was not visible to the app's SSH target" from a FolderList
+     * projection/semantics problem without changing the attach journey.
+     */
+    private suspend fun writeIssue303AttachFailureDiagnostics(
+        sshKey: SshKey.Pem,
+        sshPort: Int,
+        sessionName: String,
+        failure: Throwable,
+    ) {
+        val remote = runCatching {
+            withTimeout(20_000) {
+                SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = sshPort,
+                    user = DEFAULT_USER,
+                    key = sshKey,
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ).mapCatching { session ->
+                    session.use {
+                        it.exec(
+                            """
+                            set +e
+                            printf '%s\\n' 'tmux-list-sessions'
+                            tmux list-sessions -F '#{session_name}::#{session_id}::#{session_activity}::#{session_attached}::#{@ps_agent_kind}::#{session_path}' 2>&1
+                            printf '%s\\n' 'tmux-list-panes'
+                            tmux list-panes -a -F '#{session_name}::#{window_index}::#{window_active}::#{pane_active}::#{pane_current_path}::#{pane_current_command}::#{pane_pid}' 2>&1
+                            printf '%s\\n' 'tmux-agent-kind'
+                            tmux show-options -v -t '$sessionName' @ps_agent_kind 2>&1
+                            printf '%s\\n' 'agent-lifecycle'
+                            cat /tmp/issue303-agent/lifecycle.log 2>&1
+                            printf '%s\\n' 'pocketshell-sessions'
+                            pocketshell sessions list --by activity 2>&1
+                            """.trimIndent(),
+                        )
+                    }
+                }.getOrThrow()
+            }
+        }.fold(
+            onSuccess = { result ->
+                "exit=${result.exitCode}\\nstdout:\\n${result.stdout}\\nstderr:\\n${result.stderr}"
+            },
+            onFailure = { error ->
+                "query_failure=${error::class.java.name}: ${error.message}"
+            },
+        )
+        val rootCount = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+        val sessionTextCount = compose.onAllNodesWithText(
+            sessionName,
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes().size
+        val folderTags = listOf(
+            "folder-list:content",
+            "folder-list:loading",
+            "folder-list:error",
+            "folder-list:retry",
+        ).joinToString("\\n") { tag ->
+            "$tag=${compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().size}"
+        }
+        writeText(
+            "issue303-attach-timeout-diagnostics.txt",
+            buildString {
+                appendLine("host=$DEFAULT_HOST")
+                appendLine("port=$sshPort")
+                appendLine("session_name=$sessionName")
+                appendLine("failure_type=${failure::class.java.name}")
+                appendLine("failure_message=${failure.message}")
+                appendLine("compose_root_count=$rootCount")
+                appendLine("session_text_count=$sessionTextCount")
+                appendLine("folder_tags:")
+                appendLine(folderTags)
+                appendLine("remote:")
+                appendLine(remote)
+            },
+        )
     }
 
     private suspend fun readTmuxPaneSize(sshKey: SshKey.Pem, sshPort: Int): TerminalGridSize {
@@ -1038,6 +1336,49 @@ class TmuxSessionOpencodeInputDockerTest {
         val map = keysField.get(store) as MutableMap<String, androidx.lifecycle.ViewModel>
         return map.values.firstOrNull { it is TmuxSessionViewModel } as? TmuxSessionViewModel
     }
+
+    private fun issue2087CurrentViewModelOrFail(): TmuxSessionViewModel {
+        var viewModel: TmuxSessionViewModel? = null
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        while (SystemClock.elapsedRealtime() < deadline && viewModel == null) {
+            launchedActivity?.onActivity { activity ->
+                viewModel = readViewModelOrNull((activity as ViewModelStoreOwner).viewModelStore)
+            }
+            if (viewModel == null) SystemClock.sleep(50)
+        }
+        return checkNotNull(viewModel) {
+            "#2087: TmuxSessionViewModel was not available for the plain-shell route proof"
+        }
+    }
+
+    /**
+     * Observe the real recorded-kind -> confirmed-shell production transition.
+     * This is a bounded state precondition, not a UI sleep: the following
+     * no-tabs assertion remains the load-bearing control oracle.
+     */
+    private fun waitForIssue2087ConfirmedShell(viewModel: TmuxSessionViewModel): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + VISIBLE_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (viewModel.currentSessionRecordedKind.value == SessionAgentKind.Shell &&
+                viewModel.confirmedShellPaneIds.value.isNotEmpty()
+            ) {
+                return true
+            }
+            SystemClock.sleep(50)
+        }
+        return viewModel.currentSessionRecordedKind.value == SessionAgentKind.Shell &&
+            viewModel.confirmedShellPaneIds.value.isNotEmpty()
+    }
+
+    private fun issue2087SessionHeaderLabels(): List<String> =
+        compose.onAllNodesWithTag(
+            TMUX_CONSOLIDATED_SESSION_LABEL_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes().mapNotNull { node ->
+            node.config.getOrNull(SemanticsProperties.Text)
+                ?.joinToString(separator = "") { it.text }
+                ?.takeIf { it.isNotBlank() }
+        }
 
     // ============================================================ View helpers
 
@@ -1170,6 +1511,462 @@ class TmuxSessionOpencodeInputDockerTest {
     }
 
     /**
+     * Guarantees the exact two-root cardinality that exposed #2087.
+     *
+     * A Nightly predecessor can leave the second registered root alive. A
+     * focused method starts from one root, so it receives a transparent
+     * one-pixel sibling [ComposeView] in the same activity window. Either way,
+     * the production [TMUX_SESSION_SCREEN_TAG] remains mounted only in its real
+     * root and the old global `onRoot()` query is deterministically ambiguous.
+     */
+    private fun ensureIssue2087TwoRootState(): Issue2087ForeignRootFixture? {
+        val rootsBefore = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        if (rootsBefore.size == 2) return null
+        assertEquals(
+            "#2087 reproduction requires one clean production root or the exact two-root " +
+                "Nightly state before ownership selection",
+            1,
+            rootsBefore.size,
+        )
+
+        var fixture: Issue2087ForeignRootFixture? = null
+        val scenario = checkNotNull(launchedActivity) {
+            "#2087 reproduction requires the production MainActivity to remain alive"
+        }
+        scenario.onActivity { activity ->
+            val semanticsTag = mutableStateOf(ISSUE_2087_FOREIGN_ROOT_TAG)
+            val composeView = ComposeView(activity).apply {
+                isClickable = false
+                isFocusable = false
+                setContent {
+                    Box(modifier = Modifier.testTag(semanticsTag.value))
+                }
+            }
+            (activity.window.decorView as ViewGroup).addView(
+                composeView,
+                ViewGroup.LayoutParams(1, 1),
+            )
+            fixture = Issue2087ForeignRootFixture(
+                composeView = composeView,
+                semanticsTag = semanticsTag,
+            )
+        }
+
+        compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+            compose.onAllNodes(isRoot(), useUnmergedTree = true)
+                .fetchSemanticsNodes().size == 2 &&
+                compose.onAllNodesWithTag(
+                    ISSUE_2087_FOREIGN_ROOT_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().size == 1
+        }
+        assertEquals(
+            "#2087 focused reproduction must expose exactly two registered Compose roots",
+            2,
+            compose.onAllNodes(isRoot(), useUnmergedTree = true)
+                .fetchSemanticsNodes().size,
+        )
+        return checkNotNull(fixture) {
+            "#2087 foreign Compose root attached but its typed fixture was not retained"
+        }
+    }
+
+    private fun removeIssue2087ForeignRoot(fixture: Issue2087ForeignRootFixture?) {
+        if (fixture == null) return
+        launchedActivity?.onActivity {
+            fixture.composeView.disposeComposition()
+            (fixture.composeView.parent as? ViewGroup)?.removeView(fixture.composeView)
+        }
+    }
+
+    /** The duplicate target-tag case must fail closed with the typed reason. */
+    private fun assertIssue2087AmbiguousTargetFailsClosed(
+        fixture: Issue2087ForeignRootFixture?,
+    ) {
+        if (fixture == null) return
+        val scenario = checkNotNull(launchedActivity) {
+            "#2087 ambiguity proof requires the production MainActivity"
+        }
+        try {
+            scenario.onActivity {
+                fixture.semanticsTag.value = TMUX_SESSION_SCREEN_TAG
+            }
+            compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+                compose.onAllNodesWithTag(
+                    TMUX_SESSION_SCREEN_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().size == 2
+            }
+            val failure = runCatching {
+                requireIssue2087TmuxContentRoot("issue303-ambiguous-target")
+            }.exceptionOrNull()
+            val typed = failure as? Issue2087RootOwnershipAssertionError
+            writeText(
+                "issue2087-compose-root-ambiguity-guard.txt",
+                buildString {
+                    appendLine("target_tag=$TMUX_SESSION_SCREEN_TAG")
+                    appendLine("injected_target_node_count=2")
+                    appendLine("failure_type=${failure?.javaClass?.name}")
+                    appendLine("failure_kind=${typed?.kind}")
+                },
+            )
+            assertTrue(
+                "#2087 duplicate target owners must fail closed with the typed " +
+                    "TargetTagCardinality reason; failure=$failure",
+                typed?.kind == Issue2087RootOwnershipFailureKind.TargetTagCardinality,
+            )
+        } finally {
+            scenario.onActivity {
+                fixture.semanticsTag.value = ISSUE_2087_FOREIGN_ROOT_TAG
+            }
+            compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+                compose.onAllNodesWithTag(
+                    TMUX_SESSION_SCREEN_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().size == 1 &&
+                    compose.onAllNodesWithTag(
+                        ISSUE_2087_FOREIGN_ROOT_TAG,
+                        useUnmergedTree = true,
+                    ).fetchSemanticsNodes().size == 1
+            }
+        }
+    }
+
+    /**
+     * The ownership decision must survive an adversarial root enumeration order.
+     * A `.first()` repair would pass when the production root happens to be
+     * enumerated first, so this guard deliberately puts the foreign root first
+     * while keeping the target tag unique on the production root.
+     */
+    private fun assertIssue2087RootSelectionIsOrderIndependent() {
+        val collected = collectIssue2087ComposeRootOwnership("issue303-root-order-guard")
+        val targetNode = collected.targetNodes.singleOrNull()
+            ?: throw Issue2087RootOwnershipAssertionError(
+                kind = Issue2087RootOwnershipFailureKind.TargetTagCardinality,
+                snapshot = collected.snapshot,
+            )
+        val targetRoot = targetNode.root
+        val foreignRoots = collected.roots.filter { it.root !== targetRoot }
+        val targetOwners = collected.roots.filter { it.root === targetRoot }
+        assertTrue(
+            "#2087 order guard requires at least one foreign Compose root; " +
+                "roots=${collected.roots.size} target_root=" +
+                System.identityHashCode(targetRoot),
+            foreignRoots.isNotEmpty(),
+        )
+        val adversarialOrder = foreignRoots + targetOwners
+        assertTrue(
+            "#2087 order guard must place a foreign root before the target owner",
+            adversarialOrder.first().root !== targetRoot,
+        )
+        val selected = resolveIssue2087TmuxContentRoot(
+            collected = collected,
+            rootOrder = adversarialOrder,
+        )
+        val mutantFailure = runCatching {
+            // Live #2087 mutation: the tempting `.first()` repair must be
+            // rejected when a foreign root is enumerated first. Keep this
+            // branch in the harness so the ownership assertion itself is
+            // proven selective, rather than merely documented as a risk.
+            resolveIssue2087TmuxContentRoot(
+                collected = collected,
+                rootOrder = adversarialOrder,
+                useFirstRootMutant = true,
+            )
+        }.exceptionOrNull()
+        val mutantTyped = mutantFailure as? Issue2087RootOwnershipAssertionError
+        writeText(
+            "issue2087-compose-root-order-guard.txt",
+            buildString {
+                appendLine("target_root_identity=${System.identityHashCode(targetRoot)}")
+                appendLine("foreign_root_count=${foreignRoots.size}")
+                appendLine(
+                    "adversarial_first_root_identity=" +
+                        System.identityHashCode(adversarialOrder.first().root),
+                )
+                appendLine("selected_root_identity=${System.identityHashCode(selected.rootNode.root)}")
+                appendLine("selected_root_owns_target=${selected.rootNode.root === targetRoot}")
+            },
+        )
+        writeText(
+            "issue2087-compose-root-first-mutant.txt",
+            buildString {
+                appendLine("correct_selection=passed")
+                appendLine("target_root_identity=${System.identityHashCode(targetRoot)}")
+                appendLine(
+                    "mutant_first_root_identity=" +
+                        System.identityHashCode(adversarialOrder.first().root),
+                )
+                appendLine("mutant_failure_type=${mutantFailure?.javaClass?.name}")
+                appendLine("mutant_failure_kind=${mutantTyped?.kind}")
+                appendLine(
+                    "mutant_selective_failure=" +
+                        (mutantTyped?.kind == Issue2087RootOwnershipFailureKind.SelectedRootDoesNotOwnTarget),
+                )
+            },
+        )
+        assertTrue(
+            "#2087 root ownership must follow target identity, not root enumeration order",
+            selected.rootNode.root === targetRoot,
+        )
+        assertTrue(
+            "#2087 live .first() mutant must redden only the wrong-root ownership assertion; " +
+                "failure=$mutantFailure",
+            mutantTyped?.kind == Issue2087RootOwnershipFailureKind.SelectedRootDoesNotOwnTarget,
+        )
+    }
+
+    /** Records root-tag ownership and its Android activity/window lifecycle. */
+    private fun recordIssue2087ComposeRootOwnership(
+        stage: String,
+    ): Issue2087ComposeRootOwnershipSnapshot =
+        collectIssue2087ComposeRootOwnership(stage).snapshot
+
+    private fun collectIssue2087ComposeRootOwnership(
+        stage: String,
+    ): Issue2087CollectedComposeRootOwnership {
+        val roots = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        val targetNodes = compose.onAllNodesWithTag(
+            TMUX_SESSION_SCREEN_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes()
+        val foreignNodes = compose.onAllNodesWithTag(
+            ISSUE_2087_FOREIGN_ROOT_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes()
+        val scenarioState = launchedActivity?.state?.name ?: "none"
+        val owners = roots.mapIndexed { index, rootNode ->
+            issue2087RootOwnerDiagnostics(
+                index = index,
+                rootNode = rootNode,
+                targetNodes = targetNodes,
+                foreignNodes = foreignNodes,
+                scenarioState = scenarioState,
+            )
+        }
+        val snapshot = Issue2087ComposeRootOwnershipSnapshot(
+            stage = stage,
+            targetTag = TMUX_SESSION_SCREEN_TAG,
+            targetNodeCount = targetNodes.size,
+            roots = owners,
+        )
+        writeText(
+            "issue2087-compose-root-ownership-$stage.txt",
+            buildString {
+                appendLine("stage=${snapshot.stage}")
+                appendLine("target_tag=${snapshot.targetTag}")
+                appendLine("target_node_count=${snapshot.targetNodeCount}")
+                appendLine("root_count=${snapshot.roots.size}")
+                snapshot.roots.forEach { owner ->
+                    appendLine("root[${owner.index}].root_identity=${owner.rootIdentity}")
+                    appendLine("root[${owner.index}].semantics_node_id=${owner.semanticsNodeId}")
+                    appendLine("root[${owner.index}].bounds_in_root=${owner.boundsInRoot}")
+                    appendLine("root[${owner.index}].bounds_in_window=${owner.boundsInWindow}")
+                    appendLine("root[${owner.index}].target_tag_count=${owner.targetTagCount}")
+                    appendLine("root[${owner.index}].foreign_tag_count=${owner.foreignTagCount}")
+                    appendLine("root[${owner.index}].view_class=${owner.viewClass}")
+                    appendLine("root[${owner.index}].package=${owner.packageName}")
+                    appendLine("root[${owner.index}].activity=${owner.activityClass}")
+                    appendLine("root[${owner.index}].activity_identity=${owner.activityIdentity}")
+                    appendLine("root[${owner.index}].activity_lifecycle=${owner.activityLifecycle}")
+                    appendLine("root[${owner.index}].scenario_lifecycle=${owner.scenarioLifecycle}")
+                    appendLine("root[${owner.index}].view_attached=${owner.viewAttached}")
+                    appendLine("root[${owner.index}].view_shown=${owner.viewShown}")
+                    appendLine("root[${owner.index}].window_focused=${owner.windowFocused}")
+                    appendLine("root[${owner.index}].window_token_identity=${owner.windowTokenIdentity}")
+                    appendLine("root[${owner.index}].window_root_class=${owner.windowRootClass}")
+                    appendLine("root[${owner.index}].window_root_identity=${owner.windowRootIdentity}")
+                    appendLine(
+                        "root[${owner.index}].owns_activity_window=" +
+                            owner.ownsActivityWindow,
+                    )
+                }
+            },
+        )
+        return Issue2087CollectedComposeRootOwnership(
+            roots = roots,
+            targetNodes = targetNodes,
+            snapshot = snapshot,
+        )
+    }
+
+    /**
+     * Resolves only the Compose root that owns the production session tag.
+     *
+     * Root-list order is not an ownership signal. Missing/duplicate target
+     * tags and missing/duplicate owners fail closed with a typed reason and the
+     * same per-root Android ownership fields written to the artifact bundle.
+     */
+    private fun requireIssue2087TmuxContentRoot(
+        stage: String,
+    ): Issue2087TmuxContentRoot = resolveIssue2087TmuxContentRoot(
+        collected = collectIssue2087ComposeRootOwnership(stage),
+        rootOrder = null,
+    )
+
+    private fun resolveIssue2087TmuxContentRoot(
+        collected: Issue2087CollectedComposeRootOwnership,
+        rootOrder: List<SemanticsNode>?,
+        useFirstRootMutant: Boolean = false,
+    ): Issue2087TmuxContentRoot {
+        val roots = rootOrder ?: collected.roots
+        if (collected.targetNodes.size != 1) {
+            throw Issue2087RootOwnershipAssertionError(
+                kind = Issue2087RootOwnershipFailureKind.TargetTagCardinality,
+                snapshot = collected.snapshot,
+            )
+        }
+        val targetNode = collected.targetNodes.single()
+        val owningRoots = roots.filter { rootNode ->
+            rootNode.root === targetNode.root
+        }
+        if (owningRoots.size != 1) {
+            throw Issue2087RootOwnershipAssertionError(
+                kind = Issue2087RootOwnershipFailureKind.OwningRootCardinality,
+                snapshot = collected.snapshot,
+            )
+        }
+        val selectedRoot = if (useFirstRootMutant) roots.first() else owningRoots.single()
+        if (selectedRoot.root !== targetNode.root) {
+            throw Issue2087RootOwnershipAssertionError(
+                kind = Issue2087RootOwnershipFailureKind.SelectedRootDoesNotOwnTarget,
+                snapshot = collected.snapshot,
+            )
+        }
+        return Issue2087TmuxContentRoot(
+            rootNode = selectedRoot,
+            snapshot = collected.snapshot,
+        )
+    }
+
+    private fun issue2087RootOwnerDiagnostics(
+        index: Int,
+        rootNode: SemanticsNode,
+        targetNodes: List<SemanticsNode>,
+        foreignNodes: List<SemanticsNode>,
+        scenarioState: String,
+    ): Issue2087ComposeRootOwnerDiagnostics {
+        val rootIdentity = System.identityHashCode(rootNode.root)
+        val rootView = rootNode.root as? View
+        val activity = rootView?.context?.issue2087FindActivity()
+        val windowRoot = rootView?.rootView
+        val activityDecorRoot = activity?.window?.decorView?.rootView
+        return Issue2087ComposeRootOwnerDiagnostics(
+            index = index,
+            rootIdentity = rootIdentity,
+            semanticsNodeId = rootNode.id,
+            boundsInRoot = rootNode.boundsInRoot.toString(),
+            boundsInWindow = rootNode.boundsInWindow.toString(),
+            targetTagCount = targetNodes.count { it.root === rootNode.root },
+            foreignTagCount = foreignNodes.count { it.root === rootNode.root },
+            viewClass = rootView?.javaClass?.name ?: "not-an-android-view",
+            packageName = rootView?.context?.packageName ?: "unavailable",
+            activityClass = activity?.javaClass?.name ?: "unavailable",
+            activityIdentity = activity?.let(System::identityHashCode) ?: -1,
+            activityLifecycle = (activity as? LifecycleOwner)
+                ?.lifecycle?.currentState?.name ?: "unavailable",
+            scenarioLifecycle = scenarioState,
+            viewAttached = rootView?.isAttachedToWindow == true,
+            viewShown = rootView?.isShown == true,
+            windowFocused = rootView?.hasWindowFocus() == true,
+            windowTokenIdentity = rootView?.windowToken?.let(System::identityHashCode) ?: -1,
+            windowRootClass = windowRoot?.javaClass?.name ?: "unavailable",
+            windowRootIdentity = windowRoot?.let(System::identityHashCode) ?: -1,
+            ownsActivityWindow = windowRoot != null && windowRoot === activityDecorRoot,
+        )
+    }
+
+    private fun Context.issue2087FindActivity(): Activity? {
+        var current: Context? = this
+        val visited = mutableSetOf<Context>()
+        while (current != null && visited.add(current)) {
+            if (current is Activity) return current
+            current = (current as? ContextWrapper)?.baseContext
+        }
+        return null
+    }
+
+    private data class Issue2087ForeignRootFixture(
+        val composeView: ComposeView,
+        val semanticsTag: MutableState<String>,
+    )
+
+    private data class Issue2087ComposeRootOwnershipSnapshot(
+        val stage: String,
+        val targetTag: String,
+        val targetNodeCount: Int,
+        val roots: List<Issue2087ComposeRootOwnerDiagnostics>,
+    )
+
+    private data class Issue2087CollectedComposeRootOwnership(
+        val roots: List<SemanticsNode>,
+        val targetNodes: List<SemanticsNode>,
+        val snapshot: Issue2087ComposeRootOwnershipSnapshot,
+    )
+
+    private data class Issue2087TmuxContentRoot(
+        val rootNode: SemanticsNode,
+        val snapshot: Issue2087ComposeRootOwnershipSnapshot,
+    )
+
+    private enum class Issue2087RootOwnershipFailureKind {
+        TargetTagCardinality,
+        OwningRootCardinality,
+        SelectedRootDoesNotOwnTarget,
+    }
+
+    private class Issue2087RootOwnershipAssertionError(
+        val kind: Issue2087RootOwnershipFailureKind,
+        snapshot: Issue2087ComposeRootOwnershipSnapshot,
+    ) : AssertionError(
+        buildString {
+            appendLine("#2087 Compose-root ownership failure=$kind")
+            appendLine("target_tag=${snapshot.targetTag}")
+            appendLine("target_node_count=${snapshot.targetNodeCount}")
+            appendLine("root_count=${snapshot.roots.size}")
+            snapshot.roots.forEach { owner ->
+                appendLine(
+                    "root[${owner.index}] identity=${owner.rootIdentity} " +
+                        "target_tag_count=${owner.targetTagCount} " +
+                        "foreign_tag_count=${owner.foreignTagCount} " +
+                        "package=${owner.packageName} activity=${owner.activityClass} " +
+                        "activity_lifecycle=${owner.activityLifecycle} " +
+                        "window_token_identity=${owner.windowTokenIdentity} " +
+                        "window_root=${owner.windowRootClass}@${owner.windowRootIdentity} " +
+                        "view=${owner.viewClass} attached=${owner.viewAttached} " +
+                        "shown=${owner.viewShown} focused=${owner.windowFocused} " +
+                        "bounds=${owner.boundsInRoot}",
+                )
+            }
+        },
+    )
+
+    private data class Issue2087ComposeRootOwnerDiagnostics(
+        val index: Int,
+        val rootIdentity: Int,
+        val semanticsNodeId: Int,
+        val boundsInRoot: String,
+        val boundsInWindow: String,
+        val targetTagCount: Int,
+        val foreignTagCount: Int,
+        val viewClass: String,
+        val packageName: String,
+        val activityClass: String,
+        val activityIdentity: Int,
+        val activityLifecycle: String,
+        val scenarioLifecycle: String,
+        val viewAttached: Boolean,
+        val viewShown: Boolean,
+        val windowFocused: Boolean,
+        val windowTokenIdentity: Int,
+        val windowRootClass: String,
+        val windowRootIdentity: Int,
+        val ownsActivityWindow: Boolean,
+    )
+
+    /**
      * Issue #1977 regression oracle for the exact real OpenCode toolbar state.
      *
      * A bare `assertIsDisplayed()` classified neither the nightly failure nor
@@ -1202,19 +1999,23 @@ class TmuxSessionOpencodeInputDockerTest {
         label: String,
         requireKeyboard: Boolean,
     ) {
-        val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
-        val screen = compose
+        val ownership = requireIssue2087TmuxContentRoot("geometry-$label")
+        val root = ownership.rootNode.boundsInRoot
+        val screenNode = compose
             .onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
-            .getUnclippedBoundsInRoot()
-        val toolbar = compose
+        val screen = screenNode.getUnclippedBoundsInRoot()
+        val toolbarNode = compose
             .onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG, useUnmergedTree = true)
-            .getUnclippedBoundsInRoot()
-        val tabs = compose
+        val toolbarSemantics = toolbarNode.fetchSemanticsNode()
+        val toolbar = toolbarNode.getUnclippedBoundsInRoot()
+        val tabsNode = compose
             .onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
-            .getUnclippedBoundsInRoot()
+        val tabsSemantics = tabsNode.fetchSemanticsNode()
+        val tabs = tabsNode.getUnclippedBoundsInRoot()
         val launcherNode = compose
             .onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true)
-        val launcher = launcherNode.fetchSemanticsNode().boundsInRoot
+        val launcherSemantics = launcherNode.fetchSemanticsNode()
+        val launcher = launcherSemantics.boundsInRoot
         val launcherUnclipped = launcherNode.getUnclippedBoundsInRoot()
         val keyboardNodes = compose
             .onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
@@ -1223,6 +2024,21 @@ class TmuxSessionOpencodeInputDockerTest {
         val keyboardBounds = keyboard?.boundsInRoot
         val keyboardHasClickAction =
             keyboard?.config?.getOrNull(SemanticsActions.OnClick) != null
+        val ownedControlNodes = listOf(
+            TMUX_FULL_BREADCRUMB_TAG to toolbarSemantics,
+            TMUX_TABS_TAG to tabsSemantics,
+            SESSION_COMPOSER_LAUNCHER_TAG to launcherSemantics,
+        ) + keyboardNodes.map { SHOW_KEYBOARD_CHIP_TAG to it }
+        ownedControlNodes.forEach { (tag, node) ->
+            if (node.root !== ownership.rootNode.root) {
+                throw AssertionError(
+                    "#2087: control '$tag' belongs to a foreign Compose root; " +
+                        "content_root_identity=${System.identityHashCode(ownership.rootNode.root)} " +
+                        "control_root_identity=${System.identityHashCode(node.root)} " +
+                        "target_tag=${ownership.snapshot.targetTag}",
+                )
+            }
+        }
         val keyboardClassification = when {
             keyboardBounds == null -> "absent"
             keyboardBounds.left < root.left ||
@@ -1346,6 +2162,12 @@ class TmuxSessionOpencodeInputDockerTest {
             .config
             .getOrNull(TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY)
             ?.let { it == 0 }
+
+    private fun issue2087SelectedTabIndex(): Int? =
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .config
+            .getOrNull(TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY)
 
     private fun issue1977HeldOverlayCount(): Int =
         compose.onAllNodesWithTag(TMUX_SWITCHING_LOADING_TAG, useUnmergedTree = true)

@@ -1,5 +1,14 @@
 # Per-class (and per-core-terminal-proof) instrumentation seconds for issue #1850.
-# Provenance: GitHub Actions Tests run 31961310072 on main @ 3c7a01ef (2026-08-16).
+# Provenance: baseline rows from GitHub Actions Tests run 31961310072 on main @ 3c7a01ef (2026-08-16).
+# Issue #2281 additions: the 30 selectors that were absent from that baseline
+# were measured from GitHub Actions Tests run 32566299419 on main @
+# c4bb92f3c5f29bbafd26746751220018e669821f (2026-08-22). Values are the
+# suite's integer-second per-selector costs: JOURNEY_PASS elapsed for a
+# first-pass selector; attempt-1 manifest duration plus retry elapsed for a
+# selector recovered by the per-class retry; and both completed attempt
+# manifest durations for a selector that failed twice. No median/default cost
+# was used for these additions. The additions are grouped at the end so their
+# run provenance remains auditable.
 # Jobs: shard 0=95200324865  shard 1=95200324870  shard 2=95200324829
 #       shard 3=95200324874  shard 4=95200324832  shard 5=95200324883
 # Journey classes: JOURNEY_PASS attempt-1 elapsed, except the three
@@ -210,3 +219,35 @@ com.termux.view.TerminalSelectionViewportStabilityInstrumentedTest	46
 com.termux.view.TerminalViewForceSurfaceRepaintInstrumentedTest	7
 com.termux.view.TerminalViewPixelProbeAbandonedCopyInstrumentedTest	21
 com.termux.view.TerminalViewReattachLateSubscribeRepaintInstrumentedTest	11
+
+# Issue #2281: measured additions from run 32566299419 (see provenance above).
+com.pocketshell.app.cards.SessionNotePushJourneyDockerTest	39
+com.pocketshell.app.fileviewer.FileViewerLoadingSpinnerScreenshotTest	28
+com.pocketshell.app.fileviewer.FileViewerTabStripTest#dirtyWorkDialogStayAndDiscard	20
+com.pocketshell.app.fileviewer.FileViewerTabStripTest#emptyWorkspaceShowsBrowseAndOpenPath	16
+com.pocketshell.app.fileviewer.FileViewerTabStripTest#stripShowsUniqueSuffixLabelsAndSeparateSwitchClose	23
+com.pocketshell.app.fileviewer.FileViewerTabStripTest#twelveTabOverflowKeepsActiveFullyOnScreen	17
+com.pocketshell.app.fileviewer.FileViewerTabsJourneyDockerTest#lastCloseShowsEmptyWorkspace	23
+com.pocketshell.app.fileviewer.FileViewerTabsJourneyDockerTest#openABCLeaveAndOpenFilesRestoresThreeTabsAndActive	28
+com.pocketshell.app.fileviewer.FileViewerTabsMainActivityJourneyDockerTest#mainActivityRestartRestoresTabsGuardsDirtyBackAndConsumesSubmitAction	42
+com.pocketshell.app.git.GitHistoryScaffoldTest	63
+com.pocketshell.app.proof.Issue2178TypedEchoSurvivesReseedE2eTest	41
+com.pocketshell.app.proof.Issue2189HostAckExactlyOnceAcrossFlapE2eTest	24
+com.pocketshell.app.proof.Issue2189HostAckSendHealJourneyE2eTest	66
+com.pocketshell.app.proof.Issue2189HostAckSubmitJourneyE2eTest	114
+com.pocketshell.app.proof.Issue2192ComposerLauncherAfterReconnectE2eTest	48
+com.pocketshell.app.proof.TmuxKeyBarCtrlComboE2eTest#hotkeysTwoPageFlowSendsExactShellAndAgentControlBytes	69
+com.pocketshell.app.proof.VoiceGestureCoachmarkMainActivityDockerTest	88
+com.pocketshell.app.proof.signals.TerminalViewportCaptureTest	21
+com.pocketshell.app.tmux.Issue2155ConversationRebindsAfterInSessionRelaunchDockerTest	44
+com.pocketshell.app.tmux.Issue2174LocaleProofPaneCaptureDockerTest	28
+com.pocketshell.app.tmux.Issue2185UnreadableTranscriptDockerTest	27
+com.pocketshell.app.tmux.TmuxChromeReconnectingPillLegibleTest	34
+com.pocketshell.app.tmux.TmuxConsolidatedChromeScreenshotTest	29
+com.pocketshell.app.tmux.TmuxConversationDetectingComposerVisibleTest	18
+com.pocketshell.app.tmux.TmuxConversationDetectingComposerVisibleTest#showKeyboardChipIsGoneOnEveryFrameAfterConversationTabIsSelected	22
+com.pocketshell.app.tmux.TmuxMoreMenuOpenFilesTest#openFilesItemIsPresentAndInvokesCallback	20
+com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_offlineOrReconnectingLiveLookingTerminal_launcherOpens	14
+com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_wedgeA_rawNotConnectedLiveLookingTerminal_launcherOpensEnterStaysGated	15
+com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_wedgeB_surfacePaneNullAfterReseed_launcherOpensEnterAbsent	13
+com.pocketshell.app.voice.VoiceGestureCoachmarkLauncherProofTest	43

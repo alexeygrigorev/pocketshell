@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
+import java.util.Locale
 import javax.inject.Inject
 
 /**
@@ -55,6 +57,114 @@ data class RepoRow(
     val updatedAt: String?,
 )
 
+/** The local ordering choices exposed by the repository browser. */
+enum class RepoBrowserSortOrder(val label: String) {
+    /** Preserve the cloned-first, updated-at order produced by [mergeRepos]. */
+    DEFAULT("Default"),
+    NAME_ASC("Name A-Z"),
+    LAST_CHANGED("Last changed"),
+}
+
+/**
+ * The complete local query for the loaded repository list.
+ *
+ * This is deliberately independent of SSH state. Updating any field only
+ * changes which already-loaded rows are displayed; it never triggers a
+ * remote refresh.
+ */
+data class RepoBrowserQuery(
+    val search: String = "",
+    val owner: String? = null,
+    val sortOrder: RepoBrowserSortOrder = RepoBrowserSortOrder.DEFAULT,
+) {
+    val hasActiveFilters: Boolean
+        get() = search.isNotBlank() || owner != null
+
+    val hasActiveSelection: Boolean
+        get() = hasActiveFilters || sortOrder != RepoBrowserSortOrder.DEFAULT
+}
+
+/** Owners available in the loaded list, deduplicated case-insensitively. */
+fun repoBrowserOwners(rows: List<RepoRow>): List<String> {
+    val ownersByKey = linkedMapOf<String, String>()
+    rows.forEach { row ->
+        repoBrowserOwner(row)?.let { owner ->
+            ownersByKey.putIfAbsent(owner.lowercase(Locale.ROOT), owner)
+        }
+    }
+    return ownersByKey.values.sortedWith(
+        compareBy<String>({ it.lowercase(Locale.ROOT) }, { it }),
+    )
+}
+
+/**
+ * Applies the repository browser's local search, owner filter, and ordering.
+ * The input list is never mutated and no remote work is performed.
+ */
+fun queryRepoBrowserRows(
+    rows: List<RepoRow>,
+    query: RepoBrowserQuery,
+): List<RepoRow> {
+    val search = query.search.trim()
+    val filtered = rows.filter { row ->
+        val matchesSearch = search.isBlank() || listOf(
+            repoBrowserOwner(row),
+            row.name,
+            row.fullName,
+        ).any { value -> value?.contains(search, ignoreCase = true) == true }
+        val matchesOwner = query.owner == null ||
+            repoBrowserOwner(row)?.equals(query.owner.trim(), ignoreCase = true) == true
+        matchesSearch && matchesOwner
+    }
+
+    return when (query.sortOrder) {
+        RepoBrowserSortOrder.DEFAULT -> filtered
+        RepoBrowserSortOrder.NAME_ASC -> filtered.sortedWith(NAME_ASC_COMPARATOR)
+        RepoBrowserSortOrder.LAST_CHANGED -> filtered.sortedWith(LAST_CHANGED_COMPARATOR)
+    }
+}
+
+private fun repoBrowserOwner(row: RepoRow): String? =
+    row.owner?.trim()?.takeIf { it.isNotEmpty() }
+        ?: row.fullName.substringBefore('/').trim().takeIf {
+            row.fullName.contains('/') && it.isNotEmpty()
+        }
+
+private val NAME_ASC_COMPARATOR = Comparator<RepoRow> { left, right ->
+    compareIgnoringCase(left.name, right.name).takeIf { it != 0 }
+        ?: compareIgnoringCaseThenExact(left.fullName, right.fullName).takeIf { it != 0 }
+        ?: left.name.compareTo(right.name)
+}
+
+private val LAST_CHANGED_COMPARATOR = Comparator<RepoRow> { left, right ->
+    val leftInstant = parseRepoUpdatedAt(left.updatedAt)
+    val rightInstant = parseRepoUpdatedAt(right.updatedAt)
+    when {
+        leftInstant != null && rightInstant != null -> {
+            rightInstant.compareTo(leftInstant).takeIf { it != 0 } ?: compareFullName(left, right)
+        }
+        leftInstant != null -> -1
+        rightInstant != null -> 1
+        else -> compareFullName(left, right)
+    }
+}
+
+private fun compareFullName(left: RepoRow, right: RepoRow): Int =
+    compareIgnoringCaseThenExact(left.fullName, right.fullName)
+
+private fun compareIgnoringCaseThenExact(left: String, right: String): Int {
+    val insensitive = compareIgnoringCase(left, right)
+    return if (insensitive != 0) insensitive else left.compareTo(right)
+}
+
+private fun compareIgnoringCase(left: String, right: String): Int =
+    left.lowercase(Locale.ROOT).compareTo(right.lowercase(Locale.ROOT))
+
+private fun parseRepoUpdatedAt(value: String?): Instant? =
+    value?.trim()?.takeIf { it.isNotEmpty() }?.let { raw ->
+        runCatching { Instant.parse(raw) }.getOrNull()
+    }
+
 sealed interface RepoBrowserUiState {
     data object Loading : RepoBrowserUiState
 
@@ -64,6 +174,8 @@ sealed interface RepoBrowserUiState {
         val pendingFullName: String? = null,
         /** One-shot failure banner text from the last clone/open attempt. */
         val actionError: String? = null,
+        /** Search, owner, and sort state for the already-loaded rows. */
+        val query: RepoBrowserQuery = RepoBrowserQuery(),
     ) : RepoBrowserUiState
 
     data class Failed(val message: String) : RepoBrowserUiState
@@ -126,6 +238,8 @@ class RepoBrowserViewModel @Inject constructor(
     /** Re-run the remote + local enumeration. Wired to pull-to-retry. */
     fun refresh() {
         val creds = credentials ?: return
+        val queryAtStart = (_state.value as? RepoBrowserUiState.Ready)?.query
+            ?: RepoBrowserQuery()
         loadJob?.cancel()
         // Keep the existing list visible on a refresh so the screen does
         // not flash a spinner over a usable list; only show Loading when
@@ -135,8 +249,38 @@ class RepoBrowserViewModel @Inject constructor(
         }
         loadJob = viewModelScope.launch {
             val result = withContext(Dispatchers.IO) { runLoad(creds) }
-            _state.value = result
+            val query = (_state.value as? RepoBrowserUiState.Ready)?.query ?: queryAtStart
+            _state.value = if (result is RepoBrowserUiState.Ready) {
+                result.copy(query = query)
+            } else {
+                result
+            }
         }
+    }
+
+    /** Updates the local search without reloading the remote list. */
+    fun updateSearchQuery(search: String) {
+        updateQuery { copy(search = search) }
+    }
+
+    /** Updates the local owner filter without reloading the remote list. */
+    fun updateOwnerFilter(owner: String?) {
+        updateQuery { copy(owner = owner) }
+    }
+
+    /** Updates the local sort order without reloading the remote list. */
+    fun updateSortOrder(sortOrder: RepoBrowserSortOrder) {
+        updateQuery { copy(sortOrder = sortOrder) }
+    }
+
+    /** Clears search, owner, and sort selections while keeping loaded rows. */
+    fun clearQuery() {
+        updateQuery { RepoBrowserQuery() }
+    }
+
+    private fun updateQuery(transform: RepoBrowserQuery.() -> RepoBrowserQuery) {
+        val ready = _state.value as? RepoBrowserUiState.Ready ?: return
+        _state.value = ready.copy(query = transform(ready.query))
     }
 
     /**

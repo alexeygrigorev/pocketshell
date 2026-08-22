@@ -18,6 +18,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -30,6 +33,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -155,6 +160,10 @@ fun RepoBrowserScreen(
             viewModel.onRepoTapped(row, onResolved = { path -> pickerRepoPath = path })
         },
         onDismissError = viewModel::clearActionError,
+        onSearchQueryChange = viewModel::updateSearchQuery,
+        onOwnerFilterChange = viewModel::updateOwnerFilter,
+        onSortOrderChange = viewModel::updateSortOrder,
+        onClearQuery = viewModel::clearQuery,
         modifier = modifier,
     )
 
@@ -218,6 +227,10 @@ internal fun RepoBrowserScaffold(
     onRetry: () -> Unit,
     onRepoClick: (RepoRow) -> Unit,
     onDismissError: () -> Unit,
+    onSearchQueryChange: (String) -> Unit = {},
+    onOwnerFilterChange: (String?) -> Unit = {},
+    onSortOrderChange: (RepoBrowserSortOrder) -> Unit = {},
+    onClearQuery: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(
@@ -242,6 +255,10 @@ internal fun RepoBrowserScaffold(
                     state = s,
                     onRepoClick = onRepoClick,
                     onDismissError = onDismissError,
+                    onSearchQueryChange = onSearchQueryChange,
+                    onOwnerFilterChange = onOwnerFilterChange,
+                    onSortOrderChange = onSortOrderChange,
+                    onClearQuery = onClearQuery,
                 )
             }
         }
@@ -316,13 +333,27 @@ private fun RepoBrowserContent(
     state: RepoBrowserUiState.Ready,
     onRepoClick: (RepoRow) -> Unit,
     onDismissError: () -> Unit,
+    onSearchQueryChange: (String) -> Unit,
+    onOwnerFilterChange: (String?) -> Unit,
+    onSortOrderChange: (RepoBrowserSortOrder) -> Unit,
+    onClearQuery: () -> Unit,
 ) {
+    val visibleRepos = queryRepoBrowserRows(state.repos, state.query)
+    val owners = repoBrowserOwners(state.repos)
     Column(modifier = Modifier.fillMaxSize()) {
+        RepoBrowserControls(
+            query = state.query,
+            owners = owners,
+            onSearchQueryChange = onSearchQueryChange,
+            onOwnerFilterChange = onOwnerFilterChange,
+            onSortOrderChange = onSortOrderChange,
+            onClearQuery = onClearQuery,
+        )
         state.actionError?.let { error ->
             ActionErrorBanner(message = error, onDismiss = onDismissError)
         }
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(
                 horizontal = PocketShellDensity.rowPadH,
                 vertical = PocketShellSpacing.md,
@@ -331,11 +362,13 @@ private fun RepoBrowserContent(
         ) {
             if (state.repos.isEmpty()) {
                 item { EmptyState() }
+            } else if (visibleRepos.isEmpty()) {
+                item { FilteredEmptyState(onClearQuery = onClearQuery) }
             } else {
                 item {
-                    SectionHeader(label = "Repositories", count = state.repos.size)
+                    SectionHeader(label = "Repositories", count = visibleRepos.size)
                 }
-                items(state.repos, key = { it.fullName }) { repo ->
+                items(visibleRepos, key = { it.fullName }) { repo ->
                     RepoCard(
                         repo = repo,
                         pending = state.pendingFullName == repo.fullName,
@@ -346,6 +379,188 @@ private fun RepoBrowserContent(
             }
         }
     }
+}
+
+@Composable
+private fun RepoBrowserControls(
+    query: RepoBrowserQuery,
+    owners: List<String>,
+    onSearchQueryChange: (String) -> Unit,
+    onOwnerFilterChange: (String?) -> Unit,
+    onSortOrderChange: (RepoBrowserSortOrder) -> Unit,
+    onClearQuery: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellSpacing.sm,
+            )
+            .testTag(REPO_BROWSER_CONTROLS_TAG),
+        verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
+    ) {
+        OutlinedTextField(
+            value = query.search,
+            onValueChange = onSearchQueryChange,
+            label = { Text("Search repositories") },
+            placeholder = { Text("Owner, name, or owner/repository") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(REPO_BROWSER_SEARCH_TAG)
+                .semantics {
+                    contentDescription = "Search repositories by owner or name"
+                },
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            OwnerSelector(
+                selectedOwner = query.owner,
+                owners = owners,
+                onOwnerChange = onOwnerFilterChange,
+                modifier = Modifier.weight(1f),
+            )
+            SortSelector(
+                selectedSort = query.sortOrder,
+                onSortChange = onSortOrderChange,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (query.hasActiveSelection) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                PocketShellButton(
+                    text = "Reset",
+                    onClick = onClearQuery,
+                    variant = ButtonVariant.Text,
+                    compact = true,
+                    modifier = Modifier
+                        .testTag(REPO_BROWSER_RESET_TAG)
+                        .semantics {
+                            contentDescription = "Reset repository search, owner, and sort"
+                        },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun OwnerSelector(
+    selectedOwner: String?,
+    owners: List<String>,
+    onOwnerChange: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedLabel = selectedOwner ?: "All"
+    Box(modifier = modifier) {
+        PocketShellButton(
+            text = "Owner: $selectedLabel",
+            onClick = { expanded = true },
+            variant = ButtonVariant.Secondary,
+            compact = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(REPO_BROWSER_OWNER_TAG)
+                .semantics {
+                    contentDescription = "Repository owner filter, selected $selectedLabel"
+                },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .background(PocketShellColors.Surface)
+                .testTag(REPO_BROWSER_OWNER_MENU_TAG),
+        ) {
+            DropdownMenuItem(
+                text = { SelectorOptionText("All", selectedOwner == null) },
+                onClick = {
+                    expanded = false
+                    onOwnerChange(null)
+                },
+                modifier = Modifier.testTag(REPO_BROWSER_OWNER_OPTION_ALL_TAG),
+            )
+            owners.forEach { owner ->
+                DropdownMenuItem(
+                    text = {
+                        SelectorOptionText(
+                            text = owner,
+                            selected = owner.equals(selectedOwner, ignoreCase = true),
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onOwnerChange(owner)
+                    },
+                    modifier = Modifier.testTag(repoBrowserOwnerOptionTestTag(owner)),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SortSelector(
+    selectedSort: RepoBrowserSortOrder,
+    onSortChange: (RepoBrowserSortOrder) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        PocketShellButton(
+            text = "Sort: ${selectedSort.label}",
+            onClick = { expanded = true },
+            variant = ButtonVariant.Secondary,
+            compact = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(REPO_BROWSER_SORT_TAG)
+                .semantics {
+                    contentDescription = "Repository sort, selected ${selectedSort.label}"
+                },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .background(PocketShellColors.Surface)
+                .testTag(REPO_BROWSER_SORT_MENU_TAG),
+        ) {
+            RepoBrowserSortOrder.values().forEach { sortOrder ->
+                DropdownMenuItem(
+                    text = {
+                        SelectorOptionText(
+                            text = sortOrder.label,
+                            selected = sortOrder == selectedSort,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onSortChange(sortOrder)
+                    },
+                    modifier = Modifier.testTag(repoBrowserSortOptionTestTag(sortOrder)),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SelectorOptionText(text: String, selected: Boolean) {
+    Text(
+        text = text,
+        color = if (selected) PocketShellColors.Accent else PocketShellColors.Text,
+        style = PocketShellType.bodyDense,
+        fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+    )
 }
 
 @Composable
@@ -387,6 +602,38 @@ private fun EmptyState() {
             text = "Make sure `gh` is authenticated on this host.",
             color = PocketShellColors.TextSecondary,
             style = MaterialTheme.typography.labelSmall,
+        )
+    }
+}
+
+@Composable
+private fun FilteredEmptyState(onClearQuery: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+            .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
+            .testTag(REPO_BROWSER_NO_RESULTS_TAG),
+    ) {
+        Text(
+            text = "No repositories match your search or owner filter",
+            color = PocketShellColors.Text,
+            style = PocketShellType.bodyDense,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Try a different search or owner, or clear the current filters.",
+            color = PocketShellColors.TextSecondary,
+            style = MaterialTheme.typography.labelSmall,
+        )
+        PocketShellButton(
+            text = "Clear search and filters",
+            onClick = onClearQuery,
+            variant = ButtonVariant.Text,
+            compact = true,
+            modifier = Modifier.testTag(REPO_BROWSER_CLEAR_FILTERS_TAG),
         )
     }
 }
@@ -451,8 +698,21 @@ const val REPO_BROWSER_LOADING_TAG: String = "repo-browser:loading"
 const val REPO_BROWSER_ERROR_TAG: String = "repo-browser:error"
 const val REPO_BROWSER_RETRY_TAG: String = "repo-browser:retry"
 const val REPO_BROWSER_EMPTY_TAG: String = "repo-browser:empty"
+const val REPO_BROWSER_CONTROLS_TAG: String = "repo-browser:controls"
+const val REPO_BROWSER_SEARCH_TAG: String = "repo-browser:search"
+const val REPO_BROWSER_OWNER_TAG: String = "repo-browser:owner"
+const val REPO_BROWSER_OWNER_MENU_TAG: String = "repo-browser:owner:menu"
+const val REPO_BROWSER_OWNER_OPTION_ALL_TAG: String = "repo-browser:owner:option:all"
+const val REPO_BROWSER_SORT_TAG: String = "repo-browser:sort"
+const val REPO_BROWSER_SORT_MENU_TAG: String = "repo-browser:sort:menu"
+const val REPO_BROWSER_RESET_TAG: String = "repo-browser:reset"
+const val REPO_BROWSER_NO_RESULTS_TAG: String = "repo-browser:no-results"
+const val REPO_BROWSER_CLEAR_FILTERS_TAG: String = "repo-browser:no-results:clear"
 const val REPO_BROWSER_ACTION_ERROR_TAG: String = "repo-browser:action-error"
 const val REPO_BROWSER_ACTION_ERROR_DISMISS_TAG: String = "repo-browser:action-error:dismiss"
 
 fun repoCardTestTag(fullName: String): String = "repo-browser:card:$fullName"
 fun repoCardPendingTestTag(fullName: String): String = "repo-browser:card:$fullName:pending"
+fun repoBrowserOwnerOptionTestTag(owner: String): String = "repo-browser:owner:option:$owner"
+fun repoBrowserSortOptionTestTag(sortOrder: RepoBrowserSortOrder): String =
+    "repo-browser:sort:option:${sortOrder.name}"

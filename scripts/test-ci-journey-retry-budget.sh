@@ -1089,7 +1089,7 @@ echo "== #1850 per-shard load: the shipped matrix must leave >420s retry headroo
 # Conservative fixed-cost inputs (worst observed in the #1850/#2060
 # derivation). They are fixture inputs to the production formula, NOT new
 # budget constants — case (w) above still pins those.
-LOAD_FIXTURE="$SCRIPT_DIR/fixtures/ci-journey-run-31961310072-class-seconds.tsv"
+LOAD_FIXTURE="${CI_JOURNEY_LOAD_FIXTURE:-$SCRIPT_DIR/fixtures/ci-journey-run-31961310072-class-seconds.tsv}"
 LOAD_SELECTION_HELPER="$SCRIPT_DIR/ci-journey-class-selection-functions.sh"
 LOAD_CORE_HELPER="$SCRIPT_DIR/ci-journey-core-terminal-functions.sh"
 LOAD_SHARD_COUNT="$SCRIPT_DIR/ci-journey-shard-count.sh"
@@ -1117,11 +1117,6 @@ while IFS=$'\t' read -r load_fqcn load_secs; do
 done < "$LOAD_FIXTURE"
 (( load_fixture_rows >= 150 )) \
   || fail "(aa) fixture has only $load_fixture_rows rows — a truncated TSV cannot constrain per-shard load"
-
-mapfile -t LOAD_SORTED_COSTS < <(printf '%s\n' "${LOAD_COST_SECS[@]}" | sort -n)
-LOAD_MEDIAN="${LOAD_SORTED_COSTS[$(( ${#LOAD_SORTED_COSTS[@]} / 2 ))]}"
-[[ "$LOAD_MEDIAN" =~ ^[1-9][0-9]*$ ]] \
-  || fail "(aa) could not derive a median from the fixture"
 
 # shellcheck source=scripts/ci-journey-class-selection-functions.sh
 source "$LOAD_SELECTION_HELPER"
@@ -1162,15 +1157,68 @@ for load_fqcn in "${LOAD_JOURNEY_CLASSES[@]}" "${LOAD_CORE_SELECTORS[@]}"; do
   load_unknowns+=("$load_fqcn")
 done
 if (( ${#load_unknowns[@]} > 0 )); then
-  echo "  (aa) ${#load_unknowns[@]} class(es) not in the fixture — costing each at the fixture median ${LOAD_MEDIAN}s:"
-  printf '    %s\n' "${load_unknowns[@]}"
+  echo "  (aa) missing required cost for ${#load_unknowns[@]} registered selector(s):"
+  printf '    missing required cost: %s\n' "${load_unknowns[@]}"
 fi
-(( ${#load_unknowns[@]} <= 20 )) \
-  || fail "(aa) ${#load_unknowns[@]} classes have no fixture cost — the TSV is too stale to ratchet load; re-derive it from a real run"
+(( ${#load_unknowns[@]} == 0 )) \
+  || fail "(aa) ${#load_unknowns[@]} registered selector(s) have no fixture cost — re-derive the TSV from a real run"
+
+# (aa0) G6 / issue #2281 mutation proof. Removing one real registered selector
+# from a copied fixture must execute the exact missing-cost guard and redden it;
+# a structural row-count check or a median fallback would let this mutant pass.
+# The child invocation skips only this parent self-test to avoid recursion. It
+# still runs the production-shaped parser, registry walk, and guarded failure.
+if [[ "${CI_JOURNEY_SKIP_FIXTURE_MUTATION_GUARD:-0}" != "1" ]]; then
+  load_fixture_mutant="$warm_ws/missing-required-cost.tsv"
+  load_fixture_mutant_log="$warm_ws/missing-required-cost.log"
+  load_mutant_victim=""
+  for load_fqcn in "${LOAD_JOURNEY_CLASSES[@]}" "${LOAD_CORE_SELECTORS[@]}"; do
+    if [[ -n "${LOAD_COST_SECS[$load_fqcn]+x}" ]]; then
+      load_mutant_victim="$load_fqcn"
+      break
+    fi
+  done
+  [[ -n "$load_mutant_victim" ]] \
+    || fail "(aa0) could not choose a registered fixture row for the mutation proof"
+  cp "$LOAD_FIXTURE" "$load_fixture_mutant" \
+    || fail "(aa0) could not copy the fixture for mutation"
+  python3 - "$load_fixture_mutant" "$load_mutant_victim" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+victim = sys.argv[2]
+lines = path.read_text().splitlines(keepends=True)
+matches = [i for i, line in enumerate(lines) if line.startswith(victim + "\t")]
+if len(matches) != 1:
+    raise SystemExit(f"mutation expected one row for {victim!r}, found {len(matches)}")
+del lines[matches[0]]
+path.write_text("".join(lines))
+PY
+  mutated_rows="$(awk 'NF && $1 !~ /^#/ {n++} END{print n}' "$load_fixture_mutant")"
+  [[ "$mutated_rows" == "$((load_fixture_rows - 1))" ]] \
+    || fail "(aa0) mutation changed $load_fixture_rows rows to $mutated_rows instead of removing exactly one"
+  if CI_JOURNEY_LOAD_FIXTURE="$load_fixture_mutant" \
+    CI_JOURNEY_SKIP_FIXTURE_MUTATION_GUARD=1 \
+    bash "$SCRIPT_DIR/test-ci-journey-retry-budget.sh" >"$load_fixture_mutant_log" 2>&1; then
+    load_mutant_rc=0
+  else
+    load_mutant_rc=$?
+  fi
+  (( load_mutant_rc != 0 )) \
+    || fail "(aa0) removing required cost for $load_mutant_victim stayed green"
+  grep -Fq "missing required cost: $load_mutant_victim" "$load_fixture_mutant_log" \
+    || { sed -n '/missing required cost/,+4p' "$load_fixture_mutant_log" >&2 || true; fail "(aa0) mutant did not execute the named missing-cost guard for $load_mutant_victim"; }
+  [[ "$(grep -Fc 'TEST FAIL: (aa)' "$load_fixture_mutant_log")" == "1" ]] \
+    || fail "(aa0) mutant produced an unexpected number of load-guard failures"
+  pass "(aa0) removing one required cost for $load_mutant_victim selectively reddens the live missing-cost guard (rc=$load_mutant_rc)"
+fi
 
 load_cost_of() {
   local fqcn="$1"
-  printf '%s' "${LOAD_COST_SECS[$fqcn]:-$LOAD_MEDIAN}"
+  [[ -n "${LOAD_COST_SECS[$fqcn]+x}" ]] \
+    || fail "(aa) load model requested an unpriced registered selector: $fqcn"
+  printf '%s' "${LOAD_COST_SECS[$fqcn]}"
 }
 
 # instrumentation_secs <total> <idx> — journey + core-terminal seconds the
@@ -1277,10 +1325,7 @@ for load_fqcn in "${!LOAD_COST_SECS[@]}"; do
   load_saved_costs+=("$load_fqcn" "${LOAD_COST_SECS[$load_fqcn]}")
   LOAD_COST_SECS["$load_fqcn"]=1
 done
-LOAD_MEDIAN_SAVED="$LOAD_MEDIAN"
-LOAD_MEDIAN=1
 LOAD_FLAT_THREE="$(load_model_min_margin_ms 3)"
-LOAD_MEDIAN="$LOAD_MEDIAN_SAVED"
 for (( load_i = 0; load_i < ${#load_saved_costs[@]}; load_i += 2 )); do
   LOAD_COST_SECS["${load_saved_costs[$load_i]}"]="${load_saved_costs[$((load_i + 1))]}"
 done

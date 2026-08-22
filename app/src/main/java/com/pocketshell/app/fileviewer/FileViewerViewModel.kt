@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.AppTeardownScope
 import com.pocketshell.app.requireMainThread
 import com.pocketshell.app.sessions.LeaseSessionExec
 import com.pocketshell.app.sessions.LeaseSessionTarget
@@ -18,14 +19,17 @@ import com.pocketshell.core.ssh.shellSingleQuote
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -112,6 +116,18 @@ sealed interface FileViewerUiState {
         val cacheFile: File? = null,
         val locateCandidates: List<String> = emptyList(),
     ) : FileViewerUiState
+
+    /** Issue #1715 — this host has no open files (or the last tab was closed). */
+    data object EmptyWorkspace : FileViewerUiState
+
+    /**
+     * Issue #1715 — the host CLI does not expose `tree workspace-get`. Direct
+     * viewing of a requested path still works; restored-workspace UI does not
+     * silently invent a phone-side tab store (D22).
+     */
+    data class WorkspaceUnavailable(
+        val message: String = "Open files unavailable; update PocketShell on this host",
+    ) : FileViewerUiState
 }
 
 /**
@@ -138,7 +154,19 @@ class FileViewerViewModel @Inject constructor(
     @ApplicationContext private val appContext: Context,
     private val sshLeaseManager: SshLeaseManager,
     private val prefs: FileViewerPrefsStore = FileViewerPrefsStore(appContext),
+    private val workspaceSource: FileWorkspaceRemoteSource = FileWorkspaceRemoteSource(),
 ) : ViewModel() {
+
+    /** Injectable clock for tab-recency tests; production uses wall-clock millis. */
+    internal var nowMillis: () -> Long = { System.currentTimeMillis() }
+
+    /**
+     * Workspace writes belong to the process, not to this screen's lifecycle.
+     * Tests replace this with a controlled scope; production uses the scope
+     * that also owns bounded connection teardown and is never cancelled by
+     * ViewModel/activity recreation.
+     */
+    internal var workspaceWriteScope: CoroutineScope = AppTeardownScope.scope
 
     private val _state = MutableStateFlow<FileViewerUiState>(
         FileViewerUiState.Loading(displayPath = ""),
@@ -200,22 +228,51 @@ class FileViewerViewModel @Inject constructor(
 
     private var loadJob: Job? = null
     private var lastRequest: Request? = null
+    private var workspaceHostId: Long? = null
+    private var workspaceHydrated: Boolean = false
+    private var workspaceAvailable: Boolean = true
+    private var workspaceWriteTail: Job? = null
+    private var workspaceWriteGeneration: Long = 0L
 
     /**
-     * Tiny bounded LRU of already-rendered viewer states keyed by the request
-     * (issue #697). Re-opening a file you just viewed paints the cached result
-     * instantly (the VS-Code-Remote-SSH "feels local" re-open trick) while a
-     * fresh fetch reconciles in the background and the live result always wins.
-     * Image/PDF/audio/binary entries that wrote bytes to the on-disk cache are
-     * skipped — that cached file may have been swept, so they always re-fetch.
+     * Issue #1715 — this Unix account's open-file workspace. Hydrated once
+     * from the host on the first [bind]; mutated on successful open / tab
+     * switch / close. Never polled.
      */
-    private val contentCache = object : LinkedHashMap<Request, FileViewerUiState>(
+    private val _workspace = MutableStateFlow(FileWorkspace.Empty)
+    val workspace: StateFlow<FileWorkspace> = _workspace.asStateFlow()
+
+    private val _workspaceWriteState = MutableStateFlow<FileWorkspaceWriteState>(
+        FileWorkspaceWriteState.Idle,
+    )
+    val workspaceWriteState: StateFlow<FileWorkspaceWriteState> = _workspaceWriteState.asStateFlow()
+
+    /**
+     * Issue #1715 — a tab switch/close that is blocked on pending review or
+     * annotation work. Null when no guard is showing.
+     */
+    private val _pendingTabAction = MutableStateFlow<PendingTabAction?>(null)
+    val pendingTabAction: StateFlow<PendingTabAction?> = _pendingTabAction.asStateFlow()
+
+    /** One-shot navigation result for a clean/just-submitted queued Back. */
+    private val _backEvents = MutableSharedFlow<Unit>(replay = 0, extraBufferCapacity = 1)
+    val backEvents: SharedFlow<Unit> = _backEvents.asSharedFlow()
+
+    /**
+     * Tiny bounded LRU of already-rendered viewer states keyed by
+     * `(hostId, resolved absolute path)` (issue #697, re-keyed in #1715).
+     * A relative open and its restored absolute tab must share one cache
+     * entry. Image/PDF/audio/binary entries that wrote bytes to the on-disk
+     * cache are skipped — that cached file may have been swept, so they
+     * always re-fetch.
+     */
+    private val contentCache = object : LinkedHashMap<ContentCacheKey, FileViewerUiState>(
         CONTENT_CACHE_CAP + 1,
         0.75f,
         true,
     ) {
         override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<Request, FileViewerUiState>,
+            eldest: MutableMap.MutableEntry<ContentCacheKey, FileViewerUiState>,
         ): Boolean = size > CONTENT_CACHE_CAP
     }
 
@@ -310,6 +367,7 @@ class FileViewerViewModel @Inject constructor(
                     // Clear the pending set but keep review mode active so the
                     // user can keep reviewing the same file.
                     _reviewState.value = _reviewState.value.cleared()
+                    consumePendingTabActionIfClean()
                     _reviewEvents.tryEmit(
                         ReviewSubmitEvent.Success(host = host, count = current.pendingCount, remotePath = remotePath),
                     )
@@ -434,6 +492,7 @@ class FileViewerViewModel @Inject constructor(
             result.fold(
                 onSuccess = { remotePath ->
                     _annotationState.value = _annotationState.value.cleared()
+                    consumePendingTabActionIfClean()
                     _annotationEvents.tryEmit(AnnotationSubmitEvent.Success(host = host, remotePath = remotePath))
                 },
                 onFailure = { error ->
@@ -547,15 +606,219 @@ class FileViewerViewModel @Inject constructor(
      */
     fun bind(request: Request) {
         requireMainThread("FileViewerViewModel.bind")
+        if (workspaceHostId != request.hostId) {
+            // A Hilt VM can outlive one viewer destination in the hand-rolled
+            // navigator. Never let host A's durable tabs become host B's
+            // in-memory workspace or skip B's one-time hydrate.
+            loadJob?.cancel()
+            workspaceHostId = request.hostId
+            workspaceHydrated = false
+            workspaceAvailable = true
+            _workspace.value = FileWorkspace.Empty
+            _workspaceWriteState.value = FileWorkspaceWriteState.Idle
+            _pendingTabAction.value = null
+        }
         val sameRequest = request == lastRequest
         lastRequest = request
         if (sameRequest && loadJob?.isActive == true) return
+        if (!workspaceHydrated) {
+            loadJob?.cancel()
+            _state.value = FileViewerUiState.Loading(displayPath = request.path.orEmpty())
+            loadJob = viewModelScope.launch {
+                if (!hydrateWorkspace(request) || !isCurrentRequest(request)) return@launch
+                workspaceHydrated = true
+                // Drop the hydrate job so [load] does not cancel this
+                // coroutine (and the fetch it is about to start).
+                loadJob = null
+                continueAfterHydrate(request)
+            }
+            return
+        }
+        continueAfterHydrate(request)
+    }
+
+    private fun continueAfterHydrate(request: Request) {
+        val path = request.path
+        if (path.isNullOrBlank()) {
+            if (!workspaceAvailable) {
+                _state.value = FileViewerUiState.WorkspaceUnavailable()
+                return
+            }
+            val active = _workspace.value.activePath
+            if (active.isNullOrBlank()) {
+                _state.value = FileViewerUiState.EmptyWorkspace
+                return
+            }
+            // The restored active tab is the effective current request. Keep
+            // the identity used by the load-result guard in sync with the
+            // request that is actually being fetched.
+            val restored = request.copy(path = active, cwd = null)
+            lastRequest = restored
+            load(restored)
+            return
+        }
         load(request)
+    }
+
+    private suspend fun hydrateWorkspace(request: Request): Boolean {
+        val result = LeaseSessionExec.withSession(
+            leaseManager = sshLeaseManager,
+            target = request.toLeaseTarget(),
+        ) { session ->
+            workspaceSource.getWorkspace(session)
+        }.getOrElse { FileWorkspaceResult.Unavailable }
+        // Cancellation can race a completed SSH call. Do not let an old host
+        // hydrate overwrite the workspace selected by a later bind.
+        currentCoroutineContext().ensureActive()
+        if (!isCurrentRequest(request)) return false
+        workspaceAvailable = result.available
+        if (result.available) {
+            _workspace.value = result.workspace
+        }
+        return true
+    }
+
+    /**
+     * Issue #1715 — switch the top viewer onto [tab] through the same #1713
+     * cache-then-live [load] path. Pending review/annotation work blocks the
+     * switch until the user stays, submits, or discards.
+     */
+    fun switchToTab(tab: OpenFileTab) {
+        requireMainThread("FileViewerViewModel.switchToTab")
+        val current = lastRequest ?: return
+        val showing = currentDisplayPath()
+        if (tab.absolutePath != showing && hasPendingWork()) {
+            _pendingTabAction.value = PendingTabAction.Switch(tab)
+            return
+        }
+        performSwitch(current, tab)
+    }
+
+    /**
+     * Issue #1715 — close [tab]. Closing the active tab with pending work is
+     * guarded; closing an inactive tab is always allowed.
+     */
+    fun closeTab(tab: OpenFileTab) {
+        requireMainThread("FileViewerViewModel.closeTab")
+        val showing = currentDisplayPath()
+        val isActive = tab.absolutePath == showing
+        if (isActive && hasPendingWork()) {
+            _pendingTabAction.value = PendingTabAction.Close(tab)
+            return
+        }
+        performClose(tab)
+    }
+
+    fun stayOnTab() {
+        _pendingTabAction.value = null
+    }
+
+    /**
+     * Guard both the system Back gesture and the file-viewer app-bar Back.
+     * Returning false means the screen must remain in place while the dirty
+     * dialog is showing; returning true means the caller may navigate away.
+     */
+    fun requestBack(): Boolean {
+        requireMainThread("FileViewerViewModel.requestBack")
+        if (hasPendingWork()) {
+            _pendingTabAction.value = PendingTabAction.Back
+            return false
+        }
+        _pendingTabAction.value = null
+        return true
+    }
+
+    /** Empty-workspace "Open path" — bind a typed path onto the current host. */
+    fun openPath(path: String) {
+        val current = lastRequest ?: return
+        val trimmed = path.trim()
+        if (trimmed.isEmpty()) return
+        bind(current.copy(path = trimmed, cwd = current.cwd))
+    }
+
+    /**
+     * Discard pending review/annotation work, then perform the queued switch
+     * or close exactly once.
+     */
+    fun discardPendingWorkAndProceed(): PendingTabAction? {
+        val action = _pendingTabAction.value ?: return null
+        _reviewState.value = ReviewState()
+        _annotationState.value = ImageAnnotationState()
+        _pendingTabAction.value = null
+        when (action) {
+            is PendingTabAction.Switch -> lastRequest?.let { performSwitch(it, action.tab) }
+            is PendingTabAction.Close -> performClose(action.tab)
+            PendingTabAction.Back -> Unit
+        }
+        return action
+    }
+
+    /** Consume a queued tab/back action after Submit removed the dirty state. */
+    private fun consumePendingTabActionIfClean() {
+        if (hasPendingWork()) return
+        val action = _pendingTabAction.value ?: return
+        _pendingTabAction.value = null
+        when (action) {
+            is PendingTabAction.Switch -> lastRequest?.let { performSwitch(it, action.tab) }
+            is PendingTabAction.Close -> performClose(action.tab)
+            PendingTabAction.Back -> _backEvents.tryEmit(Unit)
+        }
+    }
+
+    fun hasPendingWork(): Boolean {
+        val review = _reviewState.value
+        val annotation = _annotationState.value
+        return review.hasPending ||
+            review.submitting ||
+            annotation.annotations.isNotEmpty() ||
+            annotation.note != null ||
+            annotation.submitting
+    }
+
+    private fun performSwitch(current: Request, tab: OpenFileTab) {
+        resetCleanModes()
+        persistWorkspace(
+            FileWorkspaceReducer.activate(_workspace.value, tab.absolutePath, nowMillis()),
+        )
+        val next = current.copy(path = tab.absolutePath, cwd = null)
+        lastRequest = next
+        load(next)
+    }
+
+    private fun performClose(tab: OpenFileTab) {
+        if (currentDisplayPath() == tab.absolutePath) {
+            loadJob?.cancel()
+        }
+        val next = FileWorkspaceReducer.close(_workspace.value, tab.absolutePath)
+        persistWorkspace(next)
+        val active = next.activePath
+        if (active == null) {
+            resetCleanModes()
+            _state.value = FileViewerUiState.EmptyWorkspace
+            lastRequest = lastRequest?.copy(path = null, cwd = null)
+            return
+        }
+        if (active != currentDisplayPath()) {
+            lastRequest?.let { load(it.copy(path = active, cwd = null).also { req -> lastRequest = req }) }
+        }
+    }
+
+    private fun resetCleanModes() {
+        if (!hasPendingWork()) {
+            _reviewState.value = ReviewState()
+            _annotationState.value = ImageAnnotationState()
+        }
     }
 
     /** Re-run the fetch (wired to "Retry" on the can't-preview panel). */
     fun retry() {
-        lastRequest?.let { load(it) }
+        val current = lastRequest ?: return
+        if (current.path.isNullOrBlank()) {
+            workspaceHydrated = false
+            bind(current)
+            return
+        }
+        load(current)
     }
 
     /**
@@ -572,8 +835,9 @@ class FileViewerViewModel @Inject constructor(
     }
 
     private fun load(request: Request) {
+        val inputPath = request.path ?: return
         val resolved = RemotePathResolver.resolve(
-            input = request.path,
+            input = inputPath,
             cwd = request.cwd,
             remoteHome = conventionalRemoteHome(request.username),
         )
@@ -585,13 +849,41 @@ class FileViewerViewModel @Inject constructor(
         loadJob?.cancel()
         // Re-open of a just-viewed text file paints instantly from the LRU; a
         // fresh fetch still runs underneath and the live result wins (#697).
-        val cached = contentCache[request]
+        // Keyed by resolved absolute path so a relative open and its restored
+        // absolute tab share one cache entry (#1715).
+        activateKnownTabBeforePaint(resolved)
+        val cached = contentCache[ContentCacheKey(request.hostId, resolved)]
         _state.value = cached ?: FileViewerUiState.Loading(displayPath = resolved)
         loadJob = viewModelScope.launch {
             val fetched = withContext(Dispatchers.IO) { fetch(request, resolved) }
+            ensureActive()
+            // A cancelled SSH read may finish at the same instant as a new
+            // bind. The cancellation alone is not a sufficient stale-result
+            // guard: never paint host/path A over the request now showing B.
+            if (!isCurrentRequest(request)) return@launch
             cacheIfReusable(request, fetched)
+            considerWorkspaceUpsert(request, fetched)
+            // publish content after the synchronous workspace mutation so the
+            // tab strip and the loaded viewer cannot briefly disagree.
             _state.value = fetched
         }
+    }
+
+    private fun isCurrentRequest(request: Request): Boolean =
+        workspaceHostId == request.hostId && lastRequest == request
+
+    /**
+     * A cached reopen is visible before its live reconciliation completes.
+     * If the path is already durable, make its active identity agree with that
+     * immediate paint; only a successful fetch may add a brand-new tab.
+     */
+    private fun activateKnownTabBeforePaint(resolved: String) {
+        if (!workspaceAvailable) return
+        val workspace = _workspace.value
+        if (workspace.activePath == resolved || workspace.orderedTabs.none { it.absolutePath == resolved }) {
+            return
+        }
+        persistWorkspace(FileWorkspaceReducer.activate(workspace, resolved, nowMillis()))
     }
 
     private suspend fun fetch(request: Request, fallbackResolved: String): FileViewerUiState {
@@ -611,9 +903,10 @@ class FileViewerViewModel @Inject constructor(
     }
 
     private suspend fun readFromSession(request: Request, session: SshSession): FileViewerUiState {
+        val inputPath = request.path ?: return FileViewerUiState.EmptyWorkspace
         val remoteHome = remoteHomeDirectory(session) ?: conventionalRemoteHome(request.username)
         val resolved = RemotePathResolver.resolve(
-            input = request.path,
+            input = inputPath,
             cwd = request.cwd,
             remoteHome = remoteHome,
         )
@@ -706,7 +999,10 @@ class FileViewerViewModel @Inject constructor(
         remoteHome: String?,
     ): FileViewerUiState {
         val plan = RemotePathResolver.searchPlan(
-            input = request.path,
+            input = request.path ?: return FileViewerUiState.CannotPreview(
+                displayPath = resolved,
+                message = fileNotFoundMessage(resolved),
+            ),
             cwd = request.cwd,
             remoteHome = remoteHome,
         ) ?: return FileViewerUiState.CannotPreview(
@@ -785,8 +1081,110 @@ class FileViewerViewModel @Inject constructor(
      */
     private fun cacheIfReusable(request: Request, state: FileViewerUiState) {
         if (state is FileViewerUiState.TextContent) {
-            contentCache[request] = state
+            contentCache[ContentCacheKey(request.hostId, state.displayPath)] = state
         }
+    }
+
+    /**
+     * Add/promote a tab after a successful resolved fetch. Failures do not
+     * create a new tab, but a previously persisted tab that later fails is
+     * kept (the user still intended it to be open).
+     */
+    private fun considerWorkspaceUpsert(request: Request, fetched: FileViewerUiState) {
+        if (!workspaceAvailable) return
+        if (lastRequest != request) return
+        val path = fetched.resolvedDisplayPath() ?: return
+        val qualifies = when (fetched) {
+            is FileViewerUiState.TextContent,
+            is FileViewerUiState.Image,
+            is FileViewerUiState.Pdf,
+            is FileViewerUiState.Audio,
+            -> true
+            is FileViewerUiState.CannotPreview -> fetched.cacheFile != null
+            else -> false
+        }
+        val existing = _workspace.value.orderedTabs.any { it.absolutePath == path }
+        if (!qualifies && !existing) return
+        val next = if (qualifies) {
+            FileWorkspaceReducer.open(_workspace.value, path, nowMillis())
+        } else {
+            FileWorkspaceReducer.activate(_workspace.value, path, nowMillis())
+        }
+        persistWorkspace(next)
+    }
+
+    private fun persistWorkspace(next: FileWorkspace) {
+        _workspace.value = next
+        val request = lastRequest ?: return
+        if (!workspaceAvailable) return
+        val generation = ++workspaceWriteGeneration
+        _workspaceWriteState.value = FileWorkspaceWriteState.Pending(next)
+        val previous = workspaceWriteTail
+        workspaceWriteTail = workspaceWriteScope.launch {
+            try {
+                // Host writes are atomic but last-arrival-wins. Serialize them
+                // so a slow A snapshot cannot arrive after a fast B snapshot
+                // and silently roll the durable workspace backward.
+                previous?.join()
+                val acknowledged = LeaseSessionExec.withSession(
+                    leaseManager = sshLeaseManager,
+                    target = request.toLeaseTarget(),
+                ) { session ->
+                    workspaceSource.upsertWorkspace(session, next)
+                }.getOrElse { error -> throw error }
+                check(acknowledged) { "Host rejected the open-file workspace write" }
+                if (generation == workspaceWriteGeneration) {
+                    _workspaceWriteState.value = FileWorkspaceWriteState.Saved(next)
+                }
+            } catch (error: CancellationException) {
+                if (generation == workspaceWriteGeneration) {
+                    _workspaceWriteState.value = FileWorkspaceWriteState.Failed(
+                        workspace = next,
+                        message = "Open-file workspace save was cancelled",
+                    )
+                }
+                throw error
+            } catch (error: Throwable) {
+                if (generation == workspaceWriteGeneration) {
+                    val message = error.message?.takeIf { it.isNotBlank() }
+                        ?: "unknown host error"
+                    _workspaceWriteState.value = FileWorkspaceWriteState.Failed(
+                        workspace = next,
+                        message = "Couldn't save open-file workspace: $message",
+                    )
+                }
+                Log.w(WORKSPACE_LOG_TAG, "Open-file workspace write failed", error)
+            }
+        }
+    }
+
+    /** Resolved identity of the file actually shown, even for relative opens. */
+    private fun currentDisplayPath(): String? {
+        _state.value.resolvedDisplayPath()?.let { return it }
+        val request = lastRequest ?: return null
+        val raw = request.path ?: return null
+        return FileWorkspaceReducer.normalizeAbsolutePath(
+            RemotePathResolver.resolve(
+                input = raw,
+                cwd = request.cwd,
+                remoteHome = conventionalRemoteHome(request.username),
+            ),
+        )
+    }
+
+    private fun FileViewerUiState.resolvedDisplayPath(): String? {
+        val raw = when (this) {
+            is FileViewerUiState.Loading -> displayPath
+            is FileViewerUiState.Image -> displayPath
+            is FileViewerUiState.TextContent -> displayPath
+            is FileViewerUiState.Pdf -> displayPath
+            is FileViewerUiState.Audio -> displayPath
+            is FileViewerUiState.CannotPreview -> displayPath
+            is FileViewerUiState.EmptyWorkspace,
+            is FileViewerUiState.WorkspaceUnavailable,
+            -> null
+        }
+        return FileWorkspaceReducer.normalizeAbsolutePath(raw)
     }
 
     private fun pdfTooLarge(resolved: String, sizeBytes: Long): FileViewerUiState =
@@ -852,7 +1250,7 @@ class FileViewerViewModel @Inject constructor(
         val username: String,
         val keyPath: String,
         val passphrase: CharArray?,
-        val path: String,
+        val path: String?,
         val cwd: String?,
     ) {
         internal fun toLeaseTarget(): LeaseSessionTarget =
@@ -1024,6 +1422,12 @@ class FileViewerViewModel @Inject constructor(
          */
         internal const val CONTENT_CACHE_CAP = 8
 
+        /** Issue #1715 — text LRU identity is the resolved absolute path, not the raw request. */
+        internal data class ContentCacheKey(
+            val hostId: Long,
+            val resolvedPath: String,
+        )
+
         internal fun conventionalRemoteHome(username: String): String? {
             val user = username.trim()
             return when {
@@ -1054,6 +1458,9 @@ class FileViewerViewModel @Inject constructor(
 
         /** Logcat tag for the file viewer (issue #748 basename-search fallback). */
         internal const val LOG_TAG = "FileViewer"
+
+        /** Logcat tag for host-durable open-file workspace writes (#1715). */
+        internal const val WORKSPACE_LOG_TAG = "FileViewerWorkspace"
 
         /**
          * Cap on how many same-named files the basename-search fallback offers

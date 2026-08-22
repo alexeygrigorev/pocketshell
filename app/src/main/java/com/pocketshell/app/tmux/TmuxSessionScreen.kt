@@ -170,6 +170,8 @@ public fun TmuxSessionScreen(
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /** Issue #497: open the in-app file viewer for a remote path. */
     onOpenFile: (path: String, cwd: String?) -> Unit = { _, _ -> },
+    /** Issue #1715: restore the host-durable open-file workspace. */
+    onOpenFiles: () -> Unit = {},
     /** Issue #528: open the browsable file explorer. */
     onBrowseFiles: (startDir: String) -> Unit = {},
     // Issue #177 / #459: composer-draft persistence params — INERT here since
@@ -419,6 +421,7 @@ public fun TmuxSessionScreen(
                 onOpenSettings = onOpenSettings,
                 onOpenPortForwarding = onOpenPortForwarding,
                 onBrowseFiles = onBrowseFiles,
+                onOpenFiles = onOpenFiles,
                 onReplaceTmuxSession = onReplaceTmuxSession,
             )
 
@@ -921,6 +924,7 @@ private fun TmuxSessionHeaderRegion(
     onOpenSettings: () -> Unit,
     onOpenPortForwarding: () -> Unit,
     onBrowseFiles: (startDir: String) -> Unit,
+    onOpenFiles: () -> Unit,
     onReplaceTmuxSession: (target: TmuxSessionNavigationTarget) -> Unit,
 ) {
     val terminalHeld = conn.terminalHeld
@@ -1034,6 +1038,10 @@ private fun TmuxSessionHeaderRegion(
                 overlay.moreExpanded = false
                 val paneCwd = currentPane?.cwd?.takeIf { it.isNotBlank() }
                 onBrowseFiles(paneCwd ?: "~")
+            },
+            onOpenFiles = {
+                overlay.moreExpanded = false
+                onOpenFiles()
             },
             onDetach = {
                 overlay.moreExpanded = false

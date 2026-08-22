@@ -37,6 +37,9 @@ internal fun TmuxMoreMenu(
     // path-entry dialog. Defaulted so existing direct callers / tests of
     // TmuxMoreMenu stay source-compatible.
     onOpenFile: () -> Unit = {},
+    // Issue #1715: "Open files" kebab item — restores the host file workspace.
+    // Defaulted so existing direct callers / tests stay source-compatible.
+    onOpenFiles: () -> Unit = {},
     // Issue #528: "Browse files…" kebab item — opens the browsable file
     // explorer. Defaulted so existing direct callers / tests stay
     // source-compatible.
@@ -154,6 +157,12 @@ internal fun TmuxMoreMenu(
             text = { Text("Browse files…") },
             onClick = onBrowseFiles,
             modifier = Modifier.testTag(TMUX_BROWSE_FILES_BUTTON_TAG),
+        )
+        // Issue #1715: restore the host-durable open-file workspace.
+        DropdownMenuItem(
+            text = { Text("Open files") },
+            onClick = onOpenFiles,
+            modifier = Modifier.testTag(TMUX_OPEN_FILES_BUTTON_TAG),
         )
         // Issue #497: open a server file (image / text) in the in-app viewer.
         DropdownMenuItem(

@@ -98,6 +98,10 @@ METHOD_TTLS: Mapping[str, float] = {
     # `tree.reconcile` carry NO TTL (mutations) so their results are never
     # cached.
     "tree.get": 5.0,
+    # Issue #1715: the file-workspace hydrate read. Short TTL like `tree.get`
+    # so a `tree.workspace.upsert` mutation is not masked; the mutation itself
+    # carries no TTL and invalidates this cache explicitly.
+    "tree.workspace.get": 5.0,
 }
 
 # Length-prefix is a 4-byte unsigned big-endian integer. ``struct``
@@ -610,6 +614,20 @@ def _tree_reconcile_handler(params: Mapping[str, Any]) -> dict[str, Any]:
     return _tree.daemon_handler_reconcile(dict(params))
 
 
+def _tree_workspace_get_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``tree.workspace.get`` to the durable file-workspace registry."""
+    from pocketshell import tree as _tree
+
+    return _tree.daemon_handler_workspace_get(dict(params))
+
+
+def _tree_workspace_upsert_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``tree.workspace.upsert`` to the durable file-workspace registry."""
+    from pocketshell import tree as _tree
+
+    return _tree.daemon_handler_workspace_upsert(dict(params))
+
+
 # Single shared registry; tests can register additional methods via
 # :meth:`Daemon.register_method` on a fresh instance without touching
 # this dict.
@@ -631,6 +649,8 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "tree.get": _tree_get_handler,
     "tree.upsert": _tree_upsert_handler,
     "tree.reconcile": _tree_reconcile_handler,
+    "tree.workspace.get": _tree_workspace_get_handler,
+    "tree.workspace.upsert": _tree_workspace_upsert_handler,
 }
 
 
@@ -658,6 +678,11 @@ METHOD_CACHE_INVALIDATIONS: Mapping[str, tuple[str, ...]] = {
     # invalidate the `tree.get` cache.
     "tree.upsert": ("tree.get",),
     "tree.reconcile": ("tree.get",),
+    # Issue #1715: a workspace mutation must drop the cached hydrate read so
+    # the next Open-files restore sees the just-written tabs. Tree writers
+    # do NOT evict the workspace cache (and vice versa) — they own sibling
+    # top-level fields in the same document.
+    "tree.workspace.upsert": ("tree.workspace.get",),
 }
 
 

@@ -1,12 +1,17 @@
 package com.pocketshell.uikit.render
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -165,4 +170,81 @@ private fun FileViewerHeaderRow(name: String, path: String, iconClass: FileIconC
             FileExplorerHeaderText("Share")
         },
     )
+}
+
+/**
+ * Issue #1715: the production tab strip lives in the app module, so this
+ * mirrors it with ui-kit primitives — 48dp row, unique-suffix labels,
+ * accent underline on the active tab, 48dp close hit box.
+ */
+@Composable
+internal fun FileViewerTabStripRender() {
+    Column {
+        FileViewerHeaderRow("src/App.kt", "/home/u/src/App.kt", FileIconClass.CODE)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(48.dp)
+                .background(PocketShellColors.Background),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FileViewerTabChip("src/App.kt", FileIconClass.CODE, active = true)
+            FileViewerTabChip("test/App.kt", FileIconClass.CODE, active = false)
+            FileViewerTabChip("screenshot.png", FileIconClass.IMAGE, active = false)
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(120.dp)
+                .background(PocketShellColors.Background)
+                .padding(16.dp),
+        ) {
+            Text(
+                text = "fun main() {\n  println(\"tabs\")\n}",
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyMono,
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileViewerTabChip(label: String, iconClass: FileIconClass, active: Boolean) {
+    Column(
+        modifier = Modifier
+            .width(144.dp)
+            .height(48.dp),
+    ) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Spacer(modifier = Modifier.width(8.dp))
+            FileTypeIcon(iconClass = iconClass, sizeDp = 16)
+            Text(
+                text = label,
+                color = if (active) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyMono,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 4.dp),
+            )
+            Box(
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(text = "×", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
+            }
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(2.dp)
+                .background(if (active) PocketShellColors.Accent else PocketShellColors.Background),
+        )
+    }
 }

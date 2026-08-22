@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -222,10 +223,11 @@ fun FileViewerScreen(
     username: String,
     keyPath: String,
     passphrase: CharArray?,
-    remotePath: String,
+    remotePath: String?,
     cwd: String?,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    onBrowseFiles: () -> Unit = {},
     // Issue #763: route a saved review into the active session composer. The
     // caller (MainActivity) seeds the templated prompt into the activity-scoped
     // PromptComposerViewModel and pops back to the session. A no-op default keeps
@@ -251,6 +253,9 @@ fun FileViewerScreen(
     val readingPrefs by viewModel.readingPrefs.collectAsState()
     val reviewState by viewModel.reviewState.collectAsState()
     val annotationState by viewModel.annotationState.collectAsState()
+    val workspace by viewModel.workspace.collectAsState()
+    val workspaceWriteState by viewModel.workspaceWriteState.collectAsState()
+    val pendingTabAction by viewModel.pendingTabAction.collectAsState()
 
     // Issue #714/#763 — surface the review-submit outcome. On SUCCESS we hold
     // the result so the scaffold renders the confirmation sheet (the saved path,
@@ -284,15 +289,49 @@ fun FileViewerScreen(
         }
     }
 
+    val guardedBack = {
+        if (viewModel.requestBack()) onBack()
+    }
+    BackHandler(onBack = guardedBack)
+
+    // A queued Back is consumed after a successful Submit. The VM emits this
+    // one-shot event only after the dirty state has cleared, so Submit cannot
+    // leave the user on a stale dirty tab or silently drop the requested pop.
+    LaunchedEffect(viewModel) {
+        viewModel.backEvents.collect { onBack() }
+    }
+
+    // Workspace writes are deliberately fire-and-forget from the UI, but they
+    // are not silent-and-forget: the process-scoped queue reports a rejected or
+    // failed host acknowledgement here while keeping the local tab state.
+    LaunchedEffect(workspaceWriteState) {
+        val failure = workspaceWriteState as? FileWorkspaceWriteState.Failed
+        if (failure != null) {
+            Toast.makeText(context, failure.message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     FileViewerScaffold(
         hostName = hostName,
         state = state,
+        workspace = workspace,
+        pendingTabAction = pendingTabAction,
         readingPrefs = readingPrefs,
         reviewState = reviewState,
         submittedReview = submittedReview,
         annotationState = annotationState,
         submittedAnnotation = submittedAnnotation,
-        onBack = onBack,
+        onBack = guardedBack,
+        onSelectTab = viewModel::switchToTab,
+        onCloseTab = viewModel::closeTab,
+        onStayOnTab = viewModel::stayOnTab,
+        onDiscardAndProceed = {
+            if (viewModel.discardPendingWorkAndProceed() is PendingTabAction.Back) {
+                onBack()
+            }
+        },
+        onBrowseFiles = onBrowseFiles,
+        onOpenPath = viewModel::openPath,
         onRetry = viewModel::retry,
         onOpenLocated = viewModel::openLocated,
         onToggleWordWrap = viewModel::toggleWordWrap,
@@ -345,6 +384,14 @@ internal fun FileViewerScaffold(
     state: FileViewerUiState,
     onBack: () -> Unit,
     onRetry: () -> Unit,
+    workspace: FileWorkspace = FileWorkspace.Empty,
+    pendingTabAction: PendingTabAction? = null,
+    onSelectTab: (OpenFileTab) -> Unit = {},
+    onCloseTab: (OpenFileTab) -> Unit = {},
+    onStayOnTab: () -> Unit = {},
+    onDiscardAndProceed: () -> Unit = {},
+    onBrowseFiles: () -> Unit = {},
+    onOpenPath: (String) -> Unit = {},
     onOpenLocated: (String) -> Unit = {},
     readingPrefs: FileViewerReadingPrefs = FileViewerReadingPrefs(wordWrap = false, renderMarkdown = true),
     reviewState: ReviewState = ReviewState(),
@@ -402,7 +449,9 @@ internal fun FileViewerScaffold(
         Column(modifier = Modifier.fillMaxSize()) {
             FileViewerAppBar(
                 hostName = hostName,
-                displayPath = state.displayPath(),
+                displayPath = state.displayPath().ifEmpty {
+                    if (state is FileViewerUiState.EmptyWorkspace) "Open files" else hostName
+                },
                 fileIconClass = state.fileIconClass(),
                 shareable = state.shareable(),
                 onBack = onBack,
@@ -437,6 +486,13 @@ internal fun FileViewerScaffold(
                 } else {
                     null
                 },
+            )
+            OpenFileTabStrip(
+                tabs = workspace.orderedTabs,
+                activePath = workspace.activePath,
+                labels = FileWorkspaceReducer.uniqueLabels(workspace.orderedTabs),
+                onSelect = onSelectTab,
+                onClose = onCloseTab,
             )
             if (textState != null) {
                 TextReadingToggleBar(
@@ -502,6 +558,14 @@ internal fun FileViewerScaffold(
                         onOpenLocated = onOpenLocated,
                     )
                 }
+                is FileViewerUiState.EmptyWorkspace -> EmptyWorkspacePanel(
+                    onBrowseFiles = onBrowseFiles,
+                    onOpenPath = onOpenPath,
+                )
+                is FileViewerUiState.WorkspaceUnavailable -> WorkspaceUnavailablePanel(
+                    message = state.message,
+                    onRetry = onRetry,
+                )
             }
         }
 
@@ -557,6 +621,62 @@ internal fun FileViewerScaffold(
                 onDismiss = onDismissSubmittedAnnotation,
             )
         }
+
+        pendingTabAction?.let { action ->
+            val blockedPath = workspace.activePath ?: state.displayPath()
+            val submitting = reviewState.submitting || annotationState.submitting
+            val actionVerb = when (action) {
+                PendingTabAction.Back -> "leaving"
+                is PendingTabAction.Close -> "closing"
+                is PendingTabAction.Switch -> "switching"
+            }
+            AlertDialog(
+                onDismissRequest = onStayOnTab,
+                modifier = Modifier.testTag(FILE_VIEWER_DIRTY_WORK_DIALOG_TAG),
+                title = { Text("Unfinished work") },
+                text = {
+                    Text("Finish or discard work on $blockedPath before $actionVerb")
+                },
+                confirmButton = {
+                    PocketShellButton(
+                        text = "Stay",
+                        onClick = onStayOnTab,
+                        modifier = Modifier.testTag(FILE_VIEWER_DIRTY_STAY_TAG),
+                    )
+                },
+                dismissButton = {
+                    androidx.compose.foundation.layout.Row {
+                        if (!submitting) {
+                            if (reviewState.hasPending) {
+                                PocketShellButton(
+                                    text = "Submit",
+                                    onClick = onSubmitReview,
+                                    modifier = Modifier.testTag(FILE_VIEWER_DIRTY_SUBMIT_TAG),
+                                )
+                            } else if (annotationState.annotations.isNotEmpty() ||
+                                annotationState.note != null
+                            ) {
+                                PocketShellButton(
+                                    text = "Submit",
+                                    onClick = onSubmitAnnotation,
+                                    modifier = Modifier.testTag(FILE_VIEWER_DIRTY_SUBMIT_TAG),
+                                )
+                            }
+                            PocketShellButton(
+                                text = when (action) {
+                                    PendingTabAction.Back -> "Discard and go back"
+                                    is PendingTabAction.Close -> "Discard and close"
+                                    is PendingTabAction.Switch -> "Discard and switch"
+                                },
+                                onClick = onDiscardAndProceed,
+                                variant = ButtonVariant.Secondary,
+                                modifier = Modifier.testTag(FILE_VIEWER_DIRTY_DISCARD_TAG),
+                            )
+                        }
+                    }
+                },
+            )
+        }
     }
 }
 
@@ -567,6 +687,9 @@ private fun FileViewerUiState.displayPath(): String = when (this) {
     is FileViewerUiState.Pdf -> displayPath
     is FileViewerUiState.Audio -> displayPath
     is FileViewerUiState.CannotPreview -> displayPath
+    is FileViewerUiState.EmptyWorkspace,
+    is FileViewerUiState.WorkspaceUnavailable,
+    -> ""
 }
 
 /**
@@ -637,7 +760,10 @@ internal sealed interface Shareable {
 }
 
 private fun FileViewerUiState.shareable(): Shareable? = when (this) {
-    is FileViewerUiState.Loading -> null
+    is FileViewerUiState.Loading,
+    is FileViewerUiState.EmptyWorkspace,
+    is FileViewerUiState.WorkspaceUnavailable,
+    -> null
     is FileViewerUiState.CannotPreview -> cacheFile?.let {
         Shareable.FileBacked(
             displayPath = displayPath,
@@ -1151,6 +1277,104 @@ private fun LoadingPanel() {
         contentAlignment = Alignment.Center,
     ) {
         LoadingIndicator.Spinner()
+    }
+}
+
+@Composable
+private fun EmptyWorkspacePanel(
+    onBrowseFiles: () -> Unit,
+    onOpenPath: (String) -> Unit,
+) {
+    var showOpenPath by remember { mutableStateOf(false) }
+    var typedPath by remember { mutableStateOf("") }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag(FILE_VIEWER_EMPTY_WORKSPACE_TAG)
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = "No open files",
+                color = PocketShellColors.Text,
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = "Browse the host or open a path to start a workspace.",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+                modifier = Modifier.padding(top = 8.dp, bottom = 20.dp),
+            )
+            PocketShellButton(
+                text = "Browse files",
+                onClick = onBrowseFiles,
+                modifier = Modifier.testTag(FILE_VIEWER_EMPTY_BROWSE_TAG),
+            )
+            Spacer(Modifier.height(12.dp))
+            PocketShellButton(
+                text = "Open path",
+                onClick = { showOpenPath = true },
+                variant = ButtonVariant.Secondary,
+                modifier = Modifier.testTag(FILE_VIEWER_EMPTY_OPEN_PATH_TAG),
+            )
+        }
+    }
+    if (showOpenPath) {
+        AlertDialog(
+            onDismissRequest = { showOpenPath = false },
+            title = { Text("Open path") },
+            text = {
+                OutlinedTextField(
+                    value = typedPath,
+                    onValueChange = { typedPath = it },
+                    singleLine = true,
+                    label = { Text("Remote path") },
+                    modifier = Modifier.testTag(FILE_VIEWER_EMPTY_OPEN_PATH_FIELD_TAG),
+                )
+            },
+            confirmButton = {
+                PocketShellButton(
+                    text = "Open",
+                    onClick = {
+                        showOpenPath = false
+                        onOpenPath(typedPath)
+                    },
+                    modifier = Modifier.testTag(FILE_VIEWER_EMPTY_OPEN_PATH_CONFIRM_TAG),
+                )
+            },
+            dismissButton = {
+                PocketShellButton(
+                    text = "Cancel",
+                    onClick = { showOpenPath = false },
+                    variant = ButtonVariant.Secondary,
+                )
+            },
+        )
+    }
+}
+
+@Composable
+private fun WorkspaceUnavailablePanel(
+    message: String,
+    onRetry: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag(FILE_VIEWER_WORKSPACE_UNAVAILABLE_TAG)
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = message,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+            )
+            Spacer(Modifier.height(16.dp))
+            PocketShellButton(text = "Retry", onClick = onRetry)
+        }
     }
 }
 

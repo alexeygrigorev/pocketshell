@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reusable host-owned Android process-restart harness (issue #2264).
+# Reusable host-owned Android process-restart harness (issues #2264/#1715).
 #
 # Builds and installs one suffixed target/test APK pair, invokes two selected
 # androidTest methods through separate direct `adb shell am instrument` calls,
@@ -17,6 +17,7 @@ source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 ANDROID_SDK="${ANDROID_SDK:-${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/home/alexey/Android/Sdk}}}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 SUFFIX="${SUFFIX:-i2264}"
+PROOF_KIND="${PROOF_KIND:-last-session}"
 TEST_CLASS="${TEST_CLASS:-com.pocketshell.app.proof.LastSessionProcessRestartProofTest}"
 PHASE1_METHOD="${PHASE1_METHOD:-phaseOnePersistsExactSuccessorGeneration}"
 PHASE2_METHOD="${PHASE2_METHOD:-phaseTwoRestoresExactSuccessorGeneration}"
@@ -35,11 +36,14 @@ FORCE_STOP_WAIT_SECONDS="${FORCE_STOP_WAIT_SECONDS:-10}"
 PHASE1_READY_WAIT_SECONDS="${PHASE1_READY_WAIT_SECONDS:-60}"
 PHASE1_REAP_WAIT_SECONDS="${PHASE1_REAP_WAIT_SECONDS:-10}"
 PHASE1_KEEPALIVE_MILLIS="${PHASE1_KEEPALIVE_MILLIS:-120000}"
-EXPECTED_GENERATION_ORIGIN="agents-daemon-2239-tmux-list-sessions-through-SshHostTmuxSessionsGateway-to-navigation-to-on-stop-to-last-session-store"
-EXPECTED_PRODUCER_FIXTURE_NAME="agents-daemon-2239"
-EXPECTED_PRODUCER_FIXTURE_HOST="10.0.2.2"
-EXPECTED_PRODUCER_FIXTURE_PORT="2239"
-EXPECTED_PRODUCER_FIXTURE_USER="testuser"
+EXPECTED_GENERATION_ORIGIN="${EXPECTED_GENERATION_ORIGIN:-agents-daemon-2239-tmux-list-sessions-through-SshHostTmuxSessionsGateway-to-navigation-to-on-stop-to-last-session-store}"
+EXPECTED_PRODUCER_FIXTURE_NAME="${EXPECTED_PRODUCER_FIXTURE_NAME:-agents-daemon-2239}"
+EXPECTED_PRODUCER_FIXTURE_HOST="${EXPECTED_PRODUCER_FIXTURE_HOST:-10.0.2.2}"
+EXPECTED_PRODUCER_FIXTURE_PORT="${EXPECTED_PRODUCER_FIXTURE_PORT:-2239}"
+EXPECTED_PRODUCER_FIXTURE_USER="${EXPECTED_PRODUCER_FIXTURE_USER:-testuser}"
+EXPECTED_PRODUCER_SESSION_PREFIX="${EXPECTED_PRODUCER_SESSION_PREFIX:-issue2264-}"
+EXPECTED_PHASE1_PERSISTENCE_ORIGIN="${EXPECTED_PHASE1_PERSISTENCE_ORIGIN:-LastSessionStore.save}"
+EXPECTED_PHASE2_PERSISTENCE_ORIGIN="${EXPECTED_PHASE2_PERSISTENCE_ORIGIN:-LastSessionStore.read}"
 
 usage() {
   cat <<'USAGE'
@@ -83,6 +87,8 @@ fi
 
 [[ "$SUFFIX" =~ ^[A-Za-z0-9._]+$ ]] || fail "SUFFIX must match [A-Za-z0-9._]+"
 [[ -n "$SUFFIX" ]] || fail "a non-empty suffix is mandatory"
+[[ "$PROOF_KIND" == "last-session" || "$PROOF_KIND" == "file-viewer-workspace" ]] \
+  || fail "PROOF_KIND must be last-session or file-viewer-workspace"
 [[ "$RUN_NAMESPACE" =~ ^[A-Za-z0-9._-]+$ ]] || fail "RUN_NAMESPACE must match [A-Za-z0-9._-]+"
 [[ "$TEST_CLASS" =~ ^[A-Za-z0-9_.]+$ ]] || fail "invalid TEST_CLASS"
 [[ "$PHASE1_METHOD" =~ ^[A-Za-z0-9_]+$ ]] || fail "invalid PHASE1_METHOD"
@@ -160,6 +166,10 @@ artifact_value() {
 
 validate_phase_artifact() {
   local phase="$1" artifact="$2"
+  if [[ "$PROOF_KIND" == "file-viewer-workspace" ]]; then
+    validate_file_viewer_workspace_artifact "$phase" "$artifact"
+    return
+  fi
   [[ -s "$artifact" ]] || fail "phase $phase artifact is absent or empty"
   [[ "$(artifact_value "$artifact" schema)" == "1" ]] || fail "phase $phase artifact schema mismatch"
   [[ "$(artifact_value "$artifact" run_namespace)" == "$RUN_NAMESPACE" ]] \
@@ -193,22 +203,22 @@ validate_phase_artifact() {
   [[ "$generation_origin" == "$EXPECTED_GENERATION_ORIGIN" ]] \
     || fail "phase $phase did not exercise the production generation/persistence boundary"
   if [[ "$phase" == "1" ]]; then
-    [[ "$persistence_origin" == "LastSessionStore.save" ]] \
-      || fail "phase 1 did not publish a LastSessionStore.save artifact"
+    [[ "$persistence_origin" == "$EXPECTED_PHASE1_PERSISTENCE_ORIGIN" ]] \
+      || fail "phase 1 did not publish the expected $EXPECTED_PHASE1_PERSISTENCE_ORIGIN artifact"
   else
-    [[ "$persistence_origin" == "LastSessionStore.read" ]] \
-      || fail "phase 2 did not publish a LastSessionStore.read artifact"
+    [[ "$persistence_origin" == "$EXPECTED_PHASE2_PERSISTENCE_ORIGIN" ]] \
+      || fail "phase 2 did not publish the expected $EXPECTED_PHASE2_PERSISTENCE_ORIGIN artifact"
   fi
   [[ "$producer_fixture_name" == "$EXPECTED_PRODUCER_FIXTURE_NAME" ]] \
-    || fail "phase $phase producer fixture name is not agents-daemon-2239"
+    || fail "phase $phase producer fixture name is not $EXPECTED_PRODUCER_FIXTURE_NAME"
   [[ "$producer_fixture_host" == "$EXPECTED_PRODUCER_FIXTURE_HOST" ]] \
-    || fail "phase $phase producer fixture host is not 10.0.2.2"
+    || fail "phase $phase producer fixture host is not $EXPECTED_PRODUCER_FIXTURE_HOST"
   [[ "$producer_fixture_port" == "$EXPECTED_PRODUCER_FIXTURE_PORT" ]] \
-    || fail "phase $phase producer fixture port is not 2239"
+    || fail "phase $phase producer fixture port is not $EXPECTED_PRODUCER_FIXTURE_PORT"
   [[ "$producer_fixture_user" == "$EXPECTED_PRODUCER_FIXTURE_USER" ]] \
-    || fail "phase $phase producer fixture user is not testuser"
+    || fail "phase $phase producer fixture user is not $EXPECTED_PRODUCER_FIXTURE_USER"
   [[ -n "$producer_key_path" ]] || fail "phase $phase producer key path is empty"
-  [[ "$producer_session_name" == "issue2264-$RUN_NAMESPACE" ]] \
+  [[ "$producer_session_name" == "${EXPECTED_PRODUCER_SESSION_PREFIX}${RUN_NAMESPACE}" ]] \
     || fail "phase $phase producer session name does not bind this run namespace"
   [[ -n "$session_id" ]] || fail "phase $phase tmux_session_id is empty"
   [[ "$session_created" =~ ^[0-9]+$ && "$session_created" -gt 0 ]] \
@@ -219,6 +229,79 @@ validate_phase_artifact() {
   [[ "$session_id" != "$predecessor_id" || "$session_created" != "$predecessor_created" ]] \
     || fail "phase $phase successor aliases its predecessor generation"
   [[ "$predecessor_reappeared" == "false" ]] || fail "phase $phase restored predecessor state"
+}
+
+validate_file_viewer_workspace_artifact() {
+  local phase="$1" artifact="$2"
+  [[ -s "$artifact" ]] || fail "phase $phase artifact is absent or empty"
+  [[ "$(artifact_value "$artifact" schema)" == "1" ]] \
+    || fail "phase $phase workspace artifact schema mismatch"
+  [[ "$(artifact_value "$artifact" run_namespace)" == "$RUN_NAMESPACE" ]] \
+    || fail "phase $phase workspace artifact namespace mismatch"
+  [[ "$(artifact_value "$artifact" phase)" == "$phase" ]] \
+    || fail "phase $phase workspace artifact marker mismatch"
+
+  local pid process_name target_package test_package fixture_name fixture_host
+  local fixture_port fixture_user key_path session_name tab_count tabs active origin
+  local registry_schema route restored boundary generation_origin
+  pid="$(artifact_value "$artifact" pid)"
+  process_name="$(artifact_value "$artifact" process_name)"
+  target_package="$(artifact_value "$artifact" target_package)"
+  test_package="$(artifact_value "$artifact" test_package)"
+  fixture_name="$(artifact_value "$artifact" producer_fixture_name)"
+  fixture_host="$(artifact_value "$artifact" producer_fixture_host)"
+  fixture_port="$(artifact_value "$artifact" producer_fixture_port)"
+  fixture_user="$(artifact_value "$artifact" producer_fixture_user)"
+  key_path="$(artifact_value "$artifact" producer_key_path)"
+  session_name="$(artifact_value "$artifact" producer_session_name)"
+  tab_count="$(artifact_value "$artifact" workspace_tab_count)"
+  tabs="$(artifact_value "$artifact" workspace_tabs)"
+  active="$(artifact_value "$artifact" workspace_active)"
+  registry_schema="$(artifact_value "$artifact" workspace_registry_schema)"
+  route="$(artifact_value "$artifact" navigation_route)"
+  origin="$(artifact_value "$artifact" persistence_origin)"
+  restored="$(artifact_value "$artifact" restored_workspace)"
+  boundary="$(artifact_value "$artifact" external_pid_boundary)"
+  generation_origin="$(artifact_value "$artifact" generation_origin)"
+
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || fail "phase $phase workspace PID is not real: $pid"
+  [[ "$process_name" == "$TARGET_PACKAGE" ]] \
+    || fail "phase $phase workspace process is $process_name, not $TARGET_PACKAGE"
+  [[ "$target_package" == "$TARGET_PACKAGE" ]] || fail "phase $phase workspace target mismatch"
+  [[ "$test_package" == "$TEST_PACKAGE" ]] || fail "phase $phase workspace test package mismatch"
+  [[ "$fixture_name" == "$EXPECTED_PRODUCER_FIXTURE_NAME" ]] \
+    || fail "phase $phase workspace fixture name mismatch: $fixture_name"
+  [[ "$fixture_host" == "$EXPECTED_PRODUCER_FIXTURE_HOST" ]] \
+    || fail "phase $phase workspace fixture host mismatch: $fixture_host"
+  [[ "$fixture_port" == "$EXPECTED_PRODUCER_FIXTURE_PORT" ]] \
+    || fail "phase $phase workspace fixture port mismatch: $fixture_port"
+  [[ "$fixture_user" == "$EXPECTED_PRODUCER_FIXTURE_USER" ]] \
+    || fail "phase $phase workspace fixture user mismatch: $fixture_user"
+  [[ -n "$key_path" ]] || fail "phase $phase workspace key provenance is empty"
+  [[ "$session_name" == "${EXPECTED_PRODUCER_SESSION_PREFIX}${RUN_NAMESPACE}" ]] \
+    || fail "phase $phase workspace session does not bind this run namespace"
+  [[ "$tab_count" == "3" ]] || fail "phase $phase must publish exactly three file tabs"
+  [[ "$tabs" == */* ]] || fail "phase $phase workspace tab list is empty"
+  case "|$tabs|" in
+    *"|$active|"*) ;;
+    *) fail "phase $phase workspace active path is not one of its tabs" ;;
+  esac
+  [[ "$registry_schema" == "daemon-tree-registry.json:file_workspaces.default" ]] \
+    || fail "phase $phase did not identify the daemon file_workspaces schema"
+  [[ "$route" == "MainActivity>FolderList>Session>FileViewer" ]] \
+    || fail "phase $phase did not use the production MainActivity route"
+  if [[ "$phase" == "1" ]]; then
+    [[ "$origin" == "$EXPECTED_PHASE1_PERSISTENCE_ORIGIN" ]] \
+      || fail "phase 1 workspace origin mismatch: $origin"
+    [[ "$restored" == "false" ]] || fail "phase 1 cannot claim restored workspace"
+  else
+    [[ "$origin" == "$EXPECTED_PHASE2_PERSISTENCE_ORIGIN" ]] \
+      || fail "phase 2 workspace origin mismatch: $origin"
+    [[ "$restored" == "true" ]] || fail "phase 2 did not claim restored workspace"
+  fi
+  [[ "$boundary" == "true" ]] || fail "phase $phase lacks external PID-boundary marker"
+  [[ "$generation_origin" == "$EXPECTED_GENERATION_ORIGIN" ]] \
+    || fail "phase $phase did not identify the real daemon/session-to-registry path"
 }
 
 validate_same_producer_fixture() {
@@ -353,6 +436,7 @@ start_phase_one_instrumentation() {
   set +e
   adb_mutate shell am instrument -w -r \
     -e pocketshellRunNamespace "$RUN_NAMESPACE" \
+    -e pocketshellPhase 1 \
     -e pocketshellPhaseOneKeepaliveMillis "$PHASE1_KEEPALIVE_MILLIS" \
     -e class "$TEST_CLASS#$PHASE1_METHOD" \
     "$RUNNER_COMPONENT" > "$log_file" 2>&1 &
@@ -419,6 +503,7 @@ run_phase() {
   set +e
   adb_mutate shell am instrument -w -r \
     -e pocketshellRunNamespace "$RUN_NAMESPACE" \
+    -e pocketshellPhase 2 \
     -e class "$TEST_CLASS#$method" \
     "$RUNNER_COMPONENT" 2>&1 | tr -d '\r' | tee "$log_file"
   rc=${PIPESTATUS[0]}
@@ -559,24 +644,33 @@ PHASE2_PID="$(artifact_value "$RUN_DIR/phase-2.txt" pid)"
 
 [[ "$PHASE1_PID" != "$PHASE2_PID" ]] \
   || fail "phase 2 reused phase-1 PID $PHASE1_PID; no process restart occurred"
-PHASE1_ID="$(artifact_value "$RUN_DIR/phase-1.txt" tmux_session_id)"
-PHASE2_ID="$(artifact_value "$RUN_DIR/phase-2.txt" tmux_session_id)"
-PHASE1_CREATED="$(artifact_value "$RUN_DIR/phase-1.txt" session_created)"
-PHASE2_CREATED="$(artifact_value "$RUN_DIR/phase-2.txt" session_created)"
-PHASE1_PREDECESSOR_ID="$(artifact_value "$RUN_DIR/phase-1.txt" predecessor_tmux_session_id)"
-PHASE2_PREDECESSOR_ID="$(artifact_value "$RUN_DIR/phase-2.txt" predecessor_tmux_session_id)"
-PHASE1_PREDECESSOR_CREATED="$(artifact_value "$RUN_DIR/phase-1.txt" predecessor_session_created)"
-PHASE2_PREDECESSOR_CREATED="$(artifact_value "$RUN_DIR/phase-2.txt" predecessor_session_created)"
-[[ "$PHASE1_ID" == "$PHASE2_ID" ]] || fail "tmuxSessionId changed across process restart"
-[[ "$PHASE1_CREATED" == "$PHASE2_CREATED" ]] || fail "sessionCreated changed across process restart"
-[[ "$PHASE1_PREDECESSOR_ID" == "$PHASE2_PREDECESSOR_ID" ]] \
-  || fail "predecessor tmuxSessionId marker changed across process restart"
-[[ "$PHASE1_PREDECESSOR_CREATED" == "$PHASE2_PREDECESSOR_CREATED" ]] \
-  || fail "predecessor sessionCreated marker changed across process restart"
-[[ "$(artifact_value "$RUN_DIR/phase-1.txt" persistence_origin)" == "LastSessionStore.save" ]] \
-  || fail "phase 1 persistence origin is not LastSessionStore.save"
-[[ "$(artifact_value "$RUN_DIR/phase-2.txt" persistence_origin)" == "LastSessionStore.read" ]] \
-  || fail "phase 2 persistence origin is not LastSessionStore.read"
+if [[ "$PROOF_KIND" == "file-viewer-workspace" ]]; then
+  PHASE1_TABS="$(artifact_value "$RUN_DIR/phase-1.txt" workspace_tabs)"
+  PHASE2_TABS="$(artifact_value "$RUN_DIR/phase-2.txt" workspace_tabs)"
+  PHASE1_ACTIVE="$(artifact_value "$RUN_DIR/phase-1.txt" workspace_active)"
+  PHASE2_ACTIVE="$(artifact_value "$RUN_DIR/phase-2.txt" workspace_active)"
+  [[ "$PHASE1_TABS" == "$PHASE2_TABS" ]] \
+    || fail "daemon workspace tabs changed across external process restart"
+  [[ "$PHASE1_ACTIVE" == "$PHASE2_ACTIVE" ]] \
+    || fail "daemon active tab changed across external process restart"
+  [[ "$(artifact_value "$RUN_DIR/phase-2.txt" restored_workspace)" == "true" ]] \
+    || fail "phase 2 did not restore the daemon workspace"
+else
+  PHASE1_ID="$(artifact_value "$RUN_DIR/phase-1.txt" tmux_session_id)"
+  PHASE2_ID="$(artifact_value "$RUN_DIR/phase-2.txt" tmux_session_id)"
+  PHASE1_CREATED="$(artifact_value "$RUN_DIR/phase-1.txt" session_created)"
+  PHASE2_CREATED="$(artifact_value "$RUN_DIR/phase-2.txt" session_created)"
+  PHASE1_PREDECESSOR_ID="$(artifact_value "$RUN_DIR/phase-1.txt" predecessor_tmux_session_id)"
+  PHASE2_PREDECESSOR_ID="$(artifact_value "$RUN_DIR/phase-2.txt" predecessor_tmux_session_id)"
+  PHASE1_PREDECESSOR_CREATED="$(artifact_value "$RUN_DIR/phase-1.txt" predecessor_session_created)"
+  PHASE2_PREDECESSOR_CREATED="$(artifact_value "$RUN_DIR/phase-2.txt" predecessor_session_created)"
+  [[ "$PHASE1_ID" == "$PHASE2_ID" ]] || fail "tmuxSessionId changed across process restart"
+  [[ "$PHASE1_CREATED" == "$PHASE2_CREATED" ]] || fail "sessionCreated changed across process restart"
+  [[ "$PHASE1_PREDECESSOR_ID" == "$PHASE2_PREDECESSOR_ID" ]] \
+    || fail "predecessor tmuxSessionId marker changed across process restart"
+  [[ "$PHASE1_PREDECESSOR_CREATED" == "$PHASE2_PREDECESSOR_CREATED" ]] \
+    || fail "predecessor sessionCreated marker changed across process restart"
+fi
 [[ -s "$RUN_DIR/force-stop-evidence.txt" ]] || fail "external force-stop evidence is absent"
 [[ "$(artifact_value "$RUN_DIR/force-stop-evidence.txt" old_pid)" == "$PHASE1_PID" ]] \
   || fail "force-stop evidence names the wrong old PID"
@@ -612,6 +706,7 @@ grep -Eq ' command=shell am force-stop com\.pocketshell\.app\.[A-Za-z0-9._-]+([[
 
 {
   printf 'result=PASS\n'
+  printf 'proof_kind=%s\n' "$PROOF_KIND"
   printf 'run_namespace=%s\n' "$RUN_NAMESPACE"
   printf 'android_serial=%s\n' "$ANDROID_SERIAL"
   printf 'target_package=%s\n' "$TARGET_PACKAGE"
@@ -621,14 +716,20 @@ grep -Eq ' command=shell am force-stop com\.pocketshell\.app\.[A-Za-z0-9._-]+([[
   printf 'phase1_pid=%s\n' "$PHASE1_PID"
   printf 'phase2_pid=%s\n' "$PHASE2_PID"
   printf 'pid_changed=true\n'
-  printf 'tmux_session_id=%s\n' "$PHASE2_ID"
-  printf 'session_created=%s\n' "$PHASE2_CREATED"
   printf 'producer_fixture_name=%s\n' "$(artifact_value "$RUN_DIR/phase-2.txt" producer_fixture_name)"
   printf 'producer_fixture_host=%s\n' "$(artifact_value "$RUN_DIR/phase-2.txt" producer_fixture_host)"
   printf 'producer_fixture_port=%s\n' "$(artifact_value "$RUN_DIR/phase-2.txt" producer_fixture_port)"
   printf 'producer_fixture_user=%s\n' "$(artifact_value "$RUN_DIR/phase-2.txt" producer_fixture_user)"
-  printf 'producer_session_name=issue2264-%s\n' "$RUN_NAMESPACE"
-  printf 'exact_generation_survived=true\n'
+  printf 'producer_session_name=%s\n' "$(artifact_value "$RUN_DIR/phase-2.txt" producer_session_name)"
+  if [[ "$PROOF_KIND" == "file-viewer-workspace" ]]; then
+    printf 'workspace_tabs=%s\n' "$PHASE2_TABS"
+    printf 'workspace_active=%s\n' "$PHASE2_ACTIVE"
+    printf 'daemon_workspace_survived=true\n'
+  else
+    printf 'tmux_session_id=%s\n' "$PHASE2_ID"
+    printf 'session_created=%s\n' "$PHASE2_CREATED"
+    printf 'exact_generation_survived=true\n'
+  fi
   printf 'state_reset_between_phases=false\n'
 } > "$RUN_DIR/summary.txt"
 find "$RUN_DIR" -maxdepth 1 -type f ! -name SHA256SUMS -print0 \

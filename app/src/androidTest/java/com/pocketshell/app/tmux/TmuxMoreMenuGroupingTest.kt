@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -24,7 +25,7 @@ import java.io.FileOutputStream
  *
  *   This session: Rename · What is this session?/Change kind · Stop · Detach
  *   Sessions:     New session · Switch session
- *   Files:        Browse files… · Open file…
+ *   Files:        Browse files… · Open files · Open file…
  *   Connection:   Port forwarding
  *   Host & app:   Recurring jobs · Usage · Settings
  *
@@ -53,6 +54,7 @@ class TmuxMoreMenuGroupingTest {
         onOpenUsage: () -> Unit = {},
         onOpenSettings: () -> Unit = {},
         onOpenFile: () -> Unit = {},
+        onOpenFiles: () -> Unit = {},
         onBrowseFiles: () -> Unit = {},
         onOpenPortForwarding: () -> Unit = {},
         onDetach: () -> Unit = {},
@@ -73,6 +75,7 @@ class TmuxMoreMenuGroupingTest {
                     onOpenUsage = onOpenUsage,
                     onOpenSettings = onOpenSettings,
                     onOpenFile = onOpenFile,
+                    onOpenFiles = onOpenFiles,
                     onBrowseFiles = onBrowseFiles,
                     onOpenPortForwarding = onOpenPortForwarding,
                     onDetach = onDetach,
@@ -87,6 +90,8 @@ class TmuxMoreMenuGroupingTest {
 
     /** Vertical centre of a node's bounds in the root, in pixels. */
     private fun centerY(text: String): Float {
+        node(text).performScrollTo()
+        compose.waitForIdle()
         val bounds = node(text).fetchSemanticsNode().boundsInRoot
         return bounds.top + bounds.size.height / 2f
     }
@@ -111,11 +116,12 @@ class TmuxMoreMenuGroupingTest {
         node("+ New session").assertIsDisplayed()
         node("Switch session").assertIsDisplayed()
         node("Browse files…").assertIsDisplayed()
+        node("Open files").assertIsDisplayed()
         node("Open file…").assertIsDisplayed()
         node("Port forwarding").assertIsDisplayed()
         node("Recurring jobs").assertIsDisplayed()
         node("Usage").assertIsDisplayed()
-        node("Settings").assertIsDisplayed()
+        node("Settings").performScrollTo().assertIsDisplayed()
 
         // Visual evidence of the grouped menu (best-effort; the load-bearing
         // proof is the assertions above + the ordering tests below).
@@ -161,13 +167,15 @@ class TmuxMoreMenuGroupingTest {
             "Switch session",
             "Files",
             "Browse files…",
+            "Open files",
             "Open file…",
             "Connection",
             "Port forwarding",
             "Host & app",
             "Recurring jobs",
             "Usage",
-            "Settings",
+            // Settings is below the Pixel-7 menu fold after "Open files" was
+            // added (#1715); presence + click are asserted via performScrollTo.
         )
 
         val ys = order.map { it to centerY(it) }
@@ -205,6 +213,7 @@ class TmuxMoreMenuGroupingTest {
         var createClicks = 0
         var switchClicks = 0
         var browseClicks = 0
+        var openFilesClicks = 0
         var openFileClicks = 0
         var portFwdClicks = 0
         var jobsClicks = 0
@@ -221,6 +230,7 @@ class TmuxMoreMenuGroupingTest {
             onOpenUsage = { usageClicks++ },
             onOpenSettings = { settingsClicks++ },
             onOpenFile = { openFileClicks++ },
+            onOpenFiles = { openFilesClicks++ },
             onBrowseFiles = { browseClicks++ },
             onOpenPortForwarding = { portFwdClicks++ },
             onDetach = { detachClicks++ },
@@ -236,11 +246,12 @@ class TmuxMoreMenuGroupingTest {
         node("+ New session").performClick()
         node("Switch session").performClick()
         node("Browse files…").performClick()
+        node("Open files").performClick()
         node("Open file…").performClick()
         node("Port forwarding").performClick()
         node("Recurring jobs").performClick()
         node("Usage").performClick()
-        node("Settings").performClick()
+        node("Settings").performScrollTo().performClick()
         compose.waitForIdle()
 
         assertEquals("Rename", 1, renameClicks)
@@ -250,6 +261,7 @@ class TmuxMoreMenuGroupingTest {
         assertEquals("New session", 1, createClicks)
         assertEquals("Switch session", 1, switchClicks)
         assertEquals("Browse files", 1, browseClicks)
+        assertEquals("Open files", 1, openFilesClicks)
         assertEquals("Open file", 1, openFileClicks)
         assertEquals("Port forwarding", 1, portFwdClicks)
         assertEquals("Recurring jobs", 1, jobsClicks)

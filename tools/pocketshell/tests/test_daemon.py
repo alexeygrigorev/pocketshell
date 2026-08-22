@@ -900,6 +900,22 @@ def test_daemon_registry_includes_tree_methods() -> None:
     # Both mutations evict the cached cold-start read.
     assert daemon_mod.METHOD_CACHE_INVALIDATIONS["tree.upsert"] == ("tree.get",)
     assert daemon_mod.METHOD_CACHE_INVALIDATIONS["tree.reconcile"] == ("tree.get",)
+    # Issue #1715: workspace verbs are registered independently of the tmux tree.
+    assert "tree.workspace.get" in daemon_mod.DEFAULT_METHODS
+    assert "tree.workspace.upsert" in daemon_mod.DEFAULT_METHODS
+    assert daemon_mod.METHOD_TTLS["tree.workspace.get"] == 5.0
+    assert "tree.workspace.upsert" not in daemon_mod.METHOD_TTLS
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["tree.workspace.upsert"] == (
+        "tree.workspace.get",
+    )
+    # Two writers, two caches: a tree mutation must not evict the workspace
+    # hydrate, and a workspace mutation must not evict tree.get.
+    assert "tree.workspace.get" not in daemon_mod.METHOD_CACHE_INVALIDATIONS.get(
+        "tree.upsert", ()
+    )
+    assert "tree.get" not in daemon_mod.METHOD_CACHE_INVALIDATIONS.get(
+        "tree.workspace.upsert", ()
+    )
 
 
 def test_tree_upsert_invalidates_tree_get_cache(tmp_path: Path) -> None:
@@ -935,6 +951,48 @@ def test_tree_upsert_invalidates_tree_get_cache(tmp_path: Path) -> None:
     after = _dispatch_in_memory(daemon, "tree.get", {"host": "h1"})
     assert after["cached"] is False
     assert [n["session"] for n in after["result"]["nodes"]] == ["a"]
+
+
+def test_workspace_upsert_invalidates_workspace_get_cache(tmp_path: Path) -> None:
+    """Issue #1715: a successful workspace upsert evicts the cached hydrate."""
+    from pocketshell import tree as tree_mod
+
+    paths = tree_mod.TreePaths(tree_dir=tmp_path / "tree")
+
+    def get_handler(params: dict) -> dict:
+        return tree_mod.get_workspace(params, paths=paths)
+
+    def upsert_handler(params: dict) -> dict:
+        return tree_mod.upsert_workspace(params, paths=paths)
+
+    daemon = daemon_mod.Daemon(
+        socket_path=tmp_path / "daemon.sock",
+        methods={
+            "tree.workspace.get": get_handler,
+            "tree.workspace.upsert": upsert_handler,
+        },
+    )
+
+    first = _dispatch_in_memory(daemon, "tree.workspace.get", {})
+    assert first["result"]["tabs"] == []
+    assert first["cached"] is False
+
+    cached = _dispatch_in_memory(daemon, "tree.workspace.get", {})
+    assert cached["cached"] is True
+
+    mutation = _dispatch_in_memory(
+        daemon,
+        "tree.workspace.upsert",
+        {
+            "tabs": [{"path": "/a.md", "last_activated_ms": 1}],
+            "active_path": "/a.md",
+        },
+    )
+    assert mutation["result"]["status"] == "ok"
+
+    after = _dispatch_in_memory(daemon, "tree.workspace.get", {})
+    assert after["cached"] is False
+    assert [t["path"] for t in after["result"]["tabs"]] == ["/a.md"]
 
 
 def test_agents_kind_for_panes_round_trip(

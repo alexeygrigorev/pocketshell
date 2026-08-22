@@ -1613,6 +1613,20 @@ private fun AppNavigator(
             remotePath = dest.remotePath,
             cwd = dest.cwd,
             onBack = ::back,
+            onBrowseFiles = {
+                navigate(
+                    AppDestination.FileExplorer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        startDir = dest.cwd ?: "~",
+                    ),
+                )
+            },
             // Issue #763: "Attach to current session" — stash the review prompt
             // on the activity, then pop back to the session below in the back
             // stack. The session screen seeds it into the activity-scoped
@@ -1807,6 +1821,22 @@ private fun AppNavigator(
                         passphrase = dest.passphrase,
                         remotePath = path,
                         cwd = cwd,
+                    ),
+                )
+            },
+            // Issue #1715: kebab -> restore the host-durable open-file workspace.
+            onOpenFiles = {
+                navigate(
+                    AppDestination.FileViewer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        remotePath = null,
+                        cwd = null,
                     ),
                 )
             },

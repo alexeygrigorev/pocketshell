@@ -381,3 +381,235 @@ def test_cli_tree_reconcile_emits_deltas(tmp_path: Path, monkeypatch) -> None:
     assert envelope["alive"] == ["keep"]
     assert envelope["gone"] == ["drop"]
     assert envelope["added"] == []
+
+
+# ----- tree.workspace.get / tree.workspace.upsert (#1715) -------------
+
+
+def test_workspace_round_trip(tmp_path: Path) -> None:
+    """Issue #1715: persist + restore the host file workspace."""
+    paths = _paths(tmp_path)
+    upserted = tree_mod.upsert_workspace(
+        {
+            "tabs": [
+                {"path": "/home/u/a.md", "last_activated_ms": 10},
+                {"path": "/home/u/b.kt", "last_activated_ms": 20},
+            ],
+            "active_path": "/home/u/b.kt",
+        },
+        paths=paths,
+    )
+    assert upserted["status"] == "ok"
+    got = tree_mod.get_workspace({}, paths=paths)
+    assert [t["path"] for t in got["tabs"]] == ["/home/u/a.md", "/home/u/b.kt"]
+    assert got["active_path"] == "/home/u/b.kt"
+    assert got["tabs"][0]["last_activated_ms"] == 10
+    assert got["tabs"][1]["last_activated_ms"] == 20
+
+
+def test_workspace_empty_registry_is_valid_seed(tmp_path: Path) -> None:
+    got = tree_mod.get_workspace({}, paths=_paths(tmp_path))
+    assert got["tabs"] == []
+    assert got["active_path"] is None
+
+
+def test_workspace_rejects_non_absolute_and_normalizes(tmp_path: Path) -> None:
+    """Relative / blank / non-string paths are dropped; `.`/`..`/`//` collapse."""
+    paths = _paths(tmp_path)
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [
+                {"path": "relative.md", "last_activated_ms": 1},
+                {"path": "", "last_activated_ms": 2},
+                {"path": 123, "last_activated_ms": 3},
+                {"path": "/home/u/../u/src/./App.kt", "last_activated_ms": 4},
+                {"path": "//home//u//notes.md", "last_activated_ms": 5},
+            ],
+            "active_path": "/home/u/src/App.kt",
+        },
+        paths=paths,
+    )
+    got = tree_mod.get_workspace({}, paths=paths)
+    assert [t["path"] for t in got["tabs"]] == [
+        "/home/u/src/App.kt",
+        "/home/u/notes.md",
+    ]
+    assert got["active_path"] == "/home/u/src/App.kt"
+
+
+def test_workspace_skips_malformed_rows_without_sinking_batch(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [
+                {"path": "/ok/a.txt", "last_activated_ms": 1},
+                "not-a-mapping",
+                {"no_path": True},
+                {"path": "/ok/b.txt", "last_activated_ms": "nope"},
+                {"path": "/ok/c.txt", "last_activated_ms": 3},
+            ],
+            "active_path": "/ok/c.txt",
+        },
+        paths=paths,
+    )
+    got = tree_mod.get_workspace({}, paths=paths)
+    assert [t["path"] for t in got["tabs"]] == ["/ok/a.txt", "/ok/c.txt"]
+
+
+def test_workspace_dedupes_same_absolute_path(tmp_path: Path) -> None:
+    """Same resolved path collapses to one tab; last recency wins, first slot stays."""
+    paths = _paths(tmp_path)
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [
+                {"path": "/home/u/a.md", "last_activated_ms": 1},
+                {"path": "/home/u/../u/a.md", "last_activated_ms": 9},
+                {"path": "/home/u/b.md", "last_activated_ms": 2},
+            ],
+            "active_path": "/home/u/a.md",
+        },
+        paths=paths,
+    )
+    got = tree_mod.get_workspace({}, paths=paths)
+    assert [t["path"] for t in got["tabs"]] == ["/home/u/a.md", "/home/u/b.md"]
+    assert got["tabs"][0]["last_activated_ms"] == 9
+
+
+def test_workspace_recovers_missing_or_invalid_active_path(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [
+                {"path": "/a.md", "last_activated_ms": 1},
+                {"path": "/b.md", "last_activated_ms": 5},
+            ],
+            "active_path": "/gone.md",
+        },
+        paths=paths,
+    )
+    got = tree_mod.get_workspace({}, paths=paths)
+    assert got["active_path"] == "/b.md"
+
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [{"path": "/a.md", "last_activated_ms": 1}],
+            "active_path": "relative",
+        },
+        paths=paths,
+    )
+    got = tree_mod.get_workspace({}, paths=paths)
+    assert got["active_path"] == "/a.md"
+
+
+def test_workspace_caps_at_12_and_evicts_oldest_inactive(tmp_path: Path) -> None:
+    """The 13th tab evicts the least-recently-activated inactive tab, never the active."""
+    paths = _paths(tmp_path)
+    tabs = [
+        {"path": f"/f/{i:02d}.txt", "last_activated_ms": i}
+        for i in range(12)
+    ]
+    # Active is the oldest (0). The next open must evict 1 (oldest inactive), not 0.
+    tree_mod.upsert_workspace(
+        {
+            "tabs": tabs + [{"path": "/f/new.txt", "last_activated_ms": 100}],
+            "active_path": "/f/00.txt",
+        },
+        paths=paths,
+        now_ms=100,
+    )
+    got = tree_mod.get_workspace({}, paths=paths)
+    paths_out = [t["path"] for t in got["tabs"]]
+    assert len(paths_out) == 12
+    assert "/f/00.txt" in paths_out
+    assert "/f/new.txt" in paths_out
+    assert "/f/01.txt" not in paths_out
+    assert got["active_path"] == "/f/00.txt"
+
+
+def test_workspace_survives_tree_upsert_and_pruning_reconcile(tmp_path: Path) -> None:
+    """A tree writer must not erase file_workspaces (two-writers guard)."""
+    paths = _paths(tmp_path)
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [{"path": "/keep/me.md", "last_activated_ms": 1}],
+            "active_path": "/keep/me.md",
+        },
+        paths=paths,
+    )
+    tree_mod.upsert_tree(
+        {"host": "h1", "nodes": [{"session": "alive"}, {"session": "dead"}]},
+        paths=paths,
+    )
+    tree_mod.reconcile_tree(
+        {"host": "h1"}, paths=paths, live_names={"alive"}, now=10_000.0
+    )
+    got = tree_mod.get_workspace({}, paths=paths)
+    assert [t["path"] for t in got["tabs"]] == ["/keep/me.md"]
+    assert [n["session"] for n in tree_mod.get_tree({"host": "h1"}, paths=paths)["nodes"]] == [
+        "alive"
+    ]
+
+
+def test_tree_survives_workspace_upsert(tmp_path: Path) -> None:
+    """A workspace writer must not erase hosts."""
+    paths = _paths(tmp_path)
+    tree_mod.upsert_tree(
+        {"host": "h1", "nodes": [{"session": "keep-session"}]},
+        paths=paths,
+    )
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [{"path": "/a.md", "last_activated_ms": 1}],
+            "active_path": "/a.md",
+        },
+        paths=paths,
+    )
+    got = tree_mod.get_tree({"host": "h1"}, paths=paths)
+    assert [n["session"] for n in got["nodes"]] == ["keep-session"]
+
+
+def test_workspace_persists_atomically_with_0600(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    tree_mod.upsert_workspace(
+        {
+            "tabs": [{"path": "/a.md", "last_activated_ms": 1}],
+            "active_path": "/a.md",
+        },
+        paths=paths,
+    )
+    assert paths.registry_file.exists()
+    mode = paths.registry_file.stat().st_mode & 0o777
+    assert mode == 0o600, oct(mode)
+    assert not paths.registry_file.with_name(paths.registry_file.name + ".tmp").exists()
+
+
+def test_workspace_envelope_carries_cli_version(tmp_path: Path) -> None:
+    from pocketshell import __version__
+
+    got = tree_mod.get_workspace({}, paths=_paths(tmp_path))
+    assert got["cli_version"] == str(__version__)
+
+
+def test_cli_tree_workspace_round_trips_via_in_process(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(tree_mod, "_try_daemon_call", lambda *a, **k: None)
+
+    runner = CliRunner()
+    upsert = runner.invoke(
+        cli,
+        ["tree", "workspace-upsert"],
+        input=json.dumps(
+            {
+                "tabs": [{"path": "/home/u/a.md", "last_activated_ms": 3}],
+                "active_path": "/home/u/a.md",
+            }
+        ),
+    )
+    assert upsert.exit_code == 0, upsert.output
+    result = runner.invoke(cli, ["tree", "workspace-get"], input="{}")
+    assert result.exit_code == 0, result.output
+    envelope = json.loads(result.output)
+    assert [t["path"] for t in envelope["tabs"]] == ["/home/u/a.md"]
+    assert envelope["active_path"] == "/home/u/a.md"

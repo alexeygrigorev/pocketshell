@@ -14,6 +14,8 @@ import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -249,6 +251,44 @@ class FileViewerReviewSubmitTest {
         leaseManager.close()
     }
 
+    @Test
+    fun successfulSubmitConsumesQueuedTabSwitch() = runBlocking {
+        val session = RecordingFileSession()
+        val leaseManager = SshLeaseManager(
+            connector = CountingConnector(session),
+            idleTtlMillis = 30_000L,
+        )
+        val vm = FileViewerViewModel(
+            context,
+            leaseManager,
+            workspaceSource = AlwaysAvailableWorkspaceSource(),
+        )
+        val writeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        vm.workspaceWriteScope = writeScope
+        try {
+            vm.bind(request("/srv/a.txt"))
+            vm.state.awaitText()
+            vm.bind(request("/srv/b.txt"))
+            vm.state.awaitText()
+            val a = vm.workspace.value.orderedTabs.first { it.absolutePath == "/srv/a.txt" }
+            val b = vm.workspace.value.orderedTabs.first { it.absolutePath == "/srv/b.txt" }
+            vm.switchToTab(a)
+            vm.state.awaitText { it.displayPath == "/srv/a.txt" }
+            vm.setLineComment(1, "submit then switch")
+            vm.switchToTab(b)
+            assertTrue(vm.pendingTabAction.value is PendingTabAction.Switch)
+
+            val event = vm.submitAndAwaitEvent("hetzner")
+            assertTrue("expected successful submit, was $event", event is ReviewSubmitEvent.Success)
+            vm.state.awaitText { it.displayPath == "/srv/b.txt" }
+            assertEquals("Submit must consume the queued switch", "/srv/b.txt", vm.workspace.value.activePath)
+            assertTrue("queued action must be consumed", vm.pendingTabAction.value == null)
+        } finally {
+            writeScope.cancel()
+            leaseManager.close()
+        }
+    }
+
     // --- helpers ------------------------------------------------------------
 
     /**
@@ -285,11 +325,13 @@ class FileViewerReviewSubmitTest {
         return captured.get()!!
     }
 
-    private suspend fun StateFlow<FileViewerUiState>.awaitText(): FileViewerUiState.TextContent {
+    private suspend fun StateFlow<FileViewerUiState>.awaitText(
+        predicate: (FileViewerUiState.TextContent) -> Boolean = { true },
+    ): FileViewerUiState.TextContent {
         val deadline = System.currentTimeMillis() + 10_000
         while (System.currentTimeMillis() < deadline) {
             val s = value
-            if (s is FileViewerUiState.TextContent) return s
+            if (s is FileViewerUiState.TextContent && predicate(s)) return s
             delay(20)
         }
         error("viewer never reached TextContent; was ${value}")
@@ -315,6 +357,16 @@ class FileViewerReviewSubmitTest {
             connectCount += 1
             return Result.success(session)
         }
+    }
+
+    private class AlwaysAvailableWorkspaceSource : FileWorkspaceRemoteSource() {
+        override suspend fun getWorkspace(session: SshSession): FileWorkspaceResult =
+            FileWorkspaceResult.Empty
+
+        override suspend fun upsertWorkspace(
+            session: SshSession,
+            workspace: FileWorkspace,
+        ): Boolean = true
     }
 
     data class CapturedUpload(val name: String, val remotePath: String, val body: String)

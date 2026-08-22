@@ -1246,7 +1246,31 @@ case "${1:-}" in
         ;;
     esac
     ;;
+  tree)
+    # The standard `agents` fixture intentionally does not fake the durable
+    # file-workspace RPC. Issue #1715 journeys must target `agents-daemon`
+    # (port 2239), whose real Python tree registry owns the schema and the
+    # atomic persistence contract. Keeping a workspace.json side store here
+    # would let a proof pass without exercising the product host protocol.
+    shift
+    case "${1:-}" in
+      workspace-get|workspace-upsert)
+        printf 'pocketshell fixture: workspace RPC requires agents-daemon (port 2239)\n' >&2
+        exit 64
+        ;;
+      get|upsert|reconcile)
+        # Tree durability lives on the agents-daemon fixture. A no-op empty
+        # envelope keeps a stray `tree get` on this image from hanging.
+        printf '{"nodes":[],"version":0,"alive":[],"gone":[],"added":[]}\n'
+        exit 0
+        ;;
+      *)
+        printf 'pocketshell tree fixture supports: get|upsert|reconcile\n' >&2
+        exit 64
+        ;;
+    esac
+    ;;
 esac
 
-printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, agents kind\n' >&2
+printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, agents kind, tree get|upsert|reconcile\n' >&2
 exit 64

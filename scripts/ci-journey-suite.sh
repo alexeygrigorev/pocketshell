@@ -332,6 +332,14 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#cannotPreviewWithLocateCandidatesOffersOpenRows"
   "com.pocketshell.app.fileviewer.FileViewerScaffoldTest#markdownRenderedPipeTableShowsCellsNotRawDelimiter"  # #921 D32 G9): rendered Markdown shows GFM pipe tables as
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#reopeningAChangedTextFileShowsTheFreshHostContent"  # #1713 D33/G10: reopening a text file whose host content changed over the same warm lease must show the FRESH body, not the stale one (bind() no longer early-returns on the identical settled request)
+  "com.pocketshell.app.fileviewer.FileViewerTabsJourneyDockerTest#openABCLeaveAndOpenFilesRestoresThreeTabsAndActive"  # #1715 D32/G9/G10: open A/B/C, leave, Open files restores the three tabs and previous active file
+  "com.pocketshell.app.fileviewer.FileViewerTabsJourneyDockerTest#lastCloseShowsEmptyWorkspace"  # #1715 D32/G9: closing the last tab shows the intentional empty workspace
+  "com.pocketshell.app.fileviewer.FileViewerTabsMainActivityJourneyDockerTest#mainActivityRestartRestoresTabsGuardsDirtyBackAndConsumesSubmitAction"  # #1715 D32/G9/G10: real MainActivity route + restart + restore/switch/close + dirty app-bar Back + Submit consumes queued switch
+  "com.pocketshell.app.fileviewer.FileViewerTabStripTest#stripShowsUniqueSuffixLabelsAndSeparateSwitchClose"  # #1715 D32/G9: tab labels distinguish duplicates; switch and close are separate
+  "com.pocketshell.app.fileviewer.FileViewerTabStripTest#emptyWorkspaceShowsBrowseAndOpenPath"  # #1715 D32/G9: last-close empty workspace offers Browse files / Open path
+  "com.pocketshell.app.fileviewer.FileViewerTabStripTest#dirtyWorkDialogStayAndDiscard"  # #1715 D32/G9: pending review blocks switch with Stay/Discard
+  "com.pocketshell.app.fileviewer.FileViewerTabStripTest#twelveTabOverflowKeepsActiveFullyOnScreen"  # #1715 D32/G9: 12-tab overflow keeps the active tab fully on screen
+  "com.pocketshell.app.tmux.TmuxMoreMenuOpenFilesTest#openFilesItemIsPresentAndInvokesCallback"  # #1715 D32/G9: session kebab Open files reaches the workspace restore route
   "com.pocketshell.app.fileviewer.EnvironmentFocusOwnerCleanupE2eTest#launcherFrameworkDialogAtPriorJourneyExitCannotPoisonNextImeJourney"  # #1985 recurrence: a genuine Android launcher framework dialog is owner-scoped cleanup, then the next IME journey starts focused
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#failedSyntheticOwnerBodyRestoresFocusBeforeNextImeJourney"  # #1985 D32/G9: assertion exits always dismiss the owned synthetic window and prove PocketShell focus before the next IME journey
   "com.pocketshell.app.fileviewer.FileViewerDockerTest#moduleOneArticleListsRenderIntactAndContinuedLinkOpensExactUrl"  # #1714 D33/G9/G10: exact issue-time excerpts plus synthetic mixed/deep/wide class coverage through production MarkdownView

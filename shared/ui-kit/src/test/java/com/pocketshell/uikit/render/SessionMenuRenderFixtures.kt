@@ -303,6 +303,7 @@ internal fun SessionKebabMenuRender() {
             ),
             "Files" to listOf(
                 "Browse files…",
+                "Open files",
                 "Open file…",
             ),
             "Connection" to listOf(

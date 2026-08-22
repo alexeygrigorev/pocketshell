@@ -1623,6 +1623,16 @@ class DesignRenders {
     }
 
     /**
+     * Issue #1715: VS Code-style open-file tabs. The production strip is
+     * app-only (`OpenFileTabStrip`); this mirrors it with ui-kit primitives
+     * for the fast visual check. Emulator screenshots remain acceptance.
+     */
+    @Test
+    fun fileViewerTabStrip() = render("file-viewer-tab-strip") {
+        FileViewerTabStripRender()
+    }
+
+    /**
      * Issue #836 — the "Host ready" bottom-sheet success row. After a host
      * becomes ready the PROMINENT (filled, primary) action must be **Continue**
      * (go to the host's sessions), and **Open Usage** must be the secondary

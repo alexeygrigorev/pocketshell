@@ -280,6 +280,10 @@ sealed interface AppDestination {
      * working directory so a relative path the agent referenced resolves
      * correctly.
      *
+     * [remotePath] is optional (issue #1715): a null path is the session
+     * kebab's "Open files" restore route — the viewer hydrates the host
+     * workspace and opens the last active file, or the empty workspace.
+     *
      * SSH connection parameters are required because the screen opens a
      * one-shot [com.pocketshell.core.ssh.SshSession] to read the file.
      */
@@ -291,7 +295,7 @@ sealed interface AppDestination {
         val username: String,
         val keyPath: String,
         val passphrase: CharArray?,
-        val remotePath: String,
+        val remotePath: String?,
         val cwd: String?,
     ) : AppDestination
 

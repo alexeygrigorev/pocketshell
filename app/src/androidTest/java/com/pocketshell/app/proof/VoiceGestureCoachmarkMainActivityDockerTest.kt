@@ -141,6 +141,7 @@ class VoiceGestureCoachmarkMainActivityDockerTest {
             assertLauncherIconIdentity()
             assertCoachmarkEndAnchor()
             assertPlatformAccessibilityContract()
+            WalkthroughScreenshotArtifacts.capture("issue-1753-mainactivity-docker-coachmark-pre-action")
             invokeNativeDictationAction()
             WalkthroughScreenshotArtifacts.capture("issue-1753-mainactivity-docker-coachmark")
             waitForTerminalMarker(SESSION_A_MARKER)

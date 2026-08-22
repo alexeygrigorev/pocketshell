@@ -192,6 +192,11 @@ def _canonicalize_published_quse_record(
             f"quse provider '{provider}' emitted unsupported top-level 'windows' "
             "schema; published quse 0.0.14 uses short_term/long_term"
         )
+    if "short_term" not in record and "long_term" not in record:
+        raise ValueError(
+            f"quse provider '{provider}' is missing both published window fields "
+            "'short_term' and 'long_term'"
+        )
 
     windows: dict[str, dict[str, Any]] = {}
     for source_key in ("short_term", "long_term"):

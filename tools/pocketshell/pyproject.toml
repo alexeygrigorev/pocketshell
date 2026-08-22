@@ -37,13 +37,12 @@ dependencies = [
     # Usage backend + single source of truth for the unified provider schema
     # (issue #1318). Pinned exactly: `pocketshell usage --json` expects quse's
     # provider-keyed `--json` document and fails loudly on any schema drift,
-    # so the version is frozen, not a range. 0.0.14 (#2274): the per-provider
-    # `short_term` / `long_term` fields are REPLACED by one unified top-level
-    # `windows` map whose keys ARE the window labels (`5h` / `7d` /
-    # `monthly`, null percent_remaining for spans that don't apply), plus a
-    # new `go` (OpenCode Go) provider. The Android parser reads exactly that
-    # shape — no alias fallback. 0.0.13 (#2195) historically added the `grok`
-    # provider; 0.0.11 (#1564) labeled each Codex window from its actual
+    # so the version is frozen, not a range. The published 0.0.14 (#2274)
+    # wheel retains the per-provider `short_term` / `long_term` fields. The
+    # PocketShell boundary translates those records into the app's canonical
+    # `windows` map; 0.0.14 does not publish a top-level `windows` schema or a
+    # `go` provider. 0.0.13 (#2195) historically added the `grok` provider;
+    # 0.0.11 (#1564) labeled each Codex window from its actual
     # `limit_window_seconds`.
     "quse==0.0.14",
     # FCM HTTP v1 push delivery (#690): service-account OAuth2 bearer minting

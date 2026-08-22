@@ -98,6 +98,14 @@ def test_pyproject_pins_quse_exactly() -> None:
     assert 'specifier = "==0.0.13"' not in lock
 
 
+def test_pyproject_documents_published_quse_0014_schema() -> None:
+    """The dependency comment must describe the wheel we actually pin."""
+    text = _PYPROJECT.read_text()
+    assert "short_term" in text and "long_term" in text
+    assert "REPLACED by one unified top-level" not in text
+    assert "new `go`" not in text
+
+
 def test_resolve_quse_binary_uses_pinned_env_next_to_interpreter(tmp_path: Path) -> None:
     # AC: `pocketshell usage` invokes the PINNED quse (next to sys.executable),
     # not PATH. A quse living next to the interpreter is resolved.
@@ -202,6 +210,25 @@ def test_flatten_handles_single_provider_shape() -> None:
     assert record["provider"] == "codex"
     assert record["windows"]["7d"]["percent_remaining"] == 88.0
     assert set(record["windows"]) == {"7d"}
+
+
+def test_flatten_rejects_record_without_published_windows() -> None:
+    keyed = json.dumps(
+        {
+            "codex": {
+                "status": "error",
+                "error": "usage unavailable",
+                "details": {},
+            }
+        }
+    )
+    try:
+        normalize_usage_stdout(keyed)
+    except ValueError as exc:
+        assert "short_term" in str(exc)
+        assert "long_term" in str(exc)
+    else:  # pragma: no cover - fail-loud contract
+        raise AssertionError("a record without published windows must be rejected")
 
 
 def test_flatten_translates_published_window_labels_without_rederiving_values() -> None:

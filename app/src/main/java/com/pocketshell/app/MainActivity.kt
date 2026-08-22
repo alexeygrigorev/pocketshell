@@ -60,6 +60,7 @@ import com.pocketshell.app.fileviewer.FileViewerScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.nav.hostSessionTree
 import com.pocketshell.app.nav.parentDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.projects.FolderListScreen
@@ -204,7 +205,8 @@ class MainActivity : FragmentActivity() {
 
     /**
      * Issue #1155 / #666: the APP-LEVEL owner of the "This session no longer
-     * exists — create in this folder, or go home?" recovery prompt. Injected here
+     * exists — create in this folder, or return to this host's sessions?" recovery
+     * prompt. Injected here
      * (so it is alive and subscribed to [SessionLifecycleSignals] from `onCreate`,
      * long before any cold-restore connect emits) and observed inside
      * [AppNavigator] to render a single app-level dialog. This surfaces the
@@ -518,7 +520,8 @@ class MainActivity : FragmentActivity() {
                         onClearLastSession = { lastSessionStore.clear() },
                         // Issue #1155 / #666: the app-level recovery-prompt owner,
                         // observed to render the single "create in this folder, or
-                        // go home?" dialog — including on the cold-restore path.
+                        // return to this host's sessions?" dialog — including on the
+                        // cold-restore path.
                         staleSessionPromptController = staleSessionPromptController,
                     )
                 }
@@ -876,7 +879,8 @@ private fun AppNavigator(
     onClearLastSession: () -> Unit = {},
     // Issue #1155 / #666: the app-level "This session no longer exists" recovery
     // prompt owner. Observed here to render ONE app-level dialog (create in this
-    // folder OR go home) so the prompt also surfaces on the cold-restore path,
+    // folder OR return to this host's sessions) so the prompt also surfaces on
+    // the cold-restore path,
     // where the folder tree was never opened. Null in previews/tests that do not
     // exercise the recovery dialog.
     staleSessionPromptController: com.pocketshell.app.tmux.StaleSessionPromptController? = null,
@@ -922,7 +926,10 @@ private fun AppNavigator(
     // when the app process-restored straight onto the (now gone) session and the
     // folder tree was never opened. Updated as the user opens other sessions.
     var lastTmuxDestination: AppDestination.TmuxSession? by remember {
-        mutableStateOf(restoredTmuxDestination)
+        mutableStateOf(
+            restoredTmuxDestination
+                ?: (requestedDestination as? AppDestination.TmuxSession),
+        )
     }
     LaunchedEffect(current) {
         (current as? AppDestination.TmuxSession)?.let { lastTmuxDestination = it }
@@ -945,6 +952,11 @@ private fun AppNavigator(
     val backStack = remember { mutableListOf<AppDestination>() }
 
     fun setCurrentDestination(dest: AppDestination) {
+        // Capture synchronously with navigation. A stale-session signal can be
+        // delivered before the LaunchedEffect(current) observer gets a turn;
+        // losing this tuple makes the dialog fall back to the host list even
+        // though the cold-restore route already identifies this host.
+        (dest as? AppDestination.TmuxSession)?.let { lastTmuxDestination = it }
         current = dest
         onCurrentDestinationChanged(dest)
     }
@@ -1861,25 +1873,32 @@ private fun AppNavigator(
     // broadcasts a StaleSession; this controller — subscribed process-wide from
     // onCreate — holds the latest one, so the dialog appears REGARDLESS of which
     // screen the app is on, including the cold-restore path where the folder tree
-    // was never opened (the maintainer's dogfood scenario). Two recoveries, per
-    // the reopen: recreate a fresh session in the SAME folder, or go to the host
-    // list ("go home"). A stale broadcast only ever fires for a genuinely-gone
-    // session (never a transient reconnect blip), so this never appears spuriously.
+    // was never opened (the maintainer's dogfood scenario). Two recoveries: recreate
+    // a fresh session in the SAME folder, or leave without creating — which since
+    // #2237 lands on THAT HOST'S session tree, not the list of all hosts (see
+    // [staleSessionDismissAction]). A stale broadcast only ever fires for a
+    // genuinely-gone session (never a transient reconnect blip), so this never
+    // appears spuriously.
     val recoveryScope = rememberCoroutineScope()
     val stalePrompt = staleSessionPromptController?.prompt?.collectAsState()?.value
     var staleRecreateError by remember(stalePrompt?.hostId, stalePrompt?.sessionName) {
         mutableStateOf<String?>(null)
     }
     if (stalePrompt != null) {
-        val base = lastTmuxDestination?.takeIf { it.hostId == stalePrompt.hostId }
+        val base = staleSessionBase(
+            lastTmuxDestination = lastTmuxDestination,
+            requestedDestination = requestedDestination,
+            staleHostId = stalePrompt.hostId,
+        )
+        val dismissAction = staleSessionDismissAction(base)
         ConfirmDialog(
             title = "This session no longer exists",
             message = "The session “${stalePrompt.sessionName}” is gone on the host. " +
                 "Create a new session in “${staleSessionFolderLabel(stalePrompt.folderPath)}”, " +
-                "or go to the home screen?" +
+                "or ${dismissAction.messageClause}?" +
                 (staleRecreateError?.let { "\n\nCouldn't create session: $it" } ?: ""),
             confirmLabel = "Create session",
-            dismissLabel = "Go to home",
+            dismissLabel = dismissAction.label,
             destructive = false,
             onConfirm = {
                 if (base != null) {
@@ -1927,11 +1946,16 @@ private fun AppNavigator(
                     popToHostList()
                 }
             },
-            onDismiss = {
-                // "Go to home" (and scrim/back): drop to the host list.
-                staleSessionPromptController.clear()
-                popToHostList()
-            },
+            // Issue #2237: this is the actual callback passed to ConfirmDialog.
+            // Keep its routing separate from the copy/destination calculation so
+            // the JVM proof can invoke the same callback and observe all recovery
+            // effects, not just inspect a destination value.
+            onDismiss = staleSessionDismissCallback(
+                action = dismissAction,
+                clearPrompt = { staleSessionPromptController.clear() },
+                clearBackStack = { backStack.clear() },
+                setCurrentDestination = ::setCurrentDestination,
+            ),
             modifier = Modifier.testTag(STALE_SESSION_DIALOG_TAG),
             confirmTestTag = STALE_SESSION_CONFIRM_TAG,
             dismissTestTag = STALE_SESSION_GO_HOME_TAG,
@@ -1988,6 +2012,87 @@ internal fun staleSessionFolderLabel(folderPath: String?): String {
     if (stripped == "~" || stripped == "\$HOME") return "home"
     val tail = stripped.substringAfterLast('/')
     return tail.ifBlank { stripped }
+}
+
+/**
+ * Issue #2237: where the stale-session recovery dialog's DISMISS action lands,
+ * together with the copy that describes that landing.
+ *
+ * The maintainer's report: when a session does not exist, the leave-without-
+ * creating action should keep the user in that host — on the screen with the
+ * session tree. Dismissing is not "I'm done with this host", it is "not this
+ * session"; the useful next step is another session on the SAME host, so the
+ * landing is that host's [AppDestination.FolderList].
+ *
+ * Landing there costs nothing: the dialog is only ever raised AFTER a real attach
+ * attempt came back "session not found" (the #666 `has-session` preflight), so the
+ * host's warm lease is already up on both the in-tree and the cold-restore path.
+ * The tree therefore paints off the existing transport — no re-dial. (#666's
+ * original "land on the host list to avoid re-dialing into the dead session's host
+ * tree" rationale, still recorded on `recoverToPreviousOrHostList`, applies to the
+ * SILENT automatic recovery, which can fire before any such confirmation.)
+ *
+ * @param base the last tmux destination for the stale prompt's host, i.e. the SSH
+ *   tuple the tree destination is rebuilt from. `null` only in the rare case where
+ *   the app holds no connection details for that host — there is nothing to build a
+ *   folder list from, so that case (and only that case) still lands on the host
+ *   list, and says so.
+ *
+ * The label and the message clause travel WITH the destination rather than being
+ * fixed strings at the call site, so copy that names a screen can never describe a
+ * screen the dismiss does not go to.
+ */
+internal fun staleSessionBase(
+    lastTmuxDestination: AppDestination.TmuxSession?,
+    requestedDestination: AppDestination,
+    staleHostId: Long,
+): AppDestination.TmuxSession? = listOfNotNull(
+    lastTmuxDestination,
+    requestedDestination as? AppDestination.TmuxSession,
+).firstOrNull { it.hostId == staleHostId }
+
+internal fun staleSessionDismissAction(
+    base: AppDestination.TmuxSession?,
+): StaleSessionDismissAction = if (base != null) {
+    StaleSessionDismissAction(
+        destination = base.hostSessionTree(),
+        label = "Back to sessions",
+        messageClause = "go back to this host's sessions",
+    )
+} else {
+    StaleSessionDismissAction(
+        destination = AppDestination.HostList,
+        label = "Go to hosts",
+        messageClause = "go to the host list",
+    )
+}
+
+/** Issue #2237: the stale-session dialog's dismiss landing plus its copy. */
+internal data class StaleSessionDismissAction(
+    val destination: AppDestination,
+    val label: String,
+    val messageClause: String,
+)
+
+/**
+ * Issue #2237: the callback actually supplied to the stale-session
+ * [com.pocketshell.uikit.components.ConfirmDialog].
+ *
+ * Dismissal is a recovery landing, not a normal push: clear the prompt and the
+ * old navigation history, then show the destination selected by
+ * [staleSessionDismissAction]. Keeping those effects in the callback itself makes
+ * the JVM proof exercise the real `onDismiss` routing rather than only testing a
+ * helper that the dialog might not use.
+ */
+internal fun staleSessionDismissCallback(
+    action: StaleSessionDismissAction,
+    clearPrompt: () -> Unit,
+    clearBackStack: () -> Unit,
+    setCurrentDestination: (AppDestination) -> Unit,
+): () -> Unit = {
+    clearPrompt()
+    clearBackStack()
+    setCurrentDestination(action.destination)
 }
 
 /**

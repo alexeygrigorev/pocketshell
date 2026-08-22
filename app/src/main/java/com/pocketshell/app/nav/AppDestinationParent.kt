@@ -51,15 +51,7 @@ internal fun AppDestination.parentDestination(): AppDestination? = when (this) {
     // Host-scoped screens whose natural parent is that host's session/folder
     // list — they all carry the full SSH connection tuple, so the parent is
     // reconstructible exactly.
-    is AppDestination.TmuxSession -> folderListFor(
-        hostId = hostId,
-        hostName = hostName,
-        hostname = hostname,
-        port = port,
-        username = username,
-        keyPath = keyPath,
-        passphrase = passphrase,
-    )
+    is AppDestination.TmuxSession -> hostSessionTree()
 
     is AppDestination.RepoBrowser -> folderListFor(
         hostId = hostId,
@@ -167,6 +159,33 @@ internal fun AppDestination.parentDestination(): AppDestination? = when (this) {
     AppDestination.AiCosts -> AppDestination.HostList
     AppDestination.PortForwardChooser -> AppDestination.HostList
 }
+
+/**
+ * Issue #2237 — this session's host session/folder tree, as a non-null
+ * [AppDestination.FolderList].
+ *
+ * [parentDestination] already resolves a `TmuxSession` to exactly this screen for
+ * the #1831 empty-back-stack Back fallback, but it returns a nullable
+ * [AppDestination] because the root host list has no parent. The stale-session
+ * recovery dialog (`MainActivity`) needs the same destination as a hard fact — a
+ * dismissed "this session is gone" prompt lands the user back on THIS host's
+ * sessions, never on the unrelated list of all hosts — so it takes this typed
+ * accessor rather than re-building the seven-field constructor call by hand or
+ * null-handling a value that cannot be null.
+ *
+ * One builder, one shape: both callers go through [folderListFor], so the
+ * recovery landing and the Back fallback can never drift apart.
+ */
+internal fun AppDestination.TmuxSession.hostSessionTree(): AppDestination.FolderList =
+    folderListFor(
+        hostId = hostId,
+        hostName = hostName,
+        hostname = hostname,
+        port = port,
+        username = username,
+        keyPath = keyPath,
+        passphrase = passphrase,
+    )
 
 private fun folderListFor(
     hostId: Long,

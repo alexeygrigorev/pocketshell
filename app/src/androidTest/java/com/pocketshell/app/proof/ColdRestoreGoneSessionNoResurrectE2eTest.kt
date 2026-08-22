@@ -2,9 +2,19 @@ package com.pocketshell.app.proof
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import androidx.compose.ui.semantics.SemanticsPropertyKey
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -12,6 +22,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -19,12 +30,22 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_LOADING_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_TITLE_TAG
 import com.pocketshell.app.projects.STALE_SESSION_CONFIRM_TAG
 import com.pocketshell.app.projects.STALE_SESSION_DIALOG_TAG
 import com.pocketshell.app.projects.STALE_SESSION_GO_HOME_TAG
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.StaleSession
+import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
+import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
+import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
+import com.pocketshell.app.tmux.TMUX_RECONNECT_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_LIVE_SEMANTICS_KEY
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_SURFACE_PANE_PRESENT_SEMANTICS_KEY
+import com.pocketshell.app.tmux.TMUX_TERMINAL_HELD_SEMANTICS_KEY
+import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -37,6 +58,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import com.termux.view.TerminalView
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -109,12 +131,23 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         // Issue #788: restore RESUMED before the rule's auto-close so close()
         // does not crash if the body left the recreated scenario non-RESUMED.
         runCatching { compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED) }
+        // The Compose rule closes its scenario after @After. Close it here as
+        // well so the next SeedBeforeLaunchRule cannot inherit this test's
+        // activity-scoped TmuxSessionViewModel/lease owner. This is fixture
+        // hygiene, not a production unregister/force-release shortcut: the
+        // next launch asserts that the real owner registry is empty.
+        runCatching { compose.activityRule.scenario.close() }
         runBlocking {
             if (::fixtureKey.isInitialized) {
+                waitForNoRegisteredFixtureOwner("after ActivityScenario.close()")
                 runCatching { killRemoteSession(fixtureKey) }
+                // Issue #2237: the dismiss-lands-on-the-session-tree journey seeds a
+                // SECOND live session so the tree it lands on has something to pick.
+                runCatching { killRemoteSessionNamed(fixtureKey, SIBLING_SESSION) }
             }
         }
         clearLastSessionPrefs()
+        clearProcessScopedStalePrompt()
     }
 
     /**
@@ -128,7 +161,16 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         val key = readFixtureKey()
         fixtureKey = key
         waitForSshFixtureReady(SshKey.Pem(key))
+        // The prompt is process-scoped by design. Reset it before each seeded
+        // launch so a failed preceding journey cannot cover the next test's
+        // cold-restore/create path with an old host/session prompt.
+        clearProcessScopedStalePrompt()
         clearLastSessionPrefs()
+        // A previous test must have released its real activity/lease owner. Do
+        // not force-unregister it here: a surviving owner is precisely the
+        // stale-claude-main fixture contamination that makes a fresh handshake
+        // look connected while the screen is actually Disconnected.
+        waitForNoRegisteredFixtureOwner("before fixture seed")
         // Real tmux session, named to match a picker entry so the normal attach
         // journey can reach it. The `tmux` shim delegates to the real binary, so
         // has-session / kill-session are authoritative.
@@ -136,6 +178,47 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         assertTrue("seeded session must be alive before the journey", sessionAlive(key))
         hostRowTag = seedDockerHost(key)
     }
+
+    private fun clearProcessScopedStalePrompt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        EntryPointAccessors
+            .fromApplication(context, TestAccessEntryPoint::class.java)
+            .staleSessionPromptController()
+            .clear()
+    }
+
+    /**
+     * The app-wide registry is the authoritative fixture-visible owner of a
+     * live tmux client. A stale entry for the Docker endpoint can make the next
+     * `claude-main` attach reuse/poison the old lease, so fixture setup must
+     * observe its real removal rather than masking it with `forceUnregister`.
+     */
+    private fun waitForNoRegisteredFixtureOwner(stage: String) {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val activeClients = EntryPointAccessors
+            .fromApplication(context, TestAccessEntryPoint::class.java)
+            .activeTmuxClients()
+        val deadline = SystemClock.elapsedRealtime() + OWNER_RELEASE_TIMEOUT_MS
+        var owners = fixtureOwners(activeClients)
+        while (owners.isNotEmpty() && SystemClock.elapsedRealtime() < deadline) {
+            SystemClock.sleep(OWNER_RELEASE_SAMPLE_INTERVAL_MS)
+            owners = fixtureOwners(activeClients)
+        }
+        assertTrue(
+            "$stage left a live Docker tmux owner; close the activity/lease before " +
+                "seeding claude-main: $owners",
+            owners.isEmpty(),
+        )
+    }
+
+    private fun fixtureOwners(
+        activeClients: com.pocketshell.app.sessions.ActiveTmuxClients,
+    ): List<com.pocketshell.app.sessions.ActiveTmuxClients.Entry> =
+        activeClients.clients.value.values.filter {
+            it.hostname == DEFAULT_HOST &&
+                it.port == DEFAULT_PORT &&
+                it.username == DEFAULT_USER
+        }
 
     @Test
     fun coldRestoreToKilledSessionDoesNotRecreateAndLandsOnList() { runBlocking {
@@ -147,6 +230,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         waitForText(SEEDED_SESSION, timeoutMs = 20_000)
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForConnected("cold-restore dialog initial attach")
 
         // ---- (2) Background -> onStop persists the last session (#177).
         val stopAt = SystemClock.elapsedRealtime()
@@ -366,6 +450,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         waitForText(SEEDED_SESSION, timeoutMs = 20_000)
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForConnected("stale-dialog copy initial attach")
 
         // ---- Background -> persist last session, then kill it on the server.
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
@@ -411,14 +496,24 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
      * kill-externally → recreate/cold-restore journey as
      * [coldRestoreToKilledSessionDoesNotRecreateAndLandsOnList], but asserts the
      * user actually SEES the app-level "This session no longer exists — create in
-     * this folder, or go home?" recovery DIALOG (with the "Go to home" action), and
-     * that the session was NOT resurrected server-side. On base (tree-only owner)
-     * the dialog never appears on cold restore — this fails; with the app-level
-     * [com.pocketshell.app.tmux.StaleSessionPromptController] it appears.
+     * this folder, or go back to this host's sessions?" recovery DIALOG (with both
+     * actions), and that the session was NOT resurrected server-side. On base
+     * (tree-only owner) the dialog never appears on cold restore — this fails; with
+     * the app-level [com.pocketshell.app.tmux.StaleSessionPromptController] it
+     * appears. Where the dismiss action LANDS is #2237's
+     * [dismissTapOnColdRestoreStaleDialogLandsOnHostSessionTree].
      */
     @Test
-    fun coldRestoreToGoneSessionShowsRecreateDialogWithGoHome() { runBlocking {
+    fun coldRestoreToGoneSessionShowsBackToSessionsActionAndHostTree() { runBlocking {
         val key = fixtureKey
+
+        // The destination assertion below must be load-bearing: the tree needs a
+        // different live session to show after the gone-session dialog is dismissed.
+        seedTmuxSessionNamed(key, SIBLING_SESSION, SIBLING_READY_MARKER)
+        assertTrue(
+            "the sibling session must be alive before the cold-restore dialog journey",
+            sessionAliveNamed(key, SIBLING_SESSION),
+        )
 
         // ---- Attach to the seeded session via the normal journey.
         waitForHostRowPresent(hostRowTag)
@@ -426,6 +521,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         waitForText(SEEDED_SESSION, timeoutMs = 20_000)
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForConnected("stale-dialog copy initial attach")
 
         // ---- Background -> persist last session, then kill it on the server.
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
@@ -437,33 +533,99 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         compose.activityRule.scenario.recreate()
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
 
-        // ---- The app-level recovery DIALOG must appear (with the go-home action).
+        // ---- The app-level recovery DIALOG must appear with the new action/copy.
         compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
             runCatching {
                 compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
                     .fetchSemanticsNodes()
-                    .isNotEmpty()
+                    .isNotEmpty() &&
+                    compose.onAllNodesWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
             }.getOrDefault(false)
         }
         val dialogShown = compose
             .onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
             .fetchSemanticsNodes()
             .isNotEmpty()
-        val goHomeShown = compose
-            .onAllNodesWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true)
+        // Use merged semantics for the button's label: the test tag is on the
+        // Button container while the visible label is its Text child.
+        val dismissActionNode = compose.onNodeWithTag(STALE_SESSION_GO_HOME_TAG)
+        val dismissActionSemantics = captureDismissActionEvidence(
+            prefix = "issue2237-cold-restore-dialog-copy",
+        )
+        val backToSessionsShown = dismissActionSemantics.text == DISMISS_LABEL
+        val globalTextLookupShown = compose
+            .onAllNodesWithText(DISMISS_LABEL, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        val backToSessionsCopyShown = compose
+            .onAllNodesWithText(
+                DISMISS_MESSAGE_CLAUSE,
+                substring = true,
+                useUnmergedTree = true,
+            )
             .fetchSemanticsNodes()
             .isNotEmpty()
         val resurrected = sessionAlive(key)
+
+        // The test tag is attached to the production dismiss button itself. A
+        // global text search can miss an AlertDialog's separate Compose root (the
+        // fresh r2 run did exactly that), so the contract is asserted on the
+        // tagged node's own merged semantics, including its click action.
+        dismissActionNode
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .assertTextEquals(DISMISS_LABEL)
+        assertTrue(
+            "the stale-session dialog must explain that the action returns to this " +
+                "host's sessions",
+            backToSessionsCopyShown,
+        )
+
+        // The tap must exercise the non-null destination, not just the dialog copy.
+        compose.onNodeWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                onFolderTree() && sessionRowShown(SIBLING_SESSION)
+            }.getOrDefault(false)
+        }
+        val hostTreeShown = onFolderTree()
+        val hostTitleShown = compose
+            .onAllNodesWithText(HOST_NAME, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        val siblingShown = sessionRowShown(SIBLING_SESSION)
+        val hostListShown = onHostList(hostRowTag)
+        val dialogGoneAfterDismiss = !visibleTag(STALE_SESSION_DIALOG_TAG)
         writeText(
             "cold-restore-recreate-dialog.txt",
             buildString {
                 appendLine("restored_session=$SEEDED_SESSION")
                 appendLine("recreate_dialog_shown=$dialogShown")
-                appendLine("go_home_action_shown=$goHomeShown")
+                appendLine("dismiss_action_shown=$backToSessionsShown")
+                appendLine("dismiss_action_label=$DISMISS_LABEL")
+                appendLine("dismiss_action_semantics_text=${dismissActionSemantics.text}")
+                appendLine("dismiss_action_semantics_content_description=${dismissActionSemantics.contentDescription}")
+                appendLine("dismiss_action_semantics_has_click=${dismissActionSemantics.hasClickAction}")
+                appendLine("global_text_lookup_shown=$globalTextLookupShown")
+                appendLine("dismiss_message_clause_shown=$backToSessionsCopyShown")
                 appendLine("session_resurrected_server_side=$resurrected")
+                appendLine("host_tree_shown_after_dismiss=$hostTreeShown")
+                appendLine("host_title_shown_after_dismiss=$hostTitleShown")
+                appendLine("sibling_session_shown_after_dismiss=$siblingShown")
+                appendLine("host_list_shown_after_dismiss=$hostListShown")
+                appendLine("dialog_gone_after_dismiss=$dialogGoneAfterDismiss")
                 appendLine("expected_recreate_dialog_shown=true")
-                appendLine("expected_go_home_action_shown=true")
+                appendLine("expected_dismiss_action_shown=true")
+                appendLine("expected_dismiss_action_label=$DISMISS_LABEL")
+                appendLine("expected_dismiss_message_clause_shown=true")
                 appendLine("expected_session_resurrected=false")
+                appendLine("expected_host_tree_shown_after_dismiss=true")
+                appendLine("expected_host_title_shown_after_dismiss=true")
+                appendLine("expected_sibling_session_shown_after_dismiss=true")
+                appendLine("expected_host_list_shown_after_dismiss=false")
+                appendLine("expected_dialog_gone_after_dismiss=true")
             },
         )
         assertTrue(
@@ -472,13 +634,38 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             dialogShown,
         )
         assertTrue(
-            "the cold-restore recovery dialog must offer a 'Go to home' action " +
-                "(there is no tree behind it on this path)",
-            goHomeShown,
+            "the cold-restore recovery dialog must offer the leave-without-creating " +
+                "action (#2237: '$DISMISS_LABEL' lands on this host's session tree)",
+            backToSessionsShown,
+        )
+        assertTrue(
+            "the cold-restore recovery dialog must use copy naming this host's " +
+                "session tree, not the old home destination",
+            backToSessionsCopyShown,
         )
         assertTrue(
             "a cold restore onto a gone session must NOT resurrect it server-side",
             !resurrected,
+        )
+        assertTrue(
+            "the real cold-restore dismiss must land on the host's FolderList",
+            hostTreeShown,
+        )
+        assertTrue(
+            "the FolderList destination must retain this host identity",
+            hostTitleShown,
+        )
+        assertTrue(
+            "the host tree must expose the other live session immediately after dismiss",
+            siblingShown,
+        )
+        assertTrue(
+            "the new dismiss action must leave the host list",
+            !hostListShown,
+        )
+        assertTrue(
+            "the cold-restore dismiss action must close the recovery dialog",
+            dialogGoneAfterDismiss,
         )
         Unit
     } }
@@ -556,21 +743,22 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
     } }
 
     /**
-     * Issue #1155 REOPEN (2026-07-03) blocker 1 — the "Go to home" recovery ACTION.
-     * The sibling `coldRestoreToGoneSessionShowsRecreateDialogWithGoHome` only
-     * asserts the go-home BUTTON is present; nothing tapped it or proved it
-     * navigates. This drives the tap and asserts the app actually lands on the host
-     * list (`popToHostList()`).
+     * Issue #2237 — the stale-session dialog's DISMISS action must keep the user on
+     * the host whose session died: it lands on that host's SESSION TREE
+     * ([AppDestination.FolderList]), never on the unrelated list of all hosts.
      *
-     * It uses the OpenExisting tap path deliberately: after the gone preflight the
-     * navigator `back()`s to the FOLDER TREE (not the host list), so the dialog
-     * sits over the folder tree and the host row is NOT yet visible. Tapping "Go to
-     * home" must then `popToHostList()` — the host row appears. If `popToHostList()`
-     * is dropped from the dialog's dismiss handler the app stays on the folder tree
-     * and the host row never appears → this test fails (red→green on the action).
+     * This is the in-tree (OpenExisting tap) half of the class; the cold-restore
+     * half is [dismissTapOnColdRestoreStaleDialogLandsOnHostSessionTree]. Before
+     * #2237 the dismiss handler called `popToHostList()`, so on THIS path the tap
+     * actively threw the user off the folder tree they were standing on and onto the
+     * host list — that is the exact regression this asserts is gone (red on base:
+     * `landed_on_host_list_after_dismiss=true`).
+     *
+     * Supersedes the #1155-blocker-1 `goHomeTapOnStaleDialogReturnsToHostList`,
+     * whose expectation (host list) is the behaviour #2237 removes.
      */
     @Test
-    fun goHomeTapOnStaleDialogReturnsToHostList() { runBlocking {
+    fun dismissTapOnStaleDialogKeepsUserOnHostSessionTree() { runBlocking {
         val key = fixtureKey
 
         // ---- (1) host -> folder list; the seeded session row is present.
@@ -584,57 +772,431 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
         // ---- (3) TAP the still-shown persisted row -> OpenExisting preflight
         // confirms gone -> back() to the folder tree + stale broadcast -> dialog.
+        // Wait for the dialog AND for the drop back to the tree behind it to land:
+        // the two are not ordered, and tapping into a dialog whose window is about
+        // to be re-laid-out under a screen switch loses the tap.
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
             runCatching {
                 compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
                     .fetchSemanticsNodes()
-                    .isNotEmpty()
+                    .isNotEmpty() && onFolderTree()
             }.getOrDefault(false)
         }
+        delay(LIFECYCLE_DRAIN_MS)
 
         // Sanity: the dialog sits over the FOLDER TREE, so the host row is NOT
-        // visible yet. This is what makes the go-home nav load-bearing — the app is
-        // not already on the host list.
-        val onHostListBeforeGoHome = onHostList(hostRowTag)
+        // visible yet. The dismiss must LEAVE it that way.
+        val onHostListBeforeDismiss = onHostList(hostRowTag)
 
-        // ---- (4) TAP "Go to home" -> popToHostList().
+        // ---- (4) TAP the dismiss action.
         compose.onNodeWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true).performClick()
 
-        // ---- The app must land on the host list, and the dialog is gone.
+        // ---- The dialog goes away and the host's session tree stays up.
         compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
-            onHostList(hostRowTag) &&
+            runCatching {
                 compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
                     .fetchSemanticsNodes()
                     .isEmpty()
+            }.getOrDefault(false)
         }
+        // Give any (unwanted) navigation to the host list time to land before the
+        // assertion reads the tree — otherwise a slow pop would read as "stayed".
+        delay(LIFECYCLE_DRAIN_MS)
         val landedOnHostList = onHostList(hostRowTag)
+        val onSessionTree = onFolderTree()
         val dialogGone = compose
             .onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
             .fetchSemanticsNodes()
             .isEmpty()
         writeText(
-            "go-home-tap-nav.txt",
+            "issue2237-dismiss-in-tree-nav.txt",
             buildString {
-                appendLine("on_host_list_before_go_home=$onHostListBeforeGoHome")
-                appendLine("landed_on_host_list_after_go_home=$landedOnHostList")
+                appendLine("path=open-existing tap (dialog raised over the folder tree)")
+                appendLine("on_host_list_before_dismiss=$onHostListBeforeDismiss")
+                appendLine("landed_on_host_list_after_dismiss=$landedOnHostList")
+                appendLine("on_session_tree_after_dismiss=$onSessionTree")
                 appendLine("dialog_dismissed=$dialogGone")
-                appendLine("expected_on_host_list_before_go_home=false")
-                appendLine("expected_landed_on_host_list_after_go_home=true")
+                appendLine("expected_on_host_list_before_dismiss=false")
+                appendLine("expected_landed_on_host_list_after_dismiss=false")
+                appendLine("expected_on_session_tree_after_dismiss=true")
                 appendLine("expected_dialog_dismissed=true")
             },
         )
+        captureFullDevice("issue2237-dismiss-in-tree")
         assertTrue(
             "precondition: the dialog must sit over the folder tree (NOT the host " +
-                "list) so the go-home navigation is actually exercised",
-            !onHostListBeforeGoHome,
+                "list) so the dismiss navigation is actually exercised",
+            !onHostListBeforeDismiss,
+        )
+        assertTrue("the stale-session dialog must be dismissed", dialogGone)
+        assertTrue(
+            "REGRESSION (#2237): dismissing the stale-session dialog threw the user " +
+                "out to the HOST LIST; it must keep them on this host's session tree",
+            !landedOnHostList,
         )
         assertTrue(
-            "REGRESSION (#1155 reopen): tapping 'Go to home' on the stale-session " +
-                "dialog must popToHostList() — the host list should be shown",
-            landedOnHostList,
+            "after dismissing, the host's session tree must be the visible screen",
+            onSessionTree,
         )
-        assertTrue("the stale-session dialog must be dismissed after 'Go to home'", dialogGone)
+        Unit
+    } }
+
+    /**
+     * Issue #2237 — the maintainer's reported gesture, on the path where the
+     * destination is actually load-bearing.
+     *
+     * On the COLD-RESTORE path the app process-restored straight onto the (now
+     * dead) session with an EMPTY back stack, and the #666 automatic recovery
+     * (`recoverToPreviousOrHostList`, which has nothing to pop) has ALREADY put the
+     * user on the host list by the time the dialog is raised — measured, and
+     * recorded as `on_host_list_before_dismiss=true`. That is what makes this the
+     * load-bearing half: the dismiss handler has to BUILD this host's
+     * [AppDestination.FolderList] out of the restored session's connection tuple and
+     * navigate off the host list. On base it called `popToHostList()` and the user
+     * stayed dumped on the list of all hosts (red); a dismiss that merely did
+     * nothing would also leave them there (red). Only building + navigating to the
+     * host's session tree passes.
+     *
+     * It also proves the POINT of landing there (acceptance criterion 2): a
+     * DIFFERENT live session on the same host is immediately listed and tappable,
+     * and opening it reaches the session screen off the already-warm lease — with no
+     * "Loading workspace tree" rebuild flash in between.
+     */
+    @Test
+    fun dismissTapOnColdRestoreStaleDialogLandsOnHostSessionTree() { runBlocking {
+        val key = fixtureKey
+
+        // A SECOND live session on the same host, so the tree the dismiss lands on
+        // has a real alternative to pick (the whole reason for landing there).
+        seedTmuxSessionNamed(key, SIBLING_SESSION, SIBLING_READY_MARKER)
+        assertTrue(
+            "the sibling session must be alive before the journey",
+            sessionAliveNamed(key, SIBLING_SESSION),
+        )
+        // Add a distinct host row to make the routing oracle host-specific. The
+        // second host is deliberately not connected; a successful dismiss must
+        // still select the restored host's FolderList, not merely any tree.
+        val otherHostRowTag = seedSecondaryDockerHost(key)
+
+        // ---- (1) Attach to the seeded session via the normal journey.
+        waitForHostRowsPresent(hostRowTag, otherHostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SEEDED_SESSION, timeoutMs = 20_000)
+        compose.onNodeWithText(SEEDED_SESSION).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        val initialUiEvidence = waitForStableSessionUi(
+            label = "cold-restore initial attach",
+            expectedSessionName = SEEDED_SESSION,
+            readyMarker = SEEDED_READY_MARKER,
+        )
+        val initialConnectionStatus = initialUiEvidence.statusName
+
+        // ---- (2) Background -> onStop persists the last session (#177).
+        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+        delay(LIFECYCLE_DRAIN_MS)
+
+        // ---- (3) Kill it on the server. It is now GONE.
+        killRemoteSession(key)
+        assertTrue("session must be gone on the server after kill", !sessionAlive(key))
+
+        // ---- (4) Cold-restore into the gone session (savedInstanceState != null).
+        compose.activityRule.scenario.recreate()
+        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+
+        // ---- (5) The app-level recovery dialog must appear, AND the #666 automatic
+        // recovery behind it must have finished landing on the host list. Those two
+        // are not ordered: the dialog is raised off the stale broadcast while the
+        // navigator drop is still in flight, and clicking into a dialog whose window
+        // is about to be re-laid-out under a screen switch loses the tap (observed
+        // twice: `pre-dismiss ... hostRow=false` then a HostList route ~2s later,
+        // with the prompt never cleared). Waiting for BOTH settles the frame and is
+        // also the exact state the maintainer reports the dialog in.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    onHostList(hostRowTag) &&
+                    onHostList(otherHostRowTag)
+            }.getOrDefault(false)
+        }
+        // Preconditions that make the destination load-bearing: the session tree is
+        // NOT up behind the dialog (so "we are already there" cannot pass the test),
+        // and the #666 automatic recovery has already dropped the user onto the HOST
+        // LIST (so the dismiss must navigate OFF it to satisfy #2237).
+        val onSessionTreeBeforeDismiss = onFolderTree()
+        val onHostListBeforeDismiss = onHostList(hostRowTag)
+        val onOtherHostListBeforeDismiss = onHostList(otherHostRowTag)
+
+        // ---- (6) TAP the dismiss action and observe the transition from its
+        // FIRST frame. Do not sleep for a fixed settle delay before checking the
+        // loading tag: that was the review hole, because a short reconnect flash
+        // could end before the assertion ran.
+        val connectAttemptsBeforeDismiss = TMUX_CONNECT_ATTEMPTS.get()
+        val sshHandshakesBeforeDismiss = SSH_HANDSHAKE_ATTEMPTS.get()
+        val dismissAt = SystemClock.elapsedRealtime()
+        var transitionSettled = false
+        var loadingSeenBeforeSettlement = false
+        var loadingSeenAfterSettlement = false
+        var transitionSamples = 0
+        fun sampleDismissTransition() {
+            transitionSamples += 1
+            if (visibleTag(FOLDER_LIST_LOADING_TAG)) {
+                if (transitionSettled) {
+                    loadingSeenAfterSettlement = true
+                } else {
+                    loadingSeenBeforeSettlement = true
+                }
+            }
+        }
+        Log.i(
+            LOG_TAG,
+            "issue2237 pre-dismiss dialogs=${compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true).fetchSemanticsNodes().size}" +
+                " goHomeNodes=${compose.onAllNodesWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true).fetchSemanticsNodes().size}" +
+                " tree=${onFolderTree()} hostRow=${onHostList(hostRowTag)}",
+        )
+        compose.onNodeWithTag(STALE_SESSION_GO_HOME_TAG, useUnmergedTree = true).performClick()
+        // The first sample is immediately after performClick; later samples are
+        // bounded to 50ms so the proof covers the whole pre-settlement interval.
+        sampleDismissTransition()
+        Log.i(
+            LOG_TAG,
+            "issue2237 post-dismiss dialogs=${compose.onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true).fetchSemanticsNodes().size}" +
+                " tree=${onFolderTree()} hostRow=${onHostList(hostRowTag)}" +
+                " sessionScreen=${compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).fetchSemanticsNodes().size}" +
+                " sibling=${sessionRowShown(SIBLING_SESSION)}",
+        )
+
+        // ---- (7) The app must land on THIS HOST'S session tree, with the sibling
+        // session listed. The condition is the settlement point: until both the
+        // destination title and a real sibling row exist, any loading panel is a
+        // pre-settlement flash and is load-bearing evidence.
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            sampleDismissTransition()
+            val settled = runCatching {
+                onFolderTreeFor(HOST_NAME) && sessionRowShown(SIBLING_SESSION)
+            }.getOrDefault(false)
+            if (settled) {
+                transitionSettled = true
+                sampleDismissTransition()
+                true
+            } else {
+                SystemClock.sleep(DISMISS_TRANSITION_SAMPLE_INTERVAL_MS)
+                false
+            }
+        }
+        val treeShownMs = SystemClock.elapsedRealtime() - dismissAt
+        // Keep sampling briefly after settlement as well. This catches a late
+        // loading/reconnect overlay and makes the artifact distinguish a clean
+        // transition from a panel that appeared just after the row was painted.
+        val postSettlementStartedAt = SystemClock.elapsedRealtime()
+        val postSettlementDeadline =
+            postSettlementStartedAt + DISMISS_POST_SETTLEMENT_OBSERVATION_MS
+        while (SystemClock.elapsedRealtime() < postSettlementDeadline) {
+            sampleDismissTransition()
+            val remaining = postSettlementDeadline - SystemClock.elapsedRealtime()
+            if (remaining > 0L) {
+                SystemClock.sleep(minOf(DISMISS_TRANSITION_SAMPLE_INTERVAL_MS, remaining))
+            }
+        }
+        val landedOnHostList = onHostList(hostRowTag)
+        val onSessionTree = onFolderTreeFor(HOST_NAME)
+        val wrongHostTreeShown = onFolderTreeFor(OTHER_HOST_NAME)
+        val siblingRowShown = sessionRowShown(SIBLING_SESSION)
+        val dialogGone = compose
+            .onAllNodesWithTag(STALE_SESSION_DIALOG_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isEmpty()
+        val connectAttemptDelta = TMUX_CONNECT_ATTEMPTS.get() - connectAttemptsBeforeDismiss
+        val sshHandshakeDelta = SSH_HANDSHAKE_ATTEMPTS.get() - sshHandshakesBeforeDismiss
+        captureFullDevice("issue2237-dismiss-cold-restore-tree")
+
+        // ---- (8) The listed sibling session must be immediately usable: tapping it
+        // opens that session's screen off the same warm host connection.
+        val siblingConnectAttemptsAtTap = TMUX_CONNECT_ATTEMPTS.get()
+        val siblingSshHandshakesAtTap = SSH_HANDSHAKE_ATTEMPTS.get()
+        val openAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText(SIBLING_SESSION).performClick()
+        compose.waitUntil(timeoutMillis = CREATE_TIMEOUT_MS) {
+            runCatching {
+                compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }.getOrDefault(false)
+        }
+        val siblingOpenMs = SystemClock.elapsedRealtime() - openAt
+        val siblingSessionOpened = compose
+            .onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        val siblingUiEvidence = waitForStableSessionUi(
+            label = "sibling session open",
+            expectedSessionName = SIBLING_SESSION,
+            readyMarker = SIBLING_READY_MARKER,
+        )
+        val siblingConnectionStatus = siblingUiEvidence.statusName
+        val siblingUiAfterCapture: SessionUiSnapshot
+        captureFullDevice("issue2237-dismiss-cold-restore-sibling-open-connected")
+        siblingUiAfterCapture = currentSessionUiSnapshot(SIBLING_SESSION)
+
+        writeText(
+            "issue2237-dismiss-cold-restore-nav.txt",
+            buildString {
+                appendLine("path=cold restore onto the gone session (empty back stack)")
+                appendLine("gone_session=$SEEDED_SESSION")
+                appendLine("sibling_session=$SIBLING_SESSION")
+                appendLine("other_host_name=$OTHER_HOST_NAME")
+                appendLine("other_host_row_tag=$otherHostRowTag")
+                appendLine("initial_connection_status=$initialConnectionStatus")
+                appendLine("sibling_connection_status=$siblingConnectionStatus")
+                appendLine("initial_ui_stable_samples=${initialUiEvidence.stableSamples}")
+                appendLine("initial_ui_stable_window_ms=${initialUiEvidence.stableWindowMs}")
+                appendLine("initial_terminal_session_name=${initialUiEvidence.terminalSessionName}")
+                appendLine("initial_terminal_output_seen=${initialUiEvidence.terminalOutputSeen}")
+                appendLine("initial_session_label_count=${initialUiEvidence.sessionLabelCount}")
+                appendLine("on_session_tree_before_dismiss=$onSessionTreeBeforeDismiss")
+                appendLine("on_host_list_before_dismiss=$onHostListBeforeDismiss")
+                appendLine("on_other_host_list_before_dismiss=$onOtherHostListBeforeDismiss")
+                appendLine("landed_on_host_list_after_dismiss=$landedOnHostList")
+                appendLine("on_session_tree_after_dismiss=$onSessionTree")
+                appendLine("wrong_host_tree_shown_after_dismiss=$wrongHostTreeShown")
+                appendLine("sibling_session_row_shown=$siblingRowShown")
+                appendLine("loading_seen_before_settlement=$loadingSeenBeforeSettlement")
+                appendLine("loading_seen_after_settlement=$loadingSeenAfterSettlement")
+                appendLine("dismiss_transition_samples=$transitionSamples")
+                appendLine("sibling_session_opened=$siblingSessionOpened")
+                appendLine("dialog_dismissed=$dialogGone")
+                appendLine("tree_shown_after_dismiss_ms=$treeShownMs")
+                appendLine("post_settlement_observation_ms=$DISMISS_POST_SETTLEMENT_OBSERVATION_MS")
+                appendLine("connect_attempt_delta_before_sibling_tap=$connectAttemptDelta")
+                appendLine("ssh_handshake_delta_before_sibling_tap=$sshHandshakeDelta")
+                appendLine("sibling_connect_attempts_at_tap=$siblingConnectAttemptsAtTap")
+                appendLine("sibling_ssh_handshakes_at_tap=$siblingSshHandshakesAtTap")
+                appendLine("sibling_connect_attempts_at_stable_start=${siblingUiEvidence.connectAttemptsAtStableStart}")
+                appendLine("sibling_ssh_handshakes_at_stable_start=${siblingUiEvidence.sshHandshakesAtStableStart}")
+                appendLine("sibling_connect_attempts_at_settlement=${siblingUiEvidence.connectAttemptsAtSettlement}")
+                appendLine("sibling_ssh_handshakes_at_settlement=${siblingUiEvidence.sshHandshakesAtSettlement}")
+                appendLine("sibling_connect_attempt_delta_after_tap=${siblingUiEvidence.connectAttemptsAtSettlement - siblingConnectAttemptsAtTap}")
+                appendLine("sibling_ssh_handshake_delta_after_tap=${siblingUiEvidence.sshHandshakesAtSettlement - siblingSshHandshakesAtTap}")
+                appendLine("sibling_ui_stable_samples=${siblingUiEvidence.stableSamples}")
+                appendLine("sibling_ui_stable_window_ms=${siblingUiEvidence.stableWindowMs}")
+                appendLine("sibling_terminal_session_name=${siblingUiEvidence.terminalSessionName}")
+                appendLine("sibling_terminal_output_seen=${siblingUiEvidence.terminalOutputSeen}")
+                appendLine("sibling_session_label_count_at_settlement=${siblingUiEvidence.sessionLabelCount}")
+                appendLine("sibling_error_band_count_after_settlement=${siblingUiAfterCapture.errorBandCount}")
+                appendLine("sibling_connection_pill_count_after_settlement=${siblingUiAfterCapture.connectionPillCount}")
+                appendLine("sibling_reconnect_text_count_after_settlement=${siblingUiAfterCapture.reconnectTextCount}")
+                appendLine("sibling_disconnected_text_count_after_settlement=${siblingUiAfterCapture.disconnectedTextCount}")
+                appendLine("sibling_reconnecting_text_count_after_settlement=${siblingUiAfterCapture.reconnectingTextCount}")
+                appendLine("sibling_screen_live_after_settlement=${siblingUiAfterCapture.sessionLive}")
+                appendLine("sibling_terminal_held_after_settlement=${siblingUiAfterCapture.terminalHeld}")
+                appendLine("sibling_surface_pane_present_after_settlement=${siblingUiAfterCapture.surfacePanePresent}")
+                appendLine("sibling_session_label_count_after_settlement=${siblingUiAfterCapture.sessionLabelCount}")
+                appendLine("sibling_connected_screenshot=issue2237-dismiss-cold-restore-sibling-open-connected-viewport.png")
+                appendLine("sibling_ui_ready_after_screenshot=${siblingUiAfterCapture.isReadyFor(SIBLING_SESSION, SIBLING_READY_MARKER)}")
+                appendLine("sibling_open_ms=$siblingOpenMs")
+                appendLine("expected_on_session_tree_before_dismiss=false")
+                appendLine("expected_on_host_list_before_dismiss=true")
+                appendLine("expected_on_other_host_list_before_dismiss=true")
+                appendLine("expected_landed_on_host_list_after_dismiss=false")
+                appendLine("expected_on_session_tree_after_dismiss=true")
+                appendLine("expected_folder_tree_title=$HOST_NAME")
+                appendLine("expected_wrong_host_tree_shown_after_dismiss=false")
+                appendLine("expected_initial_connection_status=Connected")
+                appendLine("expected_sibling_connection_status=Connected")
+                appendLine("expected_sibling_session_row_shown=true")
+                appendLine("expected_loading_seen_before_settlement=false")
+                appendLine("expected_loading_seen_after_settlement=false")
+                appendLine("expected_connect_attempt_delta_before_sibling_tap=0")
+                appendLine("expected_ssh_handshake_delta_before_sibling_tap=0")
+                appendLine("expected_sibling_session_opened=true")
+                appendLine("expected_dialog_dismissed=true")
+            },
+        )
+
+        assertTrue(
+            "precondition: on the cold-restore path the session tree must NOT already " +
+                "be up behind the dialog, or the destination is not exercised",
+            !onSessionTreeBeforeDismiss,
+        )
+        assertTrue(
+            "precondition: on cold restore the #666 automatic recovery drops to the " +
+                "HOST LIST before the dialog is raised — that is the state whose " +
+                "dismiss #2237 changes, so if it is not reached this test proves nothing",
+            onHostListBeforeDismiss,
+        )
+        assertTrue(
+            "precondition: the cold-restore host list must contain the distinct " +
+                "second host, so the post-dismiss host identity is load-bearing",
+            onOtherHostListBeforeDismiss,
+        )
+        assertTrue("the stale-session dialog must be dismissed", dialogGone)
+        assertTrue(
+            "REGRESSION (#2237): dismissing the cold-restore stale-session dialog " +
+                "dropped the user on the HOST LIST; it must land on this host's " +
+                "session tree",
+            !landedOnHostList,
+        )
+        assertTrue(
+            "dismissing must land on this host's session tree (FolderList)",
+            onSessionTree,
+        )
+        assertTrue(
+            "dismissing must select the stale prompt's host tree, not the other " +
+                "configured host",
+            !wrongHostTreeShown,
+        )
+        assertTrue(
+            "the session tree must list the host's other live session `$SIBLING_SESSION` " +
+                "so the user can pick it right away",
+            siblingRowShown,
+        )
+        assertTrue(
+            "REGRESSION (#2237): the host-tree loading panel appeared before the " +
+                "FolderList settled; the warm lease must not flash a reconnect/dial " +
+                "panel during the dismiss transition",
+            !loadingSeenBeforeSettlement,
+        )
+        assertTrue(
+            "REGRESSION (#2237): the host-tree loading panel appeared after the " +
+                "FolderList settled; the warm lease must stay settled",
+            !loadingSeenAfterSettlement,
+        )
+        assertEquals(
+            "dismissing onto the warm host tree must not invoke another logical tmux connect",
+            0,
+            connectAttemptDelta,
+        )
+        assertEquals(
+            "dismissing onto the warm host tree must not open another SSH handshake",
+            0,
+            sshHandshakeDelta,
+        )
+        assertTrue(
+            "the listed sibling session must be tappable and open its session screen",
+            siblingSessionOpened,
+        )
+        assertEquals(
+            "the initial attach must establish a real connected fixture",
+            "Connected",
+            initialConnectionStatus,
+        )
+        assertEquals(
+            "the sibling tap must open a connected session, not a Disconnected screen",
+            "Connected",
+            siblingConnectionStatus,
+        )
+        assertTrue(
+            "the sibling UI must still be genuinely ready after the connected screenshot " +
+                "was captured; a VM Connected value alone is not sufficient",
+            siblingUiAfterCapture.isReadyFor(SIBLING_SESSION, SIBLING_READY_MARKER),
+        )
+        assertTrue(
+            "the sibling screenshot must correspond to the selected sibling terminal " +
+                "and its visible fixture output",
+            siblingUiAfterCapture.terminalOutputSeen,
+        )
         Unit
     } }
 
@@ -1051,10 +1613,302 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
     // ---------------------------------------------------------------- Helpers
 
+    private fun visibleTag(tag: String): Boolean =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }.getOrDefault(false)
+
     private fun onHostList(hostRowTag: String): Boolean =
-        compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+        visibleTag(hostRowTag)
+
+    /**
+     * Issue #2237: true iff the host's session/folder tree
+     * ([com.pocketshell.app.nav.AppDestination.FolderList]) is the visible screen.
+     * The tree's header title tag is present for the whole screen, including while
+     * it is still loading, so this identifies the DESTINATION rather than a
+     * particular tree content state.
+     */
+    private fun onFolderTree(): Boolean =
+        visibleTag(FOLDER_LIST_TITLE_TAG)
+
+    /** Issue #2237: the FolderList header must be for the stale prompt's host. */
+    private fun onFolderTreeFor(hostName: String): Boolean =
+        runCatching {
+            compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG, useUnmergedTree = true)
+                .assertTextEquals(hostName)
+            true
+        }.getOrDefault(false)
+
+    /** Issue #2237: true iff a session row with [sessionName] is listed. */
+    private fun sessionRowShown(sessionName: String): Boolean =
+        compose.onAllNodesWithText(sessionName, useUnmergedTree = true)
             .fetchSemanticsNodes()
             .isNotEmpty()
+
+    private fun waitForHostRowsPresent(vararg hostRowTags: String) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
+            hostRowTags.all(::visibleTag)
+        }
+    }
+
+    /** Return the activity-scoped VM's real status, not a screen tag proxy. */
+    private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
+        var viewModel: TmuxSessionViewModel? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            viewModel = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+        }
+        return requireNotNull(viewModel) { "TmuxSessionViewModel not available" }
+            .connectionStatus
+            .value
+    }
+
+    private data class TerminalViewSnapshot(
+        val visible: Boolean,
+        val sessionName: String?,
+        val transcriptText: String,
+    )
+
+    private data class SessionUiSnapshot(
+        val status: TmuxSessionViewModel.ConnectionStatus,
+        val sessionLive: Boolean?,
+        val terminalHeld: Boolean?,
+        val surfacePanePresent: Boolean?,
+        val errorBandCount: Int,
+        val connectionPillCount: Int,
+        val reconnectButtonCount: Int,
+        val reconnectTextCount: Int,
+        val disconnectedTextCount: Int,
+        val reconnectingTextCount: Int,
+        val sessionLabelCount: Int,
+        val terminalViewVisible: Boolean,
+        val terminalSessionName: String?,
+        val terminalText: String,
+    ) {
+        fun isReadyFor(expectedSessionName: String, readyMarker: String): Boolean =
+            status is TmuxSessionViewModel.ConnectionStatus.Connected &&
+                sessionLive == true &&
+                terminalHeld == false &&
+                surfacePanePresent == true &&
+                errorBandCount == 0 &&
+                connectionPillCount == 0 &&
+                reconnectButtonCount == 0 &&
+                reconnectTextCount == 0 &&
+                disconnectedTextCount == 0 &&
+                reconnectingTextCount == 0 &&
+                sessionLabelCount > 0 &&
+                terminalViewVisible &&
+                terminalText.contains(readyMarker)
+
+        val terminalOutputSeen: Boolean
+            get() = terminalViewVisible && terminalText.isNotBlank()
+    }
+
+    private data class StableSessionEvidence(
+        val statusName: String,
+        val terminalSessionName: String?,
+        val terminalOutputSeen: Boolean,
+        val sessionLabelCount: Int,
+        val stableSamples: Int,
+        val stableWindowMs: Long,
+        val connectAttemptsAtStableStart: Int,
+        val sshHandshakesAtStableStart: Int,
+        val connectAttemptsAtSettlement: Int,
+        val sshHandshakesAtSettlement: Int,
+    )
+
+    private fun sessionScreenBoolean(key: SemanticsPropertyKey<Boolean>): Boolean? =
+        runCatching {
+            compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .firstOrNull()
+                ?.config
+                ?.getOrNull(key)
+        }.getOrNull()
+
+    private fun visibleNodeCount(tag: String): Int =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(0)
+
+    private fun visibleTextCount(text: String, substring: Boolean = true): Int =
+        runCatching {
+            compose.onAllNodesWithText(text, substring = substring, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(0)
+
+    private fun findTerminalView(root: View): TerminalView? {
+        if (root is TerminalView) return root
+        if (root !is ViewGroup) return null
+        repeat(root.childCount) { index ->
+            findTerminalView(root.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+
+    private fun currentTerminalViewSnapshot(): TerminalViewSnapshot {
+        var snapshot = TerminalViewSnapshot(
+            visible = false,
+            sessionName = null,
+            transcriptText = "",
+        )
+        compose.activityRule.scenario.onActivity { activity ->
+            val terminal = findTerminalView(activity.window.decorView)
+            val session = terminal?.currentSession
+            val visibleRect = Rect()
+            val visible = terminal != null &&
+                terminal.isShown &&
+                terminal.width > 0 &&
+                terminal.height > 0 &&
+                terminal.getGlobalVisibleRect(visibleRect) &&
+                visibleRect.width() > 0 &&
+                visibleRect.height() > 0
+            snapshot = TerminalViewSnapshot(
+                visible = visible,
+                sessionName = session?.mSessionName,
+                transcriptText = session?.emulator?.screen?.transcriptText.orEmpty(),
+            )
+        }
+        return snapshot
+    }
+
+    private fun currentSessionUiSnapshot(expectedSessionName: String): SessionUiSnapshot {
+        val terminal = currentTerminalViewSnapshot()
+        return SessionUiSnapshot(
+            status = currentConnectionStatus(),
+            sessionLive = sessionScreenBoolean(TMUX_SESSION_LIVE_SEMANTICS_KEY),
+            terminalHeld = sessionScreenBoolean(TMUX_TERMINAL_HELD_SEMANTICS_KEY),
+            surfacePanePresent = sessionScreenBoolean(TMUX_SURFACE_PANE_PRESENT_SEMANTICS_KEY),
+            errorBandCount = visibleNodeCount(TMUX_SESSION_ERROR_TAG),
+            connectionPillCount = visibleNodeCount(TMUX_CONNECTION_STATUS_PILL_TAG),
+            reconnectButtonCount = visibleNodeCount(TMUX_RECONNECT_BUTTON_TAG),
+            reconnectTextCount = visibleTextCount("Reconnect"),
+            disconnectedTextCount = visibleTextCount("Disconnected"),
+            reconnectingTextCount = visibleTextCount("Reconnecting"),
+            sessionLabelCount = visibleTextCount(expectedSessionName, substring = false),
+            terminalViewVisible = terminal.visible,
+            terminalSessionName = terminal.sessionName,
+            terminalText = terminal.transcriptText,
+        )
+    }
+
+    /**
+     * Wait for the rendered session to be genuinely usable, not merely for its
+     * activity-scoped VM to report Connected. The window is reset if either
+     * production connect/handshake counter moves while the UI looks healthy;
+     * this keeps a stale target or late reconnect from being laundered into a
+     * green journey result.
+     */
+    private fun waitForStableSessionUi(
+        label: String,
+        expectedSessionName: String,
+        readyMarker: String,
+    ): StableSessionEvidence {
+        val deadline = SystemClock.elapsedRealtime() + CREATE_TIMEOUT_MS
+        var stableStartedAt = 0L
+        var stableSamples = 0
+        var connectAttemptsAtStableStart = -1
+        var sshHandshakesAtStableStart = -1
+        var lastSnapshot: SessionUiSnapshot? = null
+        var samples = 0
+
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val now = SystemClock.elapsedRealtime()
+            val snapshot = currentSessionUiSnapshot(expectedSessionName)
+            lastSnapshot = snapshot
+            samples += 1
+            val connectAttempts = TMUX_CONNECT_ATTEMPTS.get()
+            val sshHandshakes = SSH_HANDSHAKE_ATTEMPTS.get()
+            if (snapshot.isReadyFor(expectedSessionName, readyMarker)) {
+                if (stableStartedAt == 0L ||
+                    connectAttempts != connectAttemptsAtStableStart ||
+                    sshHandshakes != sshHandshakesAtStableStart
+                ) {
+                    stableStartedAt = now
+                    stableSamples = 0
+                    connectAttemptsAtStableStart = connectAttempts
+                    sshHandshakesAtStableStart = sshHandshakes
+                }
+                stableSamples += 1
+                val stableWindowMs = now - stableStartedAt
+                if (stableWindowMs >= SESSION_UI_STABLE_WINDOW_MS) {
+                    val settledSnapshot = currentSessionUiSnapshot(expectedSessionName)
+                    val settledConnectAttempts = TMUX_CONNECT_ATTEMPTS.get()
+                    val settledSshHandshakes = SSH_HANDSHAKE_ATTEMPTS.get()
+                    lastSnapshot = settledSnapshot
+                    if (
+                        settledSnapshot.isReadyFor(expectedSessionName, readyMarker) &&
+                        settledConnectAttempts == connectAttemptsAtStableStart &&
+                        settledSshHandshakes == sshHandshakesAtStableStart
+                    ) {
+                        val statusName = settledSnapshot.status::class.simpleName ?: "unknown"
+                        return StableSessionEvidence(
+                            statusName = statusName,
+                            terminalSessionName = settledSnapshot.terminalSessionName,
+                            terminalOutputSeen = settledSnapshot.terminalText.contains(readyMarker),
+                            sessionLabelCount = settledSnapshot.sessionLabelCount,
+                            stableSamples = stableSamples,
+                            stableWindowMs = stableWindowMs,
+                            connectAttemptsAtStableStart = connectAttemptsAtStableStart,
+                            sshHandshakesAtStableStart = sshHandshakesAtStableStart,
+                            connectAttemptsAtSettlement = settledConnectAttempts,
+                            sshHandshakesAtSettlement = settledSshHandshakes,
+                        )
+                    }
+                    stableStartedAt = 0L
+                    stableSamples = 0
+                }
+            } else {
+                stableStartedAt = 0L
+                stableSamples = 0
+            }
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining > 0L) {
+                SystemClock.sleep(minOf(SESSION_UI_SAMPLE_INTERVAL_MS, remaining))
+            }
+        }
+
+        val last = lastSnapshot
+        val tail = last?.terminalText
+            ?.takeLast(160)
+            ?.replace('\n', ' ')
+            .orEmpty()
+        throw AssertionError(
+            "$label did not remain genuinely ready for " +
+                "${SESSION_UI_STABLE_WINDOW_MS}ms after $samples samples; " +
+                "lastStatus=${last?.status}; live=${last?.sessionLive}; " +
+                "terminalHeld=${last?.terminalHeld}; pane=${last?.surfacePanePresent}; " +
+                "errorBand=${last?.errorBandCount}; pill=${last?.connectionPillCount}; " +
+                "reconnect=${last?.reconnectTextCount}; disconnected=${last?.disconnectedTextCount}; " +
+                "reconnecting=${last?.reconnectingTextCount}; terminalVisible=${last?.terminalViewVisible}; " +
+                "sessionLabel=${last?.sessionLabelCount}; terminalSession=${last?.terminalSessionName}; " +
+                "terminalTail=$tail; " +
+                "connectAttempts=${TMUX_CONNECT_ATTEMPTS.get()}; " +
+                "sshHandshakes=${SSH_HANDSHAKE_ATTEMPTS.get()}",
+        )
+    }
+
+    /**
+     * A terminal composable can be visible while its VM is Disconnected. The
+     * connected journey must establish and retain the production Connected state
+     * before it kills the stale session, then repeat that oracle for the sibling.
+     */
+    private fun waitForConnected(label: String): String {
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected
+        }
+        val status = currentConnectionStatus()
+        val statusName = status::class.simpleName ?: "unknown"
+        assertTrue(
+            "$label did not reach Connected; final status=$statusName ($status)",
+            status is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        return statusName
+    }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()
@@ -1079,7 +1933,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             )
             val hostId = db.hostDao().insert(
                 HostEntity(
-                    name = "Issue666 GoneRestore",
+                    name = HOST_NAME,
                     hostname = DEFAULT_HOST,
                     port = DEFAULT_PORT,
                     username = DEFAULT_USER,
@@ -1094,6 +1948,35 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         }
     }
 
+    /**
+     * Add a second, distinct host through the app's singleton Room instance.
+     * Using the production DB instance makes the two-host precondition observable
+     * by the live HostList flow; it does not attach or inject any connection.
+     */
+    private suspend fun seedSecondaryDockerHost(key: String): String {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        val entryPoint = EntryPointAccessors
+            .fromApplication(appContext, TestAccessEntryPoint::class.java)
+        val storedKey = SshKeyStorage.persistKey(
+            context = appContext,
+            sshKeyDao = entryPoint.sshKeyDao(),
+            name = "issue2237-other-key-${System.currentTimeMillis()}",
+            content = key,
+        )
+        val hostId = entryPoint.appDatabase().hostDao().insert(
+            HostEntity(
+                name = OTHER_HOST_NAME,
+                hostname = OTHER_HOSTNAME,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyId = storedKey.id,
+                tmuxInstalled = false,
+                lastBootstrapAt = null,
+            ),
+        )
+        return HOST_ROW_TAG_PREFIX + hostId
+    }
+
     private suspend fun deleteHostRow(hostId: Long) {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_NAME)
@@ -1106,37 +1989,50 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         }
     }
 
-    private suspend fun seedTmuxSession(key: String) {
+    private suspend fun seedTmuxSession(key: String) =
+        seedTmuxSessionNamed(key, SEEDED_SESSION, SEEDED_READY_MARKER)
+
+    private suspend fun seedTmuxSessionNamed(
+        key: String,
+        name: String,
+        readyMarker: String = SEEDED_READY_MARKER,
+    ) {
         val script = buildString {
             appendLine("set -eu")
-            appendLine("tmux kill-session -t ${shellQuote(SEEDED_SESSION)} 2>/dev/null || true")
+            appendLine("tmux kill-session -t ${shellQuote(name)} 2>/dev/null || true")
             appendLine(
-                "tmux new-session -d -s ${shellQuote(SEEDED_SESSION)} " +
-                    "${shellQuote("printf 'ISSUE666-READY\\n'; exec sleep 600")}",
+                "tmux new-session -d -s ${shellQuote(name)} " +
+                    "${shellQuote("printf '$readyMarker\\n'; exec sleep 600")}",
             )
             appendLine("sleep 1")
-            appendLine("tmux has-session -t ${shellQuote(SEEDED_SESSION)}")
+            appendLine("tmux has-session -t ${shellQuote(name)}")
         }
         val exec = runScript(key, script)
         assertTrue(
-            "expected tmux seeding to succeed; stderr='${exec?.stderr}'",
+            "expected tmux seeding of `$name` to succeed; stderr='${exec?.stderr}'",
             exec?.exitCode == 0,
         )
         Log.i(LOG_TAG, "seeded session: ${exec?.stdout?.trim()}")
     }
 
-    private suspend fun killRemoteSession(key: String) {
+    private suspend fun killRemoteSession(key: String) =
+        killRemoteSessionNamed(key, SEEDED_SESSION)
+
+    private suspend fun killRemoteSessionNamed(key: String, name: String) {
         runScript(
             key,
-            "tmux kill-session -t ${shellQuote(SEEDED_SESSION)} 2>/dev/null || true",
+            "tmux kill-session -t ${shellQuote(name)} 2>/dev/null || true",
         )
     }
 
     /** True iff the seeded tmux session currently exists on the server. */
-    private suspend fun sessionAlive(key: String): Boolean {
+    private suspend fun sessionAlive(key: String): Boolean =
+        sessionAliveNamed(key, SEEDED_SESSION)
+
+    private suspend fun sessionAliveNamed(key: String, name: String): Boolean {
         val exec = runScript(
             key,
-            "tmux has-session -t ${shellQuote(SEEDED_SESSION)} 2>/dev/null && echo ALIVE || echo GONE",
+            "tmux has-session -t ${shellQuote(name)} 2>/dev/null && echo ALIVE || echo GONE",
         )
         return exec?.stdout?.contains("ALIVE") == true
     }
@@ -1224,6 +2120,55 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             .bufferedReader().use { it.readText() }
     }
 
+    /**
+     * Issue #2237: capture the semantics of the actual tagged dismiss button, not
+     * a global text lookup. The stale dialog is an Android AlertDialog and owns a
+     * separate Compose root; the button tag is therefore the authoritative
+     * production node for this contract.
+     */
+    private fun captureDismissActionEvidence(prefix: String): DismissActionSemantics {
+        val node = compose.onNodeWithTag(STALE_SESSION_GO_HOME_TAG).fetchSemanticsNode()
+        val text = node.config
+            .getOrNull(SemanticsProperties.Text)
+            .orEmpty()
+            .joinToString(separator = " | ") { it.text }
+        val contentDescription = node.config
+            .getOrNull(SemanticsProperties.ContentDescription)
+            .orEmpty()
+            .joinToString(separator = " | ")
+        val hasClickAction = node.config.contains(SemanticsActions.OnClick)
+        val evidence = DismissActionSemantics(
+            text = text,
+            contentDescription = contentDescription,
+            hasClickAction = hasClickAction,
+        )
+        writeText(
+            "$prefix-semantics.txt",
+            buildString {
+                appendLine("test_tag=$STALE_SESSION_GO_HOME_TAG")
+                appendLine("text=${evidence.text}")
+                appendLine("content_description=${evidence.contentDescription}")
+                appendLine("has_click_action=${evidence.hasClickAction}")
+                appendLine("expected_text=$DISMISS_LABEL")
+            },
+        )
+        captureFullDevice("$prefix-viewport")
+        captureUiHierarchy("$prefix-ui")
+        return evidence
+    }
+
+    private fun captureUiHierarchy(prefix: String) {
+        val remotePath = "/sdcard/$prefix.xml"
+        shellOutput("uiautomator dump --compressed $remotePath")
+        writeText("$prefix.xml", shellOutput("cat $remotePath"))
+    }
+
+    private data class DismissActionSemantics(
+        val text: String,
+        val contentDescription: String,
+        val hasClickAction: Boolean,
+    )
+
     private fun captureFullDevice(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
@@ -1273,9 +2218,32 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         // the normal attach journey reaches it; `tmux` itself is the real
         // binary, so has-session/kill-session are authoritative.
         const val SEEDED_SESSION: String = "claude-main"
+        const val SEEDED_READY_MARKER: String = "ISSUE666-READY"
+
+        // Issue #2237: these are the production dialog's exact non-null dismiss
+        // copy. The cold-restore dialog test asserts both the action and the
+        // message, then taps it and verifies the typed host-tree destination.
+        const val HOST_NAME: String = "Issue666 GoneRestore"
+        const val OTHER_HOST_NAME: String = "Issue2237 OtherHost"
+        const val OTHER_HOSTNAME: String = "issue2237-other.invalid"
+        const val DISMISS_LABEL: String = "Back to sessions"
+        const val DISMISS_MESSAGE_CLAUSE: String = "go back to this host's sessions"
+
+        // Issue #2237: a SECOND live session on the same host. The stale-session
+        // dialog's dismiss must land on that host's session tree, and the point of
+        // landing there (instead of the host list) is that another existing session
+        // is immediately pickable — so the tree needs one to pick.
+        const val SIBLING_SESSION: String = "codex"
+        const val SIBLING_READY_MARKER: String = "ISSUE2237-SIBLING-READY"
 
         const val LIFECYCLE_DRAIN_MS: Long = 750L
         const val RESTORE_TIMEOUT_MS: Long = 20_000L
+        const val OWNER_RELEASE_TIMEOUT_MS: Long = 10_000L
+        const val OWNER_RELEASE_SAMPLE_INTERVAL_MS: Long = 50L
+        const val DISMISS_TRANSITION_SAMPLE_INTERVAL_MS: Long = 50L
+        const val DISMISS_POST_SETTLEMENT_OBSERVATION_MS: Long = 750L
+        const val SESSION_UI_SAMPLE_INTERVAL_MS: Long = 50L
+        const val SESSION_UI_STABLE_WINDOW_MS: Long = 1_500L
 
         // A fresh SSH connect + tmux attach + `new-session -A -c <folder>` after the
         // recreate tap is slower than a restore probe (a brand-new connection, not a

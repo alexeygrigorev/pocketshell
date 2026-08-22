@@ -1036,6 +1036,16 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             readyMarker = SIBLING_READY_MARKER,
         )
         val siblingConnectionStatus = siblingUiEvidence.statusName
+        // The first stable window proves the rendered screen is live. Capture
+        // an authoritative screenshot, then require a SECOND stable window
+        // after that capture. A stale owner that starts its retry ladder after
+        // the first green VM sample must redden this post-capture oracle.
+        captureFullDevice("issue2237-dismiss-cold-restore-sibling-open-pre-settlement")
+        val siblingUiAfterScreenshotEvidence = waitForStableSessionUi(
+            label = "sibling session open after authoritative screenshot",
+            expectedSessionName = SIBLING_SESSION,
+            readyMarker = SIBLING_READY_MARKER,
+        )
         val siblingUiAfterCapture: SessionUiSnapshot
         captureFullDevice("issue2237-dismiss-cold-restore-sibling-open-connected")
         siblingUiAfterCapture = currentSessionUiSnapshot(SIBLING_SESSION)
@@ -1077,10 +1087,16 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
                 appendLine("sibling_ssh_handshakes_at_stable_start=${siblingUiEvidence.sshHandshakesAtStableStart}")
                 appendLine("sibling_connect_attempts_at_settlement=${siblingUiEvidence.connectAttemptsAtSettlement}")
                 appendLine("sibling_ssh_handshakes_at_settlement=${siblingUiEvidence.sshHandshakesAtSettlement}")
+                appendLine("expected_connect_sequence=one intentional sibling logical connect from tap to first ready; zero additional logical connects after first ready; zero SSH handshakes")
                 appendLine("sibling_connect_attempt_delta_after_tap=${siblingUiEvidence.connectAttemptsAtSettlement - siblingConnectAttemptsAtTap}")
                 appendLine("sibling_ssh_handshake_delta_after_tap=${siblingUiEvidence.sshHandshakesAtSettlement - siblingSshHandshakesAtTap}")
+                appendLine("sibling_unexpected_connect_attempt_delta_after_ready=${siblingUiAfterScreenshotEvidence.connectAttemptsAtSettlement - siblingUiEvidence.connectAttemptsAtStableStart}")
                 appendLine("sibling_ui_stable_samples=${siblingUiEvidence.stableSamples}")
                 appendLine("sibling_ui_stable_window_ms=${siblingUiEvidence.stableWindowMs}")
+                appendLine("sibling_post_screenshot_connect_attempts_at_settlement=${siblingUiAfterScreenshotEvidence.connectAttemptsAtSettlement}")
+                appendLine("sibling_post_screenshot_ssh_handshakes_at_settlement=${siblingUiAfterScreenshotEvidence.sshHandshakesAtSettlement}")
+                appendLine("sibling_post_screenshot_ui_stable_samples=${siblingUiAfterScreenshotEvidence.stableSamples}")
+                appendLine("sibling_post_screenshot_ui_stable_window_ms=${siblingUiAfterScreenshotEvidence.stableWindowMs}")
                 appendLine("sibling_terminal_session_name=${siblingUiEvidence.terminalSessionName}")
                 appendLine("sibling_terminal_output_seen=${siblingUiEvidence.terminalOutputSeen}")
                 appendLine("sibling_session_label_count_at_settlement=${siblingUiEvidence.sessionLabelCount}")
@@ -1112,6 +1128,9 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
                 appendLine("expected_ssh_handshake_delta_before_sibling_tap=0")
                 appendLine("expected_sibling_session_opened=true")
                 appendLine("expected_dialog_dismissed=true")
+                appendLine("expected_sibling_connect_attempt_delta_after_tap=1")
+                appendLine("expected_sibling_ssh_handshake_delta_after_tap=0")
+                appendLine("expected_sibling_unexpected_connect_attempt_delta_after_ready=0")
             },
         )
 
@@ -1191,6 +1210,27 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
             "the sibling UI must still be genuinely ready after the connected screenshot " +
                 "was captured; a VM Connected value alone is not sufficient",
             siblingUiAfterCapture.isReadyFor(SIBLING_SESSION, SIBLING_READY_MARKER),
+        )
+        // TMUX_CONNECT_ATTEMPTS counts logical connect() calls, so opening the
+        // selected sibling must advance it once even though the host SSH lease is
+        // reused. The stale-owner regression is an EXTRA attempt after the sibling
+        // is already ready; the next assertion is the selective oracle for it.
+        assertEquals(
+            "opening the sibling must issue exactly one intentional logical tmux connect; " +
+                "same-host switches increment TMUX_CONNECT_ATTEMPTS while reusing SSH",
+            siblingConnectAttemptsAtTap + 1,
+            siblingUiEvidence.connectAttemptsAtStableStart,
+        )
+        assertEquals(
+            "a stale old-session owner must not start another logical connect after the " +
+                "sibling first becomes genuinely ready",
+            siblingUiEvidence.connectAttemptsAtStableStart,
+            siblingUiAfterScreenshotEvidence.connectAttemptsAtSettlement,
+        )
+        assertEquals(
+            "a stale old-session owner must not start an SSH handshake after the sibling tap",
+            siblingSshHandshakesAtTap,
+            siblingUiAfterScreenshotEvidence.sshHandshakesAtSettlement,
         )
         assertTrue(
             "the sibling screenshot must correspond to the selected sibling terminal " +
@@ -1672,6 +1712,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
     private data class SessionUiSnapshot(
         val status: TmuxSessionViewModel.ConnectionStatus,
+        val sessionScreenCount: Int,
         val sessionLive: Boolean?,
         val terminalHeld: Boolean?,
         val surfacePanePresent: Boolean?,
@@ -1688,6 +1729,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
     ) {
         fun isReadyFor(expectedSessionName: String, readyMarker: String): Boolean =
             status is TmuxSessionViewModel.ConnectionStatus.Connected &&
+                sessionScreenCount == 1 &&
                 sessionLive == true &&
                 terminalHeld == false &&
                 surfacePanePresent == true &&
@@ -1780,6 +1822,7 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         val terminal = currentTerminalViewSnapshot()
         return SessionUiSnapshot(
             status = currentConnectionStatus(),
+            sessionScreenCount = visibleNodeCount(TMUX_SESSION_SCREEN_TAG),
             sessionLive = sessionScreenBoolean(TMUX_SESSION_LIVE_SEMANTICS_KEY),
             terminalHeld = sessionScreenBoolean(TMUX_TERMINAL_HELD_SEMANTICS_KEY),
             surfacePanePresent = sessionScreenBoolean(TMUX_SURFACE_PANE_PRESENT_SEMANTICS_KEY),

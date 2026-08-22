@@ -1982,6 +1982,16 @@ private fun AppNavigator(
             // effects, not just inspect a destination value.
             onDismiss = staleSessionDismissCallback(
                 action = dismissAction,
+                // Issue #2237: the stale prompt can outlive the failed attach's
+                // visible error state. Cancel the old VM owner and run its
+                // existing close cascade before the FolderList gets a chance
+                // to reuse the shared host transport. `onSessionScreenLeft`
+                // clears the remembered intent as well; the null route keeps
+                // its existing HostList fallback.
+                neutralizeOwner = {
+                    tmuxSessionViewModel.detachAndExit()
+                    tmuxSessionViewModel.onSessionScreenLeft()
+                },
                 clearPrompt = { staleSessionPromptController.clear() },
                 clearBackStack = { backStack.clear() },
                 setCurrentDestination = ::setCurrentDestination,
@@ -2116,10 +2126,12 @@ internal data class StaleSessionDismissAction(
  */
 internal fun staleSessionDismissCallback(
     action: StaleSessionDismissAction,
+    neutralizeOwner: () -> Unit,
     clearPrompt: () -> Unit,
     clearBackStack: () -> Unit,
     setCurrentDestination: (AppDestination) -> Unit,
 ): () -> Unit = {
+    neutralizeOwner()
     clearPrompt()
     clearBackStack()
     setCurrentDestination(action.destination)

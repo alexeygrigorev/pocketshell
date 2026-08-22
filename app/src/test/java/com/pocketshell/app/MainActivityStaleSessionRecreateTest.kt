@@ -159,14 +159,30 @@ class MainActivityStaleSessionRecreateTest {
         var promptVisible = true
         val backStack = mutableListOf<AppDestination>(AppDestination.Settings)
         var destination: AppDestination? = AppDestination.HostList
+        val events = mutableListOf<String>()
         val onDismiss = staleSessionDismissCallback(
             action = staleSessionDismissAction(base),
-            clearPrompt = { promptVisible = false },
-            clearBackStack = backStack::clear,
-            setCurrentDestination = { destination = it },
+            neutralizeOwner = { events += "neutralize-owner" },
+            clearPrompt = {
+                events += "clear-prompt"
+                promptVisible = false
+            },
+            clearBackStack = {
+                events += "clear-back-stack"
+                backStack.clear()
+            },
+            setCurrentDestination = {
+                events += "route"
+                destination = it
+            },
         )
         onDismiss()
 
+        assertEquals(
+            "the dead stale-session owner must be neutralized before routing",
+            listOf("neutralize-owner", "clear-prompt", "clear-back-stack", "route"),
+            events,
+        )
         assertFalse("the stale prompt must be cleared", promptVisible)
         assertTrue("recovery history must be cleared", backStack.isEmpty())
         val tree = destination as? AppDestination.FolderList
@@ -198,8 +214,9 @@ class MainActivityStaleSessionRecreateTest {
         var destination: AppDestination? = null
         val onDismiss = staleSessionDismissCallback(
             action = staleSessionDismissAction(base = null),
+            neutralizeOwner = {},
             clearPrompt = { promptVisible = false },
-            clearBackStack = backStack::clear,
+            clearBackStack = { backStack.clear() },
             setCurrentDestination = { destination = it },
         )
         onDismiss()

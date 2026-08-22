@@ -137,6 +137,11 @@ public final class TerminalEmulator {
     /** The cursor position. Between (0,0) and (mRows-1, mColumns-1). */
     private int mCursorRow, mCursorCol;
 
+    /** A separate row move waiting for a following column-to-zero move. */
+    private int mHardWrapCandidateRow = -1;
+    /** A confirmed boundary whose continuation text is being painted. */
+    private int mHardWrapContinuationRow = -1;
+
     /** The number of character rows and columns in the terminal screen. */
     public int mRows, mColumns;
 
@@ -403,6 +408,7 @@ public final class TerminalEmulator {
     public void resize(int columns, int rows, int cellWidthPixels, int cellHeightPixels) {
         this.mCellWidthPixels = cellWidthPixels;
         this.mCellHeightPixels = cellHeightPixels;
+        clearHardWrapTracking();
 
         if (mRows == rows && mColumns == columns) {
             return;
@@ -1396,14 +1402,14 @@ public final class TerminalEmulator {
         if (belowScrollingRegion) {
             // Move down (but not scroll) as long as we are above the last row.
             if (mCursorRow != mRows - 1) {
-                setCursorRow(newCursorRow);
+                setCursorRow(newCursorRow, true);
             }
         } else {
             if (newCursorRow == mBottomMargin) {
                 scrollDownOneLine();
                 newCursorRow = mBottomMargin - 1;
             }
-            setCursorRow(newCursorRow);
+            setCursorRow(newCursorRow, true);
         }
     }
 
@@ -2229,6 +2235,8 @@ public final class TerminalEmulator {
      * {@link #setCursorRowCol(int, int)} for absolute pos.
      */
     private void setCursorPosition(int x, int y) {
+        int previousRow = mCursorRow;
+        int previousCol = mCursorCol;
         boolean originMode = isDecsetInternalBitSet(DECSET_BIT_ORIGIN_MODE);
         int effectiveTopMargin = originMode ? mTopMargin : 0;
         int effectiveBottomMargin = originMode ? mBottomMargin : mRows;
@@ -2236,7 +2244,52 @@ public final class TerminalEmulator {
         int effectiveRightMargin = originMode ? mRightMargin : mColumns;
         int newRow = Math.max(effectiveTopMargin, Math.min(effectiveTopMargin + y, effectiveBottomMargin - 1));
         int newCol = Math.max(effectiveLeftMargin, Math.min(effectiveLeftMargin + x, effectiveRightMargin - 1));
+        clearHardWrapTracking();
         setCursorRowCol(newRow, newCol);
+        recordCursorAddressedHardWrap(
+            previousRow,
+            previousCol,
+            newRow,
+            newCol,
+            effectiveLeftMargin,
+            effectiveRightMargin
+        );
+    }
+
+    /**
+     * A fixed-width agent TUI may disable autowrap, paint a URL through the
+     * final cell, then address the next row. The row/column move can arrive as
+     * one CUP/HVP sequence or as separate vertical + horizontal controls; the
+     * latter leaves a candidate until the column reaches the left margin.
+     */
+    private void recordCursorAddressedHardWrap(
+        int previousRow,
+        int previousCol,
+        int newRow,
+        int newCol,
+        int leftMargin,
+        int rightMargin
+    ) {
+        if (
+            newRow != previousRow + 1 ||
+            previousCol != rightMargin - 1 ||
+            mScreen.getLineWrap(previousRow) ||
+            !mScreen.lineFillsWidth(previousRow)
+        ) {
+            return;
+        }
+        if (newCol == leftMargin) {
+            confirmHardWrapStart(newRow);
+        } else {
+            mHardWrapCandidateRow = newRow;
+        }
+    }
+
+    private void confirmHardWrapStart(int row) {
+        mScreen.clearHardWrapStart(row);
+        mScreen.setHardWrapStart(row);
+        mHardWrapContinuationRow = row;
+        mHardWrapCandidateRow = -1;
     }
 
     private void scrollDownOneLine() {
@@ -2524,7 +2577,19 @@ public final class TerminalEmulator {
         // so was mCursorCol changed after the offsetDueToCombiningChar conditional by another thread?
         // TODO: Check if there are thread synchronization issues with mCursorCol and mCursorRow, possibly causing others bugs too.
         if (column < 0) column = 0;
+        // A row move to a nonzero column is only a candidate until the cursor
+        // reaches the left margin without painting. Once content is written,
+        // the move is no longer a continuation boundary even if a later CR
+        // returns to column zero.
+        if (mHardWrapCandidateRow == mCursorRow) mHardWrapCandidateRow = -1;
         mScreen.setChar(column, mCursorRow, codePoint, getStyle());
+        if (mHardWrapContinuationRow == mCursorRow) {
+            // TerminalRow.setChar clears direct/seated provenance so ordinary
+            // buffer mutations cannot leave stale markers. The emulator owns
+            // this live continuation write and reasserts the boundary after
+            // each cell it paints.
+            mScreen.setHardWrapStart(mCursorRow);
+        }
         if (displayWidth > 0) mOsc8HyperlinkStartPending = false;
 
         markCarriageReturnOverwriteOutput(displayWidth);
@@ -2536,12 +2601,38 @@ public final class TerminalEmulator {
     }
 
     private void setCursorRow(int row) {
+        setCursorRow(row, false);
+    }
+
+    private void setCursorRow(int row, boolean fromLinefeed) {
+        int previousRow = mCursorRow;
+        int previousCol = mCursorCol;
+        clearHardWrapTracking();
         mCursorRow = row;
         mAboutToAutoWrap = false;
+        if (!fromLinefeed) {
+            recordCursorAddressedHardWrap(
+                previousRow,
+                previousCol,
+                mCursorRow,
+                mCursorCol,
+                mLeftMargin,
+                mRightMargin
+            );
+        }
     }
 
     private void setCursorCol(int col) {
         if (col < mCursorCol && mCarriageReturnOverwriteRow == -1) recordCarriageReturnOverwrite(false);
+        if (mHardWrapCandidateRow == mCursorRow) {
+            if (col == mLeftMargin) {
+                confirmHardWrapStart(mCursorRow);
+            } else {
+                mHardWrapCandidateRow = -1;
+            }
+        } else if (mHardWrapContinuationRow == mCursorRow && col != mLeftMargin) {
+            mHardWrapContinuationRow = -1;
+        }
         mCursorCol = col;
         mAboutToAutoWrap = false;
     }
@@ -2553,9 +2644,15 @@ public final class TerminalEmulator {
 
     /** TODO: Better name, distinguished from {@link #setCursorPosition(int, int)} by not regarding origin mode. */
     private void setCursorRowCol(int row, int col) {
+        clearHardWrapTracking();
         mCursorRow = Math.max(0, Math.min(row, mRows - 1));
         mCursorCol = Math.max(0, Math.min(col, mColumns - 1));
         mAboutToAutoWrap = false;
+    }
+
+    private void clearHardWrapTracking() {
+        mHardWrapCandidateRow = -1;
+        mHardWrapContinuationRow = -1;
     }
 
     private void recordCarriageReturnOverwrite(boolean fromCarriageReturn) {

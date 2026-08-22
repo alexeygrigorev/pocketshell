@@ -255,6 +255,198 @@ class WrappedUrlReassemblyInstrumentedTest {
     } }
 
     @Test
+    fun issue2269PlainTextExactScreenshotUrlsDispatchCompleteUriFromEveryFragment() { runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = compose.activity
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+        val blobUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru/part_01/01_chapter.md"
+        val treeUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "tree/main/books/mountains-ru"
+        val columns = 60
+        val blobFirst = blobUrl.take(columns)
+        val treeFirst = treeUrl.take(columns)
+
+        Intents.init()
+        try {
+            Intents.intending(hasAction(Intent.ACTION_VIEW))
+                .respondWith(android.app.Instrumentation.ActivityResult(0, null))
+
+            val viewRef = arrayOfNulls<TerminalView>(1)
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                view.measure(
+                    View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY),
+                )
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                val fontWidth = requireNotNull(view.mRenderer).fontWidth
+                val sixtyColumnWidth = (fontWidth * (columns + 0.5f)).toInt()
+                view.measure(
+                    View.MeasureSpec.makeMeasureSpec(sixtyColumnWidth, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY),
+                )
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                assertEquals(columns, requireNotNull(view.mEmulator).mColumns)
+                viewRef[0] = view
+            }
+            val view = requireNotNull(viewRef[0])
+
+            // Model the photographed plain-text agent output. Autowrap is off;
+            // each continuation is painted by a cursor move rather than an
+            // OSC 8 opener or a native terminal soft-wrap.
+            val hardWrappedPlainText = buildString {
+                append("\u001b[?7l\u001b[H\u001b[2J")
+                append(blobFirst)
+                append("\u001b[2;1H")
+                append(blobUrl.drop(columns))
+                append("\u001b[3;1H")
+                append(treeFirst)
+                append("\u001b[4;1H")
+                append(treeUrl.drop(columns))
+                append("\u001b[?7h")
+            }
+            state.appendRemoteOutput(hardWrappedPlainText.toByteArray(Charsets.US_ASCII))
+
+            val snapshotRef = arrayOfNulls<com.pocketshell.core.terminal.selection.ViewportRowsSnapshot>(1)
+            withTimeout(5_000) {
+                while (true) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        snapshotRef[0] = extractVisibleViewportRows(view)
+                    }
+                    val snapshot = snapshotRef[0] ?: continue
+                    val sourceRows = snapshot.rows.filter { it.row in 0..3 }
+                    if (
+                        sourceRows.size == 4 &&
+                        sourceRows[0].text.take(columns) == blobFirst &&
+                        sourceRows[1].text.startsWith(blobUrl.drop(columns)) &&
+                        sourceRows[2].text.take(columns) == treeFirst &&
+                        sourceRows[3].text.startsWith(treeUrl.drop(columns))
+                    ) break
+                }
+            }
+            val snapshot = requireNotNull(snapshotRef[0])
+            val sourceRows = snapshot.rows.filter { it.row in 0..3 }
+            assertEquals(listOf(false, false, false, false), sourceRows.map { it.wrapsToNext })
+            assertEquals(listOf(false, true, false, true), sourceRows.map { it.startsAfterHardWrap })
+            assertEquals(
+                "plain text must not acquire OSC 8 provenance",
+                List(8) { false },
+                sourceRows.flatMap { listOf(it.startsWithOsc8Hyperlink, it.endsWithOsc8Hyperlink) },
+            )
+
+            val urlsRef = arrayOfNulls<List<UrlRegion>>(1)
+            val pathsRef = arrayOfNulls<List<com.pocketshell.core.terminal.selection.FilePathRegion>>(1)
+            val matchesRef = arrayOfNulls<List<TerminalMatchRegion>>(1)
+            instrumentation.runOnMainSync {
+                urlsRef[0] = findVisibleUrls(view)
+                pathsRef[0] = findVisibleFilePaths(view)
+                matchesRef[0] = findVisibleTerminalMatches(view)
+            }
+            val urls = requireNotNull(urlsRef[0]).sortedBy { it.row }
+            assertEquals(listOf(0, 1, 2, 3), urls.map { it.row })
+            assertEquals(listOf(blobUrl, blobUrl, treeUrl, treeUrl), urls.map { it.url })
+            assertTrue(requireNotNull(pathsRef[0]).isEmpty())
+            val decorations = requireNotNull(matchesRef[0])
+                .filter { it.match is TerminalMatch.Url }
+                .sortedBy { it.row }
+            assertEquals(listOf(0, 1, 2, 3), decorations.map { it.row })
+            assertEquals(
+                listOf(blobUrl, blobUrl, treeUrl, treeUrl),
+                decorations.map { it.match.value },
+            )
+            assertTrue(
+                "plain URL continuations must not become smart-selection paths",
+                requireNotNull(matchesRef[0]).none { it.match is TerminalMatch.Path },
+            )
+
+            client.onTapMaybeUrl = { x, y ->
+                val hit = hitTestUrl(view, urls, x, y)
+                if (hit == null) {
+                    false
+                } else {
+                    openUrlWithFallback(context, hit.url)
+                    true
+                }
+            }
+            try {
+                for (region in urls) {
+                    val expected = region.url
+                    val before = Intents.getIntents().count {
+                        it.action == Intent.ACTION_VIEW && it.data == Uri.parse(expected)
+                    }
+                    instrumentation.runOnMainSync {
+                        val now = SystemClock.uptimeMillis()
+                        val event = MotionEvent.obtain(
+                            now,
+                            now,
+                            MotionEvent.ACTION_UP,
+                            centerX(region, view),
+                            centerY(region, view),
+                            0,
+                        )
+                        try {
+                            client.onSingleTapUp(event)
+                        } finally {
+                            event.recycle()
+                        }
+                    }
+                    val after = Intents.getIntents().count {
+                        it.action == Intent.ACTION_VIEW && it.data == Uri.parse(expected)
+                    }
+                    assertEquals(
+                        "tap on plain-text fragment row ${region.row} must dispatch the exact URL",
+                        before + 1,
+                        after,
+                    )
+                }
+            } finally {
+                client.onTapMaybeUrl = null
+            }
+
+            val summary = buildString {
+                appendLine("issue=2269")
+                appendLine("urls=$blobUrl | $treeUrl")
+                appendLine("columns=${snapshot.columns}")
+                appendLine("source_wrap_flags=${sourceRows.map { it.wrapsToNext }}")
+                appendLine("source_hard_wrap_flags=${sourceRows.map { it.startsAfterHardWrap }}")
+                appendLine("source_osc8_boundary=" + sourceRows.flatMap {
+                    listOf(it.startsWithOsc8Hyperlink, it.endsWithOsc8Hyperlink)
+                })
+                appendLine("url_region_rows=${urls.map { it.row }}")
+                appendLine("url_region_targets=${urls.map { it.url }}")
+                appendLine("file_path_regions=${pathsRef[0]}")
+                appendLine("terminal_match_regions=$decorations")
+            }
+            instrumentation.runOnMainSync {
+                saveIssue2269Artifacts(
+                    view = view,
+                    visibleText = sourceRows.joinToString("\n") { it.text.trimEnd() },
+                    summary = summary,
+                )
+            }
+        } finally {
+            Intents.release()
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    } }
+
+    @Test
     fun urlWrappedAcrossRowsIsReassembledIntoOneFullTarget() { runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
@@ -403,5 +595,28 @@ class WrappedUrlReassemblyInstrumentedTest {
         File(dir, "issue1955-visible-terminal.txt").writeText(visibleText)
         File(dir, "issue1955-summary.txt").writeText(summary)
         println("ISSUE1955_ARTIFACTS ${dir.absolutePath}")
+    }
+
+    private fun saveIssue2269Artifacts(
+        view: TerminalView,
+        visibleText: String,
+        summary: String,
+    ) {
+        val width = view.width.coerceAtLeast(1)
+        val height = view.height.coerceAtLeast(1)
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        view.draw(Canvas(bitmap))
+        val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+        val dir = File(testArtifactsRoot(ctx), "additional_test_output/issue-2269")
+        check(dir.exists() || dir.mkdirs()) { "could not create issue-2269 artifact directory: $dir" }
+        val viewport = File(dir, "issue2269-plain-text-wrapped-url-viewport.png")
+        FileOutputStream(viewport).use { out ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "could not encode #2269 viewport artifact"
+            }
+        }
+        File(dir, "issue2269-visible-terminal.txt").writeText(visibleText)
+        File(dir, "issue2269-summary.txt").writeText(summary)
+        println("ISSUE2269_ARTIFACTS ${dir.absolutePath}")
     }
 }

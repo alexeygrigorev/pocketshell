@@ -8,12 +8,15 @@ import android.view.View
 import android.view.ViewGroup
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.terminal.selection.AgentPaneAffordanceOverlay
 import com.pocketshell.core.terminal.selection.FilePathRegion
 import com.pocketshell.core.terminal.selection.UrlRegion
+import com.pocketshell.core.terminal.selection.extractVisibleViewportRows
 import com.pocketshell.core.terminal.selection.findVisibleFilePaths
 import com.pocketshell.core.terminal.selection.findVisibleUrls
 import com.pocketshell.core.terminal.selection.hitTestFilePath
@@ -199,6 +202,179 @@ class AgentPaneLinkAffordanceOffMainProofTest {
 
             captureViewport(view, "issue558-dogfood-wrapped-url")
             writeIssue558RoutedUrl(instrumentation, view, url, tappedUrls)
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    } }
+
+    /**
+     * Issue #2269: the production agent-pane/off-main overlay must consume the
+     * real TerminalView metadata for ordinary text, not a hand-built
+     * VisualRow. The two exact URLs from the Pixel screenshot are painted with
+     * autowrap disabled and explicit row/column addressing, then every visible
+     * fragment is tapped through TerminalSurface's production hook.
+     */
+    @Test
+    fun issue2269AgentPaneExactPlainTextUrlsStayWholeAndTappable() { runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val tappedUrls = mutableListOf<String>()
+        val blobUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru/part_01/01_chapter.md"
+        val treeUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "tree/main/books/mountains-ru"
+        val scanStartedAt = AtomicLong(0L)
+        val publishedAt = AtomicLong(0L)
+
+        try {
+            compose.setContent {
+                TerminalSurface(
+                    state = state,
+                    // Keep the production surface narrower than either exact
+                    // URL so the test always exercises a hard-wrap boundary;
+                    // the real TerminalView still chooses its own cell width.
+                    modifier = Modifier.layout { measurable, constraints ->
+                        val targetWidth = 200.dp.roundToPx().coerceIn(constraints.minWidth, constraints.maxWidth)
+                        val placeable = measurable.measure(
+                            constraints.copy(minWidth = targetWidth, maxWidth = targetWidth),
+                        )
+                        layout(placeable.width, placeable.height) { placeable.place(0, 0) }
+                    },
+                    urlsEnabled = true,
+                    onUrlTap = { tappedUrls.add(it) },
+                    affordanceScannersEnabled = false,
+                    agentPaneLinkAffordancesEnabled = true,
+                )
+            }
+            compose.waitForIdle()
+            val view = waitForTerminalView()
+            val client = view.mClient as PocketShellTerminalViewClient
+            val columns = requireNotNull(view.mEmulator).mColumns
+            assertTrue("the exact screenshot URLs must wrap in the production pane (columns=$columns)", columns < treeUrl.length)
+
+            val blobParts = blobUrl.chunked(columns)
+            val treeParts = treeUrl.chunked(columns)
+            val treeStartRow = blobParts.size + 1
+            val hardWrappedPlainText = buildString {
+                append("\u001b[?7l\u001b[H\u001b[2J")
+                fun appendUrl(parts: List<String>, firstRow: Int, firstAtCurrentCursor: Boolean) {
+                    parts.forEachIndexed { index, part ->
+                        val row = firstRow + index
+                        if (!(firstAtCurrentCursor && index == 0)) {
+                            append("\u001b[${row + 1};1H")
+                        }
+                        append(part)
+                    }
+                }
+                appendUrl(blobParts, firstRow = 0, firstAtCurrentCursor = true)
+                appendUrl(treeParts, firstRow = treeStartRow, firstAtCurrentCursor = false)
+                append("\u001b[?7h")
+            }
+
+            scanStartedAt.set(SystemClock.uptimeMillis())
+            stdout.emit(hardWrappedPlainText.toByteArray(Charsets.US_ASCII))
+
+            val urlsRef = AtomicReference<List<UrlRegion>>(emptyList())
+            val pathsRef = AtomicReference<List<FilePathRegion>>(emptyList())
+            val publishedRef = AtomicReference<List<UrlRegion>>(emptyList())
+            val snapshotRef = AtomicReference<com.pocketshell.core.terminal.selection.ViewportRowsSnapshot?>(null)
+            val expectedUrlCount = blobParts.size + treeParts.size
+            withTimeout(8_000) {
+                while (true) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        urlsRef.set(findVisibleUrls(view))
+                        pathsRef.set(findVisibleFilePaths(view))
+                        publishedRef.set(client.publishedUrlsForTesting?.invoke().orEmpty())
+                        snapshotRef.set(extractVisibleViewportRows(view))
+                    }
+                    val expectedUrls = urlsRef.get().filter { it.url == blobUrl || it.url == treeUrl }
+                    val published = publishedRef.get().filter { it.url == blobUrl || it.url == treeUrl }
+                    if (expectedUrls.size >= expectedUrlCount && published.size >= expectedUrlCount) {
+                        publishedAt.set(SystemClock.uptimeMillis())
+                        break
+                    }
+                }
+            }
+
+            val urls = urlsRef.get()
+                .filter { it.url == blobUrl || it.url == treeUrl }
+                .sortedBy { it.row }
+            assertEquals("every hard-wrapped URL fragment must be visible", expectedUrlCount, urls.size)
+            assertEquals(
+                "every visible fragment must carry one exact complete URL",
+                blobParts.map { blobUrl } + treeParts.map { treeUrl },
+                urls.map { it.url },
+            )
+            assertTrue(
+                "a plain URL continuation must never be classified as a local path",
+                pathsRef.get().isEmpty(),
+            )
+            assertEquals(
+                "the production tap snapshot must contain the same exact URL fragments",
+                urls,
+                publishedRef.get().filter { it.url == blobUrl || it.url == treeUrl }.sortedBy { it.row },
+            )
+
+            val snapshot = requireNotNull(snapshotRef.get())
+            val sourceRows = snapshot.rows.filter { it.row in 0 until treeStartRow + treeParts.size }
+            assertTrue(
+                "real TerminalView extraction must expose cursor-addressed hard-wrap provenance",
+                sourceRows.any { it.startsAfterHardWrap },
+            )
+            assertEquals(
+                "the real viewport must have no native soft-wrap metadata for this output",
+                sourceRows.filter { it.text.isNotEmpty() }.map { false },
+                sourceRows.filter { it.text.isNotEmpty() }.map { it.wrapsToNext },
+            )
+
+            for (region in urls) {
+                val before = tappedUrls.size
+                instrumentation.runOnMainSync { dispatchPhysicalTap(view, region) }
+                withTimeout(1_500) {
+                    while (tappedUrls.size <= before) delay(10)
+                }
+                assertEquals(
+                    "the physical tap on row ${region.row} must dispatch the exact URL",
+                    region.url,
+                    tappedUrls.last(),
+                )
+            }
+
+            val elapsed = publishedAt.get() - scanStartedAt.get()
+            val summary = buildString {
+                appendLine("scenario=#2269 production agent pane, exact Pixel screenshot URLs")
+                appendLine("blob_url=$blobUrl")
+                appendLine("tree_url=$treeUrl")
+                appendLine("columns=$columns")
+                appendLine("expected_fragment_count=$expectedUrlCount")
+                appendLine("visible_text=")
+                appendLine(snapshot.rows.joinToString("\n") { it.text.trimEnd() })
+                appendLine("visible_hard_wrap_rows=${sourceRows.filter { it.startsAfterHardWrap }.map { it.row }}")
+                appendLine("visible_native_wrap_rows=${sourceRows.filter { it.wrapsToNext }.map { it.row }}")
+                appendLine("url_region_rows=${urls.map { it.row }}")
+                appendLine("url_region_targets=${urls.map { it.url }}")
+                appendLine("file_path_regions=${pathsRef.get()}")
+                appendLine("published_url_region_rows=${publishedRef.get().map { it.row }}")
+                appendLine("tap_targets=$tappedUrls")
+                appendLine("scan_to_publication_ms=$elapsed")
+            }
+            captureViewport(view, "issue2269-agent-pane-exact")
+            val summaryFile = artifactFile(instrumentation.targetContext, "issue2269-agent-pane-summary.txt")
+            summaryFile.writeText(summary)
+            println("ISSUE2269_AGENT_PANE_SUMMARY ${summaryFile.absolutePath}")
+            android.util.Log.i(LOG_TAG, "ISSUE2269 $summary".replace('\n', ' '))
         } finally {
             producerJob.cancel()
             producerScope.cancel()

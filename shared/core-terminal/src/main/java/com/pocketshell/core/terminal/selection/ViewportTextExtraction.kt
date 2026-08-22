@@ -16,7 +16,7 @@ import com.termux.view.TerminalView
  * then run against the snapshot on any dispatcher.
  *
  * @property rows the visible [VisualRow]s, top-to-bottom, each a pure string
- *   copy with its `wrapsToNext` flag — no live emulator reference.
+ *   copy with terminal wrap/provenance flags — no live emulator reference.
  * @property columns the live grid width at extraction time, used to clip
  *   per-row spans.
  */
@@ -36,7 +36,7 @@ public data class ViewportRowsSnapshot(
  * [ViewportRowsSnapshot] (issue #871). MUST be called on the UI thread — it
  * touches the live (non-thread-safe) emulator/screen — but does only the cheap
  * work: one `getSelectedText` per visible row (typically <30 on a phone) plus
- * the soft-wrap flags. The heavy regex/reassembly work is left to the pure
+ * the soft-wrap/provenance flags. The heavy regex/reassembly work is left to the pure
  * [urlRegionsForRows] / [filePathRegionsForRows] functions, which the caller may
  * then run OFF the main thread against the returned snapshot.
  *
@@ -89,6 +89,11 @@ public fun extractVisibleViewportRows(view: TerminalView): ViewportRowsSnapshot 
         } catch (_: Throwable) {
             false
         }
+        val startsAfterHardWrap = try {
+            screen.getHardWrapStart(row)
+        } catch (_: Throwable) {
+            false
+        }
         visualRows += VisualRow(
             row = row,
             text = line,
@@ -96,6 +101,7 @@ public fun extractVisibleViewportRows(view: TerminalView): ViewportRowsSnapshot 
             startsWithOsc8Hyperlink = startsWithOsc8Hyperlink,
             endsWithOsc8Hyperlink = endsWithOsc8Hyperlink,
             startsNewOsc8Hyperlink = startsNewOsc8Hyperlink,
+            startsAfterHardWrap = startsAfterHardWrap,
         )
     }
     return ViewportRowsSnapshot(rows = visualRows, columns = columns)

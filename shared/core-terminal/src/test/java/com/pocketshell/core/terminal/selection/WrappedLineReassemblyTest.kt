@@ -14,6 +14,134 @@ import org.robolectric.RobolectricTestRunner
 class WrappedLineReassemblyTest {
 
     /**
+     * Issue #2269: the agent rendered ordinary text (not OSC 8) into two
+     * full-width physical rows.  This is the exact pair photographed on the
+     * maintainer's Pixel 7.  The terminal metadata for this agent shape has no
+     * soft-wrap bit or OSC 8 hyperlink provenance; the terminal's separate
+     * cursor-addressed hard-wrap bit is the scanner's boundary signal instead
+     * of treating the second fragment as a fresh local path.
+     */
+    @Test
+    fun `issue 2269 exact screenshot URLs stay complete across plain text hard wraps`() {
+        val blobUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru/part_01/01_chapter.md"
+        val treeUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "tree/main/books/mountains-ru"
+        val columns = 60
+        val rows = listOf(
+            VisualRow(row = 100, text = blobUrl.take(columns), wrapsToNext = false),
+            VisualRow(
+                row = 101,
+                text = blobUrl.drop(columns),
+                wrapsToNext = false,
+                startsAfterHardWrap = true,
+            ),
+            VisualRow(row = 102, text = treeUrl.take(columns), wrapsToNext = false),
+            VisualRow(
+                row = 103,
+                text = treeUrl.drop(columns),
+                wrapsToNext = false,
+                startsAfterHardWrap = true,
+            ),
+        )
+
+        assertEquals(
+            "plain agent output must have no OSC 8 boundary provenance",
+            List(8) { false },
+            rows.flatMap { listOf(it.startsWithOsc8Hyperlink, it.endsWithOsc8Hyperlink) },
+        )
+        assertEquals(
+            "plain agent output records only the two continuation row boundaries as hard wraps",
+            listOf(false, true, false, true),
+            rows.map { it.startsAfterHardWrap },
+        )
+        assertEquals(
+            "plain agent output has no native soft-wrap flags",
+            List(4) { false },
+            rows.map { it.wrapsToNext },
+        )
+
+        val urls = urlRegionsForRows(rows, columns)
+        assertEquals(
+            "every visual fragment must be exposed",
+            listOf(100, 101, 102, 103),
+            urls.map { it.row },
+        )
+        assertEquals(
+            "every visible fragment must dispatch its exact complete URL",
+            listOf(blobUrl, blobUrl, treeUrl, treeUrl),
+            urls.map { it.url },
+        )
+
+        val paths = filePathRegionsForRows(rows, columns)
+        assertTrue(
+            "a URL continuation must never become a local path: $paths",
+            paths.isEmpty(),
+        )
+
+        val matches = terminalMatchRegionsForRows(rows, columns, DefaultTerminalMatcher())
+        val matchedUrls = matches.filter { it.match is TerminalMatch.Url }
+        assertEquals(listOf(100, 101, 102, 103), matchedUrls.map { it.row })
+        assertEquals(
+            listOf(blobUrl, blobUrl, treeUrl, treeUrl),
+            matchedUrls.map { it.match.value },
+        )
+        assertTrue(
+            "smart selection must not classify the continuation as a path: $matches",
+            matches.none { it.match is TerminalMatch.Path },
+        )
+    }
+
+    @Test
+    fun `issue 2269 exact URLs survive narrower multi-row hard wraps`() {
+        val blobUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru/part_01/01_chapter.md"
+        val treeUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "tree/main/books/mountains-ru"
+        val columns = 37
+        val blobParts = blobUrl.chunked(columns)
+        val treeParts = treeUrl.chunked(columns)
+        val rows = buildList {
+            blobParts.forEachIndexed { index, part ->
+                add(
+                    VisualRow(
+                        row = size,
+                        text = part,
+                        wrapsToNext = false,
+                        startsAfterHardWrap = index > 0,
+                    ),
+                )
+            }
+            add(VisualRow(row = size, text = "", wrapsToNext = false))
+            treeParts.forEachIndexed { index, part ->
+                add(
+                    VisualRow(
+                        row = size,
+                        text = part,
+                        wrapsToNext = false,
+                        startsAfterHardWrap = index > 0,
+                    ),
+                )
+            }
+        }
+
+        val urls = urlRegionsForRows(rows, columns)
+        assertEquals(
+            blobParts.map { blobUrl } + treeParts.map { treeUrl },
+            urls.map { it.url },
+        )
+        assertEquals(
+            "narrow legitimate URL chunks must not become local paths",
+            emptyList<FilePathRegion>(),
+            filePathRegionsForRows(rows, columns),
+        )
+    }
+
+    /**
      * Issue #1955 exact real-device row shape: the agent TUI painted a URL to
      * the final grid column, continued it at column zero, but neither row kept
      * Termux's soft-wrap bit.  The screenshot split `campaigns` as
@@ -115,13 +243,63 @@ class WrappedLineReassemblyTest {
         val second = "https://github.com/DataTalksClub/playbooks"
         val rows = listOf(
             VisualRow(row = 6, text = first, wrapsToNext = false),
-            VisualRow(row = 7, text = second, wrapsToNext = false),
+            VisualRow(row = 7, text = second, wrapsToNext = false, startsAfterHardWrap = true),
         )
 
         val urls = urlRegionsForRows(rows, columns = first.length)
 
         assertEquals(listOf(first, second), urls.map { it.url })
         assertEquals(listOf(6, 7), urls.map { it.row })
+    }
+
+    @Test
+    fun `marked unrelated path stays separate from a preceding URL`() {
+        val first = "https://example.com/" + "a".repeat(40)
+        val second = "docs/readme.md"
+        val rows = listOf(
+            VisualRow(row = 60, text = first, wrapsToNext = false),
+            VisualRow(
+                row = 61,
+                text = second,
+                wrapsToNext = false,
+                startsAfterHardWrap = true,
+            ),
+        )
+
+        val urls = urlRegionsForRows(rows, columns = first.length)
+        assertEquals(listOf(first), urls.map { it.url })
+        assertEquals(listOf(60), urls.map { it.row })
+        assertEquals(listOf("docs/readme.md"), filePathRegionsForRows(rows, first.length).map { it.path })
+    }
+
+    @Test
+    fun `marked newline prose stays separate from a preceding URL`() {
+        val first = "https://example.com/" + "a".repeat(40)
+        val second = "follow-up prose is a genuine new paragraph"
+        val rows = listOf(
+            VisualRow(row = 62, text = first, wrapsToNext = false),
+            VisualRow(row = 63, text = second, wrapsToNext = false, startsAfterHardWrap = true),
+        )
+
+        val repaired = markHardWrappedUrlContinuations(rows, first.length)
+        assertEquals(listOf(false, false), repaired.map { it.wrapsToNext })
+        assertEquals(listOf(first, second), reassemble(repaired).map { it.text })
+        assertEquals(listOf(first), urlRegionsForRows(rows, first.length).map { it.url })
+    }
+
+    @Test
+    fun `marked rooted and deep project paths stay separate from a preceding URL`() {
+        val first = "https://example.com/" + "a".repeat(40)
+        for (second in listOf("/tmp/readme.md", "src/main.kt", "docs/readme")) {
+            val rows = listOf(
+                VisualRow(row = 64, text = first, wrapsToNext = false),
+                VisualRow(row = 65, text = second, wrapsToNext = false, startsAfterHardWrap = true),
+            )
+
+            val repaired = markHardWrappedUrlContinuations(rows, first.length)
+            assertEquals("path $second must not be inferred as a URL continuation", listOf(false, false), repaired.map { it.wrapsToNext })
+            assertEquals(listOf(first), urlRegionsForRows(rows, first.length).map { it.url })
+        }
     }
 
     @Test

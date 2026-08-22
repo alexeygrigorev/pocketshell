@@ -45,6 +45,13 @@ public final class TerminalRow {
     private short mSpaceUsed;
     /** If this row has been line wrapped due to text output at the end of line. */
     boolean mLineWrap;
+    /**
+     * If this row began after an explicit cursor move from a full-width
+     * predecessor without a terminal line-feed.  Agent TUIs commonly paint
+     * plain-text output with autowrap disabled and cursor addressing, so the
+     * normal mLineWrap bit is false even though a URL continues on this row.
+     */
+    boolean mHardWrapStart;
     /** The style bits of each cell in the row. See {@link TextStyle}. */
     final long[] mStyle;
     /** If this row might contain chars with width != 1, used for deactivating fast path */
@@ -89,6 +96,13 @@ public final class TerminalRow {
 
     /** NOTE: The sourceX2 is exclusive. */
     public void copyInterval(TerminalRow line, int sourceX1, int sourceX2, int destinationX) {
+        final boolean copyWholeRow =
+            sourceX1 == 0 && sourceX2 >= mColumns && destinationX == 0;
+        final boolean sourceHardWrapStart = line.mHardWrapStart;
+        // A partial cell copy replaces part of this row and cannot preserve a
+        // boundary that belongs to the old row contents. A whole-row copy is
+        // the one cell-copy operation that can transfer row provenance.
+        mHardWrapStart = false;
         mHasNonOneWidthOrSurrogateChars |= line.mHasNonOneWidthOrSurrogateChars;
         final int x1 = line.findStartOfColumn(sourceX1);
         final int x2 = line.findStartOfColumn(sourceX2);
@@ -111,6 +125,7 @@ public final class TerminalRow {
             }
             setChar(destinationX, codePoint, line.getStyle(sourceX1));
         }
+        if (copyWholeRow && sourceHardWrapStart) mHardWrapStart = true;
     }
 
     public int getSpaceUsed() {
@@ -175,6 +190,7 @@ public final class TerminalRow {
         Arrays.fill(mStyle, style);
         mSpaceUsed = (short) mColumns;
         mHasNonOneWidthOrSurrogateChars = false;
+        mHardWrapStart = false;
         mGeneration++;
     }
 
@@ -183,6 +199,11 @@ public final class TerminalRow {
         if (columnToSet  < 0 || columnToSet >= mStyle.length)
             throw new IllegalArgumentException("TerminalRow.setChar(): columnToSet=" + columnToSet + ", codePoint=" + codePoint + ", style=" + style);
 
+        // A direct cell write is a row-content replacement from the buffer's
+        // perspective. The emulator reasserts a live hard-wrap boundary after
+        // its continuation write; callers that mutate a seeded row directly
+        // must not inherit stale provenance.
+        mHardWrapStart = false;
         // Bump first so every return path (combining-char limit, fast path, wide-char
         // fixups, recursive self-calls) marks the row dirty for the renderer (#469).
         mGeneration++;

@@ -72,7 +72,113 @@ public class OperatingSystemControlTest extends TerminalTestCase {
 			0L,
 			mTerminal.getScreen().getStyleAt(1, 0) &
 				TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+			);
+	}
+
+	public void testPlainTextCursorAddressedHardWrapHasTerminalProvenance() throws Exception {
+		withTerminalSized(60, 4);
+		String url = "https://github.com/alexeygrigorev/ai-book-generator/" +
+			"blob/main/books/mountains-ru/part_01/01_chapter.md";
+		String first = url.substring(0, 60);
+		String second = url.substring(60);
+
+		// This is the plain-text agent/TUI shape from issue #2269: autowrap is
+		// disabled, the first fragment fills the row, and the continuation is
+		// painted with an explicit cursor move. There is no OSC 8 sequence.
+		enterString("\033[?7l" + first + "\033[2;1H" + second);
+
+		assertEquals("native soft wrap must stay absent", false, mTerminal.getScreen().getLineWrap(0));
+		assertEquals("native soft wrap must stay absent", false, mTerminal.getScreen().getLineWrap(1));
+		assertEquals("the cursor-addressed continuation must be recorded", true, mTerminal.getScreen().getHardWrapStart(1));
+		assertEquals("a normal row must not be marked as a continuation", false, mTerminal.getScreen().getHardWrapStart(0));
+		for (int column = 0; column < 60; column++) {
+			assertEquals(
+				"plain text must not gain OSC 8 provenance at row 0 col " + column,
+				0L,
+				mTerminal.getScreen().getStyleAt(0, column) & TextStyle.CHARACTER_ATTRIBUTE_OSC8_HYPERLINK
+			);
+		}
+
+		mTerminal = new TerminalEmulator(mOutput, 60, 4, INITIAL_CELL_WIDTH_PIXELS, INITIAL_CELL_HEIGHT_PIXELS, 8, null);
+		enterString("ordinary line\r\nnext line");
+		assertEquals(
+			"an ordinary newline must not acquire hard-wrap provenance",
+			false,
+			mTerminal.getScreen().getHardWrapStart(1)
 		);
+
+		mTerminal = new TerminalEmulator(mOutput, 60, 4, INITIAL_CELL_WIDTH_PIXELS, INITIAL_CELL_HEIGHT_PIXELS, 8, null);
+		enterString("\033[?7lshort row\033[2;1Hdocs/readme.md");
+		assertEquals(
+			"a cursor-addressed move after a short row must not create a hard-wrap boundary",
+			false,
+			mTerminal.getScreen().getHardWrapStart(1)
+		);
+	}
+
+	public void testPlainTextCursorAddressedHardWrapSeparateRowAndColumnMoves() throws Exception {
+		String url = "https://github.com/alexeygrigorev/ai-book-generator/" +
+			"tree/main/books/mountains-ru";
+		String first = url.substring(0, 60);
+		String second = url.substring(60);
+		String[] cursorMoves = {
+			"\033[1B\r", // CUD followed by CR.
+			"\033[1B\033[1G", // CUD followed by CHA.
+			"\033[2d\033[1G", // VPA followed by CHA.
+		};
+
+		for (String cursorMove : cursorMoves) {
+			mTerminal = new TerminalEmulator(mOutput, 60, 4, INITIAL_CELL_WIDTH_PIXELS, INITIAL_CELL_HEIGHT_PIXELS, 8, null);
+			enterString("\033[?7l" + first + cursorMove + second);
+			assertEquals("separate cursor controls must not set native wrap", false, mTerminal.getScreen().getLineWrap(0));
+			assertEquals("separate cursor controls must not set native wrap", false, mTerminal.getScreen().getLineWrap(1));
+			assertEquals(
+				"separate row/column cursor controls must preserve hard-wrap provenance for " + cursorMove,
+				true,
+				mTerminal.getScreen().getHardWrapStart(1)
+			);
+		}
+	}
+
+	public void testHardWrapProvenanceFollowsBufferMutations() throws Exception {
+		withTerminalSized(6, 4);
+		TerminalBuffer screen = mTerminal.getScreen();
+
+		// A direct cell write replaces row content and must clear a seeded marker.
+		screen.setHardWrapStart(1);
+		screen.setChar(0, 1, 'x', TextStyle.NORMAL);
+		assertFalse("setChar must clear stale hard-wrap provenance", screen.getHardWrapStart(1));
+
+		// Erasing even one cell is also a replacement of the row's old content.
+		screen.setHardWrapStart(1);
+		screen.blockSet(0, 1, 1, 1, ' ', TextStyle.NORMAL);
+		assertFalse("block erase must clear stale hard-wrap provenance", screen.getHardWrapStart(1));
+
+		// Partial block copies cannot transfer a row boundary. They clear the
+		// destination marker; a whole-row copy is the one copy that transfers it.
+		screen.setHardWrapStart(1);
+		screen.blockCopy(0, 0, 1, 1, 1, 1);
+		assertFalse("partial block copy must clear destination provenance", screen.getHardWrapStart(1));
+		screen.setHardWrapStart(0);
+		screen.blockCopy(0, 0, 6, 1, 0, 1);
+		assertTrue("whole-row block copy must transfer source provenance", screen.getHardWrapStart(1));
+		assertTrue("whole-row block copy must retain source provenance", screen.getHardWrapStart(0));
+
+		// Scrolling moves the row object into scrollback, while the newly exposed
+		// row is cleared and therefore cannot inherit a continuation marker.
+		screen.setHardWrapStart(0);
+		screen.scrollDownOneLine(0, 4, TextStyle.NORMAL);
+		assertTrue("scrollback movement must retain row provenance", screen.getHardWrapStart(-1));
+		assertFalse("the newly exposed row must not retain stale provenance", screen.getHardWrapStart(3));
+
+		// Resize/reflow invalidates cursor-addressed boundaries from the old grid.
+		screen.setHardWrapStart(-1);
+		screen.setHardWrapStart(0);
+		mTerminal.resize(5, 4, INITIAL_CELL_WIDTH_PIXELS, INITIAL_CELL_HEIGHT_PIXELS);
+		for (int row = -1; row < 4; row++) {
+			if (row < -mTerminal.getScreen().getActiveTranscriptRows()) continue;
+			assertFalse("resize must clear hard-wrap provenance at row " + row, mTerminal.getScreen().getHardWrapStart(row));
+		}
 	}
 
 	public void testSetTitle() throws Exception {

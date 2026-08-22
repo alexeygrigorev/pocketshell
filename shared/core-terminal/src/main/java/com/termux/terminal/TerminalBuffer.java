@@ -263,8 +263,40 @@ public final class TerminalBuffer {
         return mLines[externalToInternalRow(row)].mLineWrap;
     }
 
+    /**
+     * Returns whether the row began after a cursor-addressed move from a
+     * full-width predecessor without a line-feed.  This is a separate bit from
+     * {@link #getLineWrap(int)}: applications that render a fixed-width TUI often disable
+     * terminal autowrap and paint the continuation row with CSI cursor
+     * addressing, leaving the native line-wrap bit false.
+     */
+    public boolean getHardWrapStart(int row) {
+        return mLines[externalToInternalRow(row)].mHardWrapStart;
+    }
+
+    /** Mark a row as the cursor-addressed continuation of a full-width row. */
+    public void setHardWrapStart(int row) {
+        mLines[externalToInternalRow(row)].mHardWrapStart = true;
+    }
+
+    /** Clear cursor-addressed hard-wrap provenance when a row is reused. */
+    public void clearHardWrapStart(int row) {
+        mLines[externalToInternalRow(row)].mHardWrapStart = false;
+    }
+
+    private void clearAllHardWrapStarts() {
+        for (TerminalRow line : mLines) {
+            if (line != null) line.mHardWrapStart = false;
+        }
+    }
+
     public void clearLineWrap(int row) {
         mLines[externalToInternalRow(row)].mLineWrap = false;
+    }
+
+    /** Whether the row's last visible cell contains non-space content. */
+    public boolean lineFillsWidth(int row) {
+        return getSelectedText(0, row, mColumns, row).length() >= mColumns;
     }
 
     /**
@@ -276,6 +308,11 @@ public final class TerminalBuffer {
      * @param cursor     An int[2] containing the (column, row) cursor location.
      */
     public void resize(int newColumns, int newRows, int newTotalRows, int[] cursor, long currentStyle, boolean altScreen) {
+        // A resize can reflow/reposition rows, so cursor-addressed boundaries
+        // from the old geometry are no longer authoritative. Native line-wrap
+        // state is rebuilt below; hard-wrap provenance is deliberately cleared
+        // until the terminal receives fresh cursor-addressed output.
+        clearAllHardWrapStarts();
         // newRows > mTotalRows should not normally happen since mTotalRows is TRANSCRIPT_ROWS (10000):
         if (newColumns == mColumns && newRows <= mTotalRows) {
             // Fast resize where just the rows changed.

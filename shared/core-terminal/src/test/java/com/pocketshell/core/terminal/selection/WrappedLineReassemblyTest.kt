@@ -95,6 +95,89 @@ class WrappedLineReassemblyTest {
     }
 
     @Test
+    fun `issue 2269 screenshot prose rows preserve both exact URL targets`() {
+        val blobUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru/part_01/01_chapter.md"
+        val treeUrl =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "tree/main/books/mountains-ru"
+        val columns = 88
+        // Both photographed URLs have a prose prefix, but the row boundary is
+        // kept at the same semantic point as the Pixel-7 fixture below:
+        // `/blob/mai` or `/tree/mai` followed by `n/books...`.
+        val blobLead = "Published. Here's the link: "
+        val treeLead = "chapters 1-3 so far). Here: "
+        val rows = listOf(
+            VisualRow(
+                row = 110,
+                text = blobLead + blobUrl.take(columns - blobLead.length),
+                wrapsToNext = false,
+            ),
+            VisualRow(
+                row = 111,
+                text = blobUrl.drop(columns - blobLead.length),
+                wrapsToNext = false,
+                startsAfterHardWrap = true,
+            ),
+            VisualRow(
+                row = 112,
+                text = treeLead + treeUrl.take(columns - treeLead.length),
+                wrapsToNext = false,
+            ),
+            VisualRow(
+                row = 113,
+                text = treeUrl.drop(columns - treeLead.length),
+                wrapsToNext = false,
+                startsAfterHardWrap = true,
+            ),
+        )
+
+        assertEquals(
+            listOf(blobUrl, blobUrl, treeUrl, treeUrl),
+            urlRegionsForRows(rows, columns).map { it.url },
+        )
+        assertTrue(
+            "the second visual fragment must not become a local path",
+            filePathRegionsForRows(rows, columns).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `issue 2269 exact URLs do not absorb a marked independent namespace path`() {
+        val urls = listOf(
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru/part_01/01_chapter.md",
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "tree/main/books/mountains-ru",
+        )
+
+        for ((index, first) in urls.withIndex()) {
+            val second = "ns/a/b/README.md"
+            val rows = listOf(
+                VisualRow(row = 120 + index * 2, text = first, wrapsToNext = false),
+                VisualRow(
+                    row = 121 + index * 2,
+                    text = second,
+                    wrapsToNext = false,
+                    startsAfterHardWrap = true,
+                ),
+            )
+
+            assertEquals(
+                "the exact URL must not absorb an independent path: $first",
+                listOf(first),
+                urlRegionsForRows(rows, first.length).map { it.url },
+            )
+            assertEquals(
+                "the marked row must remain a local path: $first",
+                listOf(second),
+                filePathRegionsForRows(rows, first.length).map { it.path },
+            )
+        }
+    }
+
+    @Test
     fun `issue 2269 exact URLs survive narrower multi-row hard wraps`() {
         val blobUrl =
             "https://github.com/alexeygrigorev/ai-book-generator/" +
@@ -136,6 +219,42 @@ class WrappedLineReassemblyTest {
         )
         assertEquals(
             "narrow legitimate URL chunks must not become local paths",
+            emptyList<FilePathRegion>(),
+            filePathRegionsForRows(rows, columns),
+        )
+    }
+
+    @Test
+    fun `issue 2269 exact URLs survive the production agent pane width`() {
+        val urls = listOf(
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru/part_01/01_chapter.md",
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "tree/main/books/mountains-ru",
+        )
+        val columns = 30
+        val rows = buildList {
+            urls.forEach { url ->
+                url.chunked(columns).forEachIndexed { partIndex, part ->
+                    add(
+                        VisualRow(
+                            row = 100 + size,
+                            text = part,
+                            wrapsToNext = false,
+                            startsAfterHardWrap = partIndex > 0,
+                        ),
+                    )
+                }
+            }
+        }
+
+        val regions = urlRegionsForRows(rows, columns)
+        assertEquals(
+            urls.flatMap { url -> url.chunked(columns).map { url } },
+            regions.map { it.url },
+        )
+        assertEquals(
+            "the production-width URL chunks must not become local paths",
             emptyList<FilePathRegion>(),
             filePathRegionsForRows(rows, columns),
         )
@@ -270,6 +389,59 @@ class WrappedLineReassemblyTest {
         assertEquals(listOf(first), urls.map { it.url })
         assertEquals(listOf(60), urls.map { it.row })
         assertEquals(listOf("docs/readme.md"), filePathRegionsForRows(rows, first.length).map { it.path })
+    }
+
+    @Test
+    fun `marked short namespace path stays separate from a preceding URL`() {
+        val first = "https://example.com/" + "a".repeat(40)
+        val second = "ns/a/b/README.md"
+        val rows = listOf(
+            VisualRow(row = 66, text = first, wrapsToNext = false),
+            VisualRow(
+                row = 67,
+                text = second,
+                wrapsToNext = false,
+                startsAfterHardWrap = true,
+            ),
+        )
+
+        val urls = urlRegionsForRows(rows, columns = first.length)
+        assertEquals(
+            "a marked independent namespace path must not extend the preceding URL",
+            listOf(first),
+            urls.map { it.url },
+        )
+        assertEquals(listOf(66), urls.map { it.row })
+        assertEquals(listOf(second), filePathRegionsForRows(rows, first.length).map { it.path })
+    }
+
+    @Test
+    fun `marked extensionless project path stays separate from a preceding URL`() {
+        val first =
+            "https://github.com/alexeygrigorev/ai-book-generator/" +
+                "blob/main/books/mountains-ru"
+        val second = "generated/output"
+        val rows = listOf(
+            VisualRow(row = 68, text = first, wrapsToNext = false),
+            VisualRow(
+                row = 69,
+                text = second,
+                wrapsToNext = false,
+                startsAfterHardWrap = true,
+            ),
+        )
+
+        val repaired = markHardWrappedUrlContinuations(rows, first.length)
+        assertEquals(
+            "an extensionless project path must remain a separate logical row",
+            listOf(false, false),
+            repaired.map { it.wrapsToNext },
+        )
+        assertEquals(
+            "the marked extensionless path must not extend the URL",
+            listOf(first),
+            urlRegionsForRows(rows, first.length).map { it.url },
+        )
     }
 
     @Test

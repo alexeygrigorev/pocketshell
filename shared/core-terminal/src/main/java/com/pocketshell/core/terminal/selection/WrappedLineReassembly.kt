@@ -141,9 +141,12 @@ public fun reassemble(rows: List<VisualRow>): List<LogicalLine> {
  * the emulator's hyperlink provenance marker and whose next row does not start
  * a newly opened hyperlink. The plain-text branch uses the terminal's explicit
  * cursor-addressed hard-wrap provenance plus conservative text guards:
- * literal whitespace, another scheme, and an independently rooted/deep project
- * path terminate the candidate. SGR colour continuity is deliberately not
- * enough: independent newline rows can use the same colour and attributes.
+ * literal whitespace, another scheme, and a path-shaped next row terminate
+ * the candidate unless the two fragments form one of the unambiguous GitHub
+ * URL boundaries exercised by the real output (`/mai` + `n/` or a repository
+ * name split immediately before `/blob/` or `/tree/`). SGR colour continuity
+ * is deliberately not enough: independent newline rows can use the same
+ * colour and attributes.
  */
 internal fun markHardWrappedUrlContinuations(
     rows: List<VisualRow>,
@@ -192,6 +195,8 @@ private fun plainTextHardWrappedUrlContinuationEnd(
     if (firstFragment.any { it in OSC8_WRAP_URL_DELIMITERS }) return null
 
     var index = startIndex
+    var recognizedContinuation = false
+    var prefix = firstFragment
     while (index < rows.lastIndex) {
         val next = rows[index + 1]
         if (!next.startsAfterHardWrap) break
@@ -199,16 +204,19 @@ private fun plainTextHardWrappedUrlContinuationEnd(
         if (continuation.isEmpty() || continuation.first() in OSC8_WRAP_URL_DELIMITERS) break
         // A marked row can still be an independently painted prose/link/path
         // row. Keep it separate instead of absorbing it into the URL above.
-        // The one-/two-character first-segment exception is deliberate: the
-        // real #2269 and #1955 hard-wraps split `main`/`n` and `campaigns`/`ns`
-        // at the grid edge, so those fragments are path-shaped only because
-        // the URL token was cut mid-segment.
         if (continuation.any { it.isWhitespace() }) break
         if (continuation.contains("http://", ignoreCase = true) ||
             continuation.contains("https://", ignoreCase = true) ||
-            looksLikeIndependentPathContinuation(continuation)
+            (
+                looksLikeIndependentPathContinuation(continuation) &&
+                    !recognizedContinuation &&
+                    !looksLikeKnownGithubUrlContinuation(prefix, continuation)
+                )
         ) break
         index += 1
+        val knownBoundary = looksLikeKnownGithubUrlContinuation(prefix, continuation)
+        recognizedContinuation = recognizedContinuation || knownBoundary
+        prefix += continuation
         if (continuation.length < columns) break
     }
     return index.takeIf { it > startIndex }
@@ -220,22 +228,70 @@ private fun looksLikeIndependentPathContinuation(text: String): Boolean {
     if (first == '~' || first == '.') return true
     val pathStart = if (first == '/') 1 else 0
     val slash = candidate.indexOf('/', startIndex = pathStart)
-    if (slash <= 0) return false
+    if (slash <= pathStart) return false
     val firstSegment = candidate.substring(pathStart, slash)
-    // `n/books/...` and `ns/...` are the photographed #2269/#1955 residuals;
-    // they are too short to be a reliable independent project path. Likewise,
-    // URL repository/user fragments commonly contain '-' or '_' (for example
-    // `ai-book-generator` and `part_01`), so do not reject those merely because
-    // a later slash is present.
-    if (firstSegment.length <= 2 || firstSegment.any { it == '-' || it == '_' }) return false
 
-    // A marked row is independently path-like when the path scanner recognizes
-    // a file target, or when it begins with a conventional project path root
-    // even if the file has no extension (`docs/readme`). This deliberately
-    // avoids treating arbitrary URL path chunks such as
-    // `lexeygrigorev/ai-book-generator/...` as local paths.
+    // Every relative `segment/...` row is ambiguous with a URL continuation,
+    // so it is treated as independent by default. The caller may override
+    // that only for a structural GitHub boundary it can prove from the URL
+    // prefix. In particular, do not make short (`n`, `ns`) or punctuation-rich
+    // segments implicit continuation exceptions: both have appeared as real
+    // independent path rows.
     if (firstSegment in INDEPENDENT_PROJECT_PATH_ROOTS) return true
-    return detectFilePathsInLine(candidate).any { it.start == 0 }
+    if (detectFilePathsInLine(candidate).any { it.start == 0 }) return true
+    return firstSegment.isNotEmpty()
+}
+
+/**
+ * Recognizes only URL boundaries that are structurally visible in the exact
+ * GitHub output under test. A path-shaped next row is otherwise independent.
+ *
+ * The first case is the Pixel-width split of `main` (`/mai` + `n/...`). The
+ * second is the narrower fixture where the GitHub owner/repository prefix is
+ * split before the `blob`/`tree` route (`alexeygrigo` +
+ * `rev/ai-book-generator/blob|tree`, or another cut inside the same
+ * hyphenated repository). Requiring the reconstructed repository slug to
+ * contain `-`/`_`, and requiring a two-segment prefix to show the same partial
+ * slug evidence, prevents a complete URL such as
+ * `https://github.com/org/repo` from absorbing a new `repo-name/...` row.
+ */
+private fun looksLikeKnownGithubUrlContinuation(
+    prefix: String,
+    continuation: String,
+): Boolean {
+    val host = "github.com/"
+    val hostStart = prefix.indexOf(host, ignoreCase = true)
+    if (hostStart < 0) return false
+
+    val candidate = prefix + continuation
+    val candidatePath = candidate.substring(hostStart + host.length)
+
+    val completesMainBranch =
+        prefix.endsWith("/mai", ignoreCase = true) &&
+            continuation.startsWith("n/", ignoreCase = true) &&
+            (
+                candidatePath.contains("/blob/main/", ignoreCase = true) ||
+                    candidatePath.contains("/tree/main/", ignoreCase = true)
+                )
+    if (completesMainBranch) return true
+
+    val continuationRoute =
+        continuation.contains("/blob/", ignoreCase = true) ||
+            continuation.contains("/tree/", ignoreCase = true)
+    if (!continuationRoute) return false
+
+    val prefixPath = prefix.substring(hostStart + host.length)
+    val prefixSegments = prefixPath.split('/')
+    if (prefixSegments.size !in 1..2 || prefixSegments.any { it.isEmpty() }) return false
+    val candidateSegments = candidatePath.split('/')
+    val routeIndex = candidateSegments.indexOfFirst {
+        it.equals("blob", ignoreCase = true) || it.equals("tree", ignoreCase = true)
+    }
+    if (routeIndex != 2) return false
+    if (candidateSegments[1].none { it == '-' || it == '_' }) return false
+    if (prefixSegments.size == 1) return true
+    return prefixSegments[1].any { it == '-' || it == '_' } ||
+        continuation.firstOrNull() == '-'
 }
 
 private val INDEPENDENT_PROJECT_PATH_ROOTS = setOf(

@@ -51,11 +51,11 @@ class _RecordingSender(push.FcmSender):
         return self.outcomes.get(data.get("reset_key", ""), True)
 
 
-def _reset_event(reset_key: str = "codex|short_term|2026-06-11T15:00:00Z") -> dict:
+def _reset_event(reset_key: str = "codex|5h|2026-06-11T15:00:00Z") -> dict:
     return {
         "type": "reset",
         "provider": "codex",
-        "window": "short_term",
+        "window": "5h",
         "detected_at": "2026-06-11T14:30:00Z",
         "reset_key": reset_key,
     }
@@ -203,11 +203,11 @@ def test_multiple_events_each_sent_once(tmp_path: Path) -> None:
     push.register_token("tok", paths=paths)
     sender = _RecordingSender()
     events = [
-        _reset_event("codex|short_term|A"),
-        _reset_event("claude|long_term|B"),
+        _reset_event("codex|5h|A"),
+        _reset_event("claude|7d|B"),
     ]
     pushed = push.push_reset_events(events, paths=paths, sender=sender)
-    assert set(pushed) == {"codex|short_term|A", "claude|long_term|B"}
+    assert set(pushed) == {"codex|5h|A", "claude|7d|B"}
     assert len(sender.calls) == 2
 
 
@@ -258,8 +258,7 @@ def _usage_ndjson(percent: float, reset_at: str | None) -> str:
     record = {
         "provider": "codex",
         "status": "ok",
-        "short_term": {"percent_remaining": percent, "reset_at": reset_at},
-        "long_term": None,
+        "windows": {"5h": {"percent_remaining": percent, "reset_at": reset_at}},
         "block_reason": None,
         "error": None,
         "details": {},
@@ -318,5 +317,5 @@ def test_capture_never_breaks_when_push_raises(tmp_path: Path, monkeypatch) -> N
         paths=paths,
         captured_at="2026-06-11T14:30:00Z",
     )
-    assert result["records"][0]["short_term"]["percent_remaining"] == 100.0
+    assert result["records"][0]["windows"]["5h"]["percent_remaining"] == 100.0
     assert paths.cache_file.exists()

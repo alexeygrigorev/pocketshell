@@ -338,8 +338,9 @@ class PocketshellUsageResetCreditsTest {
             {
               "provider":"$provider",
               "status":"ok",
-              "short_term":{"percent_remaining":69.0,"reset_at":"$resetAt","window":"7d"},
-              "long_term":null,
+              "windows":{
+                "7d":{"percent_remaining":69.0,"reset_at":"$resetAt"}
+              },
               "block_reason":null,
               "error":null
               $detailsField

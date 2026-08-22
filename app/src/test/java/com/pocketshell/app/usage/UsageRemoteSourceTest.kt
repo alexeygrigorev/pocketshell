@@ -18,6 +18,10 @@ class UsageRemoteSourceTest {
 
     private val source = UsageRemoteSource()
 
+    /** Published quse null source spans are omitted by the host producer. */
+    private val nullSpans =
+        """"windows":{}"""
+
     private val detectCommand = PocketshellCommand.detect()
     private val defaultFetchCommand = PocketshellCommand.wrap(UsageRemoteSource.DEFAULT_USAGE_ARGS)
 
@@ -62,7 +66,7 @@ class UsageRemoteSourceTest {
         val session = FakeSshSession(
             canned = mapOf(
                 defaultFetchCommand to ExecResult(
-                    """{"provider":"codex","status":"blocked","short_term":null,"long_term":null,"block_reason":"weekly limit reached","error":null,"details":{}}""",
+                    """{"provider":"codex","status":"blocked",$nullSpans,"block_reason":"weekly limit reached","error":null,"details":{}}""",
                     "",
                     0,
                 ),
@@ -86,7 +90,7 @@ class UsageRemoteSourceTest {
         val session = FakeSshSession(
             mapOf(
                 "custom-usage --json" to ExecResult(
-                    """{"provider":"claude","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    """{"provider":"claude","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
                     "",
                     0,
                 ),
@@ -97,6 +101,29 @@ class UsageRemoteSourceTest {
 
         assertTrue(result is UsageFetchResult.Success)
         assertEquals(listOf("custom-usage --json"), session.recorded)
+    }
+
+    @Test
+    fun fetchUsage_nullPercentCanonicalWindow_failsLoud() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                defaultFetchCommand to ExecResult(
+                    """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":null,"reset_at":null}},"error":null,"details":{}}""",
+                    "",
+                    0,
+                ),
+            ),
+        )
+
+        val result = source.fetchUsage(session)
+
+        assertTrue(
+            "a null canonical percentage must fail the app fetch loudly",
+            result is UsageFetchResult.Failed,
+        )
+        assertTrue(
+            (result as UsageFetchResult.Failed).reason.contains("percent_remaining"),
+        )
     }
 
     @Test
@@ -117,7 +144,7 @@ class UsageRemoteSourceTest {
         val session = FakeSshSession(
             mapOf(
                 defaultFetchCommand to ExecResult(
-                    stdout = """{"provider":"claude","status":"error","short_term":null,"long_term":null,"block_reason":null,"error":"HTTP Error 401: Unauthorized","details":{}}""",
+                    stdout = """{"provider":"claude","status":"error",$nullSpans,"block_reason":null,"error":"HTTP Error 401: Unauthorized","details":{}}""",
                     stderr = "",
                     exitCode = 1,
                 ),
@@ -146,15 +173,15 @@ class UsageRemoteSourceTest {
 
     @Test
     fun fetchUsage_exit0PartialDrift_failsLoudNoSilentSkip() = runTest {
-        // Provider A is fine but provider B drifted (short_term is not an
-        // object). #1318: the whole panel must surface a visible failure, NOT
+        // Provider A is fine but provider B drifted (the unified `windows`
+        // map is not an object). #1318: the whole panel must surface a visible failure, NOT
         // silently render only the healthy provider.
         val session = FakeSshSession(
             mapOf(
                 defaultFetchCommand to ExecResult(
-                    stdout = """{"provider":"codex","status":"ok","short_term":{"percent_remaining":77.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""" +
+                    stdout = """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":77.0}},"block_reason":null,"error":null,"details":{}}""" +
                         "\n" +
-                        """{"status":"ok","short_term":"drifted","long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                        """{"status":"ok","windows":"drifted","block_reason":null,"error":null,"details":{}}""",
                     stderr = "",
                     exitCode = 0,
                 ),
@@ -174,9 +201,9 @@ class UsageRemoteSourceTest {
             mapOf(
                 defaultFetchCommand to ExecResult(
                     stdout = "WARNING: pocketshell 0.3.1 is deprecated\n" +
-                        """{"provider":"codex","status":"ok","short_term":{"percent_remaining":50.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""" +
+                        """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":50.0}},"block_reason":null,"error":null,"details":{}}""" +
                         "\n" +
-                        """{"provider":"claude","status":"ok","short_term":{"percent_remaining":41.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                        """{"provider":"claude","status":"ok","windows":{"5h":{"percent_remaining":41.0}},"block_reason":null,"error":null,"details":{}}""",
                     stderr = "",
                     exitCode = 0,
                 ),
@@ -277,7 +304,7 @@ class UsageRemoteSourceTest {
             mapOf(
                 cachedCommand to ExecResult(
                     """{"captured_at":"2026-06-11T09:00:00Z","records":[""" +
-                        """{"provider":"codex","status":"ok","short_term":{"percent_remaining":77.0},"long_term":null,"block_reason":null,"error":null,"details":{}}]}""",
+                        """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":77.0}},"block_reason":null,"error":null,"details":{}}]}""",
                     "",
                     0,
                 ),

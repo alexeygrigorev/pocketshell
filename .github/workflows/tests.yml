@@ -512,6 +512,22 @@ jobs:
           chmod +x scripts/test-notification-permission-fixture.sh
           scripts/test-notification-permission-fixture.sh
 
+      # Issue #2264: process death cannot be proven by
+      # connectedDebugAndroidTest because force-stopping the target kills its
+      # in-process runner. This fake-ADB contract test drives the host harness
+      # baseline and requires skipped-force-stop, partial-generation, producer
+      # provenance, and indeterminate /proc-probe mutants to fail closed
+      # without an emulator or Gradle. The real production-read mutation
+      # runner is separately invoked on a live AVD; this fake guard only
+      # checks that its APK-build/run contract is present and never launders
+      # fake ADB output into mutation evidence.
+      - name: Two-phase Android process-restart harness guard (issue #2264)
+        run: |
+          chmod +x scripts/two-phase-android-instrumentation.sh \
+            scripts/test-two-phase-android-instrumentation.sh \
+            scripts/two-phase-android-mutation.sh
+          scripts/test-two-phase-android-instrumentation.sh
+
       # Issue #1876 round 2: GitHub checks the committed Docker test key out as
       # 0644, and OpenSSH rejects it before the mobile-RTT journey can start.
       # Drive the workflow's real readiness block from that checkout mode and

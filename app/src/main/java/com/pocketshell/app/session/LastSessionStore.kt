@@ -9,8 +9,14 @@ import com.pocketshell.app.prefs.DeferredPrefs
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import java.util.concurrent.CancellationException
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.EmptyCoroutineContext
 
 /**
  * Issue #177: persists the user's last in-session view so returning to
@@ -80,11 +86,16 @@ import javax.inject.Singleton
 @Singleton
 class LastSessionStore @VisibleForTesting internal constructor(
     context: Context,
-    ioDispatcher: CoroutineDispatcher,
+    private val ioDispatcher: CoroutineDispatcher,
+    private val durableWriteWaitMillis: Long = DURABLE_WRITE_WAIT_MILLIS,
 ) {
 
     @Inject
-    constructor(@ApplicationContext context: Context) : this(context, Dispatchers.IO)
+    constructor(@ApplicationContext context: Context) : this(
+        context,
+        Dispatchers.IO,
+        DURABLE_WRITE_WAIT_MILLIS,
+    )
 
     // The ONE shared resilient prefs helper (#1292): eager off-main open through
     // [com.pocketshell.app.prefs.ResilientPrefs] (corrupt-tolerant, self-healing),
@@ -154,10 +165,15 @@ class LastSessionStore @VisibleForTesting internal constructor(
     /**
      * Persist [session] as the last active view. Called from
      * `MainActivity.onStop` when the current destination is a
-     * [AppDestination.TmuxSession]. A synchronous `apply()` is enough —
-     * the value is only read on the next foreground.
+     * [AppDestination.TmuxSession]. Returning from this lifecycle boundary
+     * means the snapshot has been synchronously committed to disk: an external
+     * force-stop may kill the process immediately afterwards (#2265).
+     *
+     * @return `true` only when the commit was acknowledged within the bounded
+     *   wait; `false` means the snapshot is not durably acknowledged and the
+     *   caller must not treat it as persisted.
      */
-    fun save(session: LastSession) {
+    fun save(session: LastSession): Boolean {
         // Issue #834: never persist a session the user just deleted. If the
         // user backgrounds the app while still on the now-dead session screen,
         // `onStop` would otherwise re-arm the restore for a session that no
@@ -170,8 +186,7 @@ class LastSessionStore @VisibleForTesting internal constructor(
                 "last-session-save-suppressed trigger=onStop reason=killed " +
                     "hostId=${session.hostId} session=${session.sessionName}",
             )
-            prefs.edit().clear().apply()
-            return
+            return clearDurably("save-suppressed-killed")
         }
         Log.i(
             LAST_SESSION_LOG_TAG,
@@ -179,24 +194,24 @@ class LastSessionStore @VisibleForTesting internal constructor(
                 "host=${session.hostname} port=${session.port} user=${session.username} " +
                 "session=${session.sessionName} startDirectory=${session.startDirectory}",
         )
-        val editor = prefs.edit()
-            .putLong(KEY_HOST_ID, session.hostId)
-            .putString(KEY_HOST_NAME, session.hostName)
-            .putString(KEY_HOSTNAME, session.hostname)
-            .putInt(KEY_PORT, session.port)
-            .putString(KEY_USERNAME, session.username)
-            .putString(KEY_KEY_PATH, session.keyPath)
-            .putString(KEY_SESSION_NAME, session.sessionName)
-            .putString(KEY_START_DIR, session.startDirectory)
-            .putString(KEY_TMUX_SESSION_ID, session.tmuxSessionId)
-            .putString(KEY_COMPOSER_DRAFT, session.composerDraft)
-            .putLong(KEY_SAVED_AT, session.savedAtMillis)
-        if (session.sessionCreated != null) {
-            editor.putLong(KEY_SESSION_CREATED, session.sessionCreated)
-        } else {
-            editor.remove(KEY_SESSION_CREATED)
+        return persistDurably("save") {
+            putLong(KEY_HOST_ID, session.hostId)
+            putString(KEY_HOST_NAME, session.hostName)
+            putString(KEY_HOSTNAME, session.hostname)
+            putInt(KEY_PORT, session.port)
+            putString(KEY_USERNAME, session.username)
+            putString(KEY_KEY_PATH, session.keyPath)
+            putString(KEY_SESSION_NAME, session.sessionName)
+            putString(KEY_START_DIR, session.startDirectory)
+            putString(KEY_TMUX_SESSION_ID, session.tmuxSessionId)
+            putString(KEY_COMPOSER_DRAFT, session.composerDraft)
+            putLong(KEY_SAVED_AT, session.savedAtMillis)
+            if (session.sessionCreated != null) {
+                putLong(KEY_SESSION_CREATED, session.sessionCreated)
+            } else {
+                remove(KEY_SESSION_CREATED)
+            }
         }
-        editor.apply()
     }
 
     /**
@@ -301,10 +316,14 @@ class LastSessionStore @VisibleForTesting internal constructor(
      * away from the session (Detach / back to the host list) so a later
      * resume does not silently re-route them into a session they left on
      * purpose.
+     *
+     * @return `true` only when the clear was acknowledged by `commit()` within
+     *   the bounded wait; `false` means the old snapshot is not durably known
+     *   to be gone.
      */
-    fun clear() {
+    fun clear(): Boolean {
         Log.i(LAST_SESSION_LOG_TAG, "last-session-clear trigger=onStop")
-        prefs.edit().clear().apply()
+        return clearDurably("clear")
     }
 
     /**
@@ -321,10 +340,13 @@ class LastSessionStore @VisibleForTesting internal constructor(
      * Matching is on (hostId, sessionName) — the same identity
      * [com.pocketshell.app.tmux.SessionLifecycleSignals] broadcasts. A kill on
      * one session never invalidates a different stored session.
+     *
+     * @return `true` when there was no matching persisted record or its clear
+     *   was durably acknowledged; `false` when the matching clear failed.
      */
-    fun onSessionKilled(hostId: Long, sessionName: String) {
+    fun onSessionKilled(hostId: Long, sessionName: String): Boolean {
         val trimmed = sessionName.trim()
-        if (trimmed.isEmpty()) return
+        if (trimmed.isEmpty()) return true
         val killed = SessionIdentity(hostId = hostId, sessionName = trimmed)
         killedTombstone = killed
         val stored = peek(maxAgeMillis = Long.MAX_VALUE)
@@ -333,8 +355,91 @@ class LastSessionStore @VisibleForTesting internal constructor(
                 LAST_SESSION_LOG_TAG,
                 "last-session-clear trigger=killed hostId=$hostId session=$trimmed",
             )
-            prefs.edit().clear().apply()
+            return clearDurably("clear-killed")
         }
+        return true
+    }
+
+    private fun clearDurably(operation: String): Boolean =
+        persistDurably(operation) { clear() }
+
+    /**
+     * Issue #2265: one narrow, synchronous durability boundary for every
+     * lifecycle save/clear of `last_session`.
+     *
+     * `Editor.apply()` acknowledges only the in-process map update; the #2264
+     * two-process harness proved that an immediate process death can lose it.
+     * `commit()` supplies the required disk acknowledgement, but doing the
+     * prefs open/edit/commit on Main would reintroduce the StrictMode disk IO
+     * fixed in #1087. Dispatch the entire operation to the existing IO
+     * dispatcher and wait for that exact Future, so this is not a
+     * fire-and-forget coroutine.
+     *
+     * The wait is capped well below Android's ANR interval. A wedged/saturated
+     * storage path therefore cannot park `MainActivity.onStop` indefinitely;
+     * timeout/commit failure is loud in logs and the task is cancelled. The
+     * normal path returns only after `commit()` has acknowledged durable state.
+     */
+    private fun persistDurably(
+        operation: String,
+        edit: SharedPreferences.Editor.() -> Unit,
+    ): Boolean {
+        val task = FutureTask {
+            prefs.edit().also(edit).commit()
+        }
+        try {
+            ioDispatcher.dispatch(EmptyCoroutineContext, task)
+        } catch (error: Throwable) {
+            Log.e(
+                LAST_SESSION_LOG_TAG,
+                "last-session-durable-write-dispatch-failed operation=$operation",
+                error,
+            )
+            return false
+        }
+
+        val committed = try {
+            task.get(durableWriteWaitMillis, TimeUnit.MILLISECONDS)
+        } catch (error: TimeoutException) {
+            task.cancel(true)
+            Log.e(
+                LAST_SESSION_LOG_TAG,
+                "last-session-durable-write-timeout operation=$operation " +
+                    "budgetMs=$durableWriteWaitMillis",
+                error,
+            )
+            return false
+        } catch (error: InterruptedException) {
+            task.cancel(true)
+            Thread.currentThread().interrupt()
+            Log.e(
+                LAST_SESSION_LOG_TAG,
+                "last-session-durable-write-interrupted operation=$operation",
+                error,
+            )
+            return false
+        } catch (error: ExecutionException) {
+            Log.e(
+                LAST_SESSION_LOG_TAG,
+                "last-session-durable-write-failed operation=$operation",
+                error.cause ?: error,
+            )
+            return false
+        } catch (error: CancellationException) {
+            Log.e(
+                LAST_SESSION_LOG_TAG,
+                "last-session-durable-write-cancelled operation=$operation",
+                error,
+            )
+            return false
+        }
+        if (!committed) {
+            Log.e(
+                LAST_SESSION_LOG_TAG,
+                "last-session-durable-write-commit-false operation=$operation",
+            )
+        }
+        return committed
     }
 
     /**
@@ -402,6 +507,10 @@ class LastSessionStore @VisibleForTesting internal constructor(
         private const val KEY_SAVED_AT = "saved_at"
 
         private const val DEFAULT_SSH_PORT = 22
+
+        /** Main-thread lifecycle wait ceiling; disk work itself stays on IO. */
+        @VisibleForTesting
+        internal const val DURABLE_WRITE_WAIT_MILLIS: Long = 250L
 
         /**
          * Snapshots older than this are not restored — the user has moved

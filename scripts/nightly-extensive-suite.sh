@@ -252,6 +252,10 @@ EXPECTED_FAIL_CLASSES=(
 # does not just self-skip there (the journey phase never passes the opt-in flag).
 BOOTSTRAP_TEST_CLASS="com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest"
 NOTIFICATION_PERMISSION_TEST_CLASS="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
+# Issue #2264: this class is deliberately excluded from the ordinary connected
+# suite. Its two methods only prove process death when the host runs them in two
+# direct `am instrument` processes with an external force-stop between them.
+PROCESS_RESTART_TEST_CLASS="com.pocketshell.app.proof.LastSessionProcessRestartProofTest"
 
 # Issue #2111 (audit §2.1 item 4 — the cadence gap): the real-agent release gate.
 # It drives the REAL `claude` and `codex` binaries in a tmux pane through the app
@@ -351,6 +355,7 @@ JOURNEY_EXCLUDED_CLASSES=(
   "$REAL_AGENT_TEST_CLASS"
   "$BOOTSTRAP_TEST_CLASS"
   "$NOTIFICATION_PERMISSION_TEST_CLASS"
+  "$PROCESS_RESTART_TEST_CLASS"
 )
 
 # Issue #2082: the current-run attendance selected set is this array's
@@ -512,17 +517,20 @@ NETWORK_FAULT_EXIT=0
 BOOTSTRAP_EXIT=0
 EXPECTED_FAIL_EXIT=0
 REAL_AGENT_EXIT=0
+PROCESS_RESTART_EXIT=0
 notification_permission_status="SKIP"
 notification_permission_executed=0
 nf_status="SKIP"
 bootstrap_status="SKIP"
 expectedfail_status="SKIP"
 real_agent_status="SKIP"
+process_restart_status="SKIP"
 notification_permission_classification="SKIP"
 nf_classification="SKIP"
 bootstrap_classification="SKIP"
 expectedfail_classification="SKIP"
 real_agent_classification="SKIP"
+process_restart_classification="SKIP"
 
 if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   echo "=========================================================="
@@ -732,6 +740,29 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     real_agent_classification="SKIP"
   fi
 
+  echo "=========================================================="
+  echo "Nightly Extensive Tests — phase 5: external process-restart persistence"
+  echo "Included class: $PROCESS_RESTART_TEST_CLASS"
+  echo "  (one suffixed install; two direct am instrument processes; external force-stop)"
+  echo "=========================================================="
+
+  process_restart_run_dir="$ARTIFACT_DIR/phase5-process-restart"
+  process_restart_namespace="issue2264-nightly-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+  RUN_DIR="$process_restart_run_dir" \
+    RUN_NAMESPACE="$process_restart_namespace" \
+    SUFFIX=i2264nightly \
+    TEST_CLASS="$PROCESS_RESTART_TEST_CLASS" \
+    "$REPO_ROOT/scripts/two-phase-android-instrumentation.sh"
+  PROCESS_RESTART_EXIT=$?
+  echo "phase 5 (external process restart) exit code: $PROCESS_RESTART_EXIT"
+  if [[ "$PROCESS_RESTART_EXIT" -eq 0 ]]; then
+    process_restart_classification="PASS"
+    process_restart_status="PASS"
+  else
+    process_restart_classification="SUBSTANTIVE_FAIL"
+    process_restart_status="FAIL"
+  fi
+
   nf_status="$(nightly_phase_status "$nf_classification")"
   bootstrap_status="$(nightly_phase_status "$bootstrap_classification")"
   expectedfail_status="$(nightly_phase_status "$expectedfail_classification")"
@@ -760,7 +791,7 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   echo "----------------------------------------------------------"
 else
   echo "=========================================================="
-  echo "Nightly Extensive Tests — phases 1b, 2, 2b, 3 & 4 SKIPPED on shard ${SHARD_INDEX:-0}"
+  echo "Nightly Extensive Tests — phases 1b, 2, 2b, 3, 4 & 5 SKIPPED on shard ${SHARD_INDEX:-0}"
   echo "  (notification + network-fault + expected-fail + bootstrap + real-agent"
   echo "   run once, on shard 0)"
   echo "=========================================================="
@@ -784,6 +815,7 @@ if [[ "$JOURNEY_EXIT" -ne 0 \
       || "$NETWORK_FAULT_EXIT" -ne 0 \
       || "$BOOTSTRAP_EXIT" -ne 0 \
       || "$REAL_AGENT_EXIT" -ne 0 \
+      || "$PROCESS_RESTART_EXIT" -ne 0 \
       || "$ATTENDANCE_EXIT" -ne 0 ]]; then
   overall_status="FAIL"
 fi
@@ -807,6 +839,7 @@ fi
   echo "| Expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} class(es): #822 Slice C/D TDD specs + the #2111 Conversation-open latency proof | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** ($expectedfail_classification) |"
   echo "| Bootstrap setup scenarios (GATING) | ALL ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (issue #2111) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** ($bootstrap_classification) |"
   echo "| Real-agent CLI gate (issue #2111; in overall_status, NOT in the fault verdict) | $REAL_AGENT_TEST_CLASS against real-agents:2240 | \`pocketshellRealAgentReleaseGate=1\` | $REAL_AGENT_EXIT | **$real_agent_status** ($real_agent_classification) |"
+  echo "| External process-restart persistence (#2264) | $PROCESS_RESTART_TEST_CLASS; one suffixed install and two direct runner processes | external force-stop; no state reset/reinstall between phases | $PROCESS_RESTART_EXIT | **$process_restart_status** ($process_restart_classification) |"
   echo
   echo "**Extensive-shard overall (non-gating summary): $overall_status**"
   echo

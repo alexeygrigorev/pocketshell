@@ -28,6 +28,7 @@ import com.pocketshell.app.voice.HOTKEYS_CHIP_LABEL
 import com.pocketshell.app.voice.LocalVoiceGestureBandPlaced
 import com.pocketshell.app.voice.HotkeysChipIcon
 import com.pocketshell.app.voice.SnippetsChipIcon
+import com.pocketshell.app.voice.VoiceGestureCoachmarkHost
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.HotkeySection
 import com.pocketshell.uikit.model.KeyBinding
@@ -146,12 +147,22 @@ internal fun TmuxTerminalBottomControls(
     unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    when (
-        tmuxTerminalHiddenImeSurface(
-            showConversation = showConversation,
-            terminalHeld = terminalHeld,
-        )
+    // Keep the education host outside the mutually exclusive bottom-band
+    // branches. During attach -> live (and equivalent resize/replacement)
+    // Compose disposes one branch before placing the other; a host inside the
+    // branch would release a presented claim in that gap. This stable tmux owner
+    // lets the launcher and coachmark retain one lifecycle across the swap.
+    VoiceGestureCoachmarkHost(
+        eligible = onDictateTap != null && onDictateHoldSwipeUp != null,
+        launcherEnabled = true,
+        modifier = modifier,
     ) {
+        when (
+            tmuxTerminalHiddenImeSurface(
+                showConversation = showConversation,
+                terminalHeld = terminalHeld,
+            )
+        ) {
                 TmuxTerminalHiddenImeSurface.LauncherOnly -> {
                     // Issue #786 (Conversation tab, hard-cut D22) AND Issue #1672
                     // (Terminal tab while the terminal is HELD during connect): the
@@ -181,7 +192,8 @@ internal fun TmuxTerminalBottomControls(
                             inputEnabled = true,
                             unsentCount = unsentCount,
                             unsentHasFailure = unsentHasFailure,
-                            modifier = modifier,
+                            modifier = Modifier,
+                            manageVoiceGestureCoachmark = false,
                         )
                     }
                 }
@@ -216,9 +228,11 @@ internal fun TmuxTerminalBottomControls(
                         inputEnabled = sessionLive,
                         unsentCount = unsentCount,
                         unsentHasFailure = unsentHasFailure,
-                        modifier = modifier,
+                        modifier = Modifier,
+                        manageVoiceGestureCoachmark = false,
                     )
                 }
+        }
     }
 }
 

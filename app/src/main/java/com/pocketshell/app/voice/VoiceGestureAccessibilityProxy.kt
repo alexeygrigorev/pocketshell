@@ -4,6 +4,7 @@ import android.content.Context
 import android.view.View
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Button
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
@@ -50,7 +51,7 @@ internal fun VoiceGestureAccessibilityProxy(
 
 private class VoiceGestureAccessibilityProxyView(
     context: Context,
-) : View(context) {
+) : Button(context) {
 
     private var actionsEnabled = false
     private var onCompose: (() -> Unit)? = null
@@ -61,7 +62,13 @@ private class VoiceGestureAccessibilityProxyView(
         // The proxy has no visual content. Its bounds deliberately match the
         // real launcher, so accessibility focus lands on the visible control.
         setWillNotDraw(true)
+        background = null
+        text = null
+        setPadding(0, 0, 0, 0)
+        minWidth = 0
+        minHeight = 0
         contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
+        setOnClickListener { onCompose?.invoke() }
     }
 
     fun setActions(
@@ -72,6 +79,8 @@ private class VoiceGestureAccessibilityProxyView(
         val changed = actionsEnabled != enabled
         actionsEnabled = enabled
         isEnabled = enabled
+        isClickable = enabled
+        isFocusable = enabled
         onCompose = onClick
         this.onDictation = onDictation
         if (changed) {
@@ -83,7 +92,7 @@ private class VoiceGestureAccessibilityProxyView(
 
     override fun onInitializeAccessibilityNodeInfo(info: AccessibilityNodeInfo) {
         super.onInitializeAccessibilityNodeInfo(info)
-        info.className = android.widget.Button::class.java.name
+        info.className = Button::class.java.name
         info.contentDescription = SESSION_COMPOSER_LAUNCHER_CONTENT_DESCRIPTION
         info.isEnabled = actionsEnabled
         info.isClickable = actionsEnabled

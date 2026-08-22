@@ -18,8 +18,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
- * Process-scoped cache of warm tmux/UI runtimes keyed by host identity and
- * tmux session name.
+ * Process-scoped cache of warm tmux/UI runtimes keyed by host identity and the
+ * exact tmux session generation when one is known. Picker prewarms may still
+ * carry a name-only key until the live row supplies the generation.
  *
  * A cached runtime keeps the already-attached tmux control client and
  * TerminalSurfaceState graph alive while another same-host session is in the
@@ -203,15 +204,23 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
             null
         }
 
-    internal fun removeSession(hostId: Long, sessionName: String): List<CachedTmuxRuntime> =
+    /** Remove only cached runtimes belonging to this exact tmux generation. */
+    internal fun removeSession(
+        hostId: Long,
+        generation: TmuxSessionGeneration,
+    ): List<CachedTmuxRuntime> =
         synchronized(this) {
-            val trimmed = sessionName.trim()
-            if (trimmed.isEmpty()) return@synchronized emptyList()
             val removed = mutableListOf<CachedTmuxRuntime>()
             val iterator = runtimes.entries.iterator()
             while (iterator.hasNext()) {
                 val entry = iterator.next()
-                if (entry.key.hostId == hostId && entry.key.sessionName == trimmed) {
+                if (entry.key.hostId == hostId &&
+                    entry.key.durableSessionKey == durableTmuxSessionKey(
+                        hostId,
+                        generation.sessionId,
+                        generation.createdEpochSeconds,
+                    )
+                ) {
                     iterator.remove()
                     removed += entry.value.runtime
                 }

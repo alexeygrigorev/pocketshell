@@ -31,17 +31,17 @@ internal data class KilledSessionRestorePlan(
 )
 
 /**
- * Match the confirmed kill against every in-memory restore lane. Matching is
- * deliberately host-plus-name only: that is the identity carried by the
- * lifecycle signal, and same-name recreation is allowed to clear the old
- * invalidation when its open signal arrives.
+ * Match the confirmed kill against every in-memory restore lane by the exact
+ * host-plus-generation identity. A same-name successor must never have its
+ * restore lane invalidated by a delayed predecessor event.
  */
 internal fun planKilledSessionRestore(
     killed: KilledSession,
     state: KilledSessionRestoreSnapshot,
 ): KilledSessionRestorePlan? {
     fun isKilled(target: ConnectionTarget?): Boolean =
-        target?.hostId == killed.hostId && target.sessionName == killed.sessionName
+        target?.hostId == killed.hostId &&
+            tmuxSessionGenerationOrNull(target.tmuxSessionId, target.sessionCreated) == killed.generation
 
     val activeWasKilled = isKilled(state.activeTarget)
     val connectingWasKilled = isKilled(state.connectingTarget)

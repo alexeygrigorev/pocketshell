@@ -11,6 +11,8 @@ import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxRead
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -109,8 +111,17 @@ class FolderListGatewaySshLeaseTest {
         // command strings the gateway sends rather than a fragile substring.
         val hasOldQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t '=old'\\''s'")
         val hasNewQuoted = ReposRemoteSource.pathAwareCommand("tmux has-session -t '=new name'")
+        val inspectOldQuoted = ReposRemoteSource.pathAwareCommand(
+            "${TmuxRead.CLIENT} display-message -p -t '=old'\\''s:' '#{session_id} #{session_created}'",
+        )
+        val inspectNewQuoted = ReposRemoteSource.pathAwareCommand(
+            "${TmuxRead.CLIENT} display-message -p -t '=new name:' '#{session_id} #{session_created}'",
+        )
         val session = FakeSshSession { command ->
             when (command) {
+                inspectOldQuoted,
+                inspectNewQuoted,
+                -> ExecResult(stdout = "\$7 1700000007\n", stderr = "", exitCode = 0)
                 hasOldQuoted ->
                     ExecResult(stdout = "", stderr = "", exitCode = 1)
                 hasNewQuoted ->
@@ -135,17 +146,61 @@ class FolderListGatewaySshLeaseTest {
             passphrase = null,
             oldName = "old's",
             newName = "new name",
+            expectedGeneration = TmuxSessionGeneration("\$7", 1700000007L),
         )
 
         assertTrue(result.isSuccess)
         assertEquals(
             listOf(
-                // Issue #1820: the `-t` LOOKUPS are exact (`=`); the NEW name is
-                // created, not resolved, so it stays bare.
-                "tmux rename-session -t '=old'\\''s' 'new name'",
+                // The old name is checked against the captured generation, then
+                // the rename targets the stable tmux session id. The NEW name
+                // is created, not resolved, so it stays bare.
+                "${TmuxRead.CLIENT} display-message -p -t '=old'\\''s:' '#{session_id} #{session_created}'",
+                "tmux rename-session -t '\$7' 'new name'",
                 "tmux has-session -t '=old'\\''s'",
-                "tmux has-session -t '=new name'",
+                "${TmuxRead.CLIENT} display-message -p -t '=new name:' '#{session_id} #{session_created}'",
             ).map { ReposRemoteSource.pathAwareCommand(it) },
+            session.execCommands,
+        )
+    }
+
+    @Test
+    fun renameSessionRefusesSameNameSuccessorBeforeIssuingRename() = runTest {
+        val inspectOld = ReposRemoteSource.pathAwareCommand(
+            "${TmuxRead.CLIENT} display-message -p -t '=work:' '#{session_id} #{session_created}'",
+        )
+        val session = FakeSshSession { command ->
+            if (command == inspectOld) {
+                // The live row is a successor. The delayed rename still carries
+                // the predecessor generation captured by the ViewModel.
+                ExecResult(stdout = "\$8 1700000008\n", stderr = "", exitCode = 0)
+            } else {
+                ExecResult(stdout = "", stderr = "", exitCode = 0)
+            }
+        }
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = ActiveTmuxClients(),
+            sshLeaseManager = SshLeaseManager(
+                connector = CountingConnector(session),
+                scope = this,
+                idleTtlMillis = 30_000L,
+            ),
+        )
+
+        val result = gateway.renameSession(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            oldName = "work",
+            newName = "renamed",
+            expectedGeneration = TmuxSessionGeneration("\$7", 1700000007L),
+        )
+
+        assertTrue("a same-name successor must reject the delayed rename", result.isFailure)
+        assertEquals(
+            "generation mismatch must stop before tmux rename-session can touch the successor",
+            listOf(inspectOld),
             session.execCommands,
         )
     }

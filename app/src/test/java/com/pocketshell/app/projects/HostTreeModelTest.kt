@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
@@ -140,7 +141,7 @@ class HostTreeModelTest {
     }
 
     @Test
-    fun reconcileUpdatesDurableTmuxIdentityForSameNameSession() {
+    fun reconcileReplacesSameNameSessionWhenGenerationChanges() {
         val tree = HostTreeModel()
         tree.bindHost(1L)
         tree.reconcile(
@@ -150,6 +151,9 @@ class HostTreeModelTest {
                         "alpha",
                         tmuxSessionId = "\$0",
                         sessionCreated = 100L,
+                        agentKind = SessionAgentKind.Claude,
+                        recordedProfile = "Claude (old)",
+                        windows = listOf(window(0, "@old")),
                     ),
                 ),
             ),
@@ -163,6 +167,9 @@ class HostTreeModelTest {
                         "alpha",
                         tmuxSessionId = "\$1",
                         sessionCreated = 200L,
+                        agentKind = SessionAgentKind.Codex,
+                        recordedProfile = "Codex (new)",
+                        windows = listOf(window(1, "@new")),
                     ),
                 ),
             ),
@@ -173,6 +180,91 @@ class HostTreeModelTest {
         assertEquals("alpha", alpha.sessionName)
         assertEquals("\$1", alpha.tmuxSessionId)
         assertEquals(200L, alpha.sessionCreated)
+        assertEquals(SessionAgentKind.Codex, alpha.agentKind)
+        assertEquals("Codex (new)", alpha.recordedProfile)
+        assertEquals(listOf("@new"), alpha.windows.map { it.windowId })
+    }
+
+    @Test
+    fun degradedSameNameProbeCannotReplaceExactGeneration() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        val generation = TmuxSessionGeneration("\$4", 1_710_000_000L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "work",
+                        tmuxSessionId = generation.sessionId,
+                        sessionCreated = generation.createdEpochSeconds,
+                        agentKind = SessionAgentKind.Claude,
+                        recordedProfile = "Claude (old)",
+                    ),
+                ),
+            ),
+            now = 100L,
+        )
+
+        // A degraded probe carries the name but no generation. It may not
+        // authorize deletion or state transfer from the exact held node.
+        tree.reconcile(
+            snapshot(listOf(session("work", agentKind = SessionAgentKind.Probing))),
+            now = 200L,
+        )
+
+        val held = tree.sessionEntries().single()
+        assertEquals(generation.sessionId, held.tmuxSessionId)
+        assertEquals(generation.createdEpochSeconds, held.sessionCreated)
+        assertEquals(SessionAgentKind.Claude, held.agentKind)
+        assertEquals("Claude (old)", held.recordedProfile)
+    }
+
+    @Test
+    fun delayedNameOnlyKillCannotRemoveSameNameSuccessorGeneration() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "work",
+                        tmuxSessionId = "\$4",
+                        sessionCreated = 1_710_000_000L,
+                        agentKind = SessionAgentKind.Claude,
+                        recordedProfile = "Claude (old)",
+                    ),
+                ),
+            ),
+            now = 100L,
+        )
+
+        val oldGeneration = TmuxSessionGeneration("\$4", 1_710_000_000L)
+        val successorGeneration = TmuxSessionGeneration("\$9", 1_720_000_000L)
+
+        // The old lifecycle event is delayed until after the authoritative probe
+        // has already observed the same-name successor. The exact-generation
+        // mutation must now be an idempotent no-op for the old generation.
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        "work",
+                        tmuxSessionId = "\$9",
+                        sessionCreated = 1_720_000_000L,
+                        agentKind = SessionAgentKind.Codex,
+                        recordedProfile = "Codex (new)",
+                    ),
+                ),
+            ),
+            now = 200L,
+        )
+
+        assertFalse(tree.removeSession(oldGeneration))
+        val successor = tree.sessionEntries().singleOrNull()
+        assertEquals(successorGeneration.sessionId, successor?.tmuxSessionId)
+        assertEquals(successorGeneration.createdEpochSeconds, successor?.sessionCreated)
+        assertEquals(SessionAgentKind.Codex, successor?.agentKind)
+        assertEquals("Codex (new)", successor?.recordedProfile)
     }
 
     // --- Sticky agent-ness (#716) ----------------------------------------
@@ -606,10 +698,23 @@ class HostTreeModelTest {
     fun removeSessionDropsRowImmediatelyById() {
         val tree = HostTreeModel()
         tree.bindHost(1L)
-        tree.reconcile(snapshot(listOf(session("alpha"), session("beta"))), now = 100L)
-        assertTrue(tree.removeSession("beta"))
+        val alphaGeneration = TmuxSessionGeneration("\$alpha", 1L)
+        val betaGeneration = TmuxSessionGeneration("\$beta", 2L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("alpha", tmuxSessionId = alphaGeneration.sessionId, sessionCreated = alphaGeneration.createdEpochSeconds),
+                    session("beta", tmuxSessionId = betaGeneration.sessionId, sessionCreated = betaGeneration.createdEpochSeconds),
+                ),
+            ),
+            now = 100L,
+        )
+        assertTrue(tree.removeSession(betaGeneration))
         assertEquals(listOf("alpha"), tree.sessionEntries().map { it.sessionName })
-        assertFalse("removing an unknown session is a no-op", tree.removeSession("ghost"))
+        assertFalse(
+            "removing an unknown generation is a no-op",
+            tree.removeSession(TmuxSessionGeneration("\$ghost", 3L)),
+        )
     }
 
     @Test
@@ -749,9 +854,107 @@ class HostTreeModelTest {
     fun renameSessionPreservesSlot() {
         val tree = HostTreeModel()
         tree.bindHost(1L)
-        tree.reconcile(snapshot(listOf(session("a"), session("b"), session("c"))), now = 100L)
-        assertTrue(tree.renameSession("b", "b2"))
+        val generation = TmuxSessionGeneration("\$2", 1_710_000_002L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session("a"),
+                    session(
+                        name = "b",
+                        tmuxSessionId = generation.sessionId,
+                        sessionCreated = generation.createdEpochSeconds,
+                    ),
+                    session("c"),
+                ),
+            ),
+            now = 100L,
+        )
+        assertTrue(tree.renameSession(generation, "b2"))
         assertEquals(listOf("a", "b2", "c"), tree.sessionEntries().map { it.sessionName })
+    }
+
+    @Test
+    fun renameExactGenerationRekeysNameIndexesAndExportWithoutChangingState() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        val generation = TmuxSessionGeneration("$" + "4", 1_710_000_000L)
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        name = "old-name",
+                        tmuxSessionId = generation.sessionId,
+                        sessionCreated = generation.createdEpochSeconds,
+                        agentKind = SessionAgentKind.Claude,
+                        recordedProfile = "Claude (old)",
+                        windows = listOf(window(0, "@old")),
+                    ),
+                ),
+            ),
+            now = 100L,
+        )
+
+        assertTrue(tree.renameSession(generation, "new-name"))
+
+        val row = tree.sessionEntries().single()
+        assertEquals("new-name", row.sessionName)
+        assertEquals(generation.sessionId, row.tmuxSessionId)
+        assertEquals(generation.createdEpochSeconds, row.sessionCreated)
+        assertEquals(SessionAgentKind.Claude, row.agentKind)
+        assertEquals("Claude (old)", row.recordedProfile)
+        assertEquals(listOf("@old"), row.windows.map { it.windowId })
+        assertEquals(generation, tree.generationForSession("new-name"))
+        assertNull(tree.generationForSession("old-name"))
+
+        val projection = tree.snapshotForProjection()
+        assertTrue("new-name" in projection.sessionFolderPaths)
+        assertFalse("old-name" in projection.sessionFolderPaths)
+        assertEquals("/home/alexey/git/old-name", projection.sessionFolderPaths["new-name"])
+
+        val exported = tree.exportNodes().single()
+        assertEquals("new-name", exported.sessionName)
+        assertEquals(generation, exported.generation)
+    }
+
+    @Test
+    fun delayedPredecessorRenameCannotRenameSameNameSuccessor() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        val predecessor = TmuxSessionGeneration("\$5", 1_710_000_005L)
+        val successor = TmuxSessionGeneration("\$6", 1_720_000_006L)
+
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        name = "work",
+                        tmuxSessionId = predecessor.sessionId,
+                        sessionCreated = predecessor.createdEpochSeconds,
+                    ),
+                ),
+            ),
+            now = 100L,
+        )
+
+        // The async rename captured predecessor before the remote operation.
+        // Reconcile installs a same-name successor while that operation is in
+        // flight; the old generation must no longer authorize a local rename.
+        tree.reconcile(
+            snapshot(
+                listOf(
+                    session(
+                        name = "work",
+                        tmuxSessionId = successor.sessionId,
+                        sessionCreated = successor.createdEpochSeconds,
+                    ),
+                ),
+            ),
+            now = 200L,
+        )
+
+        assertFalse(tree.renameSession(predecessor, "renamed"))
+        assertEquals("work", tree.sessionEntries().single().sessionName)
+        assertEquals(successor, tree.generationForSession("work"))
     }
 
     // --- Intrinsic expansion (#471) --------------------------------------

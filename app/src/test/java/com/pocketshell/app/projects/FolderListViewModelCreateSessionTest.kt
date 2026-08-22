@@ -5,6 +5,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.tmux.SessionLifecycleSignals
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -669,6 +670,7 @@ class FolderListViewModelCreateSessionTest {
             passphrase: CharArray?,
             oldName: String,
             newName: String,
+            expectedGeneration: TmuxSessionGeneration,
         ): Result<Unit> = error("not used")
     }
 

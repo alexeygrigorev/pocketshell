@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -27,12 +28,14 @@ class HostTreeModelHydrateTest {
         folder: String = "/home/alexey/git/$name",
         collapsed: Boolean = false,
         foreign: SessionAgentKind? = null,
+        generation: TmuxSessionGeneration? = null,
     ) = HostTreeModel.HydratedNode(
         sessionName = name,
         order = order,
         folderPath = FolderListViewModel.canonicalisePath(folder),
         collapsed = collapsed,
         foreignGuess = foreign,
+        generation = generation,
     )
 
     private fun probe(names: List<String>) = HostTreeModel.ProbeSnapshot(
@@ -131,9 +134,10 @@ class HostTreeModelHydrateTest {
     fun exportRoundTripsOrderFolderAndCollapseButNotConfirmedKind() {
         val tree = HostTreeModel()
         tree.bindHost(1L)
+        val betaGeneration = TmuxSessionGeneration("\$7", 1_700_000_007L)
         tree.hydrate(
             listOf(
-                node("beta", order = 0),
+                node("beta", order = 0, generation = betaGeneration),
                 node("alpha", order = 1, collapsed = true),
             ),
         )
@@ -143,6 +147,7 @@ class HostTreeModelHydrateTest {
         assertEquals(listOf(0, 1), exported.map { it.order })
         val alpha = exported.first { it.sessionName == "alpha" }
         assertTrue("the user's collapse choice round-trips", alpha.collapsed)
+        assertEquals(betaGeneration, exported.first { it.sessionName == "beta" }.generation)
     }
 
     @Test
@@ -183,8 +188,15 @@ class HostTreeModelHydrateTest {
     fun applyReconcileGoneDeltaPrunesInPlace() {
         val tree = HostTreeModel()
         tree.bindHost(1L)
-        tree.hydrate(listOf(node("keep", order = 0), node("drop", order = 1)))
-        val pruned = tree.applyReconcileGoneDelta(listOf("drop"))
+        val keepGeneration = TmuxSessionGeneration("\$keep", 1L)
+        val dropGeneration = TmuxSessionGeneration("\$drop", 2L)
+        tree.hydrate(
+            listOf(
+                node("keep", order = 0, generation = keepGeneration),
+                node("drop", order = 1, generation = dropGeneration),
+            ),
+        )
+        val pruned = tree.applyReconcileGoneDelta(listOf(dropGeneration))
         assertTrue(pruned)
         assertEquals(listOf("keep"), tree.sessionEntries().map { it.sessionName })
     }
@@ -195,17 +207,20 @@ class HostTreeModelHydrateTest {
         tree.bindHost(1L)
         // A freshly app-inserted session (optimistic marker set now) must be
         // spared from a gone-delta that has not yet observed it.
+        val freshGeneration = TmuxSessionGeneration("\$fresh", 3L)
         tree.insertSession(
             FolderSessionEntry(
                 sessionName = "fresh",
                 lastActivity = 1L,
                 attached = false,
                 agentKind = SessionAgentKind.Shell,
+                tmuxSessionId = freshGeneration.sessionId,
+                sessionCreated = freshGeneration.createdEpochSeconds,
             ),
             folderPath = "/home/alexey/git/fresh",
             now = 1_000L,
         )
-        val pruned = tree.applyReconcileGoneDelta(listOf("fresh"), now = 1_005L)
+        val pruned = tree.applyReconcileGoneDelta(listOf(freshGeneration), now = 1_005L)
         assertFalse("a node within optimistic grace is spared", pruned)
         assertEquals(listOf("fresh"), tree.sessionEntries().map { it.sessionName })
     }

@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.annotation.VisibleForTesting
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.prefs.DeferredPrefs
+import com.pocketshell.app.tmux.TmuxSessionGeneration
+import com.pocketshell.app.tmux.tmuxSessionGenerationOrNull
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -134,8 +136,11 @@ class LastSessionStore @VisibleForTesting internal constructor(
     @Volatile
     private var killedTombstone: SessionIdentity? = null
 
-    /** Minimal (hostId, sessionName) identity used for kill matching (#834). */
-    private data class SessionIdentity(val hostId: Long, val sessionName: String)
+    /** Exact host-scoped tmux generation used for kill matching (#834). */
+    private data class SessionIdentity(
+        val hostId: Long,
+        val generation: TmuxSessionGeneration,
+    )
 
     /**
      * Persisted snapshot of the last active `tmux -CC` session view.
@@ -160,7 +165,11 @@ class LastSessionStore @VisibleForTesting internal constructor(
         val sessionCreated: Long? = null,
         val composerDraft: String,
         val savedAtMillis: Long,
-    )
+    ) {
+        /** The complete tmux identity, when this snapshot carried one. */
+        val generation: TmuxSessionGeneration?
+            get() = tmuxSessionGenerationOrNull(tmuxSessionId, sessionCreated)
+    }
 
     /**
      * Persist [session] as the last active view. Called from
@@ -180,7 +189,7 @@ class LastSessionStore @VisibleForTesting internal constructor(
         // longer exists, and the next foreground/process-death restore would
         // reopen it (→ #818 Conversation tab of a deleted session, the #686
         // hazard). Clear the on-disk record instead of writing the dead one.
-        if (killedTombstone == session.identity()) {
+        if (session.identity()?.let { it == killedTombstone } == true) {
             Log.i(
                 LAST_SESSION_LOG_TAG,
                 "last-session-save-suppressed trigger=onStop reason=killed " +
@@ -337,23 +346,31 @@ class LastSessionStore @VisibleForTesting internal constructor(
      *     [save] for the SAME dead session (user still parked on the now-dead
      *     screen) is refused rather than re-arming the restore.
      *
-     * Matching is on (hostId, sessionName) — the same identity
-     * [com.pocketshell.app.tmux.SessionLifecycleSignals] broadcasts. A kill on
-     * one session never invalidates a different stored session.
+     * Matching is on (hostId, exact tmux generation). The display name is only
+     * diagnostic copy; it is never used to invalidate a snapshot or suppress a
+     * save. A delayed predecessor event therefore cannot clear or suppress a
+     * same-name successor.
      *
      * @return `true` when there was no matching persisted record or its clear
      *   was durably acknowledged; `false` when the matching clear failed.
      */
-    fun onSessionKilled(hostId: Long, sessionName: String): Boolean {
-        val trimmed = sessionName.trim()
-        if (trimmed.isEmpty()) return true
-        val killed = SessionIdentity(hostId = hostId, sessionName = trimmed)
+    fun onSessionKilled(
+        hostId: Long,
+        generation: TmuxSessionGeneration,
+        lastKnownName: String,
+    ): Boolean {
+        val exact = tmuxSessionGenerationOrNull(
+            generation.sessionId,
+            generation.createdEpochSeconds,
+        ) ?: return true
+        val killed = SessionIdentity(hostId = hostId, generation = exact)
         killedTombstone = killed
         val stored = peek(maxAgeMillis = Long.MAX_VALUE)
         if (stored != null && stored.identity() == killed) {
             Log.i(
                 LAST_SESSION_LOG_TAG,
-                "last-session-clear trigger=killed hostId=$hostId session=$trimmed",
+                "last-session-clear trigger=killed hostId=$hostId " +
+                    "generation=$exact session=${lastKnownName.trim()}",
             )
             return clearDurably("clear-killed")
         }
@@ -443,32 +460,36 @@ class LastSessionStore @VisibleForTesting internal constructor(
     }
 
     /**
-     * Issue #834: a session of [sessionName] on [hostId] was legitimately
+     * Issue #834: a session generation on [hostId] was legitimately
      * (re)opened. Clears the kill tombstone for that exact identity so a
-     * recreated same-name session is restorable again.
+     * recreated same-name generation is restorable again.
      *
      * tmux session names are user-chosen and habitually reused (`main`,
      * `work`, `claude-main`), so a kill tombstone must NOT outlive the
      * recreation of that identity — otherwise the next `onStop` [save] of the
      * recreated live session is wrongly suppressed and the #177 fast-resume
      * breaks for that name forever (the over-suppression the reviewer flagged).
-     * Matching is on (hostId, sessionName), identical to [onSessionKilled], so
-     * opening a DIFFERENT session never clears another session's tombstone.
+     * Matching is on (hostId, exact tmux generation), identical to
+     * [onSessionKilled], so opening a DIFFERENT generation never clears another
+     * session's tombstone.
      */
-    fun onSessionOpened(hostId: Long, sessionName: String) {
-        val trimmed = sessionName.trim()
-        if (trimmed.isEmpty()) return
-        if (killedTombstone == SessionIdentity(hostId = hostId, sessionName = trimmed)) {
+    fun onSessionOpened(hostId: Long, generation: TmuxSessionGeneration) {
+        val exact = tmuxSessionGenerationOrNull(
+            generation.sessionId,
+            generation.createdEpochSeconds,
+        ) ?: return
+        if (killedTombstone == SessionIdentity(hostId = hostId, generation = exact)) {
             Log.i(
                 LAST_SESSION_LOG_TAG,
-                "last-session-tombstone-clear trigger=opened hostId=$hostId session=$trimmed",
+                "last-session-tombstone-clear trigger=opened hostId=$hostId " +
+                    "generation=$exact",
             )
             killedTombstone = null
         }
     }
 
-    private fun LastSession.identity(): SessionIdentity =
-        SessionIdentity(hostId = hostId, sessionName = sessionName)
+    private fun LastSession.identity(): SessionIdentity? =
+        generation?.let { SessionIdentity(hostId = hostId, generation = it) }
 
     /**
      * Rebuild the navigation destination from a persisted [LastSession].

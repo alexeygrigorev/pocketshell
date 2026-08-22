@@ -1,5 +1,7 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.tmux.TmuxSessionGeneration
+import com.pocketshell.app.tmux.tmuxSessionGenerationOrNull
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.SessionAgentState
@@ -21,7 +23,7 @@ import com.pocketshell.uikit.model.SessionAgentState
  * [HostTreeModel] makes the **held tree the source of truth**:
  *
  *  - Node existence, order, and expansion are **intrinsic state** — a session
- *    keeps its slot because it is the same keyed entry in the same
+ *    keeps its slot because it is the same generation-keyed entry in the same
  *    [LinkedHashMap] position, not because a stabilizer re-froze the order.
  *  - The tree is **held across opens** — only a host *change* resets it
  *    ([reset]). Re-opening the same host renders the held tree INSTANTLY with
@@ -29,7 +31,7 @@ import com.pocketshell.uikit.model.SessionAgentState
  *  - A probe becomes a **reconcile** ([reconcile]): diff incoming keys against
  *    held keys → add new, remove gone, update-in-place existing — never
  *    blank-and-rebuild.
- *  - App-initiated changes mutate the tree **directly by id**
+ *  - App-initiated changes mutate the tree **directly by generation**
  *    ([removeSession], [insertWindow]) the instant the app knows about them
  *    (#653 stop→remove, #678 create-window→insert), so the probe is a
  *    confirmation, not the source of truth for our own actions.
@@ -76,16 +78,28 @@ internal class HostTreeModel {
         private set
 
     /**
-     * Keyed session nodes in **insertion order** — the intrinsic display order
-     * that replaces the #639 `stableSessionOrder` stabilizer. A session keeps
-     * its slot across reconciles because it stays the same map entry; only
-     * genuinely new sessions are appended (sorted among new peers), and removed
-     * sessions drop out.
+     * Exact live session nodes keyed by the tmux generation identity. A
+     * same-name recreation therefore cannot update this map entry in place.
      */
-    private val sessions = LinkedHashMap<String, SessionNode>()
+    private val sessions = LinkedHashMap<TmuxSessionGeneration, SessionNode>()
 
-    /** Folder path per session, canonicalised. Mirrors `lastSessionFolderPaths`. */
-    private val sessionFolderPaths = LinkedHashMap<String, String>()
+    /**
+     * Legacy/degraded probe rows that have no complete generation. These rows
+     * are display-only until an authoritative probe supplies an exact identity;
+     * no destructive lifecycle event can target them.
+     */
+    private val provisionalSessions = LinkedHashMap<String, SessionNode>()
+
+    /** Intrinsic display order for exact and provisional nodes. */
+    private val sessionOrder = LinkedHashMap<SessionNodeKey, Unit>()
+
+    /** Secondary name index used only for display lookup and rename routing. */
+    private val sessionNameIndex = LinkedHashMap<String, SessionNodeKey>()
+
+    private sealed interface SessionNodeKey {
+        data class Exact(val generation: TmuxSessionGeneration) : SessionNodeKey
+        data class Provisional(val sessionName: String) : SessionNodeKey
+    }
 
     /** The host's watched-root overlay (Room `project_roots`). */
     private var watchedFolders: List<ProjectRootEntity> = emptyList()
@@ -95,18 +109,16 @@ internal class HostTreeModel {
     private var resolvedWatchedRootPaths: Map<String, String> = emptyMap()
 
     /**
-     * #729 (#679 Slice 2): sticky bucket placement memory. Maps a session name
-     * to the resolved root *match* path it was last AUTHORITATIVELY placed under
+     * #729 (#679 Slice 2): sticky bucket placement memory. Each held node stores
+     * the resolved root *match* path it was last AUTHORITATIVELY placed under
      * by a healthy probe. A reconcile refreshes the entry whenever the live
      * probe resolves the session under a watched root, and drops it when the
      * session authoritatively moves out of every root. [project] threads this
      * into [FolderListViewModel.buildFolderTree] so a momentarily-degraded
      * `resolvedWatchedRootPaths` cannot flash an already-placed session into
-     * "Other folders" — the placement is held by node id, not recomputed solely
+     * "Other folders" — the placement is held by generation, not recomputed solely
      * from the degraded roots on every projection.
      */
-    private val stickyBuckets = LinkedHashMap<String, String>()
-
     /**
      * Optimistic folder overlay (#653 create/import). Holds canonical path →
      * label for a folder the app created locally before a probe confirms it.
@@ -145,6 +157,8 @@ internal class HostTreeModel {
      * to be re-derived each probe, plus the optimistic-insert grace marker.
      */
     private data class SessionNode(
+        var sessionName: String,
+        var folderPath: String,
         var lastActivity: Long?,
         var attached: Boolean,
         var agentKind: SessionAgentKind,
@@ -175,6 +189,8 @@ internal class HostTreeModel {
          * [tmuxSessionId] for durable identity construction.
          */
         var sessionCreated: Long?,
+        /** Held bucket placement, scoped to this exact node/generation. */
+        var stickyBucket: String? = null,
         /**
          * Wall-clock millis this node was inserted optimistically by an
          * app-initiated action (#653/#678), or `null` if it came from a probe.
@@ -207,12 +223,13 @@ internal class HostTreeModel {
         hasSnapshot = false
         lastReconciledAt = null
         sessions.clear()
-        sessionFolderPaths.clear()
+        provisionalSessions.clear()
+        sessionOrder.clear()
+        sessionNameIndex.clear()
         watchedFolders = emptyList()
         scannedProjectFoldersByRoot = emptyMap()
         historyProjectFoldersByRoot = emptyMap()
         resolvedWatchedRootPaths = emptyMap()
-        stickyBuckets.clear()
         optimisticFolders.clear()
         userCollapsedProjectPaths = emptySet()
         expandedProjectPaths = emptySet()
@@ -256,7 +273,17 @@ internal class HostTreeModel {
 
         val collapsedPaths = LinkedHashSet<String>()
         nodes.forEach { node ->
+            val canonicalFolder = FolderListViewModel.canonicalisePath(node.folderPath)
+                .ifBlank { FolderListViewModel.UNTRACKED_PATH }
+            val key = node.generation?.let(SessionNodeKey::Exact)
+                ?: SessionNodeKey.Provisional(node.sessionName)
+            // A malformed/colliding registry entry must not create two visible
+            // rows for one display name. The first persisted row wins, and the
+            // following authoritative reconcile supplies the live identity.
+            if (sessionNameIndex.containsKey(node.sessionName)) return@forEach
             val placeholder = SessionNode(
+                sessionName = node.sessionName,
+                folderPath = canonicalFolder,
                 lastActivity = null,
                 attached = false,
                 agentKind = node.foreignGuess ?: SessionAgentKind.Probing,
@@ -268,16 +295,13 @@ internal class HostTreeModel {
                 // the recorded profile — the first reconcile re-reads it from the
                 // host @ps_agent_profile option (#858).
                 recordedProfile = null,
-                tmuxSessionId = null,
-                sessionCreated = null,
+                tmuxSessionId = node.generation?.sessionId,
+                sessionCreated = node.generation?.createdEpochSeconds,
                 // A registry seed is NOT app-inserted: leave it prunable by the
                 // first reconcile if the session is gone.
                 optimisticSince = null,
             )
-            sessions[node.sessionName] = placeholder
-            val canonicalFolder = FolderListViewModel.canonicalisePath(node.folderPath)
-                .ifBlank { FolderListViewModel.UNTRACKED_PATH }
-            sessionFolderPaths[node.sessionName] = canonicalFolder
+            addNode(key, placeholder)
             if (node.collapsed && canonicalFolder.isNotBlank()) {
                 collapsedPaths.add(canonicalFolder)
             }
@@ -380,14 +404,14 @@ internal class HostTreeModel {
      */
     fun exportNodes(): List<HydratedNode> {
         var order = 0
-        return sessions.entries.map { (name, node) ->
-            val folderPath = sessionFolderPaths[name] ?: FolderListViewModel.UNTRACKED_PATH
+        return orderedNodes().map { (key, node) ->
             HydratedNode(
-                sessionName = name,
+                sessionName = node.sessionName,
                 order = order++,
-                folderPath = folderPath,
-                collapsed = folderPath in userCollapsedProjectPaths,
+                folderPath = node.folderPath,
+                collapsed = node.folderPath in userCollapsedProjectPaths,
                 foreignGuess = node.agentKind.takeIf { it.isForeignGuessExportable() },
+                generation = (key as? SessionNodeKey.Exact)?.generation,
             )
         }
     }
@@ -404,6 +428,7 @@ internal class HostTreeModel {
         val folderPath: String,
         val collapsed: Boolean,
         val foreignGuess: SessionAgentKind? = null,
+        val generation: TmuxSessionGeneration? = null,
     )
 
     /**
@@ -439,67 +464,89 @@ internal class HostTreeModel {
      *   stamp [lastReconciledAt]. Injectable for deterministic tests.
      */
     fun reconcile(snapshot: ProbeSnapshot, now: Long = System.currentTimeMillis()) {
-        val incomingByName = snapshot.sessions.associateBy { it.sessionName }
-        val incomingNames = incomingByName.keys
-
-        // Remove held sessions the probe no longer reports, sparing nodes still
-        // inside their optimistic grace window.
-        val toRemove = sessions.keys.filter { name ->
-            if (name in incomingNames) return@filter false
-            val node = sessions[name]
-            val since = node?.optimisticSince
-            // Prune unless the node was optimistically inserted recently.
-            since == null || (now - since) >= OPTIMISTIC_GRACE_MS
-        }
-        toRemove.forEach { name ->
-            sessions.remove(name)
-            sessionFolderPaths.remove(name)
-        }
-
-        // Add new + update existing, preserving the insertion order of held
-        // sessions and appending genuinely-new ones in probe order.
+        val incomingByGeneration = LinkedHashMap<TmuxSessionGeneration, FolderSessionEntry>()
+        val incomingProvisionalByName = LinkedHashMap<String, FolderSessionEntry>()
         snapshot.sessions.forEach { entry ->
-            val existing = sessions[entry.sessionName]
-            if (existing == null) {
-                sessions[entry.sessionName] = entry.toNode(optimisticSince = null)
+            val generation = entry.generationOrNull()
+            if (generation == null) {
+                incomingProvisionalByName[entry.sessionName] = entry
             } else {
-                existing.lastActivity = entry.lastActivity
-                existing.attached = entry.attached
-                // Issue #1237: the agent state is NOT sticky — take the latest
-                // read. The `@ps_agent_state` option is authoritative and a
-                // resting state that has gone stale is already dropped to
-                // Unknown upstream (resolveSessionAgentState), so a fresh read
-                // never wrongly persists an old idle/waiting chip.
-                existing.agentState = entry.agentState
-                // Issue #716: agent-ness is STICKY. A known agent kind is only
-                // overwritten by another agent kind or a CONFIRMED Shell — an
-                // incoming Probing must NOT clobber a known agent.
-                existing.agentKind = mergeAgentKind(existing.agentKind, entry.agentKind)
-                // Issue #858 / #889: reconcile the recorded profile against the
-                // host. A fresh NON-NULL read is always authoritative (a z.ai
-                // launch or a profile change). A BLANK read is authoritative
-                // ONLY when the incoming read is itself authoritative — i.e. it
-                // carries a real recorded agent kind or a confirmed shell (the
-                // host returned a live `@ps_agent_kind`, not a slow/incomplete
-                // probe). That blank means the host CLEARED `@ps_agent_profile`
-                // (a default relaunch in the same tmux session, #889): the stale
-                // z.ai chip MUST drop, not stay sticky. A blank read from a
-                // DEGRADED probe (incoming kind still Probing/Exited —
-                // `@ps_agent_kind` not read) keeps the held label so a transient
-                // blank doesn't flicker the chip off (the #858 stickiness intent).
-                existing.recordedProfile = when {
-                    entry.recordedProfile != null -> entry.recordedProfile
-                    entry.agentKind.isAuthoritativeRead -> null
-                    else -> existing.recordedProfile
-                }
-                existing.tmuxSessionId = entry.tmuxSessionId
-                existing.sessionCreated = entry.sessionCreated
-                existing.windows = mergeWindows(existing.windows, entry.windows.map { it.toState() })
-                // The probe confirmed this node — it is no longer optimistic.
-                existing.optimisticSince = null
+                incomingByGeneration[generation] = entry
             }
-            sessionFolderPaths[entry.sessionName] = snapshot.folderPaths[entry.sessionName]
+        }
+        val incomingExactNames = incomingByGeneration.values.mapTo(linkedSetOf()) { it.sessionName }
+
+        // A generation match is the ONLY in-place update. A same-name row with
+        // another generation is an explicit replacement: remove the predecessor
+        // first so agent/profile/window state cannot leak into the successor.
+        orderedNodes().forEach { (key, node) ->
+            val generation = (key as? SessionNodeKey.Exact)?.generation
+            val generationStillLive = generation != null && generation in incomingByGeneration
+            if (generationStillLive) return@forEach
+            val provisionalStillLive =
+                key is SessionNodeKey.Provisional && key.sessionName in incomingProvisionalByName
+            if (provisionalStillLive) return@forEach
+            // A degraded name-only row cannot prove that an exact held row was
+            // replaced or killed. Keep the exact node until a probe supplies
+            // either its matching generation, a different exact generation, or
+            // no row at all.
+            if (key is SessionNodeKey.Exact && node.sessionName in incomingProvisionalByName) {
+                return@forEach
+            }
+
+            val sameNameIsPresent = node.sessionName in incomingExactNames
+            val replacement = sameNameIsPresent
+            val since = node.optimisticSince
+            val outsideGrace = since == null || (now - since) >= OPTIMISTIC_GRACE_MS
+            if (replacement || outsideGrace) {
+                removeNode(key)
+            }
+        }
+
+        // Add new + update existing, preserving the insertion order of exact
+        // generations. A rename with the same generation keeps its slot; a
+        // same-name recreation gets a new node and therefore fresh state.
+        snapshot.sessions.forEach { entry ->
+            val generation = entry.generationOrNull()
+            val folderPath = snapshot.folderPaths[entry.sessionName]
                 ?: FolderListViewModel.UNTRACKED_PATH
+            if (generation == null) {
+                // An exact held row wins over a degraded same-name observation;
+                // do not create a provisional alias or overwrite its state.
+                if (sessionNameIndex[entry.sessionName] is SessionNodeKey.Exact) {
+                    return@forEach
+                }
+                val existing = provisionalSessions[entry.sessionName]
+                if (existing == null) {
+                    addNode(
+                        SessionNodeKey.Provisional(entry.sessionName),
+                        entry.toNode(folderPath = folderPath, optimisticSince = null),
+                    )
+                } else {
+                    updateNode(existing, entry, folderPath)
+                    existing.optimisticSince = null
+                }
+            } else {
+                val existing = sessions[generation]
+                if (existing == null) {
+                    // A provisional row for this display name has no state that
+                    // may be transferred into an exact generation.
+                    sessionNameIndex[entry.sessionName]?.let(::removeNode)
+                    addNode(
+                        SessionNodeKey.Exact(generation),
+                        entry.toNode(folderPath = folderPath, optimisticSince = null),
+                    )
+                } else {
+                    // A rename cannot alias another live node under the target
+                    // name. The exact generation remains the authority.
+                    sessionNameIndex[entry.sessionName]
+                        ?.takeUnless { it == SessionNodeKey.Exact(generation) }
+                        ?.let(::removeNode)
+                    renameNodeIfNeeded(existing, entry.sessionName, SessionNodeKey.Exact(generation))
+                    updateNode(existing, entry, folderPath)
+                    existing.optimisticSince = null
+                }
+            }
         }
 
         scannedProjectFoldersByRoot = snapshot.scannedProjectFoldersByRoot
@@ -511,7 +558,7 @@ internal class HostTreeModel {
         // A reconcile that observes a created folder (under a real session or
         // scan) retires its optimistic overlay entry.
         if (optimisticFolders.isNotEmpty()) {
-            val observed = sessionFolderPaths.values.toSet() +
+            val observed = orderedNodes().mapTo(mutableSetOf()) { it.second.folderPath } +
                 snapshot.scannedProjectFoldersByRoot.values.flatten()
                     .map(FolderListViewModel::canonicalisePath)
             optimisticFolders.keys.removeAll { it in observed }
@@ -537,26 +584,29 @@ internal class HostTreeModel {
      * node, never letting a degraded probe flash it into "Other folders".
      */
     private fun refreshStickyBuckets() {
-        stickyBuckets.keys.retainAll(sessionFolderPaths.keys)
         val livePlacements = FolderListViewModel.resolveStickyPlacements(
-            sessionFolderPaths = sessionFolderPaths,
+            sessionFolderPaths = orderedNodes().associate { (_, node) ->
+                node.sessionName to node.folderPath
+            },
             watchedFolders = watchedFolders,
             resolvedWatchedRootPaths = resolvedWatchedRootPaths,
         )
-        for ((name, cwd) in sessionFolderPaths) {
+        for ((_, node) in orderedNodes()) {
+            val name = node.sessionName
+            val cwd = node.folderPath
             val live = livePlacements[name]
             if (live != null) {
                 // Healthy placement — refresh the held root.
-                stickyBuckets[name] = live
+                node.stickyBucket = live
                 continue
             }
             // No live placement. Keep a held sticky root only while the cwd
             // still sits under it (degraded probe); otherwise the session
             // authoritatively left the root, so drop the entry.
-            val held = stickyBuckets[name]
+            val held = node.stickyBucket
             val canonicalCwd = FolderListViewModel.canonicalisePath(cwd)
             if (held != null && !FolderListViewModel.pathWithinRoot(canonicalCwd, held)) {
-                stickyBuckets.remove(name)
+                node.stickyBucket = null
             }
         }
     }
@@ -566,10 +616,18 @@ internal class HostTreeModel {
      * from the next [project] immediately; the following reconcile is a
      * confirmation, not the trigger. Returns `true` when a node was removed.
      */
-    fun removeSession(sessionName: String): Boolean {
-        if (sessions.remove(sessionName) == null) return false
-        sessionFolderPaths.remove(sessionName)
-        return true
+    fun removeSession(generation: TmuxSessionGeneration): Boolean {
+        return removeNode(SessionNodeKey.Exact(generation)) != null
+    }
+
+    /**
+     * Resolve a name to an exact generation for callers that only have a row's
+     * display name. A provisional row deliberately returns `null`, forcing the
+     * caller to request an authoritative reconcile instead of deleting by name.
+     */
+    fun generationForSession(sessionName: String): TmuxSessionGeneration? {
+        val key = sessionNameIndex[sessionName.trim()] as? SessionNodeKey.Exact ?: return null
+        return key.generation
     }
 
     /**
@@ -594,7 +652,7 @@ internal class HostTreeModel {
      */
     fun removeWindow(windowId: String): Boolean {
         if (windowId.isBlank()) return false
-        sessions.values.forEach { node ->
+        orderedNodes().forEach { (_, node) ->
             if (node.windows.any { it.windowId == windowId }) {
                 node.windows = node.windows.filterNot { it.windowId == windowId }
                 return true
@@ -604,24 +662,20 @@ internal class HostTreeModel {
     }
 
     /**
-     * Optimistically rename a session by id, preserving its slot, windows, and
-     * expansion (#653). The new name inherits the old node's insertion position
-     * so the row does not jump. Returns `true` when the rename applied.
+     * Optimistically rename one exact session generation, preserving its slot,
+     * windows, and expansion (#653). The new name inherits the old node's
+     * insertion position so the row does not jump. A display name is only a
+     * lookup hint at the UI boundary; it is never sufficient to authorize this
+     * mutation because a same-name successor may already occupy the row.
+     * Returns `true` when the rename applied.
      */
-    fun renameSession(oldName: String, newName: String): Boolean {
+    fun renameSession(generation: TmuxSessionGeneration, newName: String): Boolean {
+        val oldKey = SessionNodeKey.Exact(generation)
+        val node = nodeFor(oldKey) ?: return false
+        val oldName = node.sessionName
         if (oldName == newName) return false
-        val node = sessions[oldName] ?: return false
-        // Rebuild the map preserving order, swapping the key in place.
-        val rebuilt = LinkedHashMap<String, SessionNode>(sessions.size)
-        sessions.forEach { (name, value) ->
-            if (name == oldName) rebuilt[newName] = value else rebuilt[name] = value
-        }
-        sessions.clear()
-        sessions.putAll(rebuilt)
-        sessionFolderPaths[oldName]?.let { path ->
-            sessionFolderPaths.remove(oldName)
-            sessionFolderPaths[newName] = path
-        }
+        if (sessionNameIndex.containsKey(newName)) return false
+        renameNodeIfNeeded(node, newName, oldKey)
         return true
     }
 
@@ -642,47 +696,61 @@ internal class HostTreeModel {
      * slot); a new node is appended.
      */
     fun insertSession(entry: FolderSessionEntry, folderPath: String, now: Long = System.currentTimeMillis()) {
-        val existing = sessions[entry.sessionName]
-        if (existing == null) {
-            sessions[entry.sessionName] = entry.toNode(optimisticSince = now)
+        val generation = entry.generationOrNull()
+        if (generation == null) {
+            // A name-only insert is provisional. It may be displayed, but it
+            // cannot replace or authorize destructive mutation of an exact row.
+            if (sessionNameIndex[entry.sessionName] is SessionNodeKey.Exact) return
+            val existing = provisionalSessions[entry.sessionName]
+            if (existing == null) {
+                addNode(
+                    SessionNodeKey.Provisional(entry.sessionName),
+                    entry.toNode(folderPath = folderPath, optimisticSince = now),
+                )
+            } else {
+                updateNode(existing, entry, folderPath)
+                existing.optimisticSince = now
+            }
         } else {
-            existing.lastActivity = entry.lastActivity
-            existing.attached = entry.attached
-            existing.agentKind = entry.agentKind
-            existing.agentState = entry.agentState
-            existing.windows = entry.windows.map { it.toState() }
-            existing.recordedProfile = entry.recordedProfile
-            existing.tmuxSessionId = entry.tmuxSessionId
-            existing.sessionCreated = entry.sessionCreated
-            existing.optimisticSince = now
+            sessionNameIndex[entry.sessionName]
+                ?.takeUnless { it == SessionNodeKey.Exact(generation) }
+                ?.let(::removeNode)
+            val existing = sessions[generation]
+            if (existing == null) {
+                addNode(
+                    SessionNodeKey.Exact(generation),
+                    entry.toNode(folderPath = folderPath, optimisticSince = now),
+                )
+            } else {
+                renameNodeIfNeeded(existing, entry.sessionName, SessionNodeKey.Exact(generation))
+                updateNode(existing, entry, folderPath)
+                existing.optimisticSince = now
+            }
         }
-        sessionFolderPaths[entry.sessionName] =
-            FolderListViewModel.canonicalisePath(folderPath).ifBlank { FolderListViewModel.UNTRACKED_PATH }
         hasSnapshot = true
     }
 
     /**
      * Epic #821 slice C (issue #837): apply a `tree.reconcile` DELTA to the held
      * tree without a full reload — the "refresh to see which sessions are gone,
-     * without reloading everything" path. Prunes each session in [goneNames]
-     * from the held tree by id (sparing nodes still within their optimistic
+     * without reloading everything" path. Prunes each session in
+     * [goneGenerations] from the held tree by exact generation (sparing nodes
+     * still within their optimistic
      * grace, exactly like [reconcile]). Returns `true` when at least one node was
      * pruned, so the caller can persist + re-emit. ADDED sessions are NOT folded
      * here — they need a full probe to fetch their content, so the caller kicks a
      * reconcile when the delta reports additions.
      */
     fun applyReconcileGoneDelta(
-        goneNames: Collection<String>,
+        goneGenerations: Collection<TmuxSessionGeneration>,
         now: Long = System.currentTimeMillis(),
     ): Boolean {
         var pruned = false
-        goneNames.forEach { name ->
-            val node = sessions[name] ?: return@forEach
+        goneGenerations.forEach { generation ->
+            val node = sessions[generation] ?: return@forEach
             val since = node.optimisticSince
             if (since != null && (now - since) < OPTIMISTIC_GRACE_MS) return@forEach
-            sessions.remove(name)
-            sessionFolderPaths.remove(name)
-            stickyBuckets.remove(name)
+            removeNode(SessionNodeKey.Exact(generation))
             pruned = true
         }
         return pruned
@@ -702,7 +770,7 @@ internal class HostTreeModel {
 
     /** The maintained session list in intrinsic insertion order. */
     fun sessionEntries(): List<FolderSessionEntry> =
-        sessions.entries.map { (name, node) -> node.toEntry(name) }
+        orderedNodes().map { (_, node) -> node.toEntry() }
 
     /** Current expanded-folder set (intrinsic, for the rendered Ready state). */
     fun expandedPaths(): Set<String> = expandedProjectPaths
@@ -756,13 +824,17 @@ internal class HostTreeModel {
     fun snapshotForProjection(): ProjectionSnapshot =
         ProjectionSnapshot(
             orderedSessions = sessionEntries(),
-            sessionFolderPaths = LinkedHashMap(sessionFolderPaths),
+            sessionFolderPaths = orderedNodes().associateTo(LinkedHashMap()) { (_, node) ->
+                node.sessionName to node.folderPath
+            },
             watchedFolders = watchedFolders,
             scannedProjectFoldersByRoot = scannedProjectFoldersByRoot,
             historyProjectFoldersByRoot = historyProjectFoldersByRoot,
             resolvedWatchedRootPaths = resolvedWatchedRootPaths,
             optimisticFolders = LinkedHashMap(optimisticFolders),
-            stickyBuckets = LinkedHashMap(stickyBuckets),
+            stickyBuckets = orderedNodes().mapNotNull { (_, node) ->
+                node.stickyBucket?.let { node.sessionName to it }
+            }.toMap(LinkedHashMap()),
             previousExpanded = expandedProjectPaths,
             userCollapsedProjectPaths = userCollapsedProjectPaths,
         )
@@ -771,6 +843,91 @@ internal class HostTreeModel {
     fun applyProjection(result: ProjectionResult) {
         expandedProjectPaths = result.projection.expandedProjectPaths
         userCollapsedProjectPaths = result.userCollapsedProjectPaths
+    }
+
+    private fun FolderSessionEntry.generationOrNull(): TmuxSessionGeneration? =
+        tmuxSessionGenerationOrNull(tmuxSessionId, sessionCreated)
+
+    private fun nodeFor(key: SessionNodeKey): SessionNode? = when (key) {
+        is SessionNodeKey.Exact -> sessions[key.generation]
+        is SessionNodeKey.Provisional -> provisionalSessions[key.sessionName]
+    }
+
+    private fun orderedNodes(): List<Pair<SessionNodeKey, SessionNode>> =
+        sessionOrder.keys.mapNotNull { key -> nodeFor(key)?.let { key to it } }
+
+    private fun addNode(key: SessionNodeKey, node: SessionNode) {
+        when (key) {
+            is SessionNodeKey.Exact -> sessions[key.generation] = node
+            is SessionNodeKey.Provisional -> provisionalSessions[key.sessionName] = node
+        }
+        sessionOrder[key] = Unit
+        sessionNameIndex[node.sessionName] = key
+    }
+
+    private fun removeNode(key: SessionNodeKey): SessionNode? {
+        val node = nodeFor(key) ?: return null
+        when (key) {
+            is SessionNodeKey.Exact -> sessions.remove(key.generation)
+            is SessionNodeKey.Provisional -> provisionalSessions.remove(key.sessionName)
+        }
+        sessionOrder.remove(key)
+        if (sessionNameIndex[node.sessionName] == key) {
+            sessionNameIndex.remove(node.sessionName)
+        }
+        return node
+    }
+
+    /** Rename the display field while keeping an exact generation key stable. */
+    private fun renameNodeIfNeeded(
+        node: SessionNode,
+        newName: String,
+        key: SessionNodeKey,
+    ) {
+        if (node.sessionName == newName) return
+        sessionNameIndex.remove(node.sessionName)
+        if (key is SessionNodeKey.Provisional) {
+            val newKey = SessionNodeKey.Provisional(newName)
+            provisionalSessions.remove(key.sessionName)
+            provisionalSessions[newName] = node
+            val rebuiltOrder = LinkedHashMap<SessionNodeKey, Unit>(sessionOrder.size)
+            sessionOrder.forEach { (candidate, value) ->
+                rebuiltOrder[if (candidate == key) newKey else candidate] = value
+            }
+            sessionOrder.clear()
+            sessionOrder.putAll(rebuiltOrder)
+            sessionNameIndex[newName] = newKey
+        } else {
+            sessionNameIndex[newName] = key
+        }
+        node.sessionName = newName
+    }
+
+    /** Update fields only after the caller proved the generation is unchanged. */
+    private fun updateNode(
+        existing: SessionNode,
+        entry: FolderSessionEntry,
+        folderPath: String,
+    ) {
+        existing.lastActivity = entry.lastActivity
+        existing.attached = entry.attached
+        // Issue #1237: the agent state is NOT sticky — take the latest read.
+        existing.agentState = entry.agentState
+        // Issue #716: a degraded Probing read must not clobber a known agent.
+        existing.agentKind = mergeAgentKind(existing.agentKind, entry.agentKind)
+        // Issue #858 / #889: retain a profile only across a degraded read. A
+        // generation replacement never reaches this function, so it starts
+        // with the successor's own profile state.
+        existing.recordedProfile = when {
+            entry.recordedProfile != null -> entry.recordedProfile
+            entry.agentKind.isAuthoritativeRead -> null
+            else -> existing.recordedProfile
+        }
+        existing.tmuxSessionId = entry.tmuxSessionId
+        existing.sessionCreated = entry.sessionCreated
+        existing.windows = mergeWindows(existing.windows, entry.windows.map { it.toState() })
+        existing.folderPath = FolderListViewModel.canonicalisePath(folderPath)
+            .ifBlank { FolderListViewModel.UNTRACKED_PATH }
     }
 
     /**
@@ -871,8 +1028,14 @@ internal class HostTreeModel {
         }
     }
 
-    private fun FolderSessionEntry.toNode(optimisticSince: Long?): SessionNode =
+    private fun FolderSessionEntry.toNode(
+        folderPath: String,
+        optimisticSince: Long?,
+    ): SessionNode =
         SessionNode(
+            sessionName = sessionName,
+            folderPath = FolderListViewModel.canonicalisePath(folderPath)
+                .ifBlank { FolderListViewModel.UNTRACKED_PATH },
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,
@@ -884,9 +1047,9 @@ internal class HostTreeModel {
             optimisticSince = optimisticSince,
         )
 
-    private fun SessionNode.toEntry(name: String): FolderSessionEntry =
+    private fun SessionNode.toEntry(): FolderSessionEntry =
         FolderSessionEntry(
-            sessionName = name,
+            sessionName = sessionName,
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,

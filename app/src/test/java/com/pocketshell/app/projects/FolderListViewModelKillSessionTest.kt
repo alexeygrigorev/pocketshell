@@ -6,6 +6,7 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.tmux.KilledSession
 import com.pocketshell.app.tmux.SessionLifecycleSignals
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -16,8 +17,10 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
@@ -79,7 +82,7 @@ class FolderListViewModelKillSessionTest {
             runCurrent()
 
             // Kill confirmed on the per-session screen for the bound host.
-            signals.emitKilled(HOST.id, "beta")
+            signals.emitKilled(HOST.id, generation("beta"), "beta")
             runCurrent()
 
             assertTrue(
@@ -114,7 +117,7 @@ class FolderListViewModelKillSessionTest {
 
             // A kill of a same-named session on a DIFFERENT host must not
             // touch this host's tree.
-            signals.emitKilled(HOST.id + 1, "beta")
+            signals.emitKilled(HOST.id + 1, generation("beta"), "beta")
             runCurrent()
 
             assertEquals(
@@ -145,7 +148,7 @@ class FolderListViewModelKillSessionTest {
 
             // Remote no longer reports beta -> kill agreed -> row gone.
             gateway.rows = listOf(sessionRow("alpha"))
-            signals.emitKilled(HOST.id, "beta")
+            signals.emitKilled(HOST.id, generation("beta"), "beta")
             runCurrent()
             assertEquals(setOf("alpha"), readySessionNames(vm))
 
@@ -153,10 +156,152 @@ class FolderListViewModelKillSessionTest {
             // -> re-probe reconciles it back so a live row is never lost.
             gateway.rows = listOf(sessionRow("alpha"), sessionRow("gamma"))
             runCurrent()
-            signals.emitKilled(HOST.id, "gamma")
+            signals.emitKilled(HOST.id, generation("gamma"), "gamma")
             runCurrent()
             assertEquals(setOf("alpha", "gamma"), readySessionNames(vm))
         } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun delayedPredecessorKillDoesNotDeleteSameNameSuccessorThroughViewModel() = runTest {
+        val signals = SessionLifecycleSignals()
+        val predecessor = TmuxSessionGeneration("predecessor-id", 1_710_000_000L)
+        val successor = TmuxSessionGeneration("successor-id", 1_720_000_000L)
+        val gateway = StubGateway(
+            listOf(
+                sessionRow(
+                    name = "work",
+                    generation = predecessor,
+                    agentKind = SessionAgentKind.Claude,
+                    recordedProfile = "Claude (old)",
+                ),
+            ),
+        )
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+
+            // The authoritative production reconcile observes a same-name
+            // recreation with a different exact generation. The successor is
+            // intentionally left with its own state so a name-keyed kill can
+            // only pass by deleting the actual successor row below.
+            gateway.rows = listOf(
+                sessionRow(
+                    name = "work",
+                    generation = successor,
+                    agentKind = SessionAgentKind.Codex,
+                    recordedProfile = "Codex (new)",
+                ),
+            )
+            vm.refreshSessions()
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+
+            signals.emitKilled(HOST.id, predecessor, "work")
+            runCurrent()
+
+            val rows = (vm.state.value as FolderListUiState.Ready).flatSessions
+                .filter { it.sessionName == "work" }
+            assertEquals(
+                "same-name successor must survive delayed predecessor kill through the production ViewModel",
+                1,
+                rows.size,
+            )
+            val held = rows.single()
+            assertEquals(successor.sessionId, held.tmuxSessionId)
+            assertEquals(successor.createdEpochSeconds, held.sessionCreated)
+            assertEquals(SessionAgentKind.Codex, held.agentKind)
+            assertEquals("Codex (new)", held.recordedProfile)
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun treeKillCarriesGenerationCapturedBeforeSameNameRecreationCanReconcile() = runTest {
+        val signals = SessionLifecycleSignals()
+        val killed = mutableListOf<KilledSession>()
+        val collector = launchKilledCollector(signals, killed)
+        val predecessor = TmuxSessionGeneration("predecessor-id", 1_710_000_000L)
+        val successor = TmuxSessionGeneration("successor-id", 1_720_000_000L)
+        val gateway = StubGateway(
+            listOf(
+                sessionRow(
+                    name = "work",
+                    generation = predecessor,
+                    agentKind = SessionAgentKind.Claude,
+                    recordedProfile = "Claude (old)",
+                ),
+            ),
+        )
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+
+            val successorReconciled = CompletableDeferred<Unit>()
+            val allowKillReturn = CompletableDeferred<Unit>()
+            gateway.onSessionsListed = {
+                if (gateway.rows.singleOrNull()?.tmuxSessionId == successor.sessionId) {
+                    successorReconciled.complete(Unit)
+                }
+            }
+            gateway.afterSuccessfulKill = {
+                gateway.rows = listOf(
+                    sessionRow(
+                        name = "work",
+                        generation = successor,
+                        agentKind = SessionAgentKind.Codex,
+                        recordedProfile = "Codex (new)",
+                    ),
+                )
+                vm.refreshSessions()
+                // Hold the gateway result open until the authoritative probe
+                // has installed the same-name successor in the production
+                // tree. This makes a post-async name lookup observably stale.
+                successorReconciled.await()
+                allowKillReturn.await()
+            }
+            vm.killSession("work")
+            runCurrent()
+
+            assertTrue(
+                "successor must be reconciled before the gateway kill returns",
+                successorReconciled.isCompleted,
+            )
+            assertTrue(
+                "kill event must remain pending while the gateway result is held",
+                killed.isEmpty(),
+            )
+            val reconciledRows = (vm.state.value as FolderListUiState.Ready).flatSessions
+                .filter { it.sessionName == "work" }
+            assertEquals(1, reconciledRows.size)
+            assertEquals(successor.sessionId, reconciledRows.single().tmuxSessionId)
+            assertEquals(successor.createdEpochSeconds, reconciledRows.single().sessionCreated)
+
+            allowKillReturn.complete(Unit)
+            runCurrent()
+            val event = killed.single { it.hostId == HOST.id && it.sessionName == "work" }
+            assertEquals(
+                "tree Stop must retain the generation selected before the async gateway result",
+                predecessor,
+                event.generation,
+            )
+            val rows = (vm.state.value as FolderListUiState.Ready).flatSessions
+                .filter { it.sessionName == "work" }
+            assertEquals(1, rows.size)
+            assertEquals(successor.sessionId, rows.single().tmuxSessionId)
+            assertEquals(successor.createdEpochSeconds, rows.single().sessionCreated)
+        } finally {
+            collector.cancel()
             vm.stopPolling()
         }
     }
@@ -317,6 +462,51 @@ class FolderListViewModelKillSessionTest {
         }
     }
 
+    @Test
+    fun delayedPredecessorRenameCarriesGenerationAndCannotRenameSuccessor() = runTest {
+        val signals = SessionLifecycleSignals()
+        val predecessor = TmuxSessionGeneration("predecessor-id", 1_710_000_000L)
+        val successor = TmuxSessionGeneration("successor-id", 1_720_000_000L)
+        val renameGate = CompletableDeferred<Unit>()
+        val gateway = StubGateway(
+            rows = listOf(sessionRow(name = "work", generation = predecessor)),
+        ).also { it.renameGate = renameGate }
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+
+            vm.renameSession("work", "renamed")
+            runCurrent()
+            assertEquals(listOf(predecessor), gateway.renamedGenerations)
+
+            // The gateway is still suspended. A fresh reconcile replaces the
+            // row with a same-name successor before the old rename returns.
+            gateway.rows = listOf(sessionRow(name = "work", generation = successor))
+            vm.refreshSessions()
+            runCurrent()
+            val reconciled = (vm.state.value as FolderListUiState.Ready).flatSessions.single()
+            assertEquals(successor.sessionId, reconciled.tmuxSessionId)
+            assertEquals(successor.createdEpochSeconds, reconciled.sessionCreated)
+
+            renameGate.complete(Unit)
+            runCurrent()
+
+            assertEquals(
+                "a generation-aware gateway must reject the predecessor after recreation",
+                setOf("work"),
+                readySessionNames(vm),
+            )
+            val held = (vm.state.value as FolderListUiState.Ready).flatSessions.single()
+            assertEquals(successor.sessionId, held.tmuxSessionId)
+            assertEquals(successor.createdEpochSeconds, held.sessionCreated)
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
     private fun TestScope.launchKilledCollector(
         signals: SessionLifecycleSignals,
         sink: MutableList<KilledSession>,
@@ -341,13 +531,25 @@ class FolderListViewModelKillSessionTest {
         return state.flatSessions.map { it.sessionName }.toSet()
     }
 
-    private fun sessionRow(name: String): FolderSessionRow =
+    private fun sessionRow(
+        name: String,
+        generation: TmuxSessionGeneration = generation(name),
+        agentKind: SessionAgentKind = SessionAgentKind.Shell,
+        recordedProfile: String? = null,
+    ): FolderSessionRow =
         FolderSessionRow(
             sessionName = name,
             lastActivity = 1_000L,
             attached = false,
             cwd = "/home/alexey/git/$name",
+            agentKind = agentKind,
+            recordedProfile = recordedProfile,
+            tmuxSessionId = generation.sessionId,
+            sessionCreated = generation.createdEpochSeconds,
         )
+
+    private fun generation(name: String): TmuxSessionGeneration =
+        TmuxSessionGeneration(sessionId = "id-$name", createdEpochSeconds = name.length.toLong() + 1L)
 
     private fun TestScope.newViewModel(
         gateway: FolderListGateway,
@@ -395,13 +597,24 @@ class FolderListViewModelKillSessionTest {
         var killedSessionNames: MutableList<String> = mutableListOf()
         @Volatile
         var renamedSessionNames: MutableList<Pair<String, String>> = mutableListOf()
+        @Volatile
+        var renamedGenerations: MutableList<TmuxSessionGeneration> = mutableListOf()
+        @Volatile
+        var renameGate: CompletableDeferred<Unit>? = null
+        @Volatile
+        var afterSuccessfulKill: (suspend () -> Unit)? = null
+        @Volatile
+        var onSessionsListed: (() -> Unit)? = null
 
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
             keyPath: String,
             passphrase: CharArray?,
             watchedRoots: List<ProjectRootEntity>,
-        ): FolderListResult = FolderListResult.Sessions(rows = rows)
+        ): FolderListResult {
+            onSessionsListed?.invoke()
+            return FolderListResult.Sessions(rows = rows)
+        }
 
         override suspend fun createSession(
             host: HostEntity,
@@ -440,6 +653,7 @@ class FolderListViewModelKillSessionTest {
             }
             killedSessionNames.add(sessionName)
             rows = rows.filterNot { it.sessionName == sessionName }
+            afterSuccessfulKill?.invoke()
             return Result.success(Unit)
         }
 
@@ -449,9 +663,22 @@ class FolderListViewModelKillSessionTest {
             passphrase: CharArray?,
             oldName: String,
             newName: String,
+            expectedGeneration: TmuxSessionGeneration,
         ): Result<Unit> {
+            renamedGenerations.add(expectedGeneration)
+            renameGate?.await()
             if (!renameSucceeds) {
                 return Result.failure(RuntimeException("rename failed"))
+            }
+            val current = rows.singleOrNull { it.sessionName == oldName }
+                ?.let { row ->
+                    TmuxSessionGeneration(
+                        sessionId = requireNotNull(row.tmuxSessionId),
+                        createdEpochSeconds = requireNotNull(row.sessionCreated),
+                    )
+                }
+            if (current != expectedGeneration) {
+                return Result.failure(RuntimeException("session generation changed"))
             }
             renamedSessionNames.add(oldName to newName)
             rows = rows.map { row ->

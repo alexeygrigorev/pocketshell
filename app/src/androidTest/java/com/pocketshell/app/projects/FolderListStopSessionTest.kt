@@ -23,6 +23,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.tmux.SessionLifecycleSignals
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -627,6 +628,7 @@ class FolderListStopSessionTest {
             passphrase: CharArray?,
             oldName: String,
             newName: String,
+            expectedGeneration: TmuxSessionGeneration,
         ): Result<Unit> {
             renamedSessions.add(oldName to newName)
             rows = rows.map { row ->

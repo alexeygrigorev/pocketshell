@@ -113,6 +113,27 @@ def test_get_returns_persisted_nodes_after_upsert(tmp_path: Path) -> None:
     assert got["nodes"][1]["collapsed"] is False
 
 
+def test_get_preserves_exact_tmux_generation(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    tree_mod.upsert_tree(
+        {
+            "host": "h1",
+            "nodes": [
+                {
+                    "session": "work",
+                    "tmux_session_id": "$9",
+                    "session_created": 1720000000,
+                },
+            ],
+        },
+        paths=paths,
+    )
+
+    node = tree_mod.get_tree({"host": "h1"}, paths=paths)["nodes"][0]
+    assert node["tmux_session_id"] == "$9"
+    assert node["session_created"] == 1720000000
+
+
 def test_get_is_host_scoped(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     tree_mod.upsert_tree(

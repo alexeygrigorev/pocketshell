@@ -620,6 +620,21 @@ class FolderListViewModel internal constructor(
     private var sessionRefreshInFlight: Boolean = false
     private var createSessionInFlight: Boolean = false
     private var refreshSessionsRequested: Boolean = false
+    /**
+     * A lifecycle signal without a complete generation is only a hint.  Keep
+     * it until an authoritative session probe succeeds; never let the hint
+     * authorize a name-based removal.
+     */
+    private var sessionIdentityReconcileRequested: Boolean = false
+
+    private val sessionLifecycleActions = FolderListSessionLifecycleActions(
+        boundHostId = { bound?.hostId },
+        tree = tree,
+        emitReady = ::emitReady,
+        isPolling = { probeJob != null },
+        refresh = ::refresh,
+        requestIdentityReconcile = { sessionIdentityReconcileRequested = true },
+    )
 
     /**
      * Issue #711: count of consecutive QUIET retries the current refresh has
@@ -660,36 +675,15 @@ class FolderListViewModel internal constructor(
                 emitReady()
             }
         }
-        // Issue #464: when the per-session screen confirms a Kill session,
-        // drop the matching row from this tree immediately (optimistic),
-        // then re-probe so a failed kill that somehow still broadcast — or
-        // a same-name session recreated since — is reconciled against the
-        // authoritative `tmux list-sessions` result.
         sessionLifecycleSignals?.let { signals ->
-            viewModelScope.launch {
-                signals.killedSessions.collect { killed ->
-                    onSessionKilled(killed)
-                }
-            }
-            // Issue #883: a confirmed single-window close (the session survived).
-            // Drop ONLY that window row from this tree — siblings + the session
-            // stay — then reconcile if the tree screen is still composed.
-            viewModelScope.launch {
-                signals.closedWindows.collect { closed ->
-                    onWindowClosed(closed)
-                }
-            }
-            // Issue #1155 (Part B): a persisted session the user tried to open was
-            // confirmed GENUINELY GONE on attach (absent tmux session, not a
-            // transient reconnect). Raise the "create a new session in this folder?"
-            // recreate prompt so the user recovers in one tap instead of landing on
-            // a blank list. Filtered by bound host so a gone session on host A never
-            // prompts on host B's tree.
-            viewModelScope.launch {
-                signals.staleSessions.collect { stale ->
-                    onStaleSession(stale)
-                }
-            }
+            bindFolderListSessionLifecycleSignals(
+                scope = viewModelScope,
+                signals = signals,
+                onKilled = ::onSessionKilled,
+                onWindowClosed = sessionLifecycleActions::onWindowClosed,
+                onStale = sessionLifecycleActions::onStale,
+                onIdentityUncertain = sessionLifecycleActions::onIdentityUncertain,
+            )
         }
         // EPIC #679 requirement #2: reconcile INFREQUENTLY, not on a constant
         // poll. The tree is held across opens, so a foreground/resume only
@@ -738,20 +732,17 @@ class FolderListViewModel internal constructor(
     internal fun onSessionKilled(killed: com.pocketshell.app.tmux.KilledSession) {
         val params = bound ?: return
         if (params.hostId != killed.hostId) return
-        // EPIC #679: drop the dead row from the maintained tree directly by id.
-        // The reconcile is a confirmation, not the trigger.
-        if (tree.removeSession(killed.sessionName)) {
+        if (tree.removeSession(killed.generation)) {
             emitReady()
         }
-        // Only kick an authoritative reconcile when the tree screen is still
-        // composed (a reconcile is already in flight / the screen is live). If
-        // the user navigated onward (stopPolling cleared probeJob), the
-        // optimistic drop stands and the reconcile rides the next bind/resume —
-        // re-probing now would re-acquire the warm lease and race the session
-        // screen's own attach, and a gateway that still reports the just-killed
-        // session would resurrect the dropped row.
         if (probeJob != null) refresh()
     }
+
+    /** Name-only signals request a probe. */
+    @androidx.annotation.VisibleForTesting
+    internal fun onSessionIdentityUncertain(
+        uncertain: com.pocketshell.app.tmux.SessionIdentityUncertain,
+    ) = sessionLifecycleActions.onIdentityUncertain(uncertain)
 
     /**
      * Issue #883: handle a confirmed single-window close broadcast from the
@@ -763,14 +754,8 @@ class FolderListViewModel internal constructor(
      * and the next bind/resume re-probe confirms it). Ignores other hosts.
      */
     @androidx.annotation.VisibleForTesting
-    internal fun onWindowClosed(closed: com.pocketshell.app.tmux.ClosedWindow) {
-        val params = bound ?: return
-        if (params.hostId != closed.hostId) return
-        if (tree.removeWindow(closed.windowId)) {
-            emitReady()
-        }
-        if (probeJob != null) refresh()
-    }
+    internal fun onWindowClosed(closed: com.pocketshell.app.tmux.ClosedWindow) =
+        sessionLifecycleActions.onWindowClosed(closed)
 
     /**
      * Issue #1155: handle a persisted-but-GENUINELY-GONE session broadcast from
@@ -788,14 +773,8 @@ class FolderListViewModel internal constructor(
      * tree it IS bound to accurate.
      */
     @androidx.annotation.VisibleForTesting
-    internal fun onStaleSession(stale: com.pocketshell.app.tmux.StaleSession) {
-        val params = bound ?: return
-        if (params.hostId != stale.hostId) return
-        // The session is confirmed gone — drop its row from the maintained tree.
-        if (tree.removeSession(stale.sessionName)) {
-            emitReady()
-        }
-    }
+    internal fun onStaleSession(stale: com.pocketshell.app.tmux.StaleSession) =
+        sessionLifecycleActions.onStale(stale)
 
     /**
      * Attach a [ProcessLifecycleOwner] observer so [processStarted]
@@ -935,6 +914,7 @@ class FolderListViewModel internal constructor(
         lastWatchedFolders = emptyList()
         sessionRefreshInFlight = false
         transientRefreshRetries = 0
+        sessionIdentityReconcileRequested = false
         // Issue #867 (stale-while-revalidate): paint the last-known tree
         // INSTANTLY from the per-host CLIENT cache before any SSH, so a fresh
         // connect / cold app start no longer flashes the empty rebuild ("No
@@ -1192,6 +1172,11 @@ class FolderListViewModel internal constructor(
         val params = bound ?: return
         val target = sessionName.trim()
         if (target.isEmpty()) return
+        // Authorize the destructive action against the exact row the user
+        // tapped, before the gateway suspension can observe a same-name
+        // recreation. Never resolve this generation again from [target] after
+        // the async kill: that lookup could authorize the successor instead.
+        val requestedGeneration = tree.generationForSession(target)
         viewModelScope.launch {
             val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _actionStatus.value = FolderActionStatus.Failed("Host not found.")
@@ -1212,13 +1197,30 @@ class FolderListViewModel internal constructor(
                     // so every view model converges on the dead session being
                     // gone. onSessionKilled also kicks an authoritative
                     // re-probe when the tree poll is still live.
-                    onSessionKilled(
-                        com.pocketshell.app.tmux.KilledSession(
-                            hostId = params.hostId,
-                            sessionName = target,
-                        ),
+                    val generation = requestedGeneration
+                    if (generation != null) {
+                        onSessionKilled(
+                            com.pocketshell.app.tmux.KilledSession(
+                                hostId = params.hostId,
+                                generation = generation,
+                                lastKnownName = target,
+                            ),
+                        )
+                    } else {
+                        onSessionIdentityUncertain(
+                            com.pocketshell.app.tmux.SessionIdentityUncertain(
+                                hostId = params.hostId,
+                                lastKnownName = target,
+                                folderPath = null,
+                                action = com.pocketshell.app.tmux.SessionLifecycleAction.Kill,
+                            ),
+                        )
+                    }
+                    sessionLifecycleSignals?.emitKilled(
+                        hostId = params.hostId,
+                        generation = generation,
+                        lastKnownName = target,
                     )
-                    sessionLifecycleSignals?.emitKilled(params.hostId, target)
                 },
                 onFailure = { error ->
                     _actionStatus.value = FolderActionStatus.Failed(
@@ -1234,37 +1236,25 @@ class FolderListViewModel internal constructor(
         val oldTarget = oldName.trim()
         val newTarget = newName.trim()
         if (oldTarget.isEmpty() || newTarget.isEmpty() || oldTarget == newTarget) return
-        viewModelScope.launch {
-            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
-                _actionStatus.value = FolderActionStatus.Failed("Host not found.")
-                return@launch
-            }
-            val result = gateway.renameSession(
-                host = host,
-                keyPath = params.keyPath,
-                passphrase = params.passphrase,
-                oldName = oldTarget,
-                newName = newTarget,
-            )
-            result.fold(
-                onSuccess = {
-                    // Issue #656: a successful rename emits no banner — the
-                    // renamed row in the list is the feedback.
-                    renameSessionSnapshot(oldTarget = oldTarget, newTarget = newTarget)
-                    refresh()
-                },
-                onFailure = { error ->
-                    _actionStatus.value = FolderActionStatus.Failed(
-                        "Couldn't rename $oldTarget: ${error.message ?: error.javaClass.simpleName}",
-                    )
-                },
-            )
-        }
-    }
-
-    private fun renameSessionSnapshot(oldTarget: String, newTarget: String) {
-        // EPIC #679: rename by id on the maintained tree, preserving the slot.
-        if (tree.renameSession(oldTarget, newTarget)) emitReady()
+        launchFolderListRename(
+            scope = viewModelScope,
+            gateway = gateway,
+            hostDao = hostDao,
+            ioDispatcher = ioDispatcher,
+            tree = tree,
+            params = params,
+            oldTarget = oldTarget,
+            newTarget = newTarget,
+            refresh = ::refresh,
+            emitReady = ::emitReady,
+            onMissingGeneration = {
+                sessionIdentityReconcileRequested = true
+                if (probeJob != null) refresh()
+            },
+            onFailure = { message ->
+                _actionStatus.value = FolderActionStatus.Failed(message)
+            },
+        )
     }
 
     fun createEmptyProject(
@@ -1475,6 +1465,10 @@ class FolderListViewModel internal constructor(
             return
         }
         lastResumeGenerationHandled = foregroundGeneration
+        if (sessionIdentityReconcileRequested) {
+            launchReconcile(params)
+            return
+        }
         if (tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = HostTreeModel.RECONCILE_STALENESS_MS)) {
             launchReconcile(params)
         } else {
@@ -1499,16 +1493,20 @@ class FolderListViewModel internal constructor(
         // Only react to a genuine new foreground generation.
         if (foregroundGeneration == lastResumeGenerationHandled) return
         lastResumeGenerationHandled = foregroundGeneration
+        if (sessionIdentityReconcileRequested) {
+            launchReconcile(params)
+            return
+        }
         if (!tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = RESUME_FRESHEN_MS)) {
             return
         }
         // Epic #821 slice C (issue #837): on a resume-when-stale, prefer the
-        // CHEAP daemon delta reconcile (gone/added by name) over a full gateway
-        // re-probe when the durable seam is available — "refresh to see which
-        // sessions are gone, without reloading everything". A clean delta (no
-        // additions) prunes gone sessions in place and avoids the heavier probe;
-        // any addition (or an unavailable delta) falls back to the full
-        // reconcile so the new session's content is fetched.
+        // CHEAP daemon delta reconcile over a full gateway re-probe when the
+        // durable seam is available — "refresh to see which sessions are gone,
+        // without reloading everything". Added/unavailable deltas fall back to
+        // the full reconcile so new content is fetched. Gone names also use the
+        // full path because a name-only delta cannot safely delete a successor
+        // generation.
         if (treeRemoteSource != null && tree.hasSnapshot) {
             reconcileTreeDeltasOnResume(params)
         } else {
@@ -1518,11 +1516,11 @@ class FolderListViewModel internal constructor(
 
     /**
      * Epic #821 slice C (issue #837): the delta-refresh path. Execs the daemon
-     * `tree.reconcile` over the warm session, prunes the held tree's GONE
-     * sessions in place (deltas only — no full reload), and only escalates to a
-     * full [launchReconcile] when the delta reports ADDED sessions (whose content
-     * a probe must fetch) or when the delta is unavailable. Persists the pruned
-     * tree so the registry stays clean.
+     * `tree.reconcile` over the warm session. Added or unavailable deltas use a
+     * full [launchReconcile] because their content must be fetched. Gone hints
+     * are also escalated to the authoritative probe: the daemon delta currently
+     * carries names only, and a name cannot authorize deletion of a same-name
+     * successor generation.
      */
     private fun reconcileTreeDeltasOnResume(params: BoundParams) {
         val source = treeRemoteSource ?: run { launchReconcile(params); return }
@@ -1549,12 +1547,13 @@ class FolderListViewModel internal constructor(
                 launchReconcile(params)
                 return@launch
             }
-            // Gone-only delta: prune in place, re-emit, persist. No full reload.
-            if (tree.applyReconcileGoneDelta(delta.gone)) {
-                emitReady()
-                persistTree(params)
-                // Issue #867: keep the client cache in step with the pruned tree.
-                persistClientCache(params)
+            // A daemon delta currently identifies gone rows by display name.
+            // That is insufficient to authorize destructive mutation because a
+            // same-name successor may already be live.  Use the authoritative
+            // probe path for every gone hint; HostTreeModel then applies exact
+            // generation replacement/removal semantics.
+            if (delta.gone.isNotEmpty()) {
+                launchReconcile(params)
             }
         }
     }
@@ -2319,6 +2318,7 @@ class FolderListViewModel internal constructor(
                 // budget so a later, unrelated transient drop gets its own full
                 // retry allowance.
                 transientRefreshRetries = 0
+                sessionIdentityReconcileRequested = false
                 setSessionRefreshInFlight(false)
                 emitReady()
                 // Epic #821 slice C (issue #837): persist the freshened tree so

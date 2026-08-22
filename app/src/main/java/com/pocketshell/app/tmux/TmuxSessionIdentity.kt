@@ -3,9 +3,17 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.core.connection.SessionId
 
-internal data class DurableTmuxSessionIdentity(
-    val tmuxSessionId: String,
-    val sessionCreated: Long,
+/**
+ * Exact identity of one tmux session generation.
+ *
+ * A tmux session name is mutable and can be reused. The server-assigned
+ * `#{session_id}` plus `#{session_created}` pair remains stable for the
+ * lifetime of that session object, so destructive lifecycle mutations must
+ * carry this value instead of falling back to the display name.
+ */
+public data class TmuxSessionGeneration(
+    val sessionId: String,
+    val createdEpochSeconds: Long,
 )
 
 /** Correlated navigation payload; identity travels with the user action. */
@@ -19,6 +27,15 @@ internal fun HostTmuxSessionRow.navigationTargetOrNull(): TmuxSessionNavigationT
     val id = tmuxSessionId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
     val created = createdAt?.takeIf { it > 0L } ?: return null
     return TmuxSessionNavigationTarget(name, id, created)
+}
+
+internal fun tmuxSessionGenerationOrNull(
+    tmuxSessionId: String?,
+    sessionCreated: Long?,
+): TmuxSessionGeneration? {
+    val id = tmuxSessionId?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val created = sessionCreated?.takeIf { it > 0L } ?: return null
+    return TmuxSessionGeneration(sessionId = id, createdEpochSeconds = created)
 }
 
 internal fun durableTmuxSessionKey(
@@ -42,7 +59,7 @@ internal fun tmuxTargetSessionId(
 internal fun parseDurableTmuxSessionIdentity(
     hostId: Long,
     durableSessionKey: String?,
-): DurableTmuxSessionIdentity? {
+): TmuxSessionGeneration? {
     val body = durableSessionKey?.removePrefix("tmux:$hostId:")
         ?.takeIf { it != durableSessionKey }
         ?: return null
@@ -50,7 +67,7 @@ internal fun parseDurableTmuxSessionIdentity(
     if (separator <= 0 || separator == body.lastIndex) return null
     val id = body.substring(0, separator).trim().takeIf { it.isNotEmpty() } ?: return null
     val created = body.substring(separator + 1).toLongOrNull()?.takeIf { it > 0L } ?: return null
-    return DurableTmuxSessionIdentity(id, created)
+    return TmuxSessionGeneration(id, created)
 }
 
 internal fun sessionCardsTargetKey(

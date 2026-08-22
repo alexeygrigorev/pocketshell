@@ -97,20 +97,51 @@ class AgentSessionMemoryTest {
     }
 
     @Test
-    fun forgetSessionClearsEveryRememberedWindowForKilledSessionName() {
+    fun forgetSessionClearsOnlyTheKilledGeneration() {
         val memory = AgentSessionMemory()
-        memory.remember(7L, "work", "@2", claude(), wasOnConversation = true)
-        memory.remember(7L, "work", "@3", claude(), wasOnConversation = false)
+        val oldKey = "tmux:7:\$0:100"
+        val successorKey = "tmux:7:\$1:200"
+        memory.remember(
+            7L,
+            "work",
+            "@2",
+            claude(),
+            wasOnConversation = true,
+            durableSessionKey = oldKey,
+        )
+        memory.remember(
+            7L,
+            "work",
+            "@3",
+            claude(),
+            wasOnConversation = false,
+            durableSessionKey = oldKey,
+        )
+        memory.remember(
+            7L,
+            "work",
+            "@2",
+            claude(),
+            wasOnConversation = false,
+            durableSessionKey = successorKey,
+        )
         memory.remember(7L, "deploy", "@2", claude(), wasOnConversation = true)
         memory.remember(8L, "work", "@2", claude(), wasOnConversation = true)
 
-        memory.forgetSession(hostId = 7L, sessionName = "work")
+        memory.forgetSession(
+            hostId = 7L,
+            generation = TmuxSessionGeneration("\$0", 100L),
+        )
 
         assertNull(
-            "a same-name successor must not recall window memory from the killed session",
-            memory.recall(7L, "work", "@2"),
+            "the killed generation's first window must be forgotten",
+            memory.recall(7L, "work", "@2", durableSessionKey = oldKey),
         )
-        assertNull(memory.recall(7L, "work", "@3"))
+        assertNull(memory.recall(7L, "work", "@3", durableSessionKey = oldKey))
+        assertEquals(
+            claude(),
+            memory.recall(7L, "work", "@2", durableSessionKey = successorKey)?.detection,
+        )
         assertEquals(claude(), memory.recall(7L, "deploy", "@2")?.detection)
         assertEquals(claude(), memory.recall(8L, "work", "@2")?.detection)
     }

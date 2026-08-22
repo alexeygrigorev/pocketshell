@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
@@ -58,6 +59,8 @@ class HostTreeModelProjectionOffMainTest {
                 attached = i == 0,
                 agentKind = agentKinds[i % agentKinds.size],
                 windows = emptyList(),
+                tmuxSessionId = "id-$i",
+                sessionCreated = i.toLong() + 1L,
             )
         }
         val folderPaths = sessionEntries.associate { it.sessionName to projectPath(it.sessionName.substringAfter('-').toInt()) }
@@ -166,7 +169,7 @@ class HostTreeModelProjectionOffMainTest {
         val snapshot = tree.snapshotForProjection()
         val sizeBefore = snapshot.orderedSessions.size
         // Mutate the model AFTER taking the snapshot.
-        tree.removeSession("session-0")
+        tree.removeSession(TmuxSessionGeneration("id-0", 1L))
         // The snapshot is a copy — the heavy build over it still sees the
         // pre-mutation set, so an off-Main build can never observe a half-mutated
         // model.

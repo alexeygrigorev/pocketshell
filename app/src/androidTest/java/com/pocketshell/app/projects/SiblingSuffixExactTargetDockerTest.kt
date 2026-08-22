@@ -7,6 +7,7 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.session.AgentConversationRepository
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.app.tmux.buildTmuxPaneListingCommand
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -203,6 +204,7 @@ class SiblingSuffixExactTargetDockerTest {
         // both ways on real tmux 3.4 before pinning it.
         val renamed = base.replace("issue1820-rename-", "issue1820-newname-")
         createdSessions += renamed
+        val baseGeneration = sessionGeneration(base)
         assertTrue(
             "the new name must not share the base's prefix, or the bug cannot bite",
             !renamed.startsWith(base),
@@ -214,6 +216,7 @@ class SiblingSuffixExactTargetDockerTest {
             passphrase = null,
             oldName = base,
             newName = renamed,
+            expectedGeneration = baseGeneration,
         )
 
         assertTrue(
@@ -547,6 +550,23 @@ class SiblingSuffixExactTargetDockerTest {
     private fun literalExactSession(sessionName: String): String = "=$sessionName"
 
     private fun literalExactPane(sessionName: String): String = "=$sessionName:"
+
+    private suspend fun sessionGeneration(sessionName: String): TmuxSessionGeneration =
+        withHostSession { session ->
+            val output = session.exec(
+                "tmux display-message -p -t '${literalExactPane(sessionName)}' " +
+                    "'#{session_id} #{session_created}'",
+            ).stdout.trim()
+            val fields = output.split(Regex("\\s+"))
+            check(fields.size == 2) {
+                "could not read exact generation for '$sessionName': '$output'"
+            }
+            TmuxSessionGeneration(
+                sessionId = fields[0],
+                createdEpochSeconds = fields[1].toLongOrNull()
+                    ?: error("invalid session_created for '$sessionName': '$output'"),
+            )
+        }
 
     /**
      * Seed `<base>` + `<base>-2`, then remove `<base>` so a bare `-t <base>`

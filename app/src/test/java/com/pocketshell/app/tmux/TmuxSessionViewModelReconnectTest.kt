@@ -141,6 +141,8 @@ class TmuxSessionViewModelReconnectTest : TmuxSessionViewModelTestBase() {
             user = "alex",
             keyPath = "/keys/a",
             sessionName = "work",
+            tmuxSessionId = "\$4",
+            sessionCreated = 1_710_000_000L,
             client = FakeTmuxClient(),
         )
 

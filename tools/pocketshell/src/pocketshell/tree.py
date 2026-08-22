@@ -11,9 +11,10 @@ state. It is a host-keyed JSON registry the `pocketshell` daemon owns, exposed
 via three JSON-RPC methods:
 
 - ``tree.get {host}`` -> ``{nodes: [...], version}`` — the persisted node list
-  (order, folder_path, collapsed, optional cached foreign-guess kind). An empty
-  result is valid (no registry yet → the client seeds fresh). Cached with a
-  short TTL (~5 s) like ``sessions.list``.
+  (order, folder_path, collapsed, optional cached foreign-guess kind, and the
+  exact tmux generation when known). An empty result is valid (no registry yet
+  → the client seeds fresh). Cached with a short TTL (~5 s) like
+  ``sessions.list``.
 - ``tree.upsert {host, nodes}`` -> ``{status, version}`` — atomically persists
   the node list. A mutation: it carries NO TTL and invalidates the ``tree.get``
   cache for that host (see :data:`pocketshell.daemon.METHOD_CACHE_INVALIDATIONS`).
@@ -191,8 +192,10 @@ def _normalise_node(raw: Any, fallback_order: int) -> Optional[dict[str, Any]]:
     A node MUST have a non-empty ``session`` string; everything else is
     optional and defaulted. ``foreign_kind`` is the cheap one-shot foreign-guess
     cache (NOT the confirmed kind — that lives in ``@ps_agent_kind``); it is
-    persisted verbatim when present and omitted otherwise. One malformed node
-    never sinks the batch — the caller filters ``None`` out.
+    persisted verbatim when present and omitted otherwise. ``tmux_session_id``
+    and positive ``session_created`` are persisted together as the exact
+    generation; an incomplete pair is treated as provisional. One malformed
+    node never sinks the batch — the caller filters ``None`` out.
     """
     if not isinstance(raw, Mapping):
         return None
@@ -217,6 +220,16 @@ def _normalise_node(raw: Any, fallback_order: int) -> Optional[dict[str, Any]]:
     foreign_kind = raw.get("foreign_kind")
     if isinstance(foreign_kind, str) and foreign_kind:
         node["foreign_kind"] = foreign_kind
+    tmux_session_id = raw.get("tmux_session_id")
+    session_created = raw.get("session_created")
+    if isinstance(tmux_session_id, str) and tmux_session_id.strip():
+        try:
+            created = int(session_created)
+        except (TypeError, ValueError):
+            created = 0
+        if created > 0:
+            node["tmux_session_id"] = tmux_session_id.strip()
+            node["session_created"] = created
     # Preserve / stamp the optimistic-grace marker so the next reconcile spares
     # a just-upserted node the live probe has not yet observed.
     optimistic_since = raw.get("optimistic_since")

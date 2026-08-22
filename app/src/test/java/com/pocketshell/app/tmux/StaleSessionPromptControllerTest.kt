@@ -79,7 +79,12 @@ class StaleSessionPromptControllerTest {
         assertNull("no prompt before the gone-session broadcast", controller.prompt.value)
 
         // The cold-restore attach confirmed the session is genuinely gone.
-        signals.emitStaleSession(hostId = 7L, sessionName = "work", folderPath = goneFolder)
+        signals.emitStaleSession(
+            hostId = 7L,
+            generation = generation("work"),
+            lastKnownName = "work",
+            folderPath = goneFolder,
+        )
         runCurrent()
 
         val prompt = controller.prompt.value
@@ -103,7 +108,12 @@ class StaleSessionPromptControllerTest {
         val controller = StaleSessionPromptController(signals)
         runCurrent()
 
-        signals.emitStaleSession(hostId = 3L, sessionName = "beta", folderPath = "/srv/beta")
+        signals.emitStaleSession(
+            hostId = 3L,
+            generation = generation("beta"),
+            lastKnownName = "beta",
+            folderPath = "/srv/beta",
+        )
         runCurrent()
 
         assertEquals("beta", controller.prompt.value?.sessionName)
@@ -121,7 +131,12 @@ class StaleSessionPromptControllerTest {
         val controller = StaleSessionPromptController(signals)
         runCurrent()
 
-        signals.emitStaleSession(hostId = 9L, sessionName = "orphan", folderPath = null)
+        signals.emitStaleSession(
+            hostId = 9L,
+            generation = generation("orphan"),
+            lastKnownName = "orphan",
+            folderPath = null,
+        )
         runCurrent()
 
         val prompt = controller.prompt.value
@@ -145,7 +160,11 @@ class StaleSessionPromptControllerTest {
 
         // A transient reconnect emits a KILL or nothing on this bus, never a
         // stale-session; assert the controller does not fabricate a prompt.
-        signals.emitKilled(hostId = 7L, sessionName = "work")
+        signals.emitKilled(
+            hostId = 7L,
+            generation = generation("work"),
+            lastKnownName = "work",
+        )
         runCurrent()
 
         assertNull("only a genuinely-gone broadcast may surface the prompt", controller.prompt.value)
@@ -158,7 +177,12 @@ class StaleSessionPromptControllerTest {
         val controller = StaleSessionPromptController(signals)
         runCurrent()
 
-        signals.emitStaleSession(hostId = 7L, sessionName = "work", folderPath = goneFolder)
+        signals.emitStaleSession(
+            hostId = 7L,
+            generation = generation("work"),
+            lastKnownName = "work",
+            folderPath = goneFolder,
+        )
         runCurrent()
         assertNotNull(controller.prompt.value)
 
@@ -277,6 +301,9 @@ class StaleSessionPromptControllerTest {
 
     private fun host(id: Long): HostEntity =
         HostEntity(id = id, name = "h", hostname = "example", username = "u", keyId = 1L)
+
+    private fun generation(name: String): TmuxSessionGeneration =
+        TmuxSessionGeneration(sessionId = "id-$name", createdEpochSeconds = name.length.toLong() + 1L)
 
     private class FakeHostDao(private val host: HostEntity) : HostDao {
         override fun getAll(): Flow<List<HostEntity>> = flowOf(listOf(host))

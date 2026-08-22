@@ -218,6 +218,12 @@ public class TreeClientCache @Inject constructor(
                 .put(KEY_FOLDER_PATH, node.folderPath)
                 .put(KEY_COLLAPSED, node.collapsed)
             node.foreignKind?.takeIf { it.isNotBlank() }?.let { obj.put(KEY_FOREIGN_KIND, it) }
+            node.tmuxSessionId?.trim()?.takeIf { it.isNotEmpty() }?.let { id ->
+                node.sessionCreated?.takeIf { it > 0L }?.let { created ->
+                    obj.put(KEY_TMUX_SESSION_ID, id)
+                    obj.put(KEY_SESSION_CREATED, created)
+                }
+            }
             nodesArray.put(obj)
         }
         val watchedArray = JSONArray()
@@ -244,6 +250,10 @@ public class TreeClientCache @Inject constructor(
         for (i in 0 until nodesJson.length()) {
             val obj = nodesJson.optJSONObject(i) ?: continue
             val session = obj.optString(KEY_SESSION).takeIf { it.isNotBlank() } ?: continue
+            val tmuxSessionId = obj.optString(KEY_TMUX_SESSION_ID, "")
+                .trim()
+                .takeIf { it.isNotEmpty() }
+            val sessionCreated = obj.optLong(KEY_SESSION_CREATED, 0L).takeIf { it > 0L }
             nodes.add(
                 TreeRemoteSource.TreeNode(
                     session = session,
@@ -251,6 +261,8 @@ public class TreeClientCache @Inject constructor(
                     folderPath = obj.optString(KEY_FOLDER_PATH, ""),
                     collapsed = obj.optBoolean(KEY_COLLAPSED, false),
                     foreignKind = obj.optString(KEY_FOREIGN_KIND, "").takeIf { it.isNotBlank() },
+                    tmuxSessionId = tmuxSessionId?.takeIf { sessionCreated != null },
+                    sessionCreated = sessionCreated?.takeIf { tmuxSessionId != null },
                 ),
             )
         }
@@ -319,6 +331,8 @@ public class TreeClientCache @Inject constructor(
         const val KEY_FOLDER_PATH: String = "folder_path"
         const val KEY_COLLAPSED: String = "collapsed"
         const val KEY_FOREIGN_KIND: String = "foreign_kind"
+        const val KEY_TMUX_SESSION_ID: String = "tmux_session_id"
+        const val KEY_SESSION_CREATED: String = "session_created"
         const val KEY_WATCHED_FOLDERS: String = "watched_folders"
         const val KEY_WATCHED_PATH: String = "path"
         const val KEY_WATCHED_LABEL: String = "label"

@@ -8,6 +8,7 @@ import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.launchTargetCollisionMessage
 import com.pocketshell.app.sessions.remoteStartDirectoryExistsCommand
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.app.ssh.BoundedSessionExec
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.portfwd.PortScanner
@@ -430,6 +431,7 @@ interface FolderListGateway {
         passphrase: CharArray?,
         oldName: String,
         newName: String,
+        expectedGeneration: TmuxSessionGeneration,
     ): Result<Unit> = Result.failure(UnsupportedOperationException("Session rename is not available."))
 
     /**
@@ -1574,34 +1576,25 @@ class SshFolderListGateway internal constructor(
         passphrase: CharArray?,
         oldName: String,
         newName: String,
-    ): Result<Unit> {
-        val oldTarget = oldName.trim()
-        val newTarget = newName.trim()
-        if (oldTarget.isEmpty() || newTarget.isEmpty()) {
-            return Result.failure(IllegalArgumentException("Enter a session name."))
-        }
-        if (oldTarget == newTarget) return Result.success(Unit)
-        return withLeaseSession(host, keyPath, passphrase) { session ->
-            // Issue #1820: EXACT session targets. The NEW name is a name to
-            // CREATE, not a target to resolve, so it stays verbatim — only the
-            // `-t` lookups take the `=` prefix. Without it, renaming `<name>`
-            // while `<name>-2` lives renames the neighbour, and the
-            // old-name verify below prefix-matches the survivor and reports
-            // "was not renamed" even when the rename landed.
-            val quotedOld = shellQuote(TmuxTarget.session(oldTarget))
-            val quotedNewTarget = shellQuote(TmuxTarget.session(newTarget))
-            val quotedNew = shellQuote(newTarget)
-            val rename = session.exec(pathAware("tmux rename-session -t $quotedOld $quotedNew"))
-            if (rename.exitCode != 0) {
-                throw RuntimeException(rename.stderr.ifBlank { rename.stdout }.trim())
-            }
-            val oldExists = session.exec(pathAware("tmux has-session -t $quotedOld"))
-            val newExists = session.exec(pathAware("tmux has-session -t $quotedNewTarget"))
-            if (oldExists.exitCode == 0 || newExists.exitCode != 0) {
-                throw RuntimeException("tmux session '$oldTarget' was not renamed to '$newTarget'.")
-            }
-        }
-    }
+        expectedGeneration: TmuxSessionGeneration,
+    ): Result<Unit> = renameSessionWithGeneration(
+        host = host,
+        keyPath = keyPath,
+        passphrase = passphrase,
+        oldName = oldName,
+        newName = newName,
+        expectedGeneration = expectedGeneration,
+        withLeaseSession = { targetHost, targetKeyPath, targetPassphrase, block ->
+            withLeaseSession(
+                targetHost,
+                targetKeyPath,
+                targetPassphrase,
+                block = block,
+            )
+        },
+        pathAware = ::pathAware,
+        shellQuote = ::shellQuote,
+    )
 
     override suspend fun setRecordedKind(
         host: HostEntity,

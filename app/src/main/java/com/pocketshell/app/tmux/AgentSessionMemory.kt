@@ -108,11 +108,14 @@ public class AgentSessionMemory @Inject constructor() {
      * A newly-created session can reuse the same name and even the same tmux
      * window ids, so per-window forget is not enough at session teardown.
      */
-    internal fun forgetSession(hostId: Long, sessionName: String) {
-        val trimmed = sessionName.trim()
-        if (trimmed.isEmpty()) return
+    internal fun forgetSession(hostId: Long, generation: TmuxSessionGeneration) {
+        val durableKey = durableTmuxSessionKey(
+            hostId,
+            generation.sessionId,
+            generation.createdEpochSeconds,
+        ) ?: return
         statuses.keys.removeIf { key ->
-            key.hostId == hostId && key.sessionName == trimmed
+            key.hostId == hostId && key.durableSessionKey == durableKey
         }
     }
 

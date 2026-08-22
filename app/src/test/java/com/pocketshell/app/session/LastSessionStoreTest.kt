@@ -6,6 +6,7 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.resolveLastSessionForStop
 import com.pocketshell.app.tmux.TmuxConnectTrigger
 import com.pocketshell.app.tmux.TmuxRestoreIntentSnapshot
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -53,6 +54,9 @@ class LastSessionStoreTest {
         composerDraft = draft,
         savedAtMillis = savedAtMillis,
     )
+
+    private val predecessor = TmuxSessionGeneration("\$3", 1_700_000_003L)
+    private val successor = TmuxSessionGeneration("\$4", 1_700_000_004L)
 
     @Test
     fun `read on cold store returns null`() {
@@ -346,9 +350,19 @@ class LastSessionStoreTest {
         // Repro of #834: the killed agent session is the persisted "last
         // active". On d63b6a63 nothing cleared it, so a restore re-opened it.
         val store = LastSessionStore(context)
-        store.save(sample(savedAtMillis = 1_000L)) // sessionName = "claude-main", hostId = 7
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        )
 
-        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
 
         // Read from a fresh instance to prove the clear reached disk.
         assertNull(
@@ -361,9 +375,19 @@ class LastSessionStoreTest {
     fun `onSessionKilled does NOT clear a record for a different session`() {
         // Guard: killing session A never invalidates a stored session B.
         val store = LastSessionStore(context)
-        store.save(sample(savedAtMillis = 1_000L)) // "claude-main"
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        )
 
-        store.onSessionKilled(hostId = 7L, sessionName = "codex-side")
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = successor,
+            lastKnownName = "claude-main",
+        )
 
         val read = LastSessionStore(context).read(nowMillis = 2_000L)
         assertNotNull("an unrelated stored session must remain restorable", read)
@@ -372,12 +396,22 @@ class LastSessionStoreTest {
 
     @Test
     fun `onSessionKilled does NOT clear a same-name session on a different host`() {
-        // Identity is (hostId, sessionName): a same-named session on host 99
-        // must not be invalidated by a kill on host 7.
+        // The exact generation is host-scoped: the same generation payload on
+        // another host must not invalidate host 7's record.
         val store = LastSessionStore(context)
-        store.save(sample(savedAtMillis = 1_000L)) // host 7, "claude-main"
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        )
 
-        store.onSessionKilled(hostId = 99L, sessionName = "claude-main")
+        store.onSessionKilled(
+            hostId = 99L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
 
         val read = LastSessionStore(context).read(nowMillis = 2_000L)
         assertNotNull("a same-name session on another host must remain", read)
@@ -391,9 +425,19 @@ class LastSessionStoreTest {
         // re-`save()` the dead session and re-arm the restore. The tombstone
         // makes that save a no-op (clears instead).
         val store = LastSessionStore(context)
-        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
 
-        store.save(sample(savedAtMillis = 5_000L)) // same identity as the kill
+        store.save(
+            sample(
+                savedAtMillis = 5_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        )
 
         assertNull(
             "a save for the just-killed session must not persist a restore target",
@@ -406,9 +450,19 @@ class LastSessionStoreTest {
         // Guard: the tombstone only suppresses the exact killed identity;
         // opening + saving a DIFFERENT session still arms a normal restore.
         val store = LastSessionStore(context)
-        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
 
-        store.save(sample(savedAtMillis = 5_000L).copyWith(sessionName = "codex"))
+        store.save(
+            sample(
+                savedAtMillis = 5_000L,
+                tmuxSessionId = successor.sessionId,
+                sessionCreated = successor.createdEpochSeconds,
+            ).copyWith(sessionName = "codex"),
+        )
 
         val read = LastSessionStore(context).read(nowMillis = 6_000L)
         assertNotNull("a different session must still be restorable after a kill", read)
@@ -416,14 +470,24 @@ class LastSessionStoreTest {
     }
 
     @Test
-    fun `onSessionKilled with a blank session name is a no-op`() {
+    fun `onSessionKilled uses the exact generation even when the display name is blank`() {
         val store = LastSessionStore(context)
-        store.save(sample(savedAtMillis = 1_000L))
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        )
 
-        store.onSessionKilled(hostId = 7L, sessionName = "   ")
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "   ",
+        )
 
-        assertNotNull(
-            "a blank kill name must not clear an unrelated stored session",
+        assertNull(
+            "the display name must never replace the exact generation as identity",
             LastSessionStore(context).read(nowMillis = 2_000L),
         )
     }
@@ -437,14 +501,24 @@ class LastSessionStoreTest {
         val store = LastSessionStore(context)
 
         // 1. Delete the original same-identity session.
-        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
 
         // 2. The user recreates + OPENS a new session of that identity
         //    (navigator routes to the TmuxSession destination → onSessionOpened).
-        store.onSessionOpened(hostId = 7L, sessionName = "claude-main")
+        store.onSessionOpened(hostId = 7L, generation = successor)
 
         // 3. Background → onStop saves the now-live recreated session.
-        store.save(sample(savedAtMillis = 5_000L)) // host 7, "claude-main"
+        store.save(
+            sample(
+                savedAtMillis = 5_000L,
+                tmuxSessionId = successor.sessionId,
+                sessionCreated = successor.createdEpochSeconds,
+            ),
+        ) // host 7, "claude-main"
 
         // 4. Next foreground must restore it — the tombstone is gone.
         val read = LastSessionStore(context).read(nowMillis = 6_000L)
@@ -463,12 +537,22 @@ class LastSessionStoreTest {
         // identity. Opening session B must not un-suppress a just-killed
         // session A, so A still cannot re-arm a restore.
         val store = LastSessionStore(context)
-        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
 
-        store.onSessionOpened(hostId = 7L, sessionName = "codex-side")
+        store.onSessionOpened(hostId = 7L, generation = successor)
 
         // A's tombstone survives, so a save of A is still suppressed.
-        store.save(sample(savedAtMillis = 5_000L)) // host 7, "claude-main"
+        store.save(
+            sample(
+                savedAtMillis = 5_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        ) // host 7, "claude-main"
         assertNull(
             "killing A then opening B must not let A re-arm a restore",
             LastSessionStore(context).read(nowMillis = 6_000L),
@@ -478,10 +562,16 @@ class LastSessionStoreTest {
     @Test
     fun `opening a session with no tombstone is a harmless no-op`() {
         val store = LastSessionStore(context)
-        store.save(sample(savedAtMillis = 1_000L))
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = successor.sessionId,
+                sessionCreated = successor.createdEpochSeconds,
+            ),
+        )
 
         // No kill happened; opening must not disturb the stored record.
-        store.onSessionOpened(hostId = 7L, sessionName = "claude-main")
+        store.onSessionOpened(hostId = 7L, generation = successor)
 
         val read = LastSessionStore(context).read(nowMillis = 2_000L)
         assertNotNull(read)
@@ -544,10 +634,58 @@ class LastSessionStoreTest {
     @Test
     fun `peek returns null after the stored session is killed`() {
         val store = LastSessionStore(context)
-        store.save(sample(savedAtMillis = 1_000L))
-        store.onSessionKilled(hostId = 7L, sessionName = "claude-main")
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        )
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
 
         assertNull(LastSessionStore(context).peek(nowMillis = 2_000L))
+    }
+
+    @Test
+    fun `delayed predecessor kill cannot clear same-name successor restore`() {
+        val store = LastSessionStore(context)
+        store.save(
+            sample(
+                savedAtMillis = 1_000L,
+                tmuxSessionId = predecessor.sessionId,
+                sessionCreated = predecessor.createdEpochSeconds,
+            ),
+        )
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
+
+        // The name is reused by a distinct tmux generation before a delayed
+        // predecessor event is delivered. The successor is the restore target.
+        store.save(
+            sample(
+                savedAtMillis = 2_000L,
+                tmuxSessionId = successor.sessionId,
+                sessionCreated = successor.createdEpochSeconds,
+            ),
+        )
+        store.onSessionKilled(
+            hostId = 7L,
+            generation = predecessor,
+            lastKnownName = "claude-main",
+        )
+        store.onSessionOpened(hostId = 7L, generation = predecessor)
+
+        val restored = LastSessionStore(context).read(nowMillis = 3_000L)
+        assertNotNull("a delayed predecessor event must not clear the successor", restored)
+        assertEquals(successor.sessionId, restored!!.tmuxSessionId)
+        assertEquals(successor.createdEpochSeconds, restored.sessionCreated)
     }
 
     private fun LastSessionStore.LastSession.copyWith(

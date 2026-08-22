@@ -46,6 +46,7 @@ import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SURFACE_PANE_PRESENT_SEMANTICS_KEY
 import com.pocketshell.app.tmux.TMUX_TERMINAL_HELD_SEMANTICS_KEY
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -351,18 +352,33 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         // as both Stop entry points do. MainActivity's #834 observer must
         // invalidate the restore record. Resolve the host id we just seeded so
         // the (hostId, sessionName) identity matches what was persisted.
-        killRemoteSession(key)
-        assertTrue("session must be gone server-side after delete", !sessionAlive(key))
         val ctx = InstrumentationRegistry.getInstrumentation().targetContext
         val entryPoint = EntryPointAccessors
             .fromApplication(ctx, TestAccessEntryPoint::class.java)
         val killedHostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
+        val storedBeforeKill = checkNotNull(
+            entryPoint.lastSessionStore().read(maxAgeMillis = Long.MAX_VALUE),
+        ) { "backgrounding the attached session must persist its exact restore identity" }
+        val killedGeneration = TmuxSessionGeneration(
+            sessionId = checkNotNull(storedBeforeKill.tmuxSessionId) {
+                "persisted killed session must carry tmux session id"
+            },
+            createdEpochSeconds = checkNotNull(storedBeforeKill.sessionCreated) {
+                "persisted killed session must carry tmux creation timestamp"
+            },
+        )
+        killRemoteSession(key)
+        assertTrue("session must be gone server-side after delete", !sessionAlive(key))
         // The activity is in CREATED (still STARTED-collected? no — CREATED is
         // below STARTED). Bring it to STARTED so the repeatOnLifecycle observer
         // is collecting, emit the kill, then let it drain.
         compose.activityRule.scenario.moveToState(Lifecycle.State.STARTED)
         delay(LIFECYCLE_DRAIN_MS)
-        entryPoint.sessionLifecycleSignals().emitKilled(killedHostId, SEEDED_SESSION)
+        entryPoint.sessionLifecycleSignals().emitKilled(
+            hostId = killedHostId,
+            generation = killedGeneration,
+            lastKnownName = SEEDED_SESSION,
+        )
         delay(LIFECYCLE_DRAIN_MS)
 
         // The store must no longer hold the deleted session as a restore target.
@@ -455,6 +471,17 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         // ---- Background -> persist last session, then kill it on the server.
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         delay(LIFECYCLE_DRAIN_MS)
+        val storedBeforeKill = checkNotNull(
+            entryPoint.lastSessionStore().read(maxAgeMillis = Long.MAX_VALUE),
+        ) { "backgrounding the attached session must persist its exact restore identity" }
+        val expectedGeneration = TmuxSessionGeneration(
+            sessionId = checkNotNull(storedBeforeKill.tmuxSessionId) {
+                "cold-restore stale proof needs the persisted tmux session id"
+            },
+            createdEpochSeconds = checkNotNull(storedBeforeKill.sessionCreated) {
+                "cold-restore stale proof needs the persisted tmux creation timestamp"
+            },
+        )
         killRemoteSession(key)
         assertTrue("session must be gone on the server after kill", !sessionAlive(key))
 
@@ -465,22 +492,28 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         // The genuinely-gone attach must broadcast a StaleSession naming the gone
         // session, so the folder tree can offer the recreate prompt.
         compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
-            staleEvents.any { it.sessionName == SEEDED_SESSION }
+            staleEvents.any {
+                it.sessionName == SEEDED_SESSION && it.generation == expectedGeneration
+            }
         }
         val fired = synchronized(staleEvents) { staleEvents.toList() }
         writeText(
             "stale-session-signal.txt",
             buildString {
                 appendLine("expected_stale_session=$SEEDED_SESSION")
+                appendLine("expected_generation=$expectedGeneration")
                 appendLine("stale_events=${fired.map { it.sessionName }}")
+                appendLine("stale_generations=${fired.map { it.generation }}")
                 appendLine("stale_folders=${fired.map { it.folderPath }}")
+                appendLine("exact_generation_match=${fired.any { it.generation == expectedGeneration }}")
             },
         )
         collectorScope.coroutineContext[kotlinx.coroutines.Job]?.cancel()
         assertTrue(
             "a genuinely-gone cold-restore must broadcast a StaleSession for the " +
-                "folder tree's recreate prompt; saw ${fired.map { it.sessionName }}",
-            fired.any { it.sessionName == SEEDED_SESSION },
+                "folder tree's recreate prompt with the persisted generation; saw " +
+                "${fired.map { it.sessionName to it.generation }}",
+            fired.any { it.sessionName == SEEDED_SESSION && it.generation == expectedGeneration },
         )
         Unit
     } }

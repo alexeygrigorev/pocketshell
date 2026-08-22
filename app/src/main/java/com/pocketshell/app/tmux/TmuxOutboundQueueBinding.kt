@@ -69,8 +69,8 @@ internal fun knownSessionNavigationTarget(
     val identity = hostId?.let { parseDurableTmuxSessionIdentity(it, durableKey) }
     return TmuxSessionNavigationTarget(
         sessionName,
-        identity?.tmuxSessionId,
-        identity?.sessionCreated,
+        identity?.sessionId,
+        identity?.createdEpochSeconds,
     )
 }
 
@@ -84,5 +84,9 @@ internal fun knownPaneSessionNavigationTarget(
         .firstOrNull { it.key.sessionName == sessionName && it.panes.any { pane -> pane.paneId == paneId } }
         ?.key?.durableSessionKey
         ?.let { parseDurableTmuxSessionIdentity(hostId, it) }
-    return TmuxSessionNavigationTarget(sessionName, identity?.tmuxSessionId, identity?.sessionCreated)
+    return TmuxSessionNavigationTarget(
+        sessionName,
+        identity?.sessionId,
+        identity?.createdEpochSeconds,
+    )
 }

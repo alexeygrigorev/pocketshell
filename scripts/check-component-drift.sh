@@ -30,6 +30,7 @@
 # Usage:
 #   scripts/check-component-drift.sh            # check against the committed baseline
 #   scripts/check-component-drift.sh --update   # rewrite the baseline to current counts
+#   scripts/check-component-drift.sh --self-test # prove raw-call mutations go red
 #
 # Exit codes:
 #   0  no NEW drift (counts <= baseline)            [also: --update succeeded]
@@ -64,6 +65,72 @@ current_counts() {
     | awk '{ printf "%s %s\n", $2, $1 }' \
     | sort
 }
+
+# Mutation-sensitive proof for the guard itself. The production FileViewer
+# source is copied into a temporary miniature tree, then each migrated form
+# dialog is changed back to a raw AlertDialog in isolation. The real guard must
+# reject both mutations; otherwise a green count check could be disconnected
+# from the source boundary it is meant to protect.
+self_test() (
+  set -euo pipefail
+
+  local sandbox clean_source scan_source mutant_file output
+  sandbox="$(mktemp -d "${TMPDIR:-/tmp}/component-drift-selftest.XXXXXX")"
+  trap 'rm -rf -- "$sandbox"' EXIT
+
+  scan_source="$sandbox/app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt"
+  clean_source="$sandbox/clean/FileViewerScreen.kt"
+  mkdir -p "$(dirname "$scan_source")" "$(dirname "$clean_source")" "$sandbox/shared/ui-kit/src/main" "$sandbox/scripts"
+  cp "$REPO_ROOT/app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt" "$clean_source"
+  cp "$clean_source" "$scan_source"
+  cp "$BASELINE_FILE" "$sandbox/scripts/component-drift-baseline.txt"
+  cp "$SCRIPT_DIR/check-component-drift.sh" "$sandbox/scripts/check-component-drift.sh"
+  chmod +x "$sandbox/scripts/check-component-drift.sh"
+
+  if ! output="$(cd "$sandbox" && scripts/check-component-drift.sh 2>&1)"; then
+    printf '%s\n' "$output" >&2
+    echo "FAIL: clean FileViewerScreen source is not accepted by the component-drift guard" >&2
+    exit 1
+  fi
+
+  mutate_and_require_red() {
+    local label="$1"
+    local range_start="$2"
+    local range_end="$3"
+    local mutated_call="$4"
+    mutant_file="$sandbox/$label/FileViewerScreen.kt"
+    mkdir -p "$(dirname "$mutant_file")"
+    cp "$clean_source" "$mutant_file"
+    sed -i "/$range_start/,/$range_end/ s/FormDialog(/AlertDialog(/" "$mutant_file"
+    [[ "$(grep -Fxc "$mutated_call" "$mutant_file")" == 1 ]] \
+      || { echo "FAIL: $label mutation did not apply" >&2; exit 1; }
+
+    cp "$mutant_file" "$scan_source"
+    if output="$(cd "$sandbox" && scripts/check-component-drift.sh 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      echo "FAIL: $label raw-component mutation was accepted" >&2
+      exit 1
+    fi
+    grep -Fq \
+      'DRIFT  app/src/main/java/com/pocketshell/app/fileviewer/FileViewerScreen.kt: 2 raw component call-sites (baseline 1, +1 new)' \
+      <<<"$output" \
+      || { printf '%s\n' "$output" >&2; echo "FAIL: $label mutation failed for an unexpected reason" >&2; exit 1; }
+    echo "PASS: $label raw-component mutation is rejected"
+    cp "$clean_source" "$scan_source"
+  }
+
+  mutate_and_require_red \
+    open-path 'if (showOpenPath) {' 'title = "Open path",' '        AlertDialog('
+  mutate_and_require_red \
+    annotation-text 'private fun AnnotationTextDialog(' 'title = "Add text",' '    AlertDialog('
+
+  echo "PASS: clean source is accepted and both FileViewer form migrations are guarded"
+)
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  self_test
+  exit 0
+fi
 
 if [[ "${1:-}" == "--update" ]]; then
   {

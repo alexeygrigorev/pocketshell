@@ -104,7 +104,7 @@ class UsageRemoteSourceTest {
     }
 
     @Test
-    fun fetchUsage_nullPercentCanonicalWindow_failsLoud() = runTest {
+    fun fetchUsage_nullPercentCanonicalWindow_isNonRenderable_notAFetchFailure() = runTest {
         val session = FakeSshSession(
             mapOf(
                 defaultFetchCommand to ExecResult(
@@ -118,12 +118,12 @@ class UsageRemoteSourceTest {
         val result = source.fetchUsage(session)
 
         assertTrue(
-            "a null canonical percentage must fail the app fetch loudly",
-            result is UsageFetchResult.Failed,
+            "a null canonical percentage is valid source data but has no renderable row",
+            result is UsageFetchResult.Success,
         )
-        assertTrue(
-            (result as UsageFetchResult.Failed).reason.contains("percent_remaining"),
-        )
+        val success = result as UsageFetchResult.Success
+        assertEquals("codex", success.records.single().provider)
+        assertTrue("null-percent spans must not become ghost rows", success.records.single().windows.isEmpty())
     }
 
     @Test

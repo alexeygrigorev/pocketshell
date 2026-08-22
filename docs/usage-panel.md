@@ -1,6 +1,6 @@
 # Usage Panel
 
-Provider quota tracking for Claude Code, Codex, GitHub Copilot, Grok Build, Z.AI, and other coding-agent CLIs — surfaced as a dedicated screen and a dashboard widget. Lets the user check "how much budget have I burned through this week" without leaving PocketShell.
+Provider quota tracking for Claude Code, Codex, GitHub Copilot, Grok Build, Z.AI, and other coding-agent CLIs — surfaced as a dedicated screen and a dashboard widget. The pinned backend currently reports five providers; a separate canonical producer contract can add providers such as OpenCode Go.
 
 ## Key principle: zero credentials on the phone
 
@@ -55,20 +55,21 @@ NAME each record carries drives the label:
 | `7d` | `7d window` |
 | `weekly` | `Weekly limit` |
 | `monthly` | `Monthly limit` |
-| anything else (`short_term` / `long_term` / unknown) | humanized (`Short term` / `Long term`, #522) |
+| anything else (`short_term` / `long_term` / unknown) | humanized (`Short term` / `Long term` / `Custom span`, #522) |
 
-The window NAME comes STRAIGHT from quse's `window` field — quse v0.0.9 is the
-single source of truth for the span (issue #1318). The two main coding-agent
-providers — **Codex and Claude Code** — both use the same 5h + 7d windows, so
-quse emits `5h` / `7d` for both and they render the identical concrete
-`5h window` / `7d window` labels. **Monthly-cadence providers keep their real
+The window NAME comes STRAIGHT from the canonical `windows` map key — the
+producer is the single source of truth for the span (issue #1318). For the
+pinned PyPI quse 0.0.14 wheel, the host maps each legacy `window` value into
+that key and falls back to `short_term` or `long_term` when the legacy value is
+null. The two main coding-agent providers — **Codex and Claude Code** — both
+use the same 5h + 7d windows, so they render the identical concrete `5h
+window` / `7d window` labels. **Monthly-cadence providers keep their real
 cadence**: GitHub Copilot's long-term quota carries `monthly` and renders
-`Monthly limit`, NOT a 7d window. When quse carries no span (`window: null`,
-e.g. Copilot's short-term bucket), the parser falls back to the generic key
-name so the label humanizes to `Short term` / `Long term`. There is no
-downstream re-derivation of the span from `details`. The app ignores
-`details` for quota windows; the one narrow exception is Codex reset-credit
-inventory described below.
+`Monthly limit`, NOT a 7d window. A source span with
+`percent_remaining: null` does not apply to that provider and is omitted at the
+host boundary. There is no downstream re-derivation of the span from
+`details`. The app ignores `details` for quota windows; the one narrow
+exception is Codex reset-credit inventory described below.
 
 ### Codex reset credits (issue #1789)
 
@@ -171,46 +172,69 @@ schema.
 
 ## Expected JSON Schema
 
-`quse` (the pinned usage backend bundled with `pocketshell`, issue #1318) is
-the single source of truth for the unified schema. Its `--json` output is a
-**provider-keyed object**; `pocketshell usage --json` FLATTENS it into
-newline-delimited JSON (NDJSON) — one record per line per provider, injecting
-the provider name from the key and passing quse's unified fields through
-unchanged. No downstream re-derivation of windows / resets / percentages
-(hard-cut, D22). `quse`'s raw output:
+The pinned PyPI `quse==0.0.14` backend is the source for the published usage
+values (issue #1318). Its `--json` output is a **provider-keyed object** with
+five providers and legacy `short_term` / `long_term` records. The host helper
+flattens that object into newline-delimited JSON (NDJSON), injects the provider
+name from the key, and translates the two legacy records into the canonical
+`windows` map. It does not re-derive windows, resets, percentages, or provider
+details (hard-cut, D22). The published raw shape looks like this:
 
 ```json
 {
   "codex": {
     "status": "ok",
-    "short_term": {"percent_remaining": 100.0, "reset_at": "2026-07-07T23:57:08Z", "window": "5h"},
-    "long_term":  {"percent_remaining": 2.0,   "reset_at": "2026-07-11T06:23:55Z", "window": "7d"},
+    "short_term": {"percent_remaining": null, "reset_at": null, "window": null},
+    "long_term": {"percent_remaining": 56.0, "reset_at": "2026-08-27T03:30:22Z", "window": "7d"},
     "error": null,
     "details": { ... extra fields; Codex reset-credit inventory is the sole app exception ... }
   },
-  "claude": { "status": "ok", "short_term": {...}, "long_term": {...}, "error": null, "details": {...} }
+  "claude": {
+    "status": "ok",
+    "short_term": {"percent_remaining": 99.0, "reset_at": "2026-08-22T15:49:59Z", "window": "5h"},
+    "long_term": {"percent_remaining": 93.0, "reset_at": "2026-08-27T14:59:59Z", "window": "7d"},
+    "error": null,
+    "details": { ... }
+  }
 }
 ```
 
 which `pocketshell usage --json` flattens to one record per line:
 
 ```json
-{"provider":"codex","status":"ok","short_term":{"percent_remaining":100.0,"reset_at":"2026-07-07T23:57:08Z","window":"5h"},"long_term":{"percent_remaining":2.0,"reset_at":"2026-07-11T06:23:55Z","window":"7d"},"error":null,"details":{...}}
-{"provider":"claude","status":"ok","short_term":{...},"long_term":{...},"error":null,"details":{...}}
+{"provider":"codex","status":"ok","windows":{"7d":{"percent_remaining":56.0,"reset_at":"2026-08-27T03:30:22Z"}},"error":null,"details":{...}}
+{"provider":"claude","status":"ok","windows":{"5h":{"percent_remaining":99.0,"reset_at":"2026-08-22T15:49:59Z"},"7d":{"percent_remaining":93.0,"reset_at":"2026-08-27T14:59:59Z"}},"error":null,"details":{...}}
 ```
 
-The app reads `provider`, `status`, `short_term` / `long_term`
-`{percent_remaining, reset_at, window}`, and `error` directly, and expects
-this exact schema — a mismatch fails the whole panel loudly (no per-record
-skip-resilience). `reset_at` is canonical ISO-8601 UTC; the window label comes
-straight from `short_term.window` / `long_term.window`. The app ignores
-`details` except for Codex's strict reset-credit inventory fields documented
-above; it never reads `details.windows` or re-derives quota state from details.
+The app reads `provider`, `status`, canonical top-level `windows`, and `error`.
+The host producer requires each input provider record to contain either
+canonical `windows` or at least one legacy `short_term` / `long_term` field;
+missing all three is a schema error and fails loudly. Legacy records may carry
+both fields with null values; the host then emits `windows: {}`. Canonical
+producers should emit the empty map explicitly when no span is renderable.
+The Android parser defensively treats an absent or null map as zero renderable
+windows, but `pocketshell usage --json` does not emit that incomplete shape.
 
-The supported providers are `codex`, `claude`, `copilot`, `grok` (Grok Build;
-alias `grok-build`), and `zai`.
-`gemini` is accepted but reports `status: "unsupported"` because Gemini
-does not currently expose a usage endpoint.
+`reset_at`, when present, is canonical ISO-8601 UTC; an absent or null value
+means that no reset time is available. Each window label comes straight from
+the `windows` map key. A window object with `percent_remaining: null` is
+non-renderable. A non-object window or malformed numeric value or timestamp is
+a schema error. The app ignores `details` except for Codex's strict
+reset-credit inventory fields documented above; it never reads
+`details.windows` or re-derives quota state from details.
+
+Boundary compatibility contract (issue #2274): the pinned PyPI wheel uses the
+legacy producer fields above, while newer or custom producers may send
+canonical top-level `windows` records directly. The host helper handles both
+forms and emits only canonical NDJSON. The legacy bridge is covered by the
+published five-provider fixture tests. Canonical OpenCode Go support is covered
+by separate contract tests; the pinned wheel does not publish a `go` provider.
+
+The pinned wheel provides `codex`, `claude`, `copilot`, `grok` (Grok Build; alias
+`grok-build`), and `zai`. The canonical app wire also supports `go` (OpenCode
+Go) when a canonical producer supplies it. `gemini` is accepted but reports
+`status: "unsupported"` because Gemini does not currently expose a usage
+endpoint.
 
 `status` values:
 
@@ -219,11 +243,12 @@ does not currently expose a usage endpoint.
 - `error` — the upstream API failed; `error` carries a free-form message (e.g. `"login required: run codex login"`).
 - `unsupported` — the provider has no usage endpoint yet (currently only `gemini`).
 
-Either `short_term` or `long_term` may be `null` when a provider only
-exposes one of them. Both can also be `null` for `unsupported` / `error`
-statuses. PocketShell maps `percent_remaining = R` to `used = 100 - R,
-limit = 100, unit = "percent"` so the existing progress-bar UI keeps the
-same data contract.
+Any `windows` entry may be null-percent when a provider does not expose that
+span. A canonical producer uses an empty map for `unsupported` / `error`
+statuses with no renderable span; a legacy producer can keep both source fields
+null and the host will produce that empty map. PocketShell maps
+`percent_remaining = R` to `used = 100 - R, limit = 100, unit = "percent"` so
+the existing progress-bar UI keeps the same data contract.
 
 ## Out of scope (v1)
 

@@ -7,12 +7,14 @@ import java.time.Instant
 /**
  * Parser for the per-provider NDJSON produced by `pocketshell usage --json`.
  *
- * `pocketshell usage` normalizes quse's provider-keyed `--json` document into
- * newline-delimited JSON — ONE object per line per provider. Published quse
- * 0.0.14 still emits `short_term` / `long_term`; the host producer performs
- * that explicit compatibility translation, and this parser consumes the
- * resulting PocketShell wire shape. It does NOT re-derive windows / resets /
- * percentages. Each record has this fixed shape:
+ * `pocketshell usage` flattens quse's provider-keyed `--json` document into
+ * newline-delimited JSON — ONE object per line per provider. The pinned PyPI
+ * quse 0.0.14 wheel is the five-provider legacy `short_term` /
+ * `long_term` producer; the host boundary translates it and this parser
+ * consumes only the resulting canonical PocketShell wire shape. A separate
+ * canonical producer contract may add providers such as OpenCode Go. The
+ * parser does NOT re-derive windows / resets / percentages. Each record has
+ * this shape:
  *
  * ```json
  * {
@@ -29,9 +31,9 @@ import java.time.Instant
  * ```
  *
  * The top-level `windows` map carries one entry per span; the KEY IS the
- * producer's window label (`5h`, `7d`, `weekly`, `monthly`, or the explicit
- * `short_term` fallback) and is passed through verbatim. A span that does not
- * apply to the provider is omitted by the host translation. Only the `5h` entry may carry a
+ * producer's window label (`5h`, `7d`, `weekly`, `monthly`, or another
+ * provider-owned key) and is passed through verbatim. A span that does not
+ * apply to the provider is omitted from rendering. Only the `5h` entry may carry a
  * `rolling: bool`, which has no counterpart in the PocketShell window model
  * and is deliberately ignored. `status` values include `ok`, `unsupported`,
  * `error`, and `limited` / `blocked`. When `status == "error"` the `error`
@@ -43,7 +45,7 @@ import java.time.Instant
  * canonical schema.
  * Any malformed record — non-JSON line, missing `provider`, a `windows` that
  * is not an object, a null/non-object window entry, or a window with a
- * missing/null/non-numeric percentage — throws
+ * missing/non-numeric percentage — throws
  * [UsageParseException], which the caller surfaces as a whole-panel error.
  * There is no per-record skip-resilience, no old-schema alias fallback, and no
  * re-derivation: a schema mismatch fails visibly instead of silently rendering
@@ -180,13 +182,17 @@ public class PocketshellUsageJsonParser {
      * The per-window `rolling: bool` (only the `5h` entry carries it) has no
      * counterpart in the [UsageWindow] model and is deliberately ignored.
      *
-     * Returns an empty list only when the map is absent / null. THROWS
+     * The host producer requires either canonical `windows` or at least one
+     * legacy `short_term` / `long_term` field, so a producer record missing
+     * both never reaches this parser. For defensive compatibility, this parser
+     * returns an empty list when the canonical map is absent / null. THROWS
      * fail-loud (issue #1318) when `windows` is present but not an object,
      * when an entry is present but not an object, or when `percent_remaining`
-     * / `reset_at` are missing or malformed. The host producer omits
-     * published quse's non-applicable null-percentage source spans before
-     * producing this canonical map; silently skipping a null canonical value
-     * here would hide a producer/schema regression.
+     * A non-null `reset_at` must be canonical ISO-8601; an absent or null
+     * `reset_at` means that no reset time is available. A present window
+     * object with a null `percent_remaining` is a valid non-applicable span
+     * in a canonical producer record and is omitted from rendering; a present
+     * non-object entry remains a schema error.
      * There is NO `short_term` / `long_term` alias fallback here: the host
      * producer owns that compatibility translation, so reading those fields
      * in the app would silently mask a producer/schema drift.
@@ -206,11 +212,12 @@ public class PocketshellUsageJsonParser {
             }
             val obj = windowsObj.opt(key) as? JSONObject
                 ?: throw UsageParseException("'windows.$key' for $provider is not an object")
-            if (!obj.has("percent_remaining") || obj.isNull("percent_remaining")) {
+            if (!obj.has("percent_remaining")) {
                 throw UsageParseException(
-                    "'windows.$key.percent_remaining' for $provider is missing or null",
+                    "'windows.$key.percent_remaining' for $provider is missing",
                 )
             }
+            if (obj.isNull("percent_remaining")) continue
             val percentRemaining = obj.requiredNumber("percent_remaining", provider, key)
             val used = (100.0 - percentRemaining).coerceIn(0.0, 100.0)
             windows += UsageWindow(

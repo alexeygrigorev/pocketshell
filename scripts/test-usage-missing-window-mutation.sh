@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Deterministic mutation/selectivity proof for issue #2274.
 #
-# This intentionally works on a temporary copy.  The four-file implementation
-# in the worktree is never edited; the temporary source is restored before the
-# script exits, including on an unexpected failure.
+# This intentionally works on a temporary copy. The worktree source is never
+# edited; the temporary source is restored before the script exits, including
+# on an unexpected failure.
 
 set -Eeuo pipefail
 
@@ -65,7 +65,7 @@ require_rc() {
   fi
 }
 
-apply_old_silent_empty_mutant() {
+apply_missing_both_fields_mutant() {
   "$PYTHON" - "$CANDIDATE_SOURCE" <<'PY'
 from pathlib import Path
 import sys
@@ -74,20 +74,21 @@ path = Path(sys.argv[1])
 text = path.read_text()
 anchor = '''    if "short_term" not in record and "long_term" not in record:
         raise ValueError(
-            f"quse provider '{provider}' is missing both published window fields "
-            "'short_term' and 'long_term'"
+            f"quse provider '{provider}' is missing canonical 'windows' or both "
+            "legacy window fields 'short_term' and 'long_term'"
         )
 '''
 if text.count(anchor) != 1:
     raise SystemExit(
-        f"expected exactly one #2274 guard block in {path}, found {text.count(anchor)}"
+        f"expected exactly one #2274 missing-both guard in {path}, found {text.count(anchor)}"
     )
 
-# Exact old behavior: no missing-both-fields check, so the later loop silently
-# emits windows={} and returns a flattened record.
+# Exact regression mutant: remove the missing-both guard. The old loop then
+# silently emits an empty canonical map, while both valid producer controls
+# remain unaffected.
 mutated = text.replace(anchor, "", 1)
 if mutated == text or anchor in mutated:
-    raise SystemExit("old silent-empty mutant was not applied exactly once")
+    raise SystemExit("missing-both guard mutant was not applied exactly once")
 path.write_text(mutated)
 PY
 }
@@ -113,10 +114,10 @@ write_manifest() {
     printf 'worktree_source_sha_after=%s\n' "$worktree_after"
     printf 'baseline_affected_rc=%s\n' "${BASELINE_AFFECTED_RC:-not-run}"
     printf 'baseline_control_translation_rc=%s\n' "${BASELINE_CONTROL_TRANSLATION_RC:-not-run}"
-    printf 'baseline_control_top_level_windows_rc=%s\n' "${BASELINE_CONTROL_TOP_LEVEL_RC:-not-run}"
+    printf 'baseline_control_canonical_rc=%s\n' "${BASELINE_CONTROL_CANONICAL_RC:-not-run}"
     printf 'mutant_affected_rc=%s\n' "${MUTANT_AFFECTED_RC:-not-run}"
     printf 'mutant_control_translation_rc=%s\n' "${MUTANT_CONTROL_TRANSLATION_RC:-not-run}"
-    printf 'mutant_control_top_level_windows_rc=%s\n' "${MUTANT_CONTROL_TOP_LEVEL_RC:-not-run}"
+    printf 'mutant_control_canonical_rc=%s\n' "${MUTANT_CONTROL_CANONICAL_RC:-not-run}"
     printf 'restored_affected_rc=%s\n' "${RESTORED_AFFECTED_RC:-not-run}"
     printf 'final_rc=%s\n' "$final_rc"
     printf 'source_restored=%s\n' "$([[ "$candidate_after_restore" == "$WORKTREE_SOURCE_SHA_BEFORE" ]] && echo yes || echo no)"
@@ -126,11 +127,11 @@ write_manifest() {
 
 BASELINE_AFFECTED_RC="not-run"
 BASELINE_CONTROL_TRANSLATION_RC="not-run"
-BASELINE_CONTROL_TOP_LEVEL_RC="not-run"
+BASELINE_CONTROL_CANONICAL_RC="not-run"
 MUTANT_SOURCE_SHA="not-recorded"
 MUTANT_AFFECTED_RC="not-run"
 MUTANT_CONTROL_TRANSLATION_RC="not-run"
-MUTANT_CONTROL_TOP_LEVEL_RC="not-run"
+MUTANT_CONTROL_CANONICAL_RC="not-run"
 RESTORED_AFFECTED_RC="not-run"
 
 on_exit() {
@@ -159,7 +160,7 @@ if [[ "$candidate_clean_sha" != "$WORKTREE_SOURCE_SHA_BEFORE" ]]; then
 fi
 
 run_test baseline_affected \
-  tests/test_usage.py::test_flatten_rejects_record_without_published_windows
+  tests/test_usage.py::test_flatten_rejects_record_without_any_window_fields
 BASELINE_AFFECTED_RC="$RUN_RC"
 require_rc 0 "fixed affected test"
 
@@ -168,32 +169,32 @@ run_test baseline_control_translation \
 BASELINE_CONTROL_TRANSLATION_RC="$RUN_RC"
 require_rc 0 "fixed translation control"
 
-run_test baseline_control_top_level_windows \
-  tests/test_usage.py::test_flatten_rejects_unreleased_top_level_windows_schema
-BASELINE_CONTROL_TOP_LEVEL_RC="$RUN_RC"
-require_rc 0 "fixed top-level-windows control"
+run_test baseline_control_canonical \
+  tests/test_usage.py::test_flatten_accepts_separate_canonical_go_contract
+BASELINE_CONTROL_CANONICAL_RC="$RUN_RC"
+require_rc 0 "fixed canonical control"
 
-apply_old_silent_empty_mutant
+apply_missing_both_fields_mutant
 MUTANT_SOURCE_SHA="$(sha256sum "$CANDIDATE_SOURCE" | awk '{print $1}')"
 if [[ "$MUTANT_SOURCE_SHA" == "$candidate_clean_sha" ]]; then
-  printf 'FAIL: old silent-empty mutant did not change candidate source\n' >&2
+  printf 'FAIL: missing-both guard mutant did not change candidate source\n' >&2
   exit 1
 fi
 
 run_test mutant_affected \
-  tests/test_usage.py::test_flatten_rejects_record_without_published_windows
+  tests/test_usage.py::test_flatten_rejects_record_without_any_window_fields
 MUTANT_AFFECTED_RC="$RUN_RC"
-require_rc 1 "old silent-empty mutant affected test"
+require_rc 1 "missing-both guard mutant affected test"
 
 run_test mutant_control_translation \
   tests/test_usage.py::test_flatten_translates_published_window_labels_without_rederiving_values
 MUTANT_CONTROL_TRANSLATION_RC="$RUN_RC"
-require_rc 0 "old silent-empty mutant translation control"
+require_rc 0 "missing-both guard mutant translation control"
 
-run_test mutant_control_top_level_windows \
-  tests/test_usage.py::test_flatten_rejects_unreleased_top_level_windows_schema
-MUTANT_CONTROL_TOP_LEVEL_RC="$RUN_RC"
-require_rc 0 "old silent-empty mutant top-level-windows control"
+run_test mutant_control_canonical \
+  tests/test_usage.py::test_flatten_accepts_separate_canonical_go_contract
+MUTANT_CONTROL_CANONICAL_RC="$RUN_RC"
+require_rc 0 "missing-both guard mutant canonical control"
 
 cp "$PRISTINE_SOURCE" "$CANDIDATE_SOURCE"
 restored_sha="$(sha256sum "$CANDIDATE_SOURCE" | awk '{print $1}')"
@@ -203,7 +204,7 @@ if [[ "$restored_sha" != "$candidate_clean_sha" ]]; then
 fi
 
 run_test restored_affected \
-  tests/test_usage.py::test_flatten_rejects_record_without_published_windows
+  tests/test_usage.py::test_flatten_rejects_record_without_any_window_fields
 RESTORED_AFFECTED_RC="$RUN_RC"
 require_rc 0 "restored affected test"
 
@@ -213,4 +214,4 @@ if [[ "$worktree_after_run" != "$WORKTREE_SOURCE_SHA_BEFORE" ]]; then
   exit 1
 fi
 
-printf 'PASS: mutant red (affected rc=1), controls green (translation/top-level rc=0), source restored\n'
+printf 'PASS: missing-both mutant red (affected rc=1), legacy/canonical controls green, source restored\n'

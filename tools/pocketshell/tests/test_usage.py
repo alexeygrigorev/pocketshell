@@ -8,7 +8,8 @@ provider details. The app parser consumes only that canonical wire shape.
 
 The tests use a live output captured from the published 0.0.14 wheel. The
 unreleased ``a86959e`` six-provider/top-level-``windows`` producer is not part
-of the fixture or contract.
+of the fixture or published-wheel contract. A small inline test covers the
+separate canonical producer contract for OpenCode Go.
 
 The tests stub ``pocketshell.usage._resolve_quse_binary`` and
 ``subprocess.run`` so they never invoke a real ``quse`` binary; the contract
@@ -98,12 +99,14 @@ def test_pyproject_pins_quse_exactly() -> None:
     assert 'specifier = "==0.0.13"' not in lock
 
 
-def test_pyproject_documents_published_quse_0014_schema() -> None:
-    """The dependency comment must describe the wheel we actually pin."""
+def test_pyproject_documents_published_and_canonical_boundaries() -> None:
+    """The dependency comment must not turn local canonical data into PyPI provenance."""
     text = _PYPROJECT.read_text()
+    assert "published 0.0.14 wheel" in text
+    assert "five-provider" in text
     assert "short_term" in text and "long_term" in text
-    assert "REPLACED by one unified top-level" not in text
-    assert "new `go`" not in text
+    assert "separate top-level `windows` producer contract" in text
+    assert "OpenCode Go" in text
 
 
 def test_resolve_quse_binary_uses_pinned_env_next_to_interpreter(tmp_path: Path) -> None:
@@ -152,7 +155,11 @@ def test_quse_0014_fixture_matches_published_contract() -> None:
     raw = json.loads(_quse_keyed_json())
     assert set(raw) == {"claude", "codex", "copilot", "grok", "zai"}
     assert "go" not in raw
-    assert "Wheel SHA-256:" in _FIXTURE_0014_PROVENANCE.read_text()
+    assert (
+        "Wheel SHA-256: "
+        "7b99a3db422f2a370a0786445c7ab89215b9a93174e63802913d83f8f1dd1b76"
+        in _FIXTURE_0014_PROVENANCE.read_text()
+    )
     for record in raw.values():
         assert set(record) == {"details", "error", "long_term", "short_term", "status"}
         assert "windows" not in record
@@ -212,7 +219,7 @@ def test_flatten_handles_single_provider_shape() -> None:
     assert set(record["windows"]) == {"7d"}
 
 
-def test_flatten_rejects_record_without_published_windows() -> None:
+def test_flatten_rejects_record_without_any_window_fields() -> None:
     keyed = json.dumps(
         {
             "codex": {
@@ -225,10 +232,11 @@ def test_flatten_rejects_record_without_published_windows() -> None:
     try:
         normalize_usage_stdout(keyed)
     except ValueError as exc:
+        assert "canonical 'windows'" in str(exc)
         assert "short_term" in str(exc)
         assert "long_term" in str(exc)
     else:  # pragma: no cover - fail-loud contract
-        raise AssertionError("a record without published windows must be rejected")
+        raise AssertionError("a record without any window fields must be rejected")
 
 
 def test_flatten_translates_published_window_labels_without_rederiving_values() -> None:
@@ -259,21 +267,39 @@ def test_flatten_translates_published_window_labels_without_rederiving_values() 
     assert record["details"] == {"anything": "the app ignores this"}
 
 
-def test_flatten_rejects_unreleased_top_level_windows_schema() -> None:
+def test_flatten_accepts_separate_canonical_go_contract() -> None:
     keyed = json.dumps(
         {
             "go": {
                 "status": "ok",
-                "windows": {"5h": {"percent_remaining": 100.0, "reset_at": None}},
+                "windows": {
+                    "5h": {
+                        "percent_remaining": 100.0,
+                        "reset_at": "2026-08-22T11:21:36Z",
+                        "rolling": True,
+                    },
+                    "monthly": {"percent_remaining": 97.0, "reset_at": None},
+                },
+                "details": {"max_used_percent": 3.0},
             }
         }
     )
+    record = json.loads(normalize_usage_stdout(keyed).splitlines()[0])
+    assert record["provider"] == "go"
+    assert record["windows"] == json.loads(keyed)["go"]["windows"]
+    assert record["details"] == {"max_used_percent": 3.0}
+    assert "short_term" not in record
+    assert "long_term" not in record
+
+
+def test_flatten_rejects_canonical_windows_non_object() -> None:
+    keyed = json.dumps({"go": {"status": "ok", "windows": "not-an-object"}})
     try:
         normalize_usage_stdout(keyed)
     except ValueError as exc:
-        assert "unsupported top-level 'windows'" in str(exc)
+        assert "top-level 'windows'" in str(exc)
     else:  # pragma: no cover - fail-loud contract
-        raise AssertionError("unreleased quse schema must not be accepted as published")
+        raise AssertionError("a non-object canonical windows map must be rejected")
 
 
 def test_flatten_quse_0014_codex_reset_credits_pass_through() -> None:

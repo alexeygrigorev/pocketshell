@@ -11,15 +11,14 @@ import org.junit.Test
 
 /**
  * Strict-schema parser tests (issue #1318). `pocketshell usage --json` emits
- * per-provider NDJSON flattened from quse's provider-keyed document; quse owns
- * the unified schema, so each record carries `status`, a top-level `windows`
- * map keyed by span label (`5h` / `7d` / `monthly`; issue #2274, quse 0.0.14),
- * and `error` directly. Non-applicable null-percent spans are omitted by the
- * host producer before this canonical wire reaches the parser; a null-percent
- * canonical span is malformed and fails loudly. The key IS the window label.
- * The parser is fail-loud: any schema drift throws (no details-window aliasing,
- * no per-record skip-resilience). The app ignores
- * `details`.
+ * per-provider NDJSON flattened from quse's provider-keyed document. The
+ * published quse 0.0.14 wheel is legacy `short_term` / `long_term`; the host
+ * producer translates it before this parser sees canonical top-level
+ * `windows`. A separate canonical producer contract may include providers such
+ * as OpenCode Go. The key IS the window label. Non-applicable null-percent
+ * spans are non-renderable and omitted; malformed entries still fail loudly.
+ * The parser is fail-loud for schema drift (no details-window aliasing, no
+ * per-record skip-resilience). The app ignores `details`.
  */
 class PocketshellUsageJsonParserTest {
 
@@ -71,7 +70,8 @@ class PocketshellUsageJsonParserTest {
         assertEquals(Instant.parse("2026-08-01T00:00:00Z"), copilot.windows.single().resetAt)
 
         val zai = records[3]
-        // zai's weekly cadence renders under quse's unified "7d" key.
+        // zai's weekly cadence reaches the app under the producer's canonical
+        // "7d" key.
         assertEquals(setOf("5h", "7d"), zai.windows.map { it.name }.toSet())
         assertEquals(44.0, zai.windows.first { it.name == "7d" }.percent, 0.001) // 100 - 56
         assertEquals(Instant.parse("2026-07-11T14:04:58Z"), zai.windows.first { it.name == "7d" }.resetAt)
@@ -406,27 +406,30 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
-    fun parse_quse0014CanonicalWindows_keyIsLabel_producerOmittedNullSpan() {
+    fun parse_separateCanonicalGoContract_preservesWindowLabels() {
         val record = parser.parse(
-            """{"provider":"claude","status":"ok","windows":{"5h":{"percent_remaining":99.0,"reset_at":"2026-08-22T09:49:59Z","rolling":true},"7d":{"percent_remaining":96.0,"reset_at":"2026-08-27T14:59:59Z"}},"error":null,"details":{}}""",
+            """{"provider":"go","status":"ok","windows":{"5h":{"percent_remaining":97.0,"reset_at":"2026-08-22T11:21:36Z","rolling":true},"monthly":{"percent_remaining":94.0,"reset_at":"2026-09-22T06:20:28Z"}},"error":null,"details":{"max_used_percent":3.0}}""",
         ).single()
 
+        assertEquals("go", record.provider)
+        assertEquals("OpenCode Go", record.displayName)
         assertEquals(2, record.windows.size)
         val fiveHour = record.windows.first { it.name == "5h" }
-        // The producer's canonical map key is the window label.
+        // The separate canonical producer's map key is the window label.
         assertEquals("5h", fiveHour.name)
-        assertEquals(1.0, fiveHour.used, 0.001) // 100 - 99
+        assertEquals(3.0, fiveHour.used, 0.001) // 100 - 97
         assertEquals(100.0, fiveHour.limit, 0.001)
         assertEquals("percent", fiveHour.unit)
-        assertEquals(Instant.parse("2026-08-22T09:49:59Z"), fiveHour.resetAt)
-        assertEquals(4.0, record.windows.first { it.name == "7d" }.percent, 0.001)
+        assertEquals(Instant.parse("2026-08-22T11:21:36Z"), fiveHour.resetAt)
+        assertEquals(6.0, record.windows.first { it.name == "monthly" }.percent, 0.001)
         // Extra producer metadata such as rolling is ignored by the app model.
     }
 
     @Test
-    fun parse_quse0014AbsentWindowsField_yieldsZeroRenderableWindows_noThrow() {
-        // An absent / null top-level `windows` means "no renderable window"
-        // (unchanged absent-data semantics) — NOT a panel-failing throw.
+    fun parse_defensivelyTreatsAbsentWindowsAsZeroRenderableRows() {
+        // The producer boundary rejects a record missing both canonical and
+        // legacy window fields. The parser remains defensive for custom or
+        // already-normalized input and treats an absent/null map as no rows.
         val absent = parser.parse(
             """{"provider":"x","status":"ok","error":null,"details":{}}""",
         ).single()
@@ -463,13 +466,12 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
-    fun parse_quse0014NullPercentWindowEntry_failsLoud_insteadOfSkippingIt() {
-        val error = assertThrows(UsageParseException::class.java) {
-            parser.parse(
-                """{"provider":"x","status":"ok","windows":{"5h":{"percent_remaining":null,"reset_at":null}},"error":null,"details":{}}""",
-            )
-        }
-        assertTrue(error.message!!.contains("windows.5h.percent_remaining"))
+    fun parse_nullPercentWindowEntry_isNonRenderable_insteadOfGhostRow() {
+        val record = parser.parse(
+            """{"provider":"x","status":"ok","windows":{"5h":{"percent_remaining":null,"reset_at":null},"7d":{"percent_remaining":75.0,"reset_at":null}},"error":null,"details":{}}""",
+        ).single()
+        assertEquals(listOf("7d"), record.windows.map { it.name })
+        assertEquals(25.0, record.windows.single().percent, 0.001)
     }
 
     @Test

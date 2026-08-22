@@ -80,6 +80,7 @@ public data class UsageProviderRecord(
         get() = when (provider.lowercase()) {
             "claude" -> "Claude Code"
             "codex" -> "Codex"
+            "go" -> "OpenCode Go"
             "opencode", "open_code", "open-code" -> "OpenCode"
             "copilot", "github_copilot", "github-copilot" -> "GitHub Copilot"
             "grok", "grok-build" -> "Grok Build"

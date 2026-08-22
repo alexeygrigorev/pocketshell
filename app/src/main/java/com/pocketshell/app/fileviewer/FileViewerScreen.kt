@@ -89,6 +89,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ButtonVariant
 import com.pocketshell.uikit.components.FileIconClass
 import com.pocketshell.uikit.components.FileTypeIcon
+import com.pocketshell.uikit.components.FormDialog
 import com.pocketshell.uikit.components.LoadingIndicator
 import com.pocketshell.uikit.components.PocketShellButton
 import com.pocketshell.uikit.components.ScreenHeader
@@ -630,6 +631,9 @@ internal fun FileViewerScaffold(
                 is PendingTabAction.Close -> "closing"
                 is PendingTabAction.Switch -> "switching"
             }
+            // Deliberately raw: this footer has conditional Submit and
+            // Discard actions that the shared ConfirmDialog/FormDialog
+            // contracts do not model.
             AlertDialog(
                 onDismissRequest = onStayOnTab,
                 modifier = Modifier.testTag(FILE_VIEWER_DIRTY_WORK_DIALOG_TAG),
@@ -1321,36 +1325,24 @@ private fun EmptyWorkspacePanel(
         }
     }
     if (showOpenPath) {
-        AlertDialog(
-            onDismissRequest = { showOpenPath = false },
-            title = { Text("Open path") },
-            text = {
-                OutlinedTextField(
-                    value = typedPath,
-                    onValueChange = { typedPath = it },
-                    singleLine = true,
-                    label = { Text("Remote path") },
-                    modifier = Modifier.testTag(FILE_VIEWER_EMPTY_OPEN_PATH_FIELD_TAG),
-                )
+        FormDialog(
+            title = "Open path",
+            confirmLabel = "Open",
+            onConfirm = {
+                showOpenPath = false
+                onOpenPath(typedPath)
             },
-            confirmButton = {
-                PocketShellButton(
-                    text = "Open",
-                    onClick = {
-                        showOpenPath = false
-                        onOpenPath(typedPath)
-                    },
-                    modifier = Modifier.testTag(FILE_VIEWER_EMPTY_OPEN_PATH_CONFIRM_TAG),
-                )
-            },
-            dismissButton = {
-                PocketShellButton(
-                    text = "Cancel",
-                    onClick = { showOpenPath = false },
-                    variant = ButtonVariant.Secondary,
-                )
-            },
-        )
+            onDismiss = { showOpenPath = false },
+            confirmTestTag = FILE_VIEWER_EMPTY_OPEN_PATH_CONFIRM_TAG,
+        ) {
+            OutlinedTextField(
+                value = typedPath,
+                onValueChange = { typedPath = it },
+                singleLine = true,
+                label = { Text("Remote path") },
+                modifier = Modifier.testTag(FILE_VIEWER_EMPTY_OPEN_PATH_FIELD_TAG),
+            )
+        }
     }
 }
 
@@ -1573,50 +1565,29 @@ private fun AnnotationTextDialog(
     onDismiss: () -> Unit,
 ) {
     var text by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = PocketShellColors.Surface,
-        title = {
-            Text(
-                text = "Add text",
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                color = PocketShellColors.Text,
-            )
-        },
-        text = {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                singleLine = false,
-                placeholder = {
-                    Text(
-                        text = "Label…",
-                        style = PocketShellType.bodyDense,
-                        color = PocketShellColors.TextMuted,
-                    )
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(FILE_VIEWER_ANNOTATE_TEXT_FIELD_TAG),
-            )
-        },
-        confirmButton = {
-            PocketShellButton(
-                text = "Add",
-                onClick = { onConfirm(text) },
-                variant = ButtonVariant.Primary,
-                modifier = Modifier.testTag(FILE_VIEWER_ANNOTATE_TEXT_CONFIRM_TAG),
-            )
-        },
-        dismissButton = {
-            PocketShellButton(
-                text = "Cancel",
-                onClick = onDismiss,
-                variant = ButtonVariant.Secondary,
-            )
-        },
-    )
+    FormDialog(
+        title = "Add text",
+        confirmLabel = "Add",
+        onConfirm = { onConfirm(text) },
+        onDismiss = onDismiss,
+        confirmTestTag = FILE_VIEWER_ANNOTATE_TEXT_CONFIRM_TAG,
+    ) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            singleLine = false,
+            placeholder = {
+                Text(
+                    text = "Label…",
+                    style = PocketShellType.bodyDense,
+                    color = PocketShellColors.TextMuted,
+                )
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(FILE_VIEWER_ANNOTATE_TEXT_FIELD_TAG),
+        )
+    }
 }
 
 /**

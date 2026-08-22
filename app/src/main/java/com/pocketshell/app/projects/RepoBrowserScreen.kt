@@ -51,6 +51,7 @@ import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.components.SpinnerSize
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -611,8 +612,8 @@ private fun FilteredEmptyState(onClearQuery: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+            .background(PocketShellColors.Surface, PocketShellShapes.medium)
+            .border(1.dp, PocketShellColors.BorderSoft, PocketShellShapes.medium)
             .padding(horizontal = PocketShellSpacing.lg, vertical = PocketShellSpacing.md)
             .testTag(REPO_BROWSER_NO_RESULTS_TAG),
     ) {

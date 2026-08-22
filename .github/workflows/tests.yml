@@ -327,6 +327,7 @@ jobs:
       - name: Raw-component drift guard (issue #865)
         run: |
           chmod +x scripts/check-component-drift.sh
+          scripts/check-component-drift.sh --self-test
           scripts/check-component-drift.sh
 
       # Issue #901: design-token (radius/font-size) ladder guardrail. Sibling of

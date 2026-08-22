@@ -285,7 +285,8 @@ def test_usage_fetch_round_trip(
     provider-keyed output into per-provider NDJSON (issue #1318)."""
     fake_bin = tmp_path / "bin"
     python_exe = _fake_python_bin(fake_bin)
-    # quse-0.0.9 emits a provider-keyed object; the daemon flattens it.
+    # Published quse 0.0.14 emits a provider-keyed short/long object; the
+    # daemon applies the producer-boundary canonical windows translation.
     payload = '{"codex": {"status": "ok", "short_term": {"percent_remaining": 77.0, "reset_at": null, "window": "5h"}}}\n'
     _write_fake_quse(fake_bin, payload=payload)
 
@@ -302,7 +303,8 @@ def test_usage_fetch_round_trip(
         # stdout is FLATTENED NDJSON: one record, provider injected from key.
         record = json.loads(result["stdout"].strip())
         assert record["provider"] == "codex"
-        assert record["short_term"]["window"] == "5h"
+        # The canonical map key is the published window label.
+        assert record["windows"]["5h"]["percent_remaining"] == 77.0
     finally:
         _terminate(proc)
 
@@ -322,7 +324,7 @@ def test_two_concurrent_clients_cache_hit_is_faster(
     payload = '{"codex": {"status": "ok"}}\n'
     # The daemon flattens the provider-keyed payload into NDJSON before
     # caching; the cold and warm responses both carry this flattened form.
-    flattened = '{"provider": "codex", "status": "ok"}\n'
+    flattened = '{"provider": "codex", "status": "ok", "windows": {}}\n'
     _write_fake_quse(fake_bin, payload=payload, sleep_secs=0.3)
 
     proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)

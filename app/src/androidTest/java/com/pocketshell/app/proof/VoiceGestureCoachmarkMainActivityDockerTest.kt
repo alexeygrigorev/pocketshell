@@ -655,6 +655,7 @@ class VoiceGestureCoachmarkMainActivityDockerTest {
 
     private fun AccessibilityNodeInfo.isValidPlatformLauncher(): Boolean =
         isDiscoverableForAccessibility() &&
+            className == android.widget.Button::class.java.name &&
             isEnabled &&
             isClickable &&
             actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK } &&

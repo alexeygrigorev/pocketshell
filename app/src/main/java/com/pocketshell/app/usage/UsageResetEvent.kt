@@ -18,12 +18,12 @@ import java.time.Instant
  * Each event is the parsed JSON shape produced by `usage_reset._reset_event`:
  *
  * ```json
- * {"type":"reset","provider":"codex","window":"short_term",
+ * {"type":"reset","provider":"codex","window":"5h",
  *  "detected_at":"2026-06-11T12:00:00Z","detected_reset_at":"...",
  *  "stated_reset_at":"...","new_reset_at":"...","timing":"early",
  *  "minutes_early":15,"previous_percent_remaining":6.0,
  *  "current_percent_remaining":100.0,"signals":["recovery","window_rolled"],
- *  "reset_key":"codex|short_term|<new_reset_at>"}
+ *  "reset_key":"codex|5h|<new_reset_at>"}
  * ```
  *
  * The [resetKey] is the server-side de-dup identity (#619 don't-renotify): the

@@ -806,13 +806,14 @@ internal fun windowLabel(name: String): String = when (name.lowercase()) {
     "5h" -> "5h window"
     "7d" -> "7d window"
     "weekly" -> "Weekly limit"
-    // #800: monthly-cadence providers (e.g. GitHub Copilot) keep their real
-    // cadence label rather than being framed as a 5h/7d window.
+    // #800: monthly-cadence providers (e.g. GitHub Copilot)
+    // keep their real cadence label rather than being framed as a 5h/7d
+    // window.
     "monthly" -> "Monthly limit"
-    // #522 item 4: humanize raw snake_case keys (e.g. `short_term` /
-    // `long_term`) so the usage panel reads "Short term" / "Long term" rather
-    // than carrying the underscore. Splits on `_`, sentence-cases the first
-    // word, lowercases the rest so "Short term" reads as prose, not Title Case.
+    // #522 item 4: any unknown span key is humanized so the usage panel
+    // reads prose ("Custom span") rather than carrying an underscore. The
+    // producer owns the canonical `windows` keys, so this is only a defensive
+    // fallback for future/foreign spans.
     else -> name
         .split('_')
         .filter { it.isNotBlank() }

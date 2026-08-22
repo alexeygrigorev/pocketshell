@@ -18,8 +18,9 @@ foundation only.
 What counts as a reset
 ----------------------
 
-For each provider, and each window (``short_term`` / ``long_term``), we
-compare the previous reading to the current one:
+For each provider, and each entry of PocketShell's canonical ``windows`` map
+(the keys are the producer-normalized window labels), we compare the previous
+reading to the current one:
 
 1. **Usage dropped back toward baseline.** ``percent_remaining`` jumped UP
    by at least :data:`RESET_RECOVERY_THRESHOLD` percentage points (e.g.
@@ -68,10 +69,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from pocketshell.usage_capture import (
-    NEW_FILE_MODE,
     UsagePaths,
     _append_history,
-    _write_private,
     resolve_paths,
 )
 
@@ -88,10 +87,6 @@ RESET_RECOVERY_THRESHOLD = 30.0
 DEFAULT_RESET_EVENTS_MAX_LINES = 500
 
 RESET_EVENTS_FILENAME = "usage-reset-events.jsonl"
-
-# The windows we inspect on each provider record, in the app-facing schema
-# written by ``normalize_usage_record``.
-_WINDOWS = ("short_term", "long_term")
 
 
 def reset_events_file(paths: UsagePaths) -> Path:
@@ -114,10 +109,25 @@ def _parse_iso(value: Any) -> Optional[datetime]:
 
 
 def _window_obj(record: Any, window: str) -> Optional[dict[str, Any]]:
+    """Return the record's window object for ``window`` (a ``windows``-map
+    key), or ``None`` when absent / not an object."""
     if not isinstance(record, dict):
         return None
-    obj = record.get(window)
+    windows = record.get("windows")
+    if not isinstance(windows, dict):
+        return None
+    obj = windows.get(window)
     return obj if isinstance(obj, dict) else None
+
+
+def _window_names(record: Any) -> list[str]:
+    """The window labels present on a record's unified ``windows`` map."""
+    if not isinstance(record, dict):
+        return []
+    windows = record.get("windows")
+    if not isinstance(windows, dict):
+        return []
+    return [name for name, obj in windows.items() if isinstance(obj, dict)]
 
 
 def _records_by_provider(cache: Optional[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -147,9 +157,10 @@ def _detect_window_reset(
 ) -> Optional[dict[str, Any]]:
     """Return a reset event dict for one provider+window, or ``None``.
 
-    ``previous``/``current`` are the window objects (``short_term`` etc.)
-    from the previous and current readings. A reset is flagged when usage
-    recovered toward baseline OR a new window boundary started.
+    ``previous``/``current`` are the window objects (entries of the record's
+    unified ``windows`` map) from the previous and current readings. A reset
+    is flagged when usage recovered toward baseline OR a new window boundary
+    started.
     """
     prev_pct = previous.get("percent_remaining")
     cur_pct = current.get("percent_remaining")
@@ -254,7 +265,9 @@ def detect_resets(
         prev_record = prev_by_provider.get(provider)
         if prev_record is None:
             continue
-        for window in _WINDOWS:
+        # The producer-normalized map keys are the window labels; compare
+        # like-for-like by label.
+        for window in _window_names(cur_record):
             prev_window = _window_obj(prev_record, window)
             cur_window = _window_obj(cur_record, window)
             if prev_window is None or cur_window is None:

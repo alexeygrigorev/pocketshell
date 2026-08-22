@@ -15,7 +15,6 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Sequence
 from unittest.mock import patch
 
 from click.testing import CliRunner
@@ -35,27 +34,44 @@ from pocketshell.usage_capture import (
 # own output format — one provider record per line).
 _NDJSON = (
     '{"provider": "codex", "status": "ok", '
-    '"short_term": {"percent_remaining": 77.0, "reset_at": "2026-06-11T15:00:00Z"}}\n'
+    '"windows": {"5h": {"percent_remaining": 77.0, "reset_at": "2026-06-11T15:00:00Z"}}}\n'
     '{"provider": "claude", "status": "ok", '
-    '"short_term": {"percent_remaining": 41.0, "reset_at": "2026-06-11T14:00:00Z"}}\n'
+    '"windows": {"5h": {"percent_remaining": 41.0, "reset_at": "2026-06-11T14:00:00Z"}}}\n'
 )
 
-# quse v0.0.9's provider-keyed `--json` document — what `subprocess.run`
-# returns when the CLI capture path shells out to the pinned quse. The
-# `usage --capture` flow FLATTENS this into the NDJSON above before caching.
+# The published quse==0.0.14 provider-keyed `--json` document (old
+# `short_term` / `long_term` schema) — what `subprocess.run` returns when the
+# CLI capture path shells out to the pinned quse. The `usage --capture` flow
+# translates this at the producer boundary, then caches canonical NDJSON.
 _QUSE_KEYED = json.dumps(
     {
         "codex": {
             "status": "ok",
-            "short_term": {"percent_remaining": 77.0, "reset_at": "2026-06-11T15:00:00Z", "window": "5h"},
-            "long_term": {"percent_remaining": 88.0, "reset_at": "2026-06-18T15:00:00Z", "window": "7d"},
+            "short_term": {
+                "percent_remaining": 77.0,
+                "reset_at": "2026-06-11T15:00:00Z",
+                "window": "5h",
+            },
+            "long_term": {
+                "percent_remaining": 88.0,
+                "reset_at": "2026-06-18T15:00:00Z",
+                "window": "7d",
+            },
             "error": None,
             "details": {},
         },
         "claude": {
             "status": "ok",
-            "short_term": {"percent_remaining": 41.0, "reset_at": "2026-06-11T14:00:00Z", "window": "5h"},
-            "long_term": {"percent_remaining": 85.0, "reset_at": "2026-06-18T14:00:00Z", "window": "7d"},
+            "short_term": {
+                "percent_remaining": 41.0,
+                "reset_at": "2026-06-11T14:00:00Z",
+                "window": "5h",
+            },
+            "long_term": {
+                "percent_remaining": 85.0,
+                "reset_at": "2026-06-18T14:00:00Z",
+                "window": "7d",
+            },
             "error": None,
             "details": {},
         },

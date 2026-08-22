@@ -1,15 +1,17 @@
 """`pocketshell usage` subcommand.
 
 Implementation delegates to the **pinned** `quse` CLI via `subprocess.run`
-and FLATTENS its provider-keyed `--json` document into the per-provider
+and normalizes its provider-keyed `--json` document into the per-provider
 NDJSON the Android app consumes. Human output is proxied verbatim.
 
-quse is the single source of truth for the unified schema (issue #1318,
-D22 hard-cut): pocketshell does NOT re-derive windows / resets / percentages
-downstream. It parses quse's provider-keyed object, injects the `provider`
-name from each key, and passes quse's unified fields through unchanged. A
-schema mismatch (non-JSON / non-object payload) raises loudly rather than
-silently emptying the panel.
+The published `quse==0.0.14` contract is the old provider-keyed object with
+`short_term` / `long_term` records. PocketShell owns the narrow wire-format
+translation at this boundary: it injects the provider name and maps those
+two published records into the app's canonical `windows` map. It does not
+re-derive quota values, resets, or provider-specific details. A schema
+mismatch (non-JSON / non-object payload, malformed published window, or an
+unreleased top-level `windows` producer) raises loudly rather than silently
+emptying the panel.
 
 quse is a hard dependency of pocketshell (see `pyproject.toml`), so its
 console-script ships in the SAME bin directory as the running interpreter.
@@ -173,24 +175,89 @@ def _actionable_error(provider: str, error: Any) -> Optional[str]:
     return text
 
 
+def _canonicalize_published_quse_record(
+    provider: str,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    """Translate one published quse 0.0.14 record to the app wire shape.
+
+    The PyPI release still emits ``short_term`` / ``long_term``. Keep that
+    compatibility mapping explicit and local to the producer boundary; the
+    Android parser consumes only the canonical ``windows`` map. A top-level
+    ``windows`` field is deliberately rejected because it identifies the
+    unreleased quse commit that must not be treated as published output.
+    """
+    if "windows" in record:
+        raise ValueError(
+            f"quse provider '{provider}' emitted unsupported top-level 'windows' "
+            "schema; published quse 0.0.14 uses short_term/long_term"
+        )
+    if "short_term" not in record and "long_term" not in record:
+        raise ValueError(
+            f"quse provider '{provider}' is missing both published window fields "
+            "'short_term' and 'long_term'"
+        )
+
+    windows: dict[str, dict[str, Any]] = {}
+    for source_key in ("short_term", "long_term"):
+        if source_key not in record or record[source_key] is None:
+            continue
+        source_window = record[source_key]
+        if not isinstance(source_window, dict):
+            raise ValueError(
+                f"quse provider '{provider}' field '{source_key}' is not a JSON object"
+            )
+        if "percent_remaining" not in source_window:
+            raise ValueError(
+                f"quse provider '{provider}' field '{source_key}' is missing "
+                "percent_remaining"
+            )
+        if "reset_at" not in source_window:
+            raise ValueError(
+                f"quse provider '{provider}' field '{source_key}' is missing reset_at"
+            )
+        # Published quse represents a span that does not apply to a provider
+        # with a null percentage. It is not a valid app-wire window, so omit
+        # it explicitly at this compatibility boundary. The Android parser
+        # remains strict for canonical input and rejects the same null value
+        # if a producer emits it instead of doing this translation.
+        if source_window["percent_remaining"] is None:
+            continue
+        label = source_window.get("window") or source_key
+        if not isinstance(label, str) or not label.strip():
+            raise ValueError(
+                f"quse provider '{provider}' field '{source_key}' has an invalid window label"
+            )
+        if label in windows:
+            raise ValueError(
+                f"quse provider '{provider}' has duplicate window label '{label}'"
+            )
+        windows[label] = {
+            "percent_remaining": source_window["percent_remaining"],
+            "reset_at": source_window["reset_at"],
+        }
+
+    flattened: dict[str, Any] = {"provider": provider, **record}
+    flattened.pop("short_term", None)
+    flattened.pop("long_term", None)
+    flattened["windows"] = windows
+    return flattened
+
+
 def normalize_usage_stdout(stdout: str) -> str:
-    """Flatten quse's provider-keyed `--json` object into per-provider NDJSON.
+    """Normalize published quse's provider-keyed object into per-provider NDJSON.
 
-    quse v0.0.9 emits ONE JSON object keyed by provider name; each value is
-    the unified per-provider record (``status`` / ``short_term`` /
-    ``long_term`` / ``error`` / ``details``). This is a THIN flatten — one
-    NDJSON line per provider — that injects the provider name (from the
-    object key) as a top-level ``provider`` field and passes quse's unified
-    fields through unchanged. quse is the single source of truth for the
-    schema (D22): pocketshell does NOT re-derive windows / resets /
-    percentages here.
+    Published ``quse==0.0.14`` emits one JSON object keyed by provider; each
+    value carries ``short_term`` / ``long_term`` records. This function injects
+    the provider key and performs the one explicit compatibility translation to
+    the app-facing ``windows`` map. It never invents percentages or reset times
+    and never accepts the unreleased six-provider/top-level-``windows`` shape.
 
-    Strict / fail-loud: non-JSON stdout, a non-object top-level payload, or a
-    non-object provider value all raise ``ValueError`` so a schema mismatch
-    fails visibly instead of silently emptying the usage panel. Handles both
-    the multi-provider and single-provider (``{"<p>": {...}}``) shapes — both
-    are provider-keyed objects. Empty/blank stdout passes through untouched
-    (the caller decides what an empty read means).
+    Strict / fail-loud: non-JSON stdout, a non-object top-level payload, a
+    non-object provider value, or malformed published window fields all raise
+    ``ValueError`` so a schema mismatch fails visibly instead of silently
+    emptying the usage panel. Empty/blank stdout passes through untouched (the
+    caller decides what an empty read means).
     """
     if not stdout.strip():
         return stdout
@@ -210,7 +277,7 @@ def normalize_usage_stdout(stdout: str) -> str:
                 f"quse --json provider '{provider}' is not a JSON object "
                 f"(got {type(record).__name__})"
             )
-        flattened: dict[str, Any] = {"provider": provider, **record}
+        flattened = _canonicalize_published_quse_record(provider, record)
         if flattened.get("error") is not None:
             flattened["error"] = _actionable_error(provider, flattened["error"])
         lines.append(json.dumps(flattened, sort_keys=True))

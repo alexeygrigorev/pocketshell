@@ -1,11 +1,14 @@
 """Unit tests for `pocketshell usage` (issue #1318).
 
-quse v0.0.9 is the single source of truth for the unified usage schema. Its
-``--json`` output is a provider-keyed object; ``pocketshell usage --json``
-FLATTENS it into per-provider NDJSON (one record per line, ``provider``
-injected from the key, quse's unified fields passed through unchanged). There
-is no downstream re-derivation of windows / resets / percentages — pocketshell
-expects quse's exact schema and fails loudly on a mismatch (D22 hard-cut).
+Published ``quse==0.0.14`` emits a provider-keyed object whose records carry
+``short_term`` / ``long_term`` windows. ``pocketshell usage --json`` performs
+the one explicit producer-boundary translation into per-provider NDJSON with a
+canonical ``windows`` map; it does not re-derive quota values, reset times, or
+provider details. The app parser consumes only that canonical wire shape.
+
+The tests use a live output captured from the published 0.0.14 wheel. The
+unreleased ``a86959e`` six-provider/top-level-``windows`` producer is not part
+of the fixture or contract.
 
 The tests stub ``pocketshell.usage._resolve_quse_binary`` and
 ``subprocess.run`` so they never invoke a real ``quse`` binary; the contract
@@ -43,23 +46,19 @@ _EXPECTED_GROK_AUTH = (
 )
 
 _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
-_FIXTURE = Path(__file__).resolve().parent / "data" / "quse-0.0.9-usage.json"
-# Captured LIVE from the pinned quse 0.0.11 (`quse --json`) on 2026-07-15 —
-# the exact Codex "no 5h window" shape (#1564): Codex temporarily removed the
-# 5h window, so its `primary_window` now carries the WEEKLY (604800s) span and
-# `secondary_window` is `present: false`. quse 0.0.11 labels the primary from
-# its actual `limit_window_seconds` (→ `short_term.window == "7d"`, NOT the old
-# positional "5h") and emits the dropped window as a null placeholder
-# (`long_term: {percent_remaining: null, ...}`) instead of a phantom
-# "0% / unavailable" ghost row. Claude / Copilot / zai in the same document
-# keep their correct 5h / 7d / monthly / weekly labels (class coverage).
-_FIXTURE_0011 = Path(__file__).resolve().parent / "data" / "quse-0.0.11-usage.json"
-# Captured LIVE from host quse 0.0.13 (`quse --json`) on 2026-08-18 — the
-# first release that emits a `grok` provider (alias `grok-build`). Live
-# shape is weekly-only: null short_term, weekly long_term. Claude / Codex /
-# Copilot / zai stay in the same document (class coverage).
-_FIXTURE_0013 = Path(__file__).resolve().parent / "data" / "quse-0.0.13-usage.json"
+# Captured LIVE from the published quse 0.0.14 wheel (`quse --json`) on
+# 2026-08-22. The release still emits short_term/long_term and has five
+# providers; see the adjacent .provenance.txt sidecar for the wheel digest.
+_FIXTURE_0014 = Path(__file__).resolve().parent / "data" / "quse-0.0.14-usage.json"
+_FIXTURE_0014_PROVENANCE = (
+    Path(__file__).resolve().parent / "data" / "quse-0.0.14-usage.provenance.txt"
+)
 _LOCK = Path(__file__).resolve().parent.parent / "uv.lock"
+
+_NULL_PUBLISHED_WINDOWS = {
+    "short_term": {"percent_remaining": None, "reset_at": None, "window": None},
+    "long_term": {"percent_remaining": None, "reset_at": None, "window": None},
+}
 
 
 def _fake_completed(
@@ -76,8 +75,8 @@ def _fake_completed(
 
 
 def _quse_keyed_json() -> str:
-    """The real quse-0.0.9 provider-keyed --json document (4 providers)."""
-    return _FIXTURE.read_text()
+    """The live published quse-0.0.14 provider-keyed document (5 providers)."""
+    return _FIXTURE_0014.read_text()
 
 
 # ---------------------------------------------------------------------------
@@ -86,17 +85,25 @@ def _quse_keyed_json() -> str:
 
 
 def test_pyproject_pins_quse_exactly() -> None:
-    # AC (#2195): pocketshell pins quse==0.0.13 as a hard dependency so the
-    # usage panel can see Grok. Reverting the pin to 0.0.11 must redden this
-    # assertion (G6). 0.0.13 is the first quse that emits a `grok` provider.
+    # AC (#2274): pocketshell pins the published quse==0.0.14 release. The
+    # producer must remain aligned with that release's old short/long schema;
+    # it must not claim the unreleased a86959e output.
     text = _PYPROJECT.read_text()
-    assert '"quse==0.0.13"' in text, "pyproject must pin quse==0.0.13 in dependencies"
-    assert '"quse==0.0.11"' not in text, "the 0.0.11 pin must not remain"
+    assert '"quse==0.0.14"' in text, "pyproject must pin quse==0.0.14 in dependencies"
+    assert '"quse==0.0.13"' not in text, "the 0.0.13 pin must not remain"
     lock = _LOCK.read_text()
     assert 'name = "quse"' in lock
-    assert 'version = "0.0.13"' in lock
-    assert 'specifier = "==0.0.13"' in lock
-    assert 'specifier = "==0.0.11"' not in lock
+    assert 'version = "0.0.14"' in lock
+    assert 'specifier = "==0.0.14"' in lock
+    assert 'specifier = "==0.0.13"' not in lock
+
+
+def test_pyproject_documents_published_quse_0014_schema() -> None:
+    """The dependency comment must describe the wheel we actually pin."""
+    text = _PYPROJECT.read_text()
+    assert "short_term" in text and "long_term" in text
+    assert "REPLACED by one unified top-level" not in text
+    assert "new `go`" not in text
 
 
 def test_resolve_quse_binary_uses_pinned_env_next_to_interpreter(tmp_path: Path) -> None:
@@ -137,42 +144,51 @@ def test_resolve_quse_binary_does_not_fall_back_to_path(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# normalize_usage_stdout: thin flatten of quse's provider-keyed object
+# normalize_usage_stdout: published quse compatibility translation
 # ---------------------------------------------------------------------------
 
 
-def test_flatten_emits_per_provider_ndjson_with_window_and_iso_reset() -> None:
-    # AC: `pocketshell usage --json` fed quse-0.0.9 keyed JSON emits strict
-    # per-provider NDJSON (provider + unified fields + window + ISO reset_at).
+def test_quse_0014_fixture_matches_published_contract() -> None:
+    raw = json.loads(_quse_keyed_json())
+    assert set(raw) == {"claude", "codex", "copilot", "grok", "zai"}
+    assert "go" not in raw
+    assert "Wheel SHA-256:" in _FIXTURE_0014_PROVENANCE.read_text()
+    for record in raw.values():
+        assert set(record) == {"details", "error", "long_term", "short_term", "status"}
+        assert "windows" not in record
+
+
+def test_flatten_emits_per_provider_ndjson_with_canonical_windows_and_iso_reset() -> None:
+    # AC (#2274): the producer translates the REAL published quse-0.0.14
+    # short_term/long_term records into the app-facing windows map. Provider
+    # identity is injected from the object key and reset_at stays unchanged.
     out = normalize_usage_stdout(_quse_keyed_json())
     lines = [json.loads(ln) for ln in out.splitlines()]
     by_provider = {r["provider"]: r for r in lines}
 
-    assert set(by_provider) == {"claude", "codex", "copilot", "zai"}
+    assert set(by_provider) == {"claude", "codex", "copilot", "grok", "zai"}
 
     claude = by_provider["claude"]
-    assert claude["short_term"]["window"] == "5h"
-    assert claude["short_term"]["reset_at"] == "2026-07-07T23:19:59Z"
-    assert claude["short_term"]["percent_remaining"] == 91.0
-    assert claude["long_term"]["window"] == "7d"
-    assert claude["long_term"]["reset_at"] == "2026-07-09T14:59:59Z"
+    assert set(claude["windows"]) == {"5h", "7d"}
+    assert claude["windows"]["5h"]["percent_remaining"] == 99.0
+    assert claude["windows"]["5h"]["reset_at"] == "2026-08-22T15:49:59Z"
+    assert claude["windows"]["7d"]["percent_remaining"] == 93.0
 
     codex = by_provider["codex"]
-    assert codex["short_term"]["window"] == "5h"
-    assert codex["long_term"]["window"] == "7d"
+    # Published quse's dropped short-term span has a null percentage. The
+    # producer omits that non-renderable source span rather than emitting a
+    # malformed canonical window that the Android parser would have to skip.
+    assert set(codex["windows"]) == {"7d"}
+    assert codex["windows"]["7d"]["percent_remaining"] == 56.0
 
-    copilot = by_provider["copilot"]
-    assert copilot["long_term"]["window"] == "monthly"
-    # quse passes null short-term window/reset through unchanged.
-    assert copilot["short_term"]["window"] is None
-    assert copilot["short_term"]["reset_at"] is None
+    assert by_provider["copilot"]["windows"]["monthly"]["percent_remaining"] == 100.0
+    assert by_provider["grok"]["windows"]["weekly"]["percent_remaining"] == 0.0
+    assert by_provider["zai"]["windows"]["5h"]["percent_remaining"] == 100.0
 
-    zai = by_provider["zai"]
-    assert zai["short_term"]["window"] == "5h"
-    assert zai["long_term"]["window"] == "weekly"
-
-    # Every line carries an injected `provider` field.
-    assert all("provider" in json.loads(ln) for ln in out.splitlines())
+    for record in lines:
+        assert "provider" in record
+        assert "short_term" not in record
+        assert "long_term" not in record
 
 
 def test_flatten_handles_single_provider_shape() -> None:
@@ -180,7 +196,7 @@ def test_flatten_handles_single_provider_shape() -> None:
         {
             "codex": {
                 "status": "ok",
-                "short_term": {"percent_remaining": 77.0, "reset_at": None, "window": "5h"},
+                "short_term": {"percent_remaining": None, "reset_at": None, "window": None},
                 "long_term": {"percent_remaining": 88.0, "reset_at": None, "window": "7d"},
                 "error": None,
                 "details": {},
@@ -192,137 +208,99 @@ def test_flatten_handles_single_provider_shape() -> None:
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["provider"] == "codex"
-    assert record["short_term"]["window"] == "5h"
+    assert record["windows"]["7d"]["percent_remaining"] == 88.0
+    assert set(record["windows"]) == {"7d"}
 
 
-def test_flatten_passes_unified_fields_through_unchanged() -> None:
+def test_flatten_rejects_record_without_published_windows() -> None:
+    keyed = json.dumps(
+        {
+            "codex": {
+                "status": "error",
+                "error": "usage unavailable",
+                "details": {},
+            }
+        }
+    )
+    try:
+        normalize_usage_stdout(keyed)
+    except ValueError as exc:
+        assert "short_term" in str(exc)
+        assert "long_term" in str(exc)
+    else:  # pragma: no cover - fail-loud contract
+        raise AssertionError("a record without published windows must be rejected")
+
+
+def test_flatten_translates_published_window_labels_without_rederiving_values() -> None:
     keyed = json.dumps(
         {
             "claude": {
                 "status": "ok",
-                "short_term": {"percent_remaining": 59.0, "reset_at": "2026-05-24T14:30:00Z", "window": "5h"},
-                "long_term": {"percent_remaining": 15.0, "reset_at": "2026-05-28T14:59:59Z", "window": "7d"},
+                "short_term": {
+                    "percent_remaining": 59.0,
+                    "reset_at": "2026-05-24T14:30:00Z",
+                    "window": "5h",
+                },
+                "long_term": {
+                    "percent_remaining": 15.0,
+                    "reset_at": "2026-05-28T14:59:59Z",
+                    "window": "7d",
+                },
                 "error": None,
                 "details": {"anything": "the app ignores this"},
             }
         }
     )
     record = json.loads(normalize_usage_stdout(keyed).splitlines()[0])
-    # Quota math + spans are passed through verbatim (no re-derivation).
-    assert record["short_term"] == {
-        "percent_remaining": 59.0,
-        "reset_at": "2026-05-24T14:30:00Z",
-        "window": "5h",
+    assert record["windows"] == {
+        "5h": {"percent_remaining": 59.0, "reset_at": "2026-05-24T14:30:00Z"},
+        "7d": {"percent_remaining": 15.0, "reset_at": "2026-05-28T14:59:59Z"},
     }
-    assert record["long_term"] == {
-        "percent_remaining": 15.0,
-        "reset_at": "2026-05-28T14:59:59Z",
-        "window": "7d",
-    }
+    assert record["details"] == {"anything": "the app ignores this"}
 
 
-def test_flatten_codex_0011_no_5h_window_weekly_only_no_ghost() -> None:
-    """#1564: quse 0.0.11 fixes Codex's mislabeled/ghost windows at the source.
-
-    Feeds the REAL captured quse 0.0.11 Codex "no 5h window" shape through the
-    flatten and asserts the corrected wire shape the app consumes:
-
-    - `short_term` is the WEEKLY window labeled **"7d"** (from Codex's real
-      `limit_window_seconds=604800`) with its real reset — NOT the old phantom
-      "5h" window that showed weekly data under a 5h label with a 5-day reset.
-    - `long_term` is a null placeholder (`percent_remaining: null`) for the
-      window Codex DROPPED — the app parser treats a null-percent window as
-      absent, so there is NO "0% / unavailable" ghost row.
-
-    The flatten passes quse's unified fields through verbatim (D22 / #1318):
-    pocketshell does NOT relabel — the correct labels come from quse 0.0.11.
-    """
-    out = normalize_usage_stdout(_FIXTURE_0011.read_text())
-    by_provider = {r["provider"]: r for r in (json.loads(ln) for ln in out.splitlines())}
-
-    codex = by_provider["codex"]
-    # The single real Codex window is the WEEKLY one, labeled "7d" — no phantom 5h.
-    assert codex["short_term"]["window"] == "7d"
-    assert codex["short_term"]["window"] != "5h"
-    assert codex["short_term"]["reset_at"] == "2026-07-21T20:37:32Z"
-    assert codex["short_term"]["percent_remaining"] == 69.0
-    # The dropped window is a null placeholder → the app parser omits it (no
-    # "0% / unavailable" ghost row). percent_remaining MUST be null here.
-    assert codex["long_term"]["percent_remaining"] is None
-    assert codex["long_term"]["window"] is None
-    assert codex["long_term"]["reset_at"] is None
+def test_flatten_rejects_unreleased_top_level_windows_schema() -> None:
+    keyed = json.dumps(
+        {
+            "go": {
+                "status": "ok",
+                "windows": {"5h": {"percent_remaining": 100.0, "reset_at": None}},
+            }
+        }
+    )
+    try:
+        normalize_usage_stdout(keyed)
+    except ValueError as exc:
+        assert "unsupported top-level 'windows'" in str(exc)
+    else:  # pragma: no cover - fail-loud contract
+        raise AssertionError("unreleased quse schema must not be accepted as published")
 
 
-def test_flatten_codex_0011_leaves_other_providers_unchanged() -> None:
-    """#1564 class coverage: the quse Codex fix does NOT regress other cards.
-
-    Claude keeps its 5h + 7d windows, Copilot keeps its monthly window, and zai
-    keeps its 5h + weekly windows — all labeled correctly in the same quse
-    0.0.11 document. Only Codex's window shape changed.
-    """
-    out = normalize_usage_stdout(_FIXTURE_0011.read_text())
-    by_provider = {r["provider"]: r for r in (json.loads(ln) for ln in out.splitlines())}
-
-    claude = by_provider["claude"]
-    assert claude["short_term"]["window"] == "5h"
-    assert claude["short_term"]["reset_at"] == "2026-07-15T11:39:59Z"
-    assert claude["long_term"]["window"] == "7d"
-    assert claude["long_term"]["reset_at"] == "2026-07-16T14:59:59Z"
-
-    copilot = by_provider["copilot"]
-    assert copilot["long_term"]["window"] == "monthly"
-    assert copilot["long_term"]["percent_remaining"] == 97.1
-
-    zai = by_provider["zai"]
-    assert zai["short_term"]["window"] == "5h"
-    assert zai["long_term"]["window"] == "weekly"
-
-
-def test_flatten_quse_0013_emits_grok_and_passes_windows_through() -> None:
-    """#2195: quse 0.0.13 adds grok; flatten must emit it unchanged.
-
-    Feeds the REAL captured quse 0.0.13 document (weekly-only grok: null
-    short_term, weekly long_term) and asserts the wire shape the app consumes.
-    Reverting the pin without a grok line in the 0.0.13 fixture reddens the
-    provider set. The four historical providers stay present.
-    """
-    out = normalize_usage_stdout(_FIXTURE_0013.read_text())
-    by_provider = {r["provider"]: r for r in (json.loads(ln) for ln in out.splitlines())}
-
-    assert set(by_provider) == {"claude", "codex", "copilot", "grok", "zai"}
-    grok = by_provider["grok"]
-    assert grok["provider"] == "grok"
-    assert grok["status"] == "ok"
-    # Live 0.0.13 weekly-only shape: unused term is a null placeholder.
-    assert grok["short_term"] == {
-        "percent_remaining": None,
-        "reset_at": None,
-        "window": None,
-    }
-    assert grok["long_term"] == {
-        "percent_remaining": 95.0,
-        "reset_at": "2026-08-25T00:08:17Z",
-        "window": "weekly",
-    }
-    # Historical four-provider cards stay in the same document.
-    assert by_provider["claude"]["short_term"]["window"] == "5h"
-    assert by_provider["claude"]["long_term"]["window"] == "7d"
-    assert by_provider["copilot"]["long_term"]["window"] == "monthly"
-    assert by_provider["zai"]["long_term"]["window"] == "weekly"
+def test_flatten_quse_0014_codex_reset_credits_pass_through() -> None:
+    # Fix-shape verification: the published 0.0.14 codex details entries carry
+    # `{expires_at, status, title}` and the exact-match inventory fields the
+    # app's strict parser validates — passed through untouched here.
+    out = normalize_usage_stdout(_FIXTURE_0014.read_text())
+    codex = next(
+        json.loads(ln) for ln in out.splitlines()
+        if json.loads(ln)["provider"] == "codex"
+    )
+    credits = codex["details"]["reset_credits"]
+    assert len(credits) == 1
+    assert credits[0]["status"] == "available"
+    assert credits[0]["title"] == "Full reset"
+    assert credits[0]["expires_at"] == "2026-09-21T00:13:17Z"
+    assert codex["details"]["reset_credits_available"] == 1
 
 
 def test_flatten_handles_grok_only_object() -> None:
     # AC: flattening a grok-only object `{"grok": {...}}` emits one NDJSON
-    # line with provider "grok" and passes weekly/monthly fields through.
+    # line with provider "grok" and maps the published long-term window.
     keyed = json.dumps(
         {
             "grok": {
                 "status": "ok",
-                "short_term": {
-                    "percent_remaining": None,
-                    "reset_at": None,
-                    "window": None,
-                },
+                "short_term": {"percent_remaining": None, "reset_at": None, "window": None},
                 "long_term": {
                     "percent_remaining": 95.0,
                     "reset_at": "2026-08-25T00:08:17Z",
@@ -338,18 +316,15 @@ def test_flatten_handles_grok_only_object() -> None:
     assert len(lines) == 1
     record = json.loads(lines[0])
     assert record["provider"] == "grok"
-    assert record["long_term"] == {
+    assert record["windows"]["weekly"] == {
         "percent_remaining": 95.0,
         "reset_at": "2026-08-25T00:08:17Z",
-        "window": "weekly",
     }
-    assert record["short_term"]["percent_remaining"] is None
-    assert record["short_term"]["window"] is None
 
 
 def test_flatten_passes_grok_both_windows_through_unchanged() -> None:
-    # quse maps weekly SuperGrok + monthly credit to short_term / long_term
-    # when both windows are present. Flatten must not relabel or drop them.
+    # quse reports grok's weekly + monthly spans as short/long. Flatten must
+    # retain the provider-owned labels.
     keyed = json.dumps(
         {
             "grok": {
@@ -371,16 +346,8 @@ def test_flatten_passes_grok_both_windows_through_unchanged() -> None:
     )
     record = json.loads(normalize_usage_stdout(keyed).splitlines()[0])
     assert record["provider"] == "grok"
-    assert record["short_term"] == {
-        "percent_remaining": 62.5,
-        "reset_at": "2026-08-25T00:08:17Z",
-        "window": "weekly",
-    }
-    assert record["long_term"] == {
-        "percent_remaining": 75.0,
-        "reset_at": "2026-09-01T00:00:00Z",
-        "window": "monthly",
-    }
+    assert record["windows"]["weekly"]["percent_remaining"] == 62.5
+    assert record["windows"]["monthly"]["percent_remaining"] == 75.0
 
 
 def test_flatten_raises_on_non_json() -> None:
@@ -425,8 +392,7 @@ def test_flatten_maps_claude_401_to_actionable_error() -> None:
         {
             "claude": {
                 "status": "error",
-                "short_term": None,
-                "long_term": None,
+                **_NULL_PUBLISHED_WINDOWS,
                 "error": "HTTP Error 401: Unauthorized",
                 "details": {},
             }
@@ -459,8 +425,7 @@ def test_flatten_maps_grok_no_credentials_to_actionable_error() -> None:
         {
             "grok": {
                 "status": "error",
-                "short_term": None,
-                "long_term": None,
+                **_NULL_PUBLISHED_WINDOWS,
                 "error": "no-credentials",
                 "details": {},
             }
@@ -513,7 +478,7 @@ def test_usage_json_flattens_quse_keyed_object() -> None:
         result = runner.invoke(usage_command, ["--json", "--no-daemon"])
     assert result.exit_code == 0, result.output
     providers = [json.loads(ln)["provider"] for ln in result.output.splitlines()]
-    assert providers == ["claude", "codex", "copilot", "zai"]
+    assert providers == ["claude", "codex", "copilot", "grok", "zai"]
     # Args forwarded to the pinned quse subprocess must include `--json`.
     invoked: Sequence[str] = run.call_args.args[0]
     assert invoked == ["/fake/quse", "--json"]
@@ -534,7 +499,15 @@ def test_usage_forwards_provider_argument() -> None:
 
 def test_usage_forwards_provider_and_json_flag_together() -> None:
     runner = CliRunner()
-    single = json.dumps({"claude": {"status": "ok", "short_term": None, "long_term": None, "error": None}})
+    single = json.dumps(
+        {
+            "claude": {
+                "status": "ok",
+                **_NULL_PUBLISHED_WINDOWS,
+                "error": None,
+            }
+        }
+    )
     with patch("pocketshell.usage._resolve_quse_binary", return_value="/fake/quse"), patch(
         "pocketshell.usage.subprocess.run",
         return_value=_fake_completed(stdout=single),
@@ -547,19 +520,15 @@ def test_usage_forwards_provider_and_json_flag_together() -> None:
 
 
 def test_usage_forwards_grok_provider_and_json() -> None:
-    # AC: `pocketshell usage grok` is an accepted provider filter (quse 0.0.13
-    # already accepts it once pinned). Flatten of the grok-only object is the
-    # load-bearing JSON contract; the CLI must forward `grok` + `--json`.
+    # AC: `pocketshell usage grok` is an accepted provider filter. Flatten of
+    # the published short/long grok object is the load-bearing JSON contract;
+    # the CLI must forward `grok` + `--json`.
     runner = CliRunner()
     single = json.dumps(
         {
             "grok": {
                 "status": "ok",
-                "short_term": {
-                    "percent_remaining": None,
-                    "reset_at": None,
-                    "window": None,
-                },
+                "short_term": {"percent_remaining": None, "reset_at": None, "window": None},
                 "long_term": {
                     "percent_remaining": 95.0,
                     "reset_at": "2026-08-25T00:08:17Z",
@@ -580,7 +549,7 @@ def test_usage_forwards_grok_provider_and_json() -> None:
     assert invoked == ["/fake/quse", "grok", "--json"]
     record = json.loads(result.output.splitlines()[0])
     assert record["provider"] == "grok"
-    assert record["long_term"]["window"] == "weekly"
+    assert record["windows"]["weekly"]["percent_remaining"] == 95.0
 
 
 def test_usage_fails_loud_when_pinned_quse_missing() -> None:

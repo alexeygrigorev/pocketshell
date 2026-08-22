@@ -17,7 +17,6 @@ from pathlib import Path
 
 from click.testing import CliRunner
 
-from pocketshell import usage_reset
 from pocketshell.cli import cli
 from pocketshell.usage_capture import UsagePaths, resolve_paths, write_capture
 from pocketshell.usage_reset import (
@@ -39,18 +38,17 @@ def _cache(
     provider: str = "codex",
     percent: float | None = 40.0,
     reset_at: str | None = "2026-06-11T15:00:00Z",
-    window: str = "short_term",
+    window: str = "5h",
 ) -> dict:
+    # quse 0.0.14 unified windows (issue #2274): the map key IS the label.
     return {
         "captured_at": captured_at,
         "records": [
             {
                 "provider": provider,
                 "status": "ok",
-                window: {
-                    "percent_remaining": percent,
-                    "reset_at": reset_at,
-                    "window": "5h",
+                "windows": {
+                    window: {"percent_remaining": percent, "reset_at": reset_at},
                 },
             }
         ],
@@ -89,7 +87,7 @@ def test_reset_detected_on_recovery_to_baseline() -> None:
     event = events[0]
     assert event["type"] == "reset"
     assert event["provider"] == "codex"
-    assert event["window"] == "short_term"
+    assert event["window"] == "5h"
     assert "recovery" in event["signals"]
     assert event["current_percent_remaining"] == 100.0
     assert event["previous_percent_remaining"] == 8.0
@@ -132,7 +130,7 @@ def test_dedup_within_run_one_event_per_window() -> None:
     previous = _cache("2026-06-11T14:00:00Z", percent=5.0, reset_at="2026-06-11T15:00:00Z")
     current = _cache("2026-06-11T14:30:00Z", percent=100.0, reset_at="2026-06-11T19:30:00Z")
     # Pre-seed the known keys with this reset's key -> suppressed.
-    key = f"codex|short_term|2026-06-11T19:30:00Z"
+    key = "codex|5h|2026-06-11T19:30:00Z"
     assert detect_resets(previous, current, known_reset_keys={key}) == []
 
 
@@ -190,11 +188,11 @@ def test_record_resets_returns_empty_when_no_reset(tmp_path: Path) -> None:
 
 _NDJSON_LOW = (
     '{"provider": "codex", "status": "ok", '
-    '"short_term": {"percent_remaining": 6.0, "reset_at": "2026-06-11T15:00:00Z"}}\n'
+    '"windows": {"5h": {"percent_remaining": 6.0, "reset_at": "2026-06-11T15:00:00Z"}}}\n'
 )
 _NDJSON_RESET = (
     '{"provider": "codex", "status": "ok", '
-    '"short_term": {"percent_remaining": 100.0, "reset_at": "2026-06-11T19:30:00Z"}}\n'
+    '"windows": {"5h": {"percent_remaining": 100.0, "reset_at": "2026-06-11T19:30:00Z"}}}\n'
 )
 
 

@@ -4524,15 +4524,40 @@ public class TmuxSessionViewModel @Inject constructor(
         // animation) does not re-seed the reattach.
         pendingReattach = null
         pausedAutoReconnect = null
+        passiveDisconnectGraceJob?.cancel()
+        passiveDisconnectGraceJob = null
+        lifecycleReattachNetworkCoalesce = null
+        backgroundDetachJob?.cancel()
+        backgroundDetachJob = null
+        val connectOwner = connectJob
+        val reconnectOwner = autoReconnectJob
+        connectOwner?.cancel()
+        reconnectOwner?.cancel()
+        connectJob = null
+        autoReconnectJob = null
+        // A manual/stale-session exit is terminal for this VM's current
+        // attach intent. Leaving these fields live until the asynchronous
+        // close starts lets a late preflight/reconnect callback re-advertise
+        // the dead target while the next FolderList is binding the host.
+        latestConnectIntent = null
+        connectingTarget = null
+        val detachedHost = activeTarget?.host
+        val detachedSession = activeTarget?.sessionName
+        activeTarget = null
+        refreshReconnectAvailability()
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
-            "tmux-detach-manual host=${activeTarget?.host} session=${activeTarget?.sessionName}",
+            "tmux-detach-manual host=$detachedHost session=$detachedSession",
         )
         // Issue #935 R1: contained — the manual detach runs the full
         // close-cascade (`detach-client` + lease release + cache eviction) IO
         // against a transport racing to tear down; a throw must not crash.
         launchContainedTeardown {
             withContext(NonCancellable) {
+                connectOwner?.cancelAndJoin()
+                if (reconnectOwner !== connectOwner) {
+                    reconnectOwner?.cancelAndJoin()
+                }
                 closeCurrentConnectionAndJoin()
             }
         }

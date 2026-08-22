@@ -17,8 +17,17 @@ TEST_PATH="$ROOT_DIR/$TEST_REL"
 TEST_CLASS="com.pocketshell.app.MainActivityStaleSessionRecreateTest"
 ROUTING_TEST="staleDialogDismissCallbackRoutesToHostsOwnSessionTree"
 FALLBACK_TEST="staleDialogDismissCallbackFallsBackToHostListWhenTreeIsUnavailable"
-ANCHOR='    setCurrentDestination(action.destination)'
-MUTATION='    setCurrentDestination(AppDestination.HostList)'
+TWO_HOST_TEST="staleDialogSelectsTheStaleHostWhenRememberedDestinationIsAnotherHost"
+# Keep the mutation location-specific: this is the complete effect sequence of
+# the actual stale-session dismiss callback, not any other destination setter.
+ANCHOR='    neutralizeOwner()
+    clearPrompt()
+    clearBackStack()
+    setCurrentDestination(action.destination)'
+MUTATION='    neutralizeOwner()
+    clearPrompt()
+    clearBackStack()
+    setCurrentDestination(AppDestination.HostList)'
 CALL_SITE='            onDismiss = staleSessionDismissCallback('
 MODE=""
 ARTIFACT_DIR=""
@@ -74,11 +83,11 @@ done
 
 check_static() {
     python3 - "$SOURCE_PATH" "$TEST_PATH" "$ANCHOR" "$MUTATION" \
-        "$CALL_SITE" "$ROUTING_TEST" "$FALLBACK_TEST" <<'PY'
+        "$CALL_SITE" "$ROUTING_TEST" "$FALLBACK_TEST" "$TWO_HOST_TEST" <<'PY'
 import sys
 from pathlib import Path
 
-source_path, test_path, anchor, mutation, call_site, routing_test, fallback_test = sys.argv[1:]
+source_path, test_path, anchor, mutation, call_site, routing_test, fallback_test, two_host_test = sys.argv[1:]
 source = Path(source_path).read_text(encoding="utf-8")
 tests = Path(test_path).read_text(encoding="utf-8")
 
@@ -97,6 +106,8 @@ if tests.count(f"fun {routing_test}(") != 1:
     raise SystemExit(f"load-bearing routing test is not unique: {routing_test}")
 if tests.count(f"fun {fallback_test}(") != 1:
     raise SystemExit(f"load-bearing fallback test is not unique: {fallback_test}")
+if tests.count(f"fun {two_host_test}(") != 1:
+    raise SystemExit(f"load-bearing two-host test is not unique: {two_host_test}")
 print("PASS: #2237 mutation anchor and selective JVM test names are present")
 print(f"source={source_path}")
 print(f"anchor={anchor}")
@@ -104,6 +115,7 @@ print(f"mutation={mutation}")
 print(f"call_site={call_site}")
 print(f"routing_test={routing_test}")
 print(f"fallback_test={fallback_test}")
+print(f"two_host_test={two_host_test}")
 PY
 }
 
@@ -122,7 +134,7 @@ CLEAN_SHA256="$(sha256sum "$SOURCE_PATH" | awk '{print $1}')"
 CLEAN_MD5="$(md5sum "$SOURCE_PATH" | awk '{print $1}')"
 CLEAN_BYTES="$(wc -c < "$SOURCE_PATH" | tr -d ' ')"
 GIT_HEAD="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-COMMAND="./gradlew :app:testDebugUnitTest --tests $TEST_CLASS --console=plain --no-daemon --stacktrace --rerun-tasks --no-build-cache --no-parallel --max-workers=1 -Dorg.gradle.jvmargs=-Xmx1536m -Pkotlin.daemon.jvmargs=-Xmx3072m"
+COMMAND="./gradlew :app:testDebugUnitTest --tests $TEST_CLASS --console=plain --no-daemon --stacktrace --rerun-tasks --no-build-cache --no-parallel --max-workers=1 -Dorg.gradle.jvmargs=-Xmx3072m -Pkotlin.compiler.execution.strategy=in-process -Pkotlin.daemon.jvmargs=-Xmx3072m"
 
 cat > "$ARTIFACT_DIR/metadata.txt" <<EOF
 issue=2237
@@ -137,6 +149,7 @@ call_site=$CALL_SITE
 proof_class=$TEST_CLASS
 routing_test=$ROUTING_TEST
 fallback_test=$FALLBACK_TEST
+two_host_test=$TWO_HOST_TEST
 gradle_command=$COMMAND
 EOF
 
@@ -194,7 +207,8 @@ run_proof() {
             --no-build-cache \
             --no-parallel \
             --max-workers=1 \
-            -Dorg.gradle.jvmargs=-Xmx1536m \
+            -Dorg.gradle.jvmargs=-Xmx3072m \
+            -Pkotlin.compiler.execution.strategy=in-process \
             -Pkotlin.daemon.jvmargs=-Xmx3072m
     ) > "$log_path" 2>&1; then
         return 0
@@ -206,13 +220,13 @@ run_proof() {
 inspect_results() {
     local phase="$1"
     local worktree="$2"
-    python3 - "$phase" "$worktree" "$TEST_CLASS" "$ROUTING_TEST" "$FALLBACK_TEST" <<'PY' \
+    python3 - "$phase" "$worktree" "$TEST_CLASS" "$ROUTING_TEST" "$FALLBACK_TEST" "$TWO_HOST_TEST" <<'PY' \
         > "$ARTIFACT_DIR/${phase}-tests.txt"
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-phase, worktree, test_class, routing_test, fallback_test = sys.argv[1:]
+phase, worktree, test_class, routing_test, fallback_test, two_host_test = sys.argv[1:]
 result_dir = Path(worktree) / "app/build/test-results/testDebugUnitTest"
 records = []
 for path in sorted(result_dir.rglob("TEST-*.xml")) if result_dir.is_dir() else []:
@@ -230,8 +244,9 @@ if not records:
 by_name = {name: status for name, status, _ in records}
 for name, status, file_name in records:
     print(f"{name}={status} ({file_name})")
-if routing_test not in by_name or fallback_test not in by_name:
-    raise SystemExit("the two load-bearing callback tests were not executed")
+required = (routing_test, fallback_test, two_host_test)
+if any(name not in by_name for name in required):
+    raise SystemExit("the routing, fallback, and two-host tests were not all executed")
 
 if phase == "clean":
     if any(status != "passed" for status in by_name.values()):
@@ -241,6 +256,8 @@ elif phase == "mutant":
         raise SystemExit("the onDismiss routing mutant did not redden the routing test")
     if by_name[fallback_test] != "passed":
         raise SystemExit("the host-list fallback was not selective/green under the mutant")
+    if by_name[two_host_test] != "passed":
+        raise SystemExit("the two-host identity proof was not selective/green under the mutant")
     unexpected = [
         name for name, status in by_name.items()
         if status == "failed" and name != routing_test
@@ -250,6 +267,7 @@ elif phase == "mutant":
 else:
     raise SystemExit(f"unknown result phase: {phase}")
 print(f"tests_completed={len(records)}")
+print(f"two_host_selectivity={by_name[two_host_test]}")
 PY
 }
 

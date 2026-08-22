@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.tmux.tmuxSessionGenerationOrNull
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.isLiveAgent
 import com.pocketshell.uikit.model.resolveSessionAgentState
@@ -11,6 +12,7 @@ internal fun TreeRemoteSource.TreeNode.toHydratedNode(): HostTreeModel.HydratedN
         folderPath = folderPath,
         collapsed = collapsed,
         foreignGuess = foreignKind.toSessionAgentKindOrNull(),
+        generation = tmuxSessionGenerationOrNull(tmuxSessionId, sessionCreated),
     )
 
 internal fun HostTreeModel.HydratedNode.toTreeNode(): TreeRemoteSource.TreeNode =
@@ -20,6 +22,8 @@ internal fun HostTreeModel.HydratedNode.toTreeNode(): TreeRemoteSource.TreeNode 
         folderPath = folderPath,
         collapsed = collapsed,
         foreignKind = foreignGuess?.toRegistryKindString(),
+        tmuxSessionId = generation?.sessionId,
+        sessionCreated = generation?.createdEpochSeconds,
     )
 
 private fun String?.toSessionAgentKindOrNull(): SessionAgentKind? = when (this) {

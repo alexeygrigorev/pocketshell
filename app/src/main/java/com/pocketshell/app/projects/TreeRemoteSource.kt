@@ -53,11 +53,12 @@ public class TreeRemoteSource @Inject constructor() {
     internal var remoteExecDispatcher: CoroutineDispatcher = Dispatchers.IO
 
     /**
-     * One persisted tree node. [session] is the tmux session name (the key);
-     * [order] is its intrinsic display position; [folderPath] is its
-     * canonicalised bucket; [collapsed] is the user's expand/collapse choice for
-     * its folder; [foreignKind] is the optional one-shot foreign-guess cache
-     * (`claude` / `codex` / `opencode`), NOT the confirmed kind.
+     * One persisted tree node. [session] is the display name; [tmuxSessionId]
+     * + [sessionCreated] are the exact tmux generation when known. [order] is
+     * its intrinsic display position; [folderPath] is its canonicalised bucket;
+     * [collapsed] is the user's expand/collapse choice for its folder;
+     * [foreignKind] is the optional one-shot foreign-guess cache (`claude` /
+     * `codex` / `opencode`), NOT the confirmed kind.
      */
     public data class TreeNode(
         val session: String,
@@ -65,6 +66,8 @@ public class TreeRemoteSource @Inject constructor() {
         val folderPath: String,
         val collapsed: Boolean,
         val foreignKind: String? = null,
+        val tmuxSessionId: String? = null,
+        val sessionCreated: Long? = null,
     )
 
     /** The `tree.reconcile` delta result. Deltas only — never a full reload. */
@@ -171,6 +174,12 @@ public class TreeRemoteSource @Inject constructor() {
             if (node.foreignKind != null && node.foreignKind.isNotBlank()) {
                 obj.put("foreign_kind", node.foreignKind)
             }
+            node.tmuxSessionId?.trim()?.takeIf { it.isNotEmpty() }?.let { id ->
+                node.sessionCreated?.takeIf { it > 0L }?.let { created ->
+                    obj.put("tmux_session_id", id)
+                    obj.put("session_created", created)
+                }
+            }
             nodesArray.put(obj)
         }
         return JSONObject().put("host", host).put("nodes", nodesArray).toString()
@@ -186,6 +195,10 @@ public class TreeRemoteSource @Inject constructor() {
         for (i in 0 until nodes.length()) {
             val row = nodes.optJSONObject(i) ?: continue
             val sessionName = row.optString("session").takeIf { it.isNotBlank() } ?: continue
+            val tmuxSessionId = row.optString("tmux_session_id", "")
+                .trim()
+                .takeIf { it.isNotEmpty() }
+            val sessionCreated = row.optLong("session_created", 0L).takeIf { it > 0L }
             out.add(
                 TreeNode(
                     session = sessionName,
@@ -193,6 +206,8 @@ public class TreeRemoteSource @Inject constructor() {
                     folderPath = row.optString("folder_path", ""),
                     collapsed = row.optBoolean("collapsed", false),
                     foreignKind = row.optString("foreign_kind", "").takeIf { it.isNotBlank() },
+                    tmuxSessionId = tmuxSessionId?.takeIf { sessionCreated != null },
+                    sessionCreated = sessionCreated?.takeIf { tmuxSessionId != null },
                 ),
             )
         }

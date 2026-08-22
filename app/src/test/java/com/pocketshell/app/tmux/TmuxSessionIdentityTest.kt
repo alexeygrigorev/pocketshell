@@ -10,7 +10,7 @@ class TmuxSessionIdentityTest {
     fun durableIdentityRoundTripsForNavigationWithoutNameFallback() {
         val key = durableTmuxSessionKey(7, "\$12", 1_700_000_000)
         assertEquals(
-            DurableTmuxSessionIdentity("\$12", 1_700_000_000),
+            TmuxSessionGeneration("\$12", 1_700_000_000),
             parseDurableTmuxSessionIdentity(7, key),
         )
         assertNull(parseDurableTmuxSessionIdentity(8, key))

@@ -44,24 +44,36 @@ class TmuxSessionRuntimeCacheTest {
     }
 
     @Test
-    fun removeSessionEvictsOnlyKilledHostAndSessionName() {
+    fun removeSessionEvictsOnlyKilledGeneration() {
         val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
-        val killed = cachedRuntime("work")
+        val killed = cachedRuntime("work", durableSessionKey = "tmux:1:\$0:100")
+        val sameNameSuccessor = cachedRuntime("work", durableSessionKey = "tmux:1:\$1:200")
         val sameNameOtherHost = cachedRuntime("work", hostId = 2L)
         val otherSession = cachedRuntime("deploy")
 
         cache.put(killed)
+        cache.put(sameNameSuccessor)
         cache.put(sameNameOtherHost)
         cache.put(otherSession)
 
-        assertEquals(listOf(killed), cache.removeSession(hostId = 1L, sessionName = "work"))
+        assertEquals(
+            listOf(killed),
+            cache.removeSession(
+                hostId = 1L,
+                generation = TmuxSessionGeneration("\$0", 100L),
+            ),
+        )
 
-        assertEquals(listOf(sameNameOtherHost.key, otherSession.key), cache.snapshotKeys())
+        assertEquals(
+            listOf(sameNameSuccessor.key, sameNameOtherHost.key, otherSession.key),
+            cache.snapshotKeys(),
+        )
         assertFalse(
             "a killed session's warm runtime must not be reusable by a same-name successor",
             cache.contains(killed.key),
         )
         assertTrue(cache.contains(sameNameOtherHost.key))
+        assertTrue(cache.contains(sameNameSuccessor.key))
         assertTrue(cache.contains(otherSession.key))
     }
 

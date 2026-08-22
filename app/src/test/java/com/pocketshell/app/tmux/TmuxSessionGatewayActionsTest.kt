@@ -134,6 +134,8 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             user = "alex",
             keyPath = "/keys/a",
             sessionName = "doomed",
+            tmuxSessionId = "\$4",
+            sessionCreated = 1_710_000_000L,
             client = client,
         )
         runCurrent()
@@ -158,16 +160,26 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
     }
 
     @Test
-    fun confirmedKillEvictsKilledSessionFromNameKeyedCaches() = runTest(scheduler) {
+    fun confirmedKillEvictsKilledGenerationFromCaches() = runTest(scheduler) {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
         val agentSessionMemory = AgentSessionMemory()
         val signals = SessionLifecycleSignals(
             runtimeCache = runtimeCache,
             agentSessionMemory = agentSessionMemory,
         )
-        val doomedRuntime = cachedRuntimeForGatewayActionTest(sessionName = "doomed", hostId = 7L)
+        val doomedRuntime = cachedRuntimeForGatewayActionTest(
+            sessionName = "doomed",
+            hostId = 7L,
+            durableSessionKey = "tmux:7:\$4:1710000000",
+        )
+        val successorRuntime = cachedRuntimeForGatewayActionTest(
+            sessionName = "doomed",
+            hostId = 7L,
+            durableSessionKey = "tmux:7:\$9:1720000000",
+        )
         val otherRuntime = cachedRuntimeForGatewayActionTest(sessionName = "other", hostId = 7L)
         runtimeCache.put(doomedRuntime)
+        runtimeCache.put(successorRuntime)
         runtimeCache.put(otherRuntime)
         agentSessionMemory.remember(
             hostId = 7L,
@@ -180,6 +192,20 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
                 confidence = AgentDetection.Confidence.ProcessConfirmed,
             ),
             wasOnConversation = true,
+            durableSessionKey = "tmux:7:\$4:1710000000",
+        )
+        agentSessionMemory.remember(
+            hostId = 7L,
+            sessionName = "doomed",
+            windowId = "@2",
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/alex/.codex/projects/doomed.jsonl",
+                sessionId = "successor-agent",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            wasOnConversation = false,
+            durableSessionKey = "tmux:7:\$9:1720000000",
         )
         val gateway = RecordingStopGateway(killSucceeds = true)
         val vm = newVm(
@@ -197,6 +223,8 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             user = "alex",
             keyPath = "/keys/a",
             sessionName = "doomed",
+            tmuxSessionId = "\$4",
+            sessionCreated = 1_710_000_000L,
             client = FakeTmuxClient(),
         )
         runCurrent()
@@ -215,9 +243,24 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             runtimeCache.contains(doomedRuntime.key),
         )
         assertTrue(runtimeCache.contains(otherRuntime.key))
+        assertTrue(runtimeCache.contains(successorRuntime.key))
         assertNull(
-            "same-name successor must not recall agent memory from the killed session",
-            agentSessionMemory.recall(7L, "doomed", "@2"),
+            "the killed generation's agent memory must be forgotten",
+            agentSessionMemory.recall(
+                7L,
+                "doomed",
+                "@2",
+                durableSessionKey = "tmux:7:\$4:1710000000",
+            ),
+        )
+        assertEquals(
+            AgentKind.Codex,
+            agentSessionMemory.recall(
+                7L,
+                "doomed",
+                "@2",
+                durableSessionKey = "tmux:7:\$9:1720000000",
+            )?.detection?.agent,
         )
     }
 
@@ -510,6 +553,8 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             user = "alex",
             keyPath = "/keys/a",
             sessionName = "solo",
+            tmuxSessionId = "\$20",
+            sessionCreated = 1_720_000_020L,
             client = client,
         )
         runCurrent()
@@ -562,6 +607,8 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             user = "alex",
             keyPath = "/keys/a",
             sessionName = "whole",
+            tmuxSessionId = "\$21",
+            sessionCreated = 1_720_000_021L,
             client = client,
         )
         runCurrent()
@@ -588,6 +635,7 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
     private fun cachedRuntimeForGatewayActionTest(
         sessionName: String,
         hostId: Long = 1L,
+        durableSessionKey: String? = null,
         client: FakeTmuxClient = FakeTmuxClient(),
         session: SshSession = GatewayActionSshSession(),
     ): CachedTmuxRuntime {
@@ -598,6 +646,7 @@ class TmuxSessionGatewayActionsTest : TmuxSessionViewModelTestBase() {
             username = "alex",
             keyPath = "/keys/a",
             sessionName = sessionName,
+            durableSessionKey = durableSessionKey,
         )
         return CachedTmuxRuntime(
             key = key,

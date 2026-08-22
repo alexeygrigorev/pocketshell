@@ -90,6 +90,7 @@ import com.pocketshell.app.tmux.TmuxConnectTrigger
 import com.pocketshell.app.tmux.TmuxRestoreIntentSnapshot
 import com.pocketshell.app.tmux.TmuxSessionScreen
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.tmuxSessionGenerationOrNull
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageScreen
 import com.pocketshell.app.usage.UsageViewModel
@@ -495,7 +496,15 @@ class MainActivity : FragmentActivity() {
                             // same name. A no-op when nothing was tombstoned or
                             // the identity differs.
                             if (dest is AppDestination.TmuxSession) {
-                                lastSessionStore.onSessionOpened(dest.hostId, dest.sessionName)
+                                tmuxSessionGenerationOrNull(
+                                    dest.tmuxSessionId,
+                                    dest.sessionCreated,
+                                )?.let { generation ->
+                                    lastSessionStore.onSessionOpened(
+                                        hostId = dest.hostId,
+                                        generation = generation,
+                                    )
+                                }
                             }
                         },
                         onComposerDraftChanged = { draft -> currentComposerDraft = draft },
@@ -694,7 +703,11 @@ class MainActivity : FragmentActivity() {
                     "issue834-killed-session-clear hostId=${killed.hostId} " +
                         "session=${killed.sessionName}",
                 )
-                lastSessionStore.onSessionKilled(killed.hostId, killed.sessionName)
+                lastSessionStore.onSessionKilled(
+                    hostId = killed.hostId,
+                    generation = killed.generation,
+                    lastKnownName = killed.lastKnownName,
+                )
             }
         }
     }

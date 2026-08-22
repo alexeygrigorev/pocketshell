@@ -6720,7 +6720,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // folder?" instead of a blank drop-to-list.
         sessionLifecycleSignals?.emitStaleSession(
             hostId = target.hostId,
-            sessionName = target.sessionName,
+            generation = tmuxSessionGenerationOrNull(
+                target.tmuxSessionId,
+                target.sessionCreated,
+            ),
+            lastKnownName = target.sessionName,
             folderPath = target.startDirectory,
         )
         _sessionEnded.tryEmit(target.sessionName)
@@ -16224,11 +16228,25 @@ public class TmuxSessionViewModel @Inject constructor(
                 if (windowId != null) {
                     sessionLifecycleSignals?.emitWindowClosed(current.hostId, windowId)
                 } else {
-                    sessionLifecycleSignals?.emitKilled(current.hostId, target)
+                    sessionLifecycleSignals?.emitKilled(
+                        hostId = current.hostId,
+                        generation = tmuxSessionGenerationOrNull(
+                            current.tmuxSessionId,
+                            current.sessionCreated,
+                        ),
+                        lastKnownName = target,
+                    )
                 }
             } else {
                 sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(TmuxTarget.session(target))}'")
-                sessionLifecycleSignals?.emitKilled(current.hostId, target)
+                sessionLifecycleSignals?.emitKilled(
+                    hostId = current.hostId,
+                    generation = tmuxSessionGenerationOrNull(
+                        current.tmuxSessionId,
+                        current.sessionCreated,
+                    ),
+                    lastKnownName = target,
+                )
             }
             return
         }
@@ -16274,7 +16292,14 @@ public class TmuxSessionViewModel @Inject constructor(
                                 "stop-window-signal host=${current.hostId} name=$target " +
                                     "window=$windowIndex session-destroyed",
                             )
-                            sessionLifecycleSignals?.emitKilled(current.hostId, target)
+                            sessionLifecycleSignals?.emitKilled(
+                                hostId = current.hostId,
+                                generation = tmuxSessionGenerationOrNull(
+                                    current.tmuxSessionId,
+                                    current.sessionCreated,
+                                ),
+                                lastKnownName = target,
+                            )
                         }
                     },
                     onFailure = { error ->
@@ -16301,7 +16326,14 @@ public class TmuxSessionViewModel @Inject constructor(
                         ISSUE_464_KILL_TAG,
                         "stop-session-signal host=${current.hostId} name=$target",
                     )
-                    sessionLifecycleSignals?.emitKilled(current.hostId, target)
+                    sessionLifecycleSignals?.emitKilled(
+                        hostId = current.hostId,
+                        generation = tmuxSessionGenerationOrNull(
+                            current.tmuxSessionId,
+                            current.sessionCreated,
+                        ),
+                        lastKnownName = target,
+                    )
                 },
                 onFailure = { error ->
                     Log.w(

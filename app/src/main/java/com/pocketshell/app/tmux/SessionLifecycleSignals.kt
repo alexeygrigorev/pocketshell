@@ -23,12 +23,17 @@ import javax.inject.Singleton
  *
  * @property hostId the host the killed session belonged to. The tree filters
  *   on this so a kill on host A never disturbs host B's rows.
- * @property sessionName the tmux session name that was killed.
+ * @property generation the exact tmux generation that was killed.
+ * @property lastKnownName the display name at the time the event was emitted.
  */
 data class KilledSession(
     val hostId: Long,
-    val sessionName: String,
-)
+    val generation: TmuxSessionGeneration,
+    val lastKnownName: String,
+) {
+    /** Compatibility read-only projection for existing non-destructive logs. */
+    val sessionName: String get() = lastKnownName
+}
 
 /**
  * Issue #883: one tmux WINDOW was closed by an in-session "Stop session" on a
@@ -62,7 +67,8 @@ data class ClosedWindow(
  * folder?" so the user recovers in one tap.
  *
  * @property hostId the host the gone session belonged to (the tree filters on it).
- * @property sessionName the tmux session name that was confirmed absent.
+ * @property generation the exact tmux generation that was confirmed absent.
+ * @property lastKnownName the display name at the time the event was emitted.
  * @property folderPath the session's working directory (its folder) so the
  *   recreate reuses the SAME folder's create-session path. `null` when the gone
  *   session carried no known start directory (the prompt then falls back to the
@@ -70,8 +76,27 @@ data class ClosedWindow(
  */
 data class StaleSession(
     val hostId: Long,
-    val sessionName: String,
+    val generation: TmuxSessionGeneration,
+    val lastKnownName: String,
     val folderPath: String?,
+) {
+    /** Compatibility read-only projection for the recovery prompt copy. */
+    val sessionName: String get() = lastKnownName
+}
+
+/**
+ * A lifecycle caller knew a session was gone but could not prove its tmux
+ * generation. This is deliberately a reconcile request, never a delete: a
+ * name-only event is allowed to refresh authoritative state but cannot remove
+ * a same-name successor.
+ */
+enum class SessionLifecycleAction { Kill, Stale }
+
+data class SessionIdentityUncertain(
+    val hostId: Long,
+    val lastKnownName: String,
+    val folderPath: String?,
+    val action: SessionLifecycleAction,
 )
 
 /**
@@ -140,15 +165,43 @@ class SessionLifecycleSignals @Inject constructor(
      */
     val staleSessions: SharedFlow<StaleSession> = _staleSessions.asSharedFlow()
 
-    /** Broadcast a confirmed kill of [sessionName] on [hostId]. */
-    fun emitKilled(hostId: Long, sessionName: String) {
-        val trimmed = sessionName.trim()
+    private val _identityUncertain = MutableSharedFlow<SessionIdentityUncertain>(
+        replay = 0,
+        extraBufferCapacity = 8,
+    )
+
+    /** Name-only lifecycle observations that require an authoritative reconcile. */
+    val identityUncertain: SharedFlow<SessionIdentityUncertain> = _identityUncertain.asSharedFlow()
+
+    /**
+     * Broadcast a confirmed kill of one exact [generation] on [hostId]. A null
+     * or malformed generation emits [identityUncertain] and performs no
+     * destructive cache/tree mutation.
+     */
+    fun emitKilled(
+        hostId: Long,
+        generation: TmuxSessionGeneration?,
+        lastKnownName: String,
+    ) {
+        val trimmed = lastKnownName.trim()
         if (trimmed.isEmpty()) return
-        agentSessionMemory?.forgetSession(hostId = hostId, sessionName = trimmed)
-        runtimeCache?.removeSession(hostId = hostId, sessionName = trimmed)?.forEach { runtime ->
+        val exact = generation.normalizedOrNull()
+        if (exact == null) {
+            emitIdentityUncertain(
+                hostId = hostId,
+                lastKnownName = trimmed,
+                folderPath = null,
+                action = SessionLifecycleAction.Kill,
+            )
+            return
+        }
+        agentSessionMemory?.forgetSession(hostId = hostId, generation = exact)
+        runtimeCache?.removeSession(hostId = hostId, generation = exact)?.forEach { runtime ->
             cleanupScope.launch { runtime.closeCachedRuntime() }
         }
-        _killedSessions.tryEmit(KilledSession(hostId = hostId, sessionName = trimmed))
+        _killedSessions.tryEmit(
+            KilledSession(hostId = hostId, generation = exact, lastKnownName = trimmed),
+        )
     }
 
     /**
@@ -170,19 +223,55 @@ class SessionLifecycleSignals @Inject constructor(
      * in this folder?". Also forgets the dead session's per-host memory/runtime like
      * [emitKilled], since it is confirmed gone.
      */
-    fun emitStaleSession(hostId: Long, sessionName: String, folderPath: String?) {
-        val trimmed = sessionName.trim()
+    fun emitStaleSession(
+        hostId: Long,
+        generation: TmuxSessionGeneration?,
+        lastKnownName: String,
+        folderPath: String?,
+    ) {
+        val trimmed = lastKnownName.trim()
         if (trimmed.isEmpty()) return
-        agentSessionMemory?.forgetSession(hostId = hostId, sessionName = trimmed)
-        runtimeCache?.removeSession(hostId = hostId, sessionName = trimmed)?.forEach { runtime ->
+        val exact = generation.normalizedOrNull()
+        val cleanFolder = folderPath?.trim()?.takeIf { it.isNotEmpty() }
+        if (exact == null) {
+            emitIdentityUncertain(
+                hostId = hostId,
+                lastKnownName = trimmed,
+                folderPath = cleanFolder,
+                action = SessionLifecycleAction.Stale,
+            )
+            return
+        }
+        agentSessionMemory?.forgetSession(hostId = hostId, generation = exact)
+        runtimeCache?.removeSession(hostId = hostId, generation = exact)?.forEach { runtime ->
             cleanupScope.launch { runtime.closeCachedRuntime() }
         }
         _staleSessions.tryEmit(
             StaleSession(
                 hostId = hostId,
-                sessionName = trimmed,
-                folderPath = folderPath?.trim()?.takeIf { it.isNotEmpty() },
+                generation = exact,
+                lastKnownName = trimmed,
+                folderPath = cleanFolder,
             ),
         )
     }
+
+    private fun emitIdentityUncertain(
+        hostId: Long,
+        lastKnownName: String,
+        folderPath: String?,
+        action: SessionLifecycleAction,
+    ) {
+        _identityUncertain.tryEmit(
+            SessionIdentityUncertain(
+                hostId = hostId,
+                lastKnownName = lastKnownName,
+                folderPath = folderPath,
+                action = action,
+            ),
+        )
+    }
+
+    private fun TmuxSessionGeneration?.normalizedOrNull(): TmuxSessionGeneration? =
+        this?.let { tmuxSessionGenerationOrNull(it.sessionId, it.createdEpochSeconds) }
 }

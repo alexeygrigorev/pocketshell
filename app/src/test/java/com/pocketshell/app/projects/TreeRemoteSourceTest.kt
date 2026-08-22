@@ -72,6 +72,30 @@ class TreeRemoteSourceTest {
     }
 
     @Test
+    fun getTreeCarriesExactTmuxGeneration() = runTest {
+        val json = JSONObject()
+            .put(
+                "nodes",
+                org.json.JSONArray().put(
+                    node(
+                        "work",
+                        order = 0,
+                        folder = "/p/work",
+                        collapsed = false,
+                        tmuxSessionId = "\$9",
+                        sessionCreated = 1_720_000_000L,
+                    ),
+                ),
+            )
+            .toString()
+
+        val result = source.getTree(treeSession(getStdout = json), host = "h")
+
+        assertEquals("\$9", result.nodes.single().tmuxSessionId)
+        assertEquals(1_720_000_000L, result.nodes.single().sessionCreated)
+    }
+
+    @Test
     fun getTree_emptyRegistryYieldsEmptyList() = runTest {
         val session = treeSession(getStdout = """{"nodes":[],"version":0,"cli_version":"0.4.12"}""")
         val result = source.getTree(session, host = "h")
@@ -114,7 +138,15 @@ class TreeRemoteSourceTest {
             host = "hetzner",
             nodes = listOf(
                 TreeRemoteSource.TreeNode("a", order = 0, folderPath = "/p/a", collapsed = true),
-                TreeRemoteSource.TreeNode("b", order = 1, folderPath = "/p/b", collapsed = false, foreignKind = "claude"),
+                TreeRemoteSource.TreeNode(
+                    "b",
+                    order = 1,
+                    folderPath = "/p/b",
+                    collapsed = false,
+                    foreignKind = "claude",
+                    tmuxSessionId = "\$4",
+                    sessionCreated = 1_710_000_000L,
+                ),
             ),
         )
 
@@ -126,6 +158,8 @@ class TreeRemoteSourceTest {
         assertTrue(sent, sent.contains("\"session\":\"a\""))
         assertTrue(sent, sent.contains("\"collapsed\":true"))
         assertTrue(sent, sent.contains("\"foreign_kind\":\"claude\""))
+        assertTrue(sent, sent.contains("\"tmux_session_id\":\"\$4\""))
+        assertTrue(sent, sent.contains("\"session_created\":1710000000"))
         assertFalse("must not write a confirmed kind copy", sent.contains("\"kind\""))
     }
 
@@ -234,12 +268,18 @@ class TreeRemoteSourceTest {
         folder: String,
         collapsed: Boolean,
         foreign: String? = null,
+        tmuxSessionId: String? = null,
+        sessionCreated: Long? = null,
     ): JSONObject = JSONObject()
         .put("session", name)
         .put("order", order)
         .put("folder_path", folder)
         .put("collapsed", collapsed)
-        .apply { if (foreign != null) put("foreign_kind", foreign) }
+        .apply {
+            if (foreign != null) put("foreign_kind", foreign)
+            if (tmuxSessionId != null) put("tmux_session_id", tmuxSessionId)
+            if (sessionCreated != null) put("session_created", sessionCreated)
+        }
 
     private fun treeSession(
         getStdout: String = "",

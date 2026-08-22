@@ -5,12 +5,14 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.tmux.SessionLifecycleSignals
+import com.pocketshell.app.tmux.TmuxSessionGeneration
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -22,6 +24,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -82,7 +86,7 @@ class FolderListViewModelStaleSessionTest {
             // The session was confirmed genuinely gone on attach. The USER-FACING
             // recovery prompt is owned app-level (StaleSessionPromptController);
             // the tree just keeps its list accurate by dropping the dead row.
-            signals.emitStaleSession(HOST.id, "git-pocketshell", goneFolder)
+            signals.emitStaleSession(HOST.id, generation("git-pocketshell"), "git-pocketshell", goneFolder)
             runCurrent()
 
             assertTrue(
@@ -109,7 +113,12 @@ class FolderListViewModelStaleSessionTest {
             bind(vm)
             runCurrent()
 
-            signals.emitStaleSession(HOST.id + 1, "git-pocketshell", goneFolder)
+            signals.emitStaleSession(
+                HOST.id + 1,
+                generation("git-pocketshell"),
+                "git-pocketshell",
+                goneFolder,
+            )
             runCurrent()
 
             assertTrue(
@@ -137,11 +146,80 @@ class FolderListViewModelStaleSessionTest {
             // The COMMON case: the user removed the session THROUGH the app — the
             // tree drops the row immediately (external removal is the gone-on-open
             // case the app-level recovery prompt covers).
-            signals.emitKilled(HOST.id, "git-pocketshell")
+            signals.emitKilled(HOST.id, generation("git-pocketshell"), "git-pocketshell")
             runCurrent()
 
             assertTrue("app-created removal drops the row", "git-pocketshell" !in readySessionNames(vm))
             assertTrue("the sibling row survives", "beta" in readySessionNames(vm))
+        } finally {
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun uncertainPredecessorReconcilesWithoutHidingProbingSuccessor() = runTest {
+        val signals = SessionLifecycleSignals()
+        val predecessor = TmuxSessionGeneration("predecessor-id", 1_710_000_000L)
+        val successor = TmuxSessionGeneration("successor-id", 1_720_000_000L)
+        val gateway = StubGateway(
+            listOf(
+                sessionRow(
+                    name = "work",
+                    generation = predecessor,
+                    agentKind = SessionAgentKind.Claude,
+                    recordedProfile = "Claude (old)",
+                ),
+            ),
+        )
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+
+            // Reconcile through the production ViewModel first. A different
+            // generation starts with no predecessor state, even when its
+            // detector is still Probing and its profile is blank.
+            gateway.rows = listOf(
+                sessionRow(
+                    name = "work",
+                    generation = successor,
+                    agentKind = SessionAgentKind.Probing,
+                    recordedProfile = null,
+                ),
+            )
+            vm.refreshSessions()
+            runCurrent()
+            val beforeUncertain = readySession(vm)
+            assertEquals(successor.sessionId, beforeUncertain.tmuxSessionId)
+            assertEquals(successor.createdEpochSeconds, beforeUncertain.sessionCreated)
+            assertEquals(SessionAgentKind.Probing, beforeUncertain.agentKind)
+            assertNull(beforeUncertain.recordedProfile)
+
+            val probesBefore = gateway.probeCount
+            // A name-only lifecycle identity is uncertain. The production
+            // consumer must request an authoritative reconcile; it must not
+            // remove or hide the exact successor directly.
+            signals.emitKilled(
+                hostId = HOST.id,
+                generation = null,
+                lastKnownName = "work",
+            )
+            runCurrent()
+
+            assertEquals(
+                "identity-uncertain predecessor must trigger one authoritative production reconcile",
+                probesBefore + 1,
+                gateway.probeCount,
+            )
+            val afterUncertain = readySession(vm)
+            assertEquals(
+                "the Probing successor must remain visible after an uncertain predecessor event",
+                successor.sessionId,
+                afterUncertain.tmuxSessionId,
+            )
+            assertEquals(successor.createdEpochSeconds, afterUncertain.sessionCreated)
+            assertEquals(SessionAgentKind.Probing, afterUncertain.agentKind)
+            assertNull(afterUncertain.recordedProfile)
         } finally {
             vm.stopPolling()
         }
@@ -166,13 +244,28 @@ class FolderListViewModelStaleSessionTest {
         return state.flatSessions.map { it.sessionName }.toSet()
     }
 
-    private fun sessionRow(name: String): FolderSessionRow =
+    private fun readySession(vm: FolderListViewModel): FolderSessionEntry =
+        (vm.state.value as FolderListUiState.Ready).flatSessions.single { it.sessionName == "work" }
+
+    private fun sessionRow(
+        name: String,
+        generation: TmuxSessionGeneration = generation(name),
+        agentKind: SessionAgentKind = SessionAgentKind.Shell,
+        recordedProfile: String? = null,
+    ): FolderSessionRow =
         FolderSessionRow(
             sessionName = name,
             lastActivity = 1_000L,
             attached = false,
             cwd = "/home/alexey/git/$name",
+            agentKind = agentKind,
+            recordedProfile = recordedProfile,
+            tmuxSessionId = generation.sessionId,
+            sessionCreated = generation.createdEpochSeconds,
         )
+
+    private fun generation(name: String): TmuxSessionGeneration =
+        TmuxSessionGeneration(sessionId = "id-$name", createdEpochSeconds = name.length.toLong() + 1L)
 
     private fun TestScope.newViewModel(
         gateway: FolderListGateway,
@@ -208,13 +301,17 @@ class FolderListViewModelStaleSessionTest {
         @Volatile var rows: List<FolderSessionRow>,
     ) : FolderListGateway {
         val createdSessions: MutableList<Pair<String, String>> = mutableListOf()
+        var probeCount: Int = 0
 
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
             keyPath: String,
             passphrase: CharArray?,
             watchedRoots: List<ProjectRootEntity>,
-        ): FolderListResult = FolderListResult.Sessions(rows = rows)
+        ): FolderListResult {
+            probeCount += 1
+            return FolderListResult.Sessions(rows = rows)
+        }
 
         override suspend fun createSession(
             host: HostEntity,

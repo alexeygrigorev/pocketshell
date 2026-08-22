@@ -138,7 +138,7 @@ class FolderListViewModelTreeDurabilityTest {
     // ---- refresh reconciles gone/added as DELTAS only ----------------------
 
     @Test
-    fun resumeReconcilePrunesGoneSessionAsDelta() = runTest {
+    fun resumeReconcilePrunesGoneSessionAfterAuthoritativeProbe() = runTest {
         val daemon = FakeTreeDaemon()
         // Seed the daemon registry as if a prior session persisted two sessions.
         daemon.seed(
@@ -157,11 +157,11 @@ class FolderListViewModelTreeDurabilityTest {
         assertEquals(listOf("beta", "alpha"), readySessions(vm))
 
         // `alpha` is killed out-of-band: the daemon's live enumeration now omits
-        // it. A resume-when-stale should reconcile this as a DELTA (prune alpha)
-        // WITHOUT a full gateway reload — the gateway is told to fail loudly if
-        // it is probed, proving the delta path was used.
+        // it. A name-only gone hint is escalated to the authoritative gateway
+        // probe so a same-name successor cannot be pruned by the hint.
         daemon.setLive(HOST.name, setOf("beta"))
-        gateway.rows = null // a full re-probe would now blow up
+        val gatewayProbesBeforeResume = gateway.probeCount
+        gateway.rows = listOf(sessionRow("beta"))
 
         // Drive a resume past the freshen window.
         vm.forceTreeStaleForTest()
@@ -171,9 +171,14 @@ class FolderListViewModelTreeDurabilityTest {
         awaitReady(vm)
 
         assertEquals(
-            "the gone session is pruned via the delta path, no full reload",
+            "the authoritative probe result prunes the gone alpha session",
             listOf("beta"),
             readySessions(vm),
+        )
+        assertEquals(
+            "a name-only gone hint must trigger an authoritative gateway probe",
+            gatewayProbesBeforeResume + 1,
+            gateway.probeCount,
         )
     }
 
@@ -463,13 +468,16 @@ class FolderListViewModelTreeDurabilityTest {
     private class StubGateway(
         @Volatile var rows: List<FolderSessionRow>?,
     ) : FolderListGateway {
+        @Volatile var probeCount: Int = 0
+
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
             keyPath: String,
             passphrase: CharArray?,
             watchedRoots: List<ProjectRootEntity>,
         ): FolderListResult {
-            val r = rows ?: error("gateway probe must not be called on the delta path")
+            probeCount += 1
+            val r = rows ?: error("gateway probe result was not configured")
             return FolderListResult.Sessions(rows = r)
         }
 

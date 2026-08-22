@@ -83,7 +83,12 @@ internal fun PromptComposerViewModel.activeSendIsWedged(nowMs: Long = clock()): 
  */
 internal fun PromptComposerViewModel.retryOutboundItemThroughGate(id: String) {
     val item = outboundQueueStore.item(id) ?: return
-    if (!item.isComposerQueueRetryable()) return
+    if (item.isComposerQueueHeldForReview()) {
+        sendHeldOutboundItemNow(id)
+        return
+    } else if (!item.isComposerQueueRetryable()) {
+        return
+    }
     if (!isSendTransportWritable()) {
         rearmOutboundItemForDrain(id)
         clearOutboundRetrying(id)

@@ -823,14 +823,18 @@ class PromptComposerOutboundSendQueueViewModelTest {
         // durable representation (one row, no residual draft) that makes recovery
         // deliver the prompt exactly once rather than duplicating it. --
         val rowId = snap.single().id
+        // Keep this recovery fixture recent for #1700: the test exercises a
+        // process-death re-arm, not explicit stale-intent approval. A clock a
+        // little ahead of the real enqueue time still makes the zero-duration
+        // stale-InFlight cutoff deterministic without turning the row into a
+        // five-minute-old prompt that must be held for review.
+        val recoveryNow = System.currentTimeMillis() + 1_000L
         val vm2 = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
             composerDraftStore = draftStore,
             savedStateHandle = SavedStateHandle(),
-            // A far-future clock so the stale-InFlight recovery cutoff is > the
-            // row's real-time createdAtMs (deterministic re-arm; no time race).
-            clock = { Long.MAX_VALUE / 2 },
+            clock = { recoveryNow },
         )
         val sent2 = collectSendRequests(vm2)
         vm2.onComposerTargetChanged("1/session-a")
@@ -1718,6 +1722,37 @@ class PromptComposerOutboundSendQueueViewModelTest {
         advanceUntilIdle()
 
         waitForSidecarsCleared(sidecars, deleted.id)
+    }
+
+    @Test
+    fun heldForReviewOutboundItemCanBeDeletedAndCleansSidecar() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
+        val now = System.currentTimeMillis()
+        val queued = queue.enqueue(
+            sessionKey = "1/session-a",
+            cleanText = "old prompt",
+            createdAtMs = now - OUTBOUND_STALE_HOLD_MS,
+        )
+        val held = queue.holdStaleUnapproved("1/session-a", now).single()
+        assertEquals(queued.id, held.id)
+        sidecars.stage(held.id, listOf(Uri.fromFile(localAttachmentFile("held.txt", "held bytes"))))
+
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+        )
+        vm.onComposerTargetChanged("1/session-a")
+
+        vm.discardOutboundItem(held.id)
+        advanceUntilIdle()
+
+        assertNull(
+            "Delete is an explicit user cancellation and must remove a held row",
+            queue.item(held.id),
+        )
+        waitForSidecarsCleared(sidecars, held.id)
     }
 
     @Test

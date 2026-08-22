@@ -55,6 +55,29 @@ internal class OutboundDrainOwnership {
 }
 
 /**
+ * Retains explicit Send-now approvals that hit a busy drain gate. The approval
+ * is an intent for one durable row, not a second ownership lease: the normal
+ * drain still has to acquire [OutboundDrainOwnership] and claim the row before
+ * it can emit anything. A small synchronized FIFO also keeps two rapid row
+ * actions from overwriting one another while a current owner resolves.
+ */
+internal class OutboundDrainApprovalQueue {
+    private val lock = Any()
+    private val pendingIds = LinkedHashSet<String>()
+
+    fun retain(rowId: String) {
+        if (rowId.isBlank()) return
+        synchronized(lock) { pendingIds += rowId }
+    }
+
+    fun remove(rowId: String) {
+        synchronized(lock) { pendingIds -= rowId }
+    }
+
+    fun snapshot(): List<String> = synchronized(lock) { pendingIds.toList() }
+}
+
+/**
  * Identifies the one mounted screen consumer allowed to turn a queued request
  * into physical host IO. A generation is stamped onto every request so an old
  * screen collector cannot steal work emitted for its replacement.

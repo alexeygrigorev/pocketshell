@@ -218,10 +218,12 @@ private fun OutboundQueueBanner(
                     .height(1.dp)
                     .background(PocketShellColors.BorderSoft),
             )
+            val heldCount = items.count { it.isComposerQueueHeldForReview() }
             val resendableCount = items.count {
                 it.state == OutboundState.Queued || it.state == OutboundState.Failed
             }
-            if (resendableCount >= 2) {
+            val batchCount = if (heldCount > 0) heldCount else resendableCount
+            if (batchCount >= 2) {
                 val resendEnabled = wireWritable && !retryBlockedByHealthyOwner && retryingIds.isEmpty()
                 Box(
                     modifier = Modifier
@@ -240,6 +242,8 @@ private fun OutboundQueueBanner(
                 ) {
                     Text(
                         text = when {
+                            resendEnabled && heldCount > 0 ->
+                                "Send all older prompts ($heldCount)"
                             resendEnabled -> "Resend all ($resendableCount)"
                             !wireWritable -> "Waiting for connection"
                             else -> "Waiting for current send"
@@ -336,7 +340,10 @@ private fun OutboundQueueRow(
             } else {
                 Text(
                     text = retryAction.status ?: outboundQueueStateLabel(item, uploadProgress),
-                    color = if (item.state == OutboundState.Failed) {
+                    color = if (
+                        item.state == OutboundState.Failed ||
+                        item.state == OutboundState.HeldForReview
+                    ) {
                         PocketShellColors.Amber
                     } else {
                         PocketShellColors.TextSecondary
@@ -363,7 +370,11 @@ private fun OutboundQueueRow(
                 style = PocketShellType.bodyDense,
             )
         }
-        if (item.state == OutboundState.Queued || item.state == OutboundState.Failed) {
+        if (
+            item.state == OutboundState.Queued ||
+            item.state == OutboundState.Failed ||
+            item.state == OutboundState.HeldForReview
+        ) {
             Spacer(modifier = Modifier.height(8.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -644,11 +655,17 @@ internal fun outboundQueueSummary(
             OutboundState.InFlight -> "Sending"
             OutboundState.Delivered -> "Delivered"
             OutboundState.Failed -> "Failed — tap Retry"
+            OutboundState.HeldForReview -> outboundHeldForReviewLabel(oldest)
         }
-        return OutboundQueueSummary(primary, preview, oldest.state == OutboundState.Failed)
+        return OutboundQueueSummary(
+            primary,
+            preview,
+            oldest.state == OutboundState.Failed || oldest.state == OutboundState.HeldForReview,
+        )
     }
 
     val unconfirmedCount = items.count { it.isComposerQueueDeliveryUnconfirmed() }
+    val heldCount = items.count { it.isComposerQueueHeldForReview() }
     val failedCount = items.count { it.state == OutboundState.Failed }
     if (unconfirmedCount > 0) {
         return OutboundQueueSummary(
@@ -656,6 +673,18 @@ internal fun outboundQueueSummary(
             preview = preview,
             attention = true,
             attentionSuffix = "$unconfirmedCount unconfirmed",
+        )
+    }
+    if (heldCount > 0) {
+        return OutboundQueueSummary(
+            primary = "${items.size} queued",
+            preview = preview,
+            attention = true,
+            attentionSuffix = if (heldCount == 1) {
+                "1 older prompt needs review"
+            } else {
+                "$heldCount older prompts need review"
+            },
         )
     }
     val primary = when {
@@ -684,6 +713,7 @@ internal fun outboundQueueStateLabel(
     OutboundState.InFlight -> "Sending"
     OutboundState.Delivered -> "Delivered"
     OutboundState.Failed -> item.lastError?.takeIf { it.isNotBlank() }?.let { "Failed — $it" } ?: "Failed"
+    OutboundState.HeldForReview -> outboundHeldForReviewLabel(item)
 }
 
 internal data class OutboundRetryActionState(
@@ -693,12 +723,42 @@ internal data class OutboundRetryActionState(
 )
 
 /** Reopened #1602: a rendered Retry must state whether it can act right now. */
+internal fun outboundHeldForReviewLabel(
+    item: OutboundItem,
+    nowMs: Long = System.currentTimeMillis(),
+): String {
+    val age = formatRelativeTimestamp(item.createdAtMs, nowMs)
+    return if (item.wireAttempted) {
+        "Needs review — may already have been pasted"
+    } else {
+        "Needs review — queued $age"
+    }
+}
+
 internal fun outboundRetryActionState(
     item: OutboundItem,
     retryingIds: Set<String>,
     blockedByHealthyOwner: Boolean,
     wireWritable: Boolean,
 ): OutboundRetryActionState = when {
+    item.isComposerQueueHeldForReview() -> when {
+        !wireWritable -> OutboundRetryActionState(
+            label = "Send now",
+            enabled = false,
+            status = "Waiting — connection is offline",
+        )
+        item.id in retryingIds -> OutboundRetryActionState(
+            label = "Sending…",
+            enabled = false,
+            status = "Sending — starting delivery",
+        )
+        blockedByHealthyOwner -> OutboundRetryActionState(
+            label = "Waiting…",
+            enabled = false,
+            status = "Waiting — another prompt is still sending",
+        )
+        else -> OutboundRetryActionState(label = "Send now", enabled = true)
+    }
     !item.isComposerQueueRetryable() -> OutboundRetryActionState(label = "Retry", enabled = false)
     !wireWritable -> OutboundRetryActionState(
         label = "Offline",
@@ -723,7 +783,11 @@ internal fun outboundAttachmentCountLabel(count: Int): String =
 
 internal fun retryableOutboundQueueItem(items: List<OutboundItem>): OutboundItem? =
     items
-        .filter { it.state == OutboundState.Queued || it.state == OutboundState.Failed }
+        .filter {
+            it.state == OutboundState.Queued ||
+                it.state == OutboundState.Failed ||
+                it.state == OutboundState.HeldForReview
+        }
         .minByOrNull { it.createdAtMs }
 
 internal fun isComposerResendMode(

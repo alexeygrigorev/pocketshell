@@ -29,7 +29,7 @@ class AttachmentQueueRetentionProjectionTest {
         }
 
         assertEquals(
-            setOf("queued.png", "uploading.png", "inflight.png", "failed.png"),
+            setOf("queued.png", "uploading.png", "inflight.png", "failed.png", "heldforreview.png"),
             store.retainedRemoteAttachmentNames(DURABLE_SESSION_KEY, CURRENT_DIR),
         )
     }
@@ -92,6 +92,7 @@ class AttachmentQueueRetentionProjectionTest {
         OutboundState.InFlight -> "./$CURRENT_DIR/inflight.png"
         OutboundState.Failed -> "~/$CURRENT_DIR/./failed.png"
         OutboundState.Delivered -> "~/$CURRENT_DIR/delivered.png"
+        OutboundState.HeldForReview -> "~/$CURRENT_DIR/heldforreview.png"
     }
 
     private companion object {

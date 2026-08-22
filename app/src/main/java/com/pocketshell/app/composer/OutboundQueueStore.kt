@@ -183,7 +183,10 @@ public interface OutboundQueueStore {
      * API is what makes a second concurrent flusher safe even if one is ever
      * started.
      */
-    public fun claimNext(sessionKey: String): OutboundItem?
+    public fun claimNext(
+        sessionKey: String,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): OutboundItem?
 
     /**
      * Atomically claim the exact `Queued`/`Failed` item with [id], transition it
@@ -195,7 +198,10 @@ public interface OutboundQueueStore {
      * [OutboundState.InFlight], [OutboundState.Uploading], or otherwise not
      * claimable.
      */
-    public fun claim(id: String): OutboundItem?
+    public fun claim(
+        id: String,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): OutboundItem?
 
     /**
      * Mark the item with [id] [OutboundState.InFlight] for a send attempt that
@@ -216,6 +222,7 @@ public interface OutboundQueueStore {
     public fun markUploading(
         id: String,
         lastAttemptAtMs: Long = System.currentTimeMillis(),
+        nowMillis: Long = lastAttemptAtMs,
     ): OutboundItem?
 
     /**
@@ -312,6 +319,29 @@ public interface OutboundQueueStore {
         id: String,
         resetAttempts: Boolean = false,
         attemptDelta: Int = 0,
+    ): OutboundItem?
+
+    /**
+     * Issue #1700: atomically move every unowned stale-unapproved row for
+     * [sessionKey] to [OutboundState.HeldForReview]. Auto-flush cannot claim a
+     * held row; [approveStaleForSend] is the only re-arm. Returns the held rows
+     * oldest-first. Active `Uploading`/`InFlight` attempts are left alone.
+     */
+    public fun holdStaleUnapproved(
+        sessionKey: String,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): List<OutboundItem>
+
+    /**
+     * Issue #1700: persist approval on the same row id and re-arm it to
+     * [OutboundState.Queued] so the normal exactly-once claim path can deliver
+     * it. Wire baselines and attachment checkpoints are preserved. Approval
+     * survives process death and retry; it is not requested again. Returns
+     * `null` for unknown/`Delivered` ids.
+     */
+    public fun approveStaleForSend(
+        id: String,
+        nowMillis: Long = System.currentTimeMillis(),
     ): OutboundItem?
 
     /**
@@ -619,6 +649,12 @@ public data class OutboundItem(
     /** Tap-time tmux generation. Both fields are required for identity promotion. */
     val tmuxSessionId: String? = null,
     val tmuxSessionCreated: Long? = null,
+    /**
+     * Issue #1700: wall-clock approval of a stale row. Non-null means the user
+     * tapped Send now (or batch-approved) this exact id; auto-flush may claim
+     * it again even after [OUTBOUND_STALE_HOLD_MS]. Never cleared by a retry.
+     */
+    val staleApprovedAtMs: Long? = null,
 )
 
 /** Issue #900: persisted send route selected before an item entered the durable queue. */
@@ -642,6 +678,12 @@ public enum class OutboundState {
     InFlight,
     Delivered,
     Failed,
+    /**
+     * Issue #1700: unapproved intent older than [OUTBOUND_STALE_HOLD_MS].
+     * Auto-flush cannot claim it. Send now re-arms the same id; Delete
+     * removes it. Never silently dropped.
+     */
+    HeldForReview,
     ;
 
     /**
@@ -728,6 +770,8 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
                 items[rearmed.id] = rearmed
                 rearmed
             }
+            // Held → still needs review; a duplicate enqueue of the same id is a no-op.
+            existing != null && existing.state == OutboundState.HeldForReview -> existing
             // Unknown id but a same-sendKey un-delivered sibling exists — coalesce
             // (issue #961: the sidecar/attachment re-send path mints a fresh id,
             // so the id branch above never fires; dedup on the logical key here).
@@ -779,9 +823,17 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
 
     override fun item(id: String): OutboundItem? = synchronized(lock) { items[id] }
 
-    override fun claimNext(sessionKey: String): OutboundItem? = synchronized(lock) {
+    override fun claimNext(
+        sessionKey: String,
+        nowMillis: Long,
+    ): OutboundItem? = synchronized(lock) {
+        holdStaleLocked(sessionKey, nowMillis)
         val next = items.values
-            .filter { it.sessionKey == sessionKey && it.state == OutboundState.Queued }
+            .filter {
+                it.sessionKey == sessionKey &&
+                    it.state == OutboundState.Queued &&
+                    !it.isStaleUnapproved(nowMillis)
+            }
             .minByOrNull { it.createdAtMs }
             ?: return null
         val claimed = next.claimedForAttempt()
@@ -789,8 +841,12 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         claimed
     }
 
-    override open fun claim(id: String): OutboundItem? = synchronized(lock) {
+    override open fun claim(id: String, nowMillis: Long): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
+        if (existing.isStaleUnapproved(nowMillis)) {
+            items[existing.id] = existing.heldForReview()
+            return null
+        }
         if (!existing.state.isExactClaimable) return null
         val claimed = existing.claimedForAttempt()
         items[claimed.id] = claimed
@@ -799,7 +855,10 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
 
     override fun markInFlight(id: String): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
-        if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
+        if (existing.state == OutboundState.Delivered ||
+            existing.state == OutboundState.Failed ||
+            existing.state == OutboundState.HeldForReview
+        ) {
             return existing
         }
         val updated = existing.claimedForAttempt()
@@ -807,8 +866,17 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         updated
     }
 
-    override open fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = synchronized(lock) {
+    override open fun markUploading(
+        id: String,
+        lastAttemptAtMs: Long,
+        nowMillis: Long,
+    ): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
+        if (existing.isStaleUnapproved(nowMillis)) {
+            val held = existing.heldForReview()
+            items[held.id] = held
+            return null
+        }
         if (!existing.state.isExactClaimable) return null
         val updated = existing.copy(
             state = OutboundState.Uploading,
@@ -878,6 +946,7 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
     ): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
         if (existing.state == OutboundState.Delivered) return null
+        if (existing.state == OutboundState.HeldForReview) return existing
         val updated = existing.copy(
             state = OutboundState.Queued,
             lastError = null,
@@ -889,6 +958,33 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         )
         items[updated.id] = updated
         updated
+    }
+
+    override fun holdStaleUnapproved(
+        sessionKey: String,
+        nowMillis: Long,
+    ): List<OutboundItem> = synchronized(lock) { holdStaleLocked(sessionKey, nowMillis) }
+
+    override fun approveStaleForSend(id: String, nowMillis: Long): OutboundItem? =
+        synchronized(lock) {
+            val existing = items[id] ?: return null
+            if (existing.state == OutboundState.Delivered) return null
+            val updated = existing.copy(
+                state = OutboundState.Queued,
+                lastError = null,
+                staleApprovedAtMs = existing.staleApprovedAtMs ?: nowMillis,
+            )
+            items[updated.id] = updated
+            updated
+        }
+
+    private fun holdStaleLocked(sessionKey: String, nowMillis: Long): List<OutboundItem> {
+        val held = items.values
+            .filter { it.sessionKey == sessionKey && it.isStaleUnapproved(nowMillis) }
+            .sortedBy { it.createdAtMs }
+            .map { it.heldForReview() }
+        held.forEach { items[it.id] = it }
+        return held
     }
 
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> =
@@ -1024,15 +1120,17 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
         tmuxSessionCreated: Long,
     ): List<OutboundItem> = emptyList()
     override fun item(id: String): OutboundItem? = null
-    override fun claimNext(sessionKey: String): OutboundItem? = null
-    override fun claim(id: String): OutboundItem? = null
+    override fun claimNext(sessionKey: String, nowMillis: Long): OutboundItem? = null
+    override fun claim(id: String, nowMillis: Long): OutboundItem? = null
     override fun markInFlight(id: String): OutboundItem? = null
-    override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = null
+    override fun markUploading(id: String, lastAttemptAtMs: Long, nowMillis: Long): OutboundItem? = null
     override fun markAttachmentsUploaded(id: String, attachments: List<DurableAttachmentRef>): OutboundItem? = null
     override fun markDelivered(id: String): Boolean = false
     override fun acknowledgeLateDelivered(id: String, sendKey: String, wireAttemptGeneration: Int): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
     override fun requeueForRetry(id: String, resetAttempts: Boolean, attemptDelta: Int): OutboundItem? = null
+    override fun holdStaleUnapproved(sessionKey: String, nowMillis: Long): List<OutboundItem> = emptyList()
+    override fun approveStaleForSend(id: String, nowMillis: Long): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
     override fun clearSession(sessionKey: String) = Unit
@@ -1194,6 +1292,7 @@ public class SharedPrefsOutboundQueueStore internal constructor(
                 replaceAndStore(item.sessionKey, list, rearmed)
                 rearmed
             }
+            existing != null && existing.state == OutboundState.HeldForReview -> existing
             else -> {
                 // Issue #961: a fresh-id re-send of the same logical prompt
                 // coalesces onto the existing un-delivered sibling (the sidecar
@@ -1265,10 +1364,13 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         sessionKeys().firstNotNullOfOrNull { key -> loadSession(key).firstOrNull { it.id == id } }
     }
 
-    override fun claimNext(sessionKey: String): OutboundItem? = synchronized(lock) {
+    override fun claimNext(sessionKey: String, nowMillis: Long): OutboundItem? = synchronized(lock) {
         val list = loadSession(sessionKey)
+        holdStaleInList(sessionKey, list, nowMillis)
         val next = list
-            .filter { it.state == OutboundState.Queued }
+            .filter {
+                it.state == OutboundState.Queued && !it.isStaleUnapproved(nowMillis)
+            }
             .minByOrNull { it.createdAtMs }
             ?: return null
         val claimed = next.claimedForAttempt()
@@ -1276,10 +1378,14 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         claimed
     }
 
-    override fun claim(id: String): OutboundItem? = synchronized(lock) {
+    override fun claim(id: String, nowMillis: Long): OutboundItem? = synchronized(lock) {
         val sessionKey = sessionOf(id) ?: return null
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
+        if (existing.isStaleUnapproved(nowMillis)) {
+            replaceAndStore(sessionKey, list, existing.heldForReview())
+            return null
+        }
         if (!existing.state.isExactClaimable) return null
         val claimed = existing.claimedForAttempt()
         replaceAndStore(sessionKey, list, claimed)
@@ -1290,7 +1396,10 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         val sessionKey = sessionOf(id) ?: return null
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
-        if (existing.state == OutboundState.Delivered || existing.state == OutboundState.Failed) {
+        if (existing.state == OutboundState.Delivered ||
+            existing.state == OutboundState.Failed ||
+            existing.state == OutboundState.HeldForReview
+        ) {
             return existing
         }
         val updated = existing.claimedForAttempt()
@@ -1298,10 +1407,18 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         updated
     }
 
-    override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = synchronized(lock) {
+    override fun markUploading(
+        id: String,
+        lastAttemptAtMs: Long,
+        nowMillis: Long,
+    ): OutboundItem? = synchronized(lock) {
         val sessionKey = sessionOf(id) ?: return null
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
+        if (existing.isStaleUnapproved(nowMillis)) {
+            replaceAndStore(sessionKey, list, existing.heldForReview())
+            return null
+        }
         if (!existing.state.isExactClaimable) return null
         val updated = existing.copy(
             state = OutboundState.Uploading,
@@ -1383,6 +1500,7 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
         if (existing.state == OutboundState.Delivered) return null
+        if (existing.state == OutboundState.HeldForReview) return existing
         val updated = existing.copy(
             state = OutboundState.Queued,
             lastError = null,
@@ -1394,6 +1512,47 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         )
         replaceAndStore(sessionKey, list, updated)
         updated
+    }
+
+    override fun holdStaleUnapproved(
+        sessionKey: String,
+        nowMillis: Long,
+    ): List<OutboundItem> = synchronized(lock) {
+        val list = loadSession(sessionKey)
+        holdStaleInList(sessionKey, list, nowMillis)
+    }
+
+    override fun approveStaleForSend(id: String, nowMillis: Long): OutboundItem? =
+        synchronized(lock) {
+            val sessionKey = sessionOf(id) ?: return null
+            val list = loadSession(sessionKey)
+            val existing = list.firstOrNull { it.id == id } ?: return null
+            if (existing.state == OutboundState.Delivered) return null
+            val updated = existing.copy(
+                state = OutboundState.Queued,
+                lastError = null,
+                staleApprovedAtMs = existing.staleApprovedAtMs ?: nowMillis,
+            )
+            replaceAndStore(sessionKey, list, updated)
+            updated
+        }
+
+    private fun holdStaleInList(
+        sessionKey: String,
+        list: MutableList<OutboundItem>,
+        nowMillis: Long,
+    ): List<OutboundItem> {
+        val held = list
+            .filter { it.isStaleUnapproved(nowMillis) }
+            .map { it.heldForReview() }
+        if (held.isEmpty()) return emptyList()
+        val byId = held.associateBy { it.id }
+        for (index in list.indices) {
+            val replacement = byId[list[index].id] ?: continue
+            list[index] = replacement
+        }
+        storeSession(sessionKey, list.sortedBy { it.createdAtMs })
+        return held.sortedBy { it.createdAtMs }
     }
 
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> =
@@ -1522,6 +1681,9 @@ public class SharedPrefsOutboundQueueStore internal constructor(
 
 private val OutboundState.isExactClaimable: Boolean
     get() = this == OutboundState.Queued || this == OutboundState.Failed
+
+private fun OutboundItem.heldForReview(): OutboundItem =
+    copy(state = OutboundState.HeldForReview)
 
 /**
  * Issue #1541 / #1554: whether this row is the durable wire-attempt record for
@@ -1723,6 +1885,7 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
                 .orEmpty(),
             item.wireAttemptGeneration.toString(),
             if (item.wireOutcomeUnknown) "1" else "0",
+            item.staleApprovedAtMs?.toString().orEmpty(),
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -1764,6 +1927,7 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
             wireAttemptGeneration = f.getOrNull(24)?.toIntOrNull()
                 ?: if (submitAttempted) 1 else 0,
             wireOutcomeUnknown = f.getOrNull(25) == "1",
+            staleApprovedAtMs = f.getOrNull(26)?.takeIf { it.isNotEmpty() }?.toLongOrNull(),
             wireSubmitTranscriptBaseline = f.getOrNull(20)
                 ?.takeIf { it.isNotEmpty() }
                 ?.let { sourcePath ->

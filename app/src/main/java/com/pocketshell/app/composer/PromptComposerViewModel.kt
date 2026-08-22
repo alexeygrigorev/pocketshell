@@ -281,6 +281,7 @@ public class PromptComposerViewModel @Inject constructor(
         null
     internal var outboundSidecarDispatchInFlight: Boolean = false
     internal val outboundDrainOwnership = OutboundDrainOwnership()
+    internal val outboundDrainApprovals = OutboundDrainApprovalQueue()
     internal val outboundSendConsumers = OutboundSendConsumerRegistry {
         // Re-render Retry truth when switch-away/back replaces its IO consumer.
         _uiState.update { current ->
@@ -1025,7 +1026,7 @@ public class PromptComposerViewModel @Inject constructor(
         _uiState.update { it.copy(sendInFlight = false) }
         markOutboundSendDelivered(request)
         val autoClose = deliveryIsQuiescentAt(closeEpoch, requestTarget = request?.sendTarget?.sessionKey)
-        if (!outboundHandoffInProgress) retryNextOutboundItem()
+        wakeOutboundDrainAfterOwnerResolution()
         return autoClose
     }
 
@@ -1182,6 +1183,7 @@ public class PromptComposerViewModel @Inject constructor(
             id?.let(outboundAutoCloseEpochs::remove)
             // No durable row to keep queued — restore to the composer so it is not lost.
             restoreFailedSendAfterOwnershipClaimed(request, message = noRowFallbackMessage)
+            wakeOutboundDrainAfterOwnerResolution(approvedOnly = true)
             return
         }
         if (deliveryOutcomeUnknown) outboundQueueStore.markDeliveryOutcomeUnknown(requeued.id)
@@ -1202,6 +1204,10 @@ public class PromptComposerViewModel @Inject constructor(
         requeued.sessionKey
             .takeIf { it.isNotBlank() }
             ?.let { refreshOutboundQueueItemsFor(it) }
+        wakeOutboundDrainAfterOwnerResolution(
+            excludingId = id,
+            approvedOnly = true,
+        )
     }
 
     /**
@@ -1291,6 +1297,10 @@ public class PromptComposerViewModel @Inject constructor(
                 current.copy(sendInFlight = false)
             }
         }
+        // A pre-handoff strand has no durable terminal row to exclude here.
+        // Do not immediately reselect the row that just failed preparation;
+        // only an explicitly approved #1700 row may be woken from this path.
+        wakeOutboundDrainAfterOwnerResolution(approvedOnly = true)
     }
 
     /**
@@ -1456,15 +1466,16 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #900: user-visible queue cleanup. Only idle retryable rows can be
-     * deleted from the composer surface; upload/in-flight rows stay visible and
-     * owned by the delivery worker.
+     * Issue #900/#1700: user-visible queue cleanup. Idle retryable rows and
+     * explicitly held-for-review rows can be deleted from the composer surface;
+     * upload/in-flight rows stay visible and owned by the delivery worker.
      */
     public fun discardOutboundItem(id: String) {
         val item = outboundQueueStore.item(id) ?: return
-        if (!item.isComposerQueueRetryable()) return
+        if (!item.isComposerQueueRetryable() && !item.isComposerQueueHeldForReview()) return
         outboundQueueStore.remove(id)
         clearOutboundRetrying(id)
+        clearApprovedOutboundItemForDrain(id)
         launchSidecarRemoval(id)
         refreshOutboundQueueItems()
     }
@@ -1506,27 +1517,8 @@ public class PromptComposerViewModel @Inject constructor(
      * sending one row at a time keeps [UiState.sendInFlight] as the single
      * delivery gate and prevents a failed row from spinning in a tight loop.
      */
-    public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? {
-        if (_uiState.value.sendInFlight) return null
-        // Do not race delivery/pruning past #961 coalescing.
-        if (outboundHandoffInProgress) return null
-        val target = composerTarget?.takeIf { it.isNotBlank() } ?: return null
-        // Issue #1602: PARK an auto-retry-exhausted head (Failed, surfaced) so the
-        // drain skips it and the healthy tail drains; per-row Retry re-drives it.
-        val itemsSnapshot = _outboundQueueItems.value
-        if (itemsSnapshot.hasGenerationBoundRowsAwaitingPromotion(target)) return null
-        val plan = itemsSnapshot.planComposerAutoFlush(target, excludingIds)
-        if (plan.parkIds.isNotEmpty()) {
-            plan.parkIds.forEach {
-                outboundQueueStore.markFailed(it, lastError = OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE)
-            }
-            refreshOutboundQueueItemsFor(target)
-        }
-        val nextId = plan.nextId
-        val dispatched = nextId != null && dispatchOutboundItem(nextId)
-        ComposerQueueDiagnostics.recordDrainCycle(target, itemsSnapshot, plan, excludingIds.size, dispatched) // #1682
-        return if (dispatched) nextId else null
-    }
+    public fun retryNextOutboundItem(excludingIds: Set<String> = emptySet()): String? =
+        retryNextOutboundItemThroughPlan(excludingIds)
 
     /**
      * Issue #1308: re-arm EVERY resendable outbound row for the current composer
@@ -1716,7 +1708,7 @@ public class PromptComposerViewModel @Inject constructor(
         // Issue #929: the claim lost the race (row already claimed/delivered/
         // gone). Non-delivering exit — clear the in-flight gates so the next
         // send is not wedged behind a stranded `sendInFlight`.
-        val active = outboundQueueStore.claim(id) ?: run {
+        val active = outboundQueueStore.claim(id, nowMillis = clock()) ?: run {
             clearStrandedSendInFlight()
             return false
         }

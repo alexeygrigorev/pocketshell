@@ -51,6 +51,10 @@ class PromptComposerSheetQueueHelperTest {
             OutboundQueueSummary("Failed — tap Retry", "“failed”", attention = true),
             outboundQueueSummary(listOf(item("failed", OutboundState.Failed, 1L)), false),
         )
+        val held = item("from the past", OutboundState.HeldForReview, 1L)
+        val heldSummary = outboundQueueSummary(listOf(held), false)
+        assertTrue(heldSummary.attention)
+        assertEquals(outboundHeldForReviewLabel(held), heldSummary.primary)
     }
 
     @Test
@@ -130,6 +134,26 @@ class PromptComposerSheetQueueHelperTest {
             recoveredUpload,
             retryableOutboundQueueItem(listOf(recoveredUpload, freshUpload)),
         )
+    }
+
+    @Test
+    fun outboundHeldRowUsesSendNowAndNeedsReviewCopy() {
+        val held = item("held-row", OutboundState.HeldForReview, createdAtMs = 1L)
+        assertEquals(
+            OutboundRetryActionState("Send now", enabled = true),
+            outboundRetryActionState(held, emptySet(), blockedByHealthyOwner = false, wireWritable = true),
+        )
+        assertTrue(outboundHeldForReviewLabel(held).startsWith("Needs review"))
+        assertTrue(
+            outboundHeldForReviewLabel(held.copy(wireAttempted = true))
+                .contains("may already have been pasted"),
+        )
+        val summary = outboundQueueSummary(
+            listOf(held, item("fresh", OutboundState.Queued, 2L)),
+            false,
+        )
+        assertTrue(summary.attention)
+        assertEquals("1 older prompt needs review", summary.attentionSuffix)
     }
 
     @Test

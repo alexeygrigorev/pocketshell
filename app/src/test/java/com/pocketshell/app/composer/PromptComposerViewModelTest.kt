@@ -1,6 +1,8 @@
 package com.pocketshell.app.composer
 
+import android.content.Context
 import androidx.lifecycle.SavedStateHandle
+import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.di.WhisperClientFactory
@@ -168,6 +170,7 @@ class PromptComposerViewModelTest {
         connectivity: PromptComposerViewModel.ConnectivityProbe = AlwaysOnlineConnectivityProbe,
         outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
         outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
+        outboundQueueLifecycleCoordinator: OutboundQueueLifecycleCoordinator? = null,
         savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
@@ -182,6 +185,7 @@ class PromptComposerViewModelTest {
             composerDraftStore = composerDraftStore,
             outboundQueueStore = outboundQueueStore,
             outboundAttachmentSidecarStore = outboundAttachmentSidecarStore,
+            outboundQueueLifecycleCoordinator = outboundQueueLifecycleCoordinator,
             savedStateHandle = savedStateHandle,
         )
         if (samplerDispatcher != null) {
@@ -204,6 +208,41 @@ class PromptComposerViewModelTest {
         // load-bearing behaviour is still proven (never vacuously skipped).
         vm.setSendWatchdogTimeoutForTest(null)
         return vm
+    }
+
+    @Test
+    fun queueDeleteUsesTheRealDrainOwnerAndRefusesUntilDeliveryReleases() = runTest {
+        val queue = InMemoryOutboundQueueStore()
+        val sidecars = OutboundAttachmentSidecarStore(
+            ApplicationProvider.getApplicationContext<Context>(),
+        ).also { it.ioDispatcher = StandardTestDispatcher(testScheduler) }
+        val coordinator = OutboundQueueLifecycleCoordinator(
+            queueStore = queue,
+            sidecarStore = sidecars,
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            autoRepairOnInit = false,
+        )
+        val row = queue.enqueue("tmux:7:\$12:1700000000", "do not race delivery")
+        val vm = newVm(
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+            outboundQueueLifecycleCoordinator = coordinator,
+        )
+        try {
+            val delivery = requireNotNull(vm.outboundDrainOwnership.tryAcquire(row.id))
+
+            vm.discardOutboundItem(row.id)
+            runCurrent()
+            assertNotNull("Delete must refuse while the real drain owns any row", queue.item(row.id))
+
+            assertTrue(vm.outboundDrainOwnership.release(delivery))
+            vm.discardOutboundItem(row.id)
+            advanceUntilIdle()
+            assertNull("Delete may commit only under its typed disposal permit", queue.item(row.id))
+        } finally {
+            coordinator.close()
+        }
     }
 
     // -- Issue #1350: Send clears the draft for EVERY prompt shape --------
@@ -366,6 +405,15 @@ class PromptComposerViewModelTest {
     @Test
     fun discardOutboundItemRemovesQueuedAndFailedButKeepsActiveRows() = runTest {
         val queue = InMemoryOutboundQueueStore()
+        val sidecars = OutboundAttachmentSidecarStore(
+            ApplicationProvider.getApplicationContext<Context>(),
+        ).also { it.ioDispatcher = StandardTestDispatcher(testScheduler) }
+        val coordinator = OutboundQueueLifecycleCoordinator(
+            queueStore = queue,
+            sidecarStore = sidecars,
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            autoRepairOnInit = false,
+        )
         val inFlight = queue.enqueue(
             sessionKey = "1/a",
             cleanText = "in flight",
@@ -389,6 +437,8 @@ class PromptComposerViewModelTest {
         val vm = newVm(
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
+            outboundAttachmentSidecarStore = sidecars,
+            outboundQueueLifecycleCoordinator = coordinator,
         )
         vm.onComposerTargetChanged("1/a")
         assertEquals(
@@ -398,10 +448,12 @@ class PromptComposerViewModelTest {
 
         vm.discardOutboundItem(uploading.id)
         vm.discardOutboundItem(inFlight.id)
+        advanceUntilIdle()
         assertNotNull(queue.item(uploading.id))
         assertNotNull(queue.item(inFlight.id))
 
         vm.discardOutboundItem(queued.id)
+        advanceUntilIdle()
         assertNull(queue.item(queued.id))
         assertEquals(
             listOf(inFlight.id, failed.id, uploading.id),
@@ -409,11 +461,13 @@ class PromptComposerViewModelTest {
         )
 
         vm.discardOutboundItem(failed.id)
+        advanceUntilIdle()
         assertNull(queue.item(failed.id))
         assertEquals(
             listOf(inFlight.id, uploading.id),
             vm.outboundQueueItems.value.map { it.id },
         )
+        coordinator.close()
     }
 
     @Test

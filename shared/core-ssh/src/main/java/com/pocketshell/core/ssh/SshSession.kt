@@ -168,6 +168,25 @@ public interface SshSession : AutoCloseable {
         throw NotImplementedError("resumable queue-sidecar upload is only implemented by RealSshSession")
 
     /**
+     * Issue #1589: delete only the exact hashed checkpoint sibling owned by
+     * [stableToken] for [remotePath]. Never globs. Default calls [exec] so
+     * [RealSshSession] inherits the exact-path cleanup without a second owner.
+     */
+    public suspend fun discardQueueSidecarCheckpoint(
+        remotePath: String,
+        stableToken: String,
+    ) {
+        val result = exec(queueSidecarCheckpointDiscardCommand(remotePath, stableToken))
+        if (result.exitCode != 0) {
+            val detail = result.stderr.ifBlank { result.stdout }.trim()
+            throw SshException(
+                "Could not discard queue sidecar checkpoint: " +
+                    detail.ifBlank { "remote rm failed (${result.exitCode})" },
+            )
+        }
+    }
+
+    /**
      * Read the contents of a remote file at [remotePath] into memory.
      *
      * The path is resolved by the remote login shell, so `~`-relative and

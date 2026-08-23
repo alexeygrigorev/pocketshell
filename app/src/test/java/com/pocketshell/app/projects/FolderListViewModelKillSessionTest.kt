@@ -1,7 +1,11 @@
 package com.pocketshell.app.projects
 
+import android.content.Context
 import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.composer.OutboundAttachmentSidecarStore
+import com.pocketshell.app.composer.OutboundQueueLifecycleCoordinator
+import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.tmux.KilledSession
@@ -32,6 +36,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test

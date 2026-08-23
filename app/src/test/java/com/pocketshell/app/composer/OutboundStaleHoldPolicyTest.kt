@@ -438,6 +438,12 @@ class OutboundStaleHoldPolicyTest {
     fun discardHeldForReviewRemovesTheRowAndItsSidecar() = runTest {
         val store = InMemoryOutboundQueueStore()
         val sidecars = newSidecarStore(StandardTestDispatcher(testScheduler))
+        val coordinator = OutboundQueueLifecycleCoordinator(
+            queueStore = store,
+            sidecarStore = sidecars,
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            autoRepairOnInit = false,
+        )
         val now = System.currentTimeMillis()
         val queued = store.enqueue(
             sessionKey = SESSION,
@@ -460,7 +466,7 @@ class OutboundStaleHoldPolicyTest {
         assertTrue(sidecarFile.exists())
         assertEquals(listOf(staged), sidecars.refsFor(held.id))
 
-        val vm = newVm(store, sidecars)
+        val vm = newVm(store, sidecars, coordinator)
         vm.onComposerTargetChanged(SESSION)
         vm.discardOutboundItem(held.id)
         advanceUntilIdle()
@@ -477,6 +483,7 @@ class OutboundStaleHoldPolicyTest {
             "Delete must remove the held row's sidecar metadata",
             sidecars.refsFor(held.id).isEmpty(),
         )
+        coordinator.close()
     }
 
     @Test
@@ -495,6 +502,7 @@ class OutboundStaleHoldPolicyTest {
     private fun newVm(
         store: OutboundQueueStore,
         sidecars: OutboundAttachmentSidecarStore? = null,
+        coordinator: OutboundQueueLifecycleCoordinator? = null,
     ): PromptComposerViewModel {
         val dispatcher = StandardTestDispatcher(mainDispatcherRule.dispatcher.scheduler)
         val vm = PromptComposerViewModel(
@@ -523,6 +531,7 @@ class OutboundStaleHoldPolicyTest {
             },
             outboundQueueStore = store,
             outboundAttachmentSidecarStore = sidecars,
+            outboundQueueLifecycleCoordinator = coordinator,
             savedStateHandle = SavedStateHandle(),
         )
         vm.samplerDispatcher = dispatcher

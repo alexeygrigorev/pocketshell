@@ -209,6 +209,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
         connectivity: PromptComposerViewModel.ConnectivityProbe = AlwaysOnlineConnectivityProbe,
         outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
         outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
+        outboundQueueLifecycleCoordinator: OutboundQueueLifecycleCoordinator? = null,
         savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
@@ -223,6 +224,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
             composerDraftStore = composerDraftStore,
             outboundQueueStore = outboundQueueStore,
             outboundAttachmentSidecarStore = outboundAttachmentSidecarStore,
+            outboundQueueLifecycleCoordinator = outboundQueueLifecycleCoordinator,
             savedStateHandle = savedStateHandle,
         )
         if (samplerDispatcher != null) {
@@ -1681,6 +1683,12 @@ class PromptComposerOutboundSendQueueViewModelTest {
     fun deliveredAndDeletedOutboundItemsCleanUpSidecars() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
+        val coordinator = OutboundQueueLifecycleCoordinator(
+            queueStore = queue,
+            sidecarStore = sidecars,
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            autoRepairOnInit = false,
+        )
         val delivered = OutboundItem(
             id = "delivered-local",
             sessionKey = "1/session-a",
@@ -1703,6 +1711,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
+            outboundQueueLifecycleCoordinator = coordinator,
         )
         vm.onComposerTargetChanged("1/session-a")
 
@@ -1722,12 +1731,19 @@ class PromptComposerOutboundSendQueueViewModelTest {
         advanceUntilIdle()
 
         waitForSidecarsCleared(sidecars, deleted.id)
+        coordinator.close()
     }
 
     @Test
     fun heldForReviewOutboundItemCanBeDeletedAndCleansSidecar() = runTest {
         val queue = InMemoryOutboundQueueStore()
         val sidecars = newSidecarStore(ioDispatcher = StandardTestDispatcher(testScheduler))
+        val coordinator = OutboundQueueLifecycleCoordinator(
+            queueStore = queue,
+            sidecarStore = sidecars,
+            ioDispatcher = StandardTestDispatcher(testScheduler),
+            autoRepairOnInit = false,
+        )
         val now = System.currentTimeMillis()
         val queued = queue.enqueue(
             sessionKey = "1/session-a",
@@ -1742,6 +1758,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
             samplerDispatcher = StandardTestDispatcher(testScheduler),
             outboundQueueStore = queue,
             outboundAttachmentSidecarStore = sidecars,
+            outboundQueueLifecycleCoordinator = coordinator,
         )
         vm.onComposerTargetChanged("1/session-a")
 
@@ -1753,6 +1770,7 @@ class PromptComposerOutboundSendQueueViewModelTest {
             queue.item(held.id),
         )
         waitForSidecarsCleared(sidecars, held.id)
+        coordinator.close()
     }
 
     @Test

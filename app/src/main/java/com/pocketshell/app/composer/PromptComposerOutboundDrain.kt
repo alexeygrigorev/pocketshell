@@ -1,7 +1,35 @@
 package com.pocketshell.app.composer
 
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+/**
+ * Runs explicit Delete under the same physical-owner lease as delivery.
+ * Reserving the lease before launching IO prevents reconnect/collector wakes
+ * from claiming the row between the user's tap and the durable queue commit.
+ */
+internal fun PromptComposerViewModel.discardOutboundItemThroughLifecycleCoordinator(id: String) {
+    val item = outboundQueueStore.item(id) ?: return
+    if (!item.isComposerQueueRetryable() && !item.isComposerQueueHeldForReview()) return
+    val coordinator = outboundQueueLifecycleCoordinator ?: return
+    val ownership = outboundDrainOwnership.tryAcquireDisposal(id) ?: return
+    viewModelScope.launch {
+        try {
+            val result = coordinator.discardAuthorized(
+                OutboundDisposalAuthorization.ExplicitDiscard(id),
+                ownership,
+            )
+            if (id !in result.removedRowIds) return@launch
+            clearOutboundRetrying(id)
+            clearApprovedOutboundItemForDrain(id)
+            refreshOutboundQueueItems()
+        } finally {
+            outboundDrainOwnership.releaseDisposal(ownership)
+        }
+    }
+}
 
 internal fun PromptComposerViewModel.approveStaleOutboundItem(id: String): OutboundItem? {
     val previousState = outboundQueueStore.item(id)?.state?.name

@@ -755,38 +755,50 @@ internal suspend fun PromptComposerViewModel.enqueueSidecarBackedSend(
         index to localUri
     }
     val itemId = UUID.randomUUID().toString()
-    val stagedSidecars = sidecarStore.stage(
-        outboundItemId = itemId,
-        uris = localAttachments.map { it.second },
-        attachmentIndices = localAttachments.map { it.first },
-    )
-    if (stagedSidecars.size != localAttachments.size) {
-        error("Attachment upload failed: could not preserve selected file bytes")
+    val queuedItem = sidecarStore.withSidecarLock {
+        try {
+            // Commit the queue row while the sidecar lock is still held. Repair
+            // therefore cannot observe a staged ref before its row exists and
+            // delete it in the enqueue-vs-repair window.
+            val stagedSidecars = sidecarStore.stageLocked(
+                outboundItemId = itemId,
+                uris = localAttachments.map { it.second },
+                attachmentIndices = localAttachments.map { it.first },
+            )
+            if (stagedSidecars.size != localAttachments.size) {
+                error("Attachment upload failed: could not preserve selected file bytes")
+            }
+            val sidecars = sidecarStore.updateMetadataLocked(
+                stagedSidecars.associate { ref ->
+                    val attachment = attachments[requireNotNull(ref.attachmentIndex)]
+                    ref.id to (attachment.displayName to attachment.mimeType)
+                },
+            )
+            val item = OutboundItem(
+                id = itemId,
+                sessionKey = sessionKey,
+                cleanText = cleanDraft,
+                attachments = attachments.toSidecarAwareDurableRefs(sidecars),
+                withEnter = withEnter,
+                state = OutboundState.Queued,
+                createdAtMs = clock(),
+                paneId = sendTarget.paneId,
+                route = sendTarget.route,
+                agentKind = sendTarget.agentKind,
+                tmuxSessionId = sendTarget.tmuxSessionId,
+                tmuxSessionCreated = sendTarget.tmuxSessionCreated,
+                // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
+                // existing un-delivered row instead of minting a duplicate.
+                sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
+            )
+            outboundQueueStore.enqueueExisting(item)
+        } catch (t: Throwable) {
+            // A partial stage or queue persistence failure must not leave a
+            // sidecar ref outside the transaction's row ownership.
+            sidecarStore.removeOutboundItemLocked(itemId)
+            throw t
+        }
     }
-    val sidecars = sidecarStore.updateMetadata(
-        stagedSidecars.associate { ref ->
-            val attachment = attachments[requireNotNull(ref.attachmentIndex)]
-            ref.id to (attachment.displayName to attachment.mimeType)
-        },
-    )
-    val item = OutboundItem(
-        id = itemId,
-        sessionKey = sessionKey,
-        cleanText = cleanDraft,
-        attachments = attachments.toSidecarAwareDurableRefs(sidecars),
-        withEnter = withEnter,
-        state = OutboundState.Queued,
-        createdAtMs = clock(),
-        paneId = sendTarget.paneId,
-        route = sendTarget.route,
-        agentKind = sendTarget.agentKind,
-        tmuxSessionId = sendTarget.tmuxSessionId,
-        tmuxSessionCreated = sendTarget.tmuxSessionCreated,
-        // Issue #961: coalesce a re-Send of the SAME logical prompt onto the
-        // existing un-delivered row instead of minting a duplicate.
-        sendKey = computeSendKey(cleanDraft, attachments, withEnter, sendTarget),
-    )
-    val queuedItem = outboundQueueStore.enqueueExisting(item)
     // Issue #961: if this coalesced onto an existing un-delivered row, the
     // freshly-staged sidecars under our throwaway `itemId` are orphaned —
     // the existing row keeps its own staged bytes. Drop them and dispatch

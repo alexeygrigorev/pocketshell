@@ -678,6 +678,29 @@ class OutboundQueueStoreTest {
     }
 
     @Test
+    fun allLiveRowIdsEnumerateEveryUndeliveredRow() {
+        val store = store()
+        val a = store.enqueue("tmux:1:\$1:1", "a")
+        val b = store.enqueue("tmux:1:\$2:2", "b")
+        store.enqueue("tmux:1:\$1:1", "a2")
+        store.markDelivered(b.id)
+        assertEquals(setOf(a.id, store.itemsFor("tmux:1:\$1:1").last().id), store.allLiveRowIds())
+        assertFalse(b.id in store.allLiveRowIds())
+    }
+
+    @Test
+    fun removeIfIdleIsAtomicAndPreservesActiveOrOwnedRows() {
+        val store = store()
+        val queued = store.enqueue("sessA", "queued")
+        val active = store.enqueue("sessA", "active")
+        store.claim(active.id)
+
+        assertEquals(queued, store.removeIfIdle(queued.id))
+        assertNull(store.removeIfIdle(active.id))
+        assertEquals(OutboundState.InFlight, store.item(active.id)?.state)
+    }
+
+    @Test
     fun clearSessionAndRemoveAreScopedAndDoNotBleed() {
         val store = store()
         val a = store.enqueue("sessA", "a1")

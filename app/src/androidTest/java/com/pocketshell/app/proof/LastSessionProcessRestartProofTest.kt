@@ -2,6 +2,8 @@ package com.pocketshell.app.proof
 
 import android.app.Application
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.SharedPreferences
 import android.os.Process
 import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -49,7 +51,12 @@ class LastSessionProcessRestartProofTest {
         val context = targetContext()
         assertRunnerIsInTargetProcess(context.packageName)
         val namespace = runNamespace()
-        val store = LastSessionStore(context)
+        // The host force-stop is the real process boundary. This wrapper makes
+        // the old apply() behavior deterministic: it accepts the in-process
+        // editor mutation but drops the asynchronous disk handoff. The control
+        // commit() path still writes the real Android preferences file, which
+        // phase 2 reads from a genuinely new process.
+        val store = LastSessionStore(ExternalKillBoundaryContext(context))
         assertTrue("phase 1 must durably clear stale run state", store.clear())
 
         // The generation source is the real host-side tmux server used by the
@@ -100,26 +107,25 @@ class LastSessionProcessRestartProofTest {
         )
         assertTrue("successor snapshot must be durably saved", store.save(successorSnapshot))
 
-        val persistedCandidate = store.read(maxAgeMillis = Long.MAX_VALUE)
-        assertNotNull(persistedCandidate)
-        val persisted = requireNotNull(persistedCandidate)
-        assertEquals(successor.tmuxSessionId, persisted.tmuxSessionId)
-        assertEquals(successor.sessionCreated, persisted.sessionCreated)
+        // Do not read LastSessionStore here. A same-process read is allowed to
+        // observe apply()'s in-memory state and lets an async mutant flush
+        // before the host reaches the external force-stop. The phase artifact
+        // records the exact payload handed to save(); only phase 2's new
+        // process may serve as the persistence oracle.
+        val persistedGeneration = ExactGeneration(
+            tmuxSessionId = requireNotNull(successorSnapshot.tmuxSessionId),
+            sessionCreated = requireNotNull(successorSnapshot.sessionCreated),
+        )
+        assertEquals(successor, persistedGeneration)
         assertNotEquals(
-            "persisted successor generation must differ from the predecessor as a pair",
+            "successor generation must differ from the predecessor as a pair",
             predecessor,
-            ExactGeneration(
-                tmuxSessionId = requireNotNull(persisted.tmuxSessionId),
-                sessionCreated = requireNotNull(persisted.sessionCreated),
-            ),
+            persistedGeneration,
         )
 
         val phaseArtifact = writePhaseArtifact(
             phase = 1,
-            generation = ExactGeneration(
-                tmuxSessionId = requireNotNull(persisted.tmuxSessionId),
-                sessionCreated = requireNotNull(persisted.sessionCreated),
-            ),
+            generation = persistedGeneration,
             predecessor = predecessor,
             predecessorReappeared = false,
             fixture = production.fixture,
@@ -133,6 +139,7 @@ class LastSessionProcessRestartProofTest {
         val context = targetContext()
         assertRunnerIsInTargetProcess(context.packageName)
         val namespace = runNamespace()
+        writePhaseProcessMarker(phase = 2)
         val phaseOne = readPhaseOneArtifact(namespace)
         assertNotEquals(
             "phase 2 must run in a new target process after external force-stop",
@@ -547,6 +554,34 @@ class LastSessionProcessRestartProofTest {
     }
 
     /**
+     * Publish the phase-2 PID before touching the persistence oracle. The
+     * marker lets a deliberately red mutant still prove that the second direct
+     * instrumentation call entered a genuinely new target process.
+     */
+    private fun writePhaseProcessMarker(phase: Int) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val namespace = runNamespace()
+        val targetPackage = instrumentation.targetContext.packageName
+        val outputDir = File(testArtifactsRoot(instrumentation.targetContext), "process-restart/$namespace")
+        check(outputDir.mkdirs() || outputDir.isDirectory) { "cannot create $outputDir" }
+        val marker = File(outputDir, "phase-$phase.started.txt")
+        val temporary = File(outputDir, ".phase-$phase.started-${Process.myPid()}.tmp")
+        temporary.writeText(
+            buildString {
+                appendLine("schema=1")
+                appendLine("run_namespace=$namespace")
+                appendLine("phase=$phase")
+                appendLine("pid=${Process.myPid()}")
+                appendLine("process_name=${Application.getProcessName()}")
+                appendLine("target_package=$targetPackage")
+                appendLine("test_package=${instrumentation.context.packageName}")
+            },
+        )
+        check(temporary.renameTo(marker)) { "cannot atomically publish $marker" }
+        assertTrue("phase $phase process marker must be non-empty", marker.length() > 0L)
+    }
+
+    /**
      * Keep this target/instrumentation process alive after the complete phase-1
      * proof. The host force-stops both packages during this interval; the
      * bounded ceiling prevents a broken host from leaving a stray test alive
@@ -614,5 +649,70 @@ class LastSessionProcessRestartProofTest {
             "agents-daemon-2239-tmux-list-sessions-through-SshHostTmuxSessionsGateway-to-navigation-to-on-stop-to-last-session-store"
         private const val PHASE_ONE_PERSISTENCE_ORIGIN = "LastSessionStore.save"
         private const val PHASE_TWO_PERSISTENCE_ORIGIN = "LastSessionStore.read"
+    }
+}
+
+/**
+ * Deterministic external-kill boundary for the live APK mutation proof.
+ *
+ * Android documents [SharedPreferences.Editor.apply] as updating the current
+ * process immediately while scheduling its disk write asynchronously. There
+ * is no supported API that freezes that worker until an external `am
+ * force-stop`; relying on the worker losing a host-side race is therefore a
+ * flaky proof. This wrapper models the documented kill window by withholding
+ * only [SharedPreferences.Editor.apply], while delegating [commit] to the
+ * real Android preferences implementation. Phase 1 never reads the wrapped
+ * store after save; phase 2 reads the real file in a new process.
+ */
+private class ExternalKillBoundaryContext(base: Context) : ContextWrapper(base) {
+    private val crashWindowPrefs: SharedPreferences by lazy {
+        DropAsyncApplySharedPreferences(
+            base.getSharedPreferences("last_session", Context.MODE_PRIVATE),
+        )
+    }
+
+    override fun getApplicationContext(): Context = this
+
+    override fun getSharedPreferences(name: String?, mode: Int): SharedPreferences =
+        if (name == "last_session") crashWindowPrefs else super.getSharedPreferences(name, mode)
+}
+
+private class DropAsyncApplySharedPreferences(
+    private val delegate: SharedPreferences,
+) : SharedPreferences by delegate {
+    override fun edit(): SharedPreferences.Editor = Editor(delegate.edit())
+
+    private inner class Editor(
+        private val delegateEditor: SharedPreferences.Editor,
+    ) : SharedPreferences.Editor {
+        override fun putString(key: String?, value: String?) =
+            apply { delegateEditor.putString(key, value) }
+
+        override fun putStringSet(key: String?, values: MutableSet<String>?) =
+            apply { delegateEditor.putStringSet(key, values) }
+
+        override fun putInt(key: String?, value: Int) =
+            apply { delegateEditor.putInt(key, value) }
+
+        override fun putLong(key: String?, value: Long) =
+            apply { delegateEditor.putLong(key, value) }
+
+        override fun putFloat(key: String?, value: Float) =
+            apply { delegateEditor.putFloat(key, value) }
+
+        override fun putBoolean(key: String?, value: Boolean) =
+            apply { delegateEditor.putBoolean(key, value) }
+
+        override fun remove(key: String?) = apply { delegateEditor.remove(key) }
+
+        override fun clear() = apply { delegateEditor.clear() }
+
+        override fun commit(): Boolean = delegateEditor.commit()
+
+        override fun apply() {
+            // Intentional no-op: the simulated external kill wins before the
+            // asynchronous disk handoff. A same-process read is forbidden by
+            // the phase-one proof, so no in-memory oracle can mask this.
+        }
     }
 }

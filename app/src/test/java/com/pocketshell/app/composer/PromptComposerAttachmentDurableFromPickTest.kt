@@ -10,8 +10,16 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.core.ssh.SshException
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -84,7 +92,7 @@ class PromptComposerAttachmentDurableFromPickTest {
     }
 
     private fun newVm(
-        dispatcher: TestDispatcher,
+        dispatcher: CoroutineDispatcher,
         outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
         outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
         composerDraftStore: ComposerDraftStore = InMemoryComposerDraftStore(),
@@ -121,7 +129,7 @@ class PromptComposerAttachmentDurableFromPickTest {
     }
 
     private fun newSidecarStore(
-        ioDispatcher: TestDispatcher,
+        ioDispatcher: CoroutineDispatcher,
         context: Context = ApplicationProvider.getApplicationContext(),
     ): OutboundAttachmentSidecarStore {
         context.getSharedPreferences(OutboundAttachmentSidecarStore.PREFS_NAME, Context.MODE_PRIVATE)
@@ -490,6 +498,86 @@ class PromptComposerAttachmentDurableFromPickTest {
         val queuedRef = sidecars.refsFor(row.id).single()
         assertEquals("b.txt", queuedRef.displayName)
         assertEquals("B-BYTES", File(queuedRef.localPath).readText())
+    }
+
+    @Test
+    fun sidecarEnqueueAndOrphanRepairShareOneCommitLock() = runTest {
+        // G6: the queue commit is deliberately paused after staging. Repair is
+        // forced to attempt its lock during that pause; the pre-fix window let
+        // it delete the staged bytes before the row existed.
+        val executor = Executors.newFixedThreadPool(2)
+        val dispatcher = executor.asCoroutineDispatcher()
+        val releaseQueueCommit = CountDownLatch(1)
+        val enqueueEntered = CountDownLatch(1)
+        val repairAttempted = CountDownLatch(1)
+        val captured = AtomicReference<OutboundItem>()
+        var coordinator: OutboundQueueLifecycleCoordinator? = null
+        try {
+            val delegate = InMemoryOutboundQueueStore()
+            val queue = object : OutboundQueueStore by delegate {
+                override fun enqueueExisting(item: OutboundItem): OutboundItem {
+                    captured.set(item)
+                    enqueueEntered.countDown()
+                    check(releaseQueueCommit.await(5, TimeUnit.SECONDS)) {
+                        "test queue commit was not released"
+                    }
+                    return delegate.enqueueExisting(item)
+                }
+            }
+            val sidecars = newSidecarStore(dispatcher)
+            val lockAttempts = AtomicInteger()
+            sidecars.lockAttemptObserverForTest = {
+                if (lockAttempts.incrementAndGet() == 2) repairAttempted.countDown()
+            }
+            coordinator = OutboundQueueLifecycleCoordinator(
+                queueStore = queue,
+                sidecarStore = sidecars,
+                ioDispatcher = dispatcher,
+                autoRepairOnInit = false,
+            )
+            val vm = newVm(dispatcher, queue, sidecars)
+            val enqueueJob = async(dispatcher) {
+                vm.enqueueSidecarBackedSend(
+                    cleanDraft = "keep sidecar bytes",
+                    attachments = listOf(
+                        PromptComposerViewModel.StagedAttachment(
+                            remotePath = "pending/file.txt",
+                            displayName = "file.txt",
+                            previewUri = pickedFile("lock.txt", "LOCK-BYTES"),
+                            mimeType = "text/plain",
+                            transferState = AttachmentTransferState.PendingLocal,
+                        ),
+                    ),
+                    withEnter = true,
+                    sendTarget = PromptComposerViewModel.SendTargetSnapshot(
+                        sessionKey = "1/session-lock",
+                    ),
+                )
+            }
+            assertTrue(enqueueEntered.await(5, TimeUnit.SECONDS))
+            val stagedItem = requireNotNull(captured.get())
+            assertNull(delegate.item(stagedItem.id))
+
+            val repairJob = async(dispatcher) { coordinator!!.repairOrphans() }
+            assertTrue(
+                "repair must attempt the shared lock while enqueue is paused",
+                repairAttempted.await(5, TimeUnit.SECONDS),
+            )
+            assertFalse(
+                "repair must remain blocked until the queue row commits",
+                repairJob.isCompleted,
+            )
+
+            releaseQueueCommit.countDown()
+            val queued = requireNotNull(enqueueJob.await())
+            repairJob.await()
+            assertNotNull(delegate.item(queued.id))
+            assertEquals(1, sidecars.refsFor(queued.id).size)
+        } finally {
+            releaseQueueCommit.countDown()
+            coordinator?.close()
+            executor.shutdownNow()
+        }
     }
 
     // ---- R-A durability across a session switch A→B→A (no bytes lost) ---------

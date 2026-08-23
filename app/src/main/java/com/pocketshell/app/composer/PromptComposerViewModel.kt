@@ -115,6 +115,7 @@ public class PromptComposerViewModel @Inject constructor(
     // Hilt wiring provides the SharedPreferences-backed store.
     internal val outboundQueueStore: OutboundQueueStore = DisabledOutboundQueueStore,
     internal val outboundAttachmentSidecarStore: OutboundAttachmentSidecarStore? = null,
+    internal val outboundQueueLifecycleCoordinator: OutboundQueueLifecycleCoordinator? = null,
     internal val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
@@ -1470,15 +1471,8 @@ public class PromptComposerViewModel @Inject constructor(
      * explicitly held-for-review rows can be deleted from the composer surface;
      * upload/in-flight rows stay visible and owned by the delivery worker.
      */
-    public fun discardOutboundItem(id: String) {
-        val item = outboundQueueStore.item(id) ?: return
-        if (!item.isComposerQueueRetryable() && !item.isComposerQueueHeldForReview()) return
-        outboundQueueStore.remove(id)
-        clearOutboundRetrying(id)
-        clearApprovedOutboundItemForDrain(id)
-        launchSidecarRemoval(id)
-        refreshOutboundQueueItems()
-    }
+    public fun discardOutboundItem(id: String): Unit =
+        discardOutboundItemThroughLifecycleCoordinator(id)
 
     /**
      * Issue #900: manually retry a durable outbound row without minting a new

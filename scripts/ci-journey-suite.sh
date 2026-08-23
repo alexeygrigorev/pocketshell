@@ -173,6 +173,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.composer.PromptComposerSendPipeliningE2eTest"  # #1621 real-sheet A-active/B-queued FIFO, once-only completion, queue-empty and quiescent-close proof
   "com.pocketshell.app.composer.PromptComposerSendDismissE2eTest"  # #1108 #694 #872 #971 the composer send/dismiss + ATTACHMENT-on-failed-send journe…
   "com.pocketshell.app.composer.PromptComposerOutboundQueueTest"  # #848 #900 audit / ): the foreground outbound queue surface was
+  "com.pocketshell.app.composer.PromptComposerOutboundQueueProductionDeleteDockerTest"  # #1589 AC8/AC9: real Hilt sheet Delete -> permit -> durable coordinator row/sidecar cleanup
   "com.pocketshell.app.tmux.Issue1686QueueDrainWireOracleDockerTest"  # #1686 D33/G4 the composer-queue clog fix on the REAL wire: a false not-Connected label (inline enum Reconnecting + drain-gate sessionLive=false) while the -CC transport is writable — the queued prompt must DRAIN to the real tmux pane (capture-pane), and the transport-alive edge un-parks the storm-stranded backlog
   "$FQCN_PREFIX.Issue1700StaleFlushJourneyE2eTest"  # #1700 D32/G9: a 5-minute-old queued prompt must NOT silently flush into a moved-on pane when the wire returns; the fresh tail still drains (#1686), the held row is visible, and Send now delivers the same id exactly once
   "$FQCN_PREFIX.OutboundExactlyOnceAcrossFlapE2eTest"  # #1963/#1526 D31/D32: full-class fixture isolation plus delivery-level exactly-once across a mid-send flap (server capture-pane occurrence == 1, composer + keystroke lanes)

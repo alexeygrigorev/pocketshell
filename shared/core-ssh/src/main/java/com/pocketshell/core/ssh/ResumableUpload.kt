@@ -64,6 +64,20 @@ public fun queueSidecarCheckpointPaths(
     return QueueSidecarCheckpointPaths(dataPath = data, identityPath = "$data.identity")
 }
 
+/**
+ * Issue #1589: exact `rm -f` of the uploaded final file plus its hashed
+ * checkpoint + identity siblings. The command names only those three paths;
+ * callers must not append globs.
+ */
+public fun queueSidecarCheckpointDiscardCommand(
+    remotePath: String,
+    stableToken: String,
+    shellQuote: (String) -> String = ::quoteRemotePathForShell,
+): String {
+    val paths = queueSidecarCheckpointPaths(remotePath, stableToken)
+    return "rm -f -- ${shellQuote(remotePath)} ${shellQuote(paths.dataPath)} ${shellQuote(paths.identityPath)}"
+}
+
 internal fun queueSidecarCheckpointIdentity(
     request: QueueSidecarResumableUploadRequest,
 ): String = sha256Hex(

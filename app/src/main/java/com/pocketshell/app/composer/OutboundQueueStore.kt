@@ -146,6 +146,16 @@ public interface OutboundQueueStore {
     public fun itemsFor(sessionKey: String): List<OutboundItem>
 
     /**
+     * Issue #1589: every un-delivered row across all sessions, oldest-first.
+     * Sidecar repair compares refs against [allLiveRowIds].
+     */
+    public fun allLiveItems(): List<OutboundItem>
+
+    /** Stable ids of [allLiveItems]. */
+    public fun allLiveRowIds(): Set<String> =
+        allLiveItems().mapTo(mutableSetOf()) { it.id }
+
+    /**
      * Atomically move undelivered rows from a temporary [fromSessionKey] to the
      * canonical [toSessionKey], but only when each row's tap-time pane belongs
      * to [livePaneIds]. This is the bounded identity-promotion path for a live
@@ -369,6 +379,21 @@ public interface OutboundQueueStore {
      * an item was removed.
      */
     public fun remove(id: String): Boolean
+
+    /**
+     * Atomically remove an idle row owned by [id], or return `null` without
+     * changing the store when the row is active or missing. The production
+     * caller separately holds an [OutboundDisposalPermit], so a delivery worker
+     * cannot begin ownership during this store transaction. The state check and removal happen
+     * under the queue-store lock; a claim racing this operation therefore wins
+     * exactly one side of the interleaving, never both.
+     *
+     * This is the only row-removal primitive used by authorized user disposal.
+     * It intentionally permits `HeldForReview` because an explicit Delete is
+     * an exact user action; `Uploading`/`InFlight` remain protected until their
+     * owner has cancelled and joined.
+     */
+    public fun removeIfIdle(id: String): OutboundItem?
 
     /** Drop every item for [sessionKey]. */
     public fun clearSession(sessionKey: String)
@@ -693,6 +718,10 @@ public enum class OutboundState {
      */
     public val isPending: Boolean
         get() = this == Queued || this == Uploading || this == InFlight
+
+    /** Explicit Delete may remove idle/held intent, never an active attempt. */
+    public val isExplicitlyDiscardable: Boolean
+        get() = this == Queued || this == Failed || this == HeldForReview
 }
 
 /**
@@ -793,6 +822,12 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
     override fun itemsFor(sessionKey: String): List<OutboundItem> = synchronized(lock) {
         items.values
             .filter { it.sessionKey == sessionKey }
+            .sortedBy { it.createdAtMs }
+    }
+
+    override fun allLiveItems(): List<OutboundItem> = synchronized(lock) {
+        items.values
+            .filter { it.state != OutboundState.Delivered }
             .sortedBy { it.createdAtMs }
     }
 
@@ -999,6 +1034,14 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
 
     override fun remove(id: String): Boolean = synchronized(lock) { items.remove(id) != null }
 
+    override fun removeIfIdle(id: String): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return@synchronized null
+        if (!existing.state.isExplicitlyDiscardable) {
+            return@synchronized null
+        }
+        items.remove(id)
+    }
+
     override fun clearSession(sessionKey: String): Unit = synchronized(lock) {
         items.values.removeAll { it.sessionKey == sessionKey }
     }
@@ -1112,6 +1155,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
 
     override fun enqueueExisting(item: OutboundItem): OutboundItem = item
     override fun itemsFor(sessionKey: String): List<OutboundItem> = emptyList()
+    override fun allLiveItems(): List<OutboundItem> = emptyList()
     override fun promoteSessionIdentity(
         fromSessionKey: String,
         toSessionKey: String,
@@ -1133,6 +1177,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun approveStaleForSend(id: String, nowMillis: Long): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
     override fun remove(id: String): Boolean = false
+    override fun removeIfIdle(id: String): OutboundItem? = null
     override fun clearSession(sessionKey: String) = Unit
     override fun markWireAttempted(
         sessionKey: String,
@@ -1313,6 +1358,13 @@ public class SharedPrefsOutboundQueueStore internal constructor(
 
     override fun itemsFor(sessionKey: String): List<OutboundItem> = synchronized(lock) {
         loadSession(sessionKey).sortedBy { it.createdAtMs }
+    }
+
+    override fun allLiveItems(): List<OutboundItem> = synchronized(lock) {
+        sessionKeys()
+            .flatMap { key -> loadSession(key) }
+            .filter { it.state != OutboundState.Delivered }
+            .sortedBy { it.createdAtMs }
     }
 
     override fun promoteSessionIdentity(
@@ -1573,6 +1625,17 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         val removed = list.removeAll { it.id == id }
         if (removed) storeSession(sessionKey, list)
         removed
+    }
+
+    override fun removeIfIdle(id: String): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return@synchronized null
+        val list = loadSession(sessionKey)
+        val target = list.firstOrNull { it.id == id }
+            ?: return@synchronized null
+        if (!target.state.isExplicitlyDiscardable) return@synchronized null
+        val remaining = list.filterNot { it.id == id }
+        storeSession(sessionKey, remaining)
+        target
     }
 
     override fun clearSession(sessionKey: String): Unit = synchronized(lock) {

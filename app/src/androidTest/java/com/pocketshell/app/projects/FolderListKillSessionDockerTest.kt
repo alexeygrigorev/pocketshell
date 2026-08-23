@@ -1,9 +1,12 @@
 package com.pocketshell.app.projects
 
+import android.net.Uri
 import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.composer.OutboundAttachmentSidecarStore
+import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
@@ -67,6 +70,10 @@ class FolderListKillSessionDockerTest {
     private val viewModelStore = ViewModelStore()
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val createdSessions = mutableListOf<String>()
+    private var parkedQueue: SharedPrefsOutboundQueueStore? = null
+    private var parkedSidecars: OutboundAttachmentSidecarStore? = null
+    private var parkedRowId: String? = null
+    private var parkedSource: File? = null
 
     @Before
     fun setUp(): Unit { runBlocking {
@@ -93,6 +100,7 @@ class FolderListKillSessionDockerTest {
 
     @After
     fun tearDown(): Unit { runBlocking {
+        cleanupParkedQueue()
         viewModelStore.clear()
         factoryScope.cancel()
         if (createdSessions.isNotEmpty()) {
@@ -160,6 +168,29 @@ class FolderListKillSessionDockerTest {
         val host = db.hostDao().getById(hostId)!!
 
         val signals = SessionLifecycleSignals()
+        // Issue #1589/B1: the real Stop journey must not silently discard a
+        // queued prompt or its local attachment bytes. This slice deliberately
+        // has no lifecycle-to-disposal authority, so the row must survive the
+        // confirmed remote kill and its lifecycle broadcast.
+        parkedQueue = SharedPrefsOutboundQueueStore(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+        )
+        parkedSidecars = OutboundAttachmentSidecarStore(
+            InstrumentationRegistry.getInstrumentation().targetContext,
+        )
+        val parkedRow = parkedQueue!!.enqueue(
+            sessionKey = "issue1589/kill/$suffix",
+            cleanText = "keep this queued prompt",
+        )
+        parkedRowId = parkedRow.id
+        parkedSource = File(
+            InstrumentationRegistry.getInstrumentation().targetContext.cacheDir,
+            "issue1589-kill-$suffix.txt",
+        ).apply { writeText("keep these attachment bytes") }
+        val parkedRef = parkedSidecars!!.stage(
+            parkedRow.id,
+            listOf(Uri.fromFile(parkedSource!!)),
+        ).single()
 
         // 2. Folder tree lists both sessions.
         val folderVm = FolderListViewModel(
@@ -269,13 +300,33 @@ class FolderListKillSessionDockerTest {
                 "kept tmux session must still be alive on the remote",
                 keepAlive,
             )
+            assertTrue(
+                "confirmed Stop must not silently discard the queued prompt",
+                (parkedQueue ?: error("queue store was not seeded")).item(parkedRow.id) != null,
+            )
+            assertTrue(
+                "confirmed Stop must not silently discard queued attachment bytes",
+                File(parkedRef.localPath).exists(),
+            )
             // The kill really landed on the remote — drop it from cleanup.
             createdSessions.remove(doomed)
         } finally {
             tmuxVm.clearForTest()
             folderVm.stopPolling()
+            cleanupParkedQueue()
         }
     } }
+
+    private suspend fun cleanupParkedQueue() {
+        val rowId = parkedRowId ?: return
+        runCatching { parkedSidecars?.removeOutboundItem(rowId) }
+        parkedQueue?.remove(rowId)
+        parkedSource?.delete()
+        parkedRowId = null
+        parkedQueue = null
+        parkedSidecars = null
+        parkedSource = null
+    }
 
     private fun hasSession(vm: FolderListViewModel, sessionName: String): Boolean {
         val state = vm.state.value as? FolderListUiState.Ready ?: return false

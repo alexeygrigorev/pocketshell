@@ -54,15 +54,43 @@ class OutboundAttachmentSidecarStore @Inject constructor(
     // `Dispatchers.IO`, so production behaviour is unchanged.
     internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 
+    @VisibleForTesting
+    @Volatile
+    internal var lastBlockingAccessThreadNameForTest: String? = null
+
+    @VisibleForTesting
+    internal var lockAttemptObserverForTest: (() -> Unit)? = null
+
+    // Shared with enqueue/stage so repair cannot delete a dir mid-createTempFile
+    // or drop a sidecar whose row became live after a stale snapshot.
+    private val sidecarLock = Any()
+
     suspend fun stage(
         outboundItemId: String,
         uris: List<Uri>,
         attachmentIndices: List<Int> = emptyList(),
     ): List<LocalAttachmentSidecarRef> = withContext(ioDispatcher) {
-        if (outboundItemId.isBlank() || uris.isEmpty()) return@withContext emptyList()
-        uris.mapIndexedNotNull { index, uri ->
-            stageOne(outboundItemId, uri, attachmentIndices.getOrNull(index))
-        }
+        synchronized(sidecarLock) { stageLocked(outboundItemId, uris, attachmentIndices) }
+    }
+
+    /**
+     * Serialize sidecar staging/metadata plus the queue-row enqueue against
+     * orphan repair and authorized disposal. The block is deliberately
+     * non-suspending: all blocking prefs/file work and the queue-store commit
+     * happen on [ioDispatcher] while the lock is held.
+     */
+    internal suspend fun <T> withSidecarLock(block: () -> T): T = withContext(ioDispatcher) {
+        withSidecarLockBlocking(block)
+    }
+
+    /**
+     * The coordinator calls this only from its injected IO dispatcher. Keeping
+     * the blocking form explicit prevents a nested hop back to this store's
+     * independently configured dispatcher during row-before-cleanup commits.
+     */
+    internal fun <T> withSidecarLockBlocking(block: () -> T): T {
+        lockAttemptObserverForTest?.invoke()
+        return synchronized(sidecarLock) { block() }
     }
 
     suspend fun refsFor(outboundItemId: String): List<LocalAttachmentSidecarRef> = withContext(ioDispatcher) {
@@ -80,56 +108,192 @@ class OutboundAttachmentSidecarStore @Inject constructor(
      * input or ids with no matching persisted ref.
      */
     suspend fun markUploaded(uploadedRemotePathById: Map<String, String>) = withContext(ioDispatcher) {
-        if (uploadedRemotePathById.isEmpty()) return@withContext
-        val refs = allRefsBlocking()
-        if (refs.none { uploadedRemotePathById.containsKey(it.id) }) return@withContext
-        val updated = refs.map { ref ->
-            uploadedRemotePathById[ref.id]
-                ?.takeIf { it.isNotBlank() }
-                ?.let { path -> ref.copy(uploadedRemotePath = path) }
-                ?: ref
+        synchronized(sidecarLock) {
+            if (uploadedRemotePathById.isEmpty()) return@synchronized
+            val refs = allRefsBlocking()
+            if (refs.none { uploadedRemotePathById.containsKey(it.id) }) return@synchronized
+            val updated = refs.map { ref ->
+                uploadedRemotePathById[ref.id]
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { path -> ref.copy(uploadedRemotePath = path) }
+                    ?: ref
+            }
+            persistAll(updated)
         }
-        persistAll(updated)
     }
 
     internal suspend fun updateMetadata(
         metadataById: Map<String, Pair<String, String?>>,
     ): List<LocalAttachmentSidecarRef> = withContext(ioDispatcher) {
-        if (metadataById.isEmpty()) return@withContext emptyList()
+        synchronized(sidecarLock) { updateMetadataLocked(metadataById) }
+    }
+
+    suspend fun removeOutboundItem(outboundItemId: String) = withContext(ioDispatcher) {
+        synchronized(sidecarLock) { removeOutboundItemLocked(outboundItemId) }
+    }
+
+    suspend fun remove(refId: String) = withContext(ioDispatcher) {
+        synchronized(sidecarLock) {
+            val refs = allRefsBlocking()
+            refs.firstOrNull { it.id == refId }?.let { ref ->
+                runCatching { File(ref.localPath).delete() }
+            }
+            persistAll(refs.filterNot { it.id == refId })
+        }
+    }
+
+    suspend fun reconcile() = withContext(ioDispatcher) {
+        withSidecarLockBlocking { reconcileLocked() }
+    }
+
+    /**
+     * Issue #1589: compare every sidecar ref against the complete live queue-row
+     * id set. Refs whose [LocalAttachmentSidecarRef.outboundItemId] is still a
+     * live row, or a `draft/...` composer scope, are kept. Proven queue orphans
+     * lose their ref + local bytes. Existing file-vs-ref reconcile still runs
+     * first so a missing file cannot keep a dead ref alive.
+     *
+     * [liveRowIds] is a provider, not a snapshot: each candidate is re-checked
+     * immediately before delete so a concurrent enqueue+stage cannot lose a
+     * sidecar whose row is still queued. Callers that only have a frozen set
+     * should pass `{ snapshot }` and accept that they own snapshot freshness.
+     */
+    suspend fun reconcileAgainstLiveRowIds(liveRowIds: () -> Set<String>) = withContext(ioDispatcher) {
+        withSidecarLockBlocking {
+            // Keep completed remote-upload evidence through this first local
+            // file pass. A process can crash after the local sidecar is gone
+            // but before orphan repair persists the remote cleanup tombstone.
+            // Dropping that ref here would make the remote path unrecoverable.
+            reconcileLocked(preserveUploadedRemoteRefs = true)
+            val remaining = mutableListOf<LocalAttachmentSidecarRef>()
+            val orphaned = mutableListOf<LocalAttachmentSidecarRef>()
+            val snapshot = liveRowIds()
+            for (ref in allRefsBlocking()) {
+                if (OutboundQueueRetentionPolicy.isDraftSidecarScope(ref.outboundItemId)) {
+                    remaining += ref
+                    continue
+                }
+                if (ref.outboundItemId in snapshot) {
+                    remaining += ref
+                    continue
+                }
+                // Re-read immediately before delete. A snapshot taken earlier
+                // is not proof of death: a concurrent enqueue+stage on B can
+                // land between the snapshot and this point.
+                val live = liveRowIds()
+                if (ref.outboundItemId in live) {
+                    remaining += ref
+                } else {
+                    orphaned += ref
+                }
+            }
+            // A remote upload may already have completed before the process
+            // died. Persist its exact remote path before dropping the ref/file;
+            // otherwise repair would erase the only evidence needed to delete
+            // the remote checkpoint/final sidecar on the next foreground pass.
+            val remoteTombstones = orphaned.mapNotNull { ref ->
+                ref.uploadedRemotePath
+                    ?.takeIf { it.isNotBlank() }
+                    ?.let { path ->
+                        SidecarCleanupTombstone(
+                            outboundItemId = ref.outboundItemId,
+                            sidecarId = ref.id,
+                            localPath = ref.localPath,
+                            remotePath = path,
+                            stableToken = ref.id,
+                        )
+                    }
+            }
+            if (remoteTombstones.isNotEmpty()) {
+                persistTombstonesBlocking(remoteTombstones)
+            }
+            orphaned.forEach { ref -> runCatching { File(ref.localPath).delete() } }
+            persistAll(remaining)
+            orphaned.map { it.outboundItemId }.distinct().forEach { outboundItemId ->
+                runCatching { File(rootDir(), outboundItemId).deleteRecursively() }
+            }
+            rootDir().walkBottomUp()
+                .filter { it.isDirectory && it != rootDir() && it.listFiles().isNullOrEmpty() }
+                .forEach { dir -> runCatching { dir.delete() } }
+        }
+    }
+
+    suspend fun reconcileAgainstLiveRowIds(liveRowIds: Set<String>) =
+        reconcileAgainstLiveRowIds(liveRowIds = { liveRowIds })
+
+    internal fun allRefsIncludingMissingBlocking(): List<LocalAttachmentSidecarRef> =
+        synchronized(sidecarLock) { allRefsBlocking() }
+
+    internal fun tombstonesForOutboundItem(
+        outboundItemId: String,
+        remotePathBySidecarId: Map<String, String> = emptyMap(),
+    ): List<SidecarCleanupTombstone> = synchronized(sidecarLock) {
+        allRefsBlocking()
+            .filter { it.outboundItemId == outboundItemId }
+            .map { ref ->
+                SidecarCleanupTombstone(
+                    outboundItemId = outboundItemId,
+                    sidecarId = ref.id,
+                    localPath = ref.localPath,
+                    remotePath = ref.uploadedRemotePath
+                        ?: remotePathBySidecarId[ref.id]?.takeIf { it.isNotBlank() },
+                    stableToken = ref.id,
+                )
+            }
+    }
+
+    internal fun persistTombstonesBlocking(tombstones: List<SidecarCleanupTombstone>) {
+        synchronized(sidecarLock) {
+            if (tombstones.isEmpty()) return
+            val merged = (pendingTombstonesBlocking() + tombstones)
+                .associateBy { it.sidecarId }
+                .values
+                .toList()
+            prefs.edit().putString(KEY_TOMBSTONES, encodeTombstones(merged)).commit()
+        }
+    }
+
+    internal fun pendingTombstonesBlocking(): List<SidecarCleanupTombstone> =
+        synchronized(sidecarLock) {
+            decodeTombstones(prefs.getString(KEY_TOMBSTONES, "").orEmpty())
+        }
+
+    internal fun removeTombstonesBlocking(sidecarIds: Set<String>) {
+        synchronized(sidecarLock) {
+            if (sidecarIds.isEmpty()) return
+            val remaining = pendingTombstonesBlocking().filterNot { it.sidecarId in sidecarIds }
+            val editor = prefs.edit()
+            if (remaining.isEmpty()) {
+                editor.remove(KEY_TOMBSTONES)
+            } else {
+                editor.putString(KEY_TOMBSTONES, encodeTombstones(remaining))
+            }
+            editor.commit()
+        }
+    }
+
+    internal fun stageLocked(
+        outboundItemId: String,
+        uris: List<Uri>,
+        attachmentIndices: List<Int>,
+    ): List<LocalAttachmentSidecarRef> {
+        if (outboundItemId.isBlank() || uris.isEmpty()) return emptyList()
+        return uris.mapIndexedNotNull { index, uri ->
+            stageOne(outboundItemId, uri, attachmentIndices.getOrNull(index))
+        }
+    }
+
+    internal fun updateMetadataLocked(
+        metadataById: Map<String, Pair<String, String?>>,
+    ): List<LocalAttachmentSidecarRef> {
+        if (metadataById.isEmpty()) return emptyList()
         val updated = allRefsBlocking().map { ref ->
             metadataById[ref.id]?.let { (displayName, mimeType) ->
                 ref.copy(displayName = displayName, mimeType = mimeType ?: ref.mimeType)
             } ?: ref
         }
         persistAll(updated)
-        updated.filter { metadataById.containsKey(it.id) }
-    }
-
-    suspend fun removeOutboundItem(outboundItemId: String) = withContext(ioDispatcher) {
-        refsForBlocking(outboundItemId).forEach { ref -> runCatching { File(ref.localPath).delete() } }
-        val remaining = allRefsBlocking().filterNot { it.outboundItemId == outboundItemId }
-        persistAll(remaining)
-        runCatching { File(rootDir(), outboundItemId).deleteRecursively() }
-    }
-
-    suspend fun remove(refId: String) = withContext(ioDispatcher) {
-        val refs = allRefsBlocking()
-        refs.firstOrNull { it.id == refId }?.let { ref ->
-            runCatching { File(ref.localPath).delete() }
-        }
-        persistAll(refs.filterNot { it.id == refId })
-    }
-
-    suspend fun reconcile() = withContext(ioDispatcher) {
-        val liveRefs = allRefsBlocking().filter { File(it.localPath).exists() }
-        persistAll(liveRefs)
-        val livePaths = liveRefs.mapTo(mutableSetOf()) { File(it.localPath).absolutePath }
-        rootDir().walkTopDown()
-            .filter { it.isFile && it.absolutePath !in livePaths }
-            .forEach { file -> runCatching { file.delete() } }
-        rootDir().walkBottomUp()
-            .filter { it.isDirectory && it != rootDir() && it.listFiles().isNullOrEmpty() }
-            .forEach { dir -> runCatching { dir.delete() } }
+        return updated.filter { metadataById.containsKey(it.id) }
     }
 
     private fun stageOne(
@@ -198,6 +362,28 @@ class OutboundAttachmentSidecarStore @Inject constructor(
         )
     }
 
+    internal fun removeOutboundItemLocked(outboundItemId: String) {
+        refsForBlocking(outboundItemId).forEach { ref -> runCatching { File(ref.localPath).delete() } }
+        val remaining = allRefsBlocking().filterNot { it.outboundItemId == outboundItemId }
+        persistAll(remaining)
+        runCatching { File(rootDir(), outboundItemId).deleteRecursively() }
+    }
+
+    private fun reconcileLocked(preserveUploadedRemoteRefs: Boolean = false) {
+        val liveRefs = allRefsBlocking().filter { ref ->
+            File(ref.localPath).exists() ||
+                (preserveUploadedRemoteRefs && !ref.uploadedRemotePath.isNullOrBlank())
+        }
+        persistAll(liveRefs)
+        val livePaths = liveRefs.mapTo(mutableSetOf()) { File(it.localPath).absolutePath }
+        rootDir().walkTopDown()
+            .filter { it.isFile && it.absolutePath !in livePaths }
+            .forEach { file -> runCatching { file.delete() } }
+        rootDir().walkBottomUp()
+            .filter { it.isDirectory && it != rootDir() && it.listFiles().isNullOrEmpty() }
+            .forEach { dir -> runCatching { dir.delete() } }
+    }
+
     private fun refsForBlocking(outboundItemId: String): List<LocalAttachmentSidecarRef> =
         allRefsBlocking()
             .filter { it.outboundItemId == outboundItemId && File(it.localPath).exists() }
@@ -206,7 +392,9 @@ class OutboundAttachmentSidecarStore @Inject constructor(
                 .thenBy { it.id })
 
     private fun allRefsBlocking(): List<LocalAttachmentSidecarRef> =
-        decodeRefs(prefs.getString(KEY_REFS, "").orEmpty())
+        decodeRefs(prefs.getString(KEY_REFS, "").orEmpty()).also {
+            lastBlockingAccessThreadNameForTest = Thread.currentThread().name
+        }
 
     private fun persistAll(refs: List<LocalAttachmentSidecarRef>) {
         prefs.edit().putString(KEY_REFS, encodeRefs(refs)).commit()
@@ -228,8 +416,22 @@ class OutboundAttachmentSidecarStore @Inject constructor(
         internal const val DIRECTORY_NAME = "outbound-attachments"
         internal const val PREFS_NAME = "outbound_attachment_sidecars"
         private const val KEY_REFS = "refs"
+        internal const val KEY_TOMBSTONES = "tombstones"
     }
 }
+
+/**
+ * Issue #1589: crash-safe cleanup record for one discarded queue sidecar.
+ * Persisted before the durable queue row is removed so a crash between row
+ * removal and local/remote hygiene can resume without resurrecting the send.
+ */
+internal data class SidecarCleanupTombstone(
+    val outboundItemId: String,
+    val sidecarId: String,
+    val localPath: String,
+    val remotePath: String?,
+    val stableToken: String,
+)
 
 data class LocalAttachmentSidecarRef(
     val id: String,
@@ -288,6 +490,37 @@ private fun decodeRefs(raw: String): List<LocalAttachmentSidecarRef> {
             createdAtMs = createdAtMs,
             attachmentIndex = attachmentIndex,
             uploadedRemotePath = uploadedRemotePath,
+        )
+    }
+}
+
+private fun encodeTombstones(tombstones: List<SidecarCleanupTombstone>): String =
+    tombstones.joinToString("\n") { tombstone ->
+        listOf(
+            tombstone.outboundItemId,
+            tombstone.sidecarId,
+            tombstone.localPath,
+            tombstone.remotePath.orEmpty(),
+            tombstone.stableToken,
+        ).joinToString("\t") { field -> escapeSidecarField(field) }
+    }
+
+private fun decodeTombstones(raw: String): List<SidecarCleanupTombstone> {
+    if (raw.isBlank()) return emptyList()
+    return raw.split('\n').mapNotNull { row ->
+        if (row.isBlank()) return@mapNotNull null
+        val fields = row.split('\t').map { unescapeSidecarField(it) }
+        val outboundItemId = fields.getOrNull(0).orEmpty()
+        val sidecarId = fields.getOrNull(1).orEmpty()
+        val localPath = fields.getOrNull(2).orEmpty()
+        val stableToken = fields.getOrNull(4).orEmpty().ifBlank { sidecarId }
+        if (outboundItemId.isBlank() || sidecarId.isBlank()) return@mapNotNull null
+        SidecarCleanupTombstone(
+            outboundItemId = outboundItemId,
+            sidecarId = sidecarId,
+            localPath = localPath,
+            remotePath = fields.getOrNull(3)?.ifBlank { null },
+            stableToken = stableToken,
         )
     }
 }

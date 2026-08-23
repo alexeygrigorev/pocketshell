@@ -246,6 +246,10 @@ class SessionLifecycleSignals @Inject constructor(
         runtimeCache?.removeSession(hostId = hostId, generation = exact)?.forEach { runtime ->
             cleanupScope.launch { runtime.closeCachedRuntime() }
         }
+        // Name-only stale-absent is never a queue-deletion authority: a failed
+        // attach, hot-flow miss, or same-name recreate must not dispose parked
+        // rows. Lifecycle signals never dispose queue rows; explicit Delete is
+        // the only disposal authorization in this slice.
         _staleSessions.tryEmit(
             StaleSession(
                 hostId = hostId,

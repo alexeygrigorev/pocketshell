@@ -13789,6 +13789,22 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #1589: use the already-connected foreground transport to remove
+     * the exact final sidecar and its owned resumable-upload siblings. This is
+     * intentionally fail-fast when the screen has no live session so the
+     * coordinator keeps the tombstone for a later connected retry; it never
+     * creates a cleanup-only SSH connection.
+     */
+    public suspend fun discardQueueSidecarCheckpoint(
+        remotePath: String,
+        stableToken: String,
+    ) = withContext(seedIoDispatcher) {
+        val session = sessionRef?.takeIf { it.isConnected }
+            ?: throw SshException("No live foreground SSH session for queue sidecar cleanup")
+        session.discardQueueSidecarCheckpoint(remotePath, stableToken)
+    }
+
+    /**
      * Issue #451: return the live terminal [SshSession] for an attachment
      * upload, lazily connecting-then-awaiting the connection the way the
      * Send path does when the session is not currently live.

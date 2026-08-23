@@ -57,6 +57,7 @@ import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.outboundLauncherBadge
 import com.pocketshell.app.composer.promoteFallbackOutboundIdentity
+import com.pocketshell.app.composer.setOutboundQueueRemoteCleaner
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.layout.rememberTmuxImeLayoutState
 import com.pocketshell.app.projects.conventionalRemoteHome
@@ -705,11 +706,18 @@ private fun TmuxSessionScreenEffects(
                 viewModel.uploadQueuedAttachmentSidecars(pending)
             }
         }
+        // Issue #1589: remote tombstones use this screen's already-live
+        // foreground transport; the coordinator never creates a cleanup-only
+        // SSH connection.
+        promptComposerViewModel.setOutboundQueueRemoteCleaner { remotePath, stableToken ->
+            viewModel.discardQueueSidecarCheckpoint(remotePath, stableToken)
+        }
         // Issue #1686: wire the WIRE-oracle probe so the failure taxonomy + drain gate
         // read the transport's own truth instead of the ConnectionStatus enum.
         promptComposerViewModel.setTransportWritableProbe { viewModel.isSendTransportWritable() }
         onDispose {
             promptComposerViewModel.setOutboundAttachmentSidecarUploader(null)
+            promptComposerViewModel.setOutboundQueueRemoteCleaner(null)
             promptComposerViewModel.setTransportWritableProbe { false }
         }
     }

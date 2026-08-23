@@ -261,3 +261,4 @@ com.pocketshell.app.voice.VoiceGestureCoachmarkLauncherProofTest	43
 # substituted for the isolated Gradle invocation cost. Evidence XML digest:
 # ca1510f2d226f63b24bd2d07e29faaa877572b7c26219afbc2ec79464aa8d332.
 com.pocketshell.app.proof.Issue1700StaleFlushJourneyE2eTest	79
+com.pocketshell.app.composer.PromptComposerOutboundQueueProductionDeleteDockerTest	260

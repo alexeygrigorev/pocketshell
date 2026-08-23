@@ -7,7 +7,25 @@ internal data class OutboundDrainLease(
     val rowId: String,
     val token: Long,
     val acceptedByConsumer: Boolean = false,
+    val purpose: OutboundDrainLeasePurpose = OutboundDrainLeasePurpose.Delivery,
 )
+
+internal enum class OutboundDrainLeasePurpose { Delivery, Disposal }
+
+/**
+ * Typed proof that the production drain owner atomically reserved [rowId] for
+ * user-authorized disposal while no delivery owns the physical pipe. Keeping
+ * this reservation alive prevents a reconnect/collector wake from acquiring a
+ * delivery lease between the UI's Delete tap and the queue-store commit.
+ */
+internal class OutboundDisposalPermit internal constructor(
+    internal val lease: OutboundDrainLease,
+    private val owner: OutboundDrainOwnership,
+) {
+    val rowId: String get() = lease.rowId
+
+    internal fun isCurrent(): Boolean = owner.ownsDisposal(this)
+}
 
 /**
  * Owns one durable outbound row during dispatch setup. Queue effects and
@@ -28,11 +46,35 @@ internal class OutboundDrainOwnership {
         return lease.takeIf { activeLease.compareAndSet(null, lease) }
     }
 
+    /**
+     * Refuse safely when any delivery lease is live; otherwise reserve the same
+     * single-owner slot for disposal. There is deliberately no "empty owner
+     * set" fallback: callers either hold this proof or they cannot delete.
+     */
+    fun tryAcquireDisposal(rowId: String): OutboundDisposalPermit? {
+        if (rowId.isBlank()) return null
+        val lease = OutboundDrainLease(
+            rowId = rowId,
+            token = nextToken.incrementAndGet(),
+            purpose = OutboundDrainLeasePurpose.Disposal,
+        )
+        return if (activeLease.compareAndSet(null, lease)) {
+            OutboundDisposalPermit(lease, this)
+        } else {
+            null
+        }
+    }
+
     fun acceptByConsumer(rowId: String?, token: Long?): Boolean {
         if (rowId == null || token == null) return false
         while (true) {
             val current = activeLease.get() ?: return false
-            if (current.rowId != rowId || current.token != token || current.acceptedByConsumer) return false
+            if (
+                current.purpose != OutboundDrainLeasePurpose.Delivery ||
+                current.rowId != rowId ||
+                current.token != token ||
+                current.acceptedByConsumer
+            ) return false
             if (activeLease.compareAndSet(current, current.copy(acceptedByConsumer = true))) return true
         }
     }
@@ -41,13 +83,24 @@ internal class OutboundDrainOwnership {
         if (rowId == null || token == null) return false
         while (true) {
             val current = activeLease.get() ?: return false
-            if (current.rowId != rowId || current.token != token) return false
+            if (
+                current.purpose != OutboundDrainLeasePurpose.Delivery ||
+                current.rowId != rowId ||
+                current.token != token
+            ) return false
             if (activeLease.compareAndSet(current, null)) return true
         }
     }
 
     fun release(lease: OutboundDrainLease?): Boolean =
         release(lease?.rowId, lease?.token)
+
+    fun releaseDisposal(permit: OutboundDisposalPermit): Boolean =
+        activeLease.compareAndSet(permit.lease, null)
+
+    internal fun ownsDisposal(permit: OutboundDisposalPermit): Boolean =
+        permit.lease.purpose == OutboundDrainLeasePurpose.Disposal &&
+            activeLease.get() === permit.lease
 
     fun forceRelease(): String? = activeLease.getAndSet(null)?.rowId
 

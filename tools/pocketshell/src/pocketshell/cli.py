@@ -27,6 +27,7 @@ from pocketshell.cards import register_push_card_commands
 from pocketshell.agents import agent_group
 from pocketshell.agents_kind import agents_group
 from pocketshell.env import env_group
+from pocketshell.engines import engines_group
 from pocketshell.github import github_group
 from pocketshell.hooks import hooks_group
 from pocketshell.jobs import jobs_group
@@ -61,6 +62,7 @@ cli.add_command(usage_command, name="usage")
 cli.add_command(agent_group, name="agent")
 cli.add_command(agents_group, name="agents")
 cli.add_command(profiles_group, name="profiles")
+cli.add_command(engines_group, name="engines")
 cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")
 # Issue #2122 (epic #2121): the acknowledged outbound delivery primitive. The

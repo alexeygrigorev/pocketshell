@@ -490,7 +490,7 @@ public fun PromptComposerSheet(
             onToggleOutboundQueue = { outboundQueueExpanded = !outboundQueueExpanded },
             onDeleteOutboundItem = viewModel::discardOutboundItem,
             onRetryOutboundItem = onRetryOutboundItem ?: viewModel::retryOutboundItem,
-            onResendAllOutbound = onResendAllOutbound ?: { viewModel.resendAllQueued(); Unit },
+            onResendAllOutbound = onResendAllOutbound ?: { viewModel.resendAllQueuedOrApproveHeld(); Unit },
             agentKind = agentKind,
             // Issue #1272: the durable undelivered-transcript retry surface.
             undeliveredTranscripts = undelivered.transcripts,

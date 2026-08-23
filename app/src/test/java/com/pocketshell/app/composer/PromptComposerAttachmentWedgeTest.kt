@@ -318,7 +318,7 @@ class PromptComposerAttachmentWedgeTest {
     @Test
     fun attachmentSendClaimRaceEarlyReturnDoesNotWedgeSubsequentPlainSend() = runTest {
         val queue = object : InMemoryOutboundQueueStore() {
-            override fun claim(id: String): OutboundItem? = null
+            override fun claim(id: String, nowMillis: Long): OutboundItem? = null
         }
         val dispatcher = StandardTestDispatcher(testScheduler)
         val sidecars = newSidecarStore(ioDispatcher = dispatcher)
@@ -343,7 +343,11 @@ class PromptComposerAttachmentWedgeTest {
     @Test
     fun attachmentSendInternalEarlyReturnDoesNotWedgeSubsequentPlainSend() = runTest {
         val queue = object : InMemoryOutboundQueueStore() {
-            override fun markUploading(id: String, lastAttemptAtMs: Long): OutboundItem? = null
+            override fun markUploading(
+                id: String,
+                lastAttemptAtMs: Long,
+                nowMillis: Long,
+            ): OutboundItem? = null
         }
         val dispatcher = StandardTestDispatcher(testScheduler)
         val sidecars = newSidecarStore(ioDispatcher = dispatcher)

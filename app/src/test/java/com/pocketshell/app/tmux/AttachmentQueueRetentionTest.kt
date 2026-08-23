@@ -59,6 +59,11 @@ class AttachmentQueueRetentionTest {
             val referencedBytes = "durable queued attachment".toByteArray()
             val otherCollisionBytes = "other directory".toByteArray()
             val store = InMemoryOutboundQueueStore()
+            // Keep the queue intents recent: this test exercises remote-byte
+            // retention independently of #1700's stale-intent review gate. The
+            // remote objects themselves remain 2/8 days old below, which is the
+            // age input for the prune policy under test.
+            val queueCreatedAt = now - minutes(1L)
             val row = store.enqueue(
                 sessionKey = DURABLE_SESSION_KEY,
                 cleanText = "inspect this",
@@ -69,7 +74,7 @@ class AttachmentQueueRetentionTest {
                         mimeType = "image/png",
                     ),
                 ),
-                createdAtMs = now - days(2),
+                createdAtMs = queueCreatedAt,
                 paneId = "%1",
                 route = OutboundRoute.AgentPayload,
             )
@@ -83,7 +88,7 @@ class AttachmentQueueRetentionTest {
                     sessionKey = DURABLE_SESSION_KEY,
                     cleanText = state.name,
                     attachments = listOf(DurableAttachmentRef(path, path.substringAfterLast('/'))),
-                    createdAtMs = now - days(8),
+                    createdAtMs = queueCreatedAt,
                 )
                 when (state) {
                     OutboundState.Uploading -> store.markUploading(queued.id)!!

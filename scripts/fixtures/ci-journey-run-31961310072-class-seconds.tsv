@@ -251,3 +251,13 @@ com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_offlineOrReconn
 com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_wedgeA_rawNotConnectedLiveLookingTerminal_launcherOpensEnterStaysGated	15
 com.pocketshell.app.tmux.TmuxSessionVoiceSurfaceUiTest#issue2192_wedgeB_surfacePaneNullAfterReseed_launcherOpensEnterAbsent	13
 com.pocketshell.app.voice.VoiceGestureCoachmarkLauncherProofTest	43
+
+# Issue #1700: measured from the existing green connected journey evidence on
+# 2026-08-22 from candidate source c4bb92f3c5f29bbafd26746751220018e669821f
+# on emulator-5556 (standalone :app:connectedDebugAndroidTest, rc=0).
+# The wrapper ran 78.939215s (started 20:07:06.485294806Z, exited
+# 20:08:25.424509706Z); this row uses ceil(wrapper wall time)=79s, matching the
+# JOURNEY_PASS wall-time convention. JUnit suite time was 33.657s, but is not
+# substituted for the isolated Gradle invocation cost. Evidence XML digest:
+# ca1510f2d226f63b24bd2d07e29faaa877572b7c26219afbc2ec79464aa8d332.
+com.pocketshell.app.proof.Issue1700StaleFlushJourneyE2eTest	79

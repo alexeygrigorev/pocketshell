@@ -17,6 +17,40 @@ package com.pocketshell.app.composer
  */
 internal const val OUTBOUND_MAX_AUTO_ATTEMPTS: Int = 6
 
+/**
+ * Issue #1700: after this many milliseconds from [OutboundItem.createdAtMs], an
+ * unapproved `Queued`/`Failed` row is held for explicit Send now / Delete.
+ * Retries and [OutboundItem.lastAttemptAtMs] never rejuvenate the age.
+ */
+internal const val OUTBOUND_STALE_HOLD_MS: Long = 5L * 60_000L
+
+/**
+ * Issue #1700: existing tests stamp `createdAtMs = 1, 2, 10…` as a FIFO order
+ * key, not a wall-clock enqueue epoch. Production [OutboundQueueStore.enqueue]
+ * always stamps `System.currentTimeMillis()` / the VM clock (ms since 1970),
+ * which is far above this floor (2001-09-09). Age-hold applies only to real
+ * epochs so those fixtures keep their meaning.
+ */
+internal const val OUTBOUND_STALE_EPOCH_FLOOR_MS: Long = 1_000_000_000_000L
+
+internal fun outboundIntentAgeMs(createdAtMs: Long, nowMillis: Long): Long =
+    (nowMillis - createdAtMs).coerceAtLeast(0L)
+
+internal fun OutboundItem.isComposerQueueHeldForReview(): Boolean =
+    state == OutboundState.HeldForReview
+
+/**
+ * Unapproved intent whose enqueue epoch is at/over [OUTBOUND_STALE_HOLD_MS].
+ * Active `Uploading`/`InFlight` attempts are never classified here — hold
+ * applies before the next new wire step, not by interrupting a healthy claim.
+ */
+internal fun OutboundItem.isStaleUnapproved(nowMillis: Long): Boolean {
+    if (staleApprovedAtMs != null) return false
+    if (createdAtMs < OUTBOUND_STALE_EPOCH_FLOOR_MS) return false
+    if (state != OutboundState.Queued && state != OutboundState.Failed) return false
+    return outboundIntentAgeMs(createdAtMs, nowMillis) >= OUTBOUND_STALE_HOLD_MS
+}
+
 /** Issue #1602: surfaced "Failed — <this>" label a parked (budget-exhausted) row wears. */
 internal const val OUTBOUND_AUTO_RETRY_EXHAUSTED_MESSAGE: String =
     "Couldn't send after several tries. Tap Retry."
@@ -249,18 +283,21 @@ internal fun Iterable<OutboundItem>.firstComposerAutoFlushable(
     sessionKey: String,
     excludingIds: Set<String> = emptySet(),
     maxAutoAttempts: Int,
+    nowMillis: Long = System.currentTimeMillis(),
 ): OutboundItem? {
     // Preserve physical FIFO across identity promotion. An older InFlight or
     // Uploading row may still own bytes already pasted into the same pane; it
-    // blocks every younger row until its terminal callback. Two retryable shapes
-    // are the exceptions, and both are surfaced rather than hidden: an exhausted
-    // row (this cycle parks it, #1602) and a delivery-unconfirmed row (#2056 — the
-    // auto-flush can never resolve it, so re-picking it only starves the tail).
+    // blocks every younger row until its terminal callback. Skip-and-surface
+    // exceptions (never silent drops): an exhausted row (#1602), a delivery-
+    // unconfirmed row (#2056), and a stale unapproved / held-for-review row
+    // (#1700 — old intent must not block a clearly-current tail).
     val head = firstOrNull { item ->
         item.sessionKey == sessionKey &&
             item.isComposerQueueUndelivered() &&
             !(item.isComposerQueueRetryable() && item.attemptCount >= maxAutoAttempts) &&
-            !item.isComposerQueueDeliveryUnconfirmed()
+            !item.isComposerQueueDeliveryUnconfirmed() &&
+            !item.isComposerQueueHeldForReview() &&
+            !item.isStaleUnapproved(nowMillis)
     } ?: return null
     return head.takeIf {
         it.isComposerQueueRetryable() && it.id !in excludingIds
@@ -316,9 +353,15 @@ internal fun Iterable<OutboundItem>.planComposerAutoFlush(
     sessionKey: String,
     excludingIds: Set<String> = emptySet(),
     maxAutoAttempts: Int = OUTBOUND_MAX_AUTO_ATTEMPTS,
+    nowMillis: Long = System.currentTimeMillis(),
 ): ComposerAutoFlushPlan = ComposerAutoFlushPlan(
     parkIds = autoRetryExhaustedComposerRows(sessionKey, excludingIds, maxAutoAttempts).map { it.id },
-    nextId = firstComposerAutoFlushable(sessionKey, excludingIds, maxAutoAttempts)?.id,
+    nextId = firstComposerAutoFlushable(
+        sessionKey,
+        excludingIds,
+        maxAutoAttempts,
+        nowMillis,
+    )?.id,
 )
 
 internal fun Iterable<OutboundItem>.composerQueueRetryableItems(): List<OutboundItem> =
@@ -360,6 +403,8 @@ internal fun Iterable<OutboundItem>.outboundLauncherBadge(
     if (undelivered.isEmpty()) return null
     return OutboundLauncherBadge(
         count = undelivered.size,
-        hasFailure = undelivered.any { it.state == OutboundState.Failed },
+        hasFailure = undelivered.any {
+            it.state == OutboundState.Failed || it.isComposerQueueHeldForReview()
+        },
     )
 }

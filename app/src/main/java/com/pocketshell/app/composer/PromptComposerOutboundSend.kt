@@ -365,6 +365,7 @@ internal fun PromptComposerViewModel.finishOutboundHandoff(
             error = error ?: it.error,
         )
     }
+    wakeOutboundDrainAfterOwnerResolution(approvedOnly = true)
     return true
 }
 

@@ -1,6 +1,7 @@
 package com.pocketshell.app.composer
 
 import android.graphics.Color as AndroidColor
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -9,16 +10,25 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsNode
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -28,7 +38,9 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.proof.signals.assertNodeFullyWithinRoot
+import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellColors
 import org.junit.After
@@ -499,6 +511,347 @@ class PromptComposerOutboundQueueTest {
         assertEquals(listOf(item.id), retriedIds)
     }
 
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Test
+    fun productionComposerSheetSendNowClickApprovesTheExactHeldRow() {
+        // This is deliberately the FULL production route: PromptComposerSheet
+        // resolves its default retry callback, then SheetContent and
+        // PromptComposerQueueBanners carry the exact id to the VM. A direct
+        // `vm.retryOutboundItem(id)` test cannot catch a dropped UI callback.
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newComposerViewModel(queue)
+        val target = "1/a"
+        val held = OutboundItem(
+            id = "held-production-click",
+            sessionKey = target,
+            cleanText = "stale production prompt",
+            state = OutboundState.HeldForReview,
+            createdAtMs = 1L,
+        )
+        queue.enqueueExisting(held)
+        assertTrue(queue === vm.outboundQueueStore)
+        vm.onComposerTargetChanged(target)
+        vm.setTransportWritableProbe { true }
+        vm.refreshOutboundQueueItemsFor(target)
+
+        try {
+            compose.setContent {
+                PocketShellTheme {
+                    PromptComposerSheet(
+                        onDismiss = {},
+                        onSend = { _ -> ComposerSendResult.Delivered },
+                        viewModel = vm,
+                        composerTargetKey = target,
+                        collectSendRequests = false,
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                    )
+                }
+            }
+
+            compose.waitUntil(timeoutMillis = 5_000L) {
+                compose.onAllNodesWithTag(
+                    COMPOSER_OUTBOUND_QUEUE_BANNER_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag(
+                COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG,
+                useUnmergedTree = true,
+            ).performClick()
+            compose.waitUntil(timeoutMillis = 5_000L) {
+                compose.onAllNodesWithTag(
+                    composerOutboundQueueItemRowTestTag(held.id),
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+
+            // The modal's queue is intentionally bounded and scrollable. The
+            // row tag existing does not mean its trailing action is visible;
+            // scroll the exact production action into the status viewport before
+            // invoking it. Removing this scroll is the interaction mutant: the
+            // following displayed/containment assertions redden on zero bounds.
+            val sendNow = compose.onNode(
+                hasTestTag(composerOutboundQueueRetryTestTag(held.id)) and hasClickAction(),
+                useUnmergedTree = false,
+            )
+            sendNow.performScrollTo().assertIsDisplayed().assertIsEnabled()
+            compose.assertNodeFullyWithinRoot(
+                composerOutboundQueueRetryTestTag(held.id),
+                useUnmergedTree = false,
+            )
+            sendNow.performClick()
+            compose.waitUntil(timeoutMillis = 5_000L) {
+                queue.item(held.id)?.staleApprovedAtMs != null
+            }
+            val approved = queue.item(held.id)
+            assertEquals(held.id, approved?.id)
+            assertTrue(
+                "default production callback must approve the same durable row: $approved",
+                approved?.staleApprovedAtMs != null &&
+                    approved.state != OutboundState.HeldForReview,
+            )
+        } finally {
+            vm.clearForTest()
+        }
+    }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    @Test
+    fun diagnosticProductionComposerSheetExplicitRetryCallbackChangesTheSameHeldRow() {
+        val queue = InMemoryOutboundQueueStore()
+        val vm = newComposerViewModel(queue)
+        val target = "1/a"
+        val directId = "held-direct-diagnostic"
+        val clickedIds = mutableListOf<String>()
+        val held = OutboundItem(
+            id = "held-explicit-callback-diagnostic",
+            sessionKey = target,
+            cleanText = "stale production prompt through explicit callback",
+            state = OutboundState.HeldForReview,
+            createdAtMs = 1L,
+        )
+        val direct = OutboundItem(
+            id = directId,
+            sessionKey = "diagnostic-direct-target",
+            cleanText = "stale direct VM prompt",
+            state = OutboundState.HeldForReview,
+            createdAtMs = 1L,
+        )
+        queue.enqueueExisting(held)
+        queue.enqueueExisting(direct)
+        assertTrue(
+            "diagnostic queue must be the exact store owned by the VM",
+            queue === vm.outboundQueueStore,
+        )
+        vm.onComposerTargetChanged(target)
+        // Keep the auxiliary row on its own target. Its oracle is durable
+        // approval of this exact id, not the transient drain phase: held Retry
+        // deliberately routes through sendHeldOutboundItemNow, so the row may be
+        // observed as Queued or already claimed InFlight.
+        vm.setTransportWritableProbe { false }
+        vm.refreshOutboundQueueItemsFor(target)
+
+        try {
+            val directBefore = requireNotNull(queue.item(directId))
+            vm.retryOutboundItem(directId)
+            val directAfter = requireNotNull(queue.item(directId))
+            println(
+                "ISSUE1700_DIAGNOSTIC direct_id=$directId " +
+                    "before=$directBefore after=$directAfter " +
+                    "queue_is_vm_store=${queue === vm.outboundQueueStore}",
+            )
+            assertEquals(directId, directAfter.id)
+            assertTrue(
+                "direct vm.retryOutboundItem must change the same queue row: " +
+                    "before=$directBefore after=$directAfter",
+                directAfter != directBefore,
+            )
+            assertTrue(
+                "direct held-row Retry must approve the exact row and leave HeldForReview: " +
+                    "before=$directBefore after=$directAfter",
+                directAfter.staleApprovedAtMs != null &&
+                    directAfter.state in setOf(OutboundState.Queued, OutboundState.InFlight),
+            )
+
+            vm.setTransportWritableProbe { true }
+
+            compose.setContent {
+                PocketShellTheme {
+                    PromptComposerSheet(
+                        onDismiss = {},
+                        onSend = { _ -> ComposerSendResult.Delivered },
+                        viewModel = vm,
+                        composerTargetKey = target,
+                        collectSendRequests = false,
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                        onRetryOutboundItem = { id ->
+                            clickedIds += id
+                            vm.retryOutboundItem(id)
+                        },
+                    )
+                }
+            }
+
+            compose.waitUntil(timeoutMillis = 5_000L) {
+                compose.onAllNodesWithTag(
+                    COMPOSER_OUTBOUND_QUEUE_BANNER_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag(
+                COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG,
+                useUnmergedTree = true,
+            ).performClick()
+            compose.waitUntil(timeoutMillis = 5_000L) {
+                compose.onAllNodesWithTag(
+                    composerOutboundQueueItemRowTestTag(held.id),
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+
+            val retryTag = composerOutboundQueueRetryTestTag(held.id)
+            val mergedRetry = compose.onNode(
+                hasTestTag(retryTag) and hasClickAction(),
+                useUnmergedTree = false,
+            )
+            val beforeScrollSemantics = dumpIssue1700RetrySemantics(
+                stage = "before-exact-action-scroll",
+                retryTag = retryTag,
+                rowTag = composerOutboundQueueItemRowTestTag(held.id),
+            )
+            // The modal's queue lives in the bounded status viewport. Expanding
+            // creates the exact row, but does not imply its trailing action is in
+            // that viewport: the pre-scroll dump is expected to expose that
+            // distinction. Scroll the physical action itself, then re-enumerate
+            // roots/nodes so the click oracle is tied to the visible copy.
+            mergedRetry.performScrollTo()
+            compose.waitUntil(timeoutMillis = 5_000L) {
+                mergedRetry.fetchSemanticsNode().boundsInRoot.let {
+                    it.width > 0f && it.height > 0f
+                }
+            }
+            val afterScrollSemantics = dumpIssue1700RetrySemantics(
+                stage = "after-exact-action-scroll",
+                retryTag = retryTag,
+                rowTag = composerOutboundQueueItemRowTestTag(held.id),
+            )
+            val retrySemantics = beforeScrollSemantics + afterScrollSemantics
+            // The interaction must now be the visible action owned by the active
+            // ModalBottomSheet root. `performClick()` alone is not evidence: a
+            // semantics node can expose OnClick while fully clipped.
+            mergedRetry.assertIsDisplayed().assertIsEnabled()
+            compose.assertNodeFullyWithinRoot(retryTag, useUnmergedTree = false)
+            val visibleRetryBounds = mergedRetry.fetchSemanticsNode().boundsInRoot
+            assertTrue(
+                "selected merged Retry action must have non-empty bounds: $visibleRetryBounds",
+                visibleRetryBounds.width > 0f && visibleRetryBounds.height > 0f,
+            )
+            mergedRetry.performClick()
+            compose.waitForIdle()
+
+            // This assertion intentionally precedes the approval/state oracle:
+            // it proves the merged action invoked the explicit production-sheet
+            // callback and carried the exact row id into the VM.
+            assertEquals(
+                "merged production action must invoke the explicit callback before approval\n" +
+                    retrySemantics,
+                listOf(held.id),
+                clickedIds,
+            )
+            val afterCallback = queue.item(held.id)
+            println(
+                "ISSUE1700_DIAGNOSTIC callback_ids=$clickedIds " +
+                    "held_id=${held.id} after_callback=$afterCallback " +
+                    "vm_rows=${vm.outboundQueueItems.value}",
+            )
+            assertEquals(held.id, afterCallback?.id)
+            assertTrue(
+                "callback must approve the same durable row before any optional drain advance: " +
+                    "after=$afterCallback",
+                afterCallback?.staleApprovedAtMs != null &&
+                    afterCallback.state != OutboundState.HeldForReview,
+            )
+        } finally {
+            vm.clearForTest()
+        }
+    }
+
+    /**
+     * Issue #1700 diagnostic: Material's modal sheet is a separate Compose
+     * window/root. Keep the merged and unmerged populations visible in the test
+     * log so a tag/action match cannot silently select a hidden duplicate.
+     */
+    private fun dumpIssue1700RetrySemantics(
+        stage: String,
+        retryTag: String,
+        rowTag: String,
+    ): String {
+        val report = buildString {
+            appendLine("ISSUE1700_SEMANTICS stage=$stage retryTag=$retryTag rowTag=$rowTag")
+            listOf(true, false).forEach { unmerged ->
+                val tree = if (unmerged) "unmerged" else "merged"
+                val roots = compose.onAllNodes(isRoot(), useUnmergedTree = unmerged)
+                    .fetchSemanticsNodes()
+                appendLine("ISSUE1700_SEMANTICS tree=$tree rootCount=${roots.size}")
+                roots.forEachIndexed { index, root ->
+                    appendLine(
+                        "ISSUE1700_ROOT tree=$tree index=$index nodeId=${root.id} " +
+                            "rootIdentity=${System.identityHashCode(root.root)} " +
+                            "attached=${root.layoutInfo.isAttached} placed=${root.layoutInfo.isPlaced} " +
+                            "deactivated=${root.layoutInfo.isDeactivated} " +
+                            "bounds=${root.boundsInRoot} window=${root.boundsInWindow}",
+                    )
+                }
+
+                val taggedNodes = compose.onAllNodes(
+                    hasTestTag(retryTag),
+                    useUnmergedTree = unmerged,
+                ).fetchSemanticsNodes()
+                appendLine("ISSUE1700_SEMANTICS tree=$tree taggedCount=${taggedNodes.size}")
+                taggedNodes.forEachIndexed { index, node ->
+                    appendLine(issue1700NodeDiagnostic(tree, index, node, rowTag, unmerged))
+                }
+
+                val actionableNodes = compose.onAllNodes(
+                    hasTestTag(retryTag) and hasClickAction(),
+                    useUnmergedTree = unmerged,
+                ).fetchSemanticsNodes()
+                appendLine(
+                    "ISSUE1700_ACTIONABLE tree=$tree count=${actionableNodes.size} " +
+                        "nodes=${actionableNodes.map { "${it.id}@${System.identityHashCode(it.root)}" }}",
+                )
+            }
+        }
+        report.lineSequence().forEach { line ->
+            println(line)
+            Log.i("ISSUE1700_SEMANTICS", line)
+        }
+        return report
+    }
+
+    private fun issue1700NodeDiagnostic(
+        tree: String,
+        index: Int,
+        node: SemanticsNode,
+        rowTag: String,
+        useUnmergedTree: Boolean,
+    ): String {
+        val rootIdentity = System.identityHashCode(node.root)
+        val exactNode = compose.onNode(
+            SemanticsMatcher("node ${node.id} in root $rootIdentity") { candidate ->
+                candidate.id == node.id && candidate.root === node.root
+            },
+            useUnmergedTree = useUnmergedTree,
+        )
+        val displayed = runCatching {
+            exactNode.assertIsDisplayed()
+            "true"
+        }.getOrElse { error ->
+            "false(${error.message?.lineSequence()?.firstOrNull()})"
+        }
+        val click = node.config.getOrNull(SemanticsActions.OnClick)
+        val ancestors = generateSequence(node.parent) { it.parent }.toList()
+        val ancestorChain = ancestors.mapIndexed { depth, ancestor ->
+            val ancestorTag = ancestor.config.getOrNull(SemanticsProperties.TestTag)
+            val ancestorClick = ancestor.config.getOrNull(SemanticsActions.OnClick)
+            "depth=${depth + 1}:id=${ancestor.id}:tag=$ancestorTag:" +
+                "onClick=${ancestorClick != null}:root=${System.identityHashCode(ancestor.root)}:" +
+                "bounds=${ancestor.boundsInRoot}"
+        }
+        val ancestorRowTags = ancestors.mapNotNull {
+            it.config.getOrNull(SemanticsProperties.TestTag)
+        }.filter { it == rowTag || it.startsWith("composer-outbound-queue-row-") }
+        return "ISSUE1700_NODE tree=$tree index=$index nodeId=${node.id} " +
+            "rootIdentity=$rootIdentity " +
+            "attached=${node.layoutInfo.isAttached} placed=${node.layoutInfo.isPlaced} " +
+            "deactivated=${node.layoutInfo.isDeactivated} displayed=$displayed " +
+            "onClick=${click != null} clickLabel=${click?.label} " +
+            "clickActionIdentity=${click?.action?.let { System.identityHashCode(it) }} " +
+            "bounds=${node.boundsInRoot} touchBounds=${node.touchBoundsInRoot} " +
+            "window=${node.boundsInWindow} ancestorRowTags=$ancestorRowTags " +
+            "ancestors=$ancestorChain config=${node.config}"
+    }
+
     @Test
     fun outboundQueueCollapsedRetryInvokesOldestQueuedOrFailedRow() {
         val failed = OutboundItem(
@@ -774,6 +1127,34 @@ class PromptComposerOutboundQueueTest {
             bitmap.recycle()
         }
     }
+
+    private fun newComposerViewModel(queue: OutboundQueueStore): PromptComposerViewModel =
+        PromptComposerViewModel(
+            audioRecorder = object : PromptComposerViewModel.MicCapture {
+                override fun start() = Unit
+                override fun stop(): ByteArray = ByteArray(0)
+                override fun currentAmplitude(): Float = 0f
+            },
+            whisperClientFactory = WhisperClientFactory {
+                object : WhisperClient {
+                    override suspend fun transcribe(
+                        audio: ByteArray,
+                        language: String?,
+                    ): Result<String> = Result.success("")
+                }
+            },
+            apiKeyStorage = object : PromptComposerViewModel.ApiKeyVault {
+                override fun save(key: CharArray) = Unit
+                override fun load(): CharArray? = "sk-test".toCharArray()
+                override fun clear() = Unit
+            },
+            voiceSettings = object : PromptComposerViewModel.VoiceSettingsSnapshot {
+                override fun silenceWindowMs(): Long = PromptComposerViewModel.SILENCE_WINDOW_MS
+                override fun whisperLanguageHint(): String? = null
+            },
+            composerDraftStore = InMemoryComposerDraftStore(),
+            outboundQueueStore = queue,
+        )
 
     @Test
     fun resendAllButtonIsAbsentForASingleResendableRow() {

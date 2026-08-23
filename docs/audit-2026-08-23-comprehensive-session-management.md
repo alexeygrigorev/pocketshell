@@ -15,10 +15,15 @@ bounded-observation child has since been implemented, while its higher-risk
 lifecycle findings remain relevant.
 
 After the initial audits, `main` gained the #2272 alt-screen proof hardening in
-commit `d9565a56`. At consolidation time, the Tests workflow for that exact HEAD
-was still running. Therefore this report does not claim that the newest head is
-green; it treats the previous run's four genuine RED shards as still-unresolved
-baseline failures unless their owners have since closed them.
+commit `d9565a56`. Its retry of Tests run
+[32636289346](https://github.com/alexeygrigorev/pocketshell/actions/runs/32636289346)
+was cancelled as an aggregate when a newer maintainer merge advanced `main`, but
+all six shard classifiers had already written durable verdicts: shard 0 was
+`CLEAN`, while shards 1-5 were `RED`. The five RED tokens therefore remain the
+authoritative baseline for that head even though its aggregate conclusion is
+`cancelled`; they do not become green by cancellation. At reconciliation time,
+the newer `37f851db` run had green non-emulator lanes and six still-unresolved
+emulator shards; it does not supersede the audited-head evidence.
 
 Validation performed by the auditors included focused JVM session-tree suites,
 39 host tree tests, 37 daemon tests, 143 isolated real-tmux send tests, 13
@@ -249,18 +254,31 @@ until #2243 establishes the common durable-store primitive.
 ### Current CI triage
 
 At `67c5c05b`, Tests run [32621460195] had four genuine RED shards. Unit, static,
-Python utility, and Docker integration checks were green. The current-head run at
-`d9565a56` was still running during consolidation.
+Python utility, and Docker integration checks were green. On `d9565a56`, the
+interrupted retry produced these per-shard outcomes:
+
+| Shard | Verdict | Evidence |
+|---|---|---|
+| 0 | `CLEAN` | Passed on first attempt. |
+| 1 | `RED` | `Issue2189HostAckSubmitJourneyE2eTest` and `ConnectionJournalHostPullJourneyDockerTest` failed twice on the first cold boot; HostAck submit also failed twice on retry. |
+| 2 | `RED` | `ColdRestoreGoneSessionNoResurrectE2eTest` failed twice. Composer IME recovered, but `OutboundExactlyOnceAcrossFlapE2eTest` repeatedly failed and was then cut by the suite budget. |
+| 3 | `RED` | First boot: pane-output overflow and background-resume socket death each failed twice; send-heal passed. Retry: overflow and HostAck send-heal each failed twice. |
+| 4 | `RED` | `StaleRenderHealOnLiveTransportJourneyE2eTest` failed twice on both cold boots through a post-settlement resize/model mutation race; a subsequent instrumentation retry healed/recovered once. |
+| 5 | `RED` | `AttachmentDropReconnectRecoversE2eTest` failed twice on both cold boots. |
+
+Unit, static, Python utility, and Docker integration checks remained green.
+These results keep `d9565a56` red despite its cancelled aggregate.
 
 | Family | Owner/disposition |
 |---|---|
 | HostAck `already-delivered` journeys | New token-scoping and fixture-isolation trackers |
 | Cold restore loses exact tmux generation | #2294 |
-| Settings journey cannot find `settings:lazy-column` | New isolated investigation |
+| Settings journey cannot find `settings:lazy-column`, including connection-journal host pull | New isolated investigation |
 | Authoritative viewport `viewFound=false` | #788 |
 | Alt-screen heal race | #2272, closed and hardened on current head |
 | Shard budget prevents outbound exactly-once execution | #788 coverage hole |
-| Outbound suite-budget stall signals | #1819/#788 |
+| Outbound/suite-budget enumeration stall | #2317, with historical context in #1819/#788 |
+| Post-settlement stale-render resize race | #2321 |
 | Recovered composer/background/attachment flakes | Preserve evidence; address through capture-contract work below |
 
 Recovery/error journeys have a shared test-oracle problem: production replaces a
@@ -296,8 +314,9 @@ that fix or use an explicit governed waiver, not implicit structural incompleten
 
 ## Deduplicated issue plan
 
-The following deduplicated candidates were filed as #2295-#2316. Existing
-issues remain authoritative for everything already listed above.
+The following deduplicated candidates were filed as #2295-#2317, with the
+reconciliation adding #2321. Existing issues remain authoritative for everything
+already listed above.
 
 | Tracker | Priority | Candidate | Why new |
 |---|---|---|---|
@@ -323,6 +342,8 @@ issues remain authoritative for everything already listed above.
 | #2314 | Low-medium | Reliable critical SSH lease state transitions | Saturated buffer can silently drop up/down edges |
 | #2315 | Low | Forwarder and terminal drain cancellation hardening | Check-then-act and post-cancel continuation paths lack focused proofs |
 | #2316 | Low | Refresh connection architecture comments and phased-toggle docs | Source no longer matches documented lifecycle assumptions |
+| #2317 | High | Type and re-harden the in-emulator tmux enumeration budget stall | The suite budget expires during `tmux list-sessions` before outbound exactly-once reaches a trustworthy verdict |
+| #2321 | Medium-high | Stabilize stale-render heal proof against post-settlement resize races | Repeated CI RED recovered only after an extra instrumentation retry; settlement must exclude active resize/model mutations without weakening live-transport assertions |
 
 ## Non-goals
 

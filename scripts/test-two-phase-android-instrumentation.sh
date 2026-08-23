@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HARNESS="$ROOT_DIR/scripts/two-phase-android-instrumentation.sh"
 MUTATION_SCRIPT="$ROOT_DIR/scripts/two-phase-android-mutation.sh"
+DURABILITY_MUTATION_SCRIPT="$ROOT_DIR/scripts/two-phase-android-durability-mutation.sh"
 PROOF_SOURCE="$ROOT_DIR/app/src/androidTest/java/com/pocketshell/app/proof/LastSessionProcessRestartProofTest.kt"
 READ_SOURCE="$ROOT_DIR/app/src/main/java/com/pocketshell/app/session/LastSessionStore.kt"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/pocketshell-two-phase-self-test.XXXXXX")"
@@ -43,7 +44,40 @@ verify_real_mutation_contract() {
     "$READ_SOURCE" "$MUTATION_SCRIPT" > "$SCRATCH/mutation-contract.txt"
 }
 
+verify_durability_boundary_contract() {
+  local phase_one_source
+  [[ -x "$DURABILITY_MUTATION_SCRIPT" ]] \
+    || { echo "missing durability mutation runner: $DURABILITY_MUTATION_SCRIPT" >&2; exit 1; }
+  phase_one_source="$(sed -n \
+    '/fun phaseOnePersistsExactSuccessorGeneration()/,/^    @Test$/p' \
+    "$PROOF_SOURCE")"
+  if grep -Eq '\.read\(' <<<"$phase_one_source"; then
+    echo 'phase 1 must not read LastSessionStore before the external boundary' >&2
+    exit 1
+  fi
+  for proof_token in \
+    'ExternalKillBoundaryContext' \
+    'DropAsyncApplySharedPreferences' \
+    'only phase 2'
+  do
+    grep -Fq "$proof_token" "$PROOF_SOURCE" \
+      || { echo "durability proof lost required token: $proof_token" >&2; exit 1; }
+  done
+  for mutation_token in \
+    'WRITE_ANCHOR=' \
+    'apply().let { true }' \
+    'phase_one_external_boundary=true' \
+    'phase2_started_pid=' \
+    'mutant_result=RED'; do
+    grep -Fq "$mutation_token" "$DURABILITY_MUTATION_SCRIPT" \
+      || { echo "durability mutation runner lost required token: $mutation_token" >&2; exit 1; }
+  done
+  printf 'async-apply-boundary=deterministic\nrunner=%s\n' \
+    "$DURABILITY_MUTATION_SCRIPT" > "$SCRATCH/durability-contract.txt"
+}
+
 verify_real_mutation_contract
+verify_durability_boundary_contract
 for production_token in \
   'SshHostTmuxSessionsGateway' \
   'gateway.listSessions' \
@@ -205,6 +239,12 @@ case "$command_name" in
         predecessor_id="$(<"$state_root/predecessor-tmux-session-id")"
         predecessor_created="$(<"$state_root/predecessor-session-created")"
       fi
+      started_path="$output_dir/phase-$phase.started.txt"
+      {
+        printf 'schema=1\nrun_namespace=%s\nphase=%s\npid=%s\n' "$namespace" "$phase" "$pid"
+        printf 'process_name=%s\ntarget_package=%s\ntest_package=%s.test\n' \
+          "$package_name" "$package_name" "$package_name"
+      } > "$started_path"
       artifact_path="$output_dir/phase-$phase.txt"
       producer_fixture_host='10.0.2.2'
       if [[ "${FAKE_PRODUCER_METADATA_MUTANT:-0}" == "1" ]]; then

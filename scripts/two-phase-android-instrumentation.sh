@@ -352,6 +352,31 @@ validate_phase_one_ready_marker() {
     || fail "phase 1 ready marker PID does not match phase 1 artifact"
 }
 
+validate_phase_process_marker() {
+  local phase="$1" marker="$2"
+  [[ -s "$marker" ]] || fail "phase $phase process marker is absent or empty"
+  [[ "$(artifact_value "$marker" schema)" == "1" ]] \
+    || fail "phase $phase process marker schema mismatch"
+  [[ "$(artifact_value "$marker" run_namespace)" == "$RUN_NAMESPACE" ]] \
+    || fail "phase $phase process marker namespace mismatch"
+  [[ "$(artifact_value "$marker" phase)" == "$phase" ]] \
+    || fail "phase $phase process marker phase mismatch"
+
+  local pid process_name target_package test_package
+  pid="$(artifact_value "$marker" pid)"
+  process_name="$(artifact_value "$marker" process_name)"
+  target_package="$(artifact_value "$marker" target_package)"
+  test_package="$(artifact_value "$marker" test_package)"
+  [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] \
+    || fail "phase $phase process marker PID is not real: $pid"
+  [[ "$process_name" == "$TARGET_PACKAGE" ]] \
+    || fail "phase $phase process marker ran in $process_name, not $TARGET_PACKAGE"
+  [[ "$target_package" == "$TARGET_PACKAGE" ]] \
+    || fail "phase $phase process marker target mismatch"
+  [[ "$test_package" == "$TEST_PACKAGE" ]] \
+    || fail "phase $phase process marker test mismatch"
+}
+
 validate_instrumentation_success() {
   local phase="$1" method="$2" log_file="$3" rc="$4"
   [[ "$rc" == "0" ]] || fail "phase $phase am instrument exited $rc"
@@ -509,6 +534,10 @@ run_phase() {
   rc=${PIPESTATUS[0]}
   set -e
   printf '%s\n' "$rc" > "$RUN_DIR/phase-$phase-instrumentation.rc"
+  adb_cmd pull "$DEVICE_DIR/phase-$phase.started.txt" "$RUN_DIR/phase-$phase-started.txt" \
+    > "$RUN_DIR/phase-$phase-started-pull.log" 2>&1 \
+    || fail "phase $phase process marker pull failed"
+  validate_phase_process_marker "$phase" "$RUN_DIR/phase-$phase-started.txt"
   validate_instrumentation_success "$phase" "$method" "$log_file" "$rc"
   adb_cmd pull "$DEVICE_DIR/phase-$phase.txt" "$RUN_DIR/phase-$phase.txt" \
     > "$RUN_DIR/phase-$phase-artifact-pull.log" 2>&1 \
@@ -641,6 +670,10 @@ record_event "phase_1_complete"
 
 run_phase 2 "$PHASE2_METHOD"
 PHASE2_PID="$(artifact_value "$RUN_DIR/phase-2.txt" pid)"
+PHASE2_STARTED_PID="$(artifact_value "$RUN_DIR/phase-2-started.txt" pid)"
+
+[[ "$PHASE1_PID" != "$PHASE2_STARTED_PID" ]] \
+  || fail "phase 2 process marker reused phase-1 PID $PHASE1_PID"
 
 [[ "$PHASE1_PID" != "$PHASE2_PID" ]] \
   || fail "phase 2 reused phase-1 PID $PHASE1_PID; no process restart occurred"
@@ -715,6 +748,7 @@ grep -Eq ' command=shell am force-stop com\.pocketshell\.app\.[A-Za-z0-9._-]+([[
   printf 'install_test_count=1\n'
   printf 'phase1_pid=%s\n' "$PHASE1_PID"
   printf 'phase2_pid=%s\n' "$PHASE2_PID"
+  printf 'phase2_started_pid=%s\n' "$PHASE2_STARTED_PID"
   printf 'pid_changed=true\n'
   printf 'producer_fixture_name=%s\n' "$(artifact_value "$RUN_DIR/phase-2.txt" producer_fixture_name)"
   printf 'producer_fixture_host=%s\n' "$(artifact_value "$RUN_DIR/phase-2.txt" producer_fixture_host)"

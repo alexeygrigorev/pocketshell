@@ -101,6 +101,7 @@ JSONEOF
 }
 
 CLASSIFY_OUT="" CLASSIFY_RC=0 CLASSIFY_TOKEN="" CLASSIFY_REASON=""
+CLASSIFY_SETUP_ROOT=""
 run_classify() {
   local name="$1" first="$2" retry="$3"
   local setup_source="${4:-}" journey_source="${5:-}"
@@ -135,6 +136,73 @@ run_classify() {
   CLASSIFY_TOKEN="$(head -n 1 "$ws/artifacts/ci-journey-shard-verdict/shard-verdict.txt")"
   CLASSIFY_REASON="$(sed -n 's/^verdict_reason=//p' "$ws/artifacts/ci-journey-shard-verdict/shard-verdict.txt")"
   CLASSIFY_FILE="$ws/artifacts/ci-journey-shard-verdict/shard-verdict.txt"
+  CLASSIFY_SETUP_ROOT="$ws/artifacts/ci-journey-setup"
+}
+
+REPAIR_WRAPPER_RC=0 REPAIR_ROOT=""
+run_repair_wrapper_fixture() {
+  local name="$1" stub_rc="$2" mutation="${3:-}"
+  local root="$SANDBOX/$name" init_body="$SANDBOX/$name-init.sh"
+  local repair_body="$SANDBOX/$name-repair.sh"
+  local stub="$root/scripts/ci-emulator-repair-sdk-tools.sh"
+
+  rm -rf "$root"
+  mkdir -p "$root/scripts"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'echo "stub Android SDK repair output"\n'
+    printf 'exit %s\n' "$stub_rc"
+  } > "$stub"
+  chmod +x "$stub"
+
+  extract_step_body "Initialize emulator-journey setup artifacts (issue #2324)" \
+    "$init_body" '{}' \
+    || fail "could not extract the #2324 setup-artifact initialization step"
+  extract_step_body "Repair Android cmdline-tools + accept licenses (issue #771)" \
+    "$repair_body" '{}' \
+    || fail "could not extract the Android SDK repair step"
+
+  # G6 mutation: keep the repair output and original nonzero exit, but discard
+  # only the manifest write. The evidence assertion below must reject this
+  # mutant; otherwise it would be decorative and the original blind spot could
+  # recur with a green selftest.
+  if [[ "$mutation" == "drop-manifest" ]]; then
+    sed -i 's|> artifacts/ci-journey-setup/failure.env|> /dev/null|' "$repair_body"
+  fi
+
+  (cd "$root" && bash --noprofile --norc -eo pipefail "$init_body") \
+    || fail "#2324 setup-artifact initialization step failed in fixture"
+  set +e
+  (cd "$root" && bash --noprofile --norc -eo pipefail "$repair_body") \
+    > "$SANDBOX/$name-wrapper.log" 2>&1
+  REPAIR_WRAPPER_RC=$?
+  set -e
+  REPAIR_ROOT="$root/artifacts/ci-journey-setup"
+}
+
+assert_repair_wrapper_evidence() {
+  local label="$1"
+  [[ "$REPAIR_WRAPPER_RC" -eq 23 ]] || return 1
+  [[ -s "$REPAIR_ROOT/android-sdk-tools-repair.log" ]] || return 1
+  grep -Fxq 'stub Android SDK repair output' \
+    "$REPAIR_ROOT/android-sdk-tools-repair.log" || return 1
+  for field in \
+    'status=setup_failure' \
+    'reason=android_sdk_tools_repair' \
+    'fixture=android-sdk-tools' \
+    'attempts=1' \
+    'rc=23' \
+    'repair_rc=23' \
+    'tee_rc=0' \
+    'log=artifacts/ci-journey-setup/android-sdk-tools-repair.log'; do
+    grep -Fxq "$field" "$REPAIR_ROOT/failure.env" 2>/dev/null || return 1
+  done
+  run_classify "$label-classified" skipped skipped "$REPAIR_ROOT"
+  [[ "$CLASSIFY_TOKEN" == "RED" \
+      && "$CLASSIFY_REASON" == "pre_journey_setup_failure" \
+      && "$CLASSIFY_RC" -ne 0 ]] || return 1
+  [[ -s "$CLASSIFY_SETUP_ROOT/android-sdk-tools-repair.log" \
+      && -s "$CLASSIFY_SETUP_ROOT/failure.env" ]]
 }
 
 make_registry_stub() {
@@ -229,9 +297,18 @@ assert_setup_upload_contract() {
     || fail "Upload Docker logs must use actions/upload-artifact@v7"
   grep -Fxq '            artifacts/ci-journey-setup/' <<<"$step" \
     || fail "Upload Docker logs must package artifacts/ci-journey-setup/"
+  grep -Fq 'mkdir -p artifacts/ci-journey-setup' "$WORKFLOW" \
+    || fail "the emulator-journey job must initialize the setup artifact root early"
+  grep -Fq 'repair_status=("${PIPESTATUS[@]}")' "$WORKFLOW" \
+    || fail "the Android SDK repair must capture the repair command rc, not tee rc"
+  grep -Fq 'artifacts/ci-journey-setup/failure.env' "$WORKFLOW" \
+    || fail "the Android SDK repair must write a setup failure manifest"
   upload_line="$(grep -n '^      - name: Upload Docker logs$' "$WORKFLOW" | cut -d: -f1)"
   retry_line="$(grep -n 'Request failed-job retry for external setup INFRA' "$WORKFLOW" | cut -d: -f1)"
-  [[ "$upload_line" =~ ^[0-9]+$ && "$retry_line" =~ ^[0-9]+$ && "$upload_line" -lt "$retry_line" ]] \
+  init_line="$(grep -n '^      - name: Initialize emulator-journey setup artifacts (issue #2324)$' "$WORKFLOW" | cut -d: -f1)"
+  repair_line="$(grep -n '^      - name: Repair Android cmdline-tools + accept licenses (issue #771)$' "$WORKFLOW" | cut -d: -f1)"
+  [[ "$upload_line" =~ ^[0-9]+$ && "$retry_line" =~ ^[0-9]+$ && "$upload_line" -lt "$retry_line" \
+      && "$init_line" =~ ^[0-9]+$ && "$repair_line" =~ ^[0-9]+$ && "$init_line" -lt "$repair_line" ]] \
     || fail "setup logs must upload before the intentional failed-job trigger"
 }
 
@@ -255,6 +332,32 @@ grep -qx 'run_attempt=4' "$CLASSIFY_FILE" || fail "classifier token lost rerun-a
 grep -qx 'verdict_reason=preseed_before_classify' "$CLASSIFY_FILE" \
   && fail "classifier left the #1809 pre-seed in place"
 pass "skipped first/retry -> RED pre_journey_setup_failure -> aggregate RED, with current provenance"
+
+echo
+echo "== #2324 Android SDK repair failure evidence =="
+run_repair_wrapper_fixture successful-sdk-repair 0
+[[ "$REPAIR_WRAPPER_RC" -eq 0 ]] \
+  || fail "successful Android SDK repair must keep exit 0, got $REPAIR_WRAPPER_RC"
+[[ -s "$REPAIR_ROOT/android-sdk-tools-repair.log" ]] \
+  || fail "successful Android SDK repair output was not retained"
+[[ ! -e "$REPAIR_ROOT/failure.env" ]] \
+  || fail "successful Android SDK repair must not leave a failure manifest"
+pass "successful Android SDK repair keeps its output and exit behavior"
+
+run_repair_wrapper_fixture failed-sdk-repair 23
+assert_repair_wrapper_evidence failed-sdk-repair \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "failed SDK repair evidence or RED/pre_journey_setup_failure classification was lost"; }
+pass "failed Android SDK repair output + rc manifest are retained and remain RED/pre_journey_setup_failure"
+
+run_repair_wrapper_fixture failed-sdk-repair-mutant 23 drop-manifest
+[[ "$REPAIR_WRAPPER_RC" -eq 23 \
+    && -s "$REPAIR_ROOT/android-sdk-tools-repair.log" \
+    && ! -e "$REPAIR_ROOT/failure.env" ]] \
+  || fail "G6 repair mutant did not preserve the original rc/output while dropping only failure.env"
+if assert_repair_wrapper_evidence failed-sdk-repair-mutant; then
+  fail "G6 mutation discarded failure.env but the repair evidence proof still passed"
+fi
+pass "G6 mutation confirmed: dropping failure.env reddens the repair evidence proof"
 
 echo
 echo "== #2095 Docker Hub setup retry + exact signature classification =="

@@ -1279,6 +1279,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Issue #2324: create the setup evidence root before any pre-journey
+      # operation can fail. The Android SDK repair below writes its captured
+      # output and failure manifest here, and the always-run Docker evidence
+      # upload packages the root even when the journey never starts.
+      - name: Initialize emulator-journey setup artifacts (issue #2324)
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/ci-journey-setup
+
       # Issue #1809 (G5 re-run): pre-seed this shard's verdict token IMMEDIATELY
       # after checkout — before anything can fail — so EVERY attempt that starts
       # contributes a token of its own.
@@ -1348,7 +1357,40 @@ jobs:
       # verification steps live in the script header (extracted verbatim in
       # #2134).
       - name: Repair Android cmdline-tools + accept licenses (issue #771)
-        run: scripts/ci-emulator-repair-sdk-tools.sh
+        run: |
+          set -euo pipefail
+          repair_log="artifacts/ci-journey-setup/android-sdk-tools-repair.log"
+
+          # Keep the repair's complete output in the setup artifact while still
+          # streaming it into the job log. Capture PIPESTATUS immediately: the
+          # command's rc is the forensic fact, not tee's rc.
+          set +e
+          scripts/ci-emulator-repair-sdk-tools.sh 2>&1 | tee "$repair_log"
+          repair_status=("${PIPESTATUS[@]}")
+          set -e
+          repair_rc="${repair_status[0]:-1}"
+          tee_rc="${repair_status[1]:-1}"
+
+          # A failed SDK repair is a commit-bound pre-journey setup failure.
+          # Keep its manifest deliberately outside the external-registry
+          # `infra_exhausted` shape, so #2095's bounded Docker retry cannot
+          # consume or soften this failure.
+          if [[ "$repair_rc" -ne 0 || "$tee_rc" -ne 0 ]]; then
+            failure_rc="$repair_rc"
+            [[ "$failure_rc" -ne 0 ]] || failure_rc="$tee_rc"
+            {
+              printf 'status=setup_failure\n'
+              printf 'reason=android_sdk_tools_repair\n'
+              printf 'fixture=android-sdk-tools\n'
+              printf 'attempts=1\n'
+              printf 'rc=%s\n' "$failure_rc"
+              printf 'repair_rc=%s\n' "$repair_rc"
+              printf 'tee_rc=%s\n' "$tee_rc"
+              printf 'log=%s\n' "$repair_log"
+            } > artifacts/ci-journey-setup/failure.env
+            echo "::error title=Android SDK cmdline-tools repair failed::Repair rc=${repair_rc}, tee rc=${tee_rc}, returning rc=${failure_rc}; captured output is in ${repair_log} and failure.env is in artifacts/ci-journey-setup/."
+            exit "$failure_rc"
+          fi
 
       - name: Build SSH base image
         run: scripts/ci-journey-fixture-retry.sh sshd -- docker compose -f tests/docker/docker-compose.yml build sshd

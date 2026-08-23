@@ -71,30 +71,37 @@ Tmux's native split layout is unreadable on a phone. With control mode we know a
 
 The SSH/tmux connection core (connect / attach / reattach / grace / lease /
 reconnect) is the single most important subsystem and the #1 dogfood blocker
-(D28). It is being moved off the old inline path onto a first-class
-`core-connection` `ConnectionController`, turned on **phase by phase** behind a
-temporary user-facing toggle (locked decision **D29** — see decisions.md).
+(D28). The live lifecycle authority is the `core-connection`
+`ConnectionController`, integrated by `ConnectionManager` and its effect
+drivers. There is no user-facing New/Old runtime toggle.
 
-**Two selectable paths during the turn-on, chosen by a Settings toggle:**
+**Current ownership:**
 
-- **NEW (default) — `ConnectionController` + `RevealStateMachine`.** The
-  `ConnectionController` owns connect / attach / reattach / grace / lease /
-  reconnect as one state machine driven by exactly two inputs: app
-  foreground/background lifecycle, and the transport health signals
-  (`TmuxClient.disconnected` / `SshLeaseManager` state). The
-  `RevealStateMachine` keys the screen to the target session id
+- `ConnectionController` owns the lifecycle reducer for connect / attach /
+  reattach / grace / lease / reconnect. It consumes foreground/background
+  lifecycle and transport-health signals (`TmuxClient.disconnected` /
+  `SshLeaseManager` state), and publishes the authoritative connection state.
+- `ConnectionEffectDriver` coordinates the suspendable effects; `GraceEffects`,
+  `TmuxAttachEffects`, and `TransportEffects` own the corresponding transport
+  and tmux I/O. Keeping that I/O outside the reducer prevents Android and SSH
+  concerns from becoming part of the state machine.
+- `RevealStateMachine` keys the screen to the target session id
   (`Navigating(targetId) → Seeding(targetId) → Live(targetId)`) and **drops any
   pane seed whose id ≠ the current target**, so a late seed from a superseded
-  switch can never paint the wrong session. Grace is a single owner anchored on
-  the lease's 60 s warm window (D21), not three disagreeing clocks.
-- **OLD (selectable via the toggle) — inline `TmuxSessionViewModel`.** The
-  legacy reconnect/grace machine welded into the `TmuxSessionViewModel`. It
-  remains selectable as the on-device fallback **only** during the phased
-  turn-on, and is **deleted together with the toggle in #766** once the
-  maintainer confirms the new path on-device. After #766 there is a single
-  active path (D28 rule 4): `ConnectionController` only, no toggle, no old path.
+  switch cannot paint the wrong session. Grace is anchored on the lease's warm
+  window rather than several independent clocks.
+- `TmuxSessionRuntimeCache` retains warm tmux/UI runtimes for same-host
+  switches. Re-activation republishes the cached state; eviction and teardown
+  run through the contained cleanup scopes described by the runtime code.
 
-**Turn-on status — P1–P4 ALL MERGED (2026-06-14):**
+`TmuxSessionViewModel` remains the Android integration surface. #766 tracks the
+remaining hard-cut cleanup of inline connection decision sites and their gate
+repointing; it is not a second selectable runtime path. Until that cleanup is
+verified across the required journeys, documentation must distinguish the
+controller authority from the ViewModel integration residue without describing
+an obsolete fallback toggle.
+
+**Migration status — P1–P4 are merged (2026-06-14):**
 
 - **P1 — screen-keyed reveal (#686): MERGED.** The `RevealStateMachine`
   id-tagged-seed / drop-non-target behaviour above.
@@ -108,12 +115,13 @@ temporary user-facing toggle (locked decision **D29** — see decisions.md).
 - **P4 — Codex backpressure (#576): MERGED.** The core-tmux command-timeout is now
   an IDLE deadline keyed on reader-side activity (fires on reader silence, re-arms
   while bytes flow), and read-only commands fail-open instead of `FatalClose` — so
-  a busy-but-alive `-CC` link no longer self-inflicts a reconnect. No toggle
-  (transport-layer; fixes both paths). Keep-alive dead-peer detection is untouched.
+  a busy-but-alive `-CC` link no longer self-inflicts a reconnect. Keep-alive
+  dead-peer detection is untouched.
 
-The full P1–P4 ConnectionController turn-on is therefore COMPLETE behind the
-New/Old toggle (default New); only **#766** (delete the toggle + the OLD inline
-path, gated on maintainer on-device verification of all four journeys) remains.
+The P1–P4 work established the current controller/effects architecture. #766 is
+the remaining cleanup slice: delete the residual inline decision vocabulary and
+repoint its callers after the controller-owned journeys have the required
+maintainer verification.
 
 Each phase is gated by a device-truth journey (J1–J4) that asserts the **user's
 rendered viewport** — the terminal text actually shown — NOT internal/shadow

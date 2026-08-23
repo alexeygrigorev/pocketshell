@@ -365,11 +365,12 @@ internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
 ) {
     // Issue #710: this teardown must be bounded so a pane job wedged in a
     // non-cooperative `-CC` socket read (which never honours cancellation)
-    // cannot freeze the caller. `onCleared()` parks the runtime on the MAIN
-    // thread via `runBlocking`, so an unbounded `cancelAndJoin()` or a
-    // `NonCancellable` `lease.release()` would stall the main thread
-    // indefinitely (activity never DESTROYED; real-device freeze on
-    // background-mid-rapid-switch).
+    // cannot freeze the cleanup caller. Production eviction hands this
+    // suspending teardown to the contained/application cleanup scopes; the
+    // synchronous replacement seam uses the same bounded body only when its
+    // caller explicitly needs completion before returning. An unbounded
+    // `cancelAndJoin()` or `NonCancellable` `lease.release()` would otherwise
+    // keep teardown alive indefinitely and stall lifecycle cleanup.
     //
     // Bound only the steps that can suspend forever: the three cancel/join
     // sweeps and the `lease.release()`. Each gets its own [detachTimeoutMs]
@@ -399,11 +400,10 @@ internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
     runCatching { client.close() }
     withContext(NonCancellable) {
         // A wedged `lease.release()` (e.g. a transport stuck in a blocking
-        // close) must not outlive the budget either: bound it so the main
-        // thread is guaranteed to return. The abandoned lease falls to the
-        // grace TTL / GC. NonCancellable keeps the release itself from being
-        // cancelled by the parent runBlocking scope; withTimeoutOrNull adds
-        // the wall-clock ceiling on top of that.
+        // close) must not outlive the budget either: bound it so the cleanup
+        // scope can move on. The abandoned lease falls to the grace TTL / GC.
+        // NonCancellable keeps the release itself from being cancelled by the
+        // caller's scope; withTimeoutOrNull adds the wall-clock ceiling.
         withTimeoutOrNull(detachTimeoutMs) {
             runCatching { lease?.release() }
         }

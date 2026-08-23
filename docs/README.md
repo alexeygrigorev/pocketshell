@@ -26,6 +26,7 @@ context; the README and current feature docs track released behavior.
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
 | [handoff-2026-08-13-release.md](handoff-2026-08-13-release.md) | v0.4.44 release handoff: stop boundary, deferred blockers, validation, tag, and publication plan |
 | [audit-2026-07-03.md](audit-2026-07-03.md) | Stability + UX jobs-to-be-done audit (5 parallel auditors); issue map #1222–#1243 |
+| [audit-2026-08-23-comprehensive-session-management.md](audit-2026-08-23-comprehensive-session-management.md) | Session tree/connection/data/release audit consolidation; live owners and deduplicated issue plan |
 | [black-screen-handoff.md](black-screen-handoff.md) | Black-screen elimination campaign: root-cause verdict, work queue #1294–#1298, diagnostics disambiguation — the implementing agent's brief |
 | [../AGENTS.md](../AGENTS.md) | Primary project + agent instructions (imported by [../CLAUDE.md](../CLAUDE.md)) |
 | [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |

@@ -8,40 +8,50 @@ import java.time.Instant
  * Parser for the per-provider NDJSON produced by `pocketshell usage --json`.
  *
  * `pocketshell usage` flattens quse's provider-keyed `--json` document into
- * newline-delimited JSON — ONE object per line per provider. quse v0.0.9 is
- * the single source of truth for the unified schema (issue #1318, D22
- * hard-cut): the app reads quse's exact fields and does NOT re-derive windows
- * / resets / percentages. Each record has this fixed shape:
+ * newline-delimited JSON — ONE object per line per provider. The pinned PyPI
+ * quse 0.0.14 wheel is the five-provider legacy `short_term` /
+ * `long_term` producer; the host boundary translates it and this parser
+ * consumes only the resulting canonical PocketShell wire shape. A separate
+ * canonical producer contract may add providers such as OpenCode Go. The
+ * parser does NOT re-derive windows / resets / percentages. Each record has
+ * this shape:
  *
  * ```json
  * {
  *   "provider": "claude",
  *   "status": "ok",
- *   "short_term": {"percent_remaining": 91.0, "reset_at": "2026-07-07T23:19:59Z", "window": "5h"},
- *   "long_term":  {"percent_remaining": 30.0, "reset_at": "2026-07-09T14:59:59Z", "window": "7d"},
+ *   "windows": {
+ *     "5h":      {"percent_remaining": 99.0, "reset_at": "2026-08-22T09:49:59Z", "rolling": false},
+ *     "7d":      {"percent_remaining": 96.0, "reset_at": "2026-08-27T14:59:59Z"},
+ *   },
  *   "block_reason": null,
  *   "error": null,
  *   "details": { ... ignored except documented Codex reset-credit fields ... }
  * }
  * ```
  *
- * Either `short_term` or `long_term` (or both) may be present / null. The
- * window label comes straight from `short_term.window` / `long_term.window`
- * (e.g. `5h`, `7d`, `weekly`, `monthly`, or `null` → the generic key name).
- * `status` values include `ok`, `unsupported`, `error`, and `limited` /
- * `blocked`. When `status == "error"` the `error` field carries a free-form
- * string. The app ignores `details` except for Codex
- * `reset_credits_available`, `reset_credits`, and `reset_credits_error`.
- * Windows still come only from the unified top-level fields.
+ * The top-level `windows` map carries one entry per span; the KEY IS the
+ * producer's window label (`5h`, `7d`, `weekly`, `monthly`, or another
+ * provider-owned key) and is passed through verbatim. A span that does not
+ * apply to the provider is omitted from rendering. Only the `5h` entry may carry a
+ * `rolling: bool`, which has no counterpart in the PocketShell window model
+ * and is deliberately ignored. `status` values include `ok`, `unsupported`,
+ * `error`, and `limited` / `blocked`. When `status == "error"` the `error`
+ * field carries a free-form string. The app ignores `details` except for
+ * Codex `reset_credits_available`, `reset_credits`, and
+ * `reset_credits_error`. Windows still come only from quse's own fields.
  *
- * STRICT / fail-loud (issue #1318): the parser expects quse's exact schema.
- * Any malformed record — non-JSON line, missing `provider`, a `short_term` /
- * `long_term` that is not an object — throws [UsageParseException], which the
- * caller surfaces as a whole-panel error. There is no per-record
- * skip-resilience, no `details.windows` alias fallback, and no re-derivation:
- * a schema mismatch fails visibly instead of silently rendering a broken
- * panel. Genuine RUNTIME states (SSH failure, quse-missing / exit != 0
- * provider-error, empty `--cached`) are handled by the caller, not here.
+ * STRICT / fail-loud (issue #1318): the parser expects the producer's exact
+ * canonical schema.
+ * Any malformed record — non-JSON line, missing `provider`, a `windows` that
+ * is not an object, a null/non-object window entry, or a window with a
+ * missing/non-numeric percentage — throws
+ * [UsageParseException], which the caller surfaces as a whole-panel error.
+ * There is no per-record skip-resilience, no old-schema alias fallback, and no
+ * re-derivation: a schema mismatch fails visibly instead of silently rendering
+ * a broken panel. Genuine RUNTIME states (SSH
+ * failure, quse-missing / exit != 0 provider-error, empty `--cached`) are
+ * handled by the caller, not here.
  *
  * Parsing stays app-credential-free: the app only consumes JSON already
  * fetched by a server-side command.
@@ -79,17 +89,13 @@ public class PocketshellUsageJsonParser {
         val provider = obj.requiredString("provider")
         val rawStatus = obj.optString("status", "unknown").ifBlank { "unknown" }
 
-        val windows = mutableListOf<UsageWindow>()
-        parseWindow(record = obj, jsonKey = "short_term", provider = provider)?.let { windows += it }
-        parseWindow(record = obj, jsonKey = "long_term", provider = provider)?.let { windows += it }
-
         return UsageProviderRecord(
             provider = provider,
             status = parseStatus(rawStatus),
             rawStatus = rawStatus,
             blockReason = obj.optionalString("block_reason"),
             lastError = actionableProviderError(provider, obj.optionalString("error")),
-            windows = windows,
+            windows = parseWindows(record = obj, provider = provider),
             resetCredits = parseResetCredits(record = obj, provider = provider),
         )
     }
@@ -164,47 +170,65 @@ public class PocketshellUsageJsonParser {
     }
 
     /**
-     * Convert a usage window object into a [UsageWindow]. quse reports
-     * `percent_remaining`; the PocketShell model uses `used` / `limit` in
-     * `percent` units, so `percent_remaining = R` maps to
-     * `used = 100 - R, limit = 100, unit = "percent"`.
+     * Parse the producer's canonical top-level `windows` map (issue #2274,
+     * D22 hard-cut). Each KEY is the published window label (`5h`, `7d`,
+     * `weekly`, `monthly`, …) and is passed through verbatim. Each value is
+     * `{percent_remaining, reset_at[, rolling]}`; quse reports
+     * `percent_remaining`, and the PocketShell model uses `used` / `limit` in
+     * percent units, so `percent_remaining = R` maps to
+     * `used = 100 - R, limit = 100, unit = "percent"`. The reset time comes
+     * straight from the per-window `reset_at` (canonical ISO-8601 UTC).
      *
-     * The window NAME comes straight from quse's `window` field (`5h`, `7d`,
-     * `weekly`, `monthly`, …); when quse carries no span (`window: null`) the
-     * generic key name (`short_term` / `long_term`) is used so the UI's
-     * `windowLabel` humanizes it. The reset time comes straight from the
-     * `reset_at` field (canonical ISO-8601 UTC).
+     * The per-window `rolling: bool` (only the `5h` entry carries it) has no
+     * counterpart in the [UsageWindow] model and is deliberately ignored.
      *
-     * Returns `null` when the field is absent / null on the record, or when
-     * the window carries no `percent_remaining` (some providers expose only
-     * one of short/long term). THROWS when the field is present but is not an
-     * object, or when `percent_remaining` / `reset_at` are malformed
-     * (fail-loud, issue #1318).
+     * The host producer requires either canonical `windows` or at least one
+     * legacy `short_term` / `long_term` field, so a producer record missing
+     * both never reaches this parser. For defensive compatibility, this parser
+     * returns an empty list when the canonical map is absent / null. THROWS
+     * fail-loud (issue #1318) when `windows` is present but not an object,
+     * when an entry is present but not an object, or when `percent_remaining`
+     * A non-null `reset_at` must be canonical ISO-8601; an absent or null
+     * `reset_at` means that no reset time is available. A present window
+     * object with a null `percent_remaining` is a valid non-applicable span
+     * in a canonical producer record and is omitted from rendering; a present
+     * non-object entry remains a schema error.
+     * There is NO `short_term` / `long_term` alias fallback here: the host
+     * producer owns that compatibility translation, so reading those fields
+     * in the app would silently mask a producer/schema drift.
      */
-    private fun parseWindow(
+    private fun parseWindows(
         record: JSONObject,
-        jsonKey: String,
         provider: String,
-    ): UsageWindow? {
-        if (!record.has(jsonKey) || record.isNull(jsonKey)) return null
-        val obj = record.opt(jsonKey) as? JSONObject
-            ?: throw UsageParseException("'$jsonKey' for $provider is not an object")
+    ): List<UsageWindow> {
+        if (!record.has("windows") || record.isNull("windows")) return emptyList()
+        val windowsObj = record.opt("windows") as? JSONObject
+            ?: throw UsageParseException("'windows' for $provider is not an object")
 
-        if (!obj.has("percent_remaining") || obj.isNull("percent_remaining")) {
-            // The window object exists but carries no value (e.g. a provider
-            // that only populates one range, or an error record with null
-            // percent). Treat as absent — no renderable window.
-            return null
+        val windows = mutableListOf<UsageWindow>()
+        for (key in windowsObj.keys()) {
+            if (windowsObj.isNull(key)) {
+                throw UsageParseException("'windows.$key' for $provider is not an object")
+            }
+            val obj = windowsObj.opt(key) as? JSONObject
+                ?: throw UsageParseException("'windows.$key' for $provider is not an object")
+            if (!obj.has("percent_remaining")) {
+                throw UsageParseException(
+                    "'windows.$key.percent_remaining' for $provider is missing",
+                )
+            }
+            if (obj.isNull("percent_remaining")) continue
+            val percentRemaining = obj.requiredNumber("percent_remaining", provider, key)
+            val used = (100.0 - percentRemaining).coerceIn(0.0, 100.0)
+            windows += UsageWindow(
+                name = key,
+                used = used,
+                limit = 100.0,
+                unit = "percent",
+                resetAt = obj.optionalResetInstant(),
+            )
         }
-        val percentRemaining = obj.requiredNumber("percent_remaining", provider, jsonKey)
-        val used = (100.0 - percentRemaining).coerceIn(0.0, 100.0)
-        return UsageWindow(
-            name = obj.optionalString("window") ?: jsonKey,
-            used = used,
-            limit = 100.0,
-            unit = "percent",
-            resetAt = obj.optionalResetInstant(),
-        )
+        return windows
     }
 
     private fun parseStatus(raw: String): UsageStatus = when (

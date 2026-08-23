@@ -64,6 +64,10 @@ class UsageViewModelTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
+    /** Published quse null source spans are omitted by the host producer. */
+    private val nullSpans =
+        """"windows":{}"""
+
     private lateinit var db: AppDatabase
 
     @Before
@@ -119,7 +123,7 @@ class UsageViewModelTest {
 
         val parser = PocketshellUsageJsonParser()
         val populatedRecords = parser.parse(
-            """{"provider":"codex","status":"limited","short_term":null,"long_term":{"percent_remaining":25.0,"reset_at":null},"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"limited","windows":{"7d":{"percent_remaining":25.0,"reset_at":null}},"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf(
@@ -199,7 +203,7 @@ class UsageViewModelTest {
         )
         val parser = PocketshellUsageJsonParser()
         val records = parser.parse(
-            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf(
@@ -249,10 +253,10 @@ class UsageViewModelTest {
         )
         val parser = PocketshellUsageJsonParser()
         val cachedRecords = parser.parse(
-            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":60.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":60.0}},"block_reason":null,"error":null,"details":{}}""",
         )
         val liveRecords = parser.parse(
-            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":42.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":42.0}},"block_reason":null,"error":null,"details":{}}""",
         )
         val capturedAt = Instant.parse("2026-06-11T09:00:00Z")
         val liveFetchStarted = CompletableDeferred<Unit>()
@@ -304,7 +308,7 @@ class UsageViewModelTest {
             HostEntity(name = "agents", hostname = "fail.example", username = "u", keyId = keyId),
         )
         val cachedRecords = PocketshellUsageJsonParser().parse(
-            """{"provider":"claude","status":"ok","short_term":{"percent_remaining":55.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"claude","status":"ok","windows":{"5h":{"percent_remaining":55.0}},"block_reason":null,"error":null,"details":{}}""",
         )
         val capturedAt = Instant.parse("2026-06-11T08:30:00Z")
         val fetcher = FakeFetcher(
@@ -336,17 +340,17 @@ class UsageViewModelTest {
             HostEntity(name = "agents", hostname = "reset.example", username = "u", keyId = keyId),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":100.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":100.0}},"block_reason":null,"error":null,"details":{}}""",
         )
         val recentReset = UsageResetEvent(
             provider = "codex",
-            window = "short_term",
+            window = "5h",
             detectedAt = Instant.now().minusSeconds(600),
             statedResetAt = Instant.now().plusSeconds(900),
             newResetAt = Instant.now().plusSeconds(3600),
             timing = "early",
             minutesEarly = 15,
-            resetKey = "codex|short_term|recent",
+            resetKey = "codex|5h|recent",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf("reset.example" to HostUsageFetch.Records(records, Instant.now())),
@@ -358,7 +362,7 @@ class UsageViewModelTest {
 
         val banner = viewModel.state.value.resetBanner
         assertNotNull("recent reset should populate the banner", banner)
-        assertEquals("codex|short_term|recent", banner!!.resetKey)
+        assertEquals("codex|5h|recent", banner!!.resetKey)
         assertTrue(banner.title.startsWith("Codex limits reset"))
     }
 
@@ -371,7 +375,7 @@ class UsageViewModelTest {
             HostEntity(name = "agents", hostname = "noreset.example", username = "u", keyId = keyId),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"ok","short_term":{"percent_remaining":50.0},"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok","windows":{"5h":{"percent_remaining":50.0}},"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf("noreset.example" to HostUsageFetch.Records(records, Instant.now())),
@@ -396,7 +400,7 @@ class UsageViewModelTest {
             HostEntity(name = "agents", hostname = "push.example", username = "u", keyId = keyId),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf("push.example" to HostUsageFetch.Records(records, Instant.now())),
@@ -422,7 +426,7 @@ class UsageViewModelTest {
             HostEntity(name = "agents", hostname = "noreg.example", username = "u", keyId = keyId),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf("noreg.example" to HostUsageFetch.Records(records, Instant.now())),
@@ -447,7 +451,7 @@ class UsageViewModelTest {
             HostEntity(name = "agents", hostname = "failreg.example", username = "u", keyId = keyId),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf("failreg.example" to HostUsageFetch.Records(records, Instant.now())),
@@ -477,7 +481,7 @@ class UsageViewModelTest {
             HostEntity(name = "b", hostname = "h-b.example", username = "u", keyId = keyId),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+            """{"provider":"codex","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf(
@@ -508,7 +512,7 @@ class UsageViewModelTest {
             ),
         )
         val records = PocketshellUsageJsonParser().parse(
-            """{"provider":"codex","status":"exhausted","short_term":null,"long_term":null,"block_reason":"Codex quota exhausted","error":null,"details":{}}""",
+            """{"provider":"codex","status":"exhausted",$nullSpans,"block_reason":"Codex quota exhausted","error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf("codex.example" to HostUsageFetch.Records(records, Instant.now())),
@@ -644,7 +648,7 @@ class UsageViewModelTest {
         val session = FakeSshSession(
             canned = mapOf(
                 "mycorp-usage --json" to ExecResult(
-                    stdout = """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stdout = """{"provider":"codex","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
                     stderr = "",
                     exitCode = 0,
                 ),
@@ -700,7 +704,7 @@ class UsageViewModelTest {
                 // Only the PATH-robust wrapped command succeeds; a bare probe
                 // (modelled by `barePocketshellFails`) would have failed.
                 wrappedUsage to ExecResult(
-                    stdout = """{"provider":"claude","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stdout = """{"provider":"claude","status":"ok",$nullSpans,"block_reason":null,"error":null,"details":{}}""",
                     stderr = "",
                     exitCode = 0,
                 ),

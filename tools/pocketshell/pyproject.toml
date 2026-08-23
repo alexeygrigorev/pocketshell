@@ -36,16 +36,17 @@ dependencies = [
     "click>=8.2.0",
     # Usage backend + single source of truth for the unified provider schema
     # (issue #1318). Pinned exactly: `pocketshell usage --json` expects quse's
-    # provider-keyed `--json` document (per provider: status +
-    # short_term/long_term {percent_remaining, reset_at, window} + error) and
-    # fails loudly on any schema drift, so the version is frozen, not a range.
-    # 0.0.13 (#2195): adds the `grok` provider (alias `grok-build`) so
-    # `pocketshell usage --json` can emit Grok Build quota. 0.0.11 (#1564)
-    # still matters historically: it labels each Codex window from its actual
-    # `limit_window_seconds` instead of assuming primary==5h / secondary==7d,
-    # and omits a window Codex drops (`present: false`) as a null placeholder
-    # rather than a phantom "0% / unavailable" ghost row.
-    "quse==0.0.13",
+    # provider-keyed `--json` document and fails loudly on schema drift, so the
+    # version is frozen, not a range. The published 0.0.14 wheel is the
+    # five-provider legacy shape with `short_term` / `long_term` records. The
+    # host boundary translates those records into canonical `windows`; it also
+    # accepts a separate top-level `windows` producer contract for newer or
+    # custom producers, without treating that shape as PyPI 0.0.14 provenance.
+    # Canonical-only providers such as OpenCode Go belong to that separate
+    # contract, not to the published-wheel provider list. 0.0.13 (#2195)
+    # historically added the `grok` provider; 0.0.11 (#1564) labeled each
+    # Codex window from its actual `limit_window_seconds`.
+    "quse==0.0.14",
     # FCM HTTP v1 push delivery (#690): service-account OAuth2 bearer minting
     # for `pocketshell push` / the `usage --capture` reset-push send. Imported
     # lazily and fail-soft — a host without it (or without a Firebase
@@ -109,6 +110,13 @@ exclude = [
     "/.venv",
     "/dist",
 ]
+
+[tool.uv]
+# Keep the lockfile's reproducibility cutoff project-local. The host may have
+# a rolling global `exclude-newer` policy that predates a deliberately pinned
+# release (quse 0.0.14 was uploaded 2026-08-20); this exact value is also the
+# `uv.lock` options cutoff and must be used when checking this lock.
+exclude-newer = "2026-08-20T22:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

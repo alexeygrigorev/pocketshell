@@ -285,7 +285,8 @@ def test_usage_fetch_round_trip(
     provider-keyed output into per-provider NDJSON (issue #1318)."""
     fake_bin = tmp_path / "bin"
     python_exe = _fake_python_bin(fake_bin)
-    # quse-0.0.9 emits a provider-keyed object; the daemon flattens it.
+    # Published quse 0.0.14 emits a provider-keyed short/long object; the
+    # daemon applies the producer-boundary canonical windows translation.
     payload = '{"codex": {"status": "ok", "short_term": {"percent_remaining": 77.0, "reset_at": null, "window": "5h"}}}\n'
     _write_fake_quse(fake_bin, payload=payload)
 
@@ -302,7 +303,8 @@ def test_usage_fetch_round_trip(
         # stdout is FLATTENED NDJSON: one record, provider injected from key.
         record = json.loads(result["stdout"].strip())
         assert record["provider"] == "codex"
-        assert record["short_term"]["window"] == "5h"
+        # The canonical map key is the published window label.
+        assert record["windows"]["5h"]["percent_remaining"] == 77.0
     finally:
         _terminate(proc)
 
@@ -319,10 +321,14 @@ def test_two_concurrent_clients_cache_hit_is_faster(
     """
     fake_bin = tmp_path / "bin"
     python_exe = _fake_python_bin(fake_bin)
-    payload = '{"codex": {"status": "ok"}}\n'
+    payload = (
+        '{"codex": {"status": "ok", '
+        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
+        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+    )
     # The daemon flattens the provider-keyed payload into NDJSON before
     # caching; the cold and warm responses both carry this flattened form.
-    flattened = '{"provider": "codex", "status": "ok"}\n'
+    flattened = '{"provider": "codex", "status": "ok", "windows": {}}\n'
     _write_fake_quse(fake_bin, payload=payload, sleep_secs=0.3)
 
     proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)
@@ -393,7 +399,9 @@ def test_no_cache_param_bypasses_cache(
         f"n=$(cat {counter_file})\n"
         "n=$((n+1))\n"
         f'echo "$n" > {counter_file}\n'
-        'printf \'{"x": {"status": "ok", "call": %s}}\\n\' "$n"\n'
+        'printf \'{"x": {"status": "ok", "call": %s, '
+        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
+        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\\n\' "$n"\n'
     )
     script.chmod(0o755)
 
@@ -509,8 +517,16 @@ def test_no_daemon_flag_skips_daemon_probe(
     fake_bin.mkdir()
     # Provider names encode the source so the flattened NDJSON reveals which
     # path answered (issue #1318: provider-keyed payloads).
-    daemon_payload = '{"fromdaemon": {"status": "ok"}}\n'
-    subprocess_payload = '{"fromsubprocess": {"status": "ok"}}\n'
+    daemon_payload = (
+        '{"fromdaemon": {"status": "ok", '
+        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
+        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+    )
+    subprocess_payload = (
+        '{"fromsubprocess": {"status": "ok", '
+        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
+        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+    )
     _write_fake_quse(fake_bin, payload=subprocess_payload)
 
     # Spin up a daemon that returns a different payload so we can
@@ -551,8 +567,16 @@ def test_usage_uses_daemon_by_default(
     """Without ``--no-daemon`` the CLI must dispatch via the daemon."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    daemon_payload = '{"fromdaemon": {"status": "ok"}}\n'
-    subprocess_payload = '{"fromsubprocess": {"status": "ok"}}\n'
+    daemon_payload = (
+        '{"fromdaemon": {"status": "ok", '
+        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
+        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+    )
+    subprocess_payload = (
+        '{"fromsubprocess": {"status": "ok", '
+        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
+        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+    )
     _write_fake_quse(fake_bin, payload=subprocess_payload)
 
     daemon_bin = tmp_path / "daemon_bin"
@@ -586,7 +610,11 @@ def test_usage_falls_through_when_daemon_absent(
     """No daemon socket on disk => CLI must use the subprocess path."""
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    payload = '{"fromsubprocess": {"status": "ok"}}\n'
+    payload = (
+        '{"fromsubprocess": {"status": "ok", '
+        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
+        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+    )
     _write_fake_quse(fake_bin, payload=payload)
     monkeypatch.setattr(
         "pocketshell.usage._resolve_quse_binary",

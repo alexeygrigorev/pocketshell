@@ -55,4 +55,46 @@ internal data class ActivePaneRenderOwnerSnapshotForTest(
             stateIdentity == other.stateIdentity &&
             terminalSessionIdentity == other.terminalSessionIdentity &&
             emulatorIdentity == other.emulatorIdentity
+
+    /**
+     * Issue #2272: the post-resize repaint branch is valid only when it is a later, richer,
+     * fully-restored observation of the same settled pane. This pure predicate is intentionally
+     * unit-tested so removing any one guard is a live mutation, not a decorative assertion.
+     */
+    fun isAlreadyHealedPostInjectionForTest(
+        expected: ActivePaneRenderOwnerSnapshotForTest,
+        visibleFrameMarker: Boolean,
+        visibleFrameRows: Int,
+        minimumFrameRows: Int,
+    ): Boolean =
+        sameOwnerAs(expected) &&
+            modelMutationEpoch > expected.modelMutationEpoch &&
+            controlSizeGeneration >= expected.controlSizeGeneration &&
+            automaticHealActivityEpoch == expected.automaticHealActivityEpoch &&
+            attachResizeSeedSettled &&
+            !partiallyBlank &&
+            renderedNonBlankChars > expected.renderedNonBlankChars &&
+            visibleFrameMarker &&
+            visibleFrameRows >= minimumFrameRows
+}
+
+/**
+ * Issue #2272: a connected journey can only claim that the full frame was restored when the
+ * visible frame is backed by either the already-proven automatic repaint or a manual attempt
+ * that actually returned [HealOutcome.Healed]. A visually plausible frame without either source
+ * is still a no-heal outcome.
+ */
+internal data class FullFrameHealProofForTest(
+    val automaticHealRestored: Boolean,
+    val manualHealOutcome: HealOutcome?,
+    val visiblePartiallyBlank: Boolean,
+    val visibleFrameMarker: Boolean,
+    val visibleFrameRows: Int,
+    val minimumFrameRows: Int,
+) {
+    val restored: Boolean
+        get() = (automaticHealRestored || manualHealOutcome == HealOutcome.Healed) &&
+            !visiblePartiallyBlank &&
+            visibleFrameMarker &&
+            visibleFrameRows >= minimumFrameRows
 }

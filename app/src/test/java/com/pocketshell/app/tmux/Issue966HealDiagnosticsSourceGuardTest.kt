@@ -59,6 +59,9 @@ class Issue966HealDiagnosticsSourceGuardTest {
                 source.contains(
                     "localStale.renderedNonBlankChars,\n" +
                         "            healResult.stats.renderedNonBlankChars",
+                ) || source.contains(
+                    "localStale.renderedNonBlankChars,\n" +
+                        "                result.stats.renderedNonBlankChars",
                 ))
             assertTrue("$name must retain the exact reason per artifact",
                 source.contains("heal_reason=${'$'}{healResult.reason}"))
@@ -66,6 +69,44 @@ class Issue966HealDiagnosticsSourceGuardTest {
                 source.contains("heal_capture_non_blank_chars=") &&
                     source.contains("heal_capture_line_count="))
         }
+    }
+
+    @Test
+    fun issue2272KeepsSelectiveFullFrameOracleAndProductionShapedHealPath() {
+        val journey = locateJourney("AgentAltScreenPartialBlackHealJourneyE2eTest.kt")
+        val proof = locateMain("ActivePaneRenderOwnerSnapshotForTest.kt")
+
+        assertTrue(
+            "the already-healed branch must use the pure owner/frame predicate",
+            journey.contains("isAlreadyHealedPostInjectionForTest("),
+        )
+        assertTrue(
+            "the manual branch must use the production-shaped no-argument heal seam",
+            journey.contains("result = vm.healActivePaneIfStaleRenderResultForTest()"),
+        )
+        assertFalse(
+            "the follow-up must not reintroduce the expected-owner-only test seam",
+            journey.contains("result = vm.healActivePaneIfStaleRenderResultForTest(expectedOwner)"),
+        )
+        assertTrue(
+            "the journey must require an automatic or manual restoration source",
+            journey.contains("FullFrameHealProofForTest(") &&
+                journey.contains("automaticHealRestored = stablePostInjection.alreadyHealed") &&
+                journey.contains("manualHealOutcome = healResult?.outcome") &&
+                journey.contains(").restored"),
+        )
+        assertTrue(
+            "the already-healed flag must come from the guarded predicate, not merely !partial",
+            journey.contains("alreadyHealed = healedCandidate"),
+        )
+        assertTrue(
+            "the pure proof must retain the rendered-content increase guard",
+            proof.contains("renderedNonBlankChars > expected.renderedNonBlankChars"),
+        )
+        assertTrue(
+            "the pure proof must reject a no-heal source even when the frame looks full",
+            proof.contains("automaticHealRestored || manualHealOutcome == HealOutcome.Healed"),
+        )
     }
 
     @Test

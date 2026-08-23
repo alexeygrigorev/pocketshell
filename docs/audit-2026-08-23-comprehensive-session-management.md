@@ -296,33 +296,33 @@ that fix or use an explicit governed waiver, not implicit structural incompleten
 
 ## Deduplicated issue plan
 
-The following are candidates for new trackers after this report is committed.
-Existing issues remain authoritative for everything already listed above.
+The following deduplicated candidates were filed as #2295-#2316. Existing
+issues remain authoritative for everything already listed above.
 
-| Priority | Candidate | Why new |
-|---|---|---|
-| High | Globally unique/scoped non-durable HostAck delivery tokens | Real payload-suppression hazard; not owned by #2121/#2124 |
-| High | Run-scoped/reset-safe HostAck journal test isolation | Prevents tests from recreating the global-journal collision |
-| High | Recovery/error-state-aware capture and assertion contract | Shared oracle defect across overflow/background/attachment journeys |
-| High | Diagnose Settings from a live session | The wiring exists, but the authoritative journey still never reaches Settings |
-| Critical | Server-side release gate, lockstep publication order, monotonic versionCode, durable provenance | Local guard is bypassable; publication ordering violates lockstep intent |
-| High | Positive executed-test proof for every required release selector | Blocks `OK (0 tests)` and stale-selector acceptance |
-| Medium | Explicit Real LLM ledger tier | Removes an unscheduled producer from automated release requirements |
-| Medium-low | Python CI execution artifact and executed/skip floor | All-skipped suite is currently green |
-| Medium | Generation-aware host tree reconcile deltas | Completes the #2239 identity contract on the wire |
-| Medium | Typed daemon fallback and version-skew observability | Broad catch masks internal failure and method-not-found |
-| Large | `pocketshell tree watch` event stream | Structural freshness cure; reduces trigger/exec accretion |
-| Medium | Visible staleness, waiting strip, stable interaction order | Makes the primary glance question answerable without unstable rows |
-| Medium | Extract `TreeSyncCoordinator` | Gives future freshness work a bounded home outside the god ViewModel |
-| Low | Crash-durable usage history writer | Low-frequency but avoidable quota-history loss |
-| Low | Active expiry sweep and background park teardown verification | Prevents indefinite parked-runtime work under D21 |
-| Low | Pin hosted emulator actions and refresh CI matrix docs | Reproducibility/supply-chain/documentation hygiene |
-| High | Disconnect-generation fencing for pending SSH leases | Explicit close can lose to a late coalesced dial |
-| Medium-low | Per-host desired-state fence for foreground forwarding resume | Late adoption can defeat a user's explicit stop |
-| Medium-low | Atomic tmux client lifecycle contract | Close racing connect can leak shell/reader state |
-| Low-medium | Reliable critical SSH lease state transitions | Saturated buffer can silently drop up/down edges |
-| Low | Forwarder and terminal drain cancellation hardening | Check-then-act and post-cancel continuation paths lack focused proofs |
-| Low | Refresh connection architecture comments and phased-toggle docs | Source no longer matches documented lifecycle assumptions |
+| Tracker | Priority | Candidate | Why new |
+|---|---|---|---|
+| #2295 | High | Globally unique/scoped non-durable HostAck delivery tokens | Real payload-suppression hazard; not owned by #2121/#2124 |
+| #2296 | High | Run-scoped/reset-safe HostAck journal test isolation | Prevents tests from recreating the global-journal collision |
+| #2297 | High | Recovery/error-state-aware capture and assertion contract | Shared oracle defect across overflow/background/attachment journeys |
+| #2298 | High | Diagnose Settings from a live session | The wiring exists, but the authoritative journey still never reaches Settings |
+| #2299 | Critical | Server-side release gate, lockstep publication order, monotonic versionCode, durable provenance | Local guard is bypassable; publication ordering violates lockstep intent |
+| #2300 | High | Positive executed-test proof for every required release selector | Blocks `OK (0 tests)` and stale-selector acceptance |
+| #2301 | Medium | Explicit Real LLM ledger tier | Removes an unscheduled producer from automated release requirements |
+| #2302 | Medium-low | Python CI execution artifact and executed/skip floor | All-skipped suite is currently green |
+| #2303 | Medium | Generation-aware host tree reconcile deltas | Completes the #2239 identity contract on the wire |
+| #2304 | Medium | Typed daemon fallback and version-skew observability | Broad catch masks internal failure and method-not-found |
+| #2305 | Large | `pocketshell tree watch` event stream | Structural freshness cure; reduces trigger/exec accretion |
+| #2306 | Medium | Visible staleness, waiting strip, stable interaction order | Makes the primary glance question answerable without unstable rows |
+| #2307 | Medium | Extract `TreeSyncCoordinator` | Gives future freshness work a bounded home outside the god ViewModel |
+| #2308 | Low | Crash-durable usage history writer | Low-frequency but avoidable quota-history loss |
+| #2309 | Low | Active expiry sweep and background park teardown verification | Prevents indefinite parked-runtime work under D21 |
+| #2310 | Low | Pin hosted emulator actions and refresh CI matrix docs | Reproducibility/supply-chain/documentation hygiene |
+| #2311 | High | Disconnect-generation fencing for pending SSH leases | Explicit close can lose to a late coalesced dial |
+| #2312 | Medium-low | Per-host desired-state fence for foreground forwarding resume | Late adoption can defeat a user's explicit stop |
+| #2313 | Medium-low | Atomic tmux client lifecycle contract | Close racing connect can leak shell/reader state |
+| #2314 | Low-medium | Reliable critical SSH lease state transitions | Saturated buffer can silently drop up/down edges |
+| #2315 | Low | Forwarder and terminal drain cancellation hardening | Check-then-act and post-cancel continuation paths lack focused proofs |
+| #2316 | Low | Refresh connection architecture comments and phased-toggle docs | Source no longer matches documented lifecycle assumptions |
 
 ## Non-goals
 

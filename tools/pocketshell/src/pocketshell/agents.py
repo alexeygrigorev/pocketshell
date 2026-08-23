@@ -88,6 +88,7 @@ from urllib.parse import quote
 
 import click
 
+from pocketshell.engines import builtin_engine_ids, engine_for, load_registry
 from pocketshell.env import merged_exports
 
 
@@ -186,7 +187,7 @@ PROVIDER_ENV_UNSET_VARS: tuple[str, ...] = (
 
 # Recognised agent kinds. Order is the picker's order (claude, codex,
 # opencode) but the wrapper is keyed by name, not ordinal.
-AGENT_KINDS: tuple[str, ...] = ("codex", "claude", "opencode", "grok")
+AGENT_KINDS: tuple[str, ...] = builtin_engine_ids()
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +221,11 @@ def build_env(
       (``CODEX_HOME`` for codex, ``CLAUDE_CONFIG_DIR`` for claude). Ignored
       for opencode (no profile env var).
     """
+    try:
+        manifest = engine_for(kind)
+    except KeyError as exc:
+        raise ValueError(f"unknown agent kind: {kind!r}") from exc
+
     env = dict(base_env)
     env.update(folder_exports)
 
@@ -230,20 +236,20 @@ def build_env(
     if extra_env:
         env.update(extra_env)
 
+    for name, value in manifest.launch.env_set:
+        env[name] = value
+
     # Strip the provider API-key vars for EVERY agent kind so each falls
     # back to its subscription auth (maintainer decision, issue #703 —
     # subscription billing across the board for codex / claude / opencode).
     # Runs last so it overrides any provider key from base/folder/profile env.
-    for name in PROVIDER_ENV_UNSET_VARS:
+    for name in manifest.launch.env_unset:
         env.pop(name, None)
 
     if config_dir:
-        if kind == "codex":
-            env["CODEX_HOME"] = config_dir
-        elif kind == "claude":
-            env["CLAUDE_CONFIG_DIR"] = config_dir
-        elif kind == "grok":
-            env["GROK_HOME"] = config_dir
+        env_name = manifest.launch.profile_env
+        if env_name:
+            env[env_name] = config_dir
 
     return env
 
@@ -265,24 +271,14 @@ def build_argv(kind: str, *, skip_permissions: bool) -> list[str]:
     - **opencode** — no skip flag (permissions are config-driven in
       ``opencode.json``); the billing fix is the env strip, not a flag.
     """
-    if kind == "codex":
-        argv = ["codex", "-c", "check_for_update_on_startup=false"]
-        if skip_permissions:
-            argv.append("--dangerously-bypass-approvals-and-sandbox")
-        return argv
-    if kind == "claude":
-        argv = ["claude"]
-        if skip_permissions:
-            argv.append("--dangerously-skip-permissions")
-        return argv
-    if kind == "opencode":
-        return ["opencode"]
-    if kind == "grok":
-        argv = ["grok"]
-        if skip_permissions:
-            argv.append("--always-approve")
-        return argv
-    raise ValueError(f"unknown agent kind: {kind!r}")
+    try:
+        manifest = engine_for(kind)
+    except KeyError as exc:
+        raise ValueError(f"unknown agent kind: {kind!r}") from exc
+    argv = list(manifest.launch.argv)
+    if skip_permissions:
+        argv.extend(manifest.launch.skip_permissions_argv)
+    return argv
 
 
 def claude_config_path(env: dict[str, str]) -> Path:
@@ -857,6 +853,20 @@ def launch_agent(
     if record_source is None:
         record_source = record_agent_source
 
+    try:
+        manifest = engine_for(kind, probe=True)
+    except KeyError:
+        click.echo(f"pocketshell agent: unknown engine id: {kind!r}", err=True)
+        ctx.exit(2)
+        return
+    if not manifest.enabled:
+        click.echo(
+            f"pocketshell agent: engine {kind!r} is disabled in the host registry",
+            err=True,
+        )
+        ctx.exit(126)
+        return
+
     path = _resolve_dir(ctx, directory)
     resolved_dir = str(path)
 
@@ -1018,7 +1028,27 @@ def _make_agent_command(kind: str):
     return _cmd
 
 
+class _RegistryAgentGroup(click.Group):
+    """Click group that resolves newly configured registry ids on demand."""
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        names = set(super().list_commands(ctx))
+        names.update(item.id for item in load_registry(probe=False))
+        return sorted(names)
+
+    def get_command(self, ctx: click.Context, name: str):
+        command = super().get_command(ctx, name)
+        if command is not None:
+            return command
+        try:
+            engine_for(name, probe=False)
+        except KeyError:
+            return None
+        return _make_agent_command(name)
+
+
 @click.group(
+    cls=_RegistryAgentGroup,
     name="agent",
     context_settings={"help_option_names": ["-h", "--help"]},
     help=(

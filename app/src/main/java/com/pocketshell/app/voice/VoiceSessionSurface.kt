@@ -642,15 +642,12 @@ internal fun BottomChipControls(
     unsentCount: Int = 0,
     unsentHasFailure: Boolean = false,
     modifier: Modifier = Modifier,
+    // The tmux bottom band owns one stable host around its LauncherOnly/Controls
+    // branch. Direct callers keep the historical self-hosted behavior.
+    manageVoiceGestureCoachmark: Boolean = true,
 ) {
-    VoiceGestureCoachmarkHost(
-        eligible = onDictateTap != null && onDictateHoldSwipeUp != null,
-        // The terminal launcher is a local composer entry point and remains
-        // enabled through reconnect/empty-pane states (#2192). Pane-bound
-        // controls still use [inputEnabled] below.
-        launcherEnabled = true,
-        modifier = modifier,
-    ) {
+    val contentModifier = if (manageVoiceGestureCoachmark) Modifier else modifier
+    val body: @Composable () -> Unit = {
         // Issue #813 (clean rework — D22): the composer launcher RESERVES its
         // width FIRST and is NEVER the element that overflows. We compute the
         // available row width with [BoxWithConstraints] and hand the chip area
@@ -675,7 +672,7 @@ internal fun BottomChipControls(
             0.dp
         }
         BoxWithConstraints(
-            modifier = Modifier
+            modifier = contentModifier
                 .fillMaxWidth()
                 .heightIn(min = SessionBottomControlsMinHeight)
                 .background(color = PocketShellColors.Surface)
@@ -766,6 +763,21 @@ internal fun BottomChipControls(
             }
         }
     }
+
+    if (manageVoiceGestureCoachmark) {
+        VoiceGestureCoachmarkHost(
+            eligible = onDictateTap != null && onDictateHoldSwipeUp != null,
+            // The terminal launcher is a local composer entry point and remains
+            // enabled through reconnect/empty-pane states (#2192). Pane-bound
+            // controls still use [inputEnabled] below.
+            launcherEnabled = true,
+            modifier = modifier,
+        ) {
+            body()
+        }
+    } else {
+        body()
+    }
 }
 
 internal val SessionBottomControlsMinHeight = PocketShellDensity.tapTargetMin + 8.dp
@@ -799,14 +811,14 @@ internal fun ConversationComposerLauncherRow(
     // docked launcher (see [ComposerLauncherButton]).
     unsentCount: Int = 0,
     unsentHasFailure: Boolean = false,
+    // The tmux bottom band owns one stable host around its LauncherOnly/Controls
+    // branch. Direct callers keep the historical self-hosted behavior.
+    manageVoiceGestureCoachmark: Boolean = true,
 ) {
-    VoiceGestureCoachmarkHost(
-        eligible = onDictateHoldSwipeUp != null,
-        launcherEnabled = inputEnabled,
-        modifier = modifier,
-    ) {
+    val contentModifier = if (manageVoiceGestureCoachmark) Modifier else modifier
+    val body: @Composable () -> Unit = {
         Box(
-            modifier = Modifier
+            modifier = contentModifier
                 .fillMaxWidth()
                 .heightIn(min = SessionBottomControlsMinHeight)
                 .padding(
@@ -824,6 +836,18 @@ internal fun ConversationComposerLauncherRow(
                 unsentHasFailure = unsentHasFailure,
             )
         }
+    }
+
+    if (manageVoiceGestureCoachmark) {
+        VoiceGestureCoachmarkHost(
+            eligible = onDictateHoldSwipeUp != null,
+            launcherEnabled = inputEnabled,
+            modifier = modifier,
+        ) {
+            body()
+        }
+    } else {
+        body()
     }
 }
 

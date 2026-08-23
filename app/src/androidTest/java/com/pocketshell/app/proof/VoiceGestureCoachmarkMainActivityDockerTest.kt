@@ -141,6 +141,7 @@ class VoiceGestureCoachmarkMainActivityDockerTest {
             assertLauncherIconIdentity()
             assertCoachmarkEndAnchor()
             assertPlatformAccessibilityContract()
+            WalkthroughScreenshotArtifacts.capture("issue-1753-mainactivity-docker-coachmark-pre-action")
             invokeNativeDictationAction()
             WalkthroughScreenshotArtifacts.capture("issue-1753-mainactivity-docker-coachmark")
             waitForTerminalMarker(SESSION_A_MARKER)
@@ -655,6 +656,7 @@ class VoiceGestureCoachmarkMainActivityDockerTest {
 
     private fun AccessibilityNodeInfo.isValidPlatformLauncher(): Boolean =
         isDiscoverableForAccessibility() &&
+            className == android.widget.Button::class.java.name &&
             isEnabled &&
             isClickable &&
             actionList.any { it.id == AccessibilityNodeInfo.ACTION_CLICK } &&

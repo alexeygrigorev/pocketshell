@@ -14,6 +14,9 @@ the host CLI) and persists two artifacts:
    per capture (``{"captured_at": ..., "records": [...]}``). Powers usage
    tracking over time and the future reset-detection follow-up. The log is
    size-bounded (line cap with rotation) so it never grows without limit.
+   Rewrites use a unique same-directory temp, fsync the data before the
+   atomic rename, fsync the parent directory after the rename where the
+   filesystem supports it, and serialize writers with an advisory lock.
 
 Storage location
 ----------------
@@ -22,6 +25,8 @@ Storage location
 
 - ``usage-latest.json`` — the cached latest reading (mode ``0600``).
 - ``usage-history.jsonl`` — the append-only history log (mode ``0600``).
+- ``usage-history-malformed.jsonl`` — bounded diagnostics for malformed
+  capture/history lines (mode ``0600``), written only when needed.
 
 This mirrors :mod:`pocketshell.logs`' XDG-state convention so all
 PocketShell server state lives under one root. Files are ``0600`` because
@@ -39,12 +44,23 @@ no external logrotate dependency.
 
 from __future__ import annotations
 
+from collections import deque
+from contextlib import contextmanager
+import errno
 import json
+import logging
 import os
+import tempfile
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - PocketShell's host is POSIX
+    fcntl = None  # type: ignore[assignment]
 
 # File permissions for the cache + history files. ``0600`` keeps the
 # per-provider quota detail readable only by the owning user.
@@ -56,6 +72,34 @@ DEFAULT_HISTORY_MAX_LINES = 2000
 
 CACHE_FILENAME = "usage-latest.json"
 HISTORY_FILENAME = "usage-history.jsonl"
+MALFORMED_HISTORY_FILENAME = "usage-history-malformed.jsonl"
+
+# A malformed provider line must remain diagnosable without allowing a noisy
+# producer to create an unbounded second log. The raw line is also clipped so
+# a single broken output cannot consume the entire diagnostic budget.
+DEFAULT_MALFORMED_MAX_LINES = 100
+MAX_MALFORMED_LINE_LENGTH = 4096
+
+# One lock file per state directory covers the usage history and its related
+# append-only logs. It is coordination state, not user-visible history.
+HISTORY_LOCK_FILENAME = ".usage-history.lock"
+
+_LOGGER = logging.getLogger(__name__)
+_UNSUPPORTED_SYNC_ERRNOS = frozenset(
+    {
+        errno.EINVAL,
+        errno.ENOTSUP,
+        errno.EOPNOTSUPP,
+        errno.ENOSYS,
+        errno.EISDIR,
+    }
+)
+
+# `flock` is the process boundary; this lock prevents threads in one process
+# from racing through the read/trim/publish transaction before they reach the
+# kernel lock. The number of usage-state directories is tiny in practice.
+_HISTORY_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_HISTORY_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -76,6 +120,10 @@ class UsagePaths:
     @property
     def history_file(self) -> Path:
         return self.usage_dir / HISTORY_FILENAME
+
+    @property
+    def malformed_file(self) -> Path:
+        return self.usage_dir / MALFORMED_HISTORY_FILENAME
 
 
 def resolve_paths(
@@ -114,48 +162,304 @@ def _ensure_dir(path: Path) -> None:
         pass
 
 
-def _write_private(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically with mode 0600.
+def _is_unsupported_sync_error(error: OSError) -> bool:
+    return error.errno in _UNSUPPORTED_SYNC_ERRNOS
 
-    A temp file + ``os.replace`` keeps a concurrent reader (the app's SSH
-    fetch racing the scheduled capture) from ever seeing a half-written
-    cache file.
+
+def _durability_barrier(fd: int, *, path: Path, kind: str) -> bool:
+    """Apply an fsync barrier, reporting supported-but-unavailable cases.
+
+    Linux filesystems normally support both regular-file and directory fsync,
+    but some network, virtual, or non-POSIX filesystems reject one of them
+    with ``EINVAL``/``ENOTSUP``. Those filesystems still get atomic publication
+    and a warning that durability is best-effort; unexpected I/O errors remain
+    fatal so a real storage failure cannot be mistaken for a durable write.
+    """
+    while True:
+        try:
+            os.fsync(fd)
+            return True
+        except OSError as error:
+            if error.errno == errno.EINTR:
+                continue
+            if _is_unsupported_sync_error(error):
+                _LOGGER.warning(
+                    "durability barrier unavailable for %s %s: %s; "
+                    "continuing with atomic publication",
+                    kind,
+                    path,
+                    error,
+                )
+                return False
+            raise
+
+
+def _fsync_directory(path: Path) -> bool:
+    """Fsync a parent directory after rename when the filesystem permits it."""
+    flags = os.O_RDONLY
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(str(path), flags | directory_flag)
+    except OSError as error:
+        if _is_unsupported_sync_error(error):
+            _LOGGER.warning(
+                "durability barrier unavailable for directory %s: %s; "
+                "continuing with atomic publication",
+                path,
+                error,
+            )
+            return False
+        raise
+    try:
+        return _durability_barrier(fd, path=path, kind="directory")
+    finally:
+        os.close(fd)
+
+
+def _write_private(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically and as durably as possible.
+
+    The temporary is created with ``mkstemp`` in the destination directory, so
+    it is unique even when separate processes write at once and the eventual
+    ``os.replace`` remains one-filesystem atomic. The temp's bytes and mode
+    are fsync'd before publication; the parent directory is fsync'd after the
+    rename. A filesystem that does not support one of those barriers is
+    explicitly logged and still receives the atomic write, while unexpected
+    storage errors fail closed and leave the previous destination intact.
     """
     _ensure_dir(path.parent)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, NEW_FILE_MODE)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    tmp = Path(tmp_name)
+    open_fd = fd
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        with os.fdopen(fd, "wb") as handle:
+            # Ownership of the descriptor has transferred to `handle`.
+            open_fd = -1
+            handle.write(text.encode("utf-8"))
+            handle.flush()
+            os.chmod(tmp, NEW_FILE_MODE)
+            _durability_barrier(handle.fileno(), path=tmp, kind="file")
+        os.replace(tmp, path)
+        _fsync_directory(path.parent)
     except BaseException:
+        if open_fd >= 0:
+            try:
+                os.close(open_fd)
+            except OSError:
+                pass
         try:
-            os.unlink(tmp)
+            tmp.unlink()
         except FileNotFoundError:
             pass
+        except OSError:
+            pass
         raise
-    os.replace(tmp, path)
+
+
+def _history_thread_lock(history_file: Path) -> threading.Lock:
+    lock_path = os.path.abspath(str(history_file.parent / HISTORY_LOCK_FILENAME))
+    with _HISTORY_THREAD_LOCKS_GUARD:
+        lock = _HISTORY_THREAD_LOCKS.get(lock_path)
+        if lock is None:
+            lock = threading.Lock()
+            _HISTORY_THREAD_LOCKS[lock_path] = lock
+        return lock
+
+
+@contextmanager
+def _history_writer_lock(history_file: Path) -> Iterator[None]:
+    """Serialize a history read/trim/publish transaction across writers."""
+    _ensure_dir(history_file.parent)
+    lock_path = history_file.parent / HISTORY_LOCK_FILENAME
+    thread_lock = _history_thread_lock(history_file)
+    with thread_lock:
+        if fcntl is None:
+            raise RuntimeError(
+                "cross-process history locking is unavailable; "
+                "refusing an unsafe usage-history write"
+            )
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, NEW_FILE_MODE)
+        locked = False
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as error:
+                if error.errno not in {
+                    errno.EINVAL,
+                    errno.ENOTSUP,
+                    errno.EOPNOTSUPP,
+                    errno.ENOSYS,
+                }:
+                    raise
+                raise RuntimeError(
+                    "cross-process history locking is unavailable; "
+                    f"refusing an unsafe usage-history write in {history_file.parent}"
+                ) from error
+            else:
+                locked = True
+            yield
+        finally:
+            if locked:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
+def _truncate_malformed_line(line: str) -> str:
+    if len(line) <= MAX_MALFORMED_LINE_LENGTH:
+        return line
+    return line[:MAX_MALFORMED_LINE_LENGTH] + "…[truncated]"
+
+
+def _malformed_diagnostic(
+    *, source: str, line_number: int, line: str, reason: str
+) -> dict[str, Any]:
+    return {
+        "source": source,
+        "line_number": line_number,
+        "reason": reason,
+        "raw_line": _truncate_malformed_line(line),
+    }
+
+
+def _default_malformed_file(history_file: Path) -> Path:
+    if history_file.name == HISTORY_FILENAME:
+        return history_file.with_name(MALFORMED_HISTORY_FILENAME)
+    return history_file.with_name(history_file.name + ".malformed.jsonl")
+
+
+def _append_quarantine_locked(
+    quarantine_file: Path,
+    diagnostics: list[dict[str, Any]],
+    *,
+    dropped_count: int = 0,
+) -> None:
+    """Append bounded diagnostic objects while the parent state lock is held.
+
+    ``diagnostics`` is already the retained tail when the caller processed a
+    large input. ``dropped_count`` carries the count of older diagnostics so
+    the sidecar can retain an honest truncation marker without first building
+    an unbounded list.
+    """
+    if not diagnostics:
+        return
+    _ensure_dir(quarantine_file.parent)
+    # The sidecar is itself bounded, so retain only the tail while reading it.
+    # This keeps a manually corrupted or very old sidecar from turning the
+    # next capture into an unbounded read/alloc.
+    retained = deque[dict[str, Any]](maxlen=DEFAULT_MALFORMED_MAX_LINES - 1)
+    existing_count = 0
     try:
-        os.chmod(path, NEW_FILE_MODE)
+        diagnostic_stream = quarantine_file.open("r", encoding="utf-8")
     except FileNotFoundError:
-        pass
+        diagnostic_stream = None
+    if diagnostic_stream is not None:
+        with diagnostic_stream:
+            for line_number, raw_line in enumerate(diagnostic_stream, start=1):
+                raw_line = raw_line.rstrip("\r\n")
+                if not raw_line.strip():
+                    continue
+                try:
+                    parsed = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    item = _malformed_diagnostic(
+                        source=quarantine_file.name,
+                        line_number=line_number,
+                        line=raw_line,
+                        reason="invalid_diagnostic_json",
+                    )
+                else:
+                    if isinstance(parsed, dict):
+                        item = dict(parsed)
+                        raw_value = item.get("raw_line")
+                        if isinstance(raw_value, str):
+                            item["raw_line"] = _truncate_malformed_line(raw_value)
+                    else:
+                        item = _malformed_diagnostic(
+                            source=quarantine_file.name,
+                            line_number=line_number,
+                            line=raw_line,
+                            reason="diagnostic_not_object",
+                        )
+                existing_count += 1
+                retained.append(item)
+
+    all_count = existing_count + dropped_count + len(diagnostics)
+    retained.extend(diagnostics)
+    retained_list = list(retained)[-(DEFAULT_MALFORMED_MAX_LINES - 1) :]
+    if all_count > DEFAULT_MALFORMED_MAX_LINES - 1:
+        retained_list = [
+            {
+                "source": "pocketshell.usage_capture",
+                "reason": "diagnostics_truncated",
+            },
+            *retained_list,
+        ]
+        retained_list[0]["dropped"] = all_count - (DEFAULT_MALFORMED_MAX_LINES - 1)
+    _write_private(
+        quarantine_file,
+        "\n".join(json.dumps(item, sort_keys=True, ensure_ascii=False) for item in retained_list)
+        + "\n",
+    )
 
 
-def _parse_ndjson_records(stdout: str) -> list[dict[str, Any]]:
+def _parse_ndjson_records(
+    stdout: str,
+    *,
+    quarantine_file: Optional[Path] = None,
+) -> list[dict[str, Any]]:
     """Parse ``pocketshell usage --json`` NDJSON stdout into a record list.
 
     Tolerant: skips blank lines and any line that is not a JSON object so a
-    stray warning printed to stdout never wedges the capture.
+    stray warning printed to stdout never wedges the capture. When a
+    ``quarantine_file`` is supplied, skipped non-blank lines are recorded in a
+    bounded sidecar rather than disappearing without evidence.
     """
     records: list[dict[str, Any]] = []
-    for line in stdout.splitlines():
+    diagnostics = deque[dict[str, Any]](maxlen=DEFAULT_MALFORMED_MAX_LINES - 1)
+    malformed_count = 0
+
+    def remember_malformed(diagnostic: dict[str, Any]) -> None:
+        nonlocal malformed_count
+        malformed_count += 1
+        diagnostics.append(diagnostic)
+
+    for line_number, line in enumerate(stdout.splitlines(), start=1):
         if not line.strip():
             continue
         try:
             parsed = json.loads(line)
         except json.JSONDecodeError:
+            remember_malformed(
+                _malformed_diagnostic(
+                    source="capture-stdout",
+                    line_number=line_number,
+                    line=line,
+                    reason="invalid_json",
+                )
+            )
             continue
         if isinstance(parsed, dict):
             records.append(parsed)
+        else:
+            remember_malformed(
+                _malformed_diagnostic(
+                    source="capture-stdout",
+                    line_number=line_number,
+                    line=line,
+                    reason="line_not_object",
+                )
+            )
+    if quarantine_file is not None and malformed_count:
+        with _history_writer_lock(quarantine_file):
+            _append_quarantine_locked(
+                quarantine_file,
+                list(diagnostics),
+                dropped_count=malformed_count - len(diagnostics),
+            )
     return records
 
 
@@ -175,7 +479,7 @@ def write_capture(
     if paths is None:
         paths = resolve_paths()
     captured_at = captured_at or _now_iso()
-    records = _parse_ndjson_records(stdout)
+    records = _parse_ndjson_records(stdout, quarantine_file=paths.malformed_file)
 
     # Read the PREVIOUS cached reading BEFORE we overwrite it, so reset
     # detection (#690) can compare the current reading to the last one.
@@ -227,32 +531,72 @@ def _append_history(
     entry: dict[str, Any],
     *,
     history_max_lines: int,
+    quarantine_file: Optional[Path] = None,
 ) -> None:
     """Append ``entry`` as one JSON line, then trim to the line cap.
 
     The trim reads the existing tail and rewrites the file when it would
     exceed ``history_max_lines``. At ~1 capture/hour the file is tiny, so a
     full read+rewrite on each append is cheap and avoids an external
-    logrotate dependency.
+    logrotate dependency. The complete read/trim/publish transaction is held
+    under the per-directory writer lock, so concurrent captures cannot lose a
+    valid line or publish a mixed update. Existing malformed lines are
+    quarantined before the rewrite.
     """
-    _ensure_dir(history_file.parent)
-    line = json.dumps(entry, sort_keys=True)
-
-    existing: list[str] = []
-    if history_file.exists():
-        try:
-            existing = [
-                ln for ln in history_file.read_text(encoding="utf-8").splitlines()
-                if ln.strip()
-            ]
-        except OSError:
+    quarantine_file = quarantine_file or _default_malformed_file(history_file)
+    with _history_writer_lock(history_file):
+        existing: deque[str] | list[str]
+        if history_max_lines > 0:
+            existing = deque(maxlen=history_max_lines)
+        else:
             existing = []
-    existing.append(line)
+        malformed = deque[dict[str, Any]](maxlen=DEFAULT_MALFORMED_MAX_LINES - 1)
+        malformed_count = 0
+        try:
+            history_stream = history_file.open("r", encoding="utf-8")
+        except FileNotFoundError:
+            history_stream = None
+        if history_stream is not None:
+            with history_stream:
+                for line_number, raw_line in enumerate(history_stream, start=1):
+                    raw_line = raw_line.rstrip("\r\n")
+                    if not raw_line.strip():
+                        continue
+                    try:
+                        parsed = json.loads(raw_line)
+                    except json.JSONDecodeError:
+                        malformed_count += 1
+                        malformed.append(
+                            _malformed_diagnostic(
+                                source=history_file.name,
+                                line_number=line_number,
+                                line=raw_line,
+                                reason="invalid_json",
+                            )
+                        )
+                        continue
+                    if not isinstance(parsed, dict):
+                        malformed_count += 1
+                        malformed.append(
+                            _malformed_diagnostic(
+                                source=history_file.name,
+                                line_number=line_number,
+                                line=raw_line,
+                                reason="line_not_object",
+                            )
+                        )
+                        continue
+                    existing.append(raw_line)
 
-    if history_max_lines > 0 and len(existing) > history_max_lines:
-        existing = existing[-history_max_lines:]
+        if malformed:
+            _append_quarantine_locked(
+                quarantine_file,
+                list(malformed),
+                dropped_count=malformed_count - len(malformed),
+            )
 
-    _write_private(history_file, "\n".join(existing) + "\n")
+        existing.append(json.dumps(entry, sort_keys=True))
+        _write_private(history_file, "\n".join(existing) + "\n")
 
 
 def read_cache(paths: Optional[UsagePaths] = None) -> Optional[dict[str, Any]]:
@@ -295,7 +639,10 @@ def cached_document(paths: Optional[UsagePaths] = None) -> Optional[str]:
     if not isinstance(records, list):
         records = []
     captured_at = cache.get("captured_at")
-    return json.dumps(
-        {"captured_at": captured_at, "records": records},
-        sort_keys=True,
-    ) + "\n"
+    return (
+        json.dumps(
+            {"captured_at": captured_at, "records": records},
+            sort_keys=True,
+        )
+        + "\n"
+    )

@@ -1,6 +1,8 @@
 package com.pocketshell.app.sessions
 
 import com.pocketshell.uikit.model.parseAgentStateUpdatedAtEpochSec
+import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.model.sessionAgentKindFromOption
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -12,9 +14,12 @@ class HostTmuxSessionListParser @Inject constructor() {
             .mapNotNull(::parsePocketshellSessionsListRow)
             .toList()
 
-    fun parseTmuxListSessions(stdout: String): List<HostTmuxSessionRow> =
+    fun parseTmuxListSessions(
+        stdout: String,
+        familyForRawId: (String?) -> SessionAgentKind? = { null },
+    ): List<HostTmuxSessionRow> =
         stdout.lineSequence()
-            .mapNotNull(::parseTmuxListSessionsRow)
+            .mapNotNull { line -> parseTmuxListSessionsRow(line, familyForRawId) }
             .toList()
 
     internal fun parsePocketshellSessionsListRow(line: String): HostTmuxSessionRow? {
@@ -59,13 +64,20 @@ class HostTmuxSessionListParser @Inject constructor() {
         )
     }
 
-    internal fun parseTmuxListSessionsRow(line: String): HostTmuxSessionRow? {
+    internal fun parseTmuxListSessionsRow(
+        line: String,
+        familyForRawId: (String?) -> SessionAgentKind? = { null },
+    ): HostTmuxSessionRow? {
         if (line.isBlank()) return null
         val fields = parseStructuredTmuxListSessionsFields(line)
             ?: parseFallbackTmuxListSessionsFields(line)
             ?: return null
         val name = fields.name.trim()
         if (name.isEmpty()) return null
+        val recordedKindId = fields.recordedKindId
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        val recordedKind = recordedKindId.toRecordedFamily(familyForRawId)
         return HostTmuxSessionRow(
             name = name,
             tmuxSessionId = fields.tmuxSessionId?.trim()?.takeIf { it.isNotEmpty() },
@@ -83,6 +95,9 @@ class HostTmuxSessionListParser @Inject constructor() {
             // Issue #1570: accept the ISO-8601 timestamp the host hook actually
             // writes (not only an epoch int) so the staleness rule can fire.
             agentStateUpdatedAt = parseAgentStateUpdatedAtEpochSec(fields.agentStateUpdatedAt),
+            recordedKindId = recordedKindId,
+            recordedKind = recordedKind,
+            agentKind = recordedKind ?: SessionAgentKind.Shell,
         )
     }
 
@@ -91,6 +106,7 @@ class HostTmuxSessionListParser @Inject constructor() {
             // Issue #1944: picker rows carry the immutable tmux generation as
             // id + created. Parse these identity-bearing shapes first because
             // the live form has six fields, like the dashboard state form.
+            parseStructuredIdentitySevenFields(line, separator)?.let { return it }
             parseStructuredIdentitySixFields(line, separator)?.let { return it }
             parseStructuredIdentityFiveFields(line, separator)?.let { return it }
             // Issue #1237: the cross-host dashboard query appends
@@ -99,6 +115,7 @@ class HostTmuxSessionListParser @Inject constructor() {
             // an epoch int, never containing `::`). Try the 6-field shape first
             // so the agent-state chip fields are captured.
             parseStructuredSixFields(line, separator)?.let { return it }
+            parseStructuredKindAndPathSixFields(line, separator)?.let { return it }
             // Issue #463: the warm live-client query appends
             // `#{session_path}` as a 5th column. Try the 5-field shape
             // next (so the session path is captured), then fall back to
@@ -132,6 +149,24 @@ class HostTmuxSessionListParser @Inject constructor() {
             lastActivity = fields[3],
             attached = fields[4],
             path = fields[5],
+        )
+    }
+
+    private fun parseStructuredIdentitySevenFields(line: String, separator: String): TmuxListSessionsFields? {
+        val fields = line.splitFromRight(separator, expectedTailFields = 6) ?: return null
+        if (!fields[0].trim().startsWith('$') ||
+            fields[2].trim().toLongOrNull() == null ||
+            fields[3].trim().toLongOrNull() == null ||
+            fields[4].trim().toLongOrNull() == null
+        ) return null
+        return TmuxListSessionsFields(
+            tmuxSessionId = fields[0],
+            name = fields[1],
+            createdAt = fields[2],
+            lastActivity = fields[3],
+            attached = fields[4],
+            recordedKindId = fields[5],
+            path = fields[6],
         )
     }
 
@@ -181,6 +216,25 @@ class HostTmuxSessionListParser @Inject constructor() {
             attached = fields[3],
             agentStateRaw = fields[4],
             agentStateUpdatedAt = fields[5],
+        )
+    }
+
+    private fun parseStructuredKindAndPathSixFields(
+        line: String,
+        separator: String,
+    ): TmuxListSessionsFields? {
+        val fields = line.splitFromRight(separator, expectedTailFields = 5) ?: return null
+        if (fields[1].trim().toLongOrNull() == null ||
+            fields[2].trim().toLongOrNull() == null ||
+            fields[3].trim().toLongOrNull() == null
+        ) return null
+        return TmuxListSessionsFields(
+            name = fields[0],
+            createdAt = fields[1],
+            lastActivity = fields[2],
+            attached = fields[3],
+            recordedKindId = fields[4],
+            path = fields[5],
         )
     }
 
@@ -258,11 +312,22 @@ class HostTmuxSessionListParser @Inject constructor() {
         // Issue #463: session working directory from `#{session_path}`,
         // only present in the warm live-client 5-field shape.
         val path: String? = null,
+        /** Raw host-side @ps_agent_kind id, including custom registry ids. */
+        val recordedKindId: String? = null,
         // Issue #1237: raw `@ps_agent_state` + `@ps_agent_state_updated_at`,
         // only present in the cross-host dashboard 6-field shape.
         val agentStateRaw: String? = null,
         val agentStateUpdatedAt: String? = null,
     )
+
+    private fun String?.toRecordedFamily(
+        familyForRawId: (String?) -> SessionAgentKind?,
+    ): SessionAgentKind? {
+        val raw = this?.trim()?.ifBlank { null } ?: return null
+        return sessionAgentKindFromOption(raw)
+            ?: familyForRawId(raw)
+            ?: SessionAgentKind.Unknown
+    }
 
     private companion object {
         /**

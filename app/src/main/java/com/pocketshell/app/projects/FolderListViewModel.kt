@@ -111,6 +111,9 @@ class FolderListViewModel internal constructor(
     // picker profile fetch (the picker then falls back to the default-only
     // profile set).
     private val profilesGateway: ProfilesGateway? = null,
+    // Issue #2320: host engine-registry read-through for the session picker.
+    // Null in direct unit-test paths that do not exercise engine discovery.
+    private val enginesGateway: EnginesGateway? = null,
     // Epic #821 slice C (issue #837): the durable per-host tree registry seam
     // (`pocketshell tree get|upsert|reconcile` over the warm SSH session). On a
     // cold start it HYDRATES the held tree so the order + expand/collapse render
@@ -221,6 +224,8 @@ class FolderListViewModel internal constructor(
         activeTmuxClients: ActiveTmuxClients,
         // Issue #718: the host-discovered agent-profile fetch gateway.
         profilesGateway: ProfilesGateway,
+        // Issue #2320: the host engine-registry read-through gateway.
+        enginesGateway: EnginesGateway,
         // Epic #821 slice C (issue #837): the durable tree registry seam.
         treeRemoteSource: TreeRemoteSource,
         // Issue #867: the per-host client-side cold cache for instant cold render.
@@ -237,6 +242,7 @@ class FolderListViewModel internal constructor(
         sessionLifecycleSignals = sessionLifecycleSignals,
         activeTmuxClients = activeTmuxClients,
         profilesGateway = profilesGateway,
+        enginesGateway = enginesGateway,
         treeRemoteSource = treeRemoteSource,
         treeClientCache = treeClientCache,
         attachLifecycle = true,
@@ -459,6 +465,36 @@ class FolderListViewModel internal constructor(
 
     val claudeProfiles: StateFlow<List<ClaudeProfile>> = profileDiscovery.claudeProfiles
     val codexProfiles: StateFlow<List<CodexProfile>> = profileDiscovery.codexProfiles
+
+    /** Issue #2320: one-shot host engine-registry state for picker consumers. */
+    private val engineDiscovery = FolderListEngineDiscovery(
+        enginesGateway = enginesGateway,
+        hostDao = hostDao,
+        scope = viewModelScope,
+        ioDispatcher = { ioDispatcher },
+        isCurrentHost = { hostId -> bound?.hostId == hostId },
+        onRefreshApplied = ::onEngineRegistryApplied,
+    )
+
+    val engines: StateFlow<List<RemoteEngine>> = engineDiscovery.engines
+
+    /**
+     * An explicit engine-registry refresh can complete after the session
+     * enumeration that was already on screen. Re-run that authoritative
+     * projection so a custom recorded raw id is mapped to its declared family
+     * immediately. The bind-time first probe is still ordered by
+     * [bindEngineDiscoveryJob]; this callback covers picker-open retries.
+     */
+    private fun onEngineRegistryApplied(hostId: Long) {
+        val params = bound?.takeIf { it.hostId == hostId } ?: return
+        if (initialEngineReadPending) return
+        if (rootSnapshotLoaded) launchReconcile(params)
+    }
+
+    /** The bind-triggered read that must precede the first session probe. */
+    private var bindEngineDiscoveryJob: Job? = null
+    /** Prevent the initial registry callback from self-cancelling the first probe. */
+    private var initialEngineReadPending: Boolean = false
 
     private var warmJob: Job? = null
     private var warmReleaseJob: Job? = null
@@ -900,6 +936,9 @@ class FolderListViewModel internal constructor(
         }
         probeJob?.cancel()
         probeJob = null
+        bindEngineDiscoveryJob?.cancel()
+        bindEngineDiscoveryJob = null
+        initialEngineReadPending = false
         hydrateTreeJob?.cancel()
         hydrateTreeJob = null
         clientCacheSeedJob?.cancel()
@@ -958,6 +997,20 @@ class FolderListViewModel internal constructor(
         // The default-only / CLI-missing / fetch-failure cases all collapse to
         // an empty list, so the picker simply shows no profile selector.
         profileDiscovery.refresh(params)
+        // Issue #2320: one bounded engine-registry read for this host bind.
+        // There is no background engine poll; picker-open is the only retry.
+        initialEngineReadPending = enginesGateway != null
+        bindEngineDiscoveryJob = engineDiscovery.refresh(params)
+        val initialReadJob = bindEngineDiscoveryJob
+        if (initialReadJob == null) {
+            initialEngineReadPending = false
+        } else {
+            initialReadJob.invokeOnCompletion {
+                if (bindEngineDiscoveryJob === initialReadJob) {
+                    initialEngineReadPending = false
+                }
+            }
+        }
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {
@@ -1002,6 +1055,14 @@ class FolderListViewModel internal constructor(
      */
     fun refreshProfilesForPicker() {
         bound?.let(profileDiscovery::refresh)
+    }
+
+    /** Issue #2320: retry engine discovery at a real picker open. */
+    fun refreshEnginesForPicker() {
+        // An explicit picker retry supersedes the bind ordering guard. Its
+        // completion is allowed to re-project the already-bound tree.
+        initialEngineReadPending = false
+        bound?.let(engineDiscovery::refresh)
     }
 
     /**
@@ -2264,6 +2325,13 @@ class FolderListViewModel internal constructor(
         // the picker shows Loading ("Connecting…") while the connect is in
         // flight — never a hard 12s error on a connectable host.
         ensureWarmConnectForReconcile(params)
+        if (bound != params) return
+        // Order the first session enumeration after the bind-triggered engine
+        // read. This prevents a custom @ps_agent_kind id from being parsed
+        // before its declared registry family is available. A successful
+        // picker-open retry separately requests one reconcile when its read
+        // completes.
+        bindEngineDiscoveryJob?.join()
         if (bound != params) return
         // Issue #702: bound the ENUMERATION (not the connect). The gateway already
         // self-bounds its live `-CC` enumeration and SSH-lease reads, but a

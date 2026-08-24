@@ -162,6 +162,8 @@ internal class HostTreeModel {
         var lastActivity: Long?,
         var attached: Boolean,
         var agentKind: SessionAgentKind,
+        /** Exact host @ps_agent_kind id; open-ended custom engine identity. */
+        var recordedKindId: String?,
         /**
          * Issue #1237: the resolved agent resting-state chip value, re-read from
          * the host `@ps_agent_state` option on every reconcile. NOT sticky like
@@ -287,6 +289,7 @@ internal class HostTreeModel {
                 lastActivity = null,
                 attached = false,
                 agentKind = node.foreignGuess ?: SessionAgentKind.Probing,
+                recordedKindId = null,
                 // The registry seed carries no agent state — the first reconcile
                 // re-reads it from the host @ps_agent_state option (#1237).
                 agentState = SessionAgentState.Unknown,
@@ -915,6 +918,12 @@ internal class HostTreeModel {
         existing.agentState = entry.agentState
         // Issue #716: a degraded Probing read must not clobber a known agent.
         existing.agentKind = mergeAgentKind(existing.agentKind, entry.agentKind)
+        // A raw id is authoritative when present. Keep it across a degraded
+        // row that omitted the option so an unknown custom id cannot disappear
+        // merely because a refresh returned an older/partial shape.
+        if (entry.recordedKindId != null) {
+            existing.recordedKindId = entry.recordedKindId
+        }
         // Issue #858 / #889: retain a profile only across a degraded read. A
         // generation replacement never reaches this function, so it starts
         // with the successor's own profile state.
@@ -1039,6 +1048,7 @@ internal class HostTreeModel {
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,
+            recordedKindId = recordedKindId,
             agentState = agentState,
             windows = windows.map { it.toState() },
             recordedProfile = recordedProfile,
@@ -1053,6 +1063,7 @@ internal class HostTreeModel {
             lastActivity = lastActivity,
             attached = attached,
             agentKind = agentKind,
+            recordedKindId = recordedKindId,
             agentState = agentState,
             recordedProfile = recordedProfile,
             tmuxSessionId = tmuxSessionId,

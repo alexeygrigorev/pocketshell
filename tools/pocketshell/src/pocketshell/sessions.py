@@ -26,14 +26,15 @@ Why subprocess instead of `import tmuxctl`:
 
 Subcommand coverage:
 
-- `pocketshell sessions list [--json]` -> `tmuxctl list`
+- `pocketshell sessions list` -> `tmuxctl list`
 
-`tmuxctl list` does not currently support a `--json` flag; the brief
-calls it out as a future flag the underlying CLI may grow. The wrapper
-uses `ignore_unknown_options=True` so `--json` (and any other future
-flag) is forwarded verbatim without the wrapper needing a release of
-its own. If `tmuxctl list` does not understand `--json` yet, the
-subprocess exit code and stderr are proxied through unchanged.
+`tmuxctl list` currently emits its human table only; it does not support a
+structured/`--json` mode. The wrapper keeps its existing transparent
+forwarding of unknown arguments, so a caller that supplies an unsupported
+flag receives the underlying tmuxctl exit code and stderr unchanged. The
+Android folder fallback therefore uses its own bounded raw-tmux format probe
+when it needs the exact `@ps_agent_kind` value; it does not pretend that
+`pocketshell sessions list --json` is supported.
 """
 
 from __future__ import annotations
@@ -175,11 +176,10 @@ def sessions_group() -> None:
 
 @sessions_group.command(
     "list",
-    # `ignore_unknown_options` + `allow_extra_args` let callers pass
-    # flags `tmuxctl` understands that this wrapper does not list
-    # individually. The brief calls out `--json` as a future flag the
-    # underlying `tmuxctl` may grow; forwarding extras unchanged keeps
-    # the wrapper from blocking parity work upstream.
+    # `ignore_unknown_options` + `allow_extra_args` preserve the wrapper's
+    # transparent pass-through contract for flags owned by a newer tmuxctl.
+    # This is not a claim that the current tmuxctl list command supports a
+    # structured/JSON mode.
     context_settings={
         "help_option_names": ["-h", "--help"],
         "ignore_unknown_options": True,
@@ -204,8 +204,8 @@ def sessions_list(ctx: click.Context, sort_by: Optional[str]) -> None:
     args: list[str] = ["list"]
     if sort_by:
         args.extend(["--by", sort_by])
-    # `ctx.args` holds any extras we ignored (e.g. `--json` once
-    # tmuxctl supports it). Forward verbatim, position preserved.
+    # `ctx.args` holds any extras we ignored. Forward verbatim, position
+    # preserved, and let the installed tmuxctl decide whether they exist.
     args.extend(ctx.args)
     envelope = _try_daemon_sessions_list(sort_by=sort_by, extra_args=ctx.args)
     if envelope is None:

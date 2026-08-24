@@ -3,6 +3,7 @@ package com.pocketshell.app.projects
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -167,14 +168,52 @@ class FolderListGatewayKindAuthorityTest {
         )
     }
 
-    private fun gateway(session: SshSession): SshFolderListGateway =
+    @Test
+    fun coldLeaseMapsCustomEngineFamilyForNestedMultiWindowSession() = runTest {
+        val listSessions =
+            "custom-nested${SEP}1${SEP}2${SEP}1${SEP}custom-codex${SEP}${SEP}/work/custom"
+        val listPanes =
+            "custom-nested${SEP}0${SEP}parent${SEP}0${SEP}1${SEP}/work/custom${SEP}/dev/pts/1${SEP}sh${SEP}@0${SEP}111\n" +
+                "custom-nested${SEP}1${SEP}sub-agent${SEP}1${SEP}1${SEP}/work/custom/sub${SEP}/dev/pts/2${SEP}codex${SEP}@1${SEP}222"
+        val session = FakeSshSession(enumerationStdout = enumerationPayload(listSessions, listPanes))
+        val rows = (gateway(session, FamilyGateway("custom-codex")).listSessionsWithFolder(
+            HOST,
+            KEY_PATH,
+            passphrase = null,
+        ) as FolderListResult.Sessions).rows
+
+        val row = rows.single()
+        assertEquals("custom-codex", row.recordedKindId)
+        assertEquals(SessionAgentKind.Codex, row.recordedKind)
+        assertEquals(SessionAgentKind.Codex, row.agentKind)
+        assertEquals(listOf("parent", "sub-agent"), row.windows.map { it.name })
+    }
+
+    private fun gateway(
+        session: SshSession,
+        enginesGateway: EnginesGateway? = null,
+    ): SshFolderListGateway =
         SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
             activeTmuxClients = ActiveTmuxClients(),
             sshLeaseManager = SshLeaseManager(
                 connector = SshLeaseConnector { Result.success(session) },
             ),
+            sessionListParser = HostTmuxSessionListParser(),
+            execReadTimeoutMs = SshFolderListGateway.EXEC_READ_TIMEOUT_MS,
+            enginesGateway = enginesGateway,
         )
+
+    private class FamilyGateway(private val customId: String) : EnginesGateway {
+        override suspend fun listEngines(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+        ) = error("not used")
+
+        override fun familyForRawId(hostId: Long, rawId: String?): SessionAgentKind? =
+            SessionAgentKind.Codex.takeIf { rawId == customId }
+    }
 
     private class FakeSshSession(
         private val enumerationStdout: String,

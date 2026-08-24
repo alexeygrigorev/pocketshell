@@ -1,6 +1,7 @@
 package com.pocketshell.app.sessions
 
 import android.util.Log
+import com.pocketshell.app.projects.EnginesGateway
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseConnector
@@ -38,6 +39,7 @@ class SshHostTmuxSessionsGateway internal constructor(
     private val sshLeaseManager: SshLeaseManager,
     private val leaseBlockTimeoutMs: Long,
     private val liveEnumTimeoutMs: Long,
+    private val enginesGateway: EnginesGateway? = null,
 ) : HostTmuxSessionsGateway {
     constructor(
         parser: HostTmuxSessionListParser,
@@ -50,7 +52,7 @@ class SshHostTmuxSessionsGateway internal constructor(
         liveEnumTimeoutMs = LIVE_ENUM_TIMEOUT_MS,
     )
 
-    @Inject
+    /** Compatibility seam for direct callers that predate engine-family lookup. */
     constructor(
         parser: HostTmuxSessionListParser,
         activeTmuxClients: ActiveTmuxClients,
@@ -61,6 +63,22 @@ class SshHostTmuxSessionsGateway internal constructor(
         sshLeaseManager = sshLeaseManager,
         leaseBlockTimeoutMs = LEASE_BLOCK_TIMEOUT_MS,
         liveEnumTimeoutMs = LIVE_ENUM_TIMEOUT_MS,
+        enginesGateway = null,
+    )
+
+    @Inject
+    constructor(
+        parser: HostTmuxSessionListParser,
+        activeTmuxClients: ActiveTmuxClients,
+        sshLeaseManager: SshLeaseManager,
+        enginesGateway: EnginesGateway,
+    ) : this(
+        parser = parser,
+        activeTmuxClients = activeTmuxClients,
+        sshLeaseManager = sshLeaseManager,
+        leaseBlockTimeoutMs = LEASE_BLOCK_TIMEOUT_MS,
+        liveEnumTimeoutMs = LIVE_ENUM_TIMEOUT_MS,
+        enginesGateway = enginesGateway,
     )
 
     override suspend fun listSessions(
@@ -83,7 +101,11 @@ class SshHostTmuxSessionsGateway internal constructor(
         ) { session ->
             val tmux = session.exec(pathAware(LIST_SESSIONS_COMMAND))
             when {
-                tmux.exitCode == 0 -> HostTmuxSessionListResult.Sessions(parser.parseTmuxListSessions(tmux.stdout))
+                tmux.exitCode == 0 -> HostTmuxSessionListResult.Sessions(
+                    parser.parseTmuxListSessions(tmux.stdout) { rawId ->
+                        enginesGateway?.familyForRawId(host.id, rawId)
+                    },
+                )
                 tmux.exitCode == 127 || tmux.stderr.contains("not found", ignoreCase = true) ->
                     HostTmuxSessionListResult.ToolUnavailable
                 tmux.stderr.contains("no server running", ignoreCase = true) ->
@@ -142,7 +164,9 @@ class SshHostTmuxSessionsGateway internal constructor(
                 }
             } else {
                 HostTmuxSessionListResult.Sessions(
-                    parser.parseTmuxListSessions(response.output.joinToString(separator = "\n")),
+                    parser.parseTmuxListSessions(
+                        response.output.joinToString(separator = "\n"),
+                    ) { rawId -> enginesGateway?.familyForRawId(host.id, rawId) },
                 )
             }
         } catch (e: CancellationException) {
@@ -182,7 +206,7 @@ class SshHostTmuxSessionsGateway internal constructor(
         const val LIST_SESSIONS_COMMAND: String =
             "${TmuxRead.CLIENT} list-sessions -F " +
                 "'#{session_id}::#{session_name}::#{session_created}::" +
-                "#{session_activity}::#{session_attached}'"
+                "#{session_activity}::#{session_attached}::#{@ps_agent_kind}::#{session_path}'"
 
         const val LEASE_BLOCK_TIMEOUT_MS: Long = 3_500L
 
@@ -200,8 +224,8 @@ class SshHostTmuxSessionsGateway internal constructor(
         // project switcher can group sessions by project/folder without a
         // second SSH connect.
         const val LIVE_LIST_SESSIONS_COMMAND: String =
-            "list-sessions -F " +
+                "list-sessions -F " +
                 "'#{session_id}::#{session_name}::#{session_created}::#{session_activity}::" +
-                "#{session_attached}::#{session_path}'"
+                "#{session_attached}::#{@ps_agent_kind}::#{session_path}'"
     }
 }

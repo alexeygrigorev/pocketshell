@@ -1,5 +1,6 @@
 package com.pocketshell.app.sessions
 
+import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -34,6 +35,33 @@ class HostTmuxSessionListParserTest {
         )
 
         assertEquals("very-long-agent-session-name", row?.name)
+    }
+
+    @Test
+    fun parseTmuxListSessionsPreservesCustomRawIdAndResolvedFamily() {
+        val rows = parser.parseTmuxListSessions(
+            "${'$'}7::custom-session::100::200::1::custom-codex::/srv/custom\n" +
+                "foreign::150::150::0::::/srv/foreign\n",
+            familyForRawId = { rawId ->
+                if (rawId == "custom-codex") SessionAgentKind.Codex else null
+            },
+        )
+
+        assertEquals(listOf("custom-session", "foreign"), rows.map { it.name })
+        assertEquals("custom-codex", rows[0].recordedKindId)
+        assertEquals(SessionAgentKind.Codex, rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Codex, rows[0].agentKind)
+        assertEquals("${'$'}7", rows[0].tmuxSessionId)
+        assertEquals("/srv/custom", rows[0].path)
+        assertNull(rows[1].recordedKindId)
+        assertNull(rows[1].recordedKind)
+        assertEquals(SessionAgentKind.Shell, rows[1].agentKind)
+    }
+
+    @Test
+    fun parseTmuxListSessionsRejectsMalformedRows() {
+        assertTrue(parser.parseTmuxListSessions("not-a-tmux-row").isEmpty())
+        assertTrue(parser.parseTmuxListSessions("{}\n").isEmpty())
     }
 
     /**
@@ -140,6 +168,41 @@ class HostTmuxSessionListParserTest {
         assertEquals(listOf(1779520800L, 1779510000L), rows.map { it.createdAt })
         assertEquals("/srv/project", rows[0].path)
         assertNull(rows[1].path)
+    }
+
+    @Test
+    fun parseTmuxListSessionsCarriesRawKindAndDeclaredFamily() {
+        val rows = parser.parseTmuxListSessions(
+            "\$7::custom::1779520800::1779521400::1::custom-codex::/srv/project\n" +
+                "\$8::unknown::1779510000::1779510500::0::custom-other::/srv/other\n",
+            familyForRawId = { rawId ->
+                if (rawId == "custom-codex") SessionAgentKind.Codex else null
+            },
+        )
+
+        assertEquals(listOf("custom-codex", "custom-other"), rows.map { it.recordedKindId })
+        assertEquals(SessionAgentKind.Codex, rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Codex, rows[0].agentKind)
+        assertEquals(SessionAgentKind.Unknown, rows[1].recordedKind)
+        assertEquals(SessionAgentKind.Unknown, rows[1].agentKind)
+        assertEquals(listOf("/srv/project", "/srv/other"), rows.map { it.path })
+    }
+
+    @Test
+    fun parseTmuxListSessionsNormalizesBlankRawKindAcrossPickerShapes() {
+        val rows = parser.parseTmuxListSessions(
+            "\$7::identity-blank::1779520800::1779521400::1::   ::/srv/identity\n" +
+                "kind-path-blank::1779510000::1779510500::0::::/srv/kind-path\n",
+        )
+
+        assertEquals(listOf("identity-blank", "kind-path-blank"), rows.map { it.name })
+        assertEquals(listOf("/srv/identity", "/srv/kind-path"), rows.map { it.path })
+        assertNull(rows[0].recordedKindId)
+        assertNull(rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Shell, rows[0].agentKind)
+        assertNull(rows[1].recordedKindId)
+        assertNull(rows[1].recordedKind)
+        assertEquals(SessionAgentKind.Shell, rows[1].agentKind)
     }
 
     @Test

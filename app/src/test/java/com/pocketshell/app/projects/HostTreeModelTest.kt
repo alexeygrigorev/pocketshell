@@ -27,6 +27,7 @@ class HostTreeModelTest {
         agentKind: SessionAgentKind = SessionAgentKind.Shell,
         attached: Boolean = false,
         windows: List<FolderSessionWindowEntry> = emptyList(),
+        recordedKindId: String? = null,
         recordedProfile: String? = null,
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
@@ -37,6 +38,7 @@ class HostTreeModelTest {
             attached = attached,
             agentKind = agentKind,
             windows = windows,
+            recordedKindId = recordedKindId,
             recordedProfile = recordedProfile,
             tmuxSessionId = tmuxSessionId,
             sessionCreated = sessionCreated,
@@ -138,6 +140,26 @@ class HostTreeModelTest {
         val order2 = tree.sessionEntries().map { it.sessionName }
         assertEquals(order1, order2)
         assertEquals(listOf("a", "b", "c"), order2)
+    }
+
+    @Test
+    fun reconcilePreservesCustomRawKindAndDeclaredFamilyAcrossRefresh() {
+        val tree = HostTreeModel()
+        tree.bindHost(1L)
+        val custom = session(
+            name = "custom",
+            agentKind = SessionAgentKind.Codex,
+            recordedKindId = "custom-codex",
+            tmuxSessionId = "\$7",
+            sessionCreated = 1_700L,
+        )
+
+        tree.reconcile(snapshot(listOf(custom)), now = 100L)
+        tree.reconcile(snapshot(listOf(custom.copy(lastActivity = 2_000L))), now = 200L)
+
+        val held = tree.sessionEntries().single()
+        assertEquals("custom-codex", held.recordedKindId)
+        assertEquals(SessionAgentKind.Codex, held.agentKind)
     }
 
     @Test

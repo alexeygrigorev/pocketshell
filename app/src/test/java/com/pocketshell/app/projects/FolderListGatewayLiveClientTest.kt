@@ -3,6 +3,7 @@ package com.pocketshell.app.projects
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
 import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.tmux.FakeTmuxClient
@@ -114,6 +115,58 @@ class FolderListGatewayLiveClientTest {
             ),
             client.chainedCommandBatches,
         )
+    }
+
+    @Test
+    fun liveClientMapsCustomEngineFamilyForNestedMultiWindowSession() = runTest {
+        val client = FakeTmuxClient()
+        client.responses += CommandResponse(
+            number = 1L,
+            output = listOf(
+                "custom-nested::100::300::1::custom-codex::::/srv/app",
+            ),
+            isError = false,
+        )
+        client.responses += CommandResponse(
+            number = 2L,
+            output = listOf(
+                "custom-nested::0::parent::0::1::/srv/app::/dev/pts/1::sh::@0::100",
+                "custom-nested::1::sub-agent::1::1::/srv/app/sub::/dev/pts/2::codex::@1::101",
+            ),
+            isError = false,
+        )
+        activeTmuxClients.register(
+            hostId = HOST.id,
+            hostName = HOST.name,
+            hostname = HOST.hostname,
+            port = HOST.port,
+            username = HOST.username,
+            keyPath = KEY_PATH,
+            client = client,
+        )
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = SshLeaseManager(
+                connector = SshLeaseConnector {
+                    Result.failure(IllegalStateException("live path must not dial"))
+                },
+                scope = this,
+                idleTtlMillis = 0L,
+            ),
+            sessionListParser = HostTmuxSessionListParser(),
+            execReadTimeoutMs = SshFolderListGateway.EXEC_READ_TIMEOUT_MS,
+            enginesGateway = FamilyGateway("custom-codex"),
+        )
+
+        val result = gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
+
+        assertTrue(result is FolderListResult.Sessions)
+        val row = (result as FolderListResult.Sessions).rows.single()
+        assertEquals("custom-codex", row.recordedKindId)
+        assertEquals(SessionAgentKind.Codex, row.recordedKind)
+        assertEquals(SessionAgentKind.Codex, row.agentKind)
+        assertEquals(listOf("parent", "sub-agent"), row.windows.map { it.name })
     }
 
     @Test
@@ -371,6 +424,17 @@ class FolderListGatewayLiveClientTest {
         override suspend fun uploadStream(input: InputStream, length: Long, name: String, remotePath: String): String =
             error("not used")
         override fun close() = Unit
+    }
+
+    private class FamilyGateway(private val customId: String) : EnginesGateway {
+        override suspend fun listEngines(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+        ) = error("not used")
+
+        override fun familyForRawId(hostId: Long, rawId: String?): SessionAgentKind? =
+            SessionAgentKind.Codex.takeIf { rawId == customId }
     }
 
     private companion object {

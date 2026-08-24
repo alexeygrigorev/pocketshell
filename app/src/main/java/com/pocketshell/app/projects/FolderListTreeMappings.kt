@@ -48,6 +48,7 @@ internal fun FolderSessionRow.toSessionEntry(): FolderSessionEntry =
         lastActivity = lastActivity,
         attached = attached,
         agentKind = agentKind,
+        recordedKindId = recordedKindId,
         // Issue #1237/#1570: resolve the raw @ps_agent_state option to a chip
         // state. The hook fires only on stop/waiting, so fresh session activity
         // after a recorded idle/waiting means the agent resumed — for a live

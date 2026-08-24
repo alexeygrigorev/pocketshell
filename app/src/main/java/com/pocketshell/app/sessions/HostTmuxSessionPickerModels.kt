@@ -1,6 +1,7 @@
 package com.pocketshell.app.sessions
 
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.model.SessionAgentKind
 
 data class HostTmuxSessionRow(
     val name: String,
@@ -17,6 +18,12 @@ data class HostTmuxSessionRow(
      * `pocketshell sessions list` proxy or the fallback regex parse).
      */
     val path: String? = null,
+    /** Exact raw host-side `@ps_agent_kind` id, including custom ids. */
+    val recordedKindId: String? = null,
+    /** Closed family declared by the host engine registry. */
+    val recordedKind: SessionAgentKind? = null,
+    /** Rendering family; unknown custom ids remain [SessionAgentKind.Unknown]. */
+    val agentKind: SessionAgentKind = SessionAgentKind.Shell,
     /**
      * Issue #1237: raw host-side `@ps_agent_state` tmux option value
      * (`idle` / `waiting_for_input` / `working`), populated only by the list

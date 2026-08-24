@@ -6,8 +6,9 @@ The third-PR scope (#218) exercises:
 - `pocketshell sessions --help` lists the `list` subcommand.
 - `pocketshell sessions list` forwards verbatim to `tmuxctl list`.
 - `pocketshell sessions list --by activity` forwards `--by activity`.
-- `pocketshell sessions list --json` forwards `--json` verbatim (future
-  flag the underlying `tmuxctl` may grow; the wrapper must not block).
+- unsupported options are still forwarded verbatim, and the current
+  `tmuxctl list --json` rejection is surfaced unchanged (there is no fake
+  structured contract).
 - Missing `tmuxctl` produces a friendly stderr message + exit 127.
 - stdout / stderr / exit-code from the subprocess are proxied verbatim.
 - The proxied output shape stays byte-identical so the Android-side
@@ -179,48 +180,52 @@ def test_sessions_list_rejects_invalid_by_value() -> None:
     run.assert_not_called()
 
 
-def test_sessions_list_forwards_unknown_options_verbatim() -> None:
-    """The wrapper does NOT enumerate every flag `tmuxctl list` may grow.
-    The brief calls out a future `--json` flag in particular — this
-    test pins the contract that `pocketshell sessions list --json`
-    forwards `--json` to the underlying CLI without rewriting it.
+def test_sessions_list_surfaces_current_tmuxctl_json_rejection() -> None:
+    """The current tmuxctl has no structured list mode.
+
+    The wrapper's pass-through behavior is intentional, but it must not turn
+    an unsupported `--json` flag into a claimed success. This mirrors the
+    current host command (`tmuxctl list --json` -> exit 2).
     """
     runner = CliRunner()
     with patch(
         "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
     ), patch(
         "pocketshell.sessions.subprocess.run",
-        return_value=_fake_completed(stdout='{"sessions": []}\n'),
+        return_value=_fake_completed(
+            stderr="Error: No such option: --json\n",
+            returncode=2,
+        ),
     ) as run:
         result = runner.invoke(sessions_group, ["list", "--json"])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 2, result.output
+    assert "No such option: --json" in result.output
     invoked: Sequence[str] = run.call_args.args[0]
     assert invoked == ["/fake/tmuxctl", "list", "--json"]
 
 
 def test_sessions_list_forwards_by_and_unknown_options_together() -> None:
-    """`--by` (known) and `--json` (unknown / future) must both reach
-    tmuxctl in the order they were typed."""
+    """Known and unknown options both reach tmuxctl in typed order."""
     runner = CliRunner()
     with patch(
         "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
     ), patch(
         "pocketshell.sessions.subprocess.run",
-        return_value=_fake_completed(stdout='{"sessions": []}\n'),
+        return_value=_fake_completed(stdout=_fake_sessions_table()),
     ) as run:
         result = runner.invoke(
             sessions_group,
-            ["list", "--by", "activity", "--json"],
+            ["list", "--by", "activity", "--future-option"],
         )
     assert result.exit_code == 0, result.output
     invoked: Sequence[str] = run.call_args.args[0]
-    # `--by activity` is parsed by the wrapper, `--json` falls through
-    # via `ctx.args`. Both must end up in the final argv.
+    # `--by activity` is parsed by the wrapper; the unknown option falls
+    # through via `ctx.args`. Both must end up in the final argv.
     assert invoked[0] == "/fake/tmuxctl"
     assert invoked[1] == "list"
     assert "--by" in invoked
     assert "activity" in invoked
-    assert "--json" in invoked
+    assert "--future-option" in invoked
 
 
 # ----- missing-binary handling ---------------------------------------

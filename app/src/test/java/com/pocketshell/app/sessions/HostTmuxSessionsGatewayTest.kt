@@ -1,5 +1,6 @@
 package com.pocketshell.app.sessions
 
+import com.pocketshell.app.projects.EnginesGateway
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.ssh.ExecResult
@@ -12,6 +13,7 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
@@ -67,13 +69,55 @@ class HostTmuxSessionsGatewayTest {
         )
         assertEquals(0, SshOpenTelemetry.count(SSH_SOURCE_SESSION_PICKER_LIST))
         assertEquals(
-            listOf(
-                "list-sessions -F " +
-                    "'#{session_id}::#{session_name}::#{session_created}::#{session_activity}::" +
-                    "#{session_attached}::#{session_path}'",
-            ),
+            listOf(SshHostTmuxSessionsGateway.LIVE_LIST_SESSIONS_COMMAND),
             client.sentCommands,
         )
+    }
+
+    @Test
+    fun liveClientMapsCustomRecordedKindThroughEngineRegistry() = runTest {
+        val client = FakeTmuxClient()
+        client.responses += CommandResponse(
+            number = 1L,
+            output = listOf(
+                "\$2::nested-agent::101::301::1::custom-codex::/srv/app",
+            ),
+            isError = false,
+        )
+        activeTmuxClients.register(
+            hostId = HOST.id,
+            hostName = HOST.name,
+            hostname = HOST.hostname,
+            port = HOST.port,
+            username = HOST.username,
+            keyPath = KEY_PATH,
+            client = client,
+        )
+        val manager = SshLeaseManager(
+            connector = CountingConnector(Result.failure(SshException("live path must not dial"))),
+            scope = this,
+            idleTtlMillis = 0L,
+        )
+        val gateway = SshHostTmuxSessionsGateway(
+            parser = parser,
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = manager,
+            leaseBlockTimeoutMs = 250L,
+            liveEnumTimeoutMs = 250L,
+            enginesGateway = FamilyGateway("custom-codex"),
+        )
+
+        try {
+            val result = gateway.listSessions(HOST, KEY_PATH, passphrase = null)
+
+            assertTrue(result is HostTmuxSessionListResult.Sessions)
+            val row = (result as HostTmuxSessionListResult.Sessions).rows.single()
+            assertEquals("custom-codex", row.recordedKindId)
+            assertEquals(SessionAgentKind.Codex, row.recordedKind)
+            assertEquals(SessionAgentKind.Codex, row.agentKind)
+        } finally {
+            manager.close()
+        }
     }
 
     @Test
@@ -127,6 +171,46 @@ class HostTmuxSessionsGatewayTest {
     }
 
     @Test
+    fun coldLeaseMapsCustomRecordedKindThroughEngineRegistry() = runTest {
+        val session = FakeSshSession(
+            responses = ArrayDeque(
+                listOf(
+                    ExecResult(
+                        stdout = "\$3::sub-agent::100::300::0::custom-codex::/srv/app\n",
+                        stderr = "",
+                        exitCode = 0,
+                    ),
+                ),
+            ),
+        )
+        val manager = SshLeaseManager(
+            connector = CountingConnector(Result.success(session)),
+            scope = this,
+            idleTtlMillis = 30_000L,
+        )
+        val gateway = SshHostTmuxSessionsGateway(
+            parser = parser,
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = manager,
+            leaseBlockTimeoutMs = 250L,
+            liveEnumTimeoutMs = 250L,
+            enginesGateway = FamilyGateway("custom-codex"),
+        )
+
+        try {
+            val result = gateway.listSessions(HOST, KEY_PATH, passphrase = null)
+
+            assertTrue(result is HostTmuxSessionListResult.Sessions)
+            val row = (result as HostTmuxSessionListResult.Sessions).rows.single()
+            assertEquals("custom-codex", row.recordedKindId)
+            assertEquals(SessionAgentKind.Codex, row.recordedKind)
+            assertEquals(SessionAgentKind.Codex, row.agentKind)
+        } finally {
+            manager.close()
+        }
+    }
+
+    @Test
     fun liveClientTimeoutFallsBackToLeaseEnumeration() = runTest {
         val client = FakeTmuxClient().apply {
             suspendForeverOnCommandPrefix = "list-sessions"
@@ -172,11 +256,7 @@ class HostTmuxSessionsGatewayTest {
             assertEquals(1, connector.connectCount)
             assertEquals(1, SshOpenTelemetry.count(SSH_SOURCE_SESSION_PICKER_LIST))
             assertEquals(
-                listOf(
-                    "list-sessions -F " +
-                        "'#{session_id}::#{session_name}::#{session_created}::#{session_activity}::" +
-                        "#{session_attached}::#{session_path}'",
-                ),
+                listOf(SshHostTmuxSessionsGateway.LIVE_LIST_SESSIONS_COMMAND),
                 client.sentCommands,
             )
         } finally {
@@ -282,6 +362,17 @@ class HostTmuxSessionsGatewayTest {
             connectCount += 1
             return Result.success(session)
         }
+    }
+
+    private class FamilyGateway(private val customId: String) : EnginesGateway {
+        override suspend fun listEngines(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+        ) = error("not used")
+
+        override fun familyForRawId(hostId: Long, rawId: String?): SessionAgentKind? =
+            SessionAgentKind.Codex.takeIf { rawId == customId }
     }
 
     private class FakeSshSession(

@@ -1,10 +1,19 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.repos.ReposJsonParser
+import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxRead
+import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -47,6 +56,167 @@ class FolderListGatewayFallbackTest {
         assertEquals(listOf(null, null), rows.map { it.cwd })
         assertEquals(listOf(false, false), rows.map { it.attached })
         assertTrue(session.execCommands.any { it.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) })
+    }
+
+    @Test
+    fun nativeTmuxFallbackEnrichesHumanRowsWithCustomRawKind() = runTest {
+        val structured =
+            "${'$'}7::custom-session::100::200::1::custom-codex::/srv/custom\n"
+        val session = FakeSshSession(
+            pocketshellResult = ExecResult(
+                stdout = "IDX  SESSION               CREATED\n" +
+                    "1    custom-session         2026-05-30 00:20:01\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+            structuredResult = ExecResult(structured, "", 0),
+        )
+        val engines = FamilyGateway("custom-codex")
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = ActiveTmuxClients(),
+            sshLeaseManager = SshLeaseManager(
+                connector = SshLeaseConnector { Result.success(session) },
+            ),
+            sessionListParser = HostTmuxSessionListParser(),
+            execReadTimeoutMs = SshFolderListGateway.EXEC_READ_TIMEOUT_MS,
+            enginesGateway = engines,
+        )
+
+        val result = gateway.listSessionsFromNativeOrPocketshell(
+            session = session,
+            listSessions = ExecResult(
+                stdout = "",
+                stderr = "error connecting to /tmp/tmux-1000/default (No such file or directory)",
+                exitCode = 1,
+            ),
+            familyForRawId = { rawId -> engines.familyForRawId(HOST.id, rawId) },
+            probes = gateway.serialSideProbes(session, HOST, emptyList()),
+        )
+
+        assertTrue(result is FolderListResult.Sessions)
+        val row = (result as FolderListResult.Sessions).rows.single()
+        assertEquals("custom-codex", row.recordedKindId)
+        assertEquals(SessionAgentKind.Codex, row.recordedKind)
+        assertEquals(SessionAgentKind.Codex, row.agentKind)
+        assertEquals("\$7", row.tmuxSessionId)
+        assertEquals(listOf("custom-codex"), engines.resolvedRawIds)
+        assertEquals(
+            1,
+            session.execCommands.count {
+                it.contains(STRUCTURED_PROBE_HEAD)
+            },
+        )
+        assertTrue(
+            session.execCommands.any {
+                it.contains(STRUCTURED_PROBE_HEAD)
+            },
+        )
+    }
+
+    @Test
+    fun malformedTmuxEnrichmentKeepsLegacyHumanRows() = runTest {
+        val session = FakeSshSession(
+            pocketshellResult = ExecResult(
+                stdout = "IDX  SESSION               CREATED\n" +
+                    "1    legacy-session         2026-05-30 00:20:01\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+            structuredResult = ExecResult("not-a-tmux-row", "", 0),
+        )
+        val gateway = SshFolderListGateway()
+
+        val result = gateway.listSessionsFromNativeOrPocketshell(
+            session = session,
+            listSessions = ExecResult(
+                stdout = "",
+                stderr = "tmux: not found",
+                exitCode = 127,
+            ),
+            probes = gateway.serialSideProbes(session, HOST, emptyList()),
+        )
+
+        assertTrue(result is FolderListResult.Sessions)
+        val row = (result as FolderListResult.Sessions).rows.single()
+        assertEquals("legacy-session", row.sessionName)
+        assertEquals(null, row.recordedKindId)
+        assertEquals(SessionAgentKind.Shell, row.agentKind)
+    }
+
+    @Test
+    fun unavailableTmuxEnrichmentKeepsLegacyHumanRows() = runTest {
+        val session = FakeSshSession(
+            pocketshellResult = ExecResult(
+                stdout = "IDX  SESSION               CREATED\n" +
+                    "1    legacy-session         2026-05-30 00:20:01\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+            structuredResult = ExecResult(
+                stdout = "",
+                stderr = "tmux: command not found",
+                exitCode = 127,
+            ),
+        )
+
+        val gateway = SshFolderListGateway()
+        val result = gateway.listSessionsFromNativeOrPocketshell(
+            session = session,
+            listSessions = ExecResult(stdout = "", stderr = "tmux: not found", exitCode = 127),
+            probes = gateway.serialSideProbes(session, HOST, emptyList()),
+        )
+
+        assertTrue(result is FolderListResult.Sessions)
+        val row = (result as FolderListResult.Sessions).rows.single()
+        assertEquals("legacy-session", row.sessionName)
+        assertTrue(session.execCommands.any {
+            it.contains(STRUCTURED_PROBE_HEAD)
+        })
+        assertEquals(null, row.recordedKindId)
+    }
+
+    @Test
+    fun wedgedSupportedTmuxEnrichmentIsBoundedAndKeepsHumanRows() = runTest {
+        val session = FakeSshSession(
+            pocketshellResult = ExecResult(
+                stdout = "IDX  SESSION               CREATED\n" +
+                    "1    legacy-session         2026-05-30 00:20:01\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+            blockStructuredProbe = true,
+        )
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = ActiveTmuxClients(),
+            sshLeaseManager = SshLeaseManager(
+                connector = SshLeaseConnector { Result.success(session) },
+            ),
+            sessionListParser = HostTmuxSessionListParser(),
+            execReadTimeoutMs = 40L,
+            enginesGateway = null,
+        )
+
+        val result = gateway.listSessionsFromNativeOrPocketshell(
+            session = session,
+            listSessions = ExecResult(stdout = "", stderr = "tmux: not found", exitCode = 127),
+            probes = gateway.serialSideProbes(session, HOST, emptyList()),
+        )
+
+        assertTrue(result is FolderListResult.Sessions)
+        assertEquals(
+            listOf("legacy-session"),
+            (result as FolderListResult.Sessions).rows.map { it.sessionName },
+        )
+        val structuredCommands = session.execCommands.filter {
+            it.contains(STRUCTURED_PROBE_HEAD)
+        }
+        assertEquals(1, structuredCommands.size)
+        assertTrue(
+            structuredCommands.single().contains("${TmuxRead.CLIENT} list-sessions -F"),
+        )
+        assertFalse(structuredCommands.single().contains("--json"))
     }
 
     @Test
@@ -969,8 +1139,25 @@ class FolderListGatewayFallbackTest {
         override fun close() = Unit
     }
 
+    private class FamilyGateway(private val customId: String) : EnginesGateway {
+        val resolvedRawIds = mutableListOf<String?>()
+
+        override suspend fun listEngines(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+        ) = error("not used")
+
+        override fun familyForRawId(hostId: Long, rawId: String?): SessionAgentKind? {
+            resolvedRawIds += rawId
+            return SessionAgentKind.Codex.takeIf { rawId == customId }
+        }
+    }
+
     private class FakeSshSession(
         private val pocketshellResult: ExecResult,
+        private val structuredResult: ExecResult? = null,
+        private val blockStructuredProbe: Boolean = false,
     ) : SshSession {
         val execCommands = mutableListOf<String>()
 
@@ -978,10 +1165,17 @@ class FolderListGatewayFallbackTest {
 
         override suspend fun exec(command: String): ExecResult {
             execCommands += command
-            return if (command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND)) {
-                pocketshellResult
-            } else {
-                ExecResult(stdout = "", stderr = "unexpected command: $command", exitCode = 1)
+            return when {
+                command.contains(STRUCTURED_PROBE_HEAD) -> {
+                    if (blockStructuredProbe) awaitCancellation()
+                    structuredResult ?: ExecResult(
+                        stdout = "",
+                        stderr = "tmux: no server running",
+                        exitCode = 1,
+                    )
+                }
+                command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) -> pocketshellResult
+                else -> ExecResult(stdout = "", stderr = "unexpected command: $command", exitCode = 1)
             }
         }
 
@@ -1012,6 +1206,13 @@ class FolderListGatewayFallbackTest {
     private companion object {
         const val SESSION_NAME = "work session"
         const val CWD = "/home/me/proj dir"
+
+        // `pathAwareCommand` shell-quotes the format string, so the complete
+        // production constant is escaped in the command observed by this fake.
+        // The stable command head still identifies exactly the supported raw
+        // tmux enrichment probe without matching the unsupported `--json` path.
+        val STRUCTURED_PROBE_HEAD =
+            SshFolderListGateway.POCKETSHELL_SESSIONS_TMUX_COMMAND.substringBefore(" -F")
 
         val HOST = HostEntity(
             id = 1L,

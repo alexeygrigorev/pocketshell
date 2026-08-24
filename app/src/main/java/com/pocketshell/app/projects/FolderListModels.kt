@@ -103,6 +103,12 @@ data class FolderSessionEntry(
     val agentKind: SessionAgentKind,
     val windows: List<FolderSessionWindowEntry> = emptyList(),
     /**
+     * Exact host-side `@ps_agent_kind` value. This remains open-ended because
+     * the host engine registry may contain custom ids; [agentKind] is the
+     * closed family used by rendering and detection.
+     */
+    val recordedKindId: String? = null,
+    /**
      * Issue #1237: the resolved resting-state of this session's agent
      * (idle / waiting-for-input / working), read back from the host-side
      * `@ps_agent_state` tmux option written by the stop/idle hook bus.

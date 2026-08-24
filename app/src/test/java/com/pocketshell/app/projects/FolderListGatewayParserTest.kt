@@ -254,14 +254,30 @@ class FolderListGatewayParserTest {
 
     @Test
     fun parseListSessionsRowsUnknownKindFallsBackToShell() {
-        // An unrecognised option value must NOT mislabel the session — it
-        // falls back to Shell with no recorded kind.
+        // An unrecognised option value is retained as an exact raw id and gets
+        // the closed Unknown family when no engine registry is available.
         val rows = SshFolderListGateway.parseListSessionsRows(
             "weird::100::200::1::gemini::::/srv/app\n",
         )
         assertEquals(1, rows.size)
-        assertNull(rows[0].recordedKind)
-        assertEquals(SessionAgentKind.Shell, rows[0].agentKind)
+        assertEquals("gemini", rows[0].recordedKindId)
+        assertEquals(SessionAgentKind.Unknown, rows[0].recordedKind)
+        assertEquals(SessionAgentKind.Unknown, rows[0].agentKind)
+    }
+
+    @Test
+    fun parseListSessionsRowsUsesDeclaredEngineFamilyWithoutLosingRawId() {
+        val rows = SshFolderListGateway.parseListSessionsRows(
+            "custom-codex::100::200::1::custom-codex::::/srv/app\n",
+            familyForRawId = { rawId ->
+                if (rawId == "custom-codex") SessionAgentKind.Codex else null
+            },
+        )
+
+        assertEquals(1, rows.size)
+        assertEquals("custom-codex", rows.single().recordedKindId)
+        assertEquals(SessionAgentKind.Codex, rows.single().recordedKind)
+        assertEquals(SessionAgentKind.Codex, rows.single().agentKind)
     }
 
     @Test

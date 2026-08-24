@@ -271,6 +271,7 @@ fun FolderListScreen(
     LaunchedEffect(pickerFolder) {
         if (pickerFolder != null) {
             viewModel.refreshProfilesForPicker()
+            viewModel.refreshEnginesForPicker()
         }
     }
 

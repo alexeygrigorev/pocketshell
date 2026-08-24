@@ -373,7 +373,7 @@ jobs:
              echo "agents-daemon real-tree persist confirmed: $got"'
 
       - name: Run extensive connected journey/E2E + network-fault + bootstrap scenarios
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@e89f39f1abbbd05b1113a29cf4db69e7540cae5a # v2.37.0
         with:
           # API 35 (Android 15): the full connected suite includes two API-35
           # evidence tests (BoundedGraceSessionHoldJourneyE2eTest +

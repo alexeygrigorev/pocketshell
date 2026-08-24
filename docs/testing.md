@@ -2107,14 +2107,79 @@ Two guards hold the invariant, and neither is sufficient alone:
 
 ## CI matrix
 
-GitHub Actions runs:
+The `Tests` workflow separates the canonical full-suite gates from the slower
+emulator and nightly lanes. For code changes, it runs the cheap gates on pull
+requests and on `main`. The Docker and emulator jobs run on `main` pushes or
+manual dispatches, not on every pull request.
 
-1. `./gradlew test --stacktrace` — unit tests
-2. `./gradlew :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest` — Docker-backed JVM integration tests via Testcontainers
-3. Local emulator + Docker agent smoke after the fast gates pass:
-   - starts `tests/docker`'s `agents` target on host port 2222
-   - runs the connected Android suite on an emulator
-   - uploads Android test reports and Docker logs as workflow artifacts
+### Canonical full-suite gates
+
+- **JVM unit tests** — the `unit` job is a two-leg matrix, `variant: [Debug,
+  Release]`. Each leg runs the complete variant task
+  (`./gradlew testDebugUnitTest` or `./gradlew testReleaseUnitTest`) with
+  forced execution (`--rerun-tasks --no-build-cache`), rather than a filtered
+  class list. Execution-count and rolling-ledger checks prove that the
+  expected test tasks actually ran. The required `Unit tests` aggregator also
+  requires the static guards, CI-harness guards, test-selection guards, and
+  DEX ratchet job.
+- **Python utility tests** — `tools/pocketshell` runs its full `pytest` suite
+  in the separate `Python utility tests (pocketshell)` check.
+- **Docker-backed JVM integration** — the `Integration tests (Docker)` job
+  runs all four integration tasks:
+
+  ```text
+  :app:integrationTest
+  :shared:core-ssh:integrationTest
+  :shared:core-portfwd:integrationTest
+  :shared:core-tmux:integrationTest
+  ```
+
+  The execution guard verifies fresh JUnit results for the complete task set.
+- **Per-push emulator journey subset** — on `main`/manual runs,
+  `Emulator journey subset (load-bearing, Docker agents)` fans the journey
+  registry across six independent shards (`0` through `5`). Each shard gets a
+  cold API-35 Pixel 7 emulator and its Docker fixtures. The downstream
+  `Emulator journey aggregate verdict` combines shard tokens into `CLEAN`,
+  `RE-RUN`, or `RED`, with a real journey failure remaining release-blocking.
+
+For the local canonical full-JVM gate, run `scripts/full-jvm-gate.py`. A
+focused `--tests` invocation is useful for iteration but is not a substitute
+for the complete Debug + Release or unsharded local gate.
+
+### Conditional nightly and release lanes
+
+- **Nightly Extensive Tests** runs at 02:17 UTC and can be force-run manually.
+  Its cheap guard skips the expensive suite when `main` has no new commit in
+  the preceding 24 hours. When enabled, the extensive job runs three shards.
+  Phase 1 is partitioned across all three. The network-fault and bootstrap
+  phases run once on shard 0. The mixed extensive job uses
+  `continue-on-error`. The separate **Fault-injection safety verdict (release
+  gate)** reads the machine verdict for the network-fault and bootstrap phases.
+  It fails closed when a gating artifact is missing, incomplete,
+  infrastructurally unavailable, or red. The **Test-execution ledger (selected
+  vs executed)** also fails closed when a shard or selected class has no result.
+  **Nightly failure recurrence** reports the bounded historical failure trend.
+  The #822 expected-fail lane is recorded but is not part of the release-gating
+  fault verdict.
+- **Release Emulator Validation** is a manual, evidence-producing lane. Its
+  emulator step runs `scripts/release-emulator-validation.sh`. It covers the
+  pre-release confidence gate, terminal-lab, tmux-existing-session,
+  setup-detection, and visual-audit stages. The workflow then records the
+  execution ledger and uploads the evidence bundle. It does not create or push
+  a tag. For taggable evidence, validate the stable `main` commit that will be
+  tagged.
+
+Every hosted `reactivecircus/android-emulator-runner` invocation in these lanes
+uses the audited immutable v2.37.0 commit. The static guard in the `Tests`
+workflow rejects a floating tag, a different SHA, or a missing `# v2.37.0`
+comment.
+
+The optional long-running lanes stay separate from these canonical gates. A
+terminal-heavy release may opt into the real-agent terminal release check with
+`TERMINAL_RELEASE_GATE=1`. It may also enable the ten-minute stability hold
+with `LONG_RUNNING_TEST=1`. The hold isn't required for unrelated small
+releases and never replaces the canonical unit, integration, journey, nightly,
+or release evidence gates described above.
 
 ---
 

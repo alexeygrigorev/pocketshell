@@ -26,6 +26,8 @@
 #       hash-stability probe — the property (stable, disjoint, complete under
 #       edits) holds at any total; its shipped-configuration assertions (the
 #       125% balance cap and the (shard) end-to-end block) read the matrix.
+#   test-ci-journey-enumeration-stall.sh      one synthetic summary-writer
+#       context (one class on one fixture shard), not the shipped matrix.
 #
 # A site that asserts something about the SHIPPED configuration does NOT belong
 # here — it belongs on scripts/ci-journey-shard-count.sh.
@@ -41,6 +43,7 @@
 # a number here; a raise because the CODE grew a literal is the drift itself.
 scripts/ci-journey-class-selection-functions.sh	3
 scripts/test-ci-journey-budget.sh	1
+scripts/test-ci-journey-enumeration-stall.sh	1
 scripts/test-ci-journey-infra-signature.sh	1
 scripts/test-ci-journey-inter-attempt-cleanup.sh	1
 scripts/test-ci-journey-pre-journey-classification.sh	1

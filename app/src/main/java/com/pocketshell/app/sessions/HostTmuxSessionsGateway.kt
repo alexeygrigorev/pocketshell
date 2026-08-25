@@ -3,12 +3,17 @@ package com.pocketshell.app.sessions
 import android.util.Log
 import com.pocketshell.app.projects.EnginesGateway
 import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.app.ssh.BoundedSessionExec
 import com.pocketshell.core.ssh.DefaultSshLeaseConnector
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.TmuxRead
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
@@ -39,6 +44,7 @@ class SshHostTmuxSessionsGateway internal constructor(
     private val sshLeaseManager: SshLeaseManager,
     private val leaseBlockTimeoutMs: Long,
     private val liveEnumTimeoutMs: Long,
+    private val tmuxExecTimeoutMs: Long = TMUX_EXEC_TIMEOUT_MS,
     private val enginesGateway: EnginesGateway? = null,
 ) : HostTmuxSessionsGateway {
     constructor(
@@ -94,25 +100,34 @@ class SshHostTmuxSessionsGateway internal constructor(
             port = host.port,
             user = host.username,
         )
-        return LeaseSessionExec.withSession(
-            leaseManager = sshLeaseManager,
-            target = host.toLeaseSessionTarget(keyPath, passphrase),
-            blockTimeoutMs = leaseBlockTimeoutMs,
-        ) { session ->
-            val tmux = session.exec(pathAware(LIST_SESSIONS_COMMAND))
-            when {
-                tmux.exitCode == 0 -> HostTmuxSessionListResult.Sessions(
-                    parser.parseTmuxListSessions(tmux.stdout) { rawId ->
-                        enginesGateway?.familyForRawId(host.id, rawId)
-                    },
-                )
-                tmux.exitCode == 127 || tmux.stderr.contains("not found", ignoreCase = true) ->
-                    HostTmuxSessionListResult.ToolUnavailable
-                tmux.stderr.contains("no server running", ignoreCase = true) ->
-                    HostTmuxSessionListResult.Sessions(emptyList())
-                else -> HostTmuxSessionListResult.Failed(
-                    tmux.stderr.ifBlank { tmux.stdout }.ifBlank { "tmux exited ${tmux.exitCode}" },
-                )
+        // Keep the lease block ceiling, but run it on a wall-clock dispatcher.
+        // The cold exec has its own, shorter [BoundedSessionExec] ceiling; if
+        // this outer timeout inherits a runTest scheduler while the inner exec
+        // is crossing to Dispatchers.IO, a healthy fake (or a typed inner
+        // timeout) can be cancelled before exec starts. Production already
+        // needs wall-clock bounds for the SSH read, so this preserves both
+        // independent bounds instead of weakening either one.
+        return withContext(Dispatchers.IO) {
+            LeaseSessionExec.withSession(
+                leaseManager = sshLeaseManager,
+                target = host.toLeaseSessionTarget(keyPath, passphrase),
+                blockTimeoutMs = leaseBlockTimeoutMs,
+            ) { session ->
+                val tmux = session.execTmuxListSessions(pathAware(LIST_SESSIONS_COMMAND))
+                when {
+                    tmux.exitCode == 0 -> HostTmuxSessionListResult.Sessions(
+                        parser.parseTmuxListSessions(tmux.stdout) { rawId ->
+                            enginesGateway?.familyForRawId(host.id, rawId)
+                        },
+                    )
+                    tmux.exitCode == 127 || tmux.stderr.contains("not found", ignoreCase = true) ->
+                        HostTmuxSessionListResult.ToolUnavailable
+                    tmux.stderr.contains("no server running", ignoreCase = true) ->
+                        HostTmuxSessionListResult.Sessions(emptyList())
+                    else -> HostTmuxSessionListResult.Failed(
+                        tmux.stderr.ifBlank { tmux.stdout }.ifBlank { "tmux exited ${tmux.exitCode}" },
+                    )
+                }
             }
         }.fold(
             onSuccess = { it },
@@ -176,6 +191,30 @@ class SshHostTmuxSessionsGateway internal constructor(
         }
     }
 
+    /**
+     * Bound the cold list-sessions read independently of lease acquisition.
+     * [SshSession.exec] can otherwise remain parked in a blocking channel read
+     * after authentication succeeded, which is the in-emulator picker/tree
+     * stall tracked by issue #2317. The shared transport remains open when the
+     * channel is abandoned; only the typed result is surfaced to the caller.
+     */
+    private suspend fun SshSession.execTmuxListSessions(command: String): ExecResult {
+        BoundedSessionExec.execBounded(
+            session = this,
+            command = command,
+            timeoutMs = tmuxExecTimeoutMs,
+            dispatcher = Dispatchers.IO,
+            callerSite = TMUX_LIST_SESSIONS_CALLER_SITE,
+        )?.let { return it }
+
+        Log.w(
+            LOG_TAG,
+            "JOURNEY_ENUMERATION_STALL: tmux list-sessions " +
+                "caller=$TMUX_LIST_SESSIONS_CALLER_SITE timeoutMs=$tmuxExecTimeoutMs",
+        )
+        throw TmuxSessionListExecTimeoutException(command, tmuxExecTimeoutMs)
+    }
+
     private fun ActiveTmuxClients.Entry.matches(host: HostEntity, keyPath: String): Boolean =
         hostname == host.hostname &&
             port == host.port &&
@@ -211,6 +250,11 @@ class SshHostTmuxSessionsGateway internal constructor(
         const val LEASE_BLOCK_TIMEOUT_MS: Long = 3_500L
 
         const val LIVE_ENUM_TIMEOUT_MS: Long = 3_500L
+
+        /** Issue #2317: cold list-sessions read ceiling after SSH lease acquire. */
+        const val TMUX_EXEC_TIMEOUT_MS: Long = 3_000L
+
+        const val TMUX_LIST_SESSIONS_CALLER_SITE: String = "host_tmux_sessions_list"
 
         fun defaultLeaseManager(): SshLeaseManager =
             SshLeaseManager(

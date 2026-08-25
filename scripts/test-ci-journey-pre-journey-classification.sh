@@ -89,6 +89,7 @@ classify_expressions() {
   "steps.journey_retry.conclusion": "$retry",
   "steps.journey_summary.outputs.first_timeout": "false",
   "steps.journey_summary.outputs.first_failure": "false",
+  "steps.journey_summary.outputs.first_enumeration_stall": "false",
   "steps.journey_retry_budget.outputs.retry_allowed": "true",
   "steps.journey_retry_budget.outputs.retry_reason": "sufficient_remaining_budget",
   "steps.journey_retry_budget.outputs.retry_remaining_ms": "6000000",

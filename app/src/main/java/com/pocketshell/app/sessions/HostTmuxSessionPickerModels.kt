@@ -63,6 +63,21 @@ sealed interface HostTmuxSessionListResult {
     data class ConnectFailed(val cause: Throwable) : HostTmuxSessionListResult
 }
 
+/**
+ * The SSH lease was acquired, but the cold tmux session enumeration did not
+ * finish within its bounded read window. This is distinct from an SSH connect
+ * failure and is retained as the cause of [HostTmuxSessionListResult.ConnectFailed]
+ * so callers and journey diagnostics can identify a retryable enumeration
+ * stall instead of treating it as an unbounded picker hang.
+ */
+class TmuxSessionListExecTimeoutException(
+    val command: String,
+    val timeoutMs: Long,
+) : RuntimeException(
+    "tmux list-sessions enumeration did not complete within ${timeoutMs}ms: " +
+        command.takeLast(96),
+)
+
 sealed interface HostTmuxSessionPickerState {
     data object Idle : HostTmuxSessionPickerState
 

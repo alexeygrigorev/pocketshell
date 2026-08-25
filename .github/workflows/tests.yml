@@ -785,6 +785,16 @@ jobs:
           chmod +x scripts/test-ci-journey-summary-evidence.sh
           scripts/test-ci-journey-summary-evidence.sh
 
+      # Issue #2317: the recurring in-emulator tmux list-sessions stall is
+      # typed only from a failed attempt's device-logcat + completed manifest.
+      # This exercises the real artifact classifier and summary consumer with
+      # positive, generic-timeout, and passing controls; no emulator or JVM.
+      - name: CI journey enumeration-stall evidence guard (issue #2317)
+        run: |
+          chmod +x scripts/ci-journey-enumeration-stall.sh \
+            scripts/test-ci-journey-enumeration-stall.sh
+          scripts/test-ci-journey-enumeration-stall.sh
+
       # Issue #1293: fast, JVM-free fixture test for the nightly-fault per-phase
       # test-report preservation helper (scripts/lib/nightly-phase-reports.sh).
       # The nightly-fault suite runs each phase as a separate connected-test
@@ -1613,6 +1623,8 @@ jobs:
           if [[ "$first_failure" != "true" && -f "$summary" ]] && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$summary"; then
             first_timeout="true"
           fi
+          first_enumeration_stall="$(bash scripts/ci-journey-enumeration-stall.sh --workflow-first-summary "$first_failure" artifacts 2>&1 || true)"
+          [[ "$first_enumeration_stall" == "true" ]] || first_enumeration_stall="false"
           # Issue #1800: the suite records its own measured wall cost in the
           # summary's result table ("| 48 load-bearing journey classes ... | 1 |
           # 2338s | **FAIL** |"). That measured number — not the 4200s budget
@@ -1641,10 +1653,12 @@ jobs:
           [[ "$first_warm_build_secs" =~ ^[0-9]+$ ]] || first_warm_build_secs=""
           echo "first_timeout=$first_timeout" >> "$GITHUB_OUTPUT"
           echo "first_failure=$first_failure" >> "$GITHUB_OUTPUT"
+          echo "first_enumeration_stall=$first_enumeration_stall" >> "$GITHUB_OUTPUT"
           echo "first_suite_elapsed_secs=$first_suite_elapsed_secs" >> "$GITHUB_OUTPUT"
           echo "first_warm_build_secs=$first_warm_build_secs" >> "$GITHUB_OUTPUT"
           echo "first summary timeout-only: $first_timeout"
           echo "first summary genuine failure: $first_failure"
+          echo "first summary proven enumeration stall: $first_enumeration_stall"
           echo "first summary measured suite elapsed: ${first_suite_elapsed_secs:-<unmeasured>}s"
           echo "first summary measured warm build: ${first_warm_build_secs:-<unmeasured>}s"
 
@@ -1790,6 +1804,7 @@ jobs:
           retry_concl="${{ steps.journey_retry.conclusion }}"
           first_timeout="${{ steps.journey_summary.outputs.first_timeout }}"
           first_failure="${{ steps.journey_summary.outputs.first_failure }}"
+          first_enumeration_stall="${{ steps.journey_summary.outputs.first_enumeration_stall }}"
           retry_allowed="${{ steps.journey_retry_budget.outputs.retry_allowed }}"
           retry_reason="${{ steps.journey_retry_budget.outputs.retry_reason }}"
           retry_remaining_ms="${{ steps.journey_retry_budget.outputs.retry_remaining_ms }}"
@@ -1871,6 +1886,7 @@ jobs:
           echo "retry attempt conclusion:  ${retry_concl:-<skipped>}"
           echo "first summary timeout-only: ${first_timeout:-false}"
           echo "first summary genuine failure: ${first_failure:-false}"
+          echo "first summary proven enumeration stall: ${first_enumeration_stall:-false}"
           echo "cold-boot retry allowed: ${retry_allowed:-false}"
           echo "cold-boot retry reason: ${retry_reason:-missing_decision}"
           echo "cold-boot retry remaining/required: ${retry_remaining_ms:-0}/${retry_required_ms:-5400000}ms"
@@ -1960,10 +1976,13 @@ jobs:
             write_verdict RED "$(verdict_reason_for first_attempt_journey_failure)"
             exit 1
           fi
+          if [[ "${first_enumeration_stall:-false}" == "true" && "${first_timeout:-false}" == "true" ]]; then
+            bash scripts/ci-journey-enumeration-stall.sh --workflow-enumeration-warning artifacts 2>&1 || true
+            write_verdict INFRA tmux_list_sessions_enumeration_stall
+            exit 1
+          fi
           if [[ "${first_timeout:-false}" == "true" ]]; then
-            timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
-            echo "::error title=Emulator journey TIMEOUT — load-bearing classes cut short (#835/#470)::The journey suite booted and ran, but exhausted its own 4200s time budget before every load-bearing class reached a verdict (issue #835 / #470). This is now a HARD RED durable guard (#835 REOPENED, D31): a budget timeout means a load-bearing class was silently cut short, which used to be masked as advisory-green. The retry is skipped because a budget timeout is deterministic. Either the enumeration stall has returned or the selection no longer fits the budget — investigate; do NOT treat as a flake. Class(es) cut short / not run:"
-            [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
+            bash scripts/ci-journey-enumeration-stall.sh --workflow-timeout-diagnostic artifacts first 2>&1 || true
             write_verdict RED "$(verdict_reason_for suite_budget_timeout)"
             exit 1
           fi
@@ -2011,9 +2030,7 @@ jobs:
           # this is attributed distinctly from a genuine `JOURNEY_FAILED`
           # regression and from a never-booted (#771) emulator.
           if [[ -f "$summary" ]] && grep -qE 'JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' "$summary"; then
-            timed_out_classes="$(awk '/JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted/{f=1} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
-            echo "::error title=Emulator journey TIMEOUT — load-bearing classes cut short (#835/#470)::The journey suite booted and ran, but exhausted its 4200s time budget before every load-bearing class reached a verdict (issue #835 / #470). This is now a HARD RED durable guard (#835 REOPENED, D31), NOT an advisory-green: a budget timeout means a load-bearing class was silently cut short. Either the in-emulator enumeration stall has returned or the selection no longer fits the budget — investigate. This is distinct from a never-booted emulator (#771) and from a genuine test regression. Class(es) cut short / not run:"
-            [[ -n "$timed_out_classes" ]] && printf '%s\n' "$timed_out_classes"
+            bash scripts/ci-journey-enumeration-stall.sh --workflow-timeout-diagnostic artifacts both 2>&1 || true
             write_verdict RED "$(verdict_reason_for suite_budget_timeout)"
             exit 1
           fi

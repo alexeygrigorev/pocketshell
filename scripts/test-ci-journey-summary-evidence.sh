@@ -301,6 +301,7 @@ classify_expressions() {
   "steps.journey_retry.conclusion": "failure",
   "steps.journey_summary.outputs.first_timeout": "$2",
   "steps.journey_summary.outputs.first_failure": "$3",
+  "steps.journey_summary.outputs.first_enumeration_stall": "false",
   "steps.journey_retry_budget.outputs.retry_allowed": "true",
   "steps.journey_retry_budget.outputs.retry_reason": "sufficient_remaining_budget",
   "steps.journey_retry_budget.outputs.retry_remaining_ms": "3112241",

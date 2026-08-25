@@ -15,6 +15,97 @@ import org.junit.Test
 class Issue966HealDiagnosticsSourceGuardTest {
 
     @Test
+    fun staleRenderOwnerPredicateAndProofOrderAreExecutable() {
+        val first = settledOwner(modelMutationEpoch = 3)
+        val sameOwner = first.copy(renderedNonBlankChars = 40, partiallyBlank = false)
+        val mutatedOwner = first.copy(modelMutationEpoch = first.modelMutationEpoch + 1)
+
+        assertTrue(
+            "the executable owner predicate must accept two stable observations",
+            first.isIdenticalSettledObservationAsForTest(sameOwner),
+        )
+        assertFalse(
+            "the executable owner predicate must reject a mutation between observations",
+            first.isIdenticalSettledObservationAsForTest(mutatedOwner),
+        )
+
+        val order = StaleRenderHealProofOrderForTest()
+        listOf(
+            StaleRenderHealProofStepForTest.INITIAL_SETTLED_OWNER,
+            StaleRenderHealProofStepForTest.STALE_FRAME_INJECTED,
+            StaleRenderHealProofStepForTest.POST_INJECTION_SETTLED_OWNER,
+            StaleRenderHealProofStepForTest.REMOTE_LIVE_ASSERTIONS,
+            StaleRenderHealProofStepForTest.PRE_HEAL_REACQUIRED_OWNER,
+            StaleRenderHealProofStepForTest.PRE_CALL_LOCAL_ORACLE,
+            StaleRenderHealProofStepForTest.MANUAL_HEAL,
+        ).forEach(order::record)
+        assertTrue(
+            "the executable proof-order seam must accept the production journey order",
+            order.isComplete(),
+        )
+
+        val wrongOrder = StaleRenderHealProofOrderForTest()
+        val rejected = runCatching {
+            wrongOrder.record(StaleRenderHealProofStepForTest.MANUAL_HEAL)
+        }.isFailure
+        assertTrue(
+            "the executable proof-order seam must reject healing before stale/live evidence",
+            rejected,
+        )
+
+        val recoveredOrder = StaleRenderHealProofOrderForTest()
+        listOf(
+            StaleRenderHealProofStepForTest.INITIAL_SETTLED_OWNER,
+            StaleRenderHealProofStepForTest.STALE_FRAME_INJECTED,
+            StaleRenderHealProofStepForTest.POST_INJECTION_SETTLED_OWNER,
+            StaleRenderHealProofStepForTest.REMOTE_LIVE_ASSERTIONS,
+            StaleRenderHealProofStepForTest.PRE_HEAL_REACQUIRED_OWNER,
+            StaleRenderHealProofStepForTest.STALE_FRAME_RETAINED_AFTER_OWNER_MUTATION,
+            StaleRenderHealProofStepForTest.PRE_HEAL_REACQUIRED_OWNER,
+            StaleRenderHealProofStepForTest.PRE_CALL_LOCAL_ORACLE,
+            StaleRenderHealProofStepForTest.MANUAL_HEAL,
+        ).forEach(recoveredOrder::record)
+        assertTrue(
+            "the proof-order seam must allow a retained stale frame after owner mutation",
+            recoveredOrder.isComplete(),
+        )
+    }
+
+    @Test
+    fun staleRenderJourneyExecutesTheDeclaredProofOrder() {
+        val source = locateJourney("StaleRenderHealOnLiveTransportJourneyE2eTest.kt")
+        val steps = Regex(
+            """proofOrder\.record\s*\(\s*StaleRenderHealProofStepForTest\.([A-Z_]+)""",
+        ).findAll(source).map { match ->
+            StaleRenderHealProofStepForTest.valueOf(match.groupValues[1])
+        }.toList()
+
+        assertTrue(
+            "the connected journey must execute its proof-order state machine",
+            steps.isNotEmpty(),
+        )
+        val order = StaleRenderHealProofOrderForTest()
+        steps.forEach { step ->
+            order.record(step)
+            // The source has one settleOwner lambda, but recovery invokes it again after the
+            // stale frame is retained. Model that second execution so the guard checks the real
+            // runtime order rather than treating a callback's single source occurrence as one call.
+            if (step == StaleRenderHealProofStepForTest.STALE_FRAME_RETAINED_AFTER_OWNER_MUTATION) {
+                order.record(StaleRenderHealProofStepForTest.PRE_HEAL_REACQUIRED_OWNER)
+            }
+        }
+        assertTrue(
+            "the connected journey's actual proof-order calls must form a complete proof",
+            order.isComplete(),
+        )
+        assertTrue(
+            "owner recovery must retain the same stale frame for re-injection",
+            source.contains("feedFrameToActivePaneModel(\n                        staleFrame,") &&
+                source.contains("StaleRenderHealOwnerRecoveryForTest().run("),
+        )
+    }
+
+    @Test
     fun bothJourneysQuiesceBeforeInjectionAndRetainTypedEvidence() {
         listOf(
             "StaleRenderHealOnLiveTransportJourneyE2eTest.kt",
@@ -35,8 +126,13 @@ class Issue966HealDiagnosticsSourceGuardTest {
                 source.contains("appendToActivePaneRenderModelForTest(bytes, expectedOwner)"))
             assertTrue("$name must prove TerminalView and VM emulator identity equality",
                 source.contains("viewEmulatorIdentity != expectedOwner.emulatorIdentity"))
-            assertTrue("$name must retain the injected owner through the pre-call oracle",
-                source.contains("snapshot.modelMutationEpoch != expectedOwner.modelMutationEpoch"))
+            val preCallOwnerGuard = if (name == "StaleRenderHealOnLiveTransportJourneyE2eTest.kt") {
+                source.contains("isIdenticalSettledObservationAsForTest(expectedOwner)")
+            } else {
+                source.contains("snapshot.modelMutationEpoch != expectedOwner.modelMutationEpoch")
+            }
+            assertTrue("$name must retain its settled owner through the pre-call oracle",
+                preCallOwnerGuard)
             assertTrue("$name must cancel+join through the atomic VM seam",
                 source.contains("pauseActivePaneStaleRenderWatchdogForTest()"))
             assertTrue("$name must assert the watchdog is quiescent",
@@ -69,6 +165,47 @@ class Issue966HealDiagnosticsSourceGuardTest {
                 source.contains("heal_capture_non_blank_chars=") &&
                     source.contains("heal_capture_line_count="))
         }
+    }
+
+    @Test
+    fun staleRenderProofOracleRequiresHealSourceAndRestoredViewport() {
+        val valid = StaleRenderHealProofForTest(
+            localRenderLooksSuspect = true,
+            remoteCaptureNonBlankChars = 40,
+            minimumRemoteCaptureChars = 40,
+            remoteCaptureHasBanner = true,
+            transportConnected = true,
+            clientDisconnected = false,
+            reconnectSurfaceVisible = false,
+            healOutcome = HealOutcome.Healed,
+            healReason = HealAttemptReason.DivergenceApplied,
+            restoredFrameHasBanner = true,
+            restoredFrameRows = 20,
+            minimumRestoredFrameRows = 20,
+            restoredPaintedRows = 30,
+            minimumRestoredPaintedRows = 30,
+        )
+        assertTrue("the complete connected heal evidence must be accepted", valid.restored)
+        assertFalse(
+            "a full-looking frame without a healed manual attempt must fail",
+            valid.copy(healOutcome = HealOutcome.Healthy).restored,
+        )
+        assertFalse(
+            "a healed attempt without the exact divergence reason must fail",
+            valid.copy(healReason = HealAttemptReason.CaptureEmpty).restored,
+        )
+        assertFalse(
+            "a healed attempt without restored banner rows must fail",
+            valid.copy(restoredFrameRows = 19).restored,
+        )
+        assertFalse(
+            "a healed attempt without painted viewport rows must fail",
+            valid.copy(restoredPaintedRows = 29).restored,
+        )
+        assertFalse(
+            "a healed-looking viewport from a non-suspect precondition must fail",
+            valid.copy(localRenderLooksSuspect = false).restored,
+        )
     }
 
     @Test
@@ -167,12 +304,30 @@ class Issue966HealDiagnosticsSourceGuardTest {
         assertTrue(seam.contains("sizeOperationsInFlight == 0"))
         assertTrue(seam.contains("automaticHealOperationsInFlight == 0"))
         assertTrue(seam.contains("automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch"))
-        assertTrue(seam.contains("appliedColumns == effectiveColumns"))
-        assertTrue(seam.contains("appliedRows == effectiveRows"))
-        assertTrue(seam.contains("lastSeedAtMs != null"))
         assertTrue(seam.contains("before.sameOwnerAs(expectedOwner)"))
         assertTrue(seam.contains("before.modelMutationEpoch == expectedOwner.modelMutationEpoch"))
         assertTrue(seam.contains("appendDirectlyToRenderModelForTesting(bytes)"))
+
+        // Exercise the settlement gate itself. A source substring cannot prove that either
+        // applied dimension remains tied to its effective dimension after a refactor.
+        val settled = settledOwner(modelMutationEpoch = 3)
+        assertTrue("the executable settlement baseline must be positive", settled.attachResizeSeedSettled)
+        assertFalse(
+            "a zero effective column count must fail settlement",
+            settled.copy(effectiveColumns = 0).attachResizeSeedSettled,
+        )
+        assertFalse(
+            "a zero effective row count must fail settlement",
+            settled.copy(effectiveRows = 0).attachResizeSeedSettled,
+        )
+        assertFalse(
+            "an unapplied column count must fail settlement",
+            settled.copy(appliedColumns = settled.appliedColumns + 1).attachResizeSeedSettled,
+        )
+        assertFalse(
+            "an unapplied row count must fail settlement",
+            settled.copy(appliedRows = settled.appliedRows + 1).attachResizeSeedSettled,
+        )
 
         val regression = locateTest("PartialBlackPaneHealTest.kt")
         assertTrue(regression.contains("issue966ManualInjectionRejectsAnUnequalVisibleEmulatorOwner"))
@@ -206,9 +361,11 @@ class Issue966HealDiagnosticsSourceGuardTest {
             assertTrue("$name artifacts must retain it",
                 source.contains("view_terminal_session_identity="))
             assertTrue("$name must reject pending automatic heals",
-                source.contains("automaticHealOperationsInFlight != 0"))
+                source.contains("automaticHealOperationsInFlight != 0") ||
+                    source.contains("attachResizeSeedSettled"))
             assertTrue("$name must reject automatic-heal ABA at every owner checkpoint",
-                source.split("automaticHealActivityEpoch != expectedOwner.automaticHealActivityEpoch").size >= 4)
+                source.contains("isIdenticalSettledObservationAsForTest(expectedOwner)") ||
+                    source.split("automaticHealActivityEpoch != expectedOwner.automaticHealActivityEpoch").size >= 4)
             assertTrue("$name artifacts must retain the automatic-heal epoch",
                 source.contains("expected_automatic_heal_activity_epoch="))
         }
@@ -272,6 +429,34 @@ class Issue966HealDiagnosticsSourceGuardTest {
             ?: error("Could not locate ${candidates.joinToString()} from ${File(".").absolutePath}")
         return file.readText()
     }
+
+    private fun settledOwner(modelMutationEpoch: Long) = ActivePaneRenderOwnerSnapshotForTest(
+        paneId = "pane",
+        windowId = "@0",
+        sessionId = "session",
+        targetSessionName = "issue966",
+        connectGeneration = 1,
+        clientIdentity = 1,
+        stateIdentity = 1,
+        terminalSessionIdentity = 1,
+        emulatorIdentity = 1,
+        modelMutationEpoch = modelMutationEpoch,
+        modelDrainBacklogged = false,
+        seedOperationInFlight = false,
+        sizeOperationsInFlight = 0,
+        automaticHealOperationsInFlight = 0,
+        automaticHealActivityEpoch = 1,
+        controlSizeGeneration = 4,
+        effectiveColumns = 62,
+        effectiveRows = 58,
+        appliedColumns = 62,
+        appliedRows = 58,
+        lastSeedAtMs = 1,
+        renderedNonBlankChars = 39,
+        partiallyBlank = true,
+        renderLooksSuspect = true,
+        coherent = true,
+    )
 
     private fun String.substringBetween(
         start: String,

@@ -10,6 +10,7 @@ import com.pocketshell.app.tmux.TmuxSessionGeneration
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -90,11 +91,13 @@ class LastSessionStoreTest {
     @Test
     fun `save then read round-trips durable tmux identity`() {
         val store = LastSessionStore(context)
-        store.save(
-            sample(
-                savedAtMillis = 1_000L,
-                tmuxSessionId = "\$3",
-                sessionCreated = 1700000000L,
+        assertTrue(
+            store.save(
+                sample(
+                    savedAtMillis = 1_000L,
+                    tmuxSessionId = "\$3",
+                    sessionCreated = 1700000000L,
+                ),
             ),
         )
 
@@ -107,6 +110,97 @@ class LastSessionStoreTest {
         val destination = with(store) { read.toDestination() }
         assertEquals("\$3", destination.tmuxSessionId)
         assertEquals(1700000000L, destination.sessionCreated)
+    }
+
+    @Test
+    fun persistedTmuxSessionIdIsRequiredForExactIdentity() {
+        val store = LastSessionStore(context)
+        assertTrue(
+            store.save(
+                sample(
+                    savedAtMillis = 1_000L,
+                    tmuxSessionId = "\$3",
+                    sessionCreated = 1_700_000_003L,
+                ),
+            ),
+        )
+
+        val read = requireNotNull(LastSessionStore(context).read(nowMillis = 2_000L))
+        assertEquals(
+            "persisted tmux session id is part of the exact restore identity",
+            "\$3",
+            read.tmuxSessionId,
+        )
+    }
+
+    @Test
+    fun persistedSessionCreatedIsRequiredForExactIdentity() {
+        val store = LastSessionStore(context)
+        assertTrue(
+            store.save(
+                sample(
+                    savedAtMillis = 1_000L,
+                    tmuxSessionId = "\$3",
+                    sessionCreated = 1_700_000_003L,
+                ),
+            ),
+        )
+
+        val read = requireNotNull(LastSessionStore(context).read(nowMillis = 2_000L))
+        assertEquals(
+            "persisted session creation is part of the exact restore identity",
+            1_700_000_003L,
+            read.sessionCreated,
+        )
+    }
+
+    @Test
+    fun `last-session generation requires both tmux identity fields`() {
+        // Construct all three restore-record shapes explicitly. A tmux
+        // session id or creation timestamp alone is not a kill/restore
+        // identity; only the complete pair may produce a generation.
+        val complete = sample(
+            tmuxSessionId = "\$3",
+            sessionCreated = 1_700_000_003L,
+        )
+        val missingTmuxSessionId = sample(
+            tmuxSessionId = null,
+            sessionCreated = 1_700_000_003L,
+        )
+        val missingSessionCreated = sample(
+            tmuxSessionId = "\$3",
+            sessionCreated = null,
+        )
+
+        assertEquals(
+            TmuxSessionGeneration("\$3", 1_700_000_003L),
+            complete.generation,
+        )
+        assertNull(missingTmuxSessionId.generation)
+        assertNull(missingSessionCreated.generation)
+    }
+
+    @Test
+    fun generationPredicateRejectsEachMissingIdentityField() {
+        val complete = sample(
+            tmuxSessionId = "\$3",
+            sessionCreated = 1_700_000_003L,
+        )
+        val missingTmuxSessionId = complete.copy(tmuxSessionId = null)
+        val missingSessionCreated = complete.copy(sessionCreated = null)
+
+        assertNotNull(
+            "a complete pair must produce the exact restore generation",
+            complete.generation,
+        )
+        assertNull(
+            "a missing tmux session id must not produce a restore generation",
+            missingTmuxSessionId.generation,
+        )
+        assertNull(
+            "a missing session creation timestamp must not produce a restore generation",
+            missingSessionCreated.generation,
+        )
     }
 
     @Test

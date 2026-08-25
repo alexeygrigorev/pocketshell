@@ -34,6 +34,7 @@ import com.pocketshell.app.projects.FOLDER_LIST_TITLE_TAG
 import com.pocketshell.app.projects.STALE_SESSION_CONFIRM_TAG
 import com.pocketshell.app.projects.STALE_SESSION_DIALOG_TAG
 import com.pocketshell.app.projects.STALE_SESSION_GO_HOME_TAG
+import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.StaleSession
 import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
@@ -101,7 +102,10 @@ import java.io.FileOutputStream
  *
  * Artifacts (process.md "Terminal Artifact Review"): a timings file plus a
  * has-session probe log so a reviewer can confirm from the SAME run that the
- * session stayed gone and the restore landed on the list.
+ * session stayed gone and the restore landed on the list. The
+ * `issue834-last-session-identity.txt` artifact also records the persisted
+ * pair and the [LastSessionStore.LastSession.generation] contract: both
+ * `tmuxSessionId` and `sessionCreated` are required.
  */
 @RunWith(AndroidJUnit4::class)
 class ColdRestoreGoneSessionNoResurrectE2eTest {
@@ -342,10 +346,14 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         waitForText(SEEDED_SESSION, timeoutMs = 20_000)
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        // The screen tag only proves that the composable exists. The production
+        // Connected state is the readiness gate for the lifecycle save below:
+        // removing this wait must redden this exact journey instead of making
+        // the fixed lifecycle drain stand in for an attached session.
+        waitForConnected("issue834 active attach")
 
         // ---- (2) Background -> onStop persists the last session (#177).
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
-        delay(LIFECYCLE_DRAIN_MS)
 
         // ---- (3) DELETE the session: kill it server-side AND broadcast the
         // confirmed-kill lifecycle signal on the production singleton, exactly
@@ -356,17 +364,41 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         val entryPoint = EntryPointAccessors
             .fromApplication(ctx, TestAccessEntryPoint::class.java)
         val killedHostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
-        val storedBeforeKill = checkNotNull(
-            entryPoint.lastSessionStore().read(maxAgeMillis = Long.MAX_VALUE),
-        ) { "backgrounding the attached session must persist its exact restore identity" }
-        val killedGeneration = TmuxSessionGeneration(
-            sessionId = checkNotNull(storedBeforeKill.tmuxSessionId) {
-                "persisted killed session must carry tmux session id"
-            },
-            createdEpochSeconds = checkNotNull(storedBeforeKill.sessionCreated) {
-                "persisted killed session must carry tmux creation timestamp"
+        // Do not use LIFECYCLE_DRAIN_MS as a persistence oracle. Poll the same
+        // production singleton MainActivity reads until onStop has published
+        // the fresh host/session record. Deliberately do NOT require either
+        // generation field here: an incomplete production record must reach
+        // the focused LastSession.generation assertion below, where the hard
+        // null guards kill a missing tmux id or creation timestamp selectively.
+        // The JVM LastSessionStoreTest and its mutation runner pin the same
+        // three shapes without letting readiness hide a field mutant.
+        val storedBeforeKill = waitForPersistedLastSession(
+            entryPoint = entryPoint,
+            hostId = killedHostId,
+            sessionName = SEEDED_SESSION,
+        )
+        val persistedGeneration = storedBeforeKill.generation
+        writeText(
+            "issue834-last-session-identity.txt",
+            buildString {
+                appendLine("contract=LastSessionStore.LastSession.generation")
+                appendLine("contract_requires_tmux_session_id=true")
+                appendLine("contract_requires_session_created=true")
+                appendLine("persisted_host_id=${storedBeforeKill.hostId}")
+                appendLine("persisted_session=${storedBeforeKill.sessionName}")
+                appendLine("persisted_tmux_session_id=${storedBeforeKill.tmuxSessionId}")
+                appendLine("persisted_session_created=${storedBeforeKill.sessionCreated}")
+                appendLine("persisted_generation=$persistedGeneration")
+                appendLine("complete_generation=${persistedGeneration != null}")
             },
         )
+        val killedGeneration = checkNotNull(persistedGeneration) {
+            "persisted killed session must expose a complete " +
+                "LastSessionStore.LastSession.generation from BOTH " +
+                "tmuxSessionId and sessionCreated; observed " +
+                "tmuxSessionId=${storedBeforeKill.tmuxSessionId} " +
+                "sessionCreated=${storedBeforeKill.sessionCreated}"
+        }
         killRemoteSession(key)
         assertTrue("session must be gone server-side after delete", !sessionAlive(key))
         // The activity is in CREATED (still STARTED-collected? no — CREATED is
@@ -394,6 +426,9 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
                 appendLine("killed_session=$SEEDED_SESSION")
                 appendLine("stored_host_id=${storedAfterKill?.hostId}")
                 appendLine("stored_session=${storedAfterKill?.sessionName}")
+                appendLine("killed_generation=$killedGeneration")
+                appendLine("identity_contract=LastSessionStore.LastSession.generation " +
+                    "requires tmuxSessionId + sessionCreated")
                 appendLine("restore_cleared_for_killed=$restoreClearedForKilled")
                 appendLine("expected_restore_cleared=true")
             },
@@ -2182,6 +2217,82 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
         }
     }
 
+    /**
+     * Wait for the production onStop write, not for an arbitrary lifecycle
+     * sleep. The host/session identity is enough to distinguish this fresh
+     * record because [seedBeforeLaunch] clears the singleton store before the
+     * activity is launched. Generation completeness is intentionally checked
+     * by the caller: requiring both raw fields in this readiness loop would
+     * turn a missing-field mutant into a timeout and hide the focused
+     * [LastSessionStore.LastSession.generation] assertion.
+     */
+    private fun waitForPersistedLastSession(
+        entryPoint: TestAccessEntryPoint,
+        hostId: Long,
+        sessionName: String,
+    ): LastSessionStore.LastSession {
+        val startedAt = SystemClock.elapsedRealtime()
+        val deadline = startedAt + LAST_SESSION_READY_TIMEOUT_MS
+        var samples = 0
+        var latest: LastSessionStore.LastSession? = null
+        var lastReadError: Throwable? = null
+
+        while (SystemClock.elapsedRealtime() < deadline) {
+            samples += 1
+            val candidate = runCatching {
+                entryPoint.lastSessionStore().read(maxAgeMillis = Long.MAX_VALUE)
+            }.onFailure { lastReadError = it }.getOrNull()
+            latest = candidate
+            val exactRecord = candidate?.let {
+                it.hostId == hostId &&
+                    it.sessionName == sessionName
+            } == true
+            if (exactRecord) {
+                recordTiming(
+                    "issue834_last_session_ready_ms",
+                    SystemClock.elapsedRealtime() - startedAt,
+                )
+                recordTiming("issue834_last_session_samples", samples.toLong())
+                return requireNotNull(candidate)
+            }
+            val remaining = deadline - SystemClock.elapsedRealtime()
+            if (remaining > 0L) {
+                SystemClock.sleep(minOf(LAST_SESSION_READY_SAMPLE_INTERVAL_MS, remaining))
+            }
+        }
+
+        val elapsed = SystemClock.elapsedRealtime() - startedAt
+        recordTiming("issue834_last_session_ready_timeout_ms", elapsed)
+        writeText(
+            "issue834-last-session-readiness-timeout.txt",
+            buildString {
+                appendLine("wait=production LastSessionStore onStop persistence")
+                appendLine("elapsed_ms=$elapsed")
+                appendLine("samples=$samples")
+                appendLine("expected_host_id=$hostId")
+                appendLine("expected_session=$sessionName")
+                appendLine("observed_host_id=${latest?.hostId}")
+                appendLine("observed_session=${latest?.sessionName}")
+                appendLine("observed_tmux_session_id=${latest?.tmuxSessionId}")
+                appendLine("observed_session_created=${latest?.sessionCreated}")
+                appendLine("last_read_error=${lastReadError?.let { it::class.simpleName + ": " + it.message }}")
+                appendLine("readiness_contract=host_id_and_session_name_only")
+                appendLine("generation_completeness_checked_after_readiness=true")
+                appendLine("expected_generation_requires_tmux_session_id=true")
+                appendLine("expected_generation_requires_session_created=true")
+            },
+        )
+        throw AssertionError(
+            "issue834 last-session persistence did not publish the exact " +
+                "complete record within ${LAST_SESSION_READY_TIMEOUT_MS}ms; " +
+                "expected hostId=$hostId session=$sessionName, observed=" +
+                "hostId=${latest?.hostId} session=${latest?.sessionName} " +
+                "tmuxSessionId=${latest?.tmuxSessionId} " +
+                "sessionCreated=${latest?.sessionCreated} " +
+                "lastReadError=${lastReadError?.message}",
+        )
+    }
+
     private fun writeText(name: String, text: String): File {
         val file = artifactFile(name)
         file.writeText(text)
@@ -2314,6 +2425,8 @@ class ColdRestoreGoneSessionNoResurrectE2eTest {
 
         const val LIFECYCLE_DRAIN_MS: Long = 750L
         const val RESTORE_TIMEOUT_MS: Long = 20_000L
+        const val LAST_SESSION_READY_TIMEOUT_MS: Long = 20_000L
+        const val LAST_SESSION_READY_SAMPLE_INTERVAL_MS: Long = 50L
         const val OWNER_RELEASE_TIMEOUT_MS: Long = 10_000L
         const val OWNER_RELEASE_SAMPLE_INTERVAL_MS: Long = 50L
         const val DISMISS_TRANSITION_SAMPLE_INTERVAL_MS: Long = 50L

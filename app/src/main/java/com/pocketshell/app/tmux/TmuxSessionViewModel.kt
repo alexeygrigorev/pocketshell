@@ -9629,7 +9629,13 @@ public class TmuxSessionViewModel @Inject constructor(
     ): PaneReconcileResult {
         val client = clientRef ?: return PaneReconcileResult.NoClient
         val target = activeTarget
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+        // Capture the source BEFORE the list-panes round-trip. The normal
+        // attach/reconcile callers do not pass a guard, but they still need
+        // the same client + target + connect-generation fence as the
+        // coalesced refresh path. A late result must never be reinterpreted
+        // using whatever runtime happens to be current when it returns.
+        val originatingRuntime = refreshGuard ?: currentRuntimeGuardForClient(client)
+        if (originatingRuntime != null && !isCurrentRuntime(originatingRuntime)) {
             return PaneReconcileResult.NoClient
         }
         // Issue #576 (Slice A of #792) / Issue #926: the `list-panes` round-trip
@@ -9682,12 +9688,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 ),
             )
         }
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+        if (originatingRuntime != null && !isCurrentRuntime(originatingRuntime)) {
             return PaneReconcileResult.NoClient
         }
 
         val parsed: List<ParsedPane> = response.output.mapNotNull { parsePaneRow(it) }
-        if (refreshGuard != null && parsed.isEmpty() && _panes.value.isNotEmpty()) {
+        if (originatingRuntime != null && parsed.isEmpty() && _panes.value.isNotEmpty()) {
             return PaneReconcileResult.Ready(_panes.value.size)
         }
         activeAttachMilestone?.let { milestone ->
@@ -9709,11 +9715,14 @@ public class TmuxSessionViewModel @Inject constructor(
         return applyOnMain {
             // Re-check the runtime guard after the dispatcher hop: a newer
             // selection may have landed while the list-panes IO was in flight.
-            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+            if (originatingRuntime != null && !isCurrentRuntime(originatingRuntime)) {
                 return@applyOnMain PaneReconcileResult.NoClient
             }
-            val newPanes = applyParsedPanes(parsed, refreshGuard)
-            preloadVisibleContentForNewPanes(newPanes, refreshGuard)
+            val appliedPanes = applyParsedPanes(parsed, originatingRuntime)
+            preloadVisibleContentForNewPanes(
+                appliedPanes.newPanes,
+                appliedPanes.refreshGuard,
+            )
             PaneReconcileResult.Ready(_panes.value.size)
         }
     }
@@ -9759,16 +9768,52 @@ public class TmuxSessionViewModel @Inject constructor(
         applyParsedPanes(parsed)
     }
 
+    /**
+     * Test-only passthrough to the production pane reconciliation path. The
+     * stale-result cases in issue #2294 must cross the real list-panes IO and
+     * apply boundary; calling [applyParsedPanesForTest] directly would not
+     * prove that the originating runtime was captured before that IO.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal suspend fun reconcilePanesForTest(): PaneReconcileResult =
+        reconcilePanes()
+
+    private data class ParsedPaneApplyResult(
+        val newPanes: List<TmuxPaneState>,
+        val refreshGuard: RuntimeRefreshGuard?,
+    )
+
     private fun applyParsedPanes(
         parsed: List<ParsedPane>,
         refreshGuard: RuntimeRefreshGuard? = null,
-    ): List<TmuxPaneState> {
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return emptyList()
+    ): ParsedPaneApplyResult {
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+            return ParsedPaneApplyResult(emptyList(), refreshGuard)
+        }
         val client = clientRef
         val target = activeTarget
         val sorted = parsed
             .filter { pane -> target == null || pane.sessionName == target.sessionName }
             .sortedWith(compareBy({ it.windowIndex ?: Int.MAX_VALUE }, { it.windowId }, { it.paneIndex }, { it.paneId }))
+
+        // Issue #2294: the pane listing is the first authoritative exact
+        // generation on a cold attach. Promote it before any lifecycle stop
+        // can snapshot the retained restore intent.
+        val adoptedTarget = adoptExactSessionGenerationFromPanes(
+            target = target,
+            panes = sorted,
+            originatingRuntime = refreshGuard,
+        )
+        // Exact-generation adoption enriches the target that the captured
+        // runtime guard was created from. Keep the original client and
+        // connect-generation fence, but carry the enriched target through the
+        // rest of this apply (including preload) so the valid promotion does
+        // not make its own guard look stale.
+        val effectiveRefreshGuard = if (refreshGuard != null && adoptedTarget != null) {
+            refreshGuard.copy(target = adoptedTarget)
+        } else {
+            refreshGuard
+        }
 
         val nextById: MutableMap<String, TmuxPaneState> = LinkedHashMap()
         val newRows = mutableListOf<TmuxPaneState>()
@@ -9851,6 +9896,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     windowId = p.windowId,
                     windowIndex = p.windowIndex,
                     sessionId = p.sessionId,
+                    sessionCreated = p.sessionCreated,
                     title = p.title,
                     cwd = p.cwd,
                     currentCommand = p.currentCommand,
@@ -9877,9 +9923,11 @@ public class TmuxSessionViewModel @Inject constructor(
             // status (user opted into Terminal, or a prior Conversation row) is
             // NEVER overwritten (no #815 mid-session yank).
             seedPresumedAgentPlaceholder(row)
-            startAgentDetectionForPane(row, refreshGuard, p.sourceGeneration)
+            startAgentDetectionForPane(row, effectiveRefreshGuard, p.sourceGeneration)
         }
-        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return emptyList()
+        if (effectiveRefreshGuard != null && !isCurrentRuntime(effectiveRefreshGuard)) {
+            return ParsedPaneApplyResult(emptyList(), effectiveRefreshGuard)
+        }
 
         // Tear down panes that disappeared. Cancel the producer + detach
         // the bridge so the TerminalSurfaceState releases its emulator
@@ -9925,7 +9973,72 @@ public class TmuxSessionViewModel @Inject constructor(
         latchAltBufferAgentsFromParsed(sorted)
         refreshAltBufferAgentPaneIds()
         rebuildUnifiedPanes()
-        return newRows
+        return ParsedPaneApplyResult(newRows, effectiveRefreshGuard)
+    }
+
+    /**
+     * Issue #2294: promote exact tmux identity from the live pane listing to
+     * every retained target that can feed cold-restore persistence or a kill
+     * signal. A single pane is sufficient, but conflicting generations are
+     * deliberately ignored rather than choosing an unsafe winner.
+     */
+    private fun adoptExactSessionGenerationFromPanes(
+        target: ConnectionTarget?,
+        panes: List<ParsedPane>,
+        originatingRuntime: RuntimeRefreshGuard?,
+    ): ConnectionTarget? {
+        if (target == null) return null
+        // Adoption is destructive metadata promotion: it can become the
+        // identity used by cold restore and kill matching. Never infer its
+        // source from a session name. The caller must supply the runtime that
+        // was captured before list-panes IO, and that runtime must still be
+        // current at this apply point.
+        if (originatingRuntime == null || !isCurrentRuntime(originatingRuntime)) return null
+
+        // A complete row cannot stand in for a missing row. Unless a producer
+        // explicitly proves every row came from the same exact source, any
+        // incomplete generation makes the whole observation untrustworthy.
+        if (panes.any { tmuxSessionGenerationOrNull(it.sessionId, it.sessionCreated) == null }) {
+            return null
+        }
+        val generations = panes.asSequence()
+            .map { pane ->
+                // The all-complete check above makes this non-null assertion
+                // selective and keeps the fail-closed contract visible.
+                requireNotNull(tmuxSessionGenerationOrNull(pane.sessionId, pane.sessionCreated))
+            }
+            .distinct()
+            .toList()
+        val generation = generations.singleOrNull() ?: return null
+
+        fun isCurrentSession(candidate: ConnectionTarget): Boolean =
+            candidate.sessionName == target.sessionName && isSameHost(candidate, target)
+
+        activeTarget = activeTarget
+            ?.takeIf(::isCurrentSession)
+            ?.copy(
+                tmuxSessionId = generation.sessionId,
+                sessionCreated = generation.createdEpochSeconds,
+            )
+        connectingTarget = connectingTarget
+            ?.takeIf(::isCurrentSession)
+            ?.copy(
+                tmuxSessionId = generation.sessionId,
+                sessionCreated = generation.createdEpochSeconds,
+            )
+        latestConnectIntent = latestConnectIntent?.let { intent ->
+            if (!isCurrentSession(intent.target)) {
+                intent
+            } else {
+                intent.copy(
+                    target = intent.target.copy(
+                        tmuxSessionId = generation.sessionId,
+                        sessionCreated = generation.createdEpochSeconds,
+                    ),
+                )
+            }
+        }
+        return activeTarget
     }
 
     private fun attachTerminalProducerForPane(

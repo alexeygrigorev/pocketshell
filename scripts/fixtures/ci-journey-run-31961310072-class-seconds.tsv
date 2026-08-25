@@ -227,6 +227,9 @@ com.pocketshell.app.fileviewer.FileViewerTabStripTest#dirtyWorkDialogStayAndDisc
 com.pocketshell.app.fileviewer.FileViewerTabStripTest#emptyWorkspaceShowsBrowseAndOpenPath	16
 com.pocketshell.app.fileviewer.FileViewerTabStripTest#stripShowsUniqueSuffixLabelsAndSeparateSwitchClose	23
 com.pocketshell.app.fileviewer.FileViewerTabStripTest#twelveTabOverflowKeepsActiveFullyOnScreen	17
+# Issue #1715: measured from the current-main warm connected run on emulator-5558
+# (wrapper wall time 30s, one executed test, no skips/failures).
+com.pocketshell.app.fileviewer.FileViewerTabStripTest#workspaceUnavailableShowsRetryableUpdateMessage	30
 com.pocketshell.app.fileviewer.FileViewerTabsJourneyDockerTest#lastCloseShowsEmptyWorkspace	23
 com.pocketshell.app.fileviewer.FileViewerTabsJourneyDockerTest#openABCLeaveAndOpenFilesRestoresThreeTabsAndActive	28
 com.pocketshell.app.fileviewer.FileViewerTabsMainActivityJourneyDockerTest#mainActivityRestartRestoresTabsGuardsDirtyBackAndConsumesSubmitAction	42

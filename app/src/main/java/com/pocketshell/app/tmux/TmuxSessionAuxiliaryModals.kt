@@ -13,6 +13,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import com.pocketshell.app.projects.ClaudeProfile
 import com.pocketshell.app.projects.CodexProfile
+import com.pocketshell.app.projects.RemoteEngine
 import com.pocketshell.app.projects.FolderListViewModel
 import com.pocketshell.app.projects.SessionKindPickerSheet
 import com.pocketshell.app.projects.SessionTypeChoice
@@ -28,6 +29,7 @@ internal fun TmuxSessionAuxiliaryModals(
     showNewSessionSheet: Boolean,
     currentPaneCwd: String?,
     suggestStartDirectories: (suspend (String) -> List<String>)?,
+    engines: List<RemoteEngine>,
     claudeProfiles: List<ClaudeProfile>,
     codexProfiles: List<CodexProfile>,
     deriveDefaultName: (startDirectory: String) -> String,
@@ -61,6 +63,7 @@ internal fun TmuxSessionAuxiliaryModals(
             folderLabel = FolderListViewModel.defaultLabelForPath(newSessionFolderPath),
             onDismiss = onDismissNewSessionSheet,
             suggestStartDirectories = suggestStartDirectories,
+            engines = engines,
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
             deriveDefaultName = deriveDefaultName,

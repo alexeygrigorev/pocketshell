@@ -58,13 +58,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
  *
  * The maintainer's refinement comment requires that "+ New session"
  * prompts the user for the SESSION TYPE (agent vs shell) and, when
- * "Agent" is chosen, a sub-picker for the agent CLI
- * (`claude` / `codex` / `opencode`). The folder is the explicit `cwd`
- * for the new session.
+ * "Agent" is chosen, a sub-picker for the host registry's available engines.
+ * The folder is the explicit `cwd` for the new session.
  *
  * The sheet is presented from [FolderListScreen] when the user taps the
  * FAB or an empty-folder row. Confirming the sheet fires
- * [onCreate] with the chosen kind + cwd + (optional) agent CLI; the
+ * [onCreate] with the chosen kind + cwd + (optional) registry engine; the
  * caller routes to `AppDestination.TmuxSession` with the right
  * `startDirectory` and (for agent sessions) a `startCommand` that the
  * tmux create path invokes via `send-keys` so the agent CLI runs as
@@ -78,6 +77,7 @@ fun SessionTypePickerSheet(
     onDismiss: () -> Unit,
     onCreate: (choice: SessionTypeChoice) -> Unit,
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
+    engines: List<RemoteEngine> = emptyList(),
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
     creating: Boolean = false,
@@ -109,6 +109,7 @@ fun SessionTypePickerSheet(
             onCancel = onDismiss,
             onCreate = onCreate,
             autocompleteController = autocompleteController,
+            engines = engines,
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
             creating = creating,
@@ -131,6 +132,7 @@ internal fun SessionTypePickerContent(
     onCancel: () -> Unit,
     onCreate: (choice: SessionTypeChoice) -> Unit,
     autocompleteController: StartDirectoryAutocompleteController? = null,
+    engines: List<RemoteEngine> = emptyList(),
     claudeProfiles: List<ClaudeProfile> = emptyList(),
     codexProfiles: List<CodexProfile> = emptyList(),
     creating: Boolean = false,
@@ -138,8 +140,18 @@ internal fun SessionTypePickerContent(
     title: String = "New session",
     deriveDefaultName: (startDirectory: String) -> String = { it.trimEnd('/').substringAfterLast('/') },
 ) {
-    var sessionType by remember { mutableStateOf(SessionType.Agent) }
-    var agentKind by remember { mutableStateOf(AgentCli.Claude) }
+    val availableEngines = availableEnginesForCreate(engines)
+    val availableEngineIds = availableEngines.map { it.id }
+    var sessionType by remember(availableEngineIds) {
+        mutableStateOf(
+            if (availableEngines.isEmpty()) SessionType.Shell else SessionType.Agent,
+        )
+    }
+    var selectedEngineId by remember(availableEngineIds) {
+        mutableStateOf(availableEngines.firstOrNull()?.id)
+    }
+    val selectedEngine = availableEngines.firstOrNull { it.id == selectedEngineId }
+        ?: availableEngines.firstOrNull()
     // Issue #428: default ON — the maintainer almost always wants the
     // agent launched without per-action approval prompts.
     var skipPermissions by remember { mutableStateOf(true) }
@@ -155,10 +167,10 @@ internal fun SessionTypePickerContent(
             sessionName = deriveDefaultName(startDirectory)
         }
     }
-    // Issue #627: selected Claude profile. null = default (no config dir override).
-    var claudeProfile by remember { mutableStateOf<String?>(null) }
-    // Issue #631: selected Codex profile. null = default (no config dir override).
-    var codexProfile by remember { mutableStateOf<String?>(null) }
+    // The existing profile discoveries remain family-specific, but the
+    // selected picker row is an open registry engine id.
+    var profileName by remember { mutableStateOf<String?>(null) }
+    val profiles = pickerProfilesForEngine(selectedEngine, claudeProfiles, codexProfiles)
     val scrollState = rememberScrollState()
     val fallbackAutocompleteState = remember { MutableStateFlow(StartDirectoryAutocompleteUiState()) }
     val autocompleteState by (autocompleteController?.state ?: fallbackAutocompleteState).collectAsState()
@@ -179,19 +191,10 @@ internal fun SessionTypePickerContent(
         onCreate(
             SessionTypeChoice(
                 type = sessionType,
-                agent = if (sessionType == SessionType.Agent) agentKind else null,
+                engine = if (sessionType == SessionType.Agent) selectedEngine else null,
                 startDirectory = resolvedStartDirectory,
                 skipPermissions = skipPermissions,
-                claudeProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Claude) {
-                    claudeProfile
-                } else {
-                    null
-                },
-                codexProfileName = if (sessionType == SessionType.Agent && agentKind == AgentCli.Codex) {
-                    codexProfile
-                } else {
-                    null
-                },
+                profileName = if (sessionType == SessionType.Agent) profileName else null,
                 // Issue #1184: carry the user's custom label. Blank falls
                 // back to the derived default at create time.
                 customName = sessionName.trim().ifBlank { null },
@@ -307,82 +310,67 @@ internal fun SessionTypePickerContent(
                 )
             }
 
-            // Conditional agent CLI sub-picker.
+            // Conditional registry-engine sub-picker. The host owns the
+            // labels, ordering, enabled/available state, and raw launch ids.
             if (sessionType == SessionType.Agent) {
                 Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-                    SectionHeader(label = "Agent CLI")
-                    SegmentedToggle(
-                        labels = AGENT_CLI_LABELS,
-                        selectedIndex = agentKind.ordinal,
-                        onSelected = { agentKind = AgentCli.entries[it] },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = PICKER_SEGMENT_HEIGHT),
-                        fillSegments = true,
-                        segmentTag = { index -> AGENT_CLI_SEGMENT_TAGS[index] },
-                    )
-                    Text(
-                        text = "The CLI will auto-start in the new pane.",
-                        color = PocketShellColors.TextMuted,
-                        style = PocketShellType.labelMono,
-                    )
+                    if (availableEngines.isEmpty()) {
+                        Text(
+                            text = "No agent engines are available on this host.",
+                            color = PocketShellColors.TextMuted,
+                            style = PocketShellType.labelMono,
+                        )
+                    } else {
+                        SectionHeader(label = "Agent engine")
+                        SegmentedToggle(
+                            labels = availableEngines.map { it.label },
+                            selectedIndex = availableEngines
+                                .indexOfFirst { it.id == selectedEngine?.id }
+                                .coerceAtLeast(0),
+                            onSelected = {
+                                selectedEngineId = availableEngines[it].id
+                                profileName = null
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = PICKER_SEGMENT_HEIGHT),
+                            fillSegments = true,
+                            segmentTag = { index ->
+                                sessionTypePickerAgentEngineTag(availableEngines[index].id)
+                            },
+                        )
+                        Text(
+                            text = "The engine will auto-start in the new pane.",
+                            color = PocketShellColors.TextMuted,
+                            style = PocketShellType.labelMono,
+                        )
+                    }
 
-                    // Skip-permissions toggle (issue #428). Hidden for
-                    // OpenCode: its per-action permissions are config-driven
-                    // in opencode.json, not a CLI flag, so the checkbox would
-                    // be a no-op there. OpenCode is always launched
-                    // env-stripped (subscription auth) by the wrapper
-                    // regardless (issue #703).
-                    if (agentKind != AgentCli.OpenCode) {
+                    // The wrapper's generic flag is useful only when the
+                    // selected registry row declares skip-permissions support.
+                    if (selectedEngine?.launch?.supportsSkipPermissions == true) {
                         SkipPermissionsRow(
                             checked = skipPermissions,
                             onToggle = { skipPermissions = !skipPermissions },
                         )
                     }
 
-                    // Issue #627: Claude Code profile selector. Shown only
-                    // when Claude is selected AND the host has more than one
-                    // profile configured (default + at least one custom).
-                    if (agentKind == AgentCli.Claude && claudeProfiles.size > 1) {
+                    if (profiles.size > 1) {
                         Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
                             SectionHeader(label = "Profile")
                             SegmentedToggle(
-                                labels = claudeProfiles.map { it.name },
-                                selectedIndex = claudeProfiles
-                                    .indexOfFirst { it.name == claudeProfile }
+                                labels = profiles.map { it.name },
+                                selectedIndex = profiles
+                                    .indexOfFirst { it.name == profileName }
                                     .coerceAtLeast(0),
-                                onSelected = { claudeProfile = claudeProfiles[it].name },
+                                onSelected = { profileName = profiles[it].name },
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .heightIn(min = PICKER_SEGMENT_HEIGHT)
-                                    .testTag(SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG),
+                                    .testTag(SESSION_TYPE_PICKER_PROFILE_TAG),
                                 fillSegments = true,
                                 segmentTag = { index ->
-                                    "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:${claudeProfiles[index].name}"
-                                },
-                            )
-                        }
-                    }
-
-                    // Issue #631: Codex profile selector. Shown only when
-                    // Codex is selected AND the host has more than one
-                    // profile configured.
-                    if (agentKind == AgentCli.Codex && codexProfiles.size > 1) {
-                        Column(verticalArrangement = Arrangement.spacedBy(PocketShellSpacing.xs)) {
-                            SectionHeader(label = "Profile")
-                            SegmentedToggle(
-                                labels = codexProfiles.map { it.name },
-                                selectedIndex = codexProfiles
-                                    .indexOfFirst { it.name == codexProfile }
-                                    .coerceAtLeast(0),
-                                onSelected = { codexProfile = codexProfiles[it].name },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = PICKER_SEGMENT_HEIGHT)
-                                    .testTag(SESSION_TYPE_PICKER_CODEX_PROFILE_TAG),
-                                fillSegments = true,
-                                segmentTag = { index ->
-                                    "$SESSION_TYPE_PICKER_CODEX_PROFILE_TAG:${codexProfiles[index].name}"
+                                    "$SESSION_TYPE_PICKER_PROFILE_TAG:${profiles[index].name}"
                                 },
                             )
                         }
@@ -412,7 +400,9 @@ internal fun SessionTypePickerContent(
                     if (!creating) emitCreateChoice(missingFolderOffer)
                 },
                 variant = ButtonVariant.Primary,
-                enabled = startDirectory.isNotBlank() && !creating,
+                enabled = startDirectory.isNotBlank() &&
+                    !creating &&
+                    (sessionType == SessionType.Shell || selectedEngine != null),
                 modifier = Modifier.testTag(SESSION_TYPE_PICKER_CREATE_TAG),
             ) {
                 if (creating) {
@@ -455,7 +445,8 @@ private fun SkipPermissionsRow(
 /** What the picker emits when the user confirms. */
 data class SessionTypeChoice(
     val type: SessionType,
-    val agent: AgentCli?,
+    /** The host-registry row selected for an agent session. */
+    val engine: RemoteEngine?,
     val startDirectory: String,
     /**
      * Whether the agent CLI should launch with its per-action approval
@@ -466,20 +457,8 @@ data class SessionTypeChoice(
      * config-driven in `opencode.json`, not a CLI flag).
      */
     val skipPermissions: Boolean = true,
-    /**
-     * The selected Claude Code profile name (issue #627). `null` means
-     * the default profile (no `CLAUDE_CONFIG_DIR` override). Only
-     * relevant when [agent] is [AgentCli.Claude]; ignored for other
-     * agents and for shell sessions.
-     */
-    val claudeProfileName: String? = null,
-    /**
-     * The selected Codex profile name (issue #631). `null` means the
-     * default profile (no `CODEX_HOME` override). Only relevant when
-     * [agent] is [AgentCli.Codex]; ignored for other agents and shell
-     * sessions.
-     */
-    val codexProfileName: String? = null,
+    /** The selected profile name, or null for the engine default. */
+    val profileName: String? = null,
     /**
      * The user-entered custom session label (issue #1184). `null`/blank means
      * "use the directory-derived default" (#429/#642). When present it is
@@ -507,7 +486,7 @@ data class SessionTypeChoice(
      * (issue #703):
      *
      * ```
-     * pocketshell agent <kind> --dir '<dir>' [--no-skip-permissions] [--config-dir '<path>']
+     * pocketshell agent <registry-id> --dir '<dir>' [--no-skip-permissions]
      * ```
      *
      * The wrapper (`tools/pocketshell` `agent` subcommand) does everything
@@ -526,20 +505,31 @@ data class SessionTypeChoice(
      * - Skip-permissions defaults ON in the wrapper, so `--no-skip-permissions`
      *   is emitted only when the user turned it OFF (and never for OpenCode,
      *   where it is a no-op).
-     * - The selected Claude / Codex profile (issue #718) is passed by NAME as
-     *   `--profile '<name>'`; the host-side wrapper resolves the name to its
-     *   `CLAUDE_CONFIG_DIR` / `CODEX_HOME` via the same discovery the picker
-     *   was populated from. The default profile is omitted (the wrapper uses
-     *   the engine's built-in config dir).
+     * - The selected profile (issue #718) is passed by NAME as `--profile
+     *   '<name>'`; the host-side wrapper resolves it through the same
+     *   discovery the picker was populated from. The default profile is
+     *   omitted.
      */
     fun startCommand(
         claudeProfiles: List<ClaudeProfile> = emptyList(),
         codexProfiles: List<CodexProfile> = emptyList(),
-    ): String? = when (type) {
-        SessionType.Shell -> null
-        SessionType.Agent -> agent?.launchCommand(
-            startDirectory, skipPermissions, claudeProfileName, claudeProfiles,
-            codexProfileName, codexProfiles,
+    ): String? {
+        if (type == SessionType.Shell) return null
+        val selectedEngine = engine ?: return null
+        val selectedProfile = pickerProfilesForEngine(
+            engine = selectedEngine,
+            claudeProfiles = claudeProfiles,
+            codexProfiles = codexProfiles,
+        ).firstOrNull { it.name == profileName }
+            ?.takeUnless { it.default }
+            ?.name
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+        return buildRegistryAgentCommand(
+            engineId = selectedEngine.rawId,
+            directory = startDirectory,
+            noSkipPermissions = !skipPermissions && selectedEngine.launch.supportsSkipPermissions,
+            profileName = selectedProfile,
         )
     }
 
@@ -554,8 +544,12 @@ data class SessionTypeChoice(
     val sessionAgentKind: SessionAgentKind?
         get() = when (type) {
             SessionType.Shell -> null
-            SessionType.Agent -> agent?.toSessionAgentKind()
+            SessionType.Agent -> engine?.family
         }
+
+    /** Open-ended host identity used for the wrapper and durable tmux option. */
+    val engineId: String?
+        get() = engine?.rawId
 }
 
 data class MissingStartDirectoryCreation(
@@ -613,102 +607,27 @@ private fun isRootedRemoteParent(parent: String): Boolean =
 
 enum class SessionType { Shell, Agent }
 
-enum class AgentCli(val command: String) {
-    Claude("claude"),
-    Codex("codex"),
-    OpenCode("opencode"),
-    Grok("grok"),
-    ;
-
-    /**
-     * Epic #821 Workstream A: map the picked CLI to the [SessionAgentKind] the
-     * tree renders, so the chosen kind can be recorded on the new session node
-     * at create time. This is the SAME kind the `pocketshell agent <command>`
-     * wrapper records host-side as `@ps_agent_kind` ([command]), so the
-     * optimistic node and the host read-back agree.
-     */
-    fun toSessionAgentKind(): SessionAgentKind = when (this) {
-        Claude -> SessionAgentKind.Claude
-        Codex -> SessionAgentKind.Codex
-        OpenCode -> SessionAgentKind.OpenCode
-        Grok -> SessionAgentKind.Grok
+/**
+ * Assemble the short wrapper invocation for one open-ended registry id.
+ * Registry ids are validated by the host registry; directory/profile values
+ * still need shell quoting because they are user/host data.
+ */
+internal fun buildRegistryAgentCommand(
+    engineId: String,
+    directory: String,
+    noSkipPermissions: Boolean,
+    profileName: String?,
+): String {
+    val parts = StringBuilder("pocketshell agent ")
+    parts.append(engineId)
+    parts.append(" --dir ").append(shellSingleQuote(directory))
+    if (noSkipPermissions) {
+        parts.append(" --no-skip-permissions")
     }
-
-    /**
-     * Build the SHORT `pocketshell agent <kind> --dir <dir> …` line typed
-     * into the new pane (issue #703). The server-side wrapper owns the env
-     * merge, the OpenCode-only env strip, the per-agent first-run-prompt
-     * suppression, and the `execvpe`. The app's only job is to assemble the
-     * short, shell-safe argv.
-     *
-     * - [directory] → `--dir '<dir>'` (shell-quoted; the wrapper validates
-     *   and `cd`s into it).
-     * - [skipPermissions] defaults ON in the wrapper, so the app emits
-     *   `--no-skip-permissions` only when it is OFF. OpenCode never gets a
-     *   skip flag (it is a no-op there — permissions are config-driven).
-     * - A non-default Claude / Codex profile (issue #718) → `--profile
-     *   '<name>'`; the wrapper resolves the name to `CLAUDE_CONFIG_DIR` /
-     *   `CODEX_HOME` host-side. The default profile (and OpenCode, which has
-     *   no profiles) emits no `--profile`.
-     */
-    fun launchCommand(
-        directory: String,
-        skipPermissions: Boolean,
-        claudeProfileName: String? = null,
-        claudeProfiles: List<ClaudeProfile> = emptyList(),
-        codexProfileName: String? = null,
-        codexProfiles: List<CodexProfile> = emptyList(),
-    ): String {
-        // Resolve the selected profile and only pass it by NAME when it is a
-        // real, non-default profile. The default profile means "use the
-        // engine's built-in config dir", so no `--profile` is emitted.
-        val profileName: String? = when (this) {
-            Claude -> claudeProfiles.firstOrNull { it.name == claudeProfileName }
-                ?.takeUnless { it.default }?.name
-            Codex -> codexProfiles.firstOrNull { it.name == codexProfileName }
-                ?.takeUnless { it.default }?.name
-            OpenCode, Grok -> null
-        }?.trim()?.takeIf { it.isNotBlank() }
-
-        // OpenCode's skip-permissions checkbox is a no-op, so never emit the
-        // flag for it; for claude/codex the wrapper defaults ON, so we only
-        // speak up to turn it OFF.
-        val emitNoSkip = this != OpenCode && !skipPermissions
-
-        return buildAgentCommand(
-            kind = command,
-            directory = directory,
-            noSkipPermissions = emitNoSkip,
-            profileName = profileName,
-        )
+    if (profileName != null) {
+        parts.append(" --profile ").append(shellSingleQuote(profileName))
     }
-
-    companion object {
-        /**
-         * Assemble `pocketshell agent <kind> --dir '<dir>' [--no-skip-permissions]
-         * [--profile '<name>']` (issue #703 / #718). Paths and names are
-         * single-quoted so spaces or shell metacharacters cannot break out of
-         * the argument or inject a command. The whole line is single-quoted
-         * again by the gateway when it is passed to `tmux send-keys`.
-         */
-        internal fun buildAgentCommand(
-            kind: String,
-            directory: String,
-            noSkipPermissions: Boolean,
-            profileName: String?,
-        ): String {
-            val parts = StringBuilder("pocketshell agent ")
-            parts.append(kind)
-            parts.append(" --dir ").append(shellSingleQuote(directory))
-            if (noSkipPermissions) {
-                parts.append(" --no-skip-permissions")
-            }
-            if (profileName != null) {
-                parts.append(" --profile ").append(shellSingleQuote(profileName))
-            }
-            return parts.toString()
-        }
-    }
+    return parts.toString()
 }
 
 private val PICKER_SEGMENT_HEIGHT = 48.dp
@@ -721,10 +640,7 @@ const val SESSION_TYPE_PICKER_SHEET_TAG: String = "session-type-picker:sheet"
 const val SESSION_TYPE_PICKER_CONTENT_TAG: String = "session-type-picker:content"
 const val SESSION_TYPE_PICKER_SHELL_TAG: String = "session-type-picker:shell"
 const val SESSION_TYPE_PICKER_AGENT_TAG: String = "session-type-picker:agent"
-const val SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG: String = "session-type-picker:agent:claude"
-const val SESSION_TYPE_PICKER_AGENT_CODEX_TAG: String = "session-type-picker:agent:codex"
-const val SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG: String = "session-type-picker:agent:opencode"
-const val SESSION_TYPE_PICKER_AGENT_GROK_TAG: String = "session-type-picker:agent:grok"
+const val SESSION_TYPE_PICKER_AGENT_ENGINE_TAG_PREFIX: String = "session-type-picker:agent:engine:"
 const val SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG: String = "session-type-picker:skip-permissions"
 const val SESSION_TYPE_PICKER_CWD_TAG: String = "session-type-picker:cwd"
 const val SESSION_TYPE_PICKER_NAME_TAG: String = "session-type-picker:name"
@@ -732,20 +648,9 @@ const val SESSION_TYPE_PICKER_CREATE_MISSING_FOLDER_TAG: String =
     "session-type-picker:create-missing-folder"
 const val SESSION_TYPE_PICKER_CANCEL_TAG: String = "session-type-picker:cancel"
 const val SESSION_TYPE_PICKER_CREATE_TAG: String = "session-type-picker:create"
-const val SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG: String = "session-type-picker:claude-profile"
-const val SESSION_TYPE_PICKER_CODEX_PROFILE_TAG: String = "session-type-picker:codex-profile"
+const val SESSION_TYPE_PICKER_PROFILE_TAG: String = "session-type-picker:profile"
 
-// Segment labels and per-segment tags for the shared SegmentedToggle controls.
-// AGENT_CLI_* lists are ordered to match AgentCli.entries (Claude, Codex,
-// OpenCode, Grok), so the segment index maps straight onto the enum ordinal.
 private val SESSION_TYPE_LABELS = listOf("Shell", "Agent")
-private val AGENT_CLI_LABELS = listOf("claude", "codex", "opencode", "grok")
-private val AGENT_CLI_SEGMENT_TAGS = listOf(
-    SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG,
-    SESSION_TYPE_PICKER_AGENT_CODEX_TAG,
-    SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG,
-    SESSION_TYPE_PICKER_AGENT_GROK_TAG,
-)
 
 /**
  * A named Claude Code configuration profile shown in the picker — issue #718.

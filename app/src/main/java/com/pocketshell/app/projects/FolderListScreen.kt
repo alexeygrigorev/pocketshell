@@ -240,6 +240,7 @@ fun FolderListScreen(
     // over the warm session). Drives the Update button's spinner + failure line.
     val cliVersionUpdateState by viewModel.cliVersionUpdateState.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
+    val engines by viewModel.engines.collectAsState()
     val claudeProfiles by viewModel.claudeProfiles.collectAsState()
     val codexProfiles by viewModel.codexProfiles.collectAsState()
     val assistantDictationUiState = remember(assistantDictationViewModel) {
@@ -503,6 +504,7 @@ fun FolderListScreen(
             folderLabel = target.label,
             onDismiss = { pickerFolder = null },
             suggestStartDirectories = suggestStartDirectories,
+            engines = engines,
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
             creating = (state as? FolderListUiState.Ready)?.isCreatingSession == true,

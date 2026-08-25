@@ -43,7 +43,7 @@ import java.io.FileOutputStream
  *     ToolUnavailable / Failed) and to contain both seeded Claude profiles.
  *  3. The discovered rows are projected onto the picker's [ClaudeProfile]
  *     flow exactly as [FolderListViewModel] does, then the non-default
- *     "Claude (Z.AI)" profile is SELECTED and [AgentCli.launchCommand]
+ *     "Claude (Z.AI)" profile is SELECTED and the registry-row launch command
  *     threads its name into `--profile '<name>'`.
  *  4. That launch command is finally EXEC'd over SSH against the fixture's
  *     `pocketshell agent` wrapper, proving the discovered + selected profile
@@ -142,12 +142,13 @@ class ProfileDiscoveryPickerDockerTest {
         // Select the NON-default discovered profile.
         val selected = "Claude (Z.AI)"
         val workdir = "/tmp/issue732-discovery-${System.currentTimeMillis().toString().takeLast(6)}"
-        val launchCommand = AgentCli.Claude.launchCommand(
-            directory = workdir,
+        val launchCommand = SessionTypeChoice(
+            type = SessionType.Agent,
+            engine = pickerTestEngine("claude", com.pocketshell.uikit.model.SessionAgentKind.Claude),
+            startDirectory = workdir,
             skipPermissions = true,
-            claudeProfileName = selected,
-            claudeProfiles = claudeProfiles,
-        )
+            profileName = selected,
+        ).startCommand(claudeProfiles = claudeProfiles)!!
         // The selected non-default profile name is threaded into --profile.
         assertTrue(
             "launch command must thread --profile for the selected non-default profile, got: $launchCommand",

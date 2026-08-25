@@ -38,9 +38,11 @@ import com.pocketshell.app.diagnostics.consume
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.ClaudeProfile
 import com.pocketshell.app.projects.CodexProfile
+import com.pocketshell.app.projects.EnginesGateway
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.ManualKindWriter
 import com.pocketshell.app.projects.ProfilesResult
+import com.pocketshell.app.projects.RemoteEngine
 import com.pocketshell.app.projects.RemoteProfile
 import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.uikit.model.SessionAgentKind
@@ -269,6 +271,10 @@ public class TmuxSessionViewModel @Inject constructor(
     // the singleton; when absent the picker shows no profile selector (the safe
     // default-only behaviour, identical to the host screen with no gateway).
     private val profilesGateway: com.pocketshell.app.projects.ProfilesGateway? = null,
+    // Issue #2275: the in-session picker consumes the same host engine
+    // registry as the folder/repo surfaces. Nullable keeps direct unit-test
+    // constructors working; no background refresh is introduced.
+    private val enginesGateway: EnginesGateway? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
     @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
@@ -2085,6 +2091,23 @@ public class TmuxSessionViewModel @Inject constructor(
     private val _codexProfiles: MutableStateFlow<List<CodexProfile>> =
         MutableStateFlow(emptyList())
     public val codexProfiles: StateFlow<List<CodexProfile>> = _codexProfiles.asStateFlow()
+
+    /**
+     * Issue #2275: host-registry rows for the in-session new-session picker.
+     * State and refresh sequencing live in the picker-owned helper so this
+     * connection VM does not grow with registry-specific IO details.
+     */
+    private val enginePickerState: TmuxSessionEnginePickerState by lazy {
+        TmuxSessionEnginePickerState(
+            enginesGateway = enginesGateway,
+            hostDao = hostDao,
+            scope = bridgeScope,
+            ioDispatcher = { sessionCardsDispatcher },
+            activeTarget = { this@TmuxSessionViewModel.activeTarget },
+        )
+    }
+    public val engines: StateFlow<List<RemoteEngine>>
+        get() = enginePickerState.engines
 
     /**
      * Issue #894 (epic #821 "Slice C"): the durable per-session CONFIRMED-SHELL
@@ -16159,6 +16182,13 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
     }
+
+    /**
+     * Issue #2275: refresh the host engine registry when the in-session
+     * new-session sheet is opened. Cached rows are projected immediately, then
+     * one bounded read updates them; a stale session result is discarded.
+     */
+    public fun fetchEnginesForActiveSession() = enginePickerState.refresh()
 
     private fun applyProfiles(profiles: List<RemoteProfile>) {
         _claudeProfiles.value = profiles

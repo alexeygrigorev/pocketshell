@@ -6,7 +6,8 @@ import com.pocketshell.app.bootstrap.UV_EXCLUDE_NEWER_FLAG
  * Graceful version-mismatch detection for the agent-launch flow (issue #759).
  *
  * Launching a coding agent in a new pane runs the short server-side wrapper
- * `pocketshell agent <kind> --dir '<dir>' …` (see [AgentCli.launchCommand]).
+ * `pocketshell agent <registry-id> --dir '<dir>' …` (see
+ * [buildRegistryAgentCommand]).
  * That `agent` subcommand only exists in `pocketshell` ≥ [MIN_AGENT_POCKETSHELL_VERSION].
  * When the host has an OLDER `pocketshell` installed, Click answers with a raw
  *
@@ -66,7 +67,7 @@ object AgentLaunchVersionCheck {
     /**
      * The server-side wrapper line the agent-launch flow types into a fresh
      * pane is `pocketshell agent <kind> --dir '<dir>' …` (see
-     * [AgentCli.buildAgentCommand]). This prefix is how the gateway recognises
+     * [buildRegistryAgentCommand]). This prefix is how the gateway recognises
      * that a start command is an agent launch (and therefore wants the
      * pre-flight version guard) versus a plain shell session.
      */

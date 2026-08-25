@@ -339,6 +339,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.fileviewer.FileViewerTabsMainActivityJourneyDockerTest#mainActivityRestartRestoresTabsGuardsDirtyBackAndConsumesSubmitAction"  # #1715 D32/G9/G10: real MainActivity route + restart + restore/switch/close + dirty app-bar Back + Submit consumes queued switch
   "com.pocketshell.app.fileviewer.FileViewerTabStripTest#stripShowsUniqueSuffixLabelsAndSeparateSwitchClose"  # #1715 D32/G9: tab labels distinguish duplicates; switch and close are separate
   "com.pocketshell.app.fileviewer.FileViewerTabStripTest#emptyWorkspaceShowsBrowseAndOpenPath"  # #1715 D32/G9: last-close empty workspace offers Browse files / Open path
+  "com.pocketshell.app.fileviewer.FileViewerTabStripTest#workspaceUnavailableShowsRetryableUpdateMessage"  # #1715 D32/G9: old hosts show an actionable update/retry path instead of inventing phone-side tabs
   "com.pocketshell.app.fileviewer.FileViewerTabStripTest#dirtyWorkDialogStayAndDiscard"  # #1715 D32/G9: pending review blocks switch with Stay/Discard
   "com.pocketshell.app.fileviewer.FileViewerTabStripTest#twelveTabOverflowKeepsActiveFullyOnScreen"  # #1715 D32/G9: 12-tab overflow keeps the active tab fully on screen
   "com.pocketshell.app.tmux.TmuxMoreMenuOpenFilesTest#openFilesItemIsPresentAndInvokesCallback"  # #1715 D32/G9: session kebab Open files reaches the workspace restore route

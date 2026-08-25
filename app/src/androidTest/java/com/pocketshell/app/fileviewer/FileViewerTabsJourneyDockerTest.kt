@@ -1,6 +1,7 @@
 package com.pocketshell.app.fileviewer
 
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.Lifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -156,6 +157,17 @@ class FileViewerTabsJourneyDockerTest {
                 } ?: error("could not inspect the real daemon registry")
             }
             WalkthroughScreenshotArtifacts.capture("issue1715-three-tabs")
+
+            // Acceptance criterion: an actual background/return must keep the
+            // durable workspace visible before a fresh ViewModel hydrates it
+            // below. This catches lifecycle teardown/rebind paths that a pure
+            // Compose state assertion would miss.
+            composeRule.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
+            composeRule.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
+            composeRule.waitForIdle()
+            assertEquals(c, first.workspace.value.activePath)
+            composeRule.onNodeWithTag(FILE_VIEWER_TAB_STRIP_TAG).assertExists()
+            WalkthroughScreenshotArtifacts.capture("issue1715-background-return")
 
             val restored = FileViewerViewModel(
                 InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,

@@ -104,6 +104,30 @@ class FileViewerTabStripTest {
     }
 
     @Test
+    fun workspaceUnavailableShowsRetryableUpdateMessage() {
+        var retries = 0
+        compose.setContent {
+            PocketShellTheme {
+                FileViewerScaffold(
+                    modifier = Modifier.productionWindowChromePadding(),
+                    hostName = "agents",
+                    state = FileViewerUiState.WorkspaceUnavailable(),
+                    onBack = {},
+                    onRetry = { retries++ },
+                )
+            }
+        }
+        compose.assertNodeFullyWithinRoot(FILE_VIEWER_WORKSPACE_UNAVAILABLE_TAG)
+        compose.onNodeWithText("Open files unavailable; update PocketShell on this host")
+            .assertIsDisplayed()
+        compose.onNodeWithTag(FILE_VIEWER_WORKSPACE_RETRY_TAG)
+            .assertIsDisplayed()
+            .performClick()
+        compose.waitForIdle()
+        assertEquals(1, retries)
+    }
+
+    @Test
     fun dirtyWorkDialogStayAndDiscard() {
         var stay = 0
         var discard = 0

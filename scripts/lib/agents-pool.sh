@@ -96,11 +96,16 @@ pocketshell_agents_compose_file() {
 
 # The container name a lane on $port resolves to. Port 2222 keeps the legacy
 # single-lane identity (unsuffixed container) so `docker inspect
-# pocketshell-test-agents` still works for the non-pool tooling.
+# pocketshell-test-agents` still works for the non-pool tooling. Port 2239 is
+# the fixed real `agents-daemon` fixture used by durable-tree/workspace journeys;
+# it is explicit-only (not in [pocketshell_agents_pool_ports]) but must still
+# resolve correctly when connected-test captures evidence for that port.
 pocketshell_agents_container_for_port() {
   local port="$1"
   if [[ "$port" == "2222" ]]; then
     printf 'pocketshell-test-agents\n'
+  elif [[ "$port" == "2239" ]]; then
+    printf '%s-daemon\n' "$(pocketshell_agents_container_for_port 2222)"
   else
     printf 'pocketshell-test-agents-%s\n' "$port"
   fi

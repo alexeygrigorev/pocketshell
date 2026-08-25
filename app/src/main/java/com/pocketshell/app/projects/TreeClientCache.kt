@@ -91,7 +91,7 @@ import javax.inject.Singleton
 @Singleton
 public class TreeClientCache @Inject constructor(
     @ApplicationContext private val context: Context,
-) {
+) : TreeSyncCache {
 
     private val cacheDir: File by lazy {
         File(context.filesDir, CACHE_DIR_NAME).apply { mkdirs() }
@@ -129,7 +129,7 @@ public class TreeClientCache @Inject constructor(
      * back to the brief Loading and read OFF Main via [read]. Safe to call on the
      * Main thread: it only touches the in-memory map.
      */
-    public fun peek(host: String): CachedTree? = parsed[sanitise(host)]
+    override fun peek(host: String): CachedTree? = parsed[sanitise(host)]
 
     /**
      * Read the cached snapshot for [host] (the OFF-Main cold-miss / warm read).
@@ -138,7 +138,7 @@ public class TreeClientCache @Inject constructor(
      * any IO/parse failure. This DOES touch disk on a miss, so it must run off the
      * Main thread; the Main-thread seed uses [peek] instead (issue #1109 / #965).
      */
-    public fun read(host: String): CachedTree {
+    override fun read(host: String): CachedTree {
         val key = sanitise(host)
         parsed[key]?.let { return it }
         val file = fileFor(host)
@@ -178,7 +178,7 @@ public class TreeClientCache @Inject constructor(
      * cache file. Any IO failure is swallowed (the tree is still correct in
      * memory; the next write re-persists).
      */
-    public fun write(host: String, tree: CachedTree) {
+    override fun write(host: String, tree: CachedTree) {
         val key = sanitise(host)
         // Issue #1109: keep the in-memory parsed snapshot hot with the just-rendered
         // tree so the NEXT cold connect of this host in the same process [peek]s it

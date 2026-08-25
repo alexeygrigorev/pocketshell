@@ -188,6 +188,7 @@ class FolderListViewModel internal constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setPeriodicReconcileEnabledForTest(enabled: Boolean) {
         periodicReconcileEnabled = enabled
+        treeSync.setPeriodicEnabledForTest(enabled)
     }
 
     /**
@@ -360,7 +361,7 @@ class FolderListViewModel internal constructor(
             // — D21) and dialing fresh only when there is genuinely no live transport,
             // so it avoids the old `awaitWarmSession() == null` FALSE "Not connected"
             // that contradicted a connected tree + tray. Null ONLY when unreachable.
-            val session = acquireUpgradeSession(params)
+            val session = treeSync.acquireSessionForUpgrade(params)
             if (session == null || bound != params) {
                 cliVersionBanner.setUpdateState(
                     CliVersionUpdateState.Failure(
@@ -376,7 +377,7 @@ class FolderListViewModel internal constructor(
                     // banner; a no-op upgrade (already-newest / unpublished) is
                     // classified from requested vs resolved (#2033), not guessed
                     // as a cap.
-                    recheckHostVersionAfterUpgrade(params, session, result.output)
+                    recheckHostVersionAfterUpgrade(params, result.output)
                 }
                 is HostPocketshellUpgrade.Result.Failure -> {
                     cliVersionBanner.classifyAndApply(
@@ -399,11 +400,9 @@ class FolderListViewModel internal constructor(
      */
     private suspend fun recheckHostVersionAfterUpgrade(
         params: BoundParams,
-        session: SshSession,
         installerOutput: String,
     ) {
-        val source = treeRemoteSource
-        if (source == null) {
+        if (treeRemoteSource == null) {
             // No durable source (some unit paths): trust the exit-0 success and
             // clear the banner so the spinner doesn't stick.
             cliVersionBanner.clearAfterTrustedSuccess()
@@ -413,7 +412,7 @@ class FolderListViewModel internal constructor(
         // wrap the re-check in an OUTER bound too so a future unbounded `getTree`
         // can never leave the banner's spinner stuck (#947 / #944 / #939).
         val treeResult = withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
-            runCatching { source.getTree(session, params.hostName) }
+            runCatching { treeSync.getTreeForUpgrade(params) }
                 .getOrDefault(TreeRemoteSource.TreeResult.Empty)
         } ?: TreeRemoteSource.TreeResult.Empty
         if (treeResult.cliVersion.isNullOrBlank()) {
@@ -466,7 +465,7 @@ class FolderListViewModel internal constructor(
     val claudeProfiles: StateFlow<List<ClaudeProfile>> = profileDiscovery.claudeProfiles
     val codexProfiles: StateFlow<List<CodexProfile>> = profileDiscovery.codexProfiles
 
-    private val engineDiscovery = FolderListEngineDiscovery(
+    private val engineDiscovery: FolderListEngineDiscovery = FolderListEngineDiscovery(
         enginesGateway = enginesGateway,
         hostDao = hostDao,
         scope = viewModelScope,
@@ -474,40 +473,12 @@ class FolderListViewModel internal constructor(
         isCurrentHost = { hostId -> bound?.hostId == hostId },
         onRefreshApplied = { hostId ->
             bound?.takeIf { it.hostId == hostId }?.let {
-                if (rootSnapshotLoaded) launchReconcile(it)
+                if (rootSnapshotLoaded) treeSync.requestReconcile()
             }
         },
     )
 
     val engines: StateFlow<List<RemoteEngine>> = engineDiscovery.engines
-
-    private var warmJob: Job? = null
-    private var warmReleaseJob: Job? = null
-    private var warmLease: SshLease? = null
-
-    /**
-     * Epic #821 slice C (issue #837): the warm SSH session becomes available
-     * (`true`) once [replaceWarmLease] sets [warmLease]. The cold-start
-     * tree-hydrate coroutine awaits this so it execs `tree.get` over the SAME
-     * warm session the gateway uses (D21 — no new connection). Reset to `false`
-     * on a host change / release.
-     */
-    private val warmSessionReady = MutableStateFlow(false)
-
-    /** Epic #821 slice C: the cold-start tree-hydrate coroutine for this open. */
-    private var hydrateTreeJob: Job? = null
-
-    /**
-     * Issue #1109: the OFF-Main client-cache read coroutine for the cold-MISS
-     * fallback only (the in-memory snapshot was not warmed in time, so [bind]'s
-     * synchronous [peek][TreeClientCache.peek] missed). It reads + parses the file
-     * OFF Main, then hydrates the held tree + emits the advisory paint — the #965
-     * off-Main behaviour, used only on a miss. The cold-start reconcile path awaits
-     * it so the advisory paint lands BEFORE the freshening reconcile (the #867
-     * stale-while-revalidate ordering). `null`/already-completed on the common
-     * warm-hit path (the seed already painted synchronously inside `bind`).
-     */
-    private var clientCacheSeedJob: Job? = null
 
     @androidx.annotation.VisibleForTesting
     internal var warmLeaseAcquiredForTest: (() -> Unit)? = null
@@ -527,22 +498,6 @@ class FolderListViewModel internal constructor(
     @androidx.annotation.VisibleForTesting
     internal var treeDispatcher: CoroutineDispatcher =
         Dispatchers.Default.limitedParallelism(1)
-
-    /**
-     * Issue #702: outer bound on a single [runReconcile] gateway call so NO
-     * gateway path (now or in future) can pin the picker in `Loading` forever.
-     * The gateway already bounds its live `-CC` enumeration (#702) and its
-     * SSH-lease exec reads (#470), but this is the last-line defence at the view
-     * model: if the whole reconcile somehow out-waits those inner bounds, the
-     * picker surfaces a retryable `ConnectError` panel instead of an indefinite
-     * spinner. Generous relative to the sum of the inner bounds (live-enum +
-     * lease enum + agent detection + watched-root expansion) so it only fires on
-     * a true wedge, never on a slow-but-progressing reconcile. Test-overridable.
-     */
-    @androidx.annotation.VisibleForTesting
-    internal var reconcileTimeoutMs: Long = RECONCILE_TIMEOUT_MS
-    private var watchedFoldersJob: Job? = null
-    private var probeJob: Job? = null
 
     /**
      * Issue #965: the most-recent [emitReady] projection coroutine + a monotone
@@ -570,7 +525,6 @@ class FolderListViewModel internal constructor(
      * [launchReconcile], so no second SSH/`-CC` connection is opened and nothing
      * runs while backgrounded.
      */
-    private var sessionsChangedJob: Job? = null
 
     /**
      * Issue #653 / #783: subscription to the bound host's live `tmux -CC` client's
@@ -592,7 +546,6 @@ class FolderListViewModel internal constructor(
      * instant the event arrives. It reuses the warm `-CC` client (D21 — no second
      * connection) and is foreground-gated by [processStarted].
      */
-    private var windowCloseJob: Job? = null
 
     /**
      * Issue #783: the host id the event subscriptions ([sessionsChangedJob] /
@@ -602,7 +555,6 @@ class FolderListViewModel internal constructor(
      * while a host CHANGE tears them down and re-subscribes for the new host.
      * `null` while unbound.
      */
-    private var subscriptionsHost: Long? = null
 
     /**
      * Issue #783: periodic (~5 min) reconcile while the tree screen is composed.
@@ -621,7 +573,6 @@ class FolderListViewModel internal constructor(
      * loop parks at the gate and never runs background SSH work — a foreground
      * heartbeat, not a `Timer`/`WorkManager`/`AlarmManager`.
      */
-    private var periodicReconcileJob: Job? = null
 
     /**
      * EPIC #679 — the maintained in-memory project tree. Held across opens of
@@ -633,9 +584,6 @@ class FolderListViewModel internal constructor(
      * `stableSessionOrder` + `expandedProjectPaths` recompute that this view
      * model used to carry.
      */
-    private val tree = HostTreeModel()
-    private var lastWatchedFolders: List<ProjectRootEntity> = emptyList()
-    private var rootSnapshotLoaded: Boolean = false
     private var lastDiscoveredPorts: List<HostDiscoveredPort> = emptyList()
     private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
     private var sessionRefreshInFlight: Boolean = false
@@ -646,16 +594,7 @@ class FolderListViewModel internal constructor(
      * it until an authoritative session probe succeeds; never let the hint
      * authorize a name-based removal.
      */
-    private var sessionIdentityReconcileRequested: Boolean = false
 
-    private val sessionLifecycleActions = FolderListSessionLifecycleActions(
-        boundHostId = { bound?.hostId },
-        tree = tree,
-        emitReady = ::emitReady,
-        isPolling = { probeJob != null },
-        refresh = ::refresh,
-        requestIdentityReconcile = { sessionIdentityReconcileRequested = true },
-    )
 
     /**
      * Issue #711: count of consecutive QUIET retries the current refresh has
@@ -664,9 +603,6 @@ class FolderListViewModel internal constructor(
      * unrecoverable host eventually surfaces the calm message instead of looping
      * forever. Reset to 0 on any successful reconcile and on a fresh [bind].
      */
-    private var transientRefreshRetries: Int = 0
-    /** Foreground generation observed by the last scheduled resume reconcile. */
-    private var lastResumeGenerationHandled: Long = -1L
 
     /**
      * Issue #430: whole-process foreground signal driven by
@@ -686,8 +622,120 @@ class FolderListViewModel internal constructor(
      * stale `false`.
      */
     private val processStarted = MutableStateFlow(false)
-    private var foregroundGeneration: Long = 0L
     private var lifecycleObserver: LifecycleEventObserver? = null
+
+    private val treeSyncRemote = FolderListTreeSyncRemote(
+        gateway = gateway,
+        hostDao = hostDao,
+        treeRemoteSource = treeRemoteSource,
+        sshLeaseManager = sshLeaseManager,
+        activeTmuxClients = activeTmuxClients,
+        scope = viewModelScope,
+        dispatcher = { ioDispatcher },
+        warmSessionAwaitMs = { TreeSyncCoordinator.DEFAULT_WARM_SESSION_AWAIT_MS },
+        onWarmSessionAcquired = { warmLeaseAcquiredForTest?.invoke() },
+    )
+
+    private val treeSyncListener = object : TreeSyncCoordinator.Listener {
+        override fun onLoadingRequested() {
+            if (_state.value !is FolderListUiState.Ready) {
+                _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
+            }
+        }
+
+        override fun onRefreshingChanged(refreshing: Boolean) {
+            setSessionRefreshInFlight(refreshing)
+        }
+
+        override fun onTreeChanged(synchronous: Boolean) {
+            emitReady(synchronous = synchronous)
+        }
+
+        override fun onReconcileSuccess(result: FolderListResult.Sessions) {
+            lastDiscoveredPorts = InterestingPortFilter.filter(result.discoveredPorts).map { port ->
+                HostDiscoveredPort(remotePort = port.port, process = port.processName)
+            }
+            setSessionRefreshInFlight(false)
+            if (refreshSessionsRequested) completeManualRefresh() else clearRefreshFailure()
+        }
+
+        override fun onReconcileFailure(failure: TreeSyncFailure) {
+            setSessionRefreshInFlight(false)
+            when (failure) {
+                TreeSyncFailure.HostNotFound -> {
+                    _state.value = FolderListUiState.Failed("Host not found.")
+                }
+                is TreeSyncFailure.Failed -> {
+                    if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
+                    _state.value = FolderListUiState.Failed(REFRESH_FAILED_MESSAGE)
+                }
+                TreeSyncFailure.Timeout -> {
+                    val cause = FolderReconcileTimeoutException(reconcileTimeoutMs)
+                    if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
+                    _state.value = FolderListUiState.ConnectError(
+                        message = folderListConnectErrorMessage(cause, REFRESH_FAILED_MESSAGE),
+                        cause = cause,
+                    )
+                }
+                is TreeSyncFailure.ConnectFailed -> {
+                    if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
+                    _state.value = FolderListUiState.ConnectError(
+                        message = folderListConnectErrorMessage(failure.cause, REFRESH_FAILED_MESSAGE),
+                        cause = failure.cause,
+                    )
+                }
+                is TreeSyncFailure.ToolUnavailable -> {
+                    if (preserveReadyOnRefresh("Couldn't refresh sessions: tmux is not installed.")) return
+                    _state.value = FolderListUiState.ToolUnavailable
+                }
+                is TreeSyncFailure.Unexpected -> onUnexpectedFailure(failure.cause)
+            }
+        }
+
+        override fun onUnexpectedFailure(cause: Throwable) {
+            if (bound == null) return
+            if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
+            _state.value = FolderListUiState.ConnectError(
+                message = folderListConnectErrorMessage(cause, REFRESH_FAILED_MESSAGE),
+                cause = cause,
+            )
+        }
+
+        override fun onPayloadCliVersion(version: String) {
+            sessionTreeSetup.maybeRunVersionCheck(version, ::observePayloadCliVersion)
+        }
+    }
+
+    private val treeSync: TreeSyncCoordinator = TreeSyncCoordinator(
+        scope = viewModelScope,
+        remote = treeSyncRemote,
+        cache = treeClientCache,
+        processStarted = processStarted,
+        dispatcher = { ioDispatcher },
+        policy = TreeSyncPolicy(periodicEnabled = periodicReconcileEnabled),
+        awaitBeforeFullReconcile = { params: BoundParams ->
+            engineDiscovery.awaitBindRefresh(params.hostId)
+        },
+        listener = treeSyncListener,
+    )
+
+    private val tree: HostTreeModel get() = treeSync.tree
+    private val rootSnapshotLoaded: Boolean get() = treeSync.rootSnapshotLoaded
+    private val lastWatchedFolders: List<ProjectRootEntity> get() = treeSync.watchedFolders
+
+    private val sessionLifecycleActions = FolderListSessionLifecycleActions(
+        boundHostId = { bound?.hostId },
+        tree = tree,
+        emitReady = ::emitReady,
+        isPolling = { treeSync.isPolling },
+        refresh = ::refresh,
+        requestIdentityReconcile = treeSync::requestIdentityReconcile,
+    )
+
+    @androidx.annotation.VisibleForTesting
+    internal var reconcileTimeoutMs: Long
+        get() = treeSync.policy.reconcileTimeoutMs
+        set(value) { treeSync.policy.reconcileTimeoutMs = value }
 
     init {
         viewModelScope.launch {
@@ -705,16 +753,6 @@ class FolderListViewModel internal constructor(
                 onStale = sessionLifecycleActions::onStale,
                 onIdentityUncertain = sessionLifecycleActions::onIdentityUncertain,
             )
-        }
-        // EPIC #679 requirement #2: reconcile INFREQUENTLY, not on a constant
-        // poll. The tree is held across opens, so a foreground/resume only
-        // triggers a reconcile when the held tree is stale (or never
-        // reconciled). D21-clean: this rides the existing [ProcessLifecycleOwner]
-        // foreground signal, never a Timer/WorkManager/AlarmManager.
-        viewModelScope.launch {
-            processStarted.collect { started ->
-                if (started) maybeReconcileOnResume()
-            }
         }
         // Issue #1155 (Part A): the client-cache PARSED snapshots are warmed into
         // memory ONCE at process startup by [com.pocketshell.app.App.onCreate]
@@ -756,7 +794,7 @@ class FolderListViewModel internal constructor(
         if (tree.removeSession(killed.generation)) {
             emitReady()
         }
-        if (probeJob != null) refresh()
+        if (treeSync.isPolling) refresh()
     }
 
     /** Name-only signals request a probe. */
@@ -846,15 +884,11 @@ class FolderListViewModel internal constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal fun forceTreeStaleForTest() {
-        tree.markReconcileDueForTest()
+        treeSync.forceTreeStaleForTest()
     }
 
     private fun updateProcessStarted(started: Boolean) {
-        val wasStarted = processStarted.value
         processStarted.value = started
-        if (!wasStarted && started) {
-            foregroundGeneration += 1
-        }
     }
 
     /**
@@ -886,8 +920,6 @@ class FolderListViewModel internal constructor(
             keyPath = keyPath,
             passphrase = passphrase,
         )
-        warmReleaseJob?.cancel()
-        warmReleaseJob = null
         // Issue #1509: the single setup pass — folds in the notifications request
         // (the MainActivity.onCreate app-open trigger is deleted, D22).
         sessionTreeSetup.runSetup()
@@ -900,42 +932,20 @@ class FolderListViewModel internal constructor(
         // session screen still prunes the tree, because `stopPolling` no longer
         // cancels these jobs. They reuse the warm `-CC` client (D21, no second
         // connection) and are foreground-gated.
-        ensureBoundHostSubscriptions(params)
         // Issue #783: (re)start the periodic ~5-min reconcile heartbeat for the
         // SHOWN tree. Unlike the event subscriptions it follows the screen
         // lifecycle (cancelled in `stopPolling`), so it is restarted on every
         // tree open. It reuses the screen's own warm lease (no second
         // connection) and is foreground-gated.
-        startPeriodicReconcile(params)
         // EPIC #679 requirement #1: opening the host detail renders the HELD
         // tree INSTANTLY. Re-binding the SAME host reuses the maintained tree
         // (no probe-on-open, no loading flash) and only kicks a reconcile if one
         // is genuinely due (staleness gate). A host CHANGE resets the tree.
-        if (bound == params && !tree.bindHost(hostId)) {
-            // Same host: keep showing the held tree; re-project so a re-entry
-            // reflects any by-id mutation that landed while away, then reconcile
-            // only if stale.
-            if (rootSnapshotLoaded) emitReady()
-            maybeReconcileOnOpen(params)
-            return
-        }
-        probeJob?.cancel()
-        probeJob = null
-        hydrateTreeJob?.cancel()
-        hydrateTreeJob = null
-        clientCacheSeedJob?.cancel()
-        clientCacheSeedJob = null
-        warmSessionReady.value = false
+        val hostChanged = bound != params
         bound = params
         // Issue #1509: host CHANGE re-arms the one-shot version-mismatch check
         // (a same-host re-entry, handled above, keeps a dismissed banner gone).
-        sessionTreeSetup.onHostChanged()
-        tree.bindHost(hostId)
-        rootSnapshotLoaded = false
-        lastWatchedFolders = emptyList()
-        sessionRefreshInFlight = false
-        transientRefreshRetries = 0
-        sessionIdentityReconcileRequested = false
+        if (hostChanged) sessionTreeSetup.onHostChanged()
         // Issue #867 (stale-while-revalidate): paint the last-known tree
         // INSTANTLY from the per-host CLIENT cache before any SSH, so a fresh
         // connect / cold app start no longer flashes the empty rebuild ("No
@@ -964,10 +974,12 @@ class FolderListViewModel internal constructor(
         // the brief Loading + an OFF-Main read, never a Main-thread file read. The
         // cache stays ADVISORY: the silent reconcile overwrites the seeded
         // placeholders in place.
-        if (!hydrateFromClientCache(params)) {
-            _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
-            warmFromClientCacheOffMain(params)
-        }
+        // Start the registry read before binding the coordinator. Its initial
+        // reconcile may start synchronously on an unconfined/test dispatcher,
+        // so the bind-read job must already exist when the ordering barrier is
+        // reached.
+        engineDiscovery.bind(params)
+        treeSync.bind(params, projectRootDao.getByHostId(hostId))
         // The maintained in-memory tree is held across opens of the SAME host
         // (so a re-open renders instantly), the daemon registry (#837) makes the
         // presentation state durable host-side, and this client cache makes the
@@ -979,42 +991,7 @@ class FolderListViewModel internal constructor(
         // The default-only / CLI-missing / fetch-failure cases all collapse to
         // an empty list, so the picker simply shows no profile selector.
         profileDiscovery.refresh(params)
-        engineDiscovery.bind(params)
 
-        warmJob?.cancel()
-        warmJob = viewModelScope.launch {
-            replaceWarmLease(params)
-        }
-        watchedFoldersJob?.cancel()
-        watchedFoldersJob = viewModelScope.launch {
-            projectRootDao.getByHostId(hostId).collectLatest { rows ->
-                lastWatchedFolders = rows
-                tree.setWatchedFolders(rows)
-                val firstSnapshot = !rootSnapshotLoaded
-                rootSnapshotLoaded = true
-                // EPIC #679: a reconcile fires only when one is due. On the very
-                // first watched-folder snapshot the held tree has never been
-                // reconciled, so this kicks the initial probe; afterwards a
-                // watched-folder edit just re-projects (the bucket overlay
-                // changed, the session set did not).
-                if (firstSnapshot) {
-                    // Epic #821 slice C (issue #837): on a cold start of a
-                    // previously-opened host, HYDRATE the held tree from the
-                    // durable registry BEFORE the freshening reconcile so the
-                    // held order + expand/collapse render INSTANTLY (no Loading
-                    // flash, no order shuffle). [hydrateTreeOnColdStart] seeds the
-                    // tree, emits the held shape, and ONLY THEN runs the
-                    // freshening reconcile — so the reconcile never races ahead of
-                    // (and no-ops) the hydrate. Without a durable source it falls
-                    // straight through to the reconcile, exactly as before.
-                    hydrateTreeOnColdStart(params)
-                } else {
-                    // Re-emit so a watched-folder write surfaces immediately,
-                    // mapping sessions into the new root overlay without a probe.
-                    emitReady()
-                }
-            }
-        }
     }
 
     /**
@@ -1039,7 +1016,7 @@ class FolderListViewModel internal constructor(
      * foreground/resume.
      */
     fun refresh() {
-        runReconcileNow()
+        treeSync.requestReconcile()
     }
 
     /**
@@ -1274,8 +1251,7 @@ class FolderListViewModel internal constructor(
             refresh = ::refresh,
             emitReady = ::emitReady,
             onMissingGeneration = {
-                sessionIdentityReconcileRequested = true
-                if (probeJob != null) refresh()
+                treeSync.requestIdentityReconcile()
             },
             onFailure = { message ->
                 _actionStatus.value = FolderActionStatus.Failed(message)
@@ -1355,18 +1331,7 @@ class FolderListViewModel internal constructor(
     }
 
     fun toggleProjectExpanded(projectPath: String) {
-        // EPIC #679: expansion is intrinsic node state on the maintained tree
-        // (#471 collapse-stickiness lives there now). Collapsing a folder pins
-        // it collapsed across reconciles; expanding it restores auto-expand.
-        tree.toggleProjectExpanded(projectPath)
-        emitReady()
-        // Epic #821 slice C (issue #837): persist the new collapse state so a
-        // folder the user collapsed stays collapsed across an app kill +
-        // relaunch. Fire-and-forget over the warm session.
-        bound?.let { persistTree(it) }
-        // Issue #867: mirror the collapse into the CLIENT cache so the next cold
-        // start renders the collapsed folder collapsed without waiting on SSH.
-        bound?.let { persistClientCache(it) }
+        treeSync.toggleProjectExpanded(projectPath)
     }
 
     @androidx.annotation.VisibleForTesting
@@ -1477,951 +1442,11 @@ class FolderListViewModel internal constructor(
     }
 
     /**
-     * EPIC #679 reconcile entry point for an OPEN (bind / first watched-folder
-     * snapshot). Renders the held tree instantly and only kicks a reconcile when
-     * one is genuinely due (the tree was never reconciled, or it is stale past
-     * [HostTreeModel.RECONCILE_STALENESS_MS]). This is requirement #1: no
-     * probe-on-open unless due.
-     */
-    private fun maybeReconcileOnOpen(params: BoundParams) {
-        if (!rootSnapshotLoaded) {
-            if (_state.value !is FolderListUiState.Ready) {
-                _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
-            }
-            return
-        }
-        lastResumeGenerationHandled = foregroundGeneration
-        if (sessionIdentityReconcileRequested) {
-            launchReconcile(params)
-            return
-        }
-        if (tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = HostTreeModel.RECONCILE_STALENESS_MS)) {
-            launchReconcile(params)
-        } else {
-            // Fresh held tree — render it immediately, no spinner.
-            emitReady()
-        }
-    }
-
-    /**
-     * EPIC #679 requirement #2 + issue #706: a foreground/resume reconciles the
-     * held tree when it is even mildly stale (older than [RESUME_FRESHEN_MS]),
-     * NOT only past the 15-min held-tree gate. This closes the "created in
-     * another terminal / by an agent while I was away, switch back" case: a real
-     * foreground return freshens the picker within seconds. A rapid in-place
-     * background→foreground bounce (held tree younger than [RESUME_FRESHEN_MS])
-     * still does NOT re-probe, preserving #679's "no constant poll" intent.
-     * D21-clean: rides the [ProcessLifecycleOwner] signal, no background timer.
-     */
-    private fun maybeReconcileOnResume() {
-        val params = bound ?: return
-        if (!rootSnapshotLoaded) return
-        // Only react to a genuine new foreground generation.
-        if (foregroundGeneration == lastResumeGenerationHandled) return
-        lastResumeGenerationHandled = foregroundGeneration
-        if (sessionIdentityReconcileRequested) {
-            launchReconcile(params)
-            return
-        }
-        if (!tree.reconcileDue(now = System.currentTimeMillis(), staleAfterMs = RESUME_FRESHEN_MS)) {
-            return
-        }
-        // Epic #821 slice C (issue #837): on a resume-when-stale, prefer the
-        // CHEAP daemon delta reconcile over a full gateway re-probe when the
-        // durable seam is available — "refresh to see which sessions are gone,
-        // without reloading everything". Added/unavailable deltas fall back to
-        // the full reconcile so new content is fetched. Gone names also use the
-        // full path because a name-only delta cannot safely delete a successor
-        // generation.
-        if (treeRemoteSource != null && tree.hasSnapshot) {
-            reconcileTreeDeltasOnResume(params)
-        } else {
-            launchReconcile(params)
-        }
-    }
-
-    /**
-     * Epic #821 slice C (issue #837): the delta-refresh path. Execs the daemon
-     * `tree.reconcile` over the warm session. Added or unavailable deltas use a
-     * full [launchReconcile] because their content must be fetched. Gone hints
-     * are also escalated to the authoritative probe: the daemon delta currently
-     * carries names only, and a name cannot authorize deletion of a same-name
-     * successor generation.
-     */
-    private fun reconcileTreeDeltasOnResume(params: BoundParams) {
-        val source = treeRemoteSource ?: run { launchReconcile(params); return }
-        viewModelScope.launch {
-            processStarted.first { it }
-            val session = warmLease?.session ?: awaitWarmSession()
-            if (session == null) {
-                if (bound == params) launchReconcile(params)
-                return@launch
-            }
-            if (bound != params) return@launch
-            val delta = withTimeoutOrNull(reconcileTimeoutMs + 1_000L) {
-                source.reconcileTree(session, params.hostName)
-            }
-            if (bound != params) return@launch
-            // Issue #885/#1509: the reconcile payload also carries the version, so
-            // the one-shot check still fires when `tree get` returned an empty
-            // seed — still gated to ONCE per open (no re-raise on later polls).
-            sessionTreeSetup.maybeRunVersionCheck(delta?.cliVersion) {
-                observePayloadCliVersion(it)
-            }
-            if (delta == null || delta.added.isNotEmpty()) {
-                // Unavailable or new sessions appeared → full probe.
-                launchReconcile(params)
-                return@launch
-            }
-            // A daemon delta currently identifies gone rows by display name.
-            // That is insufficient to authorize destructive mutation because a
-            // same-name successor may already be live.  Use the authoritative
-            // probe path for every gone hint; HostTreeModel then applies exact
-            // generation replacement/removal semantics.
-            if (delta.gone.isNotEmpty()) {
-                launchReconcile(params)
-            }
-        }
-    }
-
-    /**
-     * Epic #821 slice C (issue #837): seed the held tree from the durable
-     * host-side registry on a cold start, BEFORE the freshening reconcile, so
-     * the held order + expand/collapse render INSTANTLY (no Loading flash, no
-     * order shuffle). Awaits the warm session (bounded), execs `tree.get` over
-     * it (D21 — no new connection), hydrates the [HostTreeModel], and emits the
-     * seeded tree immediately. A no-op when there is no [treeRemoteSource]
-     * (unit tests) or no persisted nodes (a genuinely new host stays
-     * empty-until-probe, exactly as before). [HostTreeModel.hydrate] itself
-     * skips clobbering an already-populated tree, so a reconcile that beat the
-     * hydrate is never overwritten.
-     *
-     * ## Fail-safe: the hydrate NEVER gates connect (issue #847)
-     *
-     * The hydrate is a pure PRESENTATION optimisation (instant held order +
-     * collapse). The freshening reconcile is what actually POPULATES the tree
-     * and clears "loading tree". v0.4.10 shipped a release-breaking regression
-     * (#847): on a host whose `pocketshell` CLI is OLDER than the client (no
-     * `tree` subcommand), the hydrate's `tree get` errored, and because the
-     * freshening reconcile was CHAINED AFTER the hydrate with NO bound on the
-     * `tree get`, a slow/failed/wedged `tree get` left the reconcile un-run and
-     * the screen pinned on "loading tree" forever — the app would not connect.
-     *
-     * The fix keeps the hydrate-BEFORE-reconcile ordering (so a successful
-     * `tree get` still seeds the held order + collapse memory before the
-     * reconcile lands — the #837 durability contract, see
-     * [FolderListViewModelTreeDurabilityTest]) but makes it FAIL-SAFE:
-     *  - the hydrate body (warm-session await + `tree get` + parse) is BOUNDED
-     *    by [HYDRATE_TIMEOUT_MS], so a wedged/never-returning old-CLI `tree get`
-     *    can no longer suspend the coroutine forever; and
-     *  - the freshening reconcile runs in a `finally`, so it ALWAYS fires —
-     *    whether the hydrate seeded, returned nothing, errored, or timed out —
-     *    and connect can never hang behind `tree get`.
-     * `getTree` is itself exit-code-guarded + catch-all, so a missing/old/
-     * erroring CLI yields an empty seed promptly and the `finally` reconcile
-     * runs without delay; the timeout is the last-line defence for a true wedge.
-     *
-     * NO POLLING: this runs ONCE per cold-start open.
-     */
-    private fun hydrateTreeOnColdStart(params: BoundParams) {
-        val source = treeRemoteSource
-        if (source == null) {
-            // No durable source (unit tests / never-installed daemon): on the common
-            // warm-HIT path the synchronous client-cache seed (#1109) already painted
-            // the advisory instant tree within bind(), so [clientCacheSeedJob] is null
-            // and this falls straight through. On a cold MISS it awaits the OFF-Main
-            // seed (#965) so its advisory paint lands BEFORE the freshening reconcile
-            // (the #867 stale-while-revalidate ordering), then reconciles.
-            viewModelScope.launch {
-                clientCacheSeedJob?.join()
-                if (bound != params) return@launch
-                maybeReconcileOnOpen(params)
-            }
-            return
-        }
-        hydrateTreeJob?.cancel()
-        hydrateTreeJob = viewModelScope.launch {
-            // On a cold MISS await the OFF-Main client-cache seed so its advisory
-            // paint precedes the durable hydrate + freshening reconcile (#965/#867);
-            // null/already-complete on the synchronous warm-hit path (#1109).
-            clientCacheSeedJob?.join()
-            if (bound != params) return@launch
-            // Foreground-gated, mirroring the reconcile path (D21-clean).
-            processStarted.first { it }
-            var hostChanged = false
-            try {
-                // Bound the best-effort seed so a wedged/old host CLI can't keep
-                // this coroutine alive: a missing `tree` command, a parse failure,
-                // or a never-returning exec all collapse to "no seed", and the
-                // `finally` reconcile below is the authoritative tree.
-                withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
-                    val session = awaitWarmSession() ?: return@withTimeoutOrNull
-                    if (bound != params) {
-                        hostChanged = true
-                        return@withTimeoutOrNull
-                    }
-                    // `getTree` returns an empty list for a missing/old/erroring
-                    // CLI and never throws except on cancellation. Run it in a
-                    // CHILD coroutine on [ioDispatcher] so a TRUE wedge (the #470
-                    // blocking stdout read inside `exec`, which a plain
-                    // `withTimeout` can't interrupt because the read sits in a
-                    // non-cancellable `Dispatchers.IO` block) is still bounded:
-                    // when [HYDRATE_TIMEOUT_MS] expires the parent is cancelled at
-                    // `await()` — a real suspension point — and the orphaned read
-                    // is reaped with the warm lease. In unit tests [ioDispatcher]
-                    // is the virtual test dispatcher, so a fast `getTree` resolves
-                    // synchronously and the hydrate-before-reconcile ordering is
-                    // preserved (the #837 durability contract).
-                    val treeResult = withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
-                        async(ioDispatcher) { source.getTree(session, params.hostName) }.await()
-                    } ?: return@withTimeoutOrNull
-                    if (bound != params) {
-                        hostChanged = true
-                        return@withTimeoutOrNull
-                    }
-                    // Issue #885/#1509: passive host-CLI-version check, gated to
-                    // run EXACTLY ONCE per session-tree open (the single lazy
-                    // background check, never an app-open trigger).
-                    sessionTreeSetup.maybeRunVersionCheck(treeResult.cliVersion) {
-                        observePayloadCliVersion(it)
-                    }
-                    val nodes = treeResult.nodes
-                    if (nodes.isNotEmpty()) {
-                        tree.hydrate(nodes.map { it.toHydratedNode() })
-                        // Render the seeded order/collapse immediately — instant
-                        // held shape, no Loading flash, BEFORE the reconcile.
-                        if (rootSnapshotLoaded) emitReady()
-                    }
-                }
-            } finally {
-                // Issue #847: the freshening reconcile is the load-bearing step —
-                // it populates the tree and clears "loading tree", so it MUST fire
-                // whether the hydrate seeded, no-op'd, errored, or timed out. Skip
-                // only when the host actually changed (a new bind drives its own
-                // hydrate/reconcile) or this job was cancelled.
-                if (!hostChanged && bound == params) maybeReconcileOnOpen(params)
-            }
-        }
-    }
-
-    /**
-     * Issue #867 (stale-while-revalidate) + #1109 (instant-render restore) + #965
-     * (ANR off-Main): seed the held tree from the per-host CLIENT cache and emit
-     * Ready SYNCHRONOUSLY on the calling (Main) thread, so a cold connect's FIRST
-     * painted frame is already the last-known tree — NO Loading flash. Returns
-     * `true` when a WARMED snapshot seeded a non-empty tree (the caller then skips
-     * the Loading emit) and `false` on a cold MISS (the snapshot was not warmed in
-     * time / no cache yet) — the caller then shows the brief Loading and reads OFF
-     * Main via [warmFromClientCacheOffMain].
-     *
-     * ## How it is synchronous WITHOUT a Main-thread `disk_read` (the #965 fix held)
-     *
-     * The expensive part — the file read + full `JSONObject` parse — is DECOUPLED
-     * from the hydrate. It runs OFF Main (the init pre-warm [TreeClientCache.warmAll]
-     * + each reconcile's [persistClientCache] write) into [TreeClientCache]'s
-     * in-memory PARSED snapshot. This method reads that already-parsed snapshot via
-     * [TreeClientCache.peek] — a pure in-memory lookup, NO disk I/O — and hydrates +
-     * projects it inline. So Main does ZERO file reads here (the StrictMode tripwire
-     * in [FolderListScaleAnrStrictModeDockerTest] stays green at 71/12 scale), yet
-     * the seed is fully synchronous (the instant render in
-     * [FolderListClientCacheInstantRenderDockerTest] stays green). The one-time inline
-     * `buildFolderTree` projection is bounded and the row VIRTUALIZATION restored by
-     * #965 keeps the first composition cheap; the REPEATED reconcile-driven emits
-     * still run the projection off Main (see [emitReady]).
-     *
-     * The cache stays ADVISORY: [HostTreeModel.hydrate]/[hydrateStructure]
-     * self-guard against clobbering an already-populated (fresher, authoritative)
-     * tree, and the silent reconcile overwrites the seeded placeholders + the
-     * structural maps wholesale, so a stale cache entry can never survive the
-     * first refresh (#679 stale-type guard, D22).
-     */
-    private fun hydrateFromClientCache(params: BoundParams): Boolean {
-        val cache = treeClientCache ?: return false
-        // SYNCHRONOUS, NO disk I/O on Main: the in-memory parsed snapshot only.
-        val cached = cache.peek(params.hostName) ?: return false
-        if (cached.isEmpty) return false
-        if (!applyCachedTree(cached)) return false
-        // Render the seeded order / placement / collapse + grouping INLINE — the
-        // held shape on the FIRST frame, no empty-rebuild flash. The confirmed
-        // kinds + the authoritative session set arrive with the first reconcile
-        // and update in place.
-        emitReady(synchronous = true)
-        return true
-    }
-
-    /**
-     * Issue #1109 cold-MISS fallback (the #965 off-Main path): the in-memory snapshot
-     * was not warmed before [bind] ran, so read + parse the per-host cache file OFF
-     * Main on [ioDispatcher], then hydrate the held tree + emit the advisory paint.
-     * Used ONLY on a [hydrateFromClientCache] miss — never on Main. The cold-start
-     * reconcile path joins [clientCacheSeedJob] so this advisory paint precedes the
-     * freshening reconcile (the #867 stale-while-revalidate ordering). A stale read
-     * (host changed mid-flight) is dropped.
-     */
-    private fun warmFromClientCacheOffMain(params: BoundParams) {
-        val cache = treeClientCache ?: return
-        clientCacheSeedJob?.cancel()
-        clientCacheSeedJob = viewModelScope.launch {
-            val cached = withContext(ioDispatcher) {
-                runCatching { cache.read(params.hostName) }
-                    .getOrDefault(TreeClientCache.CachedTree(nodes = emptyList()))
-            }
-            if (bound != params) return@launch
-            if (cached.isEmpty) return@launch
-            if (!applyCachedTree(cached)) return@launch
-            // AWAIT the (off-Main) projection so the advisory paint is on screen
-            // BEFORE this seed job completes — the cold-start reconcile path joins
-            // this job, so this is what preserves the #867 ordering across the hop.
-            emitReady()
-            emitJob?.join()
-        }
-    }
-
-    /**
-     * Hydrate the held tree from a (warmed or freshly-read) [TreeClientCache.CachedTree]
-     * — the watched-root overlay + the structural maps + the per-session nodes.
-     * Shared by the synchronous seed ([hydrateFromClientCache]) and the off-Main
-     * cold-miss fallback ([warmFromClientCacheOffMain]). Pure in-memory tree
-     * mutation (no I/O), so it is safe on either thread. Returns whether the tree now
-     * has a renderable snapshot.
-     */
-    private fun applyCachedTree(cached: TreeClientCache.CachedTree): Boolean {
-        // Issue #867 (REOPEN): seed the watched-root overlay + the structural maps
-        // the grouping needs BEFORE the per-session hydrate's emit, so the
-        // cold-start frame shows the SETTLED tree — sessions bucketed under their
-        // watched root, the project subfolders + counts visible — not "0 projects"
-        // with everything dumped into "Other folders". The authoritative Room
-        // `project_roots` Flow overwrites the seeded watched folders the moment it
-        // emits (advisory), and the first reconcile overwrites the structural maps
-        // wholesale.
-        if (cached.watchedFolders.isNotEmpty()) {
-            tree.setWatchedFolders(cached.watchedFolders)
-        }
-        // Hydrate the per-session nodes FIRST (populates `sessionFolderPaths`),
-        // then the structure — so [HostTreeModel.hydrateStructure]'s sticky-bucket
-        // seed sees the sessions and can place them under their root by id.
-        tree.hydrate(cached.nodes.map { it.toHydratedNode() })
-        tree.hydrateStructure(
-            resolvedWatchedRootPaths = cached.resolvedWatchedRootPaths,
-            scannedProjectFoldersByRoot = cached.scannedProjectFoldersByRoot,
-            historyProjectFoldersByRoot = cached.historyProjectFoldersByRoot,
-        )
-        return tree.hasSnapshot
-    }
-
-    /**
-     * Issue #867: persist the current tree state to the per-host CLIENT cache so
-     * the NEXT cold start renders instantly. Fire-and-forget on a background
-     * dispatcher; mirrors [persistTree]'s host-side upsert but to the local
-     * advisory cache. A no-op without a [treeClientCache]; an empty tree deletes
-     * the cache file.
-     */
-    private fun persistClientCache(params: BoundParams) {
-        val cache = treeClientCache ?: return
-        // Issue #867 (REOPEN): snapshot the FULL presentation shape — the session
-        // nodes PLUS the watched-root overlay + the structural maps — so the next
-        // cold start can reproduce the SETTLED grouping instantly (sessions under
-        // their root, project counts), not just the flat session list.
-        val structure = tree.exportStructure()
-        val cached = TreeClientCache.CachedTree(
-            nodes = tree.exportNodes().map { it.toTreeNode() },
-            watchedFolders = lastWatchedFolders,
-            resolvedWatchedRootPaths = structure.resolvedWatchedRootPaths,
-            scannedProjectFoldersByRoot = structure.scannedProjectFoldersByRoot,
-            historyProjectFoldersByRoot = structure.historyProjectFoldersByRoot,
-        )
-        viewModelScope.launch(ioDispatcher) {
-            runCatching { cache.write(params.hostName, cached) }
-        }
-    }
-
-    /**
-     * Epic #821 slice C (issue #837): fire-and-forget persist of the current
-     * tree state (order + folder paths + collapse memory + foreign-guess) to the
-     * durable registry after a mutation (toggle-expanded, reconcile). Execs
-     * `tree.upsert` over the warm session. A no-op without a [treeRemoteSource];
-     * any failure is swallowed (the tree is still correct in memory; the next
-     * mutation re-persists).
-     */
-    private fun persistTree(params: BoundParams) {
-        val source = treeRemoteSource ?: return
-        val nodes = tree.exportNodes()
-        if (nodes.isEmpty()) return
-        viewModelScope.launch {
-            val session = warmLease?.session ?: awaitWarmSession() ?: return@launch
-            if (bound != params) return@launch
-            withTimeoutOrNull(HYDRATE_TIMEOUT_MS) {
-                source.upsertTree(
-                    session = session,
-                    host = params.hostName,
-                    nodes = nodes.map { it.toTreeNode() },
-                )
-            }
-        }
-    }
-
-    /**
-     * Await the warm SSH session for a bounded window. Returns the live session
-     * once [replaceWarmLease] has acquired it, or `null` if it does not appear
-     * in time (so a hydrate/persist that loses the connect race simply skips —
-     * the tree stays correct, the next probe/mutation re-seeds/re-persists).
-     */
-    private suspend fun awaitWarmSession(): SshSession? {
-        warmLease?.session?.let { return it }
-        val ready = withTimeoutOrNull(WARM_SESSION_AWAIT_MS) {
-            warmSessionReady.first { it }
-        }
-        return if (ready == true) warmLease?.session else null
-    }
-
-    /**
-     * Issue #1157: resolve a LIVE session for the host-CLI upgrade WITHOUT
-     * dead-ending on a possibly-absent/expired warm lease.
-     *
-     * The upgrade banner runs over the FolderList's warm-lease session, which is
-     * SEPARATE from the live terminal sessions. On device the warm lease is
-     * released when the user leaves this screen ([stopPolling] → [scheduleWarmRelease])
-     * and can also go stale on a network handoff — yet the host stays genuinely
-     * connected because the live terminal sessions keep the pooled transport open.
-     * The old path (`awaitWarmSession()`) returned null (no warm lease) or a
-     * DISCONNECTED stale session, so tapping Retry surfaced a FALSE
-     * "Not connected — reconnect and try again." that contradicted the tree
-     * ("13 active") and the tray.
-     *
-     * This resolves a session robustly and D21-cleanly:
-     *  1. A still-live warm session is reused AS-IS — no new connect.
-     *  2. A bind-time warm connect in flight ([warmJob]) is joined rather than
-     *     racing a second dial.
-     *  3. Otherwise [replaceWarmLease] re-acquires from the SHARED
-     *     [sshLeaseManager]. `acquire` REUSES the live pooled transport (the one
-     *     the live terminal sessions hold — refcount, NO new connect) when one
-     *     exists, and only dials fresh when there is genuinely no live transport.
-     *
-     * Returns a connected session, or null ONLY when the host is truly
-     * unreachable — the caller then surfaces a TRUTHFUL "couldn't reach" message,
-     * never a false "not connected" while sessions are live.
-     */
-    private suspend fun acquireUpgradeSession(params: BoundParams): SshSession? {
-        // 1. Reuse a still-live warm session as-is (D21 — no new connect).
-        warmLease?.session?.takeIf { it.isConnected }?.let { return it }
-        // 2. Join a bind-time warm connect already in flight rather than dial twice.
-        warmJob?.takeIf { it.isActive }?.join()
-        warmLease?.session?.takeIf { it.isConnected }?.let { return it }
-        if (bound != params) return null
-        // 3. Warm lease genuinely absent or expired while the host may still be
-        //    connected (live terminal sessions over the shared pool). Re-acquire —
-        //    a live pooled transport is REUSED (refcount, no new connect); only a
-        //    truly poolless host dials fresh, and a truly unreachable one fails.
-        replaceWarmLease(params)
-        return warmLease?.session?.takeIf { it.isConnected }
-    }
-
-    /**
-     * Issue #847: establish the warm SSH connection BEFORE the bounded
-     * enumeration in [runReconcile], so the cold sshj dial (≤ the lease
-     * manager's ~35s connect timeout) is NOT charged against the 12s
-     * enumeration budget. This is the structural fix for the v0.4.10/v0.4.11
-     * "Session list didn't load within 12000ms" connect break: when the
-     * bootstrap "Host setup needed" sheet is dismissed via Skip its warm
-     * `warm-host-connect` lease is released, so the first reconcile would need a
-     * FRESH cold dial — and that dial, wrapped by the 12s enumeration bound,
-     * blew the budget on a real/slow network and surfaced the spurious error
-     * even though the host was connectable.
-     *
-     * Fast paths (no behaviour change for the healthy / warm-reuse case):
-     * - a still-connected warm lease is reused immediately;
-     * - a live `-CC` control client makes the enumeration leaseless, so we do
-     *   not block on a lease the gateway won't open.
-     *
-     * Otherwise we drive [replaceWarmLease] (re-using the in-flight bind-time
-     * [warmJob] when present) and await its completion. The acquire's own
-     * connect timeout bounds it — a slow-but-valid connect succeeds and the
-     * gateway acquire inside the enumeration window is then a fast REUSE of the
-     * live transport. A genuine connect failure completes [warmJob] promptly
-     * (no warm lease), and the bounded enumeration below opens its own lease and
-     * surfaces an honest retryable connect error — never a spurious 12s timeout
-     * on a connectable host.
-     */
-    private suspend fun ensureWarmConnectForReconcile(params: BoundParams) {
-        if (warmLease?.session?.isConnected == true) return
-        // A live `-CC` client serves the enumeration without a lease (the
-        // gateway's [listSessionRowsFromLiveClient] fast path), so there is
-        // nothing to pre-connect — don't block the leaseless path.
-        val liveClient = activeTmuxClients?.clients?.value?.get(params.hostId)
-            ?.takeIf { it.matches(params) }
-            ?.takeUnless { it.client.disconnected.value }
-        if (liveClient != null) return
-        val existing = warmJob
-        if (existing != null && existing.isActive) {
-            // Re-use the bind-time connect already in flight (the dominant case
-            // on a fresh open / after a bootstrap-Skip re-bind, which launches a
-            // fresh [warmJob] before this reconcile runs). Its acquire is bounded
-            // by the lease manager's OWN connect timeout (~35s), NOT the 12s
-            // enumeration budget — so a slow-but-valid cold dial completes here,
-            // OUTSIDE the window, and the gateway acquire below is then a fast
-            // REUSE. A connect failure also completes the job promptly (no warm
-            // lease), and the bounded enumeration surfaces the honest error.
-            existing.join()
-        } else if (warmLease == null && (existing == null || existing.isCancelled)) {
-            // No warm lease, and the bind-time connect is absent or was CANCELLED
-            // (not merely failed): drive ONE fresh acquire OUTSIDE the
-            // enumeration window so a slow cold dial isn't charged to the 12s
-            // budget. A connect that already RAN and failed is NOT retried here —
-            // the bounded enumeration's own gateway acquire surfaces the honest
-            // retryable connect error, and re-dialing would just waste a handshake
-            // and (worse) consume virtual time before the window opens.
-            val job = viewModelScope.launch { replaceWarmLease(params) }
-            warmJob = job
-            job.join()
-        }
-    }
-
-    /**
-     * Issue #706: subscribe the held tree to the bound host's live `tmux -CC`
-     * client's `%sessions-changed` (ControlEvent.SessionsChanged) event and treat
-     * it as a DEBOUNCED, foreground-only reconcile trigger. This is the core fix
-     * for the out-of-band-session gap: a session created/killed outside the app
-     * (another terminal, an agent spawning one) emits `%sessions-changed` on the
-     * already-open control channel, which here schedules a debounced reconcile so
-     * the new/dead row appears within seconds — instead of staying invisible
-     * until the 15-min staleness gate or a manual pull-to-refresh.
-     *
-     * D21-clean: NO poll, NO Timer/AlarmManager/WorkManager. It rides the
-     * existing hot `-CC` event bus (the SAME `%sessions-changed`
-     * [TmuxSessionViewModel]/[SessionsDashboardViewModel] already consume) and
-     * the reconcile itself is foreground-gated inside [launchReconcile]
-     * (`processStarted.first { it }`), so nothing runs while backgrounded.
-     *
-     * Tracks [ActiveTmuxClients.clients] with [collectLatest] so the
-     * subscription always follows the live client for [params]'s host: if the
-     * client (re)registers (a reconnect), the event collector re-attaches to the
-     * fresh client; if it deregisters, the inner collector is cancelled and we
-     * idle until one reappears. [debounce] coalesces a `%sessions-changed` burst
-     * into one reconcile.
-     */
-    @OptIn(kotlinx.coroutines.FlowPreview::class)
-    private fun startSessionsChangedSubscription(params: BoundParams) {
-        val registry = activeTmuxClients ?: return
-        sessionsChangedJob?.cancel()
-        sessionsChangedJob = viewModelScope.launch {
-            registry.clients
-                .map { snapshot -> snapshot[params.hostId]?.takeIf { it.matches(params) }?.client }
-                .distinctUntilChanged()
-                .collectLatest { client ->
-                    if (client == null) return@collectLatest
-                    client.events
-                        .filter { it is ControlEvent.SessionsChanged }
-                        .debounce(SESSIONS_CHANGED_DEBOUNCE_MS)
-                        .collect {
-                            // Only react while this host is still the bound one and
-                            // the tree is initialised. The reconcile is itself
-                            // foreground-gated inside launchReconcile.
-                            if (bound == params && rootSnapshotLoaded) {
-                                launchReconcile(params)
-                            }
-                        }
-                }
-        }
-    }
-
-    /**
-     * Issue #706: does this live-client registry entry describe the SAME host
-     * connection as [params]? Mirrors the gateway's
-     * `ActiveTmuxClients.Entry.matches` (host/port/user/keyPath) so the
-     * `%sessions-changed` subscription only fires for the host actually shown,
-     * never a same-id-but-different-credential entry.
-     */
-    private fun ActiveTmuxClients.Entry.matches(params: BoundParams): Boolean =
-        hostname == params.hostname &&
-            port == params.port &&
-            username == params.username &&
-            keyPath == params.keyPath
-
-    /**
-     * Issue #653: subscribe the held tree to the bound host's live `tmux -CC`
-     * client's `%window-close @<id>` event ([ControlEvent.WindowClose]) and treat
-     * it as a DIRECT, by-id window prune. When a single tmux window is closed
-     * remotely (another terminal, an agent, a `kill-window`) while its session
-     * stays alive, tmux emits `%window-close @<id>` on the already-open control
-     * channel; this drops exactly that window node from the maintained tree
-     * ([HostTreeModel.removeWindow]) — sibling windows and the parent session
-     * keep their slots — and re-projects, INCREMENTALLY, with no full reconcile.
-     *
-     * The whole-session analogue is [startSessionsChangedSubscription]; a window
-     * close that takes the session's last window also surfaces as
-     * `%sessions-changed`, which that path prunes as a whole session. There is NO
-     * debounce here: each `%window-close` carries a distinct id, so coalescing a
-     * burst would risk dropping one of several simultaneous closes — each prune
-     * is a cheap in-place mutation, so they are applied one-for-one.
-     *
-     * D21-clean: NO poll, NO Timer/AlarmManager/WorkManager. It rides the same
-     * hot `-CC` event bus as `%sessions-changed`, follows the live client with
-     * [collectLatest] across reconnects, and only mutates while the app is
-     * foregrounded ([processStarted]) and this host is still bound — so nothing
-     * runs while backgrounded.
-     */
-    private fun startWindowCloseSubscription(params: BoundParams) {
-        val registry = activeTmuxClients ?: return
-        windowCloseJob?.cancel()
-        windowCloseJob = viewModelScope.launch {
-            registry.clients
-                .map { snapshot -> snapshot[params.hostId]?.takeIf { it.matches(params) }?.client }
-                .distinctUntilChanged()
-                .collectLatest { client ->
-                    if (client == null) return@collectLatest
-                    client.events
-                        .filterIsInstance<ControlEvent.WindowClose>()
-                        .collect { event ->
-                            // Only mutate while this host is still bound, the tree
-                            // is initialised, and the app is foregrounded (D21).
-                            if (bound == params && rootSnapshotLoaded && processStarted.value) {
-                                if (tree.removeWindow(event.windowId)) {
-                                    emitReady()
-                                }
-                            }
-                        }
-                }
-        }
-    }
-
-    /**
-     * Issue #783: (re)bind the bound-host EVENT subscriptions
-     * ([startSessionsChangedSubscription] / [startWindowCloseSubscription]) for
-     * [params]'s host.
-     *
-     * Idempotent per host: a same-host re-bind (returning to the tree screen)
-     * keeps the already-running subscriptions, so there is NO restart gap in
-     * which a `%window-close` / `%sessions-changed` could fall on a cancelled
-     * collector. A host CHANGE tears the old subscriptions down and starts fresh
-     * ones for the new host. Tied to the bound-host warm-lease lifetime — NOT
-     * `FolderListScreen` composition — so the prune survives `stopPolling`.
-     *
-     * NOTE: the periodic reconcile heartbeat ([startPeriodicReconcile]) is NOT
-     * part of this — it follows the SCREEN lifecycle ([bind]/[stopPolling]), see
-     * its docs.
-     */
-    private fun ensureBoundHostSubscriptions(params: BoundParams) {
-        if (subscriptionsHost == params.hostId &&
-            sessionsChangedJob?.isActive == true &&
-            windowCloseJob?.isActive == true
-        ) {
-            // Same host, both subscriptions live — keep them so a return to the
-            // tree screen doesn't reopen the dead-collector window.
-            return
-        }
-        startSessionsChangedSubscription(params)
-        startWindowCloseSubscription(params)
-        subscriptionsHost = params.hostId
-    }
-
-    /**
-     * Issue #783: tear down the bound-host EVENT subscriptions. Called on a host
-     * change (before re-subscribing) and from [onCleared]. NOT called from
-     * [stopPolling] — that is the whole point: the subscriptions outlive screen
-     * composition so a `%window-close` while the user is on the session screen
-     * still prunes the tree. (The periodic heartbeat is cancelled separately by
-     * [stopPolling]/[onCleared].)
-     */
-    private fun tearDownBoundHostSubscriptions() {
-        sessionsChangedJob?.cancel()
-        sessionsChangedJob = null
-        windowCloseJob?.cancel()
-        windowCloseJob = null
-        subscriptionsHost = null
-    }
-
-    /**
-     * Issue #783: start the periodic (~5 min) reconcile heartbeat for the SHOWN
-     * tree screen. Started in [bind] and cancelled in [stopPolling] (screen
-     * dispose) / [onCleared] — it follows the screen, not the bound-host event
-     * subscriptions, because it is a freshness net for the tree the user is
-     * looking at and reuses the screen's own warm lease (no second connection).
-     *
-     * D21-clean: each tick's reconcile is gated on the foreground signal inside
-     * [launchReconcile] (`processStarted.first { it }`), so while backgrounded the
-     * loop parks at the gate and performs no SSH work — a foreground heartbeat,
-     * not a `Timer`/`WorkManager`/`AlarmManager`.
-     */
-    private fun startPeriodicReconcile(params: BoundParams) {
-        periodicReconcileJob?.cancel()
-        periodicReconcileJob = null
-        // Issue #783: disabled for the bare internal constructor (most unit
-        // tests) so a directly-constructed VM that never calls `stopPolling`
-        // does not leave an infinite `delay`-loop for `runTest` to chase.
-        if (!periodicReconcileEnabled) return
-        periodicReconcileJob = viewModelScope.launch {
-            while (true) {
-                delay(PERIODIC_RECONCILE_MS)
-                if (bound != params || !rootSnapshotLoaded) continue
-                // launchReconcile is itself foreground-gated, so a tick that
-                // fires while backgrounded suspends at the gate instead of
-                // probing a dead lease.
-                launchReconcile(params)
-            }
-        }
-    }
-
-    /**
-     * Force a reconcile NOW regardless of staleness — the explicit
-     * pull-to-refresh swipe (requirement #4), error-panel retry, and the
-     * post-app-action confirmation. Gated only on the foreground signal (D21).
-     */
-    private fun runReconcileNow() {
-        val params = bound ?: return
-        if (!rootSnapshotLoaded) {
-            if (_state.value !is FolderListUiState.Ready) {
-                _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
-            }
-            return
-        }
-        launchReconcile(params)
-    }
-
-    private fun launchReconcile(params: BoundParams) {
-        probeJob?.cancel()
-        probeJob = viewModelScope.launch {
-            if (_state.value !is FolderListUiState.Ready) {
-                _state.value = folderListLoadingState(bound?.hostId, forwardingSnapshots)
-            }
-            // D21 / #430: gate the reconcile on the whole-process foreground
-            // signal. While backgrounded this suspends (no background SSH work);
-            // it releases on the next ON_START.
-            processStarted.first { it }
-            setSessionRefreshInFlight(true)
-            // Issue #939 (audit #935 S5-1): [runReconcile] sets
-            // `sessionRefreshInFlight = true` then runs an unguarded suspend body
-            // (`tree.reconcile`, `persistTree`/`persistClientCache`, the
-            // `hostDao.getById` Room read, the gateway enumeration). Before this
-            // guard, ANY throw between the flag set and one of `runReconcile`'s
-            // explicit `setSessionRefreshInFlight(false)` clears escaped without
-            // ever releasing the flag — the cold-launch session-picker refresh
-            // bar then spun FOREVER with no error band, and the in-flight guard at
-            // [setSessionRefreshInFlight] made a re-tap a no-op (the user could
-            // not retry without leaving + re-binding the host). The `finally`
-            // guarantees the flag is released on EVERY exit (success, handled
-            // failure, OR an unexpected throw); the `catch` surfaces a retryable
-            // error so the picker is escapable instead of silently wedged.
-            // CancellationException (stopPolling / host change / onCleared) is
-            // rethrown so structured cancellation is preserved.
-            try {
-                runReconcile(params)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (t: Throwable) {
-                surfaceUnexpectedReconcileFailure(params, t)
-            } finally {
-                // Idempotent: the `when` arms in [runReconcile] already clear the
-                // flag on every normal exit, and [setSessionRefreshInFlight]
-                // no-ops when it is already false. This `finally` is the backstop
-                // for the throwing paths only.
-                setSessionRefreshInFlight(false)
-            }
-        }
-    }
-
-    /**
-     * Issue #939 (audit #935 S5-1): an UNEXPECTED throw inside [runReconcile]
-     * (e.g. an `SQLiteException` from the host read, a `persistTree` IO error, or
-     * a `tree.reconcile` projection fault) must NOT leave the picker silently
-     * stuck on the refresh spinner. Surface the same calm, RETRYABLE error the
-     * `ConnectFailed` arm uses: keep the last-known tree visible with a
-     * dismissable refresh-failure banner when one is already painted, otherwise
-     * show the retryable [FolderListUiState.ConnectError] panel. Either way the
-     * user has an escape (Retry / the banner clears on the next success) instead
-     * of a frozen spinner.
-     */
-    private fun surfaceUnexpectedReconcileFailure(params: BoundParams, cause: Throwable) {
-        // A reconcile for a host the user has since navigated away from must not
-        // clobber the now-current binding's state.
-        if (bound != params) return
-        if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
-        _state.value = FolderListUiState.ConnectError(
-            message = folderListConnectErrorMessage(cause, REFRESH_FAILED_MESSAGE),
-            cause = cause,
-        )
-    }
-
-    /**
-     * Stop any in-flight reconcile — wired to the screen's
-     * `DisposableEffect.onDispose` so navigating away (e.g. tapping a session
-     * row → TmuxSessionScreen) frees the SSH probe channel for the next
-     * destination immediately. The MAINTAINED TREE survives (held across opens),
-     * so returning renders it instantly without a fresh probe (#679 req #1).
+     * Stop screen-scoped synchronization while retaining the maintained tree.
+     * The coordinator owns reconcile, heartbeat, subscriptions, and warm release.
      */
     fun stopPolling() {
-        probeJob?.cancel()
-        probeJob = null
-        // Issue #783: the `%sessions-changed` / `%window-close` EVENT
-        // subscriptions are DELIBERATELY NOT torn down here. They are tied to the
-        // bound-host warm-lease lifetime (see [ensureBoundHostSubscriptions]), not
-        // screen composition, so a window/session closed on the host (or in
-        // another terminal) while the user is on the session screen still prunes
-        // the maintained tree the instant the event arrives — no dead-collector
-        // drop, no ~15-min staleness wait. They reuse the registry's live `-CC`
-        // client (D21, no second connection) and are foreground-gated, and are
-        // torn down only on a host change or [onCleared].
-        //
-        // The periodic ~5-min reconcile heartbeat DOES stop here — it is a
-        // freshness net for the SHOWN tree, so it follows screen composition like
-        // the old discovery probe and must not re-acquire the warm lease (just
-        // scheduled for release below) for an undisplayed screen.
-        periodicReconcileJob?.cancel()
-        periodicReconcileJob = null
-        scheduleWarmRelease()
-    }
-
-    private suspend fun runReconcile(params: BoundParams) {
-        val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
-            setSessionRefreshInFlight(false)
-            _state.value = FolderListUiState.Failed("Host not found.")
-            return
-        }
-        // Issue #847: establish the SSH connection OUTSIDE the enumeration window
-        // below. The cold sshj dial is bounded by the lease manager's connect
-        // timeout (~35s), which is LONGER than the 12s reconcile bound — wrapping
-        // the dial in the 12s window (as before) meant a slow-but-valid connect
-        // (e.g. the FRESH cold dial needed after the bootstrap "Host setup
-        // needed" sheet is dismissed via Skip, which releases the warm
-        // `warm-host-connect` lease) blew the budget and surfaced the spurious
-        // "Session list didn't load within 12000ms" error even though the host
-        // was connectable. Pre-establishing the warm lease here (its OWN connect
-        // bound, decoupled from the enumeration timer) makes the gateway acquire
-        // inside the bounded enumeration a fast REUSE of the live transport, and
-        // the picker shows Loading ("Connecting…") while the connect is in
-        // flight — never a hard 12s error on a connectable host.
-        ensureWarmConnectForReconcile(params)
-        if (bound != params) return
-        engineDiscovery.awaitBindRefresh(params.hostId)
-        if (bound != params) return
-        // Issue #702: bound the ENUMERATION (not the connect). The gateway already
-        // self-bounds its live `-CC` enumeration and SSH-lease reads, but a
-        // `withTimeout` here guarantees that NO gateway path can ever pin the
-        // picker in `Loading` indefinitely — on expiry we surface a retryable
-        // error panel instead of an endless spinner. With the warm lease already
-        // established above, this window now covers only the enumeration round
-        // trip(s), never a cold dial (issue #847).
-        val result = withTimeoutOrNull(reconcileTimeoutMs) {
-            gateway.listSessionsWithFolder(
-                host = host,
-                keyPath = params.keyPath,
-                passphrase = params.passphrase,
-                watchedRoots = lastWatchedFolders,
-            )
-        } ?: FolderListResult.ConnectFailed(
-            FolderReconcileTimeoutException(reconcileTimeoutMs),
-        )
-        if (bound != params) return
-        when (result) {
-            is FolderListResult.Sessions -> {
-                val sessionEntries = result.rows.map { it.toSessionEntry() }
-                val folderPaths = result.rows.associate { row ->
-                    row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
-                }
-                // EPIC #679: reconcile the held tree (diff add/remove/update by
-                // id) instead of overwriting snapshot fields + a from-scratch
-                // rebuild. The reconcile MUTATES the held maps, so — like every
-                // other tree mutation — it runs on Main (the single thread that
-                // owns the model). It is the cheap half (a keyed diff over ≤12
-                // sessions); the EXPENSIVE half is the projection, which
-                // [emitReady] runs OFF Main over an immutable snapshot (issue
-                // #965). Keeping mutations Main-confined is what makes that
-                // snapshot race-free.
-                tree.reconcile(
-                    HostTreeModel.ProbeSnapshot(
-                        sessions = sessionEntries,
-                        folderPaths = folderPaths,
-                        scannedProjectFoldersByRoot = result.projectFoldersByRoot,
-                        historyProjectFoldersByRoot = result.historyProjectFoldersByRoot,
-                        resolvedWatchedRootPaths = result.resolvedWatchedRootPaths,
-                    ),
-                )
-                // Issue #456/#602: filter discovery to interesting ports.
-                lastDiscoveredPorts = InterestingPortFilter.filter(result.discoveredPorts).map { port ->
-                    HostDiscoveredPort(
-                        remotePort = port.port,
-                        process = port.processName,
-                    )
-                }
-                // Issue #711: a successful reconcile clears the quiet-retry
-                // budget so a later, unrelated transient drop gets its own full
-                // retry allowance.
-                transientRefreshRetries = 0
-                sessionIdentityReconcileRequested = false
-                setSessionRefreshInFlight(false)
-                emitReady()
-                // Epic #821 slice C (issue #837): persist the freshened tree so
-                // the next cold start hydrates the just-reconciled order /
-                // expand-collapse / foreign-guess. Fire-and-forget.
-                persistTree(params)
-                // Issue #867: mirror the freshened tree into the CLIENT cache so
-                // the NEXT cold start paints THIS (settled) tree instantly — the
-                // local-first half of stale-while-revalidate. Fire-and-forget.
-                persistClientCache(params)
-                if (refreshSessionsRequested) {
-                    completeManualRefresh()
-                } else {
-                    clearRefreshFailure()
-                }
-            }
-            is FolderListResult.Failed -> {
-                if (handleTransientRefreshDrop(params, RuntimeException(result.message))) return
-                setSessionRefreshInFlight(false)
-                if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
-                _state.value = FolderListUiState.Failed(REFRESH_FAILED_MESSAGE)
-            }
-            is FolderListResult.ConnectFailed -> {
-                if (handleTransientRefreshDrop(params, result.cause)) return
-                setSessionRefreshInFlight(false)
-                if (preserveReadyOnRefresh(REFRESH_FAILED_MESSAGE)) return
-                // Issue #711: the user-facing connect message is the calm copy,
-                // never the raw transport exception text (which embedded the
-                // entire enumeration command). The raw [cause] is still carried
-                // for Retry/diagnostics but never rendered.
-                _state.value = FolderListUiState.ConnectError(
-                    message = folderListConnectErrorMessage(result.cause, REFRESH_FAILED_MESSAGE),
-                    cause = result.cause,
-                )
-            }
-            FolderListResult.ToolUnavailable -> {
-                setSessionRefreshInFlight(false)
-                if (preserveReadyOnRefresh("Couldn't refresh sessions: tmux is not installed.")) return
-                _state.value = FolderListUiState.ToolUnavailable
-            }
-        }
-    }
-
-    /**
-     * Issue #711: a transient transport drop mid-refresh (EOF / broken transport
-     * / channel closed / SSH not connected) is NOT a user-facing error — the
-     * gateway's own evict-and-retry heal (#680) usually recovers it, and the
-     * tree self-refreshes on the next reconcile. When such a transient error
-     * still escapes the gateway (e.g. the fresh lease also blipped), we retry
-     * QUIETLY here — up to [TRANSIENT_REFRESH_RETRY_LIMIT] times — instead of
-     * flashing a scary band carrying the raw enumeration command. We keep the
-     * last-known tree visible (no displacing error, no spinner-only screen) and
-     * only fall through to a COMPACT calm message if the retries are exhausted.
-     *
-     * Returns true when the drop was classified transient and a quiet retry was
-     * scheduled (the caller must `return` without surfacing any error state).
-     */
-    private fun handleTransientRefreshDrop(params: BoundParams, cause: Throwable): Boolean {
-        if (!isTransientFolderRefreshDrop(cause)) return false
-        if (transientRefreshRetries >= TRANSIENT_REFRESH_RETRY_LIMIT) {
-            // Retries exhausted: this is no longer "transient" from the user's
-            // point of view. Fall through to the calm-message path below.
-            transientRefreshRetries = 0
-            return false
-        }
-        transientRefreshRetries += 1
-        // Keep the held tree visible and quietly re-run the reconcile on a fresh
-        // lease. We do NOT clear isRefreshing here so the non-displacing progress
-        // bar (#639) keeps spinning across the silent retry — no error flash.
-        if (bound != params) {
-            transientRefreshRetries = 0
-            return true
-        }
-        launchReconcile(params)
-        return true
+        treeSync.stopPolling()
     }
 
     private fun preserveReadyOnRefresh(message: String): Boolean {
@@ -2540,24 +1565,9 @@ class FolderListViewModel internal constructor(
     }
 
     override fun onCleared() {
-        probeJob?.cancel()
-        // Issue #783: the event subscriptions are torn down here (and on a host
-        // change), not on screen dispose. The periodic heartbeat is cancelled
-        // here too (it normally stops on `stopPolling`, but a VM destroyed while
-        // the tree screen is still composed must not leak the loop).
-        tearDownBoundHostSubscriptions()
-        periodicReconcileJob?.cancel()
-        periodicReconcileJob = null
-        hydrateTreeJob?.cancel()
-        hydrateTreeJob = null
-        clientCacheSeedJob?.cancel()
-        clientCacheSeedJob = null
+        treeSync.close()
         emitJob?.cancel()
         emitJob = null
-        warmJob?.cancel()
-        warmReleaseJob?.cancel()
-        releaseWarmLeaseAsync()
-        watchedFoldersJob?.cancel()
         lifecycleObserver?.let { observer ->
             // `removeObserver` is main-thread-affine; `onCleared` runs on
             // the main thread so this is safe. Only set when lifecycle
@@ -2566,66 +1576,6 @@ class FolderListViewModel internal constructor(
         }
         lifecycleObserver = null
         super.onCleared()
-    }
-
-    private suspend fun releaseWarmLease() {
-        val lease = takeWarmLeaseForRelease() ?: return
-        releaseWarmLeaseBounded(lease)
-    }
-
-    private fun releaseWarmLeaseAsync() {
-        val lease = takeWarmLeaseForRelease() ?: return
-        CoroutineScope(ioDispatcher).launch {
-            releaseWarmLeaseBounded(lease)
-        }
-    }
-
-    private fun takeWarmLeaseForRelease(): SshLease? {
-        val lease = warmLease ?: return null
-        warmLease = null
-        warmSessionReady.value = false
-        return lease
-    }
-
-    private suspend fun releaseWarmLeaseBounded(lease: SshLease) {
-        // Run the bounded release off the Main thread (in production [ioDispatcher]
-        // is `Dispatchers.IO`) so a wedged half-open transport `close()` socket
-        // write can never block the caller; the lease manager's own release does
-        // the wedge-free refcount bookkeeping NonCancellably and only the bounded
-        // transport close runs here. Use the injectable [ioDispatcher] — NOT a
-        // hardcoded `Dispatchers.IO` — so a `runTest` virtual clock drives the
-        // release-into-idle-TTL deterministically, matching every other IO hop in
-        // this view model.
-        withContext(NonCancellable + ioDispatcher) {
-            withTimeoutOrNull(WARM_LEASE_RELEASE_TIMEOUT_MS) {
-                lease.release()
-            }
-        }
-    }
-
-    private suspend fun replaceWarmLease(params: BoundParams) {
-        releaseWarmLease()
-        var acquiredLease: SshLease? = null
-        try {
-            val lease = sshLeaseManager.acquire(params.toSshLeaseTarget()).getOrNull() ?: return
-            acquiredLease = lease
-            warmLeaseAcquiredForTest?.invoke()
-            withContext(NonCancellable) {
-                warmLease = lease
-                acquiredLease = null
-                warmSessionReady.value = true
-            }
-        } finally {
-            acquiredLease?.release()
-        }
-    }
-
-    private fun scheduleWarmRelease() {
-        warmReleaseJob?.cancel()
-        warmReleaseJob = viewModelScope.launch {
-            delay(WARM_RELEASE_DELAY_MS)
-            releaseWarmLease()
-        }
     }
 
     companion object {

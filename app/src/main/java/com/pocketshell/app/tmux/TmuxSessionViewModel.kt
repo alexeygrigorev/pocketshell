@@ -39,7 +39,6 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.ClaudeProfile
 import com.pocketshell.app.projects.CodexProfile
 import com.pocketshell.app.projects.EnginesGateway
-import com.pocketshell.app.projects.EnginesResult
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.ManualKindWriter
 import com.pocketshell.app.projects.ProfilesResult
@@ -2095,13 +2094,20 @@ public class TmuxSessionViewModel @Inject constructor(
 
     /**
      * Issue #2275: host-registry rows for the in-session new-session picker.
-     * The flow is filled by an explicit picker-open refresh and is host-scoped;
-     * there is intentionally no ticker or tree-sync coupling here.
+     * State and refresh sequencing live in the picker-owned helper so this
+     * connection VM does not grow with registry-specific IO details.
      */
-    private val _engines: MutableStateFlow<List<RemoteEngine>> =
-        MutableStateFlow(emptyList())
-    public val engines: StateFlow<List<RemoteEngine>> = _engines.asStateFlow()
-    private var pickerEngineRefreshGeneration: Long = 0L
+    private val enginePickerState: TmuxSessionEnginePickerState by lazy {
+        TmuxSessionEnginePickerState(
+            enginesGateway = enginesGateway,
+            hostDao = hostDao,
+            scope = bridgeScope,
+            ioDispatcher = { sessionCardsDispatcher },
+            activeTarget = { this@TmuxSessionViewModel.activeTarget },
+        )
+    }
+    public val engines: StateFlow<List<RemoteEngine>>
+        get() = enginePickerState.engines
 
     /**
      * Issue #894 (epic #821 "Slice C"): the durable per-session CONFIRMED-SHELL
@@ -16182,34 +16188,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * new-session sheet is opened. Cached rows are projected immediately, then
      * one bounded read updates them; a stale session result is discarded.
      */
-    public fun fetchEnginesForActiveSession() {
-        val gateway = enginesGateway
-        val dao = hostDao
-        val current = activeTarget
-        if (gateway == null || dao == null || current == null) {
-            _engines.value = emptyList()
-            return
-        }
-        val hostId = current.hostId
-        val refreshGeneration = ++pickerEngineRefreshGeneration
-        _engines.value = gateway.cachedEngines(hostId)
-        bridgeScope.launch {
-            val host = withContext(Dispatchers.IO) { dao.getById(hostId) } ?: return@launch
-            val result = withContext(Dispatchers.IO) {
-                gateway.listEngines(
-                    host = host,
-                    keyPath = current.keyPath,
-                    passphrase = current.passphrase,
-                )
-            }
-            if (activeTarget?.hostId != hostId || refreshGeneration != pickerEngineRefreshGeneration) {
-                return@launch
-            }
-            if (result is EnginesResult.Engines) {
-                _engines.value = result.engines
-            }
-        }
-    }
+    public fun fetchEnginesForActiveSession() = enginePickerState.refresh()
 
     private fun applyProfiles(profiles: List<RemoteProfile>) {
         _claudeProfiles.value = profiles

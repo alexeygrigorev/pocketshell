@@ -680,6 +680,8 @@ public data class OutboundItem(
      * it again even after [OUTBOUND_STALE_HOLD_MS]. Never cleared by a retry.
      */
     val staleApprovedAtMs: Long? = null,
+    /** Issue #2240: HostAck could not prove whether the payload landed. */
+    val hostAckOutcome: OutboundDeliveryOutcome = OutboundDeliveryOutcome.None,
 )
 
 /** Issue #900: persisted send route selected before an item entered the durable queue. */
@@ -687,6 +689,12 @@ public enum class OutboundRoute {
     AgentConversation,
     AgentPayload,
     RawBytes,
+}
+
+/** Issue #2240: the durable outcome owned by the acknowledged HostAck lane. */
+public enum class OutboundDeliveryOutcome {
+    None,
+    UnknownMayHaveLanded,
 }
 
 /**
@@ -723,6 +731,14 @@ public enum class OutboundState {
     public val isExplicitlyDiscardable: Boolean
         get() = this == Queued || this == Failed || this == HeldForReview
 }
+
+/**
+ * Issue #2240: an unprovable HostAck outcome is not an ordinary retryable
+ * failure. The queue-selection slice uses this narrow predicate to keep that
+ * row out of its ordinary retry lane.
+ */
+internal fun OutboundItem.isHostAckOrdinaryRetryAllowed(): Boolean =
+    hostAckOutcome == OutboundDeliveryOutcome.None
 
 /**
  * Issue #900: in-memory [OutboundQueueStore] — the production store's test
@@ -1915,7 +1931,8 @@ internal fun blobKey(sessionKey: String): String = "@q/$sessionKey"
  * `wireNeedleBaselineCount` #1577, collapsed-marker baseline #1739,
  * durable tmux identity and `wireSubmitAttempted` #1944) are appended last so legacy rows without them
  * decode to their defaults (empty `sendKey`, `wireAttempted=false`,
- * `wireNeedleBaselineCount=null`, `wireSubmitAttempted=false`) rather than a malformed row.
+ * `wireNeedleBaselineCount=null`, `wireSubmitAttempted=false`,
+ * `hostAckOutcome=None`) rather than a malformed row.
  */
 internal fun encodeOutboundItems(items: List<OutboundItem>): String =
     items.joinToString(separator = "\n") { item ->
@@ -1949,6 +1966,7 @@ internal fun encodeOutboundItems(items: List<OutboundItem>): String =
             item.wireAttemptGeneration.toString(),
             if (item.wireOutcomeUnknown) "1" else "0",
             item.staleApprovedAtMs?.toString().orEmpty(),
+            item.hostAckOutcome.name,
         ).joinToString(separator = "\t") { escapeQueueField(it) }
     }
 
@@ -1991,6 +2009,12 @@ internal fun decodeOutboundItems(sessionKey: String, raw: String): List<Outbound
                 ?: if (submitAttempted) 1 else 0,
             wireOutcomeUnknown = f.getOrNull(25) == "1",
             staleApprovedAtMs = f.getOrNull(26)?.takeIf { it.isNotEmpty() }?.toLongOrNull(),
+            hostAckOutcome = when (val serializedHostAckOutcome = f.getOrNull(27)) {
+                null -> OutboundDeliveryOutcome.None
+                else -> runCatching {
+                    OutboundDeliveryOutcome.valueOf(serializedHostAckOutcome)
+                }.getOrDefault(OutboundDeliveryOutcome.UnknownMayHaveLanded)
+            },
             wireSubmitTranscriptBaseline = f.getOrNull(20)
                 ?.takeIf { it.isNotEmpty() }
                 ?.let { sourcePath ->

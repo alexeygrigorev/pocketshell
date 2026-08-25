@@ -237,7 +237,12 @@ internal fun OutboundQueueStore.requeueDeferredSend(
 internal const val OUTBOUND_UPLOAD_FAILURE_ATTEMPT_DELTA: Int = 1
 
 internal fun OutboundItem.isComposerQueueRetryable(): Boolean =
-    state == OutboundState.Queued || state == OutboundState.Failed
+    (state == OutboundState.Queued || state == OutboundState.Failed) &&
+        isHostAckOrdinaryRetryAllowed()
+
+/** Issue #2240: HostAck exit 5/ambiguous timeout requires an explicit decision. */
+internal fun OutboundItem.isComposerQueueHostAckUnknown(): Boolean =
+    hostAckOutcome == OutboundDeliveryOutcome.UnknownMayHaveLanded
 
 /**
  * Issue #2056: this row's last delivery attempt resolved with a genuinely UNPROVABLE
@@ -253,7 +258,7 @@ internal fun OutboundItem.isComposerQueueRetryable(): Boolean =
  * still surfaced + user-retryable) so the tail drains on its own evidence.
  */
 internal fun OutboundItem.isComposerQueueDeliveryUnconfirmed(): Boolean =
-    isComposerQueueRetryable() && wireOutcomeUnknown
+    (state == OutboundState.Queued || state == OutboundState.Failed) && wireOutcomeUnknown
 
 internal fun OutboundItem.isComposerQueueUndelivered(): Boolean =
     state != OutboundState.Delivered
@@ -296,6 +301,7 @@ internal fun Iterable<OutboundItem>.firstComposerAutoFlushable(
             item.isComposerQueueUndelivered() &&
             !(item.isComposerQueueRetryable() && item.attemptCount >= maxAutoAttempts) &&
             !item.isComposerQueueDeliveryUnconfirmed() &&
+            !item.isComposerQueueHostAckUnknown() &&
             !item.isComposerQueueHeldForReview() &&
             !item.isStaleUnapproved(nowMillis)
     } ?: return null
@@ -321,7 +327,8 @@ internal fun Iterable<OutboundItem>.autoRetryExhaustedComposerRows(
         item.sessionKey == sessionKey &&
             item.id !in excludingIds &&
             item.state == OutboundState.Queued &&
-            item.attemptCount >= maxAutoAttempts
+            item.attemptCount >= maxAutoAttempts &&
+            !item.isComposerQueueHostAckUnknown()
     }
 
 /** Issue #1602: the auto-flush decision — ids to park (exhausted heads) + the next dispatchable id. */
@@ -339,6 +346,7 @@ internal fun Iterable<OutboundItem>.hasGenerationBoundRowsAwaitingPromotion(
 ): Boolean = !sessionKey.startsWith("tmux:") && any { item ->
     item.sessionKey == sessionKey &&
         item.isComposerQueueUndelivered() &&
+        !item.isComposerQueueHostAckUnknown() &&
         !item.paneId.isNullOrBlank() &&
         !item.tmuxSessionId.isNullOrBlank() &&
         item.tmuxSessionCreated != null
@@ -370,7 +378,9 @@ internal fun Iterable<OutboundItem>.composerQueueRetryableItems(): List<Outbound
 internal fun Iterable<OutboundItem>.deferredRetryCandidateFor(
     request: PromptComposerViewModel.SendRequest,
 ): OutboundItem? {
-    val candidates = filter { it.isComposerQueueUndelivered() }
+    val candidates = filter {
+        it.isComposerQueueUndelivered() && !it.isComposerQueueHostAckUnknown()
+    }
     return candidates.firstOrNull { it.cleanText == request.cleanDraft }
         ?: candidates.firstOrNull()
 }

@@ -32,9 +32,32 @@ internal class FolderListEngineDiscovery(
     private var fetchGeneration: Long = 0L
     private var stateHostId: Long? = null
     private var latestRefreshJob: Job? = null
+    private var bindRefreshJob: Job? = null
+    private var initialReadPending: Boolean = false
 
-    /** Start one read and return its job so the first session probe can order on it. */
+    /** Start the bind-time read and keep its ordering state with the owner. */
+    fun bind(params: BoundParams): Job? {
+        bindRefreshJob?.cancel()
+        initialReadPending = enginesGateway != null
+        val job = startRefresh(params)
+        bindRefreshJob = job
+        if (job == null) {
+            initialReadPending = false
+        } else {
+            job.invokeOnCompletion {
+                if (bindRefreshJob === job) initialReadPending = false
+            }
+        }
+        return job
+    }
+
+    /** Start one explicit picker-open read. */
     fun refresh(params: BoundParams): Job? {
+        initialReadPending = false
+        return startRefresh(params)
+    }
+
+    private fun startRefresh(params: BoundParams): Job? {
         val generation = ++fetchGeneration
         val initialReadForHost = stateHostId != params.hostId
         if (initialReadForHost) {
@@ -59,12 +82,7 @@ internal class FolderListEngineDiscovery(
                 // last good registry intact; a valid empty registry is distinct.
                 if (result is EnginesResult.Engines) {
                     _engines.value = result.engines
-                    // Notify every successful explicit read, including the
-                    // initial bind read. The ViewModel suppresses only the
-                    // initial callback while its ordered first probe is joining
-                    // this same job; direct consumers still observe the applied
-                    // read, and picker-open retries re-project existing rows.
-                    onRefreshApplied(params.hostId)
+                    if (!initialReadPending) onRefreshApplied(params.hostId)
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
@@ -84,5 +102,10 @@ internal class FolderListEngineDiscovery(
      */
     suspend fun awaitLatestRefresh(hostId: Long) {
         if (stateHostId == hostId) latestRefreshJob?.join()
+    }
+
+    /** Await only the bind read; picker retries are already callback-ordered. */
+    suspend fun awaitBindRefresh(hostId: Long) {
+        if (stateHostId == hostId) bindRefreshJob?.join()
     }
 }

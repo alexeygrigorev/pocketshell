@@ -114,6 +114,21 @@ class Issue2160LocaleProofReadSiteSourceGuardTest {
         )
 
         /**
+         * Production diagnostics may name the read operation they report. They
+         * are not invocations, so the scanner must not mistake the marker text
+         * for a bare tmux read. Keep this allowlist narrow and anchored to the
+         * diagnostic marker's owning source file.
+         */
+        val NON_READ_DIAGNOSTICS: List<NonReadDiagnostic> = listOf(
+            NonReadDiagnostic(
+                pathSuffix = "app/src/main/java/com/pocketshell/app/sessions/HostTmuxSessionsGateway.kt",
+                marker = "JOURNEY_ENUMERATION_STALL",
+                reason = "typed picker enumeration timeout marker; reports a completed diagnostic",
+                issue = "#2317",
+            ),
+        )
+
+        /**
          * Files that MUST contain at least one locale-proof read after the fix.
          * This is the anti-vacuity control: if the scanner's regexes ever stop
          * matching (a refactor, a formatting change), it would find nothing at
@@ -159,6 +174,13 @@ class Issue2160LocaleProofReadSiteSourceGuardTest {
     }
 
     data class Exemption(
+        val pathSuffix: String,
+        val marker: String,
+        val reason: String,
+        val issue: String,
+    )
+
+    data class NonReadDiagnostic(
         val pathSuffix: String,
         val marker: String,
         val reason: String,
@@ -224,6 +246,38 @@ class Issue2160LocaleProofReadSiteSourceGuardTest {
                 stale.joinToString("\n") { "  ${it.pathSuffix} [${it.marker}] ${it.issue}" },
             emptyList<Exemption>(),
             stale,
+        )
+    }
+
+    /**
+     * Regression proof for the explicit diagnostic exception above. The source
+     * marker must remain live, while its human-readable tmux operation must not
+     * become an unproof read site in the scanner's result.
+     */
+    @Test
+    fun everyNonReadDiagnosticStillMatchesALiveSourceAndIsIgnoredByScanner() {
+        val root = repoRoot()
+        val stale = NON_READ_DIAGNOSTICS.filter { diagnostic ->
+            val text = File(root, diagnostic.pathSuffix).readText()
+            text.lineSequence().none { line -> line.contains(diagnostic.marker) }
+        }
+        assertEquals(
+            "#2160: these non-read diagnostic allowlist entries no longer match a live " +
+                "production marker; delete or re-anchor them:\n" +
+                stale.joinToString("\n") { "  ${it.pathSuffix} [${it.marker}] ${it.issue}" },
+            emptyList<NonReadDiagnostic>(),
+            stale,
+        )
+
+        val (sites, _) = scan()
+        val diagnosticReads = sites.filter { site ->
+            site.path == "app/src/main/java/com/pocketshell/app/sessions/HostTmuxSessionsGateway.kt" &&
+                site.snippet.contains("tmux list-sessions")
+        }
+        assertTrue(
+            "#2317: the JOURNEY_ENUMERATION_STALL log names the operation but is not a " +
+                "tmux invocation; it must not be classified as a read site: $diagnosticReads",
+            diagnosticReads.isEmpty(),
         )
     }
 
@@ -320,6 +374,7 @@ class Issue2160LocaleProofReadSiteSourceGuardTest {
         val found = mutableListOf<ReadSite>()
         READ_VERBS.forEach { verb ->
             Regex(Regex.escape(verb)).findAll(text).forEach { match ->
+                if (isNonReadDiagnostic(path, text, match)) return@forEach
                 // A tmux SUB-COMMAND is followed by a flag, or ends the string
                 // literal. Prose that merely names one ("tmux list-panes failed
                 // during prewarm") is followed by a word, so it is not an
@@ -351,6 +406,16 @@ class Issue2160LocaleProofReadSiteSourceGuardTest {
             }
         }
         return found.sortedWith(compareBy({ it.path }, { it.line }))
+    }
+
+    private fun isNonReadDiagnostic(path: String, text: String, match: MatchResult): Boolean {
+        val lineStart = text.lastIndexOf('\n', startIndex = match.range.first - 1) + 1
+        val lineEnd = text.indexOf('\n', startIndex = match.range.last + 1)
+            .let { if (it < 0) text.length else it }
+        val line = text.substring(lineStart, lineEnd)
+        return NON_READ_DIAGNOSTICS.any { diagnostic ->
+            diagnostic.pathSuffix == path && line.contains(diagnostic.marker)
+        }
     }
 
     private fun repoRoot(): File {

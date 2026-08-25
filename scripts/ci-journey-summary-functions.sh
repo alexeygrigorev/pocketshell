@@ -100,7 +100,7 @@ ci_journey_core_terminal_any_failed() {
 ci_journey_assert_red_has_evidence() {
   local summary="$1" exit_code="$2"
   (( exit_code != 0 )) || return 0
-  if grep -qE 'JOURNEY_FAILED|Failed BOTH attempts|JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted' \
+  if grep -qE 'JOURNEY_FAILED|Failed BOTH attempts|JOURNEY_STEP_TIMEOUT|Suite step time budget exhausted|JOURNEY_ENUMERATION_STALL' \
       "$summary" 2>/dev/null; then
     return 0
   fi
@@ -129,15 +129,28 @@ ci_journey_assert_red_has_evidence() {
 
 finish_ci_journey_suite() {
   local journey_status
+  local enumeration_stall_out enumeration_stall_verdict enumeration_stall_evidence
+
+  # Issue #2317: preserve the generic suite-budget RED, but attach a typed
+  # infrastructure attribution only when a completed attempt artifact proves
+  # that the Android app emitted the bounded tmux list-sessions marker. The
+  # classifier must never infer this from JOURNEY_STEP_TIMEOUT alone.
+  enumeration_stall_out=""
+  enumeration_stall_verdict="NONE"
+  enumeration_stall_evidence=""
+  if [[ -n "${REPO_ROOT:-}" && -x "$REPO_ROOT/scripts/ci-journey-enumeration-stall.sh" ]]; then
+    enumeration_stall_out="$("$REPO_ROOT/scripts/ci-journey-enumeration-stall.sh" "${ARTIFACT_DIR:-}" 2>/dev/null || true)"
+    enumeration_stall_verdict="$(sed -n 's/^enumeration_stall_verdict=//p' <<<"$enumeration_stall_out" | tail -n 1)"
+    enumeration_stall_evidence="$(sed -n 's/^enumeration_stall_evidence=//p' <<<"$enumeration_stall_out" | tail -n 1)"
+  fi
 
   SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
   # The job is red iff at least one class failed BOTH attempts, OR any
   # registered core-terminal proof failed, OR the suite-level budget was
-  # exhausted by a #470 stall (issue #835). A budget timeout is NOT green — it
-  # still turns the job red — but it is labelled distinctly below so the
-  # classifier reports "journey timeout / #470 stall" instead of "EMULATOR INFRA
-  # UNAVAILABLE".
+  # exhausted (issue #835). A budget timeout is NOT green — it still turns the
+  # job red — and the exact list-sessions attribution is added only when the
+  # attempt-local proof below establishes it.
   #
   # Issue #1827: the proof half of both conditions is derived from the ONE
   # CORE_TERMINAL_PROOFS registry that also drives the failed-both bullets, so a
@@ -149,7 +162,7 @@ finish_ci_journey_suite() {
   elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 ]] \
        && ci_journey_core_terminal_none_failed; then
     # Only the budget timeout fired (no class failed BOTH attempts on its own
-    # merits): a pure #470-stall time-budget casualty.
+    # merits): a pure suite-budget casualty.
     JOURNEY_EXIT=1
     journey_status="STEP_TIMEOUT"
   else
@@ -162,7 +175,7 @@ finish_ci_journey_suite() {
   echo "  passed first try: ${#PASSED_FIRST_TRY[@]}"
   echo "  recovered on retry: ${#RECOVERED_CLASSES[@]}"
   echo "  failed twice: ${#FAILED_CLASSES[@]}"
-  echo "  budget-timeout (issue #835 / #470 stall): ${#BUDGET_TIMEOUT_CLASSES[@]}"
+  echo "  budget-timeout (issue #835): ${#BUDGET_TIMEOUT_CLASSES[@]}"
   echo "  of which the shared SSH/tmux fixture was wedged (issue #2143 SETUP failure): ${#FIXTURE_WEDGED_CLASSES[@]}"
   echo "=========================================================="
 
@@ -237,20 +250,27 @@ finish_ci_journey_suite() {
       done
     fi
     # Issue #835: emit the `JOURNEY_STEP_TIMEOUT` section whenever the suite-level
-    # time budget was exhausted (typically by the recurring #470 in-emulator tmux
-    # `list-sessions` enumeration stall). The workflow's classify step greps this
-    # marker to label the red as a journey timeout / #470 stall — DISTINCT from a
-    # genuine `JOURNEY_FAILED` regression and from a "no summary at all" #771
-    # EMULATOR INFRA UNAVAILABLE abort. Writing this summary at all (instead of
-    # being SIGKILLed mid-loop by the workflow job cap) is the whole point: an
-    # artifact exists, so the classifier can attribute the red correctly.
+    # time budget was exhausted. A generic budget timeout remains a hard RED;
+    # issue #2317's exact list-sessions attribution is additive and is emitted
+    # only by the completed attempt-local proof above.
+    if [[ "$enumeration_stall_verdict" == "INFRA" ]]; then
+      echo
+      echo "Emulator CI infrastructure evidence — JOURNEY_ENUMERATION_STALL (typed, retryable):"
+      echo "The Android app emitted the bounded tmux list-sessions stall marker in a failed"
+      echo "attempt with a complete harness snapshot. Typed reason:"
+      echo "\`tmux_list_sessions_enumeration_stall\`. Evidence: \`$enumeration_stall_evidence\`"
+    fi
     if [[ "$STEP_TIMEOUT_HIT" -eq 1 ]]; then
       echo
-      echo "Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):"
-      echo "Budget: ${JOURNEY_STEP_BUDGET_SECS}s; elapsed: ${SUITE_ELAPSED}s. The in-emulator tmux"
-      echo "\`list-sessions\` enumeration (picker/tree) stalled and consumed the budget before all"
-      echo "load-bearing classes could run. This is the #470 enumeration stall, NOT a never-booted"
-      echo "emulator (#771) and NOT a genuine test regression. Classes cut short / not run:"
+      echo "Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 hard RED — exact cause required):"
+      echo "Budget: ${JOURNEY_STEP_BUDGET_SECS}s; elapsed: ${SUITE_ELAPSED}s. The suite deadline"
+      echo "was exhausted before all load-bearing classes could run."
+      if [[ "$enumeration_stall_verdict" != "INFRA" ]]; then
+        echo "No exact attempt-local enumeration proof was accepted, so the cause is intentionally"
+        echo "unclassified; this remains a hard RED rather than an inferred infrastructure result."
+      fi
+      echo "Classes cut"
+      echo "short / not run:"
       if [[ "${#BUDGET_TIMEOUT_CLASSES[@]}" -gt 0 ]]; then
         for c in "${BUDGET_TIMEOUT_CLASSES[@]}"; do
           echo "- \`$c\`"

@@ -830,7 +830,8 @@ SUMMARY_SUITE_SECS=""; SUMMARY_WARM_SECS=""; SUMMARY_FAILURE=""
 run_journey_summary_step() {
   local ws="$1" body="$ws/journey-summary-step.sh"
   mkdir -p "$ws/scripts"
-  cp "$WARM_ELAPSED" "$SUITE_ELAPSED" "$ws/scripts/"
+  cp "$WARM_ELAPSED" "$SUITE_ELAPSED" \
+    "$SCRIPT_DIR/ci-journey-enumeration-stall.sh" "$ws/scripts/"
   extract_step_body "Inspect first journey summary" "$body" '{}' \
     || fail "could not extract the 'Inspect first journey summary' step body"
   : > "$ws/summary-output.txt"
@@ -892,6 +893,7 @@ classify_expressions() {
   "steps.journey_retry.conclusion": "skipped",
   "steps.journey_summary.outputs.first_timeout": "$2",
   "steps.journey_summary.outputs.first_failure": "$3",
+  "steps.journey_summary.outputs.first_enumeration_stall": "false",
   "steps.journey_retry_budget.outputs.retry_allowed": "$4",
   "steps.journey_retry_budget.outputs.retry_reason": "$5",
   "steps.journey_retry_budget.outputs.retry_remaining_ms": "2976238",
@@ -909,6 +911,7 @@ run_classify_step() {
   local ws="$1" idx="$2" expressions="$3" body="$ws/classify-step.sh"
   mkdir -p "$ws/scripts"
   cp "$WRITER" "$SCRIPT_DIR/ci-journey-build-phase-timeout.sh" \
+     "$SCRIPT_DIR/ci-journey-enumeration-stall.sh" \
      "$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh" \
      "$SCRIPT_DIR/ci-journey-infra-signature.sh" "$SCRIPT_DIR/ci-journey-infra-signature.py" \
      "$ws/scripts/"

@@ -524,7 +524,7 @@ pass "(f) cancelled retry takes precedence over stale Failed BOTH summary"
 mixed_summary="$SANDBOX/mixed-summary.md"
 printf '%s\n' \
   '# Per-push CI journey suite — summary' \
-  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
+  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 hard RED — exact cause required):' \
   '- `com.pocketshell.app.TimeoutOnlyClass`' \
   'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
   '- `com.pocketshell.app.RealRegressionTest`' \
@@ -540,7 +540,7 @@ pass "(g) genuine Failed BOTH summary remains red even with timeout markers pres
 retry_timeout_summary="$SANDBOX/retry-timeout-summary.md"
 printf '%s\n' \
   '# Per-push CI journey suite — summary' \
-  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
+  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 hard RED — exact cause required):' \
   '- `com.pocketshell.app.RetryTimedOutClass`' \
   > "$retry_timeout_summary"
 overwrite_verdict="$(classify "$retry_timeout_summary" failure failure failure failure false true)"
@@ -620,7 +620,7 @@ pass "(p2) raw warning counts never mask captured first-attempt failure evidence
 timeout_summary="$SANDBOX/timeout-summary.md"
 printf '%s\n' \
   '# Per-push CI journey suite — summary' \
-  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):' \
+  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 hard RED — exact cause required):' \
   '- `com.pocketshell.app.TimedOutClass`' \
   > "$timeout_summary"
 [[ "$(classify "$timeout_summary" failure failure failure failure true)" == "FIRST_TIMEOUT_RED" ]] \

@@ -86,7 +86,7 @@ run_journey_classes_with_retry() {
     # write the summary below with the `JOURNEY_STEP_TIMEOUT` marker.
     if budget_exhausted; then
       STEP_TIMEOUT_HIT=1
-      echo "JOURNEY_STEP_TIMEOUT: suite budget (${JOURNEY_STEP_BUDGET_SECS}s) exhausted before $fqcn — not run (issue #835 / #470 stall)"
+      echo "JOURNEY_STEP_TIMEOUT: suite budget (${JOURNEY_STEP_BUDGET_SECS}s) exhausted before $fqcn — not run (issue #835; exact cause required)"
       BUDGET_TIMEOUT_CLASSES+=("$fqcn")
       ci_journey_progress_event class-completed "$fqcn" budget_skipped
       continue
@@ -127,7 +127,7 @@ run_journey_classes_with_retry() {
     # summary still gets written before the workflow job cap.
     if [[ "${LAST_RUN_CLASS_BUDGET_EXHAUSTED_AFTER_ATTEMPT:-0}" -eq 1 ]]; then
       STEP_TIMEOUT_HIT=1
-      echo "JOURNEY_STEP_TIMEOUT: $fqcn attempt 1 exhausted the suite budget (rc=$rc) — not retried (issue #835 / #470 stall)"
+      echo "JOURNEY_STEP_TIMEOUT: $fqcn attempt 1 exhausted the suite budget (rc=$rc) — not retried (issue #835; exact cause required)"
       BUDGET_TIMEOUT_CLASSES+=("$fqcn")
       ci_journey_progress_event class-completed "$fqcn" budget_timeout
       continue
@@ -175,7 +175,7 @@ run_journey_classes_with_retry() {
       # Bucket it distinctly so the classifier labels the red as a journey
       # timeout, not a real test failure and not an infra abort.
       STEP_TIMEOUT_HIT=1
-      echo "JOURNEY_STEP_TIMEOUT: $fqcn retry was cut by the suite budget (rc=$rc) (issue #835 / #470 stall)"
+      echo "JOURNEY_STEP_TIMEOUT: $fqcn retry was cut by the suite budget (rc=$rc) (issue #835; exact cause required)"
       BUDGET_TIMEOUT_CLASSES+=("$fqcn")
       ci_journey_progress_event class-completed "$fqcn" budget_timeout
     elif budget_exhausted; then

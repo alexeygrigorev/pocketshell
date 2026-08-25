@@ -89,6 +89,7 @@ HELPERS=(
   ci-journey-class-loop-functions.sh
   ci-journey-core-terminal-functions.sh
   ci-journey-summary-functions.sh
+  ci-journey-enumeration-stall.sh
 )
 
 # ---------------------------------------------------------------------------
@@ -702,6 +703,7 @@ setup_classify_dir() {
   rm -rf "$CLASSIFY_DIR"
   mkdir -p "$CLASSIFY_DIR/scripts" "$CLASSIFY_DIR/artifacts/ci-journey"
   cp "$WRITER" "$BUILD_PHASE" "$BUILD_FAILURE" \
+    "$SCRIPT_DIR/ci-journey-enumeration-stall.sh" \
     "$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh" \
     "$SCRIPT_DIR/ci-journey-infra-signature.sh" "$SCRIPT_DIR/ci-journey-infra-signature.py" \
     "$CLASSIFY_DIR/scripts/"
@@ -787,7 +789,7 @@ FAILED_BOTH_SUMMARY=(
 )
 TIMEOUT_SUMMARY=(
   '# Per-push CI journey suite — summary'
-  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 / #470 stall — job red):'
+  'Suite step time budget exhausted — JOURNEY_STEP_TIMEOUT (issue #835 hard RED — exact cause required):'
   '- `com.pocketshell.app.proof.MultiSessionSwitchJourneyE2eTest`'
 )
 CLEAN_SUMMARY=('# Per-push CI journey suite — summary' 'Classes exercised:')

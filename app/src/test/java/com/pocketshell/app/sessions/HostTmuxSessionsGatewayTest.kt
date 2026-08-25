@@ -134,7 +134,7 @@ class HostTmuxSessionsGatewayTest {
         val manager = SshLeaseManager(
             connector = connector,
             scope = this,
-            idleTtlMillis = 30_000L,
+            idleTtlMillis = Long.MAX_VALUE,
         )
         val gateway = SshHostTmuxSessionsGateway(parser, activeTmuxClients, manager)
 
@@ -293,6 +293,41 @@ class HostTmuxSessionsGatewayTest {
         assertEquals(2, connector.connectCount)
         assertTrue(first.closed)
         assertTrue(second.closed)
+    }
+
+    @Test
+    fun wedgedTmuxListSessionsExecSurfacesTypedTimeoutInsteadOfHanging() = runTest {
+        val session = FakeSshSession(blockForever = true)
+        val connector = CountingConnector(Result.success(session))
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = Long.MAX_VALUE,
+        )
+        val gateway = SshHostTmuxSessionsGateway(
+            parser = parser,
+            activeTmuxClients = activeTmuxClients,
+            sshLeaseManager = manager,
+            leaseBlockTimeoutMs = 250L,
+            liveEnumTimeoutMs = 250L,
+            tmuxExecTimeoutMs = 50L,
+        )
+
+        try {
+            val result = gateway.listSessions(HOST, KEY_PATH, passphrase = null)
+
+            assertTrue(result is HostTmuxSessionListResult.ConnectFailed)
+            val cause = (result as HostTmuxSessionListResult.ConnectFailed).cause
+            assertTrue(
+                "wedged tmux list-sessions must surface its typed timeout, got ${cause::class.java.name}",
+                cause is TmuxSessionListExecTimeoutException,
+            )
+            assertEquals(50L, (cause as TmuxSessionListExecTimeoutException).timeoutMs)
+            assertEquals(1, connector.connectCount)
+            assertFalse("bounded exec must preserve the shared lease transport", session.closed)
+        } finally {
+            manager.close()
+        }
     }
 
     @Test

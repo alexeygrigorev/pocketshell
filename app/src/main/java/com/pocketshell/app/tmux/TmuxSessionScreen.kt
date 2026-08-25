@@ -333,6 +333,7 @@ public fun TmuxSessionScreen(
     // Issue #898: the single entry point for the rich "+ New session" sheet.
     val openNewSessionSheet: () -> Unit = {
         viewModel.fetchProfilesForActiveSession()
+        viewModel.fetchEnginesForActiveSession()
         sessionPickerViewModel.load(sessionPickerRequest)
         overlay.showNewSessionSheet = true
     }
@@ -1763,6 +1764,7 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
 ) {
     val currentPane = panesSel.currentPane
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
+    val newSessionEngines by viewModel.engines.collectAsState()
     val newSessionClaudeProfiles by viewModel.claudeProfiles.collectAsState()
     val newSessionCodexProfiles by viewModel.codexProfiles.collectAsState()
     val currentSessionRecordedProfile by viewModel.currentSessionRecordedProfile.collectAsState()
@@ -1801,6 +1803,7 @@ private fun BoxScope.TmuxSessionOverlaysRegion(
         showNewSessionSheet = overlay.showNewSessionSheet,
         currentPaneCwd = currentPane?.cwd,
         suggestStartDirectories = suggestStartDirectories,
+        engines = newSessionEngines,
         claudeProfiles = newSessionClaudeProfiles,
         codexProfiles = newSessionCodexProfiles,
         deriveDefaultName = { dir ->

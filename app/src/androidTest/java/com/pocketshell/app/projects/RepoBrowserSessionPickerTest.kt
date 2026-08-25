@@ -58,6 +58,7 @@ class RepoBrowserSessionPickerTest {
                     folderLabel = repoFolderLabel(repoPath),
                     onCancel = {},
                     onCreate = { choice = it },
+                    engines = pickerTestEngines,
                     // Mirror RepoBrowserScreen's production picker wiring.
                     // The standalone content fallback is only the trailing
                     // basename and stopped representing this path when the
@@ -85,7 +86,7 @@ class RepoBrowserSessionPickerTest {
 
         val shellChoice = requireNotNull(choice) { "Shell create did not fire" }
         assertEquals(SessionType.Shell, shellChoice.type)
-        assertNull("Shell session has no agent", shellChoice.agent)
+        assertNull("Shell session has no engine", shellChoice.engine)
         assertNull("Shell session is a plain terminal — no start command", shellChoice.startCommand())
         assertEquals(repoPath, shellChoice.startDirectory)
 
@@ -108,6 +109,7 @@ class RepoBrowserSessionPickerTest {
                     folderLabel = repoFolderLabel(repoPath),
                     onCancel = {},
                     onCreate = { choice = it },
+                    engines = pickerTestEngines,
                     // Keep this content-only fixture on the exact production
                     // RepoBrowserScreen name-prefill path (#1184/#1868).
                     deriveDefaultName = { path ->
@@ -120,7 +122,7 @@ class RepoBrowserSessionPickerTest {
         // Agent is the default session type; switch the CLI to codex and confirm.
         compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_TAG).performClick()
         compose.waitForIdle()
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CODEX_TAG).performClick()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("codex")).performClick()
         compose.waitForIdle()
         captureScreenshot("issue516-repo-picker-agent-codex-selected")
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
@@ -128,7 +130,7 @@ class RepoBrowserSessionPickerTest {
 
         val agentChoice = requireNotNull(choice) { "Agent create did not fire" }
         assertEquals(SessionType.Agent, agentChoice.type)
-        assertEquals(AgentCli.Codex, agentChoice.agent)
+        assertEquals("codex", agentChoice.engineId)
         assertEquals(repoPath, agentChoice.startDirectory)
         // The agent CLI is launched in the new pane through the SAME
         // `pocketshell agent <kind> --dir '<dir>'` wrapper the folder Agent

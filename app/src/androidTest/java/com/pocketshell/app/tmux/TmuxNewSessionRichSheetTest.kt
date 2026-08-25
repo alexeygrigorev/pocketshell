@@ -20,6 +20,7 @@ import com.pocketshell.app.projects.SESSION_TYPE_PICKER_CONTENT_TAG
 import com.pocketshell.app.projects.SESSION_TYPE_PICKER_SHELL_TAG
 import com.pocketshell.app.projects.SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG
 import com.pocketshell.app.projects.SessionTypePickerSheet
+import com.pocketshell.app.projects.sessionTypePickerAgentEngineTag
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
@@ -87,6 +88,7 @@ class TmuxNewSessionRichSheetTest {
                         // A multi-profile host so the Profile selector renders —
                         // proving the rich sheet's Profile criterion is reachable
                         // from this in-session entry point.
+                        engines = com.pocketshell.app.projects.pickerTestEngines,
                         claudeProfiles = listOf(
                             ClaudeProfile(name = "Claude", default = true),
                             ClaudeProfile(name = "Claude (Z.AI)"),
@@ -110,11 +112,15 @@ class TmuxNewSessionRichSheetTest {
             .assertExists()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_TAG, useUnmergedTree = true)
             .assertExists()
-        // Agent CLI sub-picker (Agent is the default selection) — claude/codex/
-        // opencode segments.
-        compose.onNodeWithText("claude", useUnmergedTree = true).assertExists()
-        compose.onNodeWithText("codex", useUnmergedTree = true).assertExists()
-        compose.onNodeWithText("opencode", useUnmergedTree = true).assertExists()
+        // Registry engine sub-picker (Agent is the default selection). The
+        // semantics tags are keyed by the raw registry ids; display labels
+        // remain host-owned and may be capitalized or customized.
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("claude"), useUnmergedTree = true)
+            .assertExists()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("codex"), useUnmergedTree = true)
+            .assertExists()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("opencode"), useUnmergedTree = true)
+            .assertExists()
         // Skip permissions row.
         compose.onNodeWithTag(SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG, useUnmergedTree = true)
             .assertExists()

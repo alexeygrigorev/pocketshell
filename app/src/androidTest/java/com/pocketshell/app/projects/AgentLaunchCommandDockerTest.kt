@@ -10,6 +10,7 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -23,7 +24,7 @@ import java.io.FileOutputStream
 
 /**
  * Connected proof for issue #703: the SHORT server-side wrapper command
- * PocketShell builds (`pocketshell agent <kind> --dir '<dir>' …`) is the
+ * PocketShell builds (`pocketshell agent <registry-id> --dir '<dir>' …`) is the
  * exact text that lands in the new tmux pane via `createSession` ->
  * `tmux send-keys`, AND the wrapper actually exec's the agent (the agent
  * STARTS / becomes usable), not merely that the command text is in
@@ -118,25 +119,25 @@ class AgentLaunchCommandDockerTest {
         val cases = listOf(
             Case(
                 name = "issue703-claude-on-$suffix",
-                choice = agentChoice(AgentCli.Claude, skip = true, cwd),
+                choice = agentChoice(pickerTestEngine("claude", SessionAgentKind.Claude), skip = true, cwd),
                 readyToken = "Claude Code fixture",
                 expectedCommand = "pocketshell agent claude --dir '$cwd'",
             ),
             Case(
                 name = "issue703-claude-off-$suffix",
-                choice = agentChoice(AgentCli.Claude, skip = false, cwd),
+                choice = agentChoice(pickerTestEngine("claude", SessionAgentKind.Claude), skip = false, cwd),
                 readyToken = "Claude Code fixture",
                 expectedCommand = "pocketshell agent claude --dir '$cwd' --no-skip-permissions",
             ),
             Case(
                 name = "issue703-codex-on-$suffix",
-                choice = agentChoice(AgentCli.Codex, skip = true, cwd),
+                choice = agentChoice(pickerTestEngine("codex", SessionAgentKind.Codex), skip = true, cwd),
                 readyToken = "Codex fixture",
                 expectedCommand = "pocketshell agent codex --dir '$cwd'",
             ),
             Case(
                 name = "issue703-opencode-$suffix",
-                choice = agentChoice(AgentCli.OpenCode, skip = true, cwd),
+                choice = agentChoice(pickerTestEngine("opencode", SessionAgentKind.OpenCode), skip = true, cwd),
                 readyToken = "OpenCode fixture",
                 expectedCommand = "pocketshell agent opencode --dir '$cwd'",
             ),
@@ -199,10 +200,10 @@ class AgentLaunchCommandDockerTest {
         File(artifactDir, "agent-launch-command-summary.txt").writeText(summary.toString())
     } }
 
-    private fun agentChoice(agent: AgentCli, skip: Boolean, cwd: String) =
+    private fun agentChoice(engine: RemoteEngine, skip: Boolean, cwd: String) =
         SessionTypeChoice(
             type = SessionType.Agent,
-            agent = agent,
+            engine = engine,
             startDirectory = cwd,
             skipPermissions = skip,
         )

@@ -96,12 +96,15 @@ class ProfileChipRelaunchDockerTest {
         tree.bindHost(host.id)
 
         // --- Launch 1: a z.ai-profile Claude (the reproduce fixture state) ----
-        val zaiCommand = AgentCli.buildAgentCommand(
-            kind = "claude",
-            directory = cwd,
-            noSkipPermissions = false,
+        val claudeEngine = pickerTestEngine("claude", SessionAgentKind.Claude)
+        val zaiCommand = SessionTypeChoice(
+            type = SessionType.Agent,
+            engine = claudeEngine,
+            startDirectory = cwd,
             profileName = zaiProfileLabel,
-        )
+        ).startCommand(
+            claudeProfiles = listOf(ClaudeProfile(zaiProfileLabel)),
+        )!!
         withTimeout(30_000) {
             gateway.createSession(
                 host, keyFile.absolutePath, null, session, cwd, zaiCommand,
@@ -129,12 +132,11 @@ class ProfileChipRelaunchDockerTest {
         // --- Launch 2: relaunch the SAME session as a DEFAULT Claude ----------
         // No --profile, so the wrapper UNSETS @ps_agent_profile. send-keys it
         // into the same pane (the fake claude already exited back to the shell).
-        val defaultCommand = AgentCli.buildAgentCommand(
-            kind = "claude",
-            directory = cwd,
-            noSkipPermissions = false,
-            profileName = null,
-        )
+        val defaultCommand = SessionTypeChoice(
+            type = SessionType.Agent,
+            engine = claudeEngine,
+            startDirectory = cwd,
+        ).startCommand()!!
         withSshSession { s ->
             s.exec("tmux send-keys -t '$session' '${defaultCommand.replace("'", "'\\''")}' Enter")
         }

@@ -30,7 +30,7 @@ import java.io.FileOutputStream
  * focused Docker-gated path:
  *
  *  1. launch Claude, Codex, and OpenCode through [SshFolderListGateway.createSession]
- *     using the same short [AgentCli.buildAgentCommand] line the app types;
+ *     using the same short registry-wrapper line the app types;
  *  2. wait for the fixture `pocketshell agent` wrapper to write host-side
  *     `@ps_agent_kind`;
  *  3. re-read via [SshFolderListGateway.listSessionsWithFolder], the same
@@ -86,26 +86,29 @@ class AgentRecordedKindReadBackDockerTest {
         ensureRemoteDir(cwd)
 
         data class Case(
-            val agent: AgentCli,
+            val engine: RemoteEngine,
             val rawKind: String,
             val expected: SessionAgentKind,
         )
 
         val cases = listOf(
-            Case(AgentCli.Claude, rawKind = "claude", expected = SessionAgentKind.Claude),
-            Case(AgentCli.Codex, rawKind = "codex", expected = SessionAgentKind.Codex),
-            Case(AgentCli.OpenCode, rawKind = "opencode", expected = SessionAgentKind.OpenCode),
+            Case(pickerTestEngine("claude", SessionAgentKind.Claude), rawKind = "claude", expected = SessionAgentKind.Claude),
+            Case(pickerTestEngine("codex", SessionAgentKind.Codex), rawKind = "codex", expected = SessionAgentKind.Codex),
+            Case(pickerTestEngine("opencode", SessionAgentKind.OpenCode), rawKind = "opencode", expected = SessionAgentKind.OpenCode),
         )
 
         for (case in cases) {
             val sessionName = "issue852-${case.rawKind}-$suffix"
             cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
-            val startCommand = AgentCli.buildAgentCommand(
-                kind = case.agent.command,
-                directory = cwd,
-                noSkipPermissions = false,
-                profileName = null,
+            val choice = SessionTypeChoice(
+                type = SessionType.Agent,
+                engine = case.engine,
+                startDirectory = cwd,
+                skipPermissions = true,
             )
+            assertEquals(case.rawKind, choice.engineId)
+            assertEquals(case.expected, choice.sessionAgentKind)
+            val startCommand = choice.startCommand()!!
 
             withTimeout(30_000) {
                 gateway.createSession(
@@ -120,19 +123,19 @@ class AgentRecordedKindReadBackDockerTest {
             }
 
             assertEquals(
-                "fixture wrapper must record @ps_agent_kind for ${case.agent}",
+                "fixture wrapper must record @ps_agent_kind for ${case.engine.id}",
                 case.rawKind,
                 awaitRecordedKindOption(sessionName, case.rawKind),
             )
 
             val row = readSessionRow(gateway, host, sessionName)
             assertEquals(
-                "gateway must read back recordedKind for ${case.agent}",
+                "gateway must read back recordedKind for ${case.engine.id}",
                 case.expected,
                 row.recordedKind,
             )
             assertEquals(
-                "recorded kind must drive the authoritative rendered kind for ${case.agent}",
+                "recorded kind must drive the authoritative rendered kind for ${case.engine.id}",
                 case.expected,
                 row.agentKind,
             )

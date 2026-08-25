@@ -1089,10 +1089,10 @@ class FolderListScreenE2eTest {
         }
         compose.onNodeWithTag(SESSION_TYPE_PICKER_SHELL_TAG).assertExists()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_TAG).assertExists()
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG).assertExists()
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CODEX_TAG).assertExists()
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG).assertExists()
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_GROK_TAG).assertExists()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("claude")).assertExists()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("codex")).assertExists()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("opencode")).assertExists()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("grok")).assertExists()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).assertExists()
 
         // Capture the picker sheet via the full-device screenshot path

@@ -2,6 +2,7 @@ package com.pocketshell.app.projects
 
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import com.pocketshell.uikit.model.SessionAgentKind
 
 /**
  * Unit tests for the tmuxctl-style directory-derived session naming
@@ -253,7 +254,7 @@ class SessionNameDerivationTest {
     fun derivedSessionNameWrapperReturnsTheBaseAndNeverDisambiguates() {
         val choice = SessionTypeChoice(
             type = SessionType.Shell,
-            agent = null,
+            engine = null,
             startDirectory = "/tmp/issue898",
             skipPermissions = false,
         )
@@ -275,7 +276,7 @@ class SessionNameDerivationTest {
         // reintroducing a client-side "remember what I just created" set.
         val choice = SessionTypeChoice(
             type = SessionType.Shell,
-            agent = null,
+            engine = null,
             startDirectory = "/tmp/issue898",
             skipPermissions = false,
         )
@@ -388,7 +389,12 @@ class SessionNameDerivationTest {
         // must sanitise + use it instead of the directory-derived default.
         val choice = SessionTypeChoice(
             type = SessionType.Agent,
-            agent = AgentCli.Claude,
+            engine = RemoteEngine(
+                id = "claude",
+                familyId = "claude",
+                family = SessionAgentKind.Claude,
+                label = "Claude",
+            ),
             startDirectory = "~/git/pocketshell",
             customName = "git pocketshell review",
         )
@@ -403,7 +409,7 @@ class SessionNameDerivationTest {
     fun derivedSessionNameWrapperKeepsCustomLabelVerbatim() {
         val choice = SessionTypeChoice(
             type = SessionType.Shell,
-            agent = null,
+            engine = null,
             startDirectory = "~/git/pocketshell",
             customName = "review",
         )
@@ -423,7 +429,7 @@ class SessionNameDerivationTest {
     fun derivedSessionNameWrapperBlankCustomFallsBackToDerived() {
         val choice = SessionTypeChoice(
             type = SessionType.Shell,
-            agent = null,
+            engine = null,
             startDirectory = "~/git/pocketshell",
             customName = "   ",
         )

@@ -135,6 +135,7 @@ fun RepoBrowserScreen(
         )
     }
     val state by viewModel.state.collectAsState()
+    val engines by sessionViewModel.engines.collectAsState()
     val claudeProfiles by sessionViewModel.claudeProfiles.collectAsState()
     val codexProfiles by sessionViewModel.codexProfiles.collectAsState()
 
@@ -148,6 +149,7 @@ fun RepoBrowserScreen(
     LaunchedEffect(pickerRepoPath) {
         if (pickerRepoPath != null) {
             sessionViewModel.refreshProfilesForPicker()
+            sessionViewModel.refreshEnginesForPicker()
         }
     }
 
@@ -174,6 +176,7 @@ fun RepoBrowserScreen(
             folderLabel = repoFolderLabel(repoPath),
             onDismiss = { pickerRepoPath = null },
             suggestStartDirectories = suggestStartDirectories,
+            engines = engines,
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
             // Issue #1184: prefill the editable "Session name" field with the

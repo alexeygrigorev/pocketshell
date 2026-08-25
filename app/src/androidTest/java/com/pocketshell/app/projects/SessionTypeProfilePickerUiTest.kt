@@ -88,6 +88,7 @@ class SessionTypeProfilePickerUiTest {
                         folderLabel = "app",
                         onCancel = {},
                         onCreate = onCreate,
+                        engines = pickerTestEngines,
                         claudeProfiles = claudeProfiles,
                         codexProfiles = codexProfiles,
                     )
@@ -103,21 +104,20 @@ class SessionTypeProfilePickerUiTest {
 
         // Agent + Claude are the defaults, so with >1 Claude profile the
         // "Profile" toggle is shown and lists all discovered profiles by name.
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_PROFILE_TAG).assertIsDisplayed()
         compose.onNodeWithText("default").assertIsDisplayed()
         compose.onNodeWithText("work").assertIsDisplayed()
         compose.onNodeWithText("oss").assertIsDisplayed()
 
         // Select the non-default "work" profile, then Create.
-        compose.onNodeWithTag("$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:work").performClick()
+        compose.onNodeWithTag("$SESSION_TYPE_PICKER_PROFILE_TAG:work").performClick()
         compose.waitForIdle()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
         compose.waitForIdle()
 
         assertTrue("create should route a choice", choice != null)
-        assertEquals(AgentCli.Claude, choice?.agent)
-        assertEquals("work", choice?.claudeProfileName)
-        assertNull("codex profile is irrelevant for a Claude session", choice?.codexProfileName)
+        assertEquals("claude", choice?.engineId)
+        assertEquals("work", choice?.profileName)
 
         // The chosen profile threads into the launched command as --profile.
         val command = choice?.startCommand(
@@ -136,7 +136,7 @@ class SessionTypeProfilePickerUiTest {
         picker(claudeProfiles = claudeProfiles, codexProfiles = codexProfiles) { choice = it }
 
         // Pick the default profile explicitly, Create.
-        compose.onNodeWithTag("$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:default").performClick()
+        compose.onNodeWithTag("$SESSION_TYPE_PICKER_PROFILE_TAG:default").performClick()
         compose.waitForIdle()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
         compose.waitForIdle()
@@ -145,7 +145,7 @@ class SessionTypeProfilePickerUiTest {
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
         )
-        assertEquals("default", choice?.claudeProfileName)
+        assertEquals("default", choice?.profileName)
         // The default profile means "use the engine's built-in config dir" — no flag.
         assertTrue(
             "the default profile must emit no --profile flag: $command",
@@ -159,18 +159,18 @@ class SessionTypeProfilePickerUiTest {
         picker(claudeProfiles = claudeProfiles, codexProfiles = codexProfiles) { choice = it }
 
         // Switch to Codex; its >1-profile toggle then appears.
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CODEX_TAG).performClick()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("codex")).performClick()
         compose.waitForIdle()
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_CODEX_PROFILE_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_PROFILE_TAG).assertIsDisplayed()
         compose.onNodeWithText("team").assertIsDisplayed()
 
-        compose.onNodeWithTag("$SESSION_TYPE_PICKER_CODEX_PROFILE_TAG:team").performClick()
+        compose.onNodeWithTag("$SESSION_TYPE_PICKER_PROFILE_TAG:team").performClick()
         compose.waitForIdle()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
         compose.waitForIdle()
 
-        assertEquals(AgentCli.Codex, choice?.agent)
-        assertEquals("team", choice?.codexProfileName)
+        assertEquals("codex", choice?.engineId)
+        assertEquals("team", choice?.profileName)
         val command = choice?.startCommand(
             claudeProfiles = claudeProfiles,
             codexProfiles = codexProfiles,
@@ -193,7 +193,7 @@ class SessionTypeProfilePickerUiTest {
             codexProfiles = codexProfiles,
         )
 
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_PROFILE_TAG).assertDoesNotExist()
     }
 
     /**
@@ -236,6 +236,13 @@ class SessionTypeProfilePickerUiTest {
         }
 
         val profilesGateway = TransientThenZaiProfilesGateway()
+        val enginesGateway = object : EnginesGateway {
+            override suspend fun listEngines(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+            ): EnginesResult = EnginesResult.Engines(pickerTestEngines)
+        }
         val sessionGateway = RecordingSessionGateway()
         lateinit var viewModel: FolderListViewModel
         instrumentation.runOnMainSync {
@@ -251,6 +258,7 @@ class SessionTypeProfilePickerUiTest {
                 ),
                 forwardingController = ForwardingController(context),
                 profilesGateway = profilesGateway,
+                enginesGateway = enginesGateway,
                 attachLifecycle = false,
             ).also {
                 it.setProcessStartedForTest(true)
@@ -298,12 +306,12 @@ class SessionTypeProfilePickerUiTest {
             // production host-screen open path retries the transient failure.
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithTag(
-                    "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:Claude (Z.AI)",
+                    "$SESSION_TYPE_PICKER_PROFILE_TAG:Claude (Z.AI)",
                     useUnmergedTree = true,
                 ).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithTag(
-                "$SESSION_TYPE_PICKER_CLAUDE_PROFILE_TAG:Claude (Z.AI)",
+                "$SESSION_TYPE_PICKER_PROFILE_TAG:Claude (Z.AI)",
                 useUnmergedTree = true,
             ).performScrollTo().assertIsDisplayed().performClick()
             compose.waitForIdle()

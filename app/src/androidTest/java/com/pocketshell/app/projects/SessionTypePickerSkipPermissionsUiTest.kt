@@ -67,6 +67,7 @@ class SessionTypePickerSkipPermissionsUiTest {
                     folderLabel = "pocketshell",
                     onCancel = {},
                     onCreate = { lastChoice = it },
+                    engines = pickerTestEngines,
                 )
             }
         }
@@ -81,7 +82,7 @@ class SessionTypePickerSkipPermissionsUiTest {
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CREATE_TAG).performClick()
         compose.waitForIdle()
         assertTrue(lastChoice?.skipPermissions == true)
-        assertTrue(lastChoice?.agent == AgentCli.Claude)
+        assertTrue(lastChoice?.engineId == "claude")
         // Post-#627/#703 hard-cut (D22): the app emits the short server-side
         // wrapper line, NOT the old inline `env -u … claude --dangerously…`.
         // Skip-permissions defaults ON in the wrapper, so no extra flag.
@@ -92,7 +93,7 @@ class SessionTypePickerSkipPermissionsUiTest {
         )
 
         // Switch to OpenCode -> the checkbox is hidden (no-op for OpenCode).
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG).performClick()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("opencode")).performClick()
         compose.waitForIdle()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG).assertDoesNotExist()
         captureScreenshot("issue428-picker-opencode-no-checkbox")
@@ -108,6 +109,7 @@ class SessionTypePickerSkipPermissionsUiTest {
                     folderLabel = "app",
                     onCancel = {},
                     onCreate = { lastChoice = it },
+                    engines = pickerTestEngines,
                 )
             }
         }
@@ -129,7 +131,7 @@ class SessionTypePickerSkipPermissionsUiTest {
     }
 
     @Test
-    fun agentCliChoicesUseSingleAlignedSegmentedRow() {
+    fun registryEngineChoicesUseSingleAlignedSegmentedRow() {
         compose.setContent {
             PocketShellTheme {
                 SessionTypePickerContent(
@@ -137,17 +139,18 @@ class SessionTypePickerSkipPermissionsUiTest {
                     folderLabel = "app",
                     onCancel = {},
                     onCreate = {},
+                    engines = pickerTestEngines,
                 )
             }
         }
 
-        val claude = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CLAUDE_TAG)
+        val claude = compose.onNodeWithTag(sessionTypePickerAgentEngineTag("claude"))
             .fetchSemanticsNode().boundsInRoot
-        val codex = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_CODEX_TAG)
+        val codex = compose.onNodeWithTag(sessionTypePickerAgentEngineTag("codex"))
             .fetchSemanticsNode().boundsInRoot
-        val opencode = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_OPENCODE_TAG)
+        val opencode = compose.onNodeWithTag(sessionTypePickerAgentEngineTag("opencode"))
             .fetchSemanticsNode().boundsInRoot
-        val grok = compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_GROK_TAG)
+        val grok = compose.onNodeWithTag(sessionTypePickerAgentEngineTag("grok"))
             .fetchSemanticsNode().boundsInRoot
 
         assertTrue("codex should sit to the right of claude", codex.left > claude.left)
@@ -170,11 +173,12 @@ class SessionTypePickerSkipPermissionsUiTest {
                     folderLabel = "app",
                     onCancel = {},
                     onCreate = {},
+                    engines = pickerTestEngines,
                 )
             }
         }
 
-        compose.onNodeWithTag(SESSION_TYPE_PICKER_AGENT_GROK_TAG).performClick()
+        compose.onNodeWithTag(sessionTypePickerAgentEngineTag("grok")).performClick()
         compose.waitForIdle()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_SKIP_PERMISSIONS_TAG).assertIsDisplayed()
         compose.onNodeWithText("Skip permissions").assertIsDisplayed()
@@ -194,6 +198,7 @@ class SessionTypePickerSkipPermissionsUiTest {
                         folderLabel = "ai-shipping-labs-workshops-raw",
                         onCancel = {},
                         onCreate = {},
+                        engines = pickerTestEngines,
                     )
                 }
             }
@@ -242,6 +247,7 @@ class SessionTypePickerSkipPermissionsUiTest {
                         folderLabel = "srv",
                         onCancel = {},
                         onCreate = {},
+                        engines = pickerTestEngines,
                         autocompleteController = autocomplete,
                     )
                 }
@@ -303,6 +309,7 @@ class SessionTypePickerSkipPermissionsUiTest {
                         folderLabel = "srv",
                         onCancel = {},
                         onCreate = { lastChoice = it },
+                        engines = pickerTestEngines,
                         autocompleteController = autocomplete,
                     )
                 }

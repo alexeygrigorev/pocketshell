@@ -105,10 +105,10 @@ class Issue1973AgentLaunchStateFolderIsolationDockerTest {
         val launchCommandDir = "/tmp/issue1973-launch-command-$suffix".also(remoteDirs::add)
         ensureRemoteDir(launchCommandDir)
         val commandLaunches = listOf(
-            Triple("claude-on", AgentCli.Claude, false),
-            Triple("claude-off", AgentCli.Claude, true),
-            Triple("codex", AgentCli.Codex, false),
-            Triple("opencode", AgentCli.OpenCode, false),
+            Triple("claude-on", pickerTestEngine("claude", SessionAgentKind.Claude), false),
+            Triple("claude-off", pickerTestEngine("claude", SessionAgentKind.Claude), true),
+            Triple("codex", pickerTestEngine("codex", SessionAgentKind.Codex), false),
+            Triple("opencode", pickerTestEngine("opencode", SessionAgentKind.OpenCode), false),
         )
         val commandSessions = commandLaunches.map { (label, agent, noSkip) ->
             val name = "issue1973-command-$label-$suffix"
@@ -122,9 +122,13 @@ class Issue1973AgentLaunchStateFolderIsolationDockerTest {
         // exact test-owned cleanup. Recorded kinds remain the sole authority.
         val recordedDir = "/tmp/issue1973-recorded-$suffix".also(remoteDirs::add)
         ensureRemoteDir(recordedDir)
-        val recordedSessions = listOf(AgentCli.Claude, AgentCli.Codex, AgentCli.OpenCode).map { agent ->
-            val name = "issue1973-recorded-${agent.command}-$suffix"
-            launchAgent(gateway, host, name, recordedDir, agent, noSkip = false)
+        val recordedSessions = listOf(
+            pickerTestEngine("claude", SessionAgentKind.Claude),
+            pickerTestEngine("codex", SessionAgentKind.Codex),
+            pickerTestEngine("opencode", SessionAgentKind.OpenCode),
+        ).map { engine ->
+            val name = "issue1973-recorded-${engine.id}-$suffix"
+            launchAgent(gateway, host, name, recordedDir, engine, noSkip = false)
             name
         }
         val recordedRows = gatewayRows(gateway, host).filter { it.sessionName in recordedSessions }
@@ -223,16 +227,16 @@ class Issue1973AgentLaunchStateFolderIsolationDockerTest {
         host: HostEntity,
         sessionName: String,
         cwd: String,
-        agent: AgentCli,
+        engine: RemoteEngine,
         noSkip: Boolean,
     ) {
         liveSessions += sessionName
-        val command = AgentCli.buildAgentCommand(
-            kind = agent.command,
-            directory = cwd,
-            noSkipPermissions = noSkip,
-            profileName = null,
-        )
+        val command = SessionTypeChoice(
+            type = SessionType.Agent,
+            engine = engine,
+            startDirectory = cwd,
+            skipPermissions = !noSkip,
+        ).startCommand()!!
         withTimeout(30_000) {
             gateway.createSession(
                 host = host,
@@ -244,7 +248,7 @@ class Issue1973AgentLaunchStateFolderIsolationDockerTest {
                 namePolicy = SessionNamePolicy.UniqueOnHost,
             ).getOrThrow()
         }
-        awaitRecordedKind(sessionName, agent.command)
+        awaitRecordedKind(sessionName, engine.id)
     }
 
     private suspend fun awaitRecordedKind(sessionName: String, expected: String) {

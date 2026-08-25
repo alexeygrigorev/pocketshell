@@ -228,7 +228,13 @@ class FileViewerViewModel @Inject constructor(
 
     private var loadJob: Job? = null
     private var lastRequest: Request? = null
-    private var workspaceHostId: Long? = null
+    /**
+     * In-memory workspace/cache scope. A host row can be edited in place, so
+     * [Request.hostId] alone is not enough to identify the remote account.
+     * Keep the endpoint/account/key identity with the durable workspace scope
+     * or a changed host profile can reuse the previous server's tabs/cache.
+     */
+    private var workspaceScope: WorkspaceScope? = null
     private var workspaceHydrated: Boolean = false
     private var workspaceAvailable: Boolean = true
     private var workspaceWriteTail: Job? = null
@@ -606,14 +612,19 @@ class FileViewerViewModel @Inject constructor(
      */
     fun bind(request: Request) {
         requireMainThread("FileViewerViewModel.bind")
-        if (workspaceHostId != request.hostId) {
+        val requestScope = request.workspaceScope()
+        if (workspaceScope != requestScope) {
             // A Hilt VM can outlive one viewer destination in the hand-rolled
             // navigator. Never let host A's durable tabs become host B's
-            // in-memory workspace or skip B's one-time hydrate.
+            // in-memory workspace or skip B's one-time hydrate. The scope
+            // includes the endpoint/account/key because a host row may be
+            // edited in place while retaining its Room id.
             loadJob?.cancel()
-            workspaceHostId = request.hostId
+            workspaceScope = requestScope
             workspaceHydrated = false
             workspaceAvailable = true
+            workspaceWriteGeneration++
+            workspaceWriteTail = null
             _workspace.value = FileWorkspace.Empty
             _workspaceWriteState.value = FileWorkspaceWriteState.Idle
             _pendingTabAction.value = null
@@ -852,7 +863,7 @@ class FileViewerViewModel @Inject constructor(
         // Keyed by resolved absolute path so a relative open and its restored
         // absolute tab share one cache entry (#1715).
         activateKnownTabBeforePaint(resolved)
-        val cached = contentCache[ContentCacheKey(request.hostId, resolved)]
+        val cached = contentCache[ContentCacheKey(request.workspaceScope(), resolved)]
         _state.value = cached ?: FileViewerUiState.Loading(displayPath = resolved)
         loadJob = viewModelScope.launch {
             val fetched = withContext(Dispatchers.IO) { fetch(request, resolved) }
@@ -870,7 +881,23 @@ class FileViewerViewModel @Inject constructor(
     }
 
     private fun isCurrentRequest(request: Request): Boolean =
-        workspaceHostId == request.hostId && lastRequest == request
+        workspaceScope == request.workspaceScope() && lastRequest == request
+
+    /**
+     * Identity for in-memory workspace and text-cache isolation. Do not use
+     * the mutable Room id alone: editing a host row can point that id at a
+     * different server or Unix account while the Hilt ViewModel survives.
+     * The passphrase is intentionally excluded; it is a credential, not a
+     * remote workspace identity, and [Request.equals] still protects
+     * in-flight content results when it changes.
+     */
+    private fun Request.workspaceScope(): WorkspaceScope = WorkspaceScope(
+        hostId = hostId,
+        hostname = hostname,
+        port = port,
+        username = username,
+        keyPath = keyPath,
+    )
 
     /**
      * A cached reopen is visible before its live reconciliation completes.
@@ -1081,7 +1108,7 @@ class FileViewerViewModel @Inject constructor(
      */
     private fun cacheIfReusable(request: Request, state: FileViewerUiState) {
         if (state is FileViewerUiState.TextContent) {
-            contentCache[ContentCacheKey(request.hostId, state.displayPath)] = state
+            contentCache[ContentCacheKey(request.workspaceScope(), state.displayPath)] = state
         }
     }
 
@@ -1422,9 +1449,20 @@ class FileViewerViewModel @Inject constructor(
          */
         internal const val CONTENT_CACHE_CAP = 8
 
-        /** Issue #1715 — text LRU identity is the resolved absolute path, not the raw request. */
-        internal data class ContentCacheKey(
+        /**
+         * Issue #1715 — text/workspace identity is the remote profile plus
+         * resolved absolute path, not only a Room id or raw request.
+         */
+        internal data class WorkspaceScope(
             val hostId: Long,
+            val hostname: String,
+            val port: Int,
+            val username: String,
+            val keyPath: String,
+        )
+
+        internal data class ContentCacheKey(
+            val scope: WorkspaceScope,
             val resolvedPath: String,
         )
 

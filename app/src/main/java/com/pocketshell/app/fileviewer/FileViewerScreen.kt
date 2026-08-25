@@ -1365,7 +1365,11 @@ private fun WorkspaceUnavailablePanel(
                 style = PocketShellType.bodyDense,
             )
             Spacer(Modifier.height(16.dp))
-            PocketShellButton(text = "Retry", onClick = onRetry)
+            PocketShellButton(
+                text = "Retry",
+                onClick = onRetry,
+                modifier = Modifier.testTag(FILE_VIEWER_WORKSPACE_RETRY_TAG),
+            )
         }
     }
 }

@@ -248,6 +248,79 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
+    fun editedHostProfileWithSameIdDoesNotReuseWorkspaceOrCachedContent() = runBlocking {
+        val source = SequencedWorkspaceSource(
+            listOf(
+                FileWorkspaceResult(
+                    workspace = FileWorkspace(
+                        orderedTabs = listOf(OpenFileTab("/host-a/restored.md", 1)),
+                        activePath = "/host-a/restored.md",
+                    ),
+                    available = true,
+                ),
+                FileWorkspaceResult(
+                    workspace = FileWorkspace(
+                        orderedTabs = listOf(OpenFileTab("/host-b/restored.md", 2)),
+                        activePath = "/host-b/restored.md",
+                    ),
+                    available = true,
+                ),
+            ),
+        )
+        val session = MutableFileSession(body = "host A")
+        val vm = viewModel(source, session)
+
+        // Room host IDs are mutable: editing a saved host can point the same
+        // row at a different endpoint/account while this Hilt VM survives.
+        vm.bind(request("/srv/shared.txt", hostId = 7L, hostname = "host-a"))
+        vm.state.awaitText { it.content == "host A" }
+        session.body.set("host B")
+        session.blockNextDownload = true
+        vm.bind(request("/srv/shared.txt", hostId = 7L, hostname = "host-b"))
+        session.awaitDownloadStarted()
+
+        assertEquals("a changed endpoint must hydrate a fresh workspace", 2, source.getCalls)
+        assertTrue(
+            "the edited host must use host B's restored tab",
+            vm.workspace.value.orderedTabs.any { it.absolutePath == "/host-b/restored.md" },
+        )
+        assertTrue(
+            "host A's tabs must not bleed through a reused Room ID",
+            vm.workspace.value.orderedTabs.none { it.absolutePath == "/host-a/restored.md" },
+        )
+        assertTrue(
+            "a changed endpoint must not paint host A's cached content",
+            vm.state.value is FileViewerUiState.Loading,
+        )
+        session.releaseDownload.complete(Unit)
+        vm.state.awaitText { it.content == "host B" }
+        vm.close()
+    }
+
+    @Test
+    fun unavailableWorkspaceExplainsHostUpdateAndRetryRestoresTabs() = runBlocking {
+        val session = MutableFileSession(body = "unused")
+        session.pathBodies["/srv/restored.md"] = "restored"
+        val source = FakeWorkspaceSource().apply { available = false }
+        val vm = viewModel(source, session)
+
+        vm.bind(request(path = null))
+        val unavailable = vm.state.awaitWorkspaceUnavailable()
+        assertTrue(unavailable.message.contains("update PocketShell on this host"))
+
+        source.available = true
+        source.stored = FileWorkspace(
+            orderedTabs = listOf(OpenFileTab("/srv/restored.md", 1)),
+            activePath = "/srv/restored.md",
+        )
+        vm.retry()
+        vm.state.awaitText { it.displayPath.endsWith("/restored.md") }
+        assertEquals("retry must ask the host for the workspace again", 2, source.getCalls)
+        assertEquals("/srv/restored.md", vm.workspace.value.activePath)
+        vm.close()
+    }
+
+    @Test
     fun relativeActiveTabStillBlocksCloseWithPendingReview() = runBlocking {
         val source = FakeWorkspaceSource()
         val vm = viewModel(source)
@@ -441,6 +514,7 @@ class FileViewerWorkspaceTest {
         fun bind(request: FileViewerViewModel.Request) = vm.bind(request)
         fun switchToTab(tab: OpenFileTab) = vm.switchToTab(tab)
         fun closeTab(tab: OpenFileTab) = vm.closeTab(tab)
+        fun retry() = vm.retry()
         fun stayOnTab() = vm.stayOnTab()
         fun discardPendingWorkAndProceed() = vm.discardPendingWorkAndProceed()
         fun hasPendingWork() = vm.hasPendingWork()
@@ -484,12 +558,30 @@ class FileViewerWorkspaceTest {
         error("viewer never reached CannotPreview; was $value")
     }
 
-    private fun request(path: String?, cwd: String? = null, hostId: Long = 1L) = FileViewerViewModel.Request(
+    private suspend fun StateFlow<FileViewerUiState>.awaitWorkspaceUnavailable(): FileViewerUiState.WorkspaceUnavailable {
+        val deadline = System.currentTimeMillis() + 10_000
+        while (System.currentTimeMillis() < deadline) {
+            val s = value
+            if (s is FileViewerUiState.WorkspaceUnavailable) return s
+            kotlinx.coroutines.delay(20)
+        }
+        error("viewer never reached WorkspaceUnavailable; was $value")
+    }
+
+    private fun request(
+        path: String?,
+        cwd: String? = null,
+        hostId: Long = 1L,
+        hostname: String = "10.0.2.2",
+        port: Int = 2222,
+        username: String = "tester",
+        keyPath: String = "/tmp/key",
+    ) = FileViewerViewModel.Request(
         hostId = hostId,
-        hostname = "10.0.2.2",
-        port = 2222,
-        username = "tester",
-        keyPath = "/tmp/key",
+        hostname = hostname,
+        port = port,
+        username = username,
+        keyPath = keyPath,
         passphrase = null,
         path = path,
         cwd = cwd,
@@ -580,6 +672,9 @@ class FileViewerWorkspaceTest {
         val pathBodies = mutableMapOf<String, String>()
         val missing = mutableSetOf<String>()
         val downloads = AtomicInteger(0)
+        var blockNextDownload: Boolean = false
+        val downloadStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val releaseDownload = kotlinx.coroutines.CompletableDeferred<Unit>()
 
         override val isConnected: Boolean
             get() = !closed
@@ -589,11 +684,25 @@ class FileViewerWorkspaceTest {
 
         override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray {
             downloads.incrementAndGet()
+            if (blockNextDownload) {
+                blockNextDownload = false
+                downloadStarted.complete(Unit)
+                releaseDownload.await()
+            }
             if (remotePath in missing) {
                 throw com.pocketshell.core.ssh.SshFileNotFoundException(remotePath)
             }
             val text = pathBodies[remotePath] ?: body.get()
             return text.toByteArray(Charsets.UTF_8)
+        }
+
+        suspend fun awaitDownloadStarted() {
+            val deadline = System.currentTimeMillis() + 10_000
+            while (System.currentTimeMillis() < deadline) {
+                if (downloadStarted.isCompleted) return
+                kotlinx.coroutines.delay(20)
+            }
+            error("viewer did not start the guarded download")
         }
 
         override suspend fun listDirectory(remotePath: String, maxEntries: Int): RemoteListing =

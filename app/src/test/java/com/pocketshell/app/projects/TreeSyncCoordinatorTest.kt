@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -26,6 +27,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.After
@@ -281,10 +283,14 @@ class TreeSyncCoordinatorTest {
             warmSessionAwaitMs = { 1_000L },
         )
 
-        remote.ensureWarmConnected(PARAMS)
-        remote.ensureWarmConnected(OTHER_PARAMS)
-        val tree = remote.getTree(OTHER_PARAMS)
-        val upgradeSession = remote.acquireSessionForUpgrade(OTHER_PARAMS)
+        val firstBinding = TreeSyncBinding(PARAMS, generation = 1L)
+        val secondBinding = TreeSyncBinding(OTHER_PARAMS, generation = 2L)
+        remote.bind(firstBinding)
+        remote.ensureWarmConnected(firstBinding)
+        remote.bind(secondBinding)
+        remote.ensureWarmConnected(secondBinding)
+        val tree = remote.getTree(secondBinding)
+        val upgradeSession = remote.acquireSessionForUpgrade(secondBinding)
 
         // Mutation caught: returning the still-connected first lease before
         // checking BoundParams makes both the tree RPC and upgrade use the
@@ -295,8 +301,129 @@ class TreeSyncCoordinatorTest {
         assertTrue(firstHostSession.closed)
     }
 
+    @Test
+    fun queuedPersistenceAndUpgradeCannotInvokeRemoteAfterHostSwitch() = runTest {
+        val remote = FakeRemote(
+            fullResults = ArrayDeque(listOf(success("held"))),
+        )
+        val coordinator = newCoordinator(remote, RecordingListener())
+
+        coordinator.bind(PARAMS, flowOf(emptyList()))
+        advanceUntilIdle()
+        remote.upsertBindings.clear()
+        remote.upgradeBindings.clear()
+
+        // Both jobs capture A but remain queued on the coordinator dispatcher.
+        // Bind(B) is the only lifecycle action between scheduling and running
+        // them, so the fake must record an invocation if either coordinator
+        // generation fence is removed.  The fake deliberately has no stale
+        // binding guard of its own.
+        coordinator.persistCurrentTree()
+        val upgradeResult = CompletableDeferred<SshSession?>()
+        backgroundScope.launch {
+            upgradeResult.complete(coordinator.acquireSessionForUpgrade(PARAMS))
+        }
+        coordinator.bind(OTHER_PARAMS, flowOf(emptyList()))
+        advanceUntilIdle()
+
+        // Mutation caught: removing TreeSyncCoordinator.persist's
+        // isCurrent(binding) check at its remote-call boundary invokes
+        // upsertTree(A) here.  This assertion therefore cannot be laundered by
+        // a remote double that independently rejects stale bindings.
+        assertTrue(remote.upsertBindings.isEmpty())
+        assertTrue(remote.upgradeBindings.isEmpty())
+        assertNull(upgradeResult.await())
+        assertEquals(OTHER_PARAMS, remote.currentBinding?.params)
+    }
+
+    @Test
+    fun inFlightPersistenceCannotReacquireOldLeaseAfterHostSwitch() = runTest {
+        val aConnectStarted = CompletableDeferred<Unit>()
+        val releaseAConnect = CompletableDeferred<Unit>()
+        val firstHostSession = HostTaggedSshSession("first-host")
+        val secondHostSession = HostTaggedSshSession("second-host")
+        val connector = BlockingHostRoutingConnector(
+            sessions = mapOf(
+                PARAMS.hostname to firstHostSession,
+                OTHER_PARAMS.hostname to secondHostSession,
+            ),
+            blockedHost = PARAMS.hostname,
+            connectStarted = aConnectStarted,
+            releaseConnect = releaseAConnect,
+        )
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val leaseManager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 0L,
+            connectTimeoutContext = dispatcher,
+            abortTimeoutContext = dispatcher,
+        )
+        val treeSource = TreeRemoteSource().apply {
+            remoteExecDispatcher = dispatcher
+            remoteExecTimeoutMs = 1_000L
+        }
+        val remote = FolderListTreeSyncRemote(
+            gateway = unusedProxy(),
+            hostDao = unusedProxy(),
+            treeRemoteSource = treeSource,
+            sshLeaseManager = leaseManager,
+            activeTmuxClients = null,
+            scope = this,
+            dispatcher = { dispatcher },
+            warmSessionAwaitMs = { 1_000L },
+        )
+        val firstBinding = TreeSyncBinding(PARAMS, generation = 1L)
+        val secondBinding = TreeSyncBinding(OTHER_PARAMS, generation = 2L)
+
+        remote.bind(firstBinding)
+        val persistence = backgroundScope.launch {
+            remote.upsertTree(
+                firstBinding,
+                listOf(
+                    TreeRemoteSource.TreeNode(
+                        session = "persisted",
+                        order = 0,
+                        folderPath = "/persisted",
+                        collapsed = false,
+                    ),
+                ),
+            )
+        }
+        aConnectStarted.await()
+
+        // The A operation is suspended in the real adapter before its warm
+        // lease is acquired.  B becomes current while that operation is live;
+        // releasing A must not let the stale caller reacquire A or issue the
+        // persistence RPC with A's session.
+        remote.bind(secondBinding)
+        val bWarm = backgroundScope.launch { remote.ensureWarmConnected(secondBinding) }
+        val staleEnsure = backgroundScope.launch {
+            // This is the delayed ensure that a fire-and-forget persistence
+            // caller can reach after the host bind has already advanced.
+            remote.ensureWarmConnected(firstBinding)
+        }
+        releaseAConnect.complete(Unit)
+        advanceUntilIdle()
+        persistence.join()
+        staleEnsure.join()
+        bWarm.join()
+
+        // Mutation caught: removing the adapter's generation checks permits
+        // a second A lease request or an A tree RPC after bind(B).  The only
+        // valid post-switch connection is B, and A must never receive a tree
+        // command.
+        assertEquals(
+            listOf(PARAMS.hostname, OTHER_PARAMS.hostname),
+            connector.requestedHosts,
+        )
+        assertTrue(firstHostSession.execCommands.isEmpty())
+        assertFalse(persistence.isCancelled)
+        remote.releaseWarm()
+    }
+
     private fun TestScope.newCoordinator(
-        remote: FakeRemote,
+        remote: TreeSyncRemote,
         listener: RecordingListener,
         cache: TreeSyncCache? = null,
         policy: TreeSyncPolicy = TreeSyncPolicy(periodicEnabled = false),
@@ -364,14 +491,22 @@ class TreeSyncCoordinatorTest {
             private set
         var firstFullCancelled = false
             private set
+        val upsertBindings = mutableListOf<TreeSyncBinding>()
+        val upgradeBindings = mutableListOf<TreeSyncBinding>()
+        var currentBinding: TreeSyncBinding? = null
+            private set
         private var concurrent = 0
 
-        override fun events(params: BoundParams): Flow<TreeSyncEvent> = eventFlow
+        override fun bind(binding: TreeSyncBinding) {
+            currentBinding = binding
+        }
 
-        override suspend fun ensureWarmConnected(params: BoundParams) = Unit
+        override fun events(binding: TreeSyncBinding): Flow<TreeSyncEvent> = eventFlow
+
+        override suspend fun ensureWarmConnected(binding: TreeSyncBinding) = Unit
 
         override suspend fun fullReconcile(
-            params: BoundParams,
+            binding: TreeSyncBinding,
             watchedFolders: List<ProjectRootEntity>,
         ): TreeSyncRemote.FullResult {
             fullCalls++
@@ -397,19 +532,25 @@ class TreeSyncCoordinatorTest {
             }
         }
 
-        override suspend fun getTree(params: BoundParams): TreeRemoteSource.TreeResult = treeResult
+        override suspend fun getTree(binding: TreeSyncBinding): TreeRemoteSource.TreeResult = treeResult
 
-        override suspend fun reconcileTree(params: BoundParams): TreeRemoteSource.ReconcileDelta? {
+        override suspend fun reconcileTree(binding: TreeSyncBinding): TreeRemoteSource.ReconcileDelta? {
             deltaCalls++
             return deltas.removeFirstOrNull()
         }
 
         override suspend fun upsertTree(
-            params: BoundParams,
+            binding: TreeSyncBinding,
             nodes: List<TreeRemoteSource.TreeNode>,
-        ): Boolean = true
+        ): Boolean {
+            upsertBindings += binding
+            return true
+        }
 
-        override suspend fun acquireSessionForUpgrade(params: BoundParams): SshSession? = null
+        override suspend fun acquireSessionForUpgrade(binding: TreeSyncBinding): SshSession? {
+            upgradeBindings += binding
+            return null
+        }
 
         override suspend fun releaseWarm() = Unit
     }
@@ -425,21 +566,44 @@ class TreeSyncCoordinatorTest {
         }
     }
 
+    private class BlockingHostRoutingConnector(
+        private val sessions: Map<String, HostTaggedSshSession>,
+        private val blockedHost: String,
+        private val connectStarted: CompletableDeferred<Unit>,
+        private val releaseConnect: CompletableDeferred<Unit>,
+    ) : SshLeaseConnector {
+        val requestedHosts = mutableListOf<String>()
+
+        override suspend fun connect(target: com.pocketshell.core.ssh.SshLeaseTarget): Result<SshSession> {
+            val host = target.leaseKey.host
+            requestedHosts += host
+            if (host == blockedHost && requestedHosts.count { it == blockedHost } == 1) {
+                connectStarted.complete(Unit)
+                releaseConnect.await()
+            }
+            return Result.success(sessions.getValue(host))
+        }
+    }
+
     private class HostTaggedSshSession(
         private val hostTag: String,
     ) : SshSession {
         var closed = false
+        val execCommands = mutableListOf<String>()
 
         override val isConnected: Boolean
             get() = !closed
 
-        override suspend fun exec(command: String): ExecResult = ExecResult(
-            stdout = """
-                {"nodes":[{"session":"$hostTag","order":0,"folder_path":"/$hostTag","collapsed":false}]}
-            """.trimIndent(),
-            stderr = "",
-            exitCode = 0,
-        )
+        override suspend fun exec(command: String): ExecResult {
+            execCommands += command
+            return ExecResult(
+                stdout = """
+                    {"nodes":[{"session":"$hostTag","order":0,"folder_path":"/$hostTag","collapsed":false}]}
+                """.trimIndent(),
+                stderr = "",
+                exitCode = 0,
+            )
+        }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job = error("not used")
 

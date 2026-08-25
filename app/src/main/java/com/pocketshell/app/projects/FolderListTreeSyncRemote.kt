@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -47,11 +49,28 @@ internal class FolderListTreeSyncRemote(
     private var warmJob: Job? = null
     private var warmLease: SshLease? = null
     private val warmSessionReady = kotlinx.coroutines.flow.MutableStateFlow(false)
-    private var boundParams: BoundParams? = null
+    private var currentBinding: TreeSyncBinding? = null
+    private var warmBinding: TreeSyncBinding? = null
+    private val warmMutex = Mutex()
 
-    override fun events(params: BoundParams): Flow<TreeSyncEvent> {
+    override fun bind(binding: TreeSyncBinding) {
+        val previous = currentBinding
+        if (previous != null && previous.generation > binding.generation) return
+        if (previous == binding) return
+        currentBinding = binding
+        warmBinding = null
+        warmSessionReady.value = false
+        // The coordinator cancels only its wrapper job. Cancel the adapter's
+        // sibling warm job immediately; the next ensure joins it before
+        // releasing the old lease and dialing the new host.
+        warmJob?.cancel()
+    }
+
+    override fun events(binding: TreeSyncBinding): Flow<TreeSyncEvent> {
         val registry = activeTmuxClients ?: return emptyFlow()
         return channelFlow {
+            if (!isCurrent(binding)) return@channelFlow
+            val params = binding.params
             launch {
                 registry.clients
                     .map { snapshot -> snapshot[params.hostId]?.takeIf { it.matches(params) }?.client }
@@ -81,33 +100,19 @@ internal class FolderListTreeSyncRemote(
         }
     }
 
-    override suspend fun ensureWarmConnected(params: BoundParams) {
-        if (boundParams != params) {
-            invalidateWarmStateForHostSwitch()
-            boundParams = params
-        }
-        if (warmLease?.session?.isConnected == true) return
-        val liveClient = activeTmuxClients?.clients?.value?.get(params.hostId)
-            ?.takeIf { it.matches(params) }
-            ?.takeUnless { it.client.disconnected.value }
-        if (liveClient != null) return
-
-        val existing = warmJob
-        if (existing != null && existing.isActive) {
-            existing.join()
-        } else if (warmLease == null && (existing == null || existing.isCancelled)) {
-            val job = scope.launch { replaceWarmLease(params) }
-            warmJob = job
-            job.join()
-        }
+    override suspend fun ensureWarmConnected(binding: TreeSyncBinding) = warmMutex.withLock {
+        ensureWarmConnectedLocked(binding)
     }
 
     override suspend fun fullReconcile(
-        params: BoundParams,
+        binding: TreeSyncBinding,
         watchedFolders: List<com.pocketshell.core.storage.entity.ProjectRootEntity>,
     ): TreeSyncRemote.FullResult {
+        if (!isCurrent(binding)) return staleFullResult()
+        val params = binding.params
         val host = withContext(dispatcher()) { hostDao.getById(params.hostId) }
             ?: return TreeSyncRemote.FullResult.HostNotFound
+        if (!isCurrent(binding)) return staleFullResult()
         return when (
             val result = gateway.listSessionsWithFolder(
                 host = host,
@@ -123,52 +128,100 @@ internal class FolderListTreeSyncRemote(
         }
     }
 
-    override suspend fun getTree(params: BoundParams): TreeRemoteSource.TreeResult {
+    override suspend fun getTree(binding: TreeSyncBinding): TreeRemoteSource.TreeResult {
+        if (!isCurrent(binding)) return TreeRemoteSource.TreeResult.Empty
+        val params = binding.params
         val source = treeRemoteSource ?: return TreeRemoteSource.TreeResult.Empty
-        val session = awaitWarmSession(params) ?: return TreeRemoteSource.TreeResult.Empty
+        val session = awaitWarmSession(binding) ?: return TreeRemoteSource.TreeResult.Empty
+        if (!isCurrent(binding)) return TreeRemoteSource.TreeResult.Empty
         return source.getTree(session, params.hostName)
     }
 
-    override suspend fun reconcileTree(params: BoundParams): TreeRemoteSource.ReconcileDelta? {
+    override suspend fun reconcileTree(binding: TreeSyncBinding): TreeRemoteSource.ReconcileDelta? {
+        if (!isCurrent(binding)) return null
+        val params = binding.params
         val source = treeRemoteSource ?: return null
-        val session = awaitWarmSession(params) ?: return null
+        val session = awaitWarmSession(binding) ?: return null
+        if (!isCurrent(binding)) return null
         return source.reconcileTree(session, params.hostName)
     }
 
     override suspend fun upsertTree(
-        params: BoundParams,
+        binding: TreeSyncBinding,
         nodes: List<TreeRemoteSource.TreeNode>,
     ): Boolean {
+        if (!isCurrent(binding)) return false
+        val params = binding.params
         val source = treeRemoteSource ?: return false
-        val session = awaitWarmSession(params) ?: return false
+        val session = awaitWarmSession(binding) ?: return false
+        if (!isCurrent(binding)) return false
         return source.upsertTree(session, params.hostName, nodes)
     }
 
-    override suspend fun acquireSessionForUpgrade(params: BoundParams): SshSession? {
-        ensureWarmConnected(params)
-        warmLease?.session?.takeIf { it.isConnected }?.let { return it }
-        warmJob?.takeIf { it.isActive }?.join()
-        warmLease?.session?.takeIf { it.isConnected }?.let { return it }
-        replaceWarmLease(params)
-        return warmLease?.session?.takeIf { it.isConnected }
-    }
-
-    override suspend fun releaseWarm() {
-        val lease = warmLease ?: return
-        warmLease = null
-        warmSessionReady.value = false
-        withContext(NonCancellable + dispatcher()) {
-            withTimeoutOrNull(WARM_LEASE_RELEASE_TIMEOUT_MS) { lease.release() }
+    override suspend fun acquireSessionForUpgrade(binding: TreeSyncBinding): SshSession? =
+        warmMutex.withLock {
+            if (!isCurrent(binding)) return@withLock null
+            ensureWarmConnectedLocked(binding)
+            if (!isCurrent(binding)) return@withLock null
+            liveWarmSessionFor(binding)?.let { return@withLock it }
+            warmJob?.takeIf { it.isActive }?.join()
+            if (!isCurrent(binding)) return@withLock null
+            liveWarmSessionFor(binding)?.let { return@withLock it }
+            replaceWarmLease(binding)
+            if (!isCurrent(binding)) return@withLock null
+            liveWarmSessionFor(binding)
         }
+
+    override suspend fun releaseWarm() = warmMutex.withLock {
+        releaseWarmLocked()
     }
 
-    private suspend fun awaitWarmSession(params: BoundParams): SshSession? {
-        ensureWarmConnected(params)
-        warmLease?.session?.let { return it }
+    private suspend fun awaitWarmSession(binding: TreeSyncBinding): SshSession? {
+        ensureWarmConnected(binding)
+        if (!isCurrent(binding)) return null
+        warmSessionFor(binding)?.let { return it }
         val ready = withTimeoutOrNull(warmSessionAwaitMs()) {
             warmSessionReady.first { it }
         }
-        return if (ready == true && boundParams == params) warmLease?.session else null
+        return if (ready == true && isCurrent(binding)) warmSessionFor(binding) else null
+    }
+
+    private suspend fun ensureWarmConnectedLocked(binding: TreeSyncBinding) {
+        if (!isCurrent(binding)) return
+        if (warmBinding != binding) {
+            invalidateWarmStateForHostSwitch()
+            if (!isCurrent(binding)) return
+            warmBinding = binding
+            warmSessionReady.value = false
+        }
+        if (!isCurrent(binding)) return
+        if (warmSessionFor(binding)?.isConnected == true) return
+        val params = binding.params
+        val liveClient = activeTmuxClients?.clients?.value?.get(params.hostId)
+            ?.takeIf { it.matches(params) }
+            ?.takeUnless { it.client.disconnected.value }
+        if (!isCurrent(binding) || liveClient != null) return
+
+        val existing = warmJob
+        if (existing != null && existing.isActive) {
+            existing.join()
+        } else if (warmLease == null && (existing == null || existing.isCancelled)) {
+            val job = scope.launch { replaceWarmLease(binding) }
+            warmJob = job
+            job.join()
+        }
+    }
+
+    private suspend fun releaseWarmLocked() {
+        val lease = warmLease
+        warmLease = null
+        warmBinding = null
+        warmSessionReady.value = false
+        if (lease != null) {
+            withContext(NonCancellable + dispatcher()) {
+                withTimeoutOrNull(WARM_LEASE_RELEASE_TIMEOUT_MS) { lease.release() }
+            }
+        }
     }
 
     /**
@@ -180,21 +233,23 @@ internal class FolderListTreeSyncRemote(
         val previousWarmJob = warmJob
         warmJob = null
         previousWarmJob?.cancelAndJoin()
-        releaseWarm()
+        releaseWarmLocked()
     }
 
-    private suspend fun replaceWarmLease(params: BoundParams) {
-        releaseWarm()
+    private suspend fun replaceWarmLease(binding: TreeSyncBinding) {
+        if (!isCurrent(binding)) return
+        releaseWarmFor(binding)
+        if (!isCurrent(binding)) return
         var acquiredLease: SshLease? = null
         try {
-            val lease = sshLeaseManager.acquire(params.toSshLeaseTarget()).getOrNull() ?: return
+            val lease = sshLeaseManager.acquire(binding.params.toSshLeaseTarget()).getOrNull() ?: return
             acquiredLease = lease
             onWarmSessionAcquired()
             withContext(NonCancellable) {
-                if (boundParams != params) return@withContext
+                if (!isCurrent(binding)) return@withContext
                 warmLease = lease
                 acquiredLease = null
-                boundParams = params
+                warmBinding = binding
                 warmSessionReady.value = true
             }
         } catch (cancellation: CancellationException) {
@@ -203,6 +258,27 @@ internal class FolderListTreeSyncRemote(
             acquiredLease?.release()
         }
     }
+
+    private fun isCurrent(binding: TreeSyncBinding): Boolean = currentBinding == binding
+
+    private fun warmSessionFor(binding: TreeSyncBinding): SshSession? =
+        warmLease?.session?.takeIf { warmBinding == binding }
+
+    private fun liveWarmSessionFor(binding: TreeSyncBinding): SshSession? =
+        warmSessionFor(binding)?.takeIf { it.isConnected }
+
+    private suspend fun releaseWarmFor(binding: TreeSyncBinding) {
+        if (warmBinding != binding) return
+        releaseWarmLocked()
+        // Replacing a lease for the same binding must not look like a failed
+        // host switch.  Keep the completed warm attempt associated with this
+        // generation so the reconcile can surface its failure through the
+        // gateway instead of immediately dialing a third time.
+        if (isCurrent(binding)) warmBinding = binding
+    }
+
+    private fun staleFullResult(): TreeSyncRemote.FullResult =
+        TreeSyncRemote.FullResult.ConnectFailed(CancellationException("stale tree binding"))
 
     private fun ActiveTmuxClients.Entry.matches(params: BoundParams): Boolean =
         hostname == params.hostname &&

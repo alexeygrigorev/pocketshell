@@ -24,6 +24,12 @@ internal sealed interface TreeSyncEvent {
     data class WindowClosed(val windowId: String) : TreeSyncEvent
 }
 
+/** Immutable host binding carried by every asynchronous tree operation. */
+internal data class TreeSyncBinding(
+    val params: BoundParams,
+    val generation: Long,
+)
+
 /**
  * Remote operations needed by [TreeSyncCoordinator].
  *
@@ -35,25 +41,27 @@ internal sealed interface TreeSyncEvent {
 internal interface TreeSyncRemote {
     val hasDurableTree: Boolean
 
-    fun events(params: BoundParams): Flow<TreeSyncEvent>
+    fun bind(binding: TreeSyncBinding) {}
 
-    suspend fun ensureWarmConnected(params: BoundParams)
+    fun events(binding: TreeSyncBinding): Flow<TreeSyncEvent>
+
+    suspend fun ensureWarmConnected(binding: TreeSyncBinding)
 
     suspend fun fullReconcile(
-        params: BoundParams,
+        binding: TreeSyncBinding,
         watchedFolders: List<ProjectRootEntity>,
     ): FullResult
 
-    suspend fun getTree(params: BoundParams): TreeRemoteSource.TreeResult
+    suspend fun getTree(binding: TreeSyncBinding): TreeRemoteSource.TreeResult
 
-    suspend fun reconcileTree(params: BoundParams): TreeRemoteSource.ReconcileDelta?
+    suspend fun reconcileTree(binding: TreeSyncBinding): TreeRemoteSource.ReconcileDelta?
 
     suspend fun upsertTree(
-        params: BoundParams,
+        binding: TreeSyncBinding,
         nodes: List<TreeRemoteSource.TreeNode>,
     ): Boolean
 
-    suspend fun acquireSessionForUpgrade(params: BoundParams): com.pocketshell.core.ssh.SshSession?
+    suspend fun acquireSessionForUpgrade(binding: TreeSyncBinding): com.pocketshell.core.ssh.SshSession?
 
     suspend fun releaseWarm()
 
@@ -128,6 +136,8 @@ internal class TreeSyncCoordinator(
     val watchedFolders: List<ProjectRootEntity> get() = lastWatchedFolders
 
     private var bound: BoundParams? = null
+    private var binding: TreeSyncBinding? = null
+    private var nextBindingGeneration: Long = 0L
     private var watchedFoldersJob: Job? = null
     private var cacheSeedJob: Job? = null
     private var hydrateJob: Job? = null
@@ -164,8 +174,15 @@ internal class TreeSyncCoordinator(
     fun bind(params: BoundParams, watchedFolders: Flow<List<ProjectRootEntity>>) {
         if (closed) return
         val sameHost = bound == params && !tree.bindHost(params.hostId)
+        val nextBinding = if (sameHost) {
+            checkNotNull(binding)
+        } else {
+            TreeSyncBinding(params = params, generation = ++nextBindingGeneration)
+        }
         warmReleaseJob?.cancel()
         warmReleaseJob = null
+        binding = nextBinding
+        remote.bind(nextBinding)
 
         if (!sameHost) {
             reconcileJob?.cancel()
@@ -186,30 +203,30 @@ internal class TreeSyncCoordinator(
             bound = params
             tree.bindHost(params.hostId)
             warmConnectJob?.cancel()
-            warmConnectJob = scope.launch { remote.ensureWarmConnected(params) }
-            if (!hydrateFromClientCache(params)) {
+            warmConnectJob = scope.launch { remote.ensureWarmConnected(nextBinding) }
+            if (!hydrateFromClientCache(nextBinding)) {
                 listener.onLoadingRequested()
-                warmFromClientCacheOffMain(params)
+                warmFromClientCacheOffMain(nextBinding)
             }
         } else {
             bound = params
             if (tree.hasSnapshot) listener.onTreeChanged()
-            maybeReconcileOnOpen(params)
+            maybeReconcileOnOpen(nextBinding)
         }
 
-        bindWatchedFolders(params, watchedFolders)
-        ensureEventSubscription(params)
-        startPeriodic(params)
+        bindWatchedFolders(nextBinding, watchedFolders)
+        ensureEventSubscription(nextBinding)
+        startPeriodic(nextBinding)
     }
 
     /** Explicit pull-to-refresh, error-panel retry, or action confirmation. */
     fun requestReconcile() {
-        val params = bound ?: return
+        val currentBinding = binding ?: return
         if (!rootSnapshotLoadedState) {
             listener.onLoadingRequested()
             return
         }
-        scheduleReconcile(params, ReconcileMode.Full)
+        scheduleReconcile(currentBinding, ReconcileMode.Full)
     }
 
     /** Request a generation-safe probe after a name-only lifecycle hint. */
@@ -225,24 +242,30 @@ internal class TreeSyncCoordinator(
 
     fun setPeriodicEnabledForTest(enabled: Boolean) {
         policy.periodicEnabled = enabled
-        bound?.let(::startPeriodic)
+        binding?.let(::startPeriodic)
     }
 
     suspend fun acquireSessionForUpgrade(params: BoundParams) =
-        remote.acquireSessionForUpgrade(params)
+        binding?.takeIf { it.params == params }?.let { current ->
+            remote.acquireSessionForUpgrade(current)
+        }
 
-    suspend fun getTreeForUpgrade(params: BoundParams) = remote.getTree(params)
+    suspend fun getTreeForUpgrade(params: BoundParams) =
+        binding?.takeIf { it.params == params }?.let { current ->
+            remote.getTree(current)
+        }
+            ?: TreeRemoteSource.TreeResult.Empty
 
     /** Toggle + persist is a tree mutation, not a UI-only operation. */
     fun toggleProjectExpanded(projectPath: String) {
         tree.toggleProjectExpanded(projectPath)
         listener.onTreeChanged()
-        bound?.let(::persist)
+        binding?.let(::persist)
     }
 
     /** Persist after an app action that has already mutated [tree]. */
     fun persistCurrentTree() {
-        bound?.let(::persist)
+        binding?.let(::persist)
     }
 
     fun setProcessStartedForTest(started: Boolean) {
@@ -282,19 +305,19 @@ internal class TreeSyncCoordinator(
     }
 
     private fun bindWatchedFolders(
-        params: BoundParams,
+        binding: TreeSyncBinding,
         watchedFolders: Flow<List<ProjectRootEntity>>,
     ) {
         watchedFoldersJob?.cancel()
         watchedFoldersJob = scope.launch {
             watchedFolders.collectLatest { rows ->
-                if (closed || bound != params) return@collectLatest
+                if (!isCurrent(binding)) return@collectLatest
                 lastWatchedFolders = rows
                 tree.setWatchedFolders(rows)
                 val firstSnapshot = !rootSnapshotLoadedState
                 rootSnapshotLoadedState = true
                 if (firstSnapshot) {
-                    hydrateTreeOnColdStart(params)
+                    hydrateTreeOnColdStart(binding)
                 } else {
                     listener.onTreeChanged()
                 }
@@ -302,7 +325,8 @@ internal class TreeSyncCoordinator(
         }
     }
 
-    private fun hydrateFromClientCache(params: BoundParams): Boolean {
+    private fun hydrateFromClientCache(binding: TreeSyncBinding): Boolean {
+        val params = binding.params
         val cached = cache?.peek(params.hostName) ?: return false
         if (cached.isEmpty) return false
         if (!applyCachedTree(cached)) return false
@@ -310,7 +334,8 @@ internal class TreeSyncCoordinator(
         return true
     }
 
-    private fun warmFromClientCacheOffMain(params: BoundParams) {
+    private fun warmFromClientCacheOffMain(binding: TreeSyncBinding) {
+        val params = binding.params
         val cache = cache ?: return
         cacheSeedJob?.cancel()
         cacheSeedJob = scope.launch(dispatcher()) {
@@ -321,7 +346,7 @@ internal class TreeSyncCoordinator(
             // Dispatchers.Main here makes the coordinator impossible to run
             // under a focused JVM harness and gives cache I/O a second,
             // non-injectable lifecycle context.
-            if (closed || bound != params || cached.isEmpty) return@launch
+            if (!isCurrent(binding) || cached.isEmpty) return@launch
             if (!applyCachedTree(cached)) return@launch
             listener.onTreeChanged()
         }
@@ -338,22 +363,23 @@ internal class TreeSyncCoordinator(
         return tree.hasSnapshot
     }
 
-    private fun hydrateTreeOnColdStart(params: BoundParams) {
+    private fun hydrateTreeOnColdStart(binding: TreeSyncBinding) {
+        val params = binding.params
         hydrateJob?.cancel()
         hydrateJob = scope.launch {
             cacheSeedJob?.join()
-            if (closed || bound != params) return@launch
+            if (!isCurrent(binding)) return@launch
             processStarted.first { it }
             if (!remote.hasDurableTree) {
-                if (isCurrent(params)) maybeReconcileOnOpen(params)
+                if (isCurrent(binding)) maybeReconcileOnOpen(binding)
                 return@launch
             }
             var cancelled = false
             try {
                 val result = withTimeoutOrNull(policy.hydrateTimeoutMs) {
-                    async(dispatcher()) { remote.getTree(params) }.await()
+                    async(dispatcher()) { remote.getTree(binding) }.await()
                 } ?: TreeRemoteSource.TreeResult.Empty
-                if (!isCurrent(params)) return@launch
+                if (!isCurrent(binding)) return@launch
                 result.cliVersion?.let(listener::onPayloadCliVersion)
                 if (result.nodes.isNotEmpty()) {
                     tree.hydrate(result.nodes.map { it.toHydratedNode() })
@@ -366,13 +392,14 @@ internal class TreeSyncCoordinator(
                 // Hydrate is advisory. The authoritative full reconcile still
                 // runs below when the host is current.
             } finally {
-                if (!cancelled && isCurrent(params)) maybeReconcileOnOpen(params)
+                if (!cancelled && isCurrent(binding)) maybeReconcileOnOpen(binding)
             }
         }
     }
 
-    private fun maybeReconcileOnOpen(params: BoundParams) {
-        if (!isCurrent(params)) return
+    private fun maybeReconcileOnOpen(binding: TreeSyncBinding) {
+        if (!isCurrent(binding)) return
+        val params = binding.params
         if (!rootSnapshotLoadedState) {
             listener.onLoadingRequested()
             return
@@ -381,84 +408,86 @@ internal class TreeSyncCoordinator(
         if (identityReconcileRequested ||
             tree.reconcileDue(now = clock(), staleAfterMs = policy.staleAfterMs)
         ) {
-            scheduleReconcile(params, ReconcileMode.Full)
+            scheduleReconcile(binding, ReconcileMode.Full)
         } else {
             listener.onTreeChanged()
         }
     }
 
     private fun maybeReconcileOnResume() {
-        val params = bound ?: return
-        if (closed || !rootSnapshotLoadedState) return
+        val binding = binding ?: return
+        val params = binding.params
+        if (!isCurrent(binding) || !rootSnapshotLoadedState) return
         if (foregroundGeneration == lastResumeGenerationHandled) return
         lastResumeGenerationHandled = foregroundGeneration
         if (identityReconcileRequested ||
             !tree.reconcileDue(now = clock(), staleAfterMs = policy.resumeFreshenMs)
         ) return
         scheduleReconcile(
-            params,
+            binding,
             if (remote.hasDurableTree && tree.hasSnapshot) ReconcileMode.DeltaThenFull
             else ReconcileMode.Full,
         )
     }
 
-    private fun scheduleReconcile(params: BoundParams, mode: ReconcileMode) {
+    private fun scheduleReconcile(binding: TreeSyncBinding, mode: ReconcileMode) {
         reconcileJob?.cancel()
         val generation = ++reconcileGeneration
         reconcileJob = scope.launch {
-            if (!isCurrent(params)) return@launch
+            if (!isCurrent(binding)) return@launch
             listener.onLoadingRequestedIfNeeded()
             processStarted.first { it }
-            if (!isCurrent(params)) return@launch
+            if (!isCurrent(binding)) return@launch
             setRefreshing(true)
             try {
                 when (mode) {
-                    ReconcileMode.Full -> runFullReconcile(params, generation)
-                    ReconcileMode.DeltaThenFull -> runDeltaThenFull(params, generation)
+                    ReconcileMode.Full -> runFullReconcile(binding, generation)
+                    ReconcileMode.DeltaThenFull -> runDeltaThenFull(binding, generation)
                 }
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (unexpected: Throwable) {
-                if (isCurrent(params)) listener.onUnexpectedFailure(unexpected)
+                if (isCurrent(binding)) listener.onUnexpectedFailure(unexpected)
             } finally {
                 if (generation == reconcileGeneration) setRefreshing(false)
             }
         }
     }
 
-    private suspend fun runDeltaThenFull(params: BoundParams, generation: Long) {
+    private suspend fun runDeltaThenFull(binding: TreeSyncBinding, generation: Long) {
         val delta = withTimeoutOrNull(policy.reconcileTimeoutMs + 1_000L) {
-            remote.reconcileTree(params)
+            remote.reconcileTree(binding)
         }
-        if (!isCurrent(params) || generation != reconcileGeneration) return
+        if (!isCurrent(binding) || generation != reconcileGeneration) return
         delta?.cliVersion?.let(listener::onPayloadCliVersion)
         if (delta == null || delta.added.isNotEmpty() || delta.gone.isNotEmpty()) {
-            runFullReconcile(params, generation)
+            runFullReconcile(binding, generation)
         }
     }
 
-    private suspend fun runFullReconcile(params: BoundParams, generation: Long) {
-        while (isCurrent(params) && generation == reconcileGeneration) {
+    private suspend fun runFullReconcile(binding: TreeSyncBinding, generation: Long) {
+        val params = binding.params
+        while (isCurrent(binding) && generation == reconcileGeneration) {
             // The warm connect has its own bound. It is intentionally outside
             // the enumeration timeout so a slow-but-valid cold dial is not
             // misreported as a 12-second list timeout.
-            remote.ensureWarmConnected(params)
-            if (!isCurrent(params) || generation != reconcileGeneration) return
+            remote.ensureWarmConnected(binding)
+            if (!isCurrent(binding) || generation != reconcileGeneration) return
             // The pre-extraction ViewModel awaited the bind-time engine
             // registry read before asking the folder gateway to enumerate
             // sessions. Keep that ordering at the coordinator boundary so a
             // cold bind cannot classify rows against an empty registry.
             awaitBeforeFullReconcile(params)
-            if (!isCurrent(params) || generation != reconcileGeneration) return
+            if (!isCurrent(binding) || generation != reconcileGeneration) return
             val result = withTimeoutOrNull(policy.reconcileTimeoutMs) {
-                remote.fullReconcile(params, lastWatchedFolders)
+                remote.fullReconcile(binding, lastWatchedFolders)
             } ?: TreeSyncRemote.FullResult.ConnectFailed(
                 FolderReconcileTimeoutException(policy.reconcileTimeoutMs),
             )
-            if (!isCurrent(params) || generation != reconcileGeneration) return
+            if (!isCurrent(binding) || generation != reconcileGeneration) return
             when (result) {
                 is TreeSyncRemote.FullResult.Sessions -> {
-                    applySuccessfulReconcile(params, result.result)
+                    applySuccessfulReconcile(binding, result.result)
                     return
                 }
                 TreeSyncRemote.FullResult.HostNotFound -> {
@@ -470,7 +499,7 @@ internal class TreeSyncCoordinator(
                     return
                 }
                 is TreeSyncRemote.FullResult.Failed -> {
-                    if (retryTransient(params, RuntimeException(result.message))) continue
+                    if (retryTransient(binding, RuntimeException(result.message))) continue
                     listener.onReconcileFailure(TreeSyncFailure.Failed(result.message))
                     return
                 }
@@ -479,7 +508,7 @@ internal class TreeSyncCoordinator(
                         listener.onReconcileFailure(TreeSyncFailure.Timeout)
                         return
                     }
-                    if (retryTransient(params, result.cause)) continue
+                    if (retryTransient(binding, result.cause)) continue
                     listener.onReconcileFailure(TreeSyncFailure.ConnectFailed(result.cause))
                     return
                 }
@@ -487,18 +516,18 @@ internal class TreeSyncCoordinator(
         }
     }
 
-    private suspend fun retryTransient(params: BoundParams, cause: Throwable): Boolean {
+    private suspend fun retryTransient(binding: TreeSyncBinding, cause: Throwable): Boolean {
         if (!isTransientFolderRefreshDrop(cause)) return false
         if (transientRetries >= policy.transientRetryLimit) {
             transientRetries = 0
             return false
         }
         transientRetries += 1
-        return isCurrent(params)
+        return isCurrent(binding)
     }
 
     private fun applySuccessfulReconcile(
-        params: BoundParams,
+        binding: TreeSyncBinding,
         result: FolderListResult.Sessions,
     ) {
         val entries = result.rows.map { it.toSessionEntry() }
@@ -520,22 +549,23 @@ internal class TreeSyncCoordinator(
         identityReconcileRequested = false
         listener.onReconcileSuccess(result)
         listener.onTreeChanged()
-        persist(params)
+        persist(binding)
     }
 
-    private fun ensureEventSubscription(params: BoundParams) {
-        if (eventJob?.isActive == true && bound == params) return
+    private fun ensureEventSubscription(binding: TreeSyncBinding) {
+        val params = binding.params
+        if (eventJob?.isActive == true && this.binding == binding) return
         eventJob?.cancel()
         eventJob = scope.launch {
-            remote.events(params).collect { event ->
-                if (!isCurrent(params) || !rootSnapshotLoadedState) return@collect
+            remote.events(binding).collect { event ->
+                if (!isCurrent(binding) || !rootSnapshotLoadedState) return@collect
                 when (event) {
                     TreeSyncEvent.SessionsChanged -> {
                         debounceJob?.cancel()
                         debounceJob = launch {
                             delay(policy.sessionsChangedDebounceMs)
-                            if (isCurrent(params) && rootSnapshotLoadedState) {
-                                scheduleReconcile(params, ReconcileMode.Full)
+                            if (isCurrent(binding) && rootSnapshotLoadedState) {
+                                scheduleReconcile(binding, ReconcileMode.Full)
                             }
                         }
                     }
@@ -549,26 +579,28 @@ internal class TreeSyncCoordinator(
         }
     }
 
-    private fun startPeriodic(params: BoundParams) {
+    private fun startPeriodic(binding: TreeSyncBinding) {
         periodicJob?.cancel()
         periodicJob = null
         if (!policy.periodicEnabled) return
         periodicJob = scope.launch {
-            while (isCurrent(params)) {
+            while (isCurrent(binding)) {
                 delay(policy.periodicReconcileMs)
-                if (isCurrent(params) && rootSnapshotLoadedState) {
-                    scheduleReconcile(params, ReconcileMode.Full)
+                if (isCurrent(binding) && rootSnapshotLoadedState) {
+                    scheduleReconcile(binding, ReconcileMode.Full)
                 }
             }
         }
     }
 
-    private fun persist(params: BoundParams) {
+    private fun persist(binding: TreeSyncBinding) {
+        val params = binding.params
         val nodes = tree.exportNodes().map { it.toTreeNode() }
         if (nodes.isNotEmpty()) {
             scope.launch {
+                if (!isCurrent(binding)) return@launch
                 withTimeoutOrNull(policy.hydrateTimeoutMs) {
-                    runCatching { remote.upsertTree(params, nodes) }
+                    runCatching { remote.upsertTree(binding, nodes) }
                 }
             }
         }
@@ -582,7 +614,9 @@ internal class TreeSyncCoordinator(
             historyProjectFoldersByRoot = structure.historyProjectFoldersByRoot,
         )
         scope.launch(dispatcher()) {
-            runCatching { cache.write(params.hostName, cached) }
+            if (isCurrent(binding)) {
+                runCatching { cache.write(params.hostName, cached) }
+            }
         }
     }
 
@@ -602,7 +636,7 @@ internal class TreeSyncCoordinator(
         listener.onRefreshingChanged(value)
     }
 
-    private fun isCurrent(params: BoundParams): Boolean = !closed && bound == params
+    private fun isCurrent(binding: TreeSyncBinding): Boolean = !closed && this.binding == binding
 
     private fun Listener.onLoadingRequestedIfNeeded() {
         // The ViewModel decides whether a Loading state would displace a Ready

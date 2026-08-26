@@ -102,7 +102,7 @@ def _try_daemon_call(
     cgroup_mount: str,
     timeout: float = 5.0,
 ) -> Optional[dict[str, Any]]:
-    """Dispatch ``agents.kind_for_panes`` to the daemon; ``None`` on miss/error.
+    """Dispatch ``agents.kind_for_panes`` through the typed daemon boundary.
 
     Mirrors :func:`pocketshell.jobs._try_daemon_jobs_call`. Only used when the
     detection runs against the real host roots — when the caller overrode
@@ -116,20 +116,15 @@ def _try_daemon_call(
     from pocketshell import daemon as _daemon
 
     socket_path = _daemon.resolve_socket_path()
-    if not socket_path.exists():
-        return None
-    try:
-        result = _daemon.call(
-            "agents.kind_for_panes",
-            params={"panes": panes},
-            socket_path=socket_path,
-            timeout=timeout,
-        )
-    except (_daemon.DaemonClientError, RuntimeError, OSError):
-        return None
-    if not isinstance(result, dict) or "results" not in result:
-        return None
-    return result
+    return _daemon.try_call(
+        "agents.kind_for_panes",
+        params={"panes": panes},
+        socket_path=socket_path,
+        timeout=timeout,
+        result_validator=lambda result: (
+            isinstance(result, dict) and isinstance(result.get("results"), list)
+        ),
+    )
 
 
 def _classify_in_process(

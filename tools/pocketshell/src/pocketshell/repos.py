@@ -80,7 +80,10 @@ The daemon (``pocketshell.daemon``) gets two RPC methods:
 
 Both subcommands honour ``--no-daemon`` (skip the daemon entirely) and
 ``--no-cache`` (force the daemon to re-run upstream). On the
-in-process path ``--no-cache`` is a no-op because there is no cache.
+in-process path ``--no-cache`` is a no-op because there is no cache. The
+shared daemon boundary falls back only for an absent/unavailable daemon or an
+explicitly supported method skew; timeout and daemon-internal failures are
+surfaced rather than retried locally.
 """
 
 from __future__ import annotations
@@ -910,32 +913,26 @@ def _try_daemon_call(
     *,
     timeout: float = 10.0,
 ) -> Optional[list[dict[str, Any]]]:
-    """Probe the daemon and dispatch ``method``; ``None`` on miss.
+    """Probe the daemon and dispatch ``method`` through typed fallback.
 
     Returns the JSON-RPC ``result`` (a list-of-dicts payload) on
-    success, or ``None`` when the daemon is unreachable and the caller
-    should fall through to the in-process path. Mirrors
-    ``pocketshell.usage._try_daemon_usage_fetch`` so fallthrough
-    semantics stay uniform across subcommands.
+    success, or ``None`` when the daemon is absent/unavailable or explicitly
+    supports a method/version skew and the caller should fall through to the
+    in-process path. Other daemon failures are surfaced and never masked.
     """
     from pocketshell import daemon as _daemon
 
     socket_path = _daemon.resolve_socket_path()
-    if not socket_path.exists():
-        return None
-
-    try:
-        result = _daemon.call(
-            method,
-            params=params,
-            socket_path=socket_path,
-            timeout=timeout,
-        )
-    except (_daemon.DaemonClientError, RuntimeError, OSError):
-        return None
-    if not isinstance(result, list):
-        return None
-    return result
+    return _daemon.try_call(
+        method,
+        params=params,
+        socket_path=socket_path,
+        timeout=timeout,
+        result_validator=lambda result: (
+            isinstance(result, list)
+            and all(isinstance(entry, dict) for entry in result)
+        ),
+    )
 
 
 def _try_daemon_list_local(

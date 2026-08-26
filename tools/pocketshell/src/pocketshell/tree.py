@@ -716,24 +716,58 @@ def _read_stdin_params() -> dict[str, Any]:
 
 
 def _try_daemon_call(method: str, params: Mapping[str, Any]) -> Optional[Any]:
-    """Dispatch ``method`` to the daemon; return ``None`` on miss/error.
+    """Dispatch ``method`` through the shared typed daemon boundary.
 
-    Mirrors :func:`pocketshell.agents_kind._try_daemon_call`.
+    ``None`` means only an absent/unavailable daemon or an explicitly
+    supported method skew. Timeouts, protocol failures, daemon errors, and
+    malformed result shapes raise a safe user-visible daemon error.
     """
     from pocketshell import daemon as _daemon
 
     socket_path = _daemon.resolve_socket_path()
-    if not socket_path.exists():
-        return None
-    try:
-        return _daemon.call(
-            method,
-            params=dict(params),
-            socket_path=socket_path,
-            timeout=5.0,
+    return _daemon.try_call(
+        method,
+        params=dict(params),
+        socket_path=socket_path,
+        timeout=5.0,
+        result_validator=lambda result: _is_daemon_result(method, result),
+    )
+
+
+def _is_daemon_result(method: str, result: Any) -> bool:
+    """Validate the result shape for each tree RPC before using it.
+
+    A successful JSON-RPC response with the wrong object shape is a daemon
+    failure, not evidence that the daemon is absent. Keeping this validation
+    beside the wrapper prevents malformed responses from reaching the local
+    fallback branch (or being emitted as a false successful CLI response).
+    """
+    if not isinstance(result, dict):
+        return False
+    if method == "tree.get":
+        return isinstance(result.get("nodes"), list) and isinstance(
+            result.get("version"), int
         )
-    except (_daemon.DaemonClientError, RuntimeError, OSError):
-        return None
+    if method == "tree.upsert":
+        return isinstance(result.get("status"), str) and isinstance(
+            result.get("version"), int
+        )
+    if method == "tree.reconcile":
+        return all(isinstance(result.get(key), list) for key in ("alive", "gone", "added"))
+    if method == "tree.workspace.get":
+        return isinstance(result.get("tabs"), list) and (
+            result.get("active_path") is None or isinstance(result.get("active_path"), str)
+        )
+    if method == "tree.workspace.upsert":
+        return (
+            isinstance(result.get("status"), str)
+            and isinstance(result.get("tabs"), list)
+            and (
+                result.get("active_path") is None
+                or isinstance(result.get("active_path"), str)
+            )
+        )
+    return False
 
 
 @click.group(

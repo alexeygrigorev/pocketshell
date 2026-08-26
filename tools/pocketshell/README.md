@@ -209,8 +209,15 @@ pocketshell usage codex     # filter to a single provider
 
 The output shape is byte-identical to `quse [provider] [--json]`. When
 the IPC daemon is running, `usage --json` dispatches `usage.fetch` over
-the daemon socket and uses the daemon's short TTL cache; otherwise it
-falls through to the one-shot subprocess path.
+the daemon socket and uses the daemon's short TTL cache; otherwise an
+absent/unavailable daemon or explicitly supported method skew falls through
+to the one-shot subprocess path. Timeout, malformed-response, and
+daemon-internal failures are surfaced instead of being retried locally.
+
+All daemon-backed wrappers (`usage`, `repos`, `tree`, `jobs`, `sessions`, and
+`agents kind`) use one typed fallback boundary. It emits the safe
+`pocketshell.daemon_call` event with `reason`, `method`, `phase`, RPC code, and
+available CLI/daemon versions. It never logs RPC parameters or command output.
 
 If `quse` is not installed, `pocketshell usage` exits with code 127 and
 prints an install hint to stderr.

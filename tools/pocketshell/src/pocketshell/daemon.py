@@ -1,10 +1,11 @@
 """`pocketshell daemon` — Unix-socket JSON-RPC 2.0 server.
 
-First-PR scope (locked by the daemon-mode spike on issue #170 comment
-4554814908): expose a single RPC method ``usage.fetch`` that delegates to
-the existing ``quse`` subprocess flow in :mod:`pocketshell.usage`, with a
-30-second per-method cache. No systemd, no other RPC methods, no Kotlin
-changes — those land in follow-up PRs.
+The daemon provides the long-lived RPC path for the host-side wrappers. It is
+an optimisation, not a dependency: wrappers may run their documented local
+implementation only when this module classifies the daemon as absent,
+unavailable, or explicitly incompatible by method. A timeout or daemon
+internal/protocol failure is surfaced so a mutating call is never duplicated
+or silently reported as successful.
 
 Why this exists
 ---------------
@@ -41,19 +42,23 @@ Design choices (verbatim from the spike)
 - **Stale-socket recovery**: the daemon ``os.unlink``-s the socket path
   before ``bind()`` and again on shutdown via an atexit handler. The
   CLI probes the socket with ``connect()``; ``ECONNREFUSED`` /
-  ``ENOENT`` falls through to either spawning a fresh daemon or running
-  the one-shot subprocess path. A stale dead file therefore self-heals
-  on the next CLI call.
+  ``ENOENT`` is classified as absent/unavailable and falls through to
+  either spawning a fresh daemon or running the one-shot subprocess path.
+  A method-not-found response is the explicitly supported version-skew
+  fallback. Timeouts, malformed responses, and daemon errors remain visible.
 
-The daemon is a pure optimisation; the CLI path falls through cleanly
-when the daemon is absent or refuses (D22 hard-cut applies to the
-direction of evolution, not to the no-daemon escape hatch).
+The daemon is a pure optimisation; the CLI path falls through cleanly only
+for the two approved fallback reasons. Every classified attempt emits the
+``pocketshell.daemon_call`` telemetry fields (including safe CLI/daemon
+versions when available) without RPC parameters or command output.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import signal
 import socket
 import struct
@@ -63,8 +68,11 @@ import threading
 import time
 import traceback
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional
+from typing import Any, Callable, Generic, Mapping, Optional, TypeVar
+
+import click
 
 # Public so the CLI module and tests can reuse without duplicating the
 # default. Override via env var ``POCKETSHELL_DAEMON_IDLE_SECS`` for
@@ -122,6 +130,187 @@ JSONRPC_INVALID_REQUEST = -32600
 JSONRPC_METHOD_NOT_FOUND = -32601
 JSONRPC_INVALID_PARAMS = -32602
 JSONRPC_INTERNAL_ERROR = -32603
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class DaemonFailureReason(str, Enum):
+    """Stable classification for a failed daemon RPC attempt.
+
+    The CLI wrappers deliberately fall back only for the first two reasons.
+    A timeout can mean the daemon accepted a mutating request but lost its
+    reply, and an internal/protocol error means the daemon is present but
+    unhealthy; retrying either locally would hide the real failure (and can
+    duplicate a side effect).
+    """
+
+    ABSENT_OR_UNAVAILABLE = "absent_or_unavailable"
+    SUPPORTED_SKEW = "supported_skew"
+    TRANSPORT_TIMEOUT = "transport_timeout"
+    DAEMON_INTERNAL_ERROR = "daemon_internal_error"
+
+
+LOCAL_FALLBACK_REASONS: frozenset[DaemonFailureReason] = frozenset(
+    {
+        DaemonFailureReason.ABSENT_OR_UNAVAILABLE,
+        DaemonFailureReason.SUPPORTED_SKEW,
+    }
+)
+
+_SAFE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+_SAFE_METHOD_RE = re.compile(r"^[A-Za-z0-9_.-]{1,96}$")
+
+
+def _safe_version(value: Any) -> Optional[str]:
+    """Return a version token safe to include in telemetry or an error."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if _SAFE_VERSION_RE.fullmatch(value) else None
+
+
+def _safe_method(value: Any) -> str:
+    """Return a protocol method suitable for user-facing diagnostics.
+
+    Method names are not user prompt data in normal operation, but the daemon
+    socket is a protocol boundary. Redacting an unexpected token keeps a
+    malformed request from turning the error/log channel into a data echo.
+    """
+    if isinstance(value, str) and _SAFE_METHOD_RE.fullmatch(value):
+        return value
+    return "<redacted>"
+
+
+def _installed_cli_version() -> Optional[str]:
+    """Read the running PocketShell version without making it a hard failure."""
+    try:
+        from pocketshell import __version__
+
+        return _safe_version(__version__)
+    except Exception:  # pragma: no cover - defensive metadata path
+        return None
+
+
+@dataclass(frozen=True)
+class DaemonFailure:
+    """Structured, sanitized description of one failed daemon call."""
+
+    reason: DaemonFailureReason
+    method: str
+    cli_version: Optional[str] = None
+    daemon_version: Optional[str] = None
+    rpc_code: Optional[int] = None
+    phase: str = "rpc"
+
+    @property
+    def fallback_allowed(self) -> bool:
+        """Whether a wrapper may run its documented local implementation."""
+        return self.reason in LOCAL_FALLBACK_REASONS
+
+    def telemetry(self) -> dict[str, Any]:
+        """Return fields safe for structured logging; never include params."""
+        return {
+            "event": "pocketshell.daemon_call",
+            "reason": self.reason.value,
+            "method": _safe_method(self.method),
+            "phase": self.phase,
+            "rpc_code": self.rpc_code,
+            "cli_version": self.cli_version,
+            "daemon_version": self.daemon_version,
+        }
+
+    def user_message(self) -> str:
+        """Render a detail-free message for a CLI error or exception string."""
+        labels = {
+            DaemonFailureReason.ABSENT_OR_UNAVAILABLE: "daemon is absent or unavailable",
+            DaemonFailureReason.SUPPORTED_SKEW: "daemon does not support this method",
+            DaemonFailureReason.TRANSPORT_TIMEOUT: "daemon transport timed out",
+            DaemonFailureReason.DAEMON_INTERNAL_ERROR: "daemon returned an internal error",
+        }
+        label = labels[self.reason]
+        if self.rpc_code == JSONRPC_INVALID_PARAMS:
+            # Keep the existing actionable shape hint without echoing the
+            # daemon's arbitrary error string, which could contain a prompt,
+            # token, or another value copied from RPC params.
+            label = "daemon rejected invalid parameters (must be a list or object as required)"
+        fields = [
+            f"method={_safe_method(self.method)}",
+            f"reason={self.reason.value}",
+        ]
+        if self.rpc_code is not None:
+            fields.append(f"rpc_code={self.rpc_code}")
+        fields.append(f"cli_version={self.cli_version or 'unknown'}")
+        fields.append(f"daemon_version={self.daemon_version or 'unknown'}")
+        return f"{label} ({', '.join(fields)})"
+
+
+_OutcomeT = TypeVar("_OutcomeT")
+
+
+@dataclass(frozen=True)
+class DaemonCallOutcome(Generic[_OutcomeT]):
+    """Result-or-classification value used by CLI-facing daemon helpers."""
+
+    result: Optional[_OutcomeT] = None
+    failure: Optional[DaemonFailure] = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.failure is None
+
+
+def _safe_error_data(data: Any) -> Optional[dict[str, Any]]:
+    """Keep only non-sensitive classification metadata in an RPC error."""
+    if not isinstance(data, Mapping):
+        return None
+    safe: dict[str, Any] = {}
+    raw_reason = data.get("failure_reason")
+    if isinstance(raw_reason, str) and raw_reason in {
+        reason.value for reason in DaemonFailureReason
+    }:
+        safe["failure_reason"] = raw_reason
+    for key in ("cli_version", "client_version", "daemon_version"):
+        version = _safe_version(data.get(key))
+        if version is not None:
+            safe[key] = version
+    return safe or None
+
+
+def _failure(
+    reason: DaemonFailureReason,
+    method: str,
+    *,
+    cli_version: Optional[str],
+    daemon_version: Optional[str] = None,
+    rpc_code: Optional[int] = None,
+    phase: str,
+) -> DaemonFailure:
+    """Build a failure with all externally sourced metadata sanitized."""
+    safe_code = rpc_code if isinstance(rpc_code, int) else None
+    return DaemonFailure(
+        reason=reason,
+        method=method,
+        cli_version=_safe_version(cli_version),
+        daemon_version=_safe_version(daemon_version),
+        rpc_code=safe_code,
+        phase=phase,
+    )
+
+
+def _log_failure(failure: DaemonFailure) -> None:
+    """Emit safe structured telemetry for a classified daemon failure.
+
+    Expected local fallback is informational; actionable skew and failures are
+    visible at warning/error level. The telemetry intentionally contains no
+    RPC params, exception text, stdout, stderr, prompt, or secret material.
+    """
+    if failure.reason == DaemonFailureReason.ABSENT_OR_UNAVAILABLE:
+        level = logging.INFO
+    elif failure.reason == DaemonFailureReason.SUPPORTED_SKEW:
+        level = logging.WARNING
+    else:
+        level = logging.ERROR
+    _LOGGER.log(level, "daemon RPC classification: %s", failure.telemetry())
 
 
 # ---------------------------------------------------------------------------
@@ -721,11 +910,15 @@ class Daemon:
         methods: Optional[Mapping[str, RpcHandler]] = None,
         pid_path: Optional[Path] = None,
         clock: Callable[[], float] = time.monotonic,
+        daemon_version: Optional[str] = None,
     ) -> None:
         self.socket_path = socket_path
         self.pid_path = pid_path or resolve_pid_path(socket_path)
         self.idle_timeout = idle_timeout
-        self._methods: dict[str, RpcHandler] = dict(methods or DEFAULT_METHODS)
+        self._methods: dict[str, RpcHandler] = dict(
+            DEFAULT_METHODS if methods is None else methods
+        )
+        self.daemon_version = _safe_version(daemon_version) or _installed_cli_version()
         self._cache = _Cache(clock=clock)
         self._clock = clock
         self._server_sock: Optional[socket.socket] = None
@@ -867,6 +1060,19 @@ class Daemon:
 
     # -- request handling ------------------------------------------------
 
+    def _failure_data(
+        self,
+        reason: DaemonFailureReason,
+        client_version: Optional[str],
+    ) -> dict[str, str]:
+        """Return safe classification metadata for an RPC error envelope."""
+        data: dict[str, str] = {"failure_reason": reason.value}
+        if client_version := _safe_version(client_version):
+            data["client_version"] = client_version
+        if daemon_version := _safe_version(self.daemon_version):
+            data["daemon_version"] = daemon_version
+        return data
+
     def _handle_one(self, client_sock: socket.socket) -> None:
         """Read one JSON-RPC request, dispatch, write the response."""
         client_sock.settimeout(5.0)
@@ -892,6 +1098,7 @@ class Daemon:
             return
 
         request_id = request.get("id")
+        client_version = _safe_version(request.get("client_version"))
         method = request.get("method")
         params = request.get("params") or {}
 
@@ -930,7 +1137,11 @@ class Daemon:
                 client_sock,
                 request_id=request_id,
                 code=JSONRPC_METHOD_NOT_FOUND,
-                message=f"unknown method: {method}",
+                message=f"unknown method: {_safe_method(method)}",
+                data=self._failure_data(
+                    DaemonFailureReason.SUPPORTED_SKEW,
+                    client_version,
+                ),
             )
             return
 
@@ -952,8 +1163,15 @@ class Daemon:
                 client_sock,
                 request_id=request_id,
                 code=exc.code,
-                message=exc.message,
-                data=exc.data,
+                message=(
+                    "invalid parameters: must be a list or object as required"
+                    if exc.code == JSONRPC_INVALID_PARAMS
+                    else "daemon request failed"
+                ),
+                data=self._failure_data(
+                    DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+                    client_version,
+                ),
             )
             return
         except Exception:  # noqa: BLE001 — JSON-RPC envelope
@@ -969,7 +1187,11 @@ class Daemon:
                 client_sock,
                 request_id=request_id,
                 code=JSONRPC_INTERNAL_ERROR,
-                message=f"internal error handling {method!r}",
+                message=f"internal error handling {_safe_method(method)}",
+                data=self._failure_data(
+                    DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+                    client_version,
+                ),
             )
             return
 
@@ -1047,20 +1269,215 @@ class Daemon:
 # ---------------------------------------------------------------------------
 
 
-class DaemonClientError(RuntimeError):
-    """Raised when the client cannot reach a running daemon.
+class DaemonClientError(click.ClickException, RuntimeError):
+    """A safe, typed failure from one daemon RPC attempt.
 
-    Distinguishes "no daemon" (callable should fall through to the
-    one-shot subprocess path) from "daemon errored" (callable should
-    propagate the error to the user).
+    ``ClickException`` makes a fatal daemon failure user-visible without a
+    traceback at the CLI boundary. ``RuntimeError`` preserves the historical
+    API for callers that handled daemon errors directly. The structured reason
+    is the only signal wrappers use to decide whether local fallback is safe.
     """
+
+    def __init__(self, failure: DaemonFailure) -> None:
+        self.failure = failure
+        message = failure.user_message()
+        click.ClickException.__init__(self, message)
+        RuntimeError.__init__(self, message)
 
 
 def _connect(socket_path: Path, *, timeout: float = 1.0) -> socket.socket:
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
-    sock.connect(str(socket_path))
+    try:
+        sock.connect(str(socket_path))
+    except BaseException:
+        # A failed connect does not transfer ownership to the caller.
+        try:
+            sock.close()
+        except OSError:
+            pass
+        raise
     return sock
+
+
+def call_outcome(
+    method: str,
+    params: Optional[Mapping[str, Any]] = None,
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+) -> DaemonCallOutcome[Any]:
+    """Send one JSON-RPC request and classify every unsuccessful attempt.
+
+    The initial socket probe/connect is the only phase classified as
+    ``ABSENT_OR_UNAVAILABLE``. Once a peer accepted the request, a timeout,
+    broken frame, or closed connection is non-fallback: a mutation may have
+    reached the daemon even if its reply did not. JSON-RPC method-not-found is
+    the one explicitly supported compatibility/skew case.
+    """
+    socket_path = socket_path or resolve_socket_path()
+    cli_version = _installed_cli_version()
+    if not socket_path.exists():
+        failure = _failure(
+            DaemonFailureReason.ABSENT_OR_UNAVAILABLE,
+            method,
+            cli_version=cli_version,
+            phase="probe",
+        )
+        _log_failure(failure)
+        return DaemonCallOutcome(failure=failure)
+
+    try:
+        sock = _connect(socket_path, timeout=timeout)
+    except (socket.timeout, TimeoutError):
+        failure = _failure(
+            DaemonFailureReason.TRANSPORT_TIMEOUT,
+            method,
+            cli_version=cli_version,
+            phase="connect",
+        )
+        _log_failure(failure)
+        return DaemonCallOutcome(failure=failure)
+    except OSError:
+        # ECONNREFUSED/ENOENT and permission/socket availability errors all
+        # mean the daemon cannot be used for this attempt. Do not expose the
+        # OS error text: it can contain a private socket path.
+        failure = _failure(
+            DaemonFailureReason.ABSENT_OR_UNAVAILABLE,
+            method,
+            cli_version=cli_version,
+            phase="connect",
+        )
+        _log_failure(failure)
+        return DaemonCallOutcome(failure=failure)
+
+    try:
+        try:
+            sock.settimeout(timeout)
+        except (socket.timeout, TimeoutError):
+            failure = _failure(
+                DaemonFailureReason.TRANSPORT_TIMEOUT,
+                method,
+                cli_version=cli_version,
+                phase="setup",
+            )
+            _log_failure(failure)
+            return DaemonCallOutcome(failure=failure)
+        except OSError:
+            failure = _failure(
+                DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+                method,
+                cli_version=cli_version,
+                phase="setup",
+            )
+            _log_failure(failure)
+            return DaemonCallOutcome(failure=failure)
+        request: dict[str, Any] = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": method,
+            "params": dict(params or {}),
+        }
+        if cli_version is not None:
+            # Top-level metadata is outside method params, so it cannot alter
+            # handler contracts or cache keys. The server sanitizes it again.
+            request["client_version"] = cli_version
+        try:
+            send_json(sock, request)
+        except (socket.timeout, TimeoutError):
+            failure = _failure(
+                DaemonFailureReason.TRANSPORT_TIMEOUT,
+                method,
+                cli_version=cli_version,
+                phase="write",
+            )
+            _log_failure(failure)
+            return DaemonCallOutcome(failure=failure)
+        except (FramingError, OSError):
+            # The peer accepted the connection. A write-side disconnect could
+            # follow a successfully applied mutation, so it is not safe to
+            # retry the operation locally.
+            failure = _failure(
+                DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+                method,
+                cli_version=cli_version,
+                phase="write",
+            )
+            _log_failure(failure)
+            return DaemonCallOutcome(failure=failure)
+
+        try:
+            response = recv_json(sock)
+        except (socket.timeout, TimeoutError):
+            failure = _failure(
+                DaemonFailureReason.TRANSPORT_TIMEOUT,
+                method,
+                cli_version=cli_version,
+                phase="read",
+            )
+            _log_failure(failure)
+            return DaemonCallOutcome(failure=failure)
+        except (FramingError, json.JSONDecodeError, UnicodeDecodeError, OSError):
+            # A connected peer sent no usable response. Treat it as an
+            # unhealthy daemon rather than an absent one; local retry could
+            # duplicate a side effect whose response was lost.
+            failure = _failure(
+                DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+                method,
+                cli_version=cli_version,
+                phase="read",
+            )
+            _log_failure(failure)
+            return DaemonCallOutcome(failure=failure)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    if not isinstance(response, dict):
+        failure = _failure(
+            DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+            method,
+            cli_version=cli_version,
+            phase="response",
+        )
+        _log_failure(failure)
+        return DaemonCallOutcome(failure=failure)
+    if "error" in response and response["error"] is not None:
+        err = response["error"]
+        code = err.get("code") if isinstance(err, dict) else None
+        safe_data = _safe_error_data(err.get("data")) if isinstance(err, dict) else None
+        daemon_version = (
+            _safe_version(safe_data.get("daemon_version"))
+            if safe_data is not None
+            else None
+        )
+        reason = (
+            DaemonFailureReason.SUPPORTED_SKEW
+            if code == JSONRPC_METHOD_NOT_FOUND
+            else DaemonFailureReason.DAEMON_INTERNAL_ERROR
+        )
+        failure = _failure(
+            reason,
+            method,
+            cli_version=cli_version,
+            daemon_version=daemon_version,
+            rpc_code=code if isinstance(code, int) else None,
+            phase="rpc",
+        )
+        _log_failure(failure)
+        return DaemonCallOutcome(failure=failure)
+    if "result" not in response:
+        failure = _failure(
+            DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+            method,
+            cli_version=cli_version,
+            phase="response",
+        )
+        _log_failure(failure)
+        return DaemonCallOutcome(failure=failure)
+    return DaemonCallOutcome(result=response["result"])
 
 
 def call(
@@ -1070,44 +1487,63 @@ def call(
     socket_path: Optional[Path] = None,
     timeout: float = 5.0,
 ) -> Any:
-    """Send one JSON-RPC request and return the ``result`` value.
+    """Send one JSON-RPC request and return its result or a typed error."""
+    outcome = call_outcome(
+        method,
+        params=params,
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+    if outcome.failure is not None:
+        raise DaemonClientError(outcome.failure)
+    return outcome.result
 
-    Raises :class:`DaemonClientError` if the socket does not exist or
-    refuses the connection. Raises :class:`RuntimeError` with the
-    JSON-RPC error message if the daemon returned a JSON-RPC error.
+
+def try_call(
+    method: str,
+    params: Optional[Mapping[str, Any]] = None,
+    *,
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+    result_validator: Optional[Callable[[Any], bool]] = None,
+) -> Any:
+    """Call the daemon, returning ``None`` only for approved local fallback.
+
+    Wrappers use this shared boundary and run their own local implementation
+    when it returns ``None``. A validator makes a malformed successful RPC
+    response a visible daemon-internal failure instead of another accidental
+    fallback path.
     """
-    socket_path = socket_path or resolve_socket_path()
-    if not socket_path.exists():
-        raise DaemonClientError(f"socket missing: {socket_path}")
-    try:
-        sock = _connect(socket_path, timeout=timeout)
-    except (ConnectionRefusedError, FileNotFoundError) as exc:
-        raise DaemonClientError(f"daemon unreachable: {exc}") from exc
-    except OSError as exc:
-        raise DaemonClientError(f"daemon connect failed: {exc}") from exc
-    try:
-        sock.settimeout(timeout)
-        send_json(sock, {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": dict(params or {}),
-        })
-        response = recv_json(sock)
-    finally:
-        try:
-            sock.close()
-        except OSError:
-            pass
+    outcome = call_outcome(
+        method,
+        params=params,
+        socket_path=socket_path,
+        timeout=timeout,
+    )
+    if outcome.failure is not None:
+        if outcome.failure.fallback_allowed:
+            return None
+        raise DaemonClientError(outcome.failure)
+    if result_validator is not None and not result_validator(outcome.result):
+        failure = _failure(
+            DaemonFailureReason.DAEMON_INTERNAL_ERROR,
+            method,
+            cli_version=_installed_cli_version(),
+            phase="validate",
+        )
+        _log_failure(failure)
+        raise DaemonClientError(failure)
+    return outcome.result
 
-    if not isinstance(response, dict):
-        raise RuntimeError(f"daemon returned non-object response: {response!r}")
-    if "error" in response and response["error"] is not None:
-        err = response["error"]
-        code = err.get("code") if isinstance(err, dict) else None
-        message = err.get("message") if isinstance(err, dict) else str(err)
-        raise RuntimeError(f"daemon error [{code}]: {message}")
-    return response.get("result")
+
+def is_command_envelope(value: Any) -> bool:
+    """Return whether ``value`` is a complete subprocess proxy envelope."""
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("stdout"), str)
+        and isinstance(value.get("stderr"), str)
+        and type(value.get("returncode")) is int
+    )
 
 
 def is_daemon_running(socket_path: Optional[Path] = None) -> bool:

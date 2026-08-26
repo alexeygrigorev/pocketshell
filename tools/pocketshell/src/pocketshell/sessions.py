@@ -115,29 +115,21 @@ def _try_daemon_sessions_list(
     sort_by: Optional[str],
     extra_args: Sequence[str],
 ) -> Optional[dict[str, Any]]:
-    """Dispatch ``sessions.list`` to the daemon; return ``None`` on miss."""
+    """Dispatch ``sessions.list`` through the shared typed daemon boundary."""
     from pocketshell import daemon as _daemon
 
     socket_path = _daemon.resolve_socket_path()
-    if not socket_path.exists():
-        return None
-
     params: dict[str, Any] = {"extra_args": list(extra_args)}
     if sort_by:
         params["sort_by"] = sort_by
 
-    try:
-        result = _daemon.call(
-            "sessions.list",
-            params=params,
-            socket_path=socket_path,
-            timeout=5.0,
-        )
-    except (_daemon.DaemonClientError, RuntimeError, OSError):
-        return None
-    if not isinstance(result, dict):
-        return None
-    return result
+    return _daemon.try_call(
+        "sessions.list",
+        params=params,
+        socket_path=socket_path,
+        timeout=5.0,
+        result_validator=_daemon.is_command_envelope,
+    )
 
 
 def daemon_handler_list(params: dict[str, Any]) -> dict[str, Any]:

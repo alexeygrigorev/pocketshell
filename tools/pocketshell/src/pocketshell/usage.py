@@ -41,10 +41,10 @@ The fall-through is intentional and matches the spike's Q6 parity rule:
 - ``--no-cache`` is honoured by the daemon (cache miss + populate)
   but is intentionally a no-op on the subprocess path: there is no
   cache to bypass when every call is a fresh subprocess.
-- The probe is best-effort: any error talking to the daemon
-  (``ECONNREFUSED``, stale socket, version-skew RPC error, slow
-  reply) falls through silently to the subprocess path. The daemon
-  never blocks correctness.
+- The probe falls through only for an absent/unavailable daemon or an
+  explicitly supported method/version skew. A transport timeout,
+  malformed response, or daemon-internal error is classified and surfaced;
+  it never silently runs a second copy of the operation.
 """
 
 from __future__ import annotations
@@ -299,12 +299,13 @@ def _try_daemon_usage_fetch(
     *,
     no_cache: bool,
 ) -> Optional[dict[str, Any]]:
-    """Probe the daemon and dispatch ``usage.fetch``; return None on miss.
+    """Probe the daemon and dispatch ``usage.fetch`` through typed fallback.
 
     Returns the JSON-RPC ``result`` envelope (a dict with
     ``stdout``/``stderr``/``returncode`` keys) on success, or ``None``
-    when the daemon is unreachable / errors out and the caller should
-    fall through to the one-shot subprocess path. The envelope's ``stdout``
+    when the daemon is absent/unavailable or explicitly supports a skewed
+    method and the caller should fall through to the one-shot subprocess path.
+    The envelope's ``stdout``
     is ALREADY-FLATTENED per-provider NDJSON (the daemon flattens before
     caching), so callers proxy it verbatim — they must NOT re-flatten it.
 
@@ -314,30 +315,19 @@ def _try_daemon_usage_fetch(
     from pocketshell import daemon as _daemon
 
     socket_path = _daemon.resolve_socket_path()
-    if not socket_path.exists():
-        return None
-
     params: dict[str, Any] = {}
     if provider is not None:
         params["provider"] = provider
     if no_cache:
         params["no_cache"] = True
 
-    try:
-        result = _daemon.call(
-            "usage.fetch",
-            params=params,
-            socket_path=socket_path,
-            timeout=5.0,
-        )
-    except (_daemon.DaemonClientError, RuntimeError, OSError):
-        # Daemon unreachable, returned an error, or socket dance went
-        # wrong. The contract is "daemon is an optimisation, never a
-        # dependency" — fall through silently.
-        return None
-    if not isinstance(result, dict):
-        return None
-    return result
+    return _daemon.try_call(
+        "usage.fetch",
+        params=params,
+        socket_path=socket_path,
+        timeout=5.0,
+        result_validator=_daemon.is_command_envelope,
+    )
 
 
 @click.command(

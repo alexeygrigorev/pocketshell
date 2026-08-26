@@ -33,6 +33,8 @@ import org.junit.runner.RunWith
  * bitmap (or return without throwing) when `width <= 0 || height <= 0`.
  * [captureViewToBitmap_failsOnZeroByZeroViewRatherThanReturningQuietly]
  * then fails because no [AssertionError] is thrown.
+ * The same mutation against [captureSessionFrameToBitmap] must redden
+ * [captureSessionFrameToBitmap_failsOnMissingViewRatherThanReturningQuietly].
  */
 @RunWith(AndroidJUnit4::class)
 class TerminalViewportCaptureTest {
@@ -106,6 +108,58 @@ class TerminalViewportCaptureTest {
             assertEquals(48, bitmap.width)
             assertEquals(32, bitmap.height)
             assertEquals(Color.RED, bitmap.getPixel(0, 0))
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    @Test
+    fun captureSessionFrameToBitmap_failsOnMissingViewRatherThanReturningQuietly() {
+        val error = runCatching {
+            captureSessionFrameToBitmap(null, "issue2297-session-missing")
+        }.exceptionOrNull()
+
+        assertNotNull("a missing session frame must hard-fail, not return quietly", error)
+        assertTrue(
+            "expected AssertionError, got ${error!!::class.java.name}: ${error.message}",
+            error is AssertionError,
+        )
+        assertTrue(
+            "failure must identify the session-frame artifact: ${error.message}",
+            error.message.orEmpty().contains("issue2297-session-missing"),
+        )
+    }
+
+    @Test
+    fun captureSessionFrameToBitmap_failsOnZeroByZeroViewRatherThanReturningQuietly() {
+        val view = View(compose.activity)
+        val error = runCatching {
+            captureSessionFrameToBitmap(view, "issue2297-session-zero")
+        }.exceptionOrNull()
+
+        assertNotNull("a 0x0 session frame must hard-fail, not return quietly", error)
+        assertTrue(error is AssertionError)
+        assertTrue(
+            "failure must identify the session-frame artifact: ${error?.message}",
+            error?.message.orEmpty().contains("issue2297-session-zero"),
+        )
+    }
+
+    @Test
+    fun captureSessionFrameToBitmap_drawsALaidOutView() {
+        val view = View(compose.activity).apply {
+            setBackgroundColor(Color.BLUE)
+            measure(
+                View.MeasureSpec.makeMeasureSpec(24, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(16, View.MeasureSpec.EXACTLY),
+            )
+            layout(0, 0, measuredWidth, measuredHeight)
+        }
+        val bitmap = captureSessionFrameToBitmap(view, "issue2297-session-sized")
+        try {
+            assertEquals(24, bitmap.width)
+            assertEquals(16, bitmap.height)
+            assertEquals(Color.BLUE, bitmap.getPixel(0, 0))
         } finally {
             bitmap.recycle()
         }

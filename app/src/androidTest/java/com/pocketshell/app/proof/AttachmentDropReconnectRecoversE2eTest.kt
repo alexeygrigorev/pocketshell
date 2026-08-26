@@ -1,5 +1,6 @@
 package com.pocketshell.app.proof
 
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.SystemClock
 import android.view.View
@@ -9,6 +10,7 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.performClick
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
@@ -19,10 +21,8 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.tmux.TMUX_PULL_TO_RECONNECT_TAG
-import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
-import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -45,8 +45,19 @@ import org.junit.Test
 import org.junit.rules.RuleChain
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.FileOutputStream
 import java.util.UUID
 import com.pocketshell.app.proof.signals.captureViewToBitmap
+import com.pocketshell.app.proof.signals.captureSessionFrameToBitmap
+import com.pocketshell.app.proof.signals.DEFAULT_SESSION_RECOVERY_INDICATOR_TAGS
+import com.pocketshell.app.proof.signals.SessionCaptureContract
+import com.pocketshell.app.proof.signals.SessionCaptureRoute
+import com.pocketshell.app.proof.signals.SessionCaptureSemantics
+import com.pocketshell.app.proof.signals.SessionIdentity
+import com.pocketshell.app.proof.signals.SessionRouteSnapshot
+import com.pocketshell.app.proof.signals.assertSessionRecoveryIndicatorVisible
+import com.pocketshell.app.proof.signals.assertSessionRouteStable
+import com.pocketshell.app.proof.signals.readAuthoritativeTmuxSessionIdentity
 
 /**
  * Issue #1072 (v0.4.19 release blocker, maintainer dogfood): "When I attach
@@ -99,8 +110,16 @@ class AttachmentDropReconnectRecoversE2eTest {
     private var seededKey: String? = null
     private var seededHostRowTag: String? = null
     private var diagnostics: RecordingDiagnosticSink? = null
+    private lateinit var sessionIdentity: SessionIdentity
     private val uploadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val timings = mutableListOf<String>()
+
+    private val captureContract = SessionCaptureContract(
+        recordSemantic = { label, text -> writeText(label, text) },
+        writeBitmap = { label, route, bitmap ->
+            writeBitmap("$label-${route.artifactSuffix}", bitmap, route)
+        },
+    )
 
     /**
      * Issue #788: all LAUNCH-time state established BEFORE MainActivity launches
@@ -202,7 +221,26 @@ class AttachmentDropReconnectRecoversE2eTest {
             "after teardown the owned upload job must no longer be active",
             !vm.attachmentUploadActiveForTest(),
         )
-        captureViewport("issue1072-A-upload-torn-down")
+        val tornDownRoute = compose.assertSessionRouteStable(
+            label = "issue1072-A-upload-torn-down",
+            sessionIdentity = sessionIdentity,
+        )
+        captureSessionEvidence(
+            name = "issue1072-A-upload-torn-down",
+            semantics = SessionCaptureSemantics(
+                route = SessionCaptureRoute.SESSION_FRAME,
+                sessionIdentity = sessionIdentity,
+                status = currentConnectionStatus().toString(),
+                booleans = mapOf(
+                    "uploadCancelledByTeardown" to cancelledByTeardown.isNotEmpty(),
+                    "uploadFailed" to result.isFailure,
+                    "uploadActive" to vm.attachmentUploadActiveForTest(),
+                ),
+                timings = timings.toList(),
+                visibleTags = setOf(TMUX_SESSION_SCREEN_TAG),
+            ),
+            expectedRoute = tornDownRoute,
+        )
         writeTimings("upload-torn-down")
     } }
 
@@ -282,12 +320,50 @@ class AttachmentDropReconnectRecoversE2eTest {
             )
 
             // The drop is USER-VISIBLE.
+            val lostTags = waitForConnectionLostIndicator(DROP_DETECT_WINDOW_MS)
+            val droppedIdentity = readAuthoritativeTmuxSessionIdentity(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = key,
+                sessionName = SESSION_NAME,
+            )
+            assertTrue(
+                "the dropped route must still identify the seeded tmux session generation; " +
+                    "before=$sessionIdentity dropped=$droppedIdentity",
+                droppedIdentity == sessionIdentity,
+            )
+            val indicator = compose.assertSessionRecoveryIndicatorVisible(
+                label = "issue1072-B-dropped-mid-upload",
+                sessionIdentity = droppedIdentity,
+                // The pull-to-refresh wrapper is only a gesture container and
+                // the surface button is hidden during active Reconnecting. The
+                // centered loader is the actual user-facing "Attaching…"
+                // indicator painted by the recovery surface.
+                indicatorTags = setOf(TMUX_SWITCHING_LOADING_TAG),
+                requiredTags = setOf(TMUX_SWITCHING_LOADING_TAG),
+            )
+            compose.onNodeWithText("Attaching…", useUnmergedTree = true).assertIsDisplayed()
             assertTrue(
                 "expected a USER-VISIBLE connection-lost indicator after the mid-upload drop " +
-                    "(status=${currentConnectionStatus()}).",
-                waitForConnectionLostIndicator(DROP_DETECT_WINDOW_MS),
+                    "(status=${currentConnectionStatus()}); observed tags=$lostTags",
+                lostTags.isNotEmpty(),
             )
-            captureViewport("issue1072-B-dropped-mid-upload")
+            captureSessionEvidence(
+                name = "issue1072-B-dropped-mid-upload",
+                semantics = SessionCaptureSemantics(
+                    route = SessionCaptureRoute.SESSION_FRAME,
+                    sessionIdentity = droppedIdentity,
+                    status = currentConnectionStatus().toString(),
+                    booleans = mapOf(
+                        "uploadFailed" to result.isFailure,
+                        "connectionLostIndicatorVisible" to true,
+                    ),
+                    timings = timings.toList(),
+                    visibleTags = setOf(TMUX_SESSION_SCREEN_TAG) + indicator.visibleTags,
+                ),
+                expectedRoute = indicator.route,
+            )
 
             // The maintainer's "I tap reconnect" — the production handler the Reconnect
             // button invokes. With the fix an explicit Reconnect PREEMPTS any in-flight
@@ -338,7 +414,38 @@ class AttachmentDropReconnectRecoversE2eTest {
                     "session (no restart). status=${currentConnectionStatus()}",
                 roundTripped,
             )
-            captureViewport("issue1072-B-recovered-live")
+            val recoveredIdentity = readAuthoritativeTmuxSessionIdentity(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = key,
+                sessionName = SESSION_NAME,
+            )
+            assertTrue(
+                "the recovered route must retain the same tmux session generation; " +
+                    "before=$sessionIdentity recovered=$recoveredIdentity",
+                recoveredIdentity == sessionIdentity,
+            )
+            val recoveredRoute = compose.assertSessionRouteStable(
+                label = "issue1072-B-recovered-live",
+                sessionIdentity = recoveredIdentity,
+            )
+            captureSessionEvidence(
+                name = "issue1072-B-recovered-live",
+                semantics = SessionCaptureSemantics(
+                    route = SessionCaptureRoute.TERMINAL_VIEWPORT,
+                    sessionIdentity = recoveredIdentity,
+                    status = currentConnectionStatus().toString(),
+                    booleans = mapOf(
+                        "recoveredWithoutRestart" to recovered,
+                        "freshClient" to (clientAfterRecovery != null && clientAfterRecovery != clientBeforeDrop),
+                        "postRecoveryRoundTripped" to roundTripped,
+                    ),
+                    timings = timings.toList(),
+                    visibleTags = setOf(TMUX_SESSION_SCREEN_TAG),
+                ),
+                expectedRoute = recoveredRoute,
+            )
             writeTimings("recovers-without-restart")
         } finally {
             runCatching { killer.close() }
@@ -367,28 +474,19 @@ class AttachmentDropReconnectRecoversE2eTest {
 
     // -- indicator helpers ---------------------------------------------------------
 
-    private fun waitForConnectionLostIndicator(timeoutMillis: Long): Boolean {
+    private fun waitForConnectionLostIndicator(timeoutMillis: Long): Set<String> {
         val deadline = SystemClock.elapsedRealtime() + timeoutMillis
         while (SystemClock.elapsedRealtime() < deadline) {
-            if (connectionLostIndicatorVisible()) return true
+            val visibleTags = visibleConnectionRecoveryTags()
+            if (visibleTags.isNotEmpty()) return visibleTags
             SystemClock.sleep(150)
         }
-        return connectionLostIndicatorVisible()
+        return visibleConnectionRecoveryTags()
     }
 
-    private fun connectionLostIndicatorVisible(): Boolean {
-        if (hasTag(TMUX_SESSION_ERROR_TAG) ||
-            hasTag(TMUX_SESSION_RECONNECT_TAG) ||
-            hasTag(TMUX_PULL_TO_RECONNECT_TAG)
-        ) {
-            return true
-        }
-        return when (currentConnectionStatus()) {
-            is TmuxSessionViewModel.ConnectionStatus.Connected -> false
-            is TmuxSessionViewModel.ConnectionStatus.Idle -> false
-            else -> true
-        }
-    }
+    private fun visibleConnectionRecoveryTags(): Set<String> = listOf(
+        *DEFAULT_SESSION_RECOVERY_INDICATOR_TAGS.toTypedArray(),
+    ).filterTo(linkedSetOf()) { hasTag(it) }
 
     private fun waitForSessionRecovered(timeoutMillis: Long): Boolean {
         val deadline = SystemClock.elapsedRealtime() + timeoutMillis
@@ -400,10 +498,7 @@ class AttachmentDropReconnectRecoversE2eTest {
     }
 
     private fun sessionHealthyConnected(): Boolean {
-        if (hasTag(TMUX_SESSION_ERROR_TAG) ||
-            hasTag(TMUX_SESSION_RECONNECT_TAG) ||
-            hasTag(TMUX_PULL_TO_RECONNECT_TAG)
-        ) {
+        if (visibleConnectionRecoveryTags().isNotEmpty()) {
             return false
         }
         return currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected
@@ -435,6 +530,15 @@ class AttachmentDropReconnectRecoversE2eTest {
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
+        sessionIdentity = runBlocking {
+            readAuthoritativeTmuxSessionIdentity(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = requireNotNull(seededKey),
+                sessionName = SESSION_NAME,
+            )
+        }
     }
 
     private fun waitForTerminalViewAttached() {
@@ -691,27 +795,86 @@ class AttachmentDropReconnectRecoversE2eTest {
 
     // -- artifacts -----------------------------------------------------------------
 
-    private fun captureViewport(name: String) {
+    private fun captureSessionEvidence(
+        name: String,
+        semantics: SessionCaptureSemantics = terminalCaptureSemantics(),
+        expectedRoute: SessionRouteSnapshot? = null,
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(150)
-        var bitmap: android.graphics.Bitmap? = null
-        compose.activityRule.scenario.onActivity { activity ->
-            bitmap = captureViewToBitmap(
-                activity.window.decorView.findTerminalView(),
-                name,
-            )
+        val routeBefore = compose.assertSessionRouteStable(
+            label = name,
+            sessionIdentity = semantics.sessionIdentity,
+            expected = expectedRoute,
+        )
+        val captured = captureContract.capture(
+            label = name,
+            semantics = semantics,
+            captureTerminalViewport = { renderTerminalViewportBitmap(name) },
+            captureSessionFrame = { renderSessionFrameBitmap(name) },
+        )
+        compose.assertSessionRouteStable(
+            label = "$name-after-capture",
+            sessionIdentity = semantics.sessionIdentity,
+            expected = routeBefore,
+        )
+        if (semantics.route == SessionCaptureRoute.TERMINAL_VIEWPORT) {
+            writeText("$name-visible-terminal.txt", visibleTerminalText())
+        } else {
+            writeText("$name-visible-session.txt", semantics.toArtifactText())
         }
-        val captured = checkNotNull(bitmap) {
-            "activity was not available to capture viewport '$name' (#2135)"
-        }
-        val file = artifactFile("$name-viewport.png")
-        java.io.FileOutputStream(file).use { out ->
-            captured.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
-        }
-        println("ISSUE1072_VIEWPORT ${file.absolutePath}")
         captured.recycle()
-        artifactFile("$name-visible-terminal.txt").writeText(visibleTerminalText())
+    }
+
+    private fun terminalCaptureSemantics(): SessionCaptureSemantics = SessionCaptureSemantics(
+        route = SessionCaptureRoute.TERMINAL_VIEWPORT,
+        sessionIdentity = sessionIdentity,
+        status = currentConnectionStatus().toString(),
+        timings = timings.toList(),
+        visibleTags = setOf(TMUX_SESSION_SCREEN_TAG),
+    )
+
+    private fun renderTerminalViewportBitmap(label: String): Bitmap {
+        var bitmap: Bitmap? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            bitmap = captureViewToBitmap(activity.window.decorView.findTerminalView(), label)
+        }
+        return checkNotNull(bitmap) {
+            "activity was not available to capture viewport '$label' (#2135)"
+        }
+    }
+
+    private fun renderSessionFrameBitmap(label: String): Bitmap {
+        var bitmap: Bitmap? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            bitmap = captureSessionFrameToBitmap(activity.window.decorView, label)
+        }
+        return checkNotNull(bitmap) {
+            "activity was not available to capture session frame '$label'"
+        }
+    }
+
+    private fun writeBitmap(
+        name: String,
+        bitmap: Bitmap,
+        route: SessionCaptureRoute = SessionCaptureRoute.TERMINAL_VIEWPORT,
+    ): File {
+        val file = artifactFile("$name.png")
+        FileOutputStream(file).use { out ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write bitmap to ${file.absolutePath}"
+            }
+        }
+        println("ISSUE1072_${route.name} ${file.absolutePath}")
+        return file
+    }
+
+    private fun writeText(name: String, text: String): File {
+        val file = artifactFile(name)
+        file.writeText(text)
+        println("ISSUE1072_TEXT ${file.absolutePath}")
+        return file
     }
 
     private fun writeTimings(label: String): File {

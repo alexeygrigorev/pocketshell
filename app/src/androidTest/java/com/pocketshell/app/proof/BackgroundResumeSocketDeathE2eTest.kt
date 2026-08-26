@@ -41,6 +41,15 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
 import com.pocketshell.app.proof.signals.captureViewToBitmap
+import com.pocketshell.app.proof.signals.captureSessionFrameToBitmap
+import com.pocketshell.app.proof.signals.SessionCaptureContract
+import com.pocketshell.app.proof.signals.SessionCaptureRoute
+import com.pocketshell.app.proof.signals.SessionCaptureSemantics
+import com.pocketshell.app.proof.signals.SessionIdentity
+import com.pocketshell.app.proof.signals.SessionRouteSnapshot
+import com.pocketshell.app.proof.signals.assertSessionRecoveryIndicatorVisible
+import com.pocketshell.app.proof.signals.assertSessionRouteStable
+import com.pocketshell.app.proof.signals.readAuthoritativeTmuxSessionIdentity
 
 /**
  * Issue #173 / #1098 (item 3) — regression test for the crash-on-resume AND the
@@ -94,9 +103,14 @@ import com.pocketshell.app.proof.signals.captureViewToBitmap
  *
  *  - `issue173-01-attached-viewport.png` + `-visible-terminal.txt` — proof
  *    the tmux session attached cleanly before the test broke the socket.
- *  - `issue173-02-after-resume-viewport.png` +
- *    `-visible-terminal.txt` — proof the app survived the resume with no
- *    crash, with the disconnect band surfaced.
+ *  - `issue173-02-after-resume-session.png` +
+ *    `-visible-session.txt` — proof the app survived the resume with no
+ *    crash, with the disconnect band surfaced. This is deliberately a
+ *    session-frame artifact because the failed route intentionally replaces
+ *    TerminalView; the terminal viewport contract remains hard for the
+ *    attached and recovered-live captures.
+ *  - `*-semantic.txt` — status, booleans, visible tags, and timing snapshot
+ *    written before each bitmap attempt.
  *  - `timings.txt` — pause-to-kill, kill-to-resume, resume-to-failed-status
  *    timings so a reviewer can tell apart "responsiveness regressed" from
  *    "didn't crash but UI never updated".
@@ -120,6 +134,14 @@ class BackgroundResumeSocketDeathE2eTest {
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
+    private lateinit var sessionIdentity: SessionIdentity
+
+    private val captureContract = SessionCaptureContract(
+        recordSemantic = { label, text -> writeText(label, text) },
+        writeBitmap = { label, route, bitmap ->
+            writeBitmap("$label-${route.artifactSuffix}", bitmap, route)
+        },
+    )
 
     @After
     fun closeLaunchedActivity() {
@@ -164,7 +186,14 @@ class BackgroundResumeSocketDeathE2eTest {
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
-        captureViewport("issue173-01-attached")
+        sessionIdentity = readAuthoritativeTmuxSessionIdentity(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = key,
+            sessionName = SEEDED_SESSION,
+        )
+        captureSessionEvidence("issue173-01-attached")
 
         // ---- (2) Sanity-check the wire is alive end-to-end before we
         // break it. We don't drive input via the IME path because the
@@ -272,7 +301,24 @@ class BackgroundResumeSocketDeathE2eTest {
             "resume_to_failed_status_ms",
             SystemClock.elapsedRealtime() - resumeAt,
         )
-        captureViewport("issue173-02-after-resume")
+        val afterResumeIdentity = readAuthoritativeTmuxSessionIdentity(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = key,
+            sessionName = SEEDED_SESSION,
+        )
+        assertTrue(
+            "the failed route must still identify the seeded tmux session generation; " +
+                "before=$sessionIdentity afterResume=$afterResumeIdentity",
+            afterResumeIdentity == sessionIdentity,
+        )
+        val recoveryIndicator = compose.assertSessionRecoveryIndicatorVisible(
+            label = "issue173-02-after-resume",
+            sessionIdentity = afterResumeIdentity,
+            indicatorTags = setOf(TMUX_SESSION_ERROR_TAG, TMUX_SESSION_RECONNECT_TAG),
+            requiredTags = setOf(TMUX_SESSION_ERROR_TAG, TMUX_SESSION_RECONNECT_TAG),
+        )
         assertTrue(
             "expected the disconnect band ([$TMUX_SESSION_ERROR_TAG] FailedConnectionRow) within " +
                 "${FAILED_STATUS_TIMEOUT_MS}ms of resume; the fix should route the genuine ladder " +
@@ -288,6 +334,22 @@ class BackgroundResumeSocketDeathE2eTest {
             "expected the disconnect band message to contain `$CONNECTION_LOST_MARKER` " +
                 "(the unified #145 wording) so the user sees a clear disconnected indicator",
             disconnectMarkerVisible,
+        )
+        captureSessionEvidence(
+            name = "issue173-02-after-resume",
+            semantics = SessionCaptureSemantics(
+                route = SessionCaptureRoute.SESSION_FRAME,
+                sessionIdentity = afterResumeIdentity,
+                status = currentConnectionStatus().toString(),
+                booleans = mapOf(
+                    "activityAlive" to activityAlive,
+                    "bandVisible" to bandVisible,
+                    "disconnectMarkerVisible" to disconnectMarkerVisible,
+                ),
+                timings = timings.toList(),
+                visibleTags = setOf(TMUX_SESSION_SCREEN_TAG) + recoveryIndicator.visibleTags,
+            ),
+            expectedRoute = recoveryIndicator.route,
         )
 
         // ---- (10) NO false-alarm permanence: the band is the HONEST, recoverable
@@ -525,11 +587,76 @@ class BackgroundResumeSocketDeathE2eTest {
         return text
     }
 
-    private fun captureViewport(name: String) {
+    private fun currentConnectionStatus(): TmuxSessionViewModel.ConnectionStatus {
+        var status: TmuxSessionViewModel.ConnectionStatus =
+            TmuxSessionViewModel.ConnectionStatus.Idle
+        launchedActivity?.onActivity { activity ->
+            status = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
+                .connectionStatus
+                .value
+        }
+        return status
+    }
+
+    private fun captureSessionEvidence(
+        name: String,
+        semantics: SessionCaptureSemantics = terminalCaptureSemantics(),
+        expectedRoute: SessionRouteSnapshot? = null,
+    ) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
         SystemClock.sleep(150)
 
+        val routeBefore = compose.assertSessionRouteStable(
+            label = name,
+            sessionIdentity = semantics.sessionIdentity,
+            expected = expectedRoute,
+        )
+        val captured = captureContract.capture(
+            label = name,
+            semantics = semantics,
+            captureTerminalViewport = { legacyTerminalCapture(name) },
+            captureSessionFrame = {
+                var bitmap: Bitmap? = null
+                launchedActivity?.onActivity { activity ->
+                    bitmap = captureSessionFrameToBitmap(activity.window.decorView, name)
+                }
+                checkNotNull(bitmap) {
+                    "activity was not available to capture session frame '$name'"
+                }
+            },
+        )
+        compose.assertSessionRouteStable(
+            label = "$name-after-capture",
+            sessionIdentity = semantics.sessionIdentity,
+            expected = routeBefore,
+        )
+        if (semantics.route == SessionCaptureRoute.TERMINAL_VIEWPORT) {
+            writeText("$name-visible-terminal.txt", visibleTerminalText())
+        } else {
+            writeText("$name-visible-session.txt", semantics.toArtifactText())
+        }
+        captured.recycle()
+    }
+
+    private fun terminalCaptureSemantics(
+        booleans: Map<String, Boolean> = emptyMap(),
+    ): SessionCaptureSemantics = SessionCaptureSemantics(
+        route = SessionCaptureRoute.TERMINAL_VIEWPORT,
+        sessionIdentity = sessionIdentity,
+        status = currentConnectionStatus().toString(),
+        booleans = booleans,
+        timings = timings.toList(),
+        visibleTags = setOf(TMUX_SESSION_SCREEN_TAG),
+    )
+
+    /*
+     * Keep the old terminal-only provider in the contract's terminal branch.
+     * This explicit callback is what preserves the #2135 hard failure for
+     * terminal-required evidence; recovery states select the session-frame
+     * callback above instead.
+     */
+    private fun legacyTerminalCapture(name: String): Bitmap {
         var bitmap: Bitmap? = null
         launchedActivity?.onActivity { activity ->
             bitmap = captureViewToBitmap(
@@ -540,19 +667,21 @@ class BackgroundResumeSocketDeathE2eTest {
         val captured = checkNotNull(bitmap) {
             "activity was not available to capture viewport '$name' (#2135)"
         }
-        writeBitmap("$name-viewport", captured)
-        writeText("$name-visible-terminal.txt", visibleTerminalText())
-        captured.recycle()
+        return captured
     }
 
-    private fun writeBitmap(name: String, bitmap: Bitmap): File {
+    private fun writeBitmap(
+        name: String,
+        bitmap: Bitmap,
+        route: SessionCaptureRoute = SessionCaptureRoute.TERMINAL_VIEWPORT,
+    ): File {
         val file = artifactFile("$name.png")
         FileOutputStream(file).use { out ->
             check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
                 "failed to write bitmap to ${file.absolutePath}"
             }
         }
-        println("ISSUE173_VIEWPORT ${file.absolutePath}")
+        println("ISSUE173_${route.name} ${file.absolutePath}")
         return file
     }
 

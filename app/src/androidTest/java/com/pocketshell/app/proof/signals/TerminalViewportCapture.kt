@@ -31,6 +31,25 @@ fun captureViewToBitmap(view: View?, label: String): Bitmap {
 }
 
 /**
+ * Draws the complete session surface (including recovery chrome) into a
+ * software bitmap. This is intentionally separate from [captureViewToBitmap]:
+ * a recovery card may legitimately have no [com.termux.view.TerminalView],
+ * while terminal-content evidence must continue to use the hard #2135 helper.
+ */
+fun captureSessionFrameToBitmap(view: View?, label: String): Bitmap {
+    if (view == null || view.width <= 0 || view.height <= 0) {
+        throw AssertionError(
+            "the session-frame artifact '$label' could not be captured: " +
+                "${describeViewCaptureState(view)}. A missing session frame " +
+                "is a hard failure for recovery evidence.",
+        )
+    }
+    val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+    view.draw(Canvas(bitmap))
+    return bitmap
+}
+
+/**
  * One-line view-state diagnostic used by [captureViewToBitmap] and by
  * tests that assert the failure names the right fields.
  *

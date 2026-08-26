@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.semantics.getOrNull
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -23,6 +24,8 @@ import com.pocketshell.app.tmux.OVERFLOW_RECOVERY_MAX_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY
+import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_SURFACE_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_SURFACE_RECREATE_TAG
 import com.pocketshell.app.tmux.TmuxSessionLatencyTelemetry
@@ -44,6 +47,15 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import com.pocketshell.app.proof.signals.captureViewToBitmap
+import com.pocketshell.app.proof.signals.captureSessionFrameToBitmap
+import com.pocketshell.app.proof.signals.SessionCaptureContract
+import com.pocketshell.app.proof.signals.SessionCaptureRoute
+import com.pocketshell.app.proof.signals.SessionCaptureSemantics
+import com.pocketshell.app.proof.signals.SessionIdentity
+import com.pocketshell.app.proof.signals.SessionRouteSnapshot
+import com.pocketshell.app.proof.signals.assertRecoveryCardVisible
+import com.pocketshell.app.proof.signals.assertSessionRouteStable
+import com.pocketshell.app.proof.signals.readAuthoritativeTmuxSessionIdentity
 
 /**
  * Issue #1205 — DEVICE-TRUTH journey for the maintainer's black-screen class where a pane
@@ -111,6 +123,14 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
 
     private lateinit var fixtureKey: String
     private lateinit var hostRowTag: String
+    private lateinit var sessionIdentity: SessionIdentity
+
+    private val captureContract = SessionCaptureContract(
+        recordSemantic = { label, text -> writeText(label, text) },
+        writeBitmap = { label, route, bitmap ->
+            writeBitmap("$label-${route.artifactSuffix}", bitmap, route)
+        },
+    )
 
     private suspend fun seedBeforeLaunch() {
         BackgroundGraceTestOverride.setForTest(null)
@@ -183,19 +203,31 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
                 "found ${bannerRowCount(visibleAfter)}",
             bannerRowCount(visibleAfter) >= MIN_RESTORED_BANNER_ROWS,
         )
-        capturePaintedRows("issue1205-backlog-02-healed")
 
         // ----- GREEN: producer REATTACHED to the LIVE client (live %output resumes). -----
         assertProducerReattachedToLiveClient(paneId, "backlog overflow")
 
         // ----- DISCRIMINATOR: still Connected, no reconnect (renderer backpressure, not a drop). -----
         assertNoVisibleReconnect("post-backlog-heal")
+        val healedStatus = currentConnectionStatus()
+        val healedClientDisconnected = clientDisconnected()
+        capturePaintedRows(
+            "issue1205-backlog-02-healed",
+            terminalCaptureSemantics(
+                booleans = mapOf(
+                    "bannerRestored" to true,
+                    "producerReattached" to true,
+                    "reconnectVisible" to false,
+                    "clientDisconnected" to healedClientDisconnected,
+                ),
+            ),
+        )
         assertTrue(
             "session must stay Connected after the overflow heal (renderer backpressure, no " +
-                "reconnect), observed=${currentConnectionStatus()}",
-            currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected,
+                "reconnect), observed=$healedStatus",
+            healedStatus is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
-        assertFalse("the tmux client must NOT be disconnected", clientDisconnected())
+        assertFalse("the tmux client must NOT be disconnected", healedClientDisconnected)
         writeSummary("backlog", "live-output pane delivery backlog Channel(4096) overflow")
     } }
 
@@ -310,14 +342,44 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
 
         // And the actionable "Recreate terminal" card renders from that state (the user-visible
         // give-up affordance). Capture the artifact regardless so a card-render gap is diagnosable.
-        val cardShown = runCatching {
-            compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
-                compose.onAllNodesWithTag(TMUX_TERMINAL_SURFACE_ERROR_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes().isNotEmpty()
-            }
-            true
-        }.getOrDefault(false)
-        capturePaintedRows("issue1205-exhaustion-card")
+        compose.waitUntil(timeoutMillis = RESTORE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_TERMINAL_SURFACE_ERROR_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        selectTerminalTabForRecoveryCard()
+        val cardRoute = compose.assertRecoveryCardVisible(
+            label = "issue1205-exhaustion-card",
+            sessionIdentity = sessionIdentity,
+        )
+        val cardShown = true
+        val cardBitmap = captureSessionArtifact(
+            name = "issue1205-exhaustion-card",
+            semantics = SessionCaptureSemantics(
+                route = SessionCaptureRoute.SESSION_FRAME,
+                sessionIdentity = sessionIdentity,
+                status = currentConnectionStatus().toString(),
+                booleans = mapOf(
+                    "surfaceError" to activePaneSurfaceError(),
+                    "cardShown" to cardShown,
+                ),
+                visibleTags = setOf(
+                    TMUX_SESSION_SCREEN_TAG,
+                    TMUX_TERMINAL_SURFACE_ERROR_TAG,
+                    TMUX_TERMINAL_SURFACE_RECREATE_TAG,
+                ),
+            ),
+            expectedRoute = cardRoute,
+        )
+        writeText(
+            "issue1205-exhaustion-card-visible-session.txt",
+            "session.name=${sessionIdentity.name}\n" +
+                "session.id=${sessionIdentity.id}\n" +
+                "session.created=${sessionIdentity.createdEpochSeconds}\n" +
+                "cardTag=$TMUX_TERMINAL_SURFACE_ERROR_TAG\n" +
+                "actionTag=$TMUX_TERMINAL_SURFACE_RECREATE_TAG\n" +
+                "sessionRoute=$TMUX_SESSION_SCREEN_TAG\n",
+        )
+        cardBitmap.recycle()
         assertTrue(
             "Issue #1205: the bounded-retry exhaustion must render the actionable 'Recreate " +
                 "terminal' card (surfaceError=${activePaneSurfaceError()})",
@@ -530,6 +592,15 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
+        sessionIdentity = runBlocking {
+            readAuthoritativeTmuxSessionIdentity(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = fixtureKey,
+                sessionName = SESSION_NAME,
+            )
+        }
     }
 
     private fun waitForTerminalViewAttached() {
@@ -541,6 +612,36 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
             }
             attached
         }
+    }
+
+    /**
+     * The recorded agent default is Conversation. The recovery card belongs to
+     * the Terminal page, so its semantics must be checked after the real tab
+     * selection rather than accepting a retained/off-page pager node.
+     */
+    private fun selectTerminalTabForRecoveryCard() {
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(TMUX_TERMINAL_TAB_TAG, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNode()
+                .config
+                .getOrNull(TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY) == 0
+        }
+        assertEquals(
+            "recovery card must be captured from the selected Terminal page",
+            0,
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNode()
+                .config
+                .getOrNull(TMUX_SELECTED_TAB_INDEX_SEMANTICS_KEY),
+        )
+        compose.waitForIdle()
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
     }
 
     private fun waitForConnected(label: String) {
@@ -687,13 +788,63 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
 
     // -------------------------------------------------------------------- Artifacts
 
-    private fun capturePaintedRows(name: String): Int {
-        val bitmap = renderViewportBitmap(name)
-        writeBitmap("$name-viewport", bitmap)
+    private fun capturePaintedRows(
+        name: String,
+        semantics: SessionCaptureSemantics = terminalCaptureSemantics(),
+    ): Int {
+        check(semantics.route == SessionCaptureRoute.TERMINAL_VIEWPORT) {
+            "painted-row assertions require an authoritative terminal viewport route"
+        }
+        val bitmap = captureSessionArtifact(name, semantics)
         writeText("$name-visible-terminal.txt", visibleTerminalText())
         val rows = paintedRowCount(bitmap)
         bitmap.recycle()
         return rows
+    }
+
+    private fun terminalCaptureSemantics(
+        booleans: Map<String, Boolean> = emptyMap(),
+    ): SessionCaptureSemantics = SessionCaptureSemantics(
+        route = SessionCaptureRoute.TERMINAL_VIEWPORT,
+        sessionIdentity = sessionIdentity,
+        status = currentConnectionStatus().toString(),
+        booleans = booleans,
+        visibleTags = setOf(TMUX_SESSION_SCREEN_TAG),
+    )
+
+    private fun captureSessionArtifact(
+        name: String,
+        semantics: SessionCaptureSemantics,
+        expectedRoute: SessionRouteSnapshot? = null,
+    ): Bitmap {
+        val routeBefore = compose.assertSessionRouteStable(
+            label = name,
+            sessionIdentity = semantics.sessionIdentity,
+            expected = expectedRoute,
+        )
+        val bitmap = captureContract.capture(
+            label = name,
+            semantics = semantics,
+            captureTerminalViewport = { renderViewportBitmap(name) },
+            captureSessionFrame = { renderSessionFrameBitmap(name) },
+        )
+        compose.assertSessionRouteStable(
+            label = "$name-after-capture",
+            sessionIdentity = semantics.sessionIdentity,
+            expected = routeBefore,
+        )
+        return bitmap
+    }
+
+    private fun renderSessionFrameBitmap(label: String): Bitmap {
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+        var bitmap: Bitmap? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            bitmap = captureSessionFrameToBitmap(activity.window.decorView, label)
+        }
+        return checkNotNull(bitmap) {
+            "activity was not available to capture session frame '$label'"
+        }
     }
 
     private fun renderViewportBitmap(label: String): Bitmap {
@@ -733,14 +884,18 @@ class PaneOutputOverflowRecoveryJourneyE2eTest {
         return painted
     }
 
-    private fun writeBitmap(name: String, bitmap: Bitmap): File {
+    private fun writeBitmap(
+        name: String,
+        bitmap: Bitmap,
+        route: SessionCaptureRoute = SessionCaptureRoute.TERMINAL_VIEWPORT,
+    ): File {
         val file = artifactFile("$name.png")
         java.io.FileOutputStream(file).use { out ->
             check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
                 "failed to write bitmap to ${file.absolutePath}"
             }
         }
-        println("ISSUE1205_VIEWPORT ${file.absolutePath}")
+        println("ISSUE1205_${route.name} ${file.absolutePath}")
         return file
     }
 

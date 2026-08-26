@@ -121,10 +121,10 @@ exclude = [
 
 [tool.uv]
 # Keep the lockfile's reproducibility cutoff project-local. The host may have
-# a rolling global `exclude-newer` policy that predates a deliberately pinned
-# release (quse 0.0.14 was uploaded 2026-08-20); this exact value is also the
+# a rolling global `exclude-newer` policy that predates deliberately pinned
+# releases (quse 0.0.14 and tmuxctl 0.3.5); this exact value is also the
 # `uv.lock` options cutoff and must be used when checking this lock.
-exclude-newer = "2026-08-20T22:00:00Z"
+exclude-newer = "2026-08-27T22:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

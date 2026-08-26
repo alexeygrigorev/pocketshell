@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-08-20T22:00:00Z"
+exclude-newer = "2026-08-27T22:00:00Z"
 
 [[package]]
 name = "annotated-doc"
@@ -348,7 +348,7 @@ requires-dist = [
     { name = "qrcode", extras = ["pil"], marker = "extra == 'qr'", specifier = ">=7.4" },
     { name = "quse", specifier = "==0.0.14" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.0" },
-    { name = "tmuxctl", specifier = ">=0.3.3" },
+    { name = "tmuxctl", specifier = ">=0.3.5" },
 ]
 provides-extras = ["dev", "qr"]
 
@@ -546,15 +546,15 @@ wheels = [
 
 [[package]]
 name = "tmuxctl"
-version = "0.3.3"
+version = "0.3.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "typer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/ce/c481381c6e28058ab2accc988b52644144da933e22dd7f3c3d476dc5f8bb/tmuxctl-0.3.3.tar.gz", hash = "sha256:e2d6bbb6f75e75e17f0714da35e6b6f070ac8ada8493863633a35186779e3de8", size = 52506, upload-time = "2026-06-13T07:49:27.031Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/f6/49c6bf24b5cac9192bfa7fb3d429ef265b9acde250728417d0b95ea4ea9d/tmuxctl-0.3.5.tar.gz", hash = "sha256:ede90c945789e298128c51126dc67ec7306edb67ce750bc3f6d0ca8df61ed401", size = 83450, upload-time = "2026-08-26T08:52:36.874Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c1/62/0ed685ea475fc2f4c2c54b32f10f28d9d979770e328269edd2b7249c6ca5/tmuxctl-0.3.3-py3-none-any.whl", hash = "sha256:746d1ad5aa2ef6f6a68e83365fae3d88a283dbe64b130676419150f4edc1d2db", size = 35421, upload-time = "2026-06-13T07:49:26.067Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/c2/c38affd173c0b7ab6e83bb70b43714ab2121845bc219350e9f129a661c34/tmuxctl-0.3.5-py3-none-any.whl", hash = "sha256:47e70bdf76101945086a95a52cbc708767077a5f4cfb31908980b37057eceae0", size = 56222, upload-time = "2026-08-26T08:52:35.587Z" },
 ]
 
 [[package]]

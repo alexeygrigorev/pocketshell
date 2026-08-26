@@ -64,7 +64,15 @@ dependencies = [
     # down every session at once; 0.3.3 starts the server in its own
     # login-independent unit under robust.slice (tmuxctl#4). 0.3.0 first shipped
     # the `create-detached` verb this CLI calls.
-    "tmuxctl>=0.3.3",
+    # >=0.3.5 is required as of 2026-08-26: 0.3.4 still resolves/creates
+    # sessions on the legacy shared socket only. A pinned-old pocketshell host
+    # CLI running alongside a newer interactive `tmuxctl`/`t` checkout (which
+    # does per-session servers) raced session creation for the same name onto
+    # two different sockets, so the app/desktop and an interactive `t` session
+    # silently disagreed about which sessions existed. 0.3.5 ships tmuxctl's
+    # per-session-server migration so every caller resolves sessions the same
+    # way.
+    "tmuxctl>=0.3.5",
 ]
 
 [project.scripts]

@@ -24,7 +24,7 @@ Command-line launch (no Android Studio):
 
 ```bash
 scripts/start-local-avd.sh
-scripts/cgroup-run.sh -- ./gradlew installDebug
+scripts/assemble-debug.sh --install
 adb shell am start -n com.pocketshell.app/.MainActivity
 ```
 

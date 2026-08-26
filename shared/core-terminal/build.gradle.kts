@@ -48,13 +48,25 @@ android {
 
         // Issue #9: a stub `libtermux.so` ships in the AAR so the vendored
         // `com.termux.terminal.JNI` static initializer (`System.loadLibrary`)
-        // does not throw `UnsatisfiedLinkError`. Limit the ABIs to the
+        // does not throw `UnsatisfiedLinkError`. Default ABIs are the
         // emulator-friendly set plus arm64; the stub is tiny (<10 KB per ABI)
         // so the APK overhead is negligible. See `src/main/cpp/CMakeLists.txt`
         // for the rationale.
+        //
+        // Local `scripts/assemble-debug.sh` may pass -PpocketshellAbiFilters to
+        // compile only the connected device ABI. CI/release omit the property
+        // and keep the full set.
+        val nativeAbis = (project.findProperty("pocketshellAbiFilters") as String?)
+            ?.split(",")
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() }
+            .orEmpty()
+            .ifEmpty {
+                listOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            }
         externalNativeBuild {
             cmake {
-                abiFilters("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+                abiFilters += nativeAbis
             }
         }
     }

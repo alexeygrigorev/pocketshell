@@ -847,6 +847,14 @@ jobs:
           chmod +x scripts/ci-assemble-with-ndk-retry.sh scripts/test-ci-ndk-retry.sh
           scripts/test-ci-ndk-retry.sh
 
+      # Local APK assemble must stay on the fast profile (daemon + cache +
+      # multi-worker) and must not silently pick up the release-gate
+      # --no-daemon/--no-build-cache/--max-workers=1 flags. Cheap, no Gradle.
+      - name: Local assemble-debug profile guard
+        run: |
+          chmod +x scripts/assemble-debug.sh scripts/test-assemble-debug.sh
+          scripts/test-assemble-debug.sh
+
   # ---------------------------------------------------------------------------
   # Issue #2067: the #2063 test-area coverage guards, as a DEDICATED job. Reached
   # through a JVM test they were paid TWICE per push (both variants) on the Unit

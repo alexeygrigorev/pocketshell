@@ -70,6 +70,11 @@ core, black screen, terminal/ANR, composer, tree, process learnings) →
   socket at `/tmp/tmux-$UID/default` unless explicitly requested. Use
   `tmux -L`, `tmux -S`, or an isolated `TMUX_TMPDIR`, and see
   [docs/tmux-socket-recovery.md](docs/tmux-socket-recovery.md).
+- Local debug APK / compile check: `scripts/assemble-debug.sh` (keeps the
+  Gradle daemon and cache). Do not use `scripts/cgroup-run.sh -- ./gradlew
+  assembleDebug` or the release-gate `--no-daemon --no-build-cache
+  --max-workers=1` profile for this. Full rule:
+  [process.md](process.md#local-debug-apk).
 - Implementers edit and test, then report changed files and verification. They
   do not commit, push, close issues, or edit outside scope.
 - Reviewers inspect the latest issue evidence and working-tree diff, run the
@@ -119,6 +124,11 @@ found` until these explicit paths have been tried:
 - `emulator`: `/home/alexey/Android/Sdk/emulator/emulator`
 - SDK root from `local.properties`: `/home/alexey/Android/Sdk`
 - Available local AVD: `test`
+
+The local debug APK command is `scripts/assemble-debug.sh` (optional
+`--abi auto --install`). JVM unit tests stay on `scripts/full-jvm-gate.py`.
+Connected/emulator tests stay on `scripts/connected-test.sh`. See
+[process.md](process.md#local-debug-apk).
 
 The canonical `scripts/full-jvm-gate.py` does not depend on ignored
 `local.properties`. It validates `ANDROID_HOME` and/or `ANDROID_SDK_ROOT` (both

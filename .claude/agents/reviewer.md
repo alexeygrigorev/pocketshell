@@ -109,7 +109,7 @@ infra is fixed). Never downgrade a BLOCKED to APPROVED on a JVM proxy.
    - `git diff <file>` for each modified file
    - Read each new source file in full
 4. Run the build and tests yourself — never approve without running them:
-   - `./gradlew assembleDebug` (or the module-specific subcommand the issue specifies)
+   - `scripts/assemble-debug.sh` for the debug APK / compile check (see `process.md` § Local debug APK). Do not use a bare `./gradlew assembleDebug` or the release-gate `--no-daemon --no-build-cache` profile here.
    - `./gradlew :module:test` for unit tests
    - `./gradlew :module:check` for integration tests
    - Capture exit codes and the last 15–20 lines of output

@@ -2191,7 +2191,7 @@ pushing an approved issue, the orchestrator follows the
 [process verification checklist](../process.md#verification-checklist).
 For testing-specific work, the minimum local checks are:
 
-1. `scripts/cgroup-run.sh -- ./gradlew assembleDebug` — does it build?
+1. `scripts/assemble-debug.sh` — does it build?
 2. `scripts/cgroup-run.sh -- ./gradlew check` — do unit tests pass?
 3. For UI changes: install on emulator, eyeball against the matching mockup
 4. For SSH / tmux / agent / usage changes: run the relevant Testcontainers

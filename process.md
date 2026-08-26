@@ -1214,6 +1214,10 @@ the same as one created by the raw commands above.
 - Work entirely inside the assigned worktree. Never edit the main checkout.
 - Apply any provided starter patch first, then validate it before adding
   new work.
+- Local debug APK / compile check: `scripts/assemble-debug.sh` from the
+  worktree (see [Local debug APK](#local-debug-apk)). Do not hand-roll
+  `./gradlew assembleDebug` or the release-gate `--no-daemon --no-build-cache`
+  flags for this.
 - Respect file ownership across parallel issues — the brief lists which
   files belong to other live issues and must not be touched.
 - Run connected/emulator tests locally only when the brief explicitly calls for
@@ -1428,13 +1432,51 @@ If implementer or reviewer confusion reveals that an issue is underspecified, fi
   without asking for context. A `needs-human-confirmation` issue with no
   attached evidence is not ready for human review.
 
+## Local debug APK
+
+The default local compile / phone-install path is `scripts/assemble-debug.sh`.
+Use it for "does it build?", putting a debug APK on a device, and the
+orchestrator verification checklist below.
+
+```bash
+scripts/assemble-debug.sh
+scripts/assemble-debug.sh --abi auto --install
+```
+
+It keeps the Gradle daemon and build cache, pins the Kotlin daemon heap
+(`-Xmx3072m`), runs under a 24G cgroup, skips androidTest unless asked, and
+compiles only the connected device ABI when `ANDROID_SERIAL` is set or exactly
+one device is attached.
+
+Do **not** use these for a local debug APK:
+
+- `scripts/cgroup-run.sh -- ./gradlew assembleDebug` — default 8G cgroup plus
+  `gradle.properties`' 2048m heap and no `kotlin.daemon.jvmargs`; this is the
+  profile that dies with a fake "IR lowering" / zipflinger OOM.
+- `./gradlew --no-daemon --no-build-cache --max-workers=1 …` — the
+  **release-gate** profile. It throws away the daemon and cache and serialises
+  every module so a release/visual-audit APK is reproducible and cannot OOM the
+  box. That is correct for
+  `scripts/capture-walkthrough-screenshots.sh`,
+  `scripts/phone-walkthrough.sh`, and
+  `scripts/pre-release-confidence-gate.sh`. It is the wrong default for a
+  compile check or a phone install.
+
+Need the androidTest APK: `scripts/assemble-debug.sh --android-test`.
+Need every native ABI: `scripts/assemble-debug.sh --abi all`.
+
+Implementers and reviewers run `scripts/assemble-debug.sh` from the issue
+worktree, not a bare `./gradlew assembleDebug`. Connected/emulator tests still
+go through `scripts/connected-test.sh --suffix i<issue>` (#672); that wrapper
+builds its own suffixed APK.
+
 ## Verification Checklist
 
 After reviewer approval, the orchestrator runs:
 
 - [ ] `git status` shows only expected files
 - [ ] `git diff` reads sensibly
-- [ ] Build succeeds, usually `scripts/cgroup-run.sh -- ./gradlew assembleDebug`
+- [ ] Build succeeds, usually `scripts/assemble-debug.sh` (see [Local debug APK](#local-debug-apk); do not use the release-gate `--no-daemon --no-build-cache` profile here)
 - [ ] Tests pass for touched code
 - [ ] No secrets or generated build outputs are staged
 - [ ] Acceptance criteria are demonstrably met

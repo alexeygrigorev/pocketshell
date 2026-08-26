@@ -24,6 +24,8 @@ import com.pocketshell.core.connection.sessionSurfaceState
 import com.pocketshell.core.connection.showsCalmFailure
 import com.pocketshell.core.connection.showsCenteredLoader
 import com.pocketshell.core.connection.surfaceOwnsPrimary
+import com.pocketshell.core.connection.targetIdOrNull
+import com.pocketshell.core.connection.targetNameOrNull
 import com.pocketshell.core.connection.terminalHeld
 import com.pocketshell.uikit.model.SessionAgentKind
 
@@ -67,6 +69,39 @@ internal class TmuxSessionConnectionRuntime(
     val sessionLive: Boolean,
 )
 
+/**
+ * Select the identity used by the rendered surface.
+ *
+ * A cold deep link can carry only a mutable tmux name. The first authoritative
+ * pane listing then rekeys [reveal] to tmux's exact generation, so the screen
+ * must follow that same reveal identity or [sessionSurfaceState] will correctly
+ * hold an otherwise valid live frame as superseded. An explicit route
+ * generation always wins; for a name-only route, adopt only an exact reveal
+ * whose host and target name match this route. The fusion below remains the
+ * final stale-id fence.
+ */
+internal fun tmuxSessionSurfaceTargetId(
+    routeTargetId: SessionId,
+    routeHostId: Long,
+    routeSessionName: String,
+    routeTmuxSessionId: String?,
+    routeSessionCreated: Long?,
+    reveal: RevealState,
+): SessionId {
+    // A route with a generation is already authoritative. Never let a held
+    // reveal from another generation replace an explicit route identity.
+    if (tmuxSessionGenerationOrNull(routeTmuxSessionId, routeSessionCreated) != null) {
+        return routeTargetId
+    }
+
+    val revealTargetId = reveal.targetIdOrNull() ?: return routeTargetId
+    if (reveal.targetNameOrNull() != routeSessionName) return routeTargetId
+    if (parseDurableTmuxSessionIdentity(routeHostId, revealTargetId.value) == null) {
+        return routeTargetId
+    }
+    return revealTargetId
+}
+
 @Composable
 internal fun rememberTmuxSessionConnectionRuntime(
     viewModel: TmuxSessionViewModel,
@@ -93,9 +128,21 @@ internal fun rememberTmuxSessionConnectionRuntime(
     // the rendered screen state is a pure function of that id (`RevealStateMachine`),
     // so a late/stale frame from the previous session can NEVER paint.
     val revealState by viewModel.revealState.collectAsState()
-    val targetSessionId = remember(hostId, sessionName, tmuxSessionId, sessionCreated) {
+    val routeTargetSessionId = remember(hostId, sessionName, tmuxSessionId, sessionCreated) {
         tmuxTargetSessionId(hostId, sessionName, tmuxSessionId, sessionCreated)
     }
+    // Issue #2294: a name-only cold route is intentionally enriched by the
+    // authoritative exact id carried by the reveal reducer after list-panes.
+    // Explicit route generations stay fixed, and the selector's name/host
+    // checks leave the fusion's strict stale-id fence intact.
+    val targetSessionId = tmuxSessionSurfaceTargetId(
+        routeTargetId = routeTargetSessionId,
+        routeHostId = hostId,
+        routeSessionName = sessionName,
+        routeTmuxSessionId = tmuxSessionId,
+        routeSessionCreated = sessionCreated,
+        reveal = revealState,
+    )
     val activeSessionCardsTargetKey = remember(hostId, host, port, user, keyPath, sessionName) {
         sessionCardsTargetKey(
             hostId = hostId,

@@ -110,6 +110,26 @@ class RevealStateMachine {
     }
 
     /**
+     * Issue #2294: enrich a name-only navigation id with tmux's authoritative
+     * session generation once the first pane listing lands. This is an identity
+     * handoff for the SAME session, not a new navigation: preserve the current
+     * loading/live surface and rewrite any already-held seeds so the next
+     * exact-id seed is accepted instead of being dropped as foreign.
+     *
+     * The explicit [from] fence is important. A late reconcile from an older
+     * runtime must not be allowed to re-key whichever session is currently on
+     * screen merely because both sessions share a name.
+     */
+    fun adoptTargetId(from: SessionId, to: SessionId) {
+        if (from == to || currentTargetId != from) return
+
+        val adoptedPanes = panes.map { it.copy(targetId = to) }
+        panes.clear()
+        panes.addAll(adoptedPanes)
+        _state.value = _state.value.withTargetId(to, adoptedPanes)
+    }
+
+    /**
      * Project a [ConnectionState] from the controller. Dropped if it is not for the
      * current target (a late lifecycle event from a superseded switch).
      *
@@ -374,4 +394,14 @@ private fun RevealState.withTargetName(name: String): RevealState = when (this) 
     is RevealState.Live -> copy(targetName = name)
     is RevealState.Gone -> copy(targetName = name)
     is RevealState.Error -> copy(targetName = name)
+}
+
+/** Return a copy of this state with the same surface under a new exact id. */
+private fun RevealState.withTargetId(targetId: SessionId, panes: List<Seed>): RevealState = when (this) {
+    is RevealState.Idle -> this
+    is RevealState.Navigating -> copy(targetId = targetId)
+    is RevealState.Seeding -> copy(targetId = targetId)
+    is RevealState.Live -> copy(targetId = targetId, panes = panes)
+    is RevealState.Gone -> copy(targetId = targetId)
+    is RevealState.Error -> copy(targetId = targetId)
 }

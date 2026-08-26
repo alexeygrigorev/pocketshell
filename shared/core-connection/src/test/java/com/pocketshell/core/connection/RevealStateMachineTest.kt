@@ -67,6 +67,36 @@ class RevealStateMachineTest {
         assertEquals("session-B", state.targetNameOrNull())
     }
 
+    @Test
+    fun `exact generation adoption rekeys the loading target before its seed lands`() {
+        val m = RevealStateMachine()
+        val exact = SessionId("tmux:7:\$0:1700000003")
+        m.navigate(a, "session-A")
+        m.onConnectionState(ConnectionState.Attaching(host, a))
+
+        m.adoptTargetId(from = a, to = exact)
+
+        assertEquals(RevealState.Seeding(exact, "session-A"), m.state.value)
+        m.onSeed(seed(exact, frame = "content-A"))
+        assertEquals(
+            RevealState.Live(exact, "session-A", listOf(seed(exact, frame = "content-A")), null),
+            m.state.value,
+        )
+    }
+
+    @Test
+    fun `late exact generation adoption cannot rekey a different current target`() {
+        val m = RevealStateMachine()
+        val exactA = SessionId("tmux:7:\$0:1700000003")
+        m.navigate(b, "session-B")
+
+        m.adoptTargetId(from = a, to = exactA)
+
+        assertEquals(RevealState.Navigating(b, "session-B"), m.state.value)
+        m.onSeed(seed(exactA, frame = "stale-A"))
+        assertEquals(RevealState.Navigating(b, "session-B"), m.state.value)
+    }
+
     // --- a foreign seed is dropped, never revealed ------------------------
 
     @Test

@@ -36,6 +36,20 @@ internal class TmuxRevealController(
         revealStateMachine.navigate(sessionId(target), target.sessionName)
     }
 
+    /**
+     * Issue #2294: keep reveal keyed to the same session while pane listing
+     * enriches a name-only target with tmux's exact generation.
+     */
+    fun adoptTargetIdentity(
+        previous: ConnectionTarget,
+        adopted: ConnectionTarget,
+    ) {
+        revealStateMachine.adoptTargetId(
+            from = sessionId(previous),
+            to = sessionId(adopted),
+        )
+    }
+
     fun offerSeed(target: ConnectionTarget, paneId: String, frame: String) {
         revealStateMachine.onSeed(
             Seed(targetId = sessionId(target), paneId = paneId, frame = frame),

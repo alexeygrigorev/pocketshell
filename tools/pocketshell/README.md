@@ -59,6 +59,7 @@ pocketshell env ...                         # .env / .envrc management
 pocketshell hooks ...                       # Claude/Codex/OpenCode hooks
 pocketshell logs ...                        # server-side trace sink
 pocketshell daemon ...                      # IPC daemon lifecycle
+pocketshell serve --dir PATH [--port N]     # foreground static HTTP server
 pocketshell qr-share ...                    # SSH host QR import payloads
 ```
 
@@ -298,6 +299,34 @@ the user to install it and run `gh auth login`; when present but
 unauthenticated the `hint` tells them to run `gh auth login`. The only
 network access is whatever `gh auth status` itself performs (a token-validity
 check); the command does NOT call the GitHub API.
+
+### `pocketshell serve`
+
+Serve a folder over HTTP for a client-owned SSH port forward:
+
+```bash
+pocketshell serve --dir /path/to/site
+pocketshell serve --dir /path/to/site --port 8080 --bind 127.0.0.1
+```
+
+The server binds `127.0.0.1` by default. Omitting `--port` (or passing
+`--port 0`) lets the OS select a free port; after binding, stdout contains
+exactly one stable JSON line with the selected port:
+
+```json
+{"port":43123}
+```
+
+The process stays in the foreground so the caller owns its lifetime: keep the
+SSH exec channel alive while the site is needed and terminate that process
+when the view closes or the connection is lost. There is no detached server
+registry or `--stop` command in this contract. HTTP access logs and errors go
+to stderr, keeping stdout parseable.
+
+Requests serve static files with stdlib MIME detection. A directory resolves
+to its `index.html` when present; paths are resolved before the containment
+check, so parent traversal and symlinks that leave the selected directory are
+rejected rather than served.
 
 ### `pocketshell qr-share`
 

@@ -3,7 +3,7 @@
 This package replaces the separately-installed `quse` and `tmuxctl`
 utilities the PocketShell app used to probe for. The app now probes a
 single `pocketshell` binary, which exposes the `usage`, `jobs`,
-`agent-log`, `sessions`, `repos`, and daemon subcommands.
+`agent-log`, `sessions`, `repos`, `serve`, and daemon subcommands.
 
 See https://github.com/alexeygrigorev/pocketshell/issues/170.
 """

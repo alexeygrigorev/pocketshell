@@ -4,6 +4,7 @@ Skeleton landed in the first PR of issue
 [#170](https://github.com/alexeygrigorev/pocketshell/issues/170). Follow-up
 PRs add subgroups: `jobs` (#170 second PR), `sessions` (#218),
 `agent-log` (#217), `daemon` (#219), and `repos` (#220).
+The foreground static server is `serve` (#2333).
 
 Per the D22 locked principle (no backwards compatibility, hard cuts only)
 the PocketShell Android app probes for this single binary instead of
@@ -39,6 +40,7 @@ from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
 from pocketshell.send import send_command
 from pocketshell.sessions import sessions_group
+from pocketshell.serve import serve_command
 from pocketshell.tree import tree_group
 from pocketshell.usage import usage_command
 
@@ -49,7 +51,7 @@ from pocketshell.usage import usage_command
         "Unified server-side helper for the PocketShell Android client.\n\n"
         "Subcommands replace the separately-installed `quse`, `tmuxctl`, "
         "and `qr-share` CLIs. Today `usage`, `jobs`, `sessions`, "
-        "`agent-log`, `repos`, `github`, `daemon`, and `qr-share` are wired "
+        "`agent-log`, `repos`, `github`, `daemon`, `serve`, and `qr-share` are wired "
         "up; more subcommands will land in follow-up rounds."
     ),
 )
@@ -83,6 +85,7 @@ cli.add_command(push_group, name="push")
 # single owner of the group object (see pocketshell.cards).
 register_push_card_commands(push_group)
 cli.add_command(qr_share_command, name="qr-share")
+cli.add_command(serve_command, name="serve")
 
 
 # ---------------------------------------------------------------------------

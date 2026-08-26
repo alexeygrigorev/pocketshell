@@ -60,9 +60,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * ## Threading
  *
- * [requestDrain] is safe from any thread (it only flips an atomic + posts to the
- * handler). The drain turns themselves run on the handler's (main) looper, so
- * `availableBytes` / `dispatchSlice` are touched only there.
+ * [requestDrain] and [cancel] are safe from any thread. The lifecycle lock
+ * linearizes cancellation with the final continuation decision: once
+ * [cancel] returns, a running turn cannot post another continuation, and any
+ * already-posted callback has been removed. A running turn re-checks
+ * cancellation before each slice, so cancellation may leave at most the
+ * currently in-flight handler dispatch to finish. The drain turns themselves
+ * run on the handler's (main) looper, so `availableBytes` / `dispatchSlice`
+ * are touched only there.
  *
  * @param handler the session's main-looper handler (the vendored
  *   `TerminalSession.mMainThreadHandler`).
@@ -97,6 +102,12 @@ internal class MainThreadDrainScheduler(
     private val maxTurnMillis: Long = DEFAULT_MAX_TURN_MILLIS,
     private val nowMillis: () -> Long = { SystemClock.uptimeMillis() },
 ) {
+    /** Serializes terminal cancellation with request/final-post ownership. */
+    private val lifecycleLock = Any()
+
+    /** A scheduler instance is single-use after cancellation. */
+    private var cancelled: Boolean = false
+
     // True while a drain turn is scheduled (posted) or running. Collapses a burst
     // of requestDrain() calls into a single pending turn. Written from any thread
     // (requestDrain) and from the main looper (drainTurn); atomic for visibility.
@@ -114,21 +125,32 @@ internal class MainThreadDrainScheduler(
      * (#796). Safe from any thread.
      */
     fun requestDrain() {
-        if (pending.compareAndSet(false, true)) {
-            handler.post(drainTurn)
+        synchronized(lifecycleLock) {
+            if (cancelled) return@synchronized
+            if (pending.compareAndSet(false, true)) {
+                handler.post(drainTurn)
+            }
         }
     }
 
     /**
-     * Drop any scheduled drain turn. Called when the bridge stops so a torn-down
-     * session leaves no posted runnable on the main looper.
+     * Drop any scheduled drain turn and permanently cancel this scheduler.
+     * Called when the bridge stops so a torn-down session leaves no posted
+     * runnable on the main looper. A turn already running owns only its
+     * current dispatch; it must pass the cancellation fence before it can
+     * schedule a continuation.
      */
     fun cancel() {
-        pending.set(false)
-        handler.removeCallbacks(drainTurn)
+        synchronized(lifecycleLock) {
+            cancelled = true
+            pending.set(false)
+            handler.removeCallbacks(drainTurn)
+        }
     }
 
     private fun runDrainTurn() {
+        if (cancelledTurn()) return
+
         // NOTE: [pending] stays TRUE for the whole turn. We deliberately do NOT
         // reset it up front. Under a producer flood, an off-main requestDrain()
         // racing this turn would otherwise win the compareAndSet and
@@ -156,6 +178,7 @@ internal class MainThreadDrainScheduler(
         // budget — bounded by the small 2 KB slice cost. Stop early if the queue
         // empties.
         while (slicesThisTurn < maxSlices && availableBytes() > 0) {
+            if (cancelledTurn()) return
             handler.dispatchMessage(Message.obtain(handler, msgNewInput))
             slicesThisTurn += 1
             // Time budget: once this turn has occupied the main thread longer than
@@ -174,21 +197,43 @@ internal class MainThreadDrainScheduler(
         // position is the resume cursor), so no byte is reordered, dropped, or
         // double-processed. The FINAL byte is still parsed because we keep
         // continuing until availableBytes() == 0.
-        if (availableBytes() > 0) {
-            // `pending` is already true; just post the delayed continuation.
-            handler.postDelayed(drainTurn, yieldDelayMs)
-            return
-        }
+        // Cancellation and the continuation decision are one ownership
+        // transition. If cancel() wins the lock first it sees no new post; if
+        // this block wins first, cancel() waits for the post and removes it
+        // before returning. Either ordering gives cancel() a joined final
+        // continuation with no post-after-return race.
+        synchronized(lifecycleLock) {
+            if (cancelled) {
+                pending.set(false)
+                return
+            }
+            if (availableBytes() > 0) {
+                // `pending` is already true; just post the delayed continuation.
+                handler.postDelayed(drainTurn, yieldDelayMs)
+                return
+            }
 
-        // Queue looks empty: release the pending flag so a FUTURE requestDrain can
-        // schedule a fresh turn. Then re-check once — if a producer wrote between
-        // our availableBytes() read above and this release, those bytes would be
-        // stranded (the racing requestDrain saw pending==true and no-op'd). Re-arm
-        // and post (delayed) so they drain on the next frame. This closes the
-        // empty-queue race without ever scheduling a no-delay back-to-back turn.
-        pending.set(false)
-        if (availableBytes() > 0 && pending.compareAndSet(false, true)) {
-            handler.postDelayed(drainTurn, yieldDelayMs)
+            // Queue looks empty: release the pending flag so a FUTURE requestDrain
+            // can schedule a fresh turn. Then re-check once — if a producer wrote
+            // between our availableBytes() read above and this release, those
+            // bytes would be stranded (the racing requestDrain saw pending==true
+            // and no-op'd). Re-arm and post (delayed) so they drain on the next
+            // frame. This closes the empty-queue race without ever scheduling a
+            // no-delay back-to-back turn.
+            pending.set(false)
+            if (!cancelled && availableBytes() > 0 && pending.compareAndSet(false, true)) {
+                handler.postDelayed(drainTurn, yieldDelayMs)
+            }
+        }
+    }
+
+    /** Clear a cancelled turn's ownership without racing a new request. */
+    private fun cancelledTurn(): Boolean = synchronized(lifecycleLock) {
+        if (!cancelled) {
+            false
+        } else {
+            pending.set(false)
+            true
         }
     }
 

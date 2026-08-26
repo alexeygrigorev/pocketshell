@@ -67,6 +67,12 @@ public object DefaultLocalPortAvailability : LocalPortAvailability {
  *
  * The same [AutoForwarder] is single-use: once [stop] has been called, the
  * forwarder is terminal — create a new one if you want to restart.
+ *
+ * [start] and [stop] are safe to call concurrently from any thread. The
+ * lifecycle lock makes publication of the scan job and the terminal stop one
+ * atomic transition: concurrent starts share one job, and a stop that wins
+ * during startup cancels that job before it can run. Calls after the first
+ * stop are no-ops.
  */
 public class AutoForwarder(
     private val session: SshSession,
@@ -160,6 +166,9 @@ public class AutoForwarder(
     private val portRemappings: Map<Int, Int> = initialRemappings.toMap()
     private var nextLocalPort: Int = config.localPortRange.first
 
+    /** Serializes the non-suspending start/stop check-then-act pair. */
+    private val lifecycleLock = Any()
+
     @Volatile
     private var loopJob: Job? = null
 
@@ -174,15 +183,22 @@ public class AutoForwarder(
      * returns the same [Job]; calling after [stop] returns a completed Job
      * (the forwarder is single-use).
      */
-    public fun start(scope: CoroutineScope): Job {
+    public fun start(scope: CoroutineScope): Job = synchronized(lifecycleLock) {
         if (stopped) {
             // Single-use: once stopped we won't restart.
-            return Job().apply { complete() }
+            return@synchronized completedJob()
         }
-        loopJob?.let { return it }
+        loopJob?.let { return@synchronized it }
         val job = scope.launch { scanLoop() }
-        loopJob = job
-        return job
+        // stop() can be called re-entrantly by a custom dispatcher while the
+        // scope is launching the coroutine, before launch() returns. Do not
+        // publish a live job after that terminal transition.
+        if (stopped) {
+            job.cancel()
+        } else {
+            loopJob = job
+        }
+        job
     }
 
     /**
@@ -190,10 +206,12 @@ public class AutoForwarder(
      * Idempotent; safe to call from any thread.
      */
     public fun stop() {
-        if (stopped) return
-        stopped = true
-        loopJob?.cancel()
-        loopJob = null
+        val jobToCancel = synchronized(lifecycleLock) {
+            if (stopped) return
+            stopped = true
+            loopJob.also { loopJob = null }
+        }
+        jobToCancel?.cancel()
 
         val tunnelsToClose = runBlocking {
             mutex.withLock {
@@ -210,6 +228,8 @@ public class AutoForwarder(
         }
         closeForwardsOffCallerThread(tunnelsToClose)
     }
+
+    private fun completedJob(): Job = Job().apply { complete() }
 
     /**
      * Close every captured forward OFF the caller's thread (see

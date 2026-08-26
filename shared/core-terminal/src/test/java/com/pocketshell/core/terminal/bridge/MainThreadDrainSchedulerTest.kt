@@ -10,6 +10,8 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.LooperMode
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -352,5 +354,117 @@ class MainThreadDrainSchedulerTest {
         scheduler.cancel()
         shadowOf(Looper.getMainLooper()).idleFor(YIELD_MS * 100, java.util.concurrent.TimeUnit.MILLISECONDS)
         assertEquals("cancel must drop the scheduled drain", afterFirstTurn, h.availableBytes())
+    }
+
+    @Test(timeout = 5_000)
+    fun `cancel during an active drain joins the turn before it can post`() {
+        val pending = AtomicInteger(sliceBytes * 10)
+        val dispatches = AtomicInteger(0)
+        val cancelReturned = CountDownLatch(1)
+        lateinit var scheduler: MainThreadDrainScheduler
+        val budget = MainThreadDrainBudget(
+            drainSliceBytes = sliceBytes,
+            bytesPerFrame = sliceBytes * 4,
+        )
+        val handler = object : Handler(Looper.getMainLooper()) {
+            override fun handleMessage(msg: Message) {
+                if (msg.what != MSG_NEW_INPUT) return
+                pending.addAndGet(-minOf(sliceBytes, pending.get()))
+                if (dispatches.incrementAndGet() == 1) {
+                    // Cancel from a producer thread while the main-looper turn
+                    // is still inside its first slice. The cancellation call
+                    // must return before this callback lets the turn continue.
+                    Thread {
+                        scheduler.cancel()
+                        cancelReturned.countDown()
+                    }.start()
+                    assertTrue(
+                        "concurrent cancel must return during the active turn",
+                        cancelReturned.await(2, TimeUnit.SECONDS),
+                    )
+                }
+            }
+        }
+        scheduler = MainThreadDrainScheduler(
+            handler = handler,
+            msgNewInput = MSG_NEW_INPUT,
+            availableBytes = pending::get,
+            budget = budget,
+            yieldDelayMs = YIELD_MS,
+        )
+
+        scheduler.requestDrain()
+        shadowOf(Looper.getMainLooper()).idle()
+        val afterCancel = pending.get()
+
+        assertEquals(
+            "cancellation must stop the active turn after the in-flight slice",
+            sliceBytes * 9,
+            afterCancel,
+        )
+        shadowOf(Looper.getMainLooper()).idleFor(
+            YIELD_MS * 100,
+            TimeUnit.MILLISECONDS,
+        )
+        assertEquals(
+            "a cancelled turn must not post or run a continuation after cancel returns",
+            afterCancel,
+            pending.get(),
+        )
+    }
+
+    @Test(timeout = 10_000)
+    fun `cancel during drain stress never revives a continuation`() {
+        repeat(50) {
+            val pending = AtomicInteger(sliceBytes * 10)
+            val dispatches = AtomicInteger(0)
+            val cancelReturned = CountDownLatch(1)
+            var cancelThread: Thread? = null
+            lateinit var scheduler: MainThreadDrainScheduler
+            val budget = MainThreadDrainBudget(
+                drainSliceBytes = sliceBytes,
+                bytesPerFrame = sliceBytes * 4,
+            )
+            val handler = object : Handler(Looper.getMainLooper()) {
+                override fun handleMessage(msg: Message) {
+                    if (msg.what != MSG_NEW_INPUT) return
+                    pending.addAndGet(-minOf(sliceBytes, pending.get()))
+                    if (dispatches.incrementAndGet() == 1) {
+                        cancelThread = Thread {
+                            scheduler.cancel()
+                            cancelReturned.countDown()
+                        }.also { it.start() }
+                        assertTrue(
+                            "cancel must return while the first slice is active",
+                            cancelReturned.await(2, TimeUnit.SECONDS),
+                        )
+                    }
+                }
+            }
+            scheduler = MainThreadDrainScheduler(
+                handler = handler,
+                msgNewInput = MSG_NEW_INPUT,
+                availableBytes = pending::get,
+                budget = budget,
+                yieldDelayMs = YIELD_MS,
+            )
+
+            scheduler.requestDrain()
+            shadowOf(Looper.getMainLooper()).idle()
+            cancelThread?.join(2_000L)
+            assertTrue("cancel worker must join", cancelThread?.isAlive != true)
+            val afterCancel = pending.get()
+            assertEquals(sliceBytes * 9, afterCancel)
+
+            // Cancellation is terminal: even a new producer request cannot
+            // re-arm the scheduler or consume bytes after the cancellation
+            // fence has returned.
+            scheduler.requestDrain()
+            shadowOf(Looper.getMainLooper()).idleFor(
+                YIELD_MS * 100,
+                TimeUnit.MILLISECONDS,
+            )
+            assertEquals(afterCancel, pending.get())
+        }
     }
 }

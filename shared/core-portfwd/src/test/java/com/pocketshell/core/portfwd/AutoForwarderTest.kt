@@ -3,6 +3,8 @@ package com.pocketshell.core.portfwd
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -24,6 +26,8 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Unit tests for [AutoForwarder] using a fully-faked [SshSession]. The fake
@@ -378,6 +382,132 @@ class AutoForwarderTest {
         assertEquals(first, second)
         forwarder.stop()
         runCurrent()
+    }
+
+    @Test(timeout = 5_000)
+    fun `concurrent starts publish one shared loop job`() {
+        val session = FakeSession()
+        val forwarder = AutoForwarder(session, smallConfig())
+        val executor = Executors.newFixedThreadPool(2)
+        val releaseDispatch = CountDownLatch(1)
+        val firstDispatchEntered = CountDownLatch(1)
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                firstDispatchEntered.countDown()
+                check(releaseDispatch.await(2, TimeUnit.SECONDS)) {
+                    "test dispatcher was not released"
+                }
+                executor.execute(block)
+            }
+        }
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        val first = AtomicReference<Job?>()
+        val second = AtomicReference<Job?>()
+        val ready = java.util.concurrent.CyclicBarrier(3)
+        val firstThread = Thread {
+            ready.await()
+            first.set(forwarder.start(scope))
+        }
+        val secondThread = Thread {
+            ready.await()
+            second.set(forwarder.start(scope))
+        }
+
+        try {
+            firstThread.start()
+            secondThread.start()
+            ready.await()
+            assertTrue(
+                "at least one start must reach the launch publication window",
+                firstDispatchEntered.await(2, TimeUnit.SECONDS),
+            )
+            releaseDispatch.countDown()
+            firstThread.join(2_000L)
+            secondThread.join(2_000L)
+
+            assertFalse("first start thread must finish", firstThread.isAlive)
+            assertFalse("second start thread must finish", secondThread.isAlive)
+            assertEquals(
+                "concurrent starts must publish and return one loop job",
+                first.get(),
+                second.get(),
+            )
+        } finally {
+            releaseDispatch.countDown()
+            scope.cancel()
+            executor.shutdownNow()
+            executor.awaitTermination(2, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test(timeout = 5_000)
+    fun `stop racing loop publication cancels the startup job`() {
+        val session = FakeSession()
+        lateinit var forwarder: AutoForwarder
+        val executor = Executors.newSingleThreadExecutor()
+        val releaseBody = CountDownLatch(1)
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                // This is the check-then-act window: start() has created the
+                // coroutine but has not published its Job yet.
+                forwarder.stop()
+                executor.execute {
+                    check(releaseBody.await(2, TimeUnit.SECONDS)) {
+                        "test dispatcher was not released"
+                    }
+                    block.run()
+                }
+            }
+        }
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        forwarder = AutoForwarder(session, smallConfig())
+
+        try {
+            val job = forwarder.start(scope)
+            assertTrue(
+                "a stop racing start must cancel the unpublished startup job",
+                job.isCancelled,
+            )
+            releaseBody.countDown()
+        } finally {
+            releaseBody.countDown()
+            forwarder.stop()
+            scope.cancel()
+            executor.shutdownNow()
+            executor.awaitTermination(2, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test(timeout = 10_000)
+    fun `concurrent start stress never publishes duplicate loop jobs`() {
+        val executor = Executors.newFixedThreadPool(4)
+        try {
+            repeat(100) {
+                val forwarder = AutoForwarder(FakeSession(), smallConfig())
+                val scope = CoroutineScope(SupervisorJob() + kotlinx.coroutines.Dispatchers.Default)
+                val ready = java.util.concurrent.CyclicBarrier(3)
+                val first = executor.submit<Job> {
+                    ready.await()
+                    forwarder.start(scope)
+                }
+                val second = executor.submit<Job> {
+                    ready.await()
+                    forwarder.start(scope)
+                }
+                ready.await()
+
+                assertEquals(
+                    "every concurrent start pair must share one scan job",
+                    first.get(2, TimeUnit.SECONDS),
+                    second.get(2, TimeUnit.SECONDS),
+                )
+                forwarder.stop()
+                scope.cancel()
+            }
+        } finally {
+            executor.shutdownNow()
+            executor.awaitTermination(2, TimeUnit.SECONDS)
+        }
     }
 
     @Test

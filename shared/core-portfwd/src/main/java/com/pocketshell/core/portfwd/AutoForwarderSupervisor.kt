@@ -8,6 +8,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -19,8 +20,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -57,6 +56,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  *    `flowOfEvents()` surface even across session swaps, so the service's
  *    notification can keep rendering through a reconnect window without
  *    needing to re-subscribe.
+ *
+ * Lifecycle contract: [start], [stop], and [reconnectNow] may be called
+ * concurrently from any thread. [start] is idempotent and publishes exactly
+ * one loop job; [stop] is terminal and linearizes with job/session
+ * publication, so a late connect result is closed rather than mounted.
+ * [reconnectNow] only publishes a wake/force intent while the supervisor is
+ * live. [lifecycleLock] protects those lifecycle fields and all state
+ * publication; blocking session/forwarder teardown happens after releasing
+ * the lock.
  */
 public class AutoForwarderSupervisor(
     /**
@@ -153,7 +161,8 @@ public class AutoForwarderSupervisor(
     @Volatile
     private var reconnectImmediately: Boolean = false
 
-    private val mutex = Mutex()
+    /** Serializes lifecycle check-then-act transitions and resource ownership. */
+    private val lifecycleLock = Any()
 
     /**
      * User-desired manual port forwards (issue #439), independent of the
@@ -171,9 +180,6 @@ public class AutoForwarderSupervisor(
      */
     private val desiredManualPorts: MutableSet<Int> = mutableSetOf()
     private val desiredLock = Any()
-
-    @Volatile
-    private var supervisorScope: CoroutineScope? = null
 
     @Volatile
     private var supervisorJob: Job? = null
@@ -214,9 +220,9 @@ public class AutoForwarderSupervisor(
      * unit-test [runTest] scope requires (otherwise child coroutines
      * outlive the test and trip `UncompletedCoroutinesError`).
      */
-    public fun start(scope: CoroutineScope): Job {
-        if (stopped) return Job().apply { complete() }
-        supervisorJob?.let { return it }
+    public fun start(scope: CoroutineScope): Job = synchronized(lifecycleLock) {
+        if (stopped) return@synchronized completedJob()
+        supervisorJob?.let { return@synchronized it }
         val job = scope.launch {
             // Run inside a `coroutineScope { ... }` so the child
             // launches inside `runForwarderUntilSessionDrops` (the
@@ -227,16 +233,25 @@ public class AutoForwarderSupervisor(
             // is what `runTest` requires to satisfy
             // `UncompletedCoroutinesError`.
             kotlinx.coroutines.coroutineScope {
-                supervisorScope = this
-                try {
-                    runConnectAndReconnectLoop()
-                } finally {
-                    supervisorScope = null
-                }
+                runConnectAndReconnectLoop()
             }
         }
-        supervisorJob = job
-        return job
+        // The loop's finally block normally owns the active resources when
+        // cancellation completes. Register a last-resort claim as well so a
+        // scope cancellation or an unusual dispatcher ordering cannot leak a
+        // resource that survived that finally block. Job completion runs only
+        // after the loop's finally blocks have run, so this cannot steal the
+        // normal synchronous close from the cancelled loop.
+        job.invokeOnCompletion { closeRemainingResources(offThread = true) }
+        // stop() may be called re-entrantly by a dispatcher while launch() is
+        // publishing the coroutine but before it returns. A cancelled
+        // supervisor must never become the live, restartable job afterward.
+        if (stopped) {
+            job.cancel()
+        } else {
+            supervisorJob = job
+        }
+        job
     }
 
     /**
@@ -244,39 +259,33 @@ public class AutoForwarderSupervisor(
      * close the live session. Idempotent.
      */
     public fun stop() {
-        if (stopped) return
-        stopped = true
-        reconnectWaiter?.complete(Unit)
-        reconnectWaiter = null
-        supervisorJob?.cancel()
-        supervisorJob = null
-        supervisorScope = null
-        // AutoForwarder.stop() already closes its forwards off the caller's
-        // thread (it offloads to its own teardownDispatcher), so this call
-        // returns promptly.
-        val forwarder = currentForwarder
-        currentForwarder = null
-        forwarder?.stop()
-        val session = currentSession
-        currentSession = null
-        connectionState.value = ConnectionState.Idle
-        tunnelsState.value = emptyList()
-        // Close the live SSH session OFF the caller's thread. stop() is
-        // reached on the Android Main thread, and RealSshSession.close()
-        // blocks the caller until the SSH_MSG_DISCONNECT socket write
-        // finishes — on a wedged socket that froze the UI (the #1085
-        // freeze-hunt F-E finding). The disconnect still happens; it just no
-        // longer rides the caller's thread. Bounded + interruptible so a
-        // wedged socket can't pin the teardown worker either.
-        if (session != null) {
-            CoroutineScope(SupervisorJob() + teardownDispatcher).launch {
-                runCatching {
-                    withTimeoutOrNull(SESSION_CLOSE_TIMEOUT_MS) {
-                        runInterruptible { session.close() }
-                    }
-                }
-            }
+        var waiterToWake: CompletableDeferred<Unit>? = null
+        var jobToCancel: Job? = null
+        synchronized(lifecycleLock) {
+            if (stopped) return
+            stopped = true
+            waiterToWake = reconnectWaiter.also { reconnectWaiter = null }
+            jobToCancel = supervisorJob.also { supervisorJob = null }
+            reconnectImmediately = false
+            connectionState.value = ConnectionState.Idle
+            tunnelsState.value = emptyList()
         }
+        // Complete/cancel outside the lifecycle lock: either operation can
+        // resume code that calls back into this object.
+        waiterToWake?.complete(Unit)
+        jobToCancel?.cancel()
+        // Snapshot, but do not clear, the resources for an immediate fallback.
+        // The cancelled loop's finally block remains allowed to claim and
+        // close them synchronously; retaining publication is what preserves
+        // the panel's fast-close contract. The fallback is needed when a
+        // dispatcher has not resumed that finally block yet (for example, a
+        // caller may cancel a live supervisor while its test dispatcher is
+        // parked), and it runs off the caller's thread.
+        val resourcesToStop = synchronized(lifecycleLock) {
+            currentForwarder to currentSession
+        }
+        resourcesToStop.first?.stop()
+        resourcesToStop.second?.let(::closeSessionOffThread)
     }
 
     /**
@@ -287,28 +296,30 @@ public class AutoForwarderSupervisor(
      * backoff.
      */
     public fun reconnectNow(force: Boolean = false) {
-        // Wake any pending backoff sleep. Completing the deferred is a
-        // no-op if no sleep is in flight, so this is safe to call from
-        // any state.
-        reconnectWaiter?.complete(Unit)
-        reconnectWaiter = null
-        if (force) {
-            // A real default-network loss/recovery can leave sshj's
-            // session object reporting "connected" even though the
-            // phone-side forwards are dead. Force closes the transport
-            // and skips the normal post-drop backoff so the next fresh
-            // session restores desired forwards promptly.
-            reconnectImmediately = true
-            runCatching { currentSession?.close() }
-            return
+        var waiterToWake: CompletableDeferred<Unit>? = null
+        var sessionToClose: SshSession? = null
+        synchronized(lifecycleLock) {
+            if (stopped || supervisorJob == null) return
+            // Wake any pending backoff sleep. Completing the deferred is a
+            // no-op if no sleep is in flight, so this is safe in every live
+            // state. Clearing under the same lock prevents stop/reconnect
+            // from racing over ownership of the waiter.
+            waiterToWake = reconnectWaiter.also { reconnectWaiter = null }
+            if (force || connectionState.value != ConnectionState.Connected) {
+                // This intent also covers the tiny transition before the
+                // waiter is installed: the loop consumes it instead of
+                // entering a missed backoff sleep.
+                reconnectImmediately = true
+                sessionToClose = currentSession
+            }
         }
-        // Do not churn a healthy connected tunnel: Android may deliver
-        // onAvailable immediately for the already-active default
-        // network. Once the supervisor has entered reconnect/backoff,
-        // the waiter wake above is enough to retry promptly.
-        if (connectionState.value != ConnectionState.Connected) {
-            runCatching { currentSession?.close() }
-        }
+        waiterToWake?.complete(Unit)
+        // A real default-network loss/recovery can leave sshj's session object
+        // reporting "connected" even though the phone-side forwards are dead.
+        // Force/non-connected reconnects close the transport so the next
+        // session restores desired forwards promptly. Do not churn a healthy
+        // connected tunnel on an ordinary availability callback.
+        runCatching { sessionToClose?.close() }
     }
 
     /**
@@ -332,7 +343,10 @@ public class AutoForwarderSupervisor(
         // a reconnect re-open a port the user just turned off, or skip one
         // they just turned on). No-op when no forwarder is mounted; the
         // desired-state record above still survives to the next reconnect.
-        currentForwarder?.ensurePort(remotePort, nowDesired)
+        val forwarder = synchronized(lifecycleLock) {
+            currentForwarder.takeUnless { stopped }
+        }
+        forwarder?.ensurePort(remotePort, nowDesired)
     }
 
     /**
@@ -352,8 +366,9 @@ public class AutoForwarderSupervisor(
 
         while (!stopped) {
             try {
-                connectionState.value =
+                val nextState =
                     if (attemptCount == 0) ConnectionState.Connecting else ConnectionState.Reconnecting
+                if (!setConnectionStateIfRunning(nextState)) break
                 if (attemptCount > 0) {
                     markTunnelsStopped()
                 }
@@ -368,15 +383,30 @@ public class AutoForwarderSupervisor(
                 val manualPortsSnapshot = synchronized(desiredLock) {
                     desiredManualPorts.toSet()
                 }
-                mutex.withLock {
-                    currentSession = session
-                    val forwarder = AutoForwarder(
-                        session = session,
-                        config = config,
-                        initialRemappings = initialRemappings,
-                        initialManualPorts = manualPortsSnapshot,
-                    )
-                    currentForwarder = forwarder
+                val forwarder = AutoForwarder(
+                    session = session,
+                    config = config,
+                    initialRemappings = initialRemappings,
+                    initialManualPorts = manualPortsSnapshot,
+                )
+                // The factory may cross a terminal stop while it is in a
+                // non-cooperative socket operation. Publish the pair only if
+                // this loop is still live; otherwise close the late result
+                // locally and never let it resurrect the supervisor.
+                val stillActive = currentCoroutineContext().isActive
+                val published = synchronized(lifecycleLock) {
+                    if (!stillActive || stopped) {
+                        false
+                    } else {
+                        currentSession = session
+                        currentForwarder = forwarder
+                        true
+                    }
+                }
+                if (!published) {
+                    forwarder.stop()
+                    runCatching { session.close() }
+                    break
                 }
                 // Reset bookkeeping for the new session — backoff
                 // restarts at the initial delay and consecutive-failure
@@ -388,8 +418,8 @@ public class AutoForwarderSupervisor(
                 // satisfy restore/readiness observers while this fresh
                 // forwarder is still doing its first scan.
                 markTunnelsStopped()
-                connectionState.value = ConnectionState.Connected
-                eventsFlow.tryEmit(Event.Connected(attemptCount))
+                if (!setConnectionStateIfRunning(ConnectionState.Connected)) break
+                emitEventIfRunning(Event.Connected(attemptCount))
 
                 // Drive the forwarder loop on the supervisor scope and
                 // mirror its tunnel snapshots out through our long-lived
@@ -403,69 +433,73 @@ public class AutoForwarderSupervisor(
                 // entirely.
                 if (!stopped) {
                     markTunnelsStopped()
-                    eventsFlow.tryEmit(Event.Disconnected("session lost"))
+                    emitEventIfRunning(Event.Disconnected("session lost"))
                 }
             } catch (ce: CancellationException) {
                 throw ce
             } catch (t: Throwable) {
-                consecutiveFailures += 1
-                val msg = t.message ?: t.javaClass.simpleName
-                eventsFlow.tryEmit(Event.Error(msg))
-                markTunnelsStopped()
+                if (!stopped) {
+                    consecutiveFailures += 1
+                    val msg = t.message ?: t.javaClass.simpleName
+                    emitEventIfRunning(Event.Error(msg))
+                    markTunnelsStopped()
+                }
             } finally {
                 // Always release the per-session forwarder + session
                 // before sleeping into the next reconnect attempt.
-                val forwarder = currentForwarder
-                currentForwarder = null
-                forwarder?.stop()
-                val session = currentSession
-                currentSession = null
-                runCatching { session?.close() }
+                closeRemainingResources()
             }
 
             if (stopped) break
 
-            if (reconnectImmediately) {
-                reconnectImmediately = false
+            if (takeImmediateReconnect()) {
                 reconnectDelay = initialReconnectDelayMs
                 continue
             }
 
             if (maxReconnectAttempts != null && consecutiveFailures >= maxReconnectAttempts) {
-                connectionState.value = ConnectionState.Lost
-                eventsFlow.tryEmit(Event.ConnectionLost("max reconnect attempts reached"))
+                if (!setConnectionStateIfRunning(ConnectionState.Lost)) break
+                emitEventIfRunning(Event.ConnectionLost("max reconnect attempts reached"))
                 // Park until reconnectNow() (which completes the waiter)
                 // or stop() (which cancels the supervisor job entirely).
                 val waiter = CompletableDeferred<Unit>()
-                reconnectWaiter = waiter
+                if (!installReconnectWaiterOrConsumeImmediate(waiter)) {
+                    if (stopped) break
+                    consecutiveFailures = 0
+                    reconnectDelay = initialReconnectDelayMs
+                    continue
+                }
                 try {
                     waiter.await()
-                } catch (_: CancellationException) {
-                    // stop() or scope cancellation — fall through to the
-                    // outer `if (stopped) break` check.
-                    throw kotlin.coroutines.cancellation.CancellationException("supervisor cancelled")
+                } finally {
+                    clearReconnectWaiter(waiter)
                 }
-                reconnectWaiter = null
                 if (stopped) break
-                reconnectImmediately = false
+                clearImmediateReconnect()
                 consecutiveFailures = 0
                 reconnectDelay = initialReconnectDelayMs
                 continue
             }
 
-            connectionState.value = ConnectionState.Reconnecting
+            if (!setConnectionStateIfRunning(ConnectionState.Reconnecting)) break
             // Sleep `reconnectDelay`. reconnectNow() / stop() complete the
             // waiter to wake us up early. Wrapped in withTimeoutOrNull so
             // the sleep terminates on either the deadline or the wake.
             val waiter = CompletableDeferred<Unit>()
-            reconnectWaiter = waiter
-            withTimeoutOrNull(reconnectDelay) {
-                waiter.await()
+            if (!installReconnectWaiterOrConsumeImmediate(waiter)) {
+                if (stopped) break
+                reconnectDelay = initialReconnectDelayMs
+                continue
             }
-            reconnectWaiter = null
+            try {
+                withTimeoutOrNull(reconnectDelay) {
+                    waiter.await()
+                }
+            } finally {
+                clearReconnectWaiter(waiter)
+            }
 
-            if (reconnectImmediately) {
-                reconnectImmediately = false
+            if (takeImmediateReconnect()) {
                 reconnectDelay = initialReconnectDelayMs
             } else {
                 reconnectDelay = (reconnectDelay * 2).coerceAtMost(maxReconnectDelayMs)
@@ -474,9 +508,11 @@ public class AutoForwarderSupervisor(
     }
 
     private suspend fun runForwarderUntilSessionDrops() {
-        val forwarder = currentForwarder ?: return
-        val session = currentSession ?: return
-        val parent = supervisorScope ?: return
+        val resources = synchronized(lifecycleLock) {
+            if (stopped) null else currentForwarder to currentSession
+        } ?: return
+        val forwarder = resources.first ?: return
+        val session = resources.second ?: return
         // Run the forwarder + tunnel-bridge inside a nested coroutineScope
         // so we deterministically join both when the session drops, the
         // supervisor stops, or the outer scope is cancelled. The nested
@@ -485,7 +521,7 @@ public class AutoForwarderSupervisor(
         // propagates correctly and `runTest` sees a clean shutdown.
         kotlinx.coroutines.coroutineScope {
             val bridgeJob = launch {
-                forwarder.flowOfTunnels().collect { tunnelsState.value = it }
+                forwarder.flowOfTunnels().collect { publishTunnelsIfRunning(it) }
             }
             val forwarderJob = forwarder.start(this)
 
@@ -494,7 +530,7 @@ public class AutoForwarderSupervisor(
                 // doesn't own session liveness; that's the supervisor's
                 // job. The poll cadence is bounded by
                 // [sessionHealthPollMs] (default 1 s; tunable for tests).
-                while (!stopped && session.isConnected && parent.isActive) {
+                while (!stopped && session.isConnected && currentCoroutineContext().isActive) {
                     delay(sessionHealthPollMs)
                 }
             } finally {
@@ -510,10 +546,109 @@ public class AutoForwarderSupervisor(
         }
     }
 
+    private fun completedJob(): Job = Job().apply { complete() }
+
+    /** Claims and tears down resources left by a completed/cancelled loop. */
+    private fun closeRemainingResources(offThread: Boolean = false) {
+        var forwarderToStop: AutoForwarder? = null
+        var sessionToClose: SshSession? = null
+        synchronized(lifecycleLock) {
+            forwarderToStop = currentForwarder.also { currentForwarder = null }
+            sessionToClose = currentSession.also { currentSession = null }
+        }
+        // AutoForwarder.stop() already closes its forwards off the caller's
+        // thread (it offloads to its own teardownDispatcher), so this call
+        // returns promptly.
+        forwarderToStop?.stop()
+        val session = sessionToClose ?: return
+        if (!offThread) {
+            runCatching { session.close() }
+            return
+        }
+        closeSessionOffThread(session)
+    }
+
+    /** Closes a session without allowing a wedged socket to block its caller. */
+    private fun closeSessionOffThread(session: SshSession) {
+        CoroutineScope(SupervisorJob() + teardownDispatcher).launch {
+            runCatching {
+                withTimeoutOrNull(SESSION_CLOSE_TIMEOUT_MS) {
+                    runInterruptible { session.close() }
+                }
+            }
+        }
+    }
+
+    private fun setConnectionStateIfRunning(state: ConnectionState): Boolean =
+        synchronized(lifecycleLock) {
+            if (stopped) {
+                false
+            } else {
+                connectionState.value = state
+                true
+            }
+        }
+
+    private fun emitEventIfRunning(event: Event) {
+        synchronized(lifecycleLock) {
+            if (!stopped) eventsFlow.tryEmit(event)
+        }
+    }
+
+    private fun publishTunnelsIfRunning(tunnels: List<TunnelInfo>) {
+        synchronized(lifecycleLock) {
+            if (!stopped) tunnelsState.value = tunnels
+        }
+    }
+
+    private fun takeImmediateReconnect(): Boolean = synchronized(lifecycleLock) {
+        if (stopped || !reconnectImmediately) {
+            false
+        } else {
+            reconnectImmediately = false
+            true
+        }
+    }
+
+    private fun clearImmediateReconnect() {
+        synchronized(lifecycleLock) {
+            reconnectImmediately = false
+        }
+    }
+
+    /**
+     * Installs a waiter unless a reconnect intent already won the race. The
+     * caller owns the returned waiter only when this returns true.
+     */
+    private fun installReconnectWaiterOrConsumeImmediate(
+        waiter: CompletableDeferred<Unit>,
+    ): Boolean = synchronized(lifecycleLock) {
+        when {
+            stopped -> false
+            reconnectImmediately -> {
+                reconnectImmediately = false
+                false
+            }
+            else -> {
+                reconnectWaiter = waiter
+                true
+            }
+        }
+    }
+
+    private fun clearReconnectWaiter(waiter: CompletableDeferred<Unit>) {
+        synchronized(lifecycleLock) {
+            if (reconnectWaiter === waiter) reconnectWaiter = null
+        }
+    }
+
     private fun markTunnelsStopped() {
-        val current = tunnelsState.value
-        if (current.isEmpty()) return
-        tunnelsState.value = current.map { it.copy(status = TunnelInfo.Status.STOPPED) }
+        synchronized(lifecycleLock) {
+            if (stopped) return@synchronized
+            val current = tunnelsState.value
+            if (current.isEmpty()) return@synchronized
+            tunnelsState.value = current.map { it.copy(status = TunnelInfo.Status.STOPPED) }
+        }
     }
 
     private companion object {

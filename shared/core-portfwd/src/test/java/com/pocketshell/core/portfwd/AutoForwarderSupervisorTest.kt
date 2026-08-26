@@ -4,13 +4,17 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -24,6 +28,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.coroutines.CoroutineContext
 
 /**
  * Unit tests for [AutoForwarderSupervisor] — the reconnect / backoff
@@ -369,6 +374,127 @@ class AutoForwarderSupervisorTest {
         )
         job.cancel()
         runCurrent()
+    }
+
+    @Test
+    fun `stop during a non cooperative connect closes the late session`() = runTest {
+        val connectEntered = CompletableDeferred<Unit>()
+        val releaseConnect = CompletableDeferred<Unit>()
+        val lateSession = FakeSession()
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = {
+                connectEntered.complete(Unit)
+                withContext(NonCancellable) { releaseConnect.await() }
+                lateSession
+            },
+            config = smallConfig(),
+            sessionHealthPollMs = 50L,
+        )
+
+        val job = supervisor.start(this)
+        runCurrent()
+        connectEntered.await()
+
+        // The factory models a real connect body that cannot be interrupted at
+        // its final socket boundary. Stop must fence the result before it can
+        // publish a new session/forwarder, then close that late result.
+        supervisor.stop()
+        releaseConnect.complete(Unit)
+        runCurrent()
+
+        assertFalse("a late session returned after stop must be closed", lateSession.isConnected)
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Idle,
+            supervisor.flowOfConnectionState().value,
+        )
+        assertTrue("stop must join the cancelled supervisor loop", job.isCompleted)
+    }
+
+    @Test(timeout = 5_000)
+    fun `stop before supervisor job publication cannot resurrect the loop`() {
+        lateinit var supervisor: AutoForwarderSupervisor
+        val executor = Executors.newSingleThreadExecutor()
+        val releaseBody = CountDownLatch(1)
+        val attempts = AtomicInteger(0)
+        val dispatcher = object : CoroutineDispatcher() {
+            override fun dispatch(context: CoroutineContext, block: Runnable) {
+                // Force stop() to run after launch has created the coroutine
+                // but before start() can publish supervisorJob.
+                supervisor.stop()
+                executor.execute {
+                    check(releaseBody.await(2, TimeUnit.SECONDS)) {
+                        "test dispatcher was not released"
+                    }
+                    block.run()
+                }
+            }
+        }
+        val scope = CoroutineScope(SupervisorJob() + dispatcher)
+        supervisor = AutoForwarderSupervisor(
+            sessionFactory = {
+                attempts.incrementAndGet()
+                FakeSession()
+            },
+            config = smallConfig(),
+            sessionHealthPollMs = 50L,
+        )
+
+        try {
+            val job = supervisor.start(scope)
+            supervisor.reconnectNow(force = true)
+            assertTrue(
+                "a stop racing supervisor start must cancel the unpublished job",
+                job.isCancelled,
+            )
+            releaseBody.countDown()
+            assertEquals("final stop must prevent a late connect", 0, attempts.get())
+            assertEquals(
+                AutoForwarderSupervisor.ConnectionState.Idle,
+                supervisor.flowOfConnectionState().value,
+            )
+        } finally {
+            releaseBody.countDown()
+            supervisor.stop()
+            scope.cancel()
+            executor.shutdownNow()
+            executor.awaitTermination(2, TimeUnit.SECONDS)
+        }
+    }
+
+    @Test
+    fun `virtual time supervisor stop stress never retries after final cancellation`() = runTest {
+        repeat(50) {
+            val attempts = AtomicInteger(0)
+            val supervisor = AutoForwarderSupervisor(
+                sessionFactory = {
+                    attempts.incrementAndGet()
+                    error("offline")
+                },
+                config = smallConfig(),
+                initialReconnectDelayMs = 100L,
+                maxReconnectDelayMs = 100L,
+                sessionHealthPollMs = 50L,
+            )
+            val job = supervisor.start(this)
+            runCurrent()
+            assertEquals("each round must reach its first connect attempt", 1, attempts.get())
+
+            supervisor.stop()
+            val attemptsAtStop = attempts.get()
+            advanceTimeBy(10_000L)
+            runCurrent()
+
+            assertEquals(
+                "final stop must prevent a delayed reconnect in every round",
+                attemptsAtStop,
+                attempts.get(),
+            )
+            assertTrue("stop must cancel and join the supervisor job", job.isCompleted)
+            assertEquals(
+                AutoForwarderSupervisor.ConnectionState.Idle,
+                supervisor.flowOfConnectionState().value,
+            )
+        }
     }
 
     @Test

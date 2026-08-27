@@ -19,6 +19,7 @@ import com.pocketshell.core.ssh.shellSingleQuote
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -159,6 +160,41 @@ class FileViewerViewModel @Inject constructor(
 
     /** Injectable clock for tab-recency tests; production uses wall-clock millis. */
     internal var nowMillis: () -> Long = { System.currentTimeMillis() }
+
+    /**
+     * Issue #2339 — the ONE seam for every blocking SSH hop this ViewModel owns
+     * (the workspace hydrate + file fetch in [load], the review write in
+     * [submitReview], the annotated-image write in [submitAnnotation]).
+     *
+     * Production is [Dispatchers.IO]. Unit tests pin it to
+     * `StandardTestDispatcher(testScheduler)` so the load path resolves on the
+     * TEST scheduler instead of a real thread pool — the Shape-A half of the
+     * #1048 de-flake convention. Without this seam a unit test can only wait for
+     * the fetch with a hand-rolled wall-clock pump, which is exactly what made
+     * `FileViewerWorkspaceTest` flaky by construction: three different members
+     * of that class failed across three runs of the same tree, because the pump
+     * returns as soon as ONE observable lands while the sibling work (the
+     * fire-and-forget workspace upsert, the live re-fetch that must lose the
+     * race against the cache paint) is still in flight on a real IO thread.
+     */
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    /**
+     * Issue #2339 — the sibling seam for the ONE cpu-bound hop this ViewModel
+     * owns: flattening the annotation overlay onto the source bitmap in
+     * [submitAnnotation] before the upload.
+     *
+     * Production is [Dispatchers.Default]. It is separate from [ioDispatcher]
+     * because the two carry genuinely different production intent (a bounded
+     * cpu pool vs an unbounded blocking-IO pool) and collapsing them would be a
+     * behaviour change smuggled in for the tests' convenience. Unit tests pin
+     * BOTH to `StandardTestDispatcher(testScheduler)`: a submit that hops to a
+     * real cpu pool halfway through is exactly as unwaitable as one that hops
+     * to a real IO pool, so leaving this on [Dispatchers.Default] would have
+     * forced `FileViewerAnnotationSubmitTest` to keep the hand-rolled
+     * `System.currentTimeMillis()` pump this issue exists to delete.
+     */
+    internal var computeDispatcher: CoroutineDispatcher = Dispatchers.Default
 
     /**
      * Workspace writes belong to the process, not to this screen's lifecycle.
@@ -365,7 +401,7 @@ class FileViewerViewModel @Inject constructor(
             )
             Log.d(REVIEW_LOG_TAG, "Submitting pocketshell_review YAML (${current.pendingCount} comments):\n$yaml")
 
-            val result = withContext(Dispatchers.IO) {
+            val result = withContext(ioDispatcher) {
                 writeReview(request, text.displayPath, yaml)
             }
             result.fold(
@@ -483,7 +519,7 @@ class FileViewerViewModel @Inject constructor(
 
         _annotationState.value = current.copy(submitting = true)
         viewModelScope.launch {
-            val pngBytes = withContext(Dispatchers.Default) {
+            val pngBytes = withContext(computeDispatcher) {
                 renderAnnotatedPng(image.cacheFile, current.annotations)
             }
             if (pngBytes == null) {
@@ -492,7 +528,7 @@ class FileViewerViewModel @Inject constructor(
                 return@launch
             }
             val submittedAt = isoUtcNow()
-            val result = withContext(Dispatchers.IO) {
+            val result = withContext(ioDispatcher) {
                 writeAnnotatedImage(request, image.displayPath, host, pngBytes, current.note, submittedAt)
             }
             result.fold(
@@ -866,7 +902,7 @@ class FileViewerViewModel @Inject constructor(
         val cached = contentCache[ContentCacheKey(request.workspaceScope(), resolved)]
         _state.value = cached ?: FileViewerUiState.Loading(displayPath = resolved)
         loadJob = viewModelScope.launch {
-            val fetched = withContext(Dispatchers.IO) { fetch(request, resolved) }
+            val fetched = withContext(ioDispatcher) { fetch(request, resolved) }
             ensureActive()
             // A cancelled SSH read may finish at the same instant as a new
             // bind. The cancellation alone is not a sufficient stale-result

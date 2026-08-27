@@ -14,12 +14,12 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.yield
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -46,13 +46,61 @@ import java.util.concurrent.atomic.AtomicReference
  *  - reuses the warm viewer lease (no fresh connection);
  *  - clears the pending annotations + emits Success on success;
  *  - KEEPS the annotations + emits Failure on failure (nothing lost).
+ *
+ * ## Issue #2339 — why there is not a single wall-clock wait in this class
+ *
+ * This class carried the same defect shape that made its sibling
+ * [FileViewerWorkspaceTest] flaky by construction and reddened the required
+ * `Unit tests` check on `main`: `runBlocking` bodies polled `state.value` and
+ * the emitted [AnnotationSubmitEvent] behind hand-rolled
+ * `System.currentTimeMillis() + 10_000` deadlines while every hop the ViewModel
+ * owns ran on a REAL thread pool. Such a pump returns the instant ONE
+ * observable lands, so a sibling effect of the same turn is sampled at an
+ * arbitrary moment. (Unlike [FileViewerWorkspaceTest] this class was never
+ * OBSERVED red — it is the identical construction on the identical seams, fixed
+ * structurally rather than waiting for it to bite.)
+ *
+ * The cure is the convention's Shape A (pinned seam), not a bigger budget:
+ * EVERY hop the code under test owns now resolves on ONE
+ * [kotlinx.coroutines.test.TestCoroutineScheduler] — `Dispatchers.Main` via
+ * [MainDispatcherRule], the ViewModel's blocking SSH hop
+ * ([FileViewerViewModel.ioDispatcher]), the workspace RPC
+ * ([FileWorkspaceRemoteSource.remoteExecDispatcher]), the process-scoped
+ * workspace write queue, and the lease manager's dial / abort / idle-close.
+ *
+ * This class is the reason [FileViewerViewModel.computeDispatcher] exists.
+ * `submitAnnotation` flattens the overlay onto the bitmap on
+ * `Dispatchers.Default` BEFORE the upload, so pinning only the IO seam would
+ * have left the submit half-resolved on a real cpu pool — exactly as unwaitable
+ * as the IO hop, and it would have forced the hand-rolled pump to stay.
+ *
+ * [settle] then drains that scheduler with `runCurrent()`, which runs every task
+ * due at the current instant (including the ones those tasks schedule) and NEVER
+ * advances virtual time. That last property is load-bearing: advancing the clock
+ * would fire the lease's idle TTL and `LeaseSessionExec`'s 45 s block bound.
+ *
+ * Note especially [submitIsANoOpWithNoAnnotations]: its old `delay(100)` was a
+ * "wait and hope nothing happened" — the weakest possible negative proof, since
+ * a slow box could simply not have got round to the upload yet. A full [settle]
+ * is strictly stronger: after it, nothing the ViewModel scheduled can still be
+ * pending, so "no upload" is a fact rather than a guess.
+ *
+ * Consequence for anyone extending this class: there is nothing to wait for.
+ * Call [settle] and assert. Do NOT reintroduce a `System.currentTimeMillis()`
+ * deadline, a `Thread.sleep`, or a `delay` — with the seams pinned they would
+ * measure nothing except how busy the box is.
+ * `scripts/check-test-validity.sh` hard-fails a hand-rolled deadline pump in
+ * this directory (#2339).
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
 class FileViewerAnnotationSubmitTest {
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
+
+    private val scheduler get() = mainDispatcherRule.dispatcher.scheduler
 
     private lateinit var context: Context
     private lateinit var pngBytes: ByteArray
@@ -63,12 +111,21 @@ class FileViewerAnnotationSubmitTest {
         pngBytes = makePng(8, 8)
     }
 
+    /**
+     * Runs every task the code under test has scheduled at the current instant,
+     * transitively, on the ONE shared test scheduler. Never advances the virtual
+     * clock — see the class KDoc.
+     */
+    private fun settle() {
+        scheduler.runCurrent()
+    }
+
     @Test
-    fun submitWritesPngAndYamlSidecarToTheAnnotationsInboxOverTheReusedLease() = runBlocking {
+    fun submitWritesPngAndYamlSidecarToTheAnnotationsInboxOverTheReusedLease() {
         val session = RecordingImageSession(pngBytes)
         val connector = CountingConnector(session)
-        val leaseManager = SshLeaseManager(connector = connector, idleTtlMillis = 30_000L)
-        val vm = FileViewerViewModel(context, leaseManager)
+        val leaseManager = leaseManager(connector)
+        val vm = viewModel(leaseManager)
 
         vm.bind(request("/srv/shot.png"))
         vm.state.awaitImage()
@@ -140,10 +197,10 @@ class FileViewerAnnotationSubmitTest {
     }
 
     @Test
-    fun submitFailureKeepsTheAnnotationsAndReportsTheError() = runBlocking {
+    fun submitFailureKeepsTheAnnotationsAndReportsTheError() {
         val session = RecordingImageSession(pngBytes, failUpload = true)
-        val leaseManager = SshLeaseManager(connector = CountingConnector(session), idleTtlMillis = 30_000L)
-        val vm = FileViewerViewModel(context, leaseManager)
+        val leaseManager = leaseManager(CountingConnector(session))
+        val vm = viewModel(leaseManager)
 
         vm.bind(request("/srv/shot.png"))
         vm.state.awaitImage()
@@ -169,17 +226,20 @@ class FileViewerAnnotationSubmitTest {
     }
 
     @Test
-    fun submitIsANoOpWithNoAnnotations() = runBlocking {
+    fun submitIsANoOpWithNoAnnotations() {
         val session = RecordingImageSession(pngBytes)
-        val leaseManager = SshLeaseManager(connector = CountingConnector(session), idleTtlMillis = 30_000L)
-        val vm = FileViewerViewModel(context, leaseManager)
+        val leaseManager = leaseManager(CountingConnector(session))
+        val vm = viewModel(leaseManager)
 
         vm.bind(request("/srv/shot.png"))
         vm.state.awaitImage()
         vm.toggleAnnotationMode()
 
+        // #2339: settle() replaces the old `delay(100)`. A drained scheduler
+        // makes "nothing happened" a fact — the old sleep only proved nothing
+        // had happened YET.
         vm.submitAnnotation("hetzner")
-        delay(100)
+        settle()
 
         assertEquals("no upload without annotations", 0, session.uploads.size)
         assertEquals("no mkdir without annotations", 0, session.mkdirCommands.size)
@@ -189,6 +249,42 @@ class FileViewerAnnotationSubmitTest {
 
     // --- helpers ------------------------------------------------------------
 
+    /**
+     * A lease manager whose OWN coroutine work is pinned to the shared test
+     * scheduler: the idle-close job, the bounded dial, and the dial's abort.
+     * The idle-close `delay(idleTtlMillis)` therefore never fires, because
+     * [settle] deliberately never advances virtual time.
+     */
+    private fun leaseManager(connector: SshLeaseConnector): SshLeaseManager =
+        SshLeaseManager(
+            connector = connector,
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler)),
+            idleTtlMillis = 30_000L,
+            // The owned dial and its abort must share the caller's clock: the
+            // acquire wraps `dial.await()` in `withTimeoutOrNull`, so a dial on
+            // a REAL dispatcher raced against a virtual-time bound (see the
+            // SshLeaseManager constructor KDoc).
+            connectTimeoutContext = StandardTestDispatcher(scheduler),
+            abortTimeoutContext = StandardTestDispatcher(scheduler),
+        )
+
+    /** Shape A: every dispatcher/scope the ViewModel owns on the test scheduler. */
+    private fun viewModel(leaseManager: SshLeaseManager): FileViewerViewModel {
+        val workspaceSource = FileWorkspaceRemoteSource().also {
+            it.remoteExecDispatcher = StandardTestDispatcher(scheduler)
+        }
+        return FileViewerViewModel(
+            context,
+            leaseManager,
+            workspaceSource = workspaceSource,
+        ).also {
+            it.ioDispatcher = StandardTestDispatcher(scheduler)
+            it.computeDispatcher = StandardTestDispatcher(scheduler)
+            it.workspaceWriteScope =
+                CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler))
+        }
+    }
+
     private fun makePng(width: Int, height: Int): ByteArray {
         val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         return ByteArrayOutputStream().use { out ->
@@ -197,30 +293,24 @@ class FileViewerAnnotationSubmitTest {
         }
     }
 
-    private suspend fun FileViewerViewModel.submitAndAwaitEvent(host: String): AnnotationSubmitEvent {
+    private fun FileViewerViewModel.submitAndAwaitEvent(host: String): AnnotationSubmitEvent {
         val captured = AtomicReference<AnnotationSubmitEvent?>(null)
         val collector = CoroutineScope(Dispatchers.Main).launch {
             annotationEvents.collect { captured.set(it) }
         }
-        yield()
+        settle()
         submitAnnotation(host)
-        val deadline = System.currentTimeMillis() + 10_000
-        while (System.currentTimeMillis() < deadline && captured.get() == null) {
-            delay(20)
-        }
+        settle()
         collector.cancel()
         assertNotNull("submit never emitted an AnnotationSubmitEvent", captured.get())
         return captured.get()!!
     }
 
-    private suspend fun StateFlow<FileViewerUiState>.awaitImage(): FileViewerUiState.Image {
-        val deadline = System.currentTimeMillis() + 10_000
-        while (System.currentTimeMillis() < deadline) {
-            val s = value
-            if (s is FileViewerUiState.Image) return s
-            delay(20)
-        }
-        error("viewer never reached Image; was $value")
+    private fun StateFlow<FileViewerUiState>.awaitImage(): FileViewerUiState.Image {
+        settle()
+        val current = value
+        assertTrue("viewer never reached Image; was $current", current is FileViewerUiState.Image)
+        return current as FileViewerUiState.Image
     }
 
     private fun request(path: String) = FileViewerViewModel.Request(

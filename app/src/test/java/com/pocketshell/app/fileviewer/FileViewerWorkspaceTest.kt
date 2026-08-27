@@ -14,11 +14,12 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -42,13 +43,50 @@ import java.util.concurrent.atomic.AtomicReference
  *  - add a tab on CannotPreview without cacheFile → missing new files would appear
  *  - key the #697 cache by raw Request → relative then absolute A would miss
  *  - switch without the pending-work guard → review comments would ride onto B
+ *
+ * ## Issue #2339 — why there is not a single wall-clock wait in this class
+ *
+ * This class shipped flaky by construction and reddened the required `Unit
+ * tests` check on `main`: a DIFFERENT member failed on each run of the SAME
+ * tree (`closeActiveSelectsRightThenEmpty` on CI,
+ * `relativeThenAbsoluteAToBToAHitsTheResolvedPathCache` and
+ * `hydrateOnceThenSuccessfulOpenAddsTab` locally). It was the #708/#882/#1048
+ * class exactly: a `runBlocking` body polled `state.value` behind hand-rolled
+ * `System.currentTimeMillis()` deadlines (10 s, and a tighter 5 s inline) while
+ * the ViewModel's owned work ran on a REAL `Dispatchers.IO` pool. Such a pump
+ * returns the instant ONE observable lands, so every sibling effect of the same
+ * turn — the fire-and-forget workspace upsert, the live re-fetch that must LOSE
+ * the race against the cache paint — was sampled at an arbitrary moment.
+ *
+ * The cure is the convention's Shape A (pinned seam), not a bigger budget:
+ * EVERY hop the code under test owns now resolves on ONE
+ * [kotlinx.coroutines.test.TestCoroutineScheduler] —
+ *  - `Dispatchers.Main` via [MainDispatcherRule] (so does `viewModelScope` and
+ *    the test-owned `workspaceWriteScope`),
+ *  - the ViewModel's blocking SSH hop via [FileViewerViewModel.ioDispatcher],
+ *  - the lease manager's owned dial, its abort, and its idle-close scope.
+ *
+ * [settle] then drains that scheduler with `runCurrent()`, which runs every task
+ * due at the current instant (including the ones those tasks schedule) and
+ * NEVER advances virtual time. That last property is load-bearing: a deliberate
+ * park in this class (a gated download, a serialized workspace write) must stay
+ * parked, and advancing the clock would instead fire
+ * `LeaseSessionExec`'s 45 s block bound and turn the park into a timeout.
+ *
+ * Consequence for anyone extending this class: there is nothing to wait for.
+ * Call [settle] and assert. Do NOT reintroduce a `System.currentTimeMillis()`
+ * deadline, a `Thread.sleep`, or a `delay` — with the seam pinned they would
+ * measure nothing except how busy the box is.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
 class FileViewerWorkspaceTest {
 
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
+
+    private val scheduler get() = mainDispatcherRule.dispatcher.scheduler
 
     private lateinit var context: Context
 
@@ -57,8 +95,17 @@ class FileViewerWorkspaceTest {
         context = ApplicationProvider.getApplicationContext()
     }
 
+    /**
+     * Runs every task the code under test has scheduled at the current instant,
+     * transitively, on the ONE shared test scheduler. Never advances the virtual
+     * clock — see the class KDoc.
+     */
+    private fun settle() {
+        scheduler.runCurrent()
+    }
+
     @Test
-    fun hydrateOnceThenSuccessfulOpenAddsTab() = runBlocking {
+    fun hydrateOnceThenSuccessfulOpenAddsTab() {
         val source = FakeWorkspaceSource()
         val vm = viewModel(source)
         vm.bind(request("/srv/a.txt"))
@@ -79,7 +126,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun missingNewFileDoesNotAddATab() = runBlocking {
+    fun missingNewFileDoesNotAddATab() {
         val session = MutableFileSession(body = "unused")
         session.missing.add("/srv/gone.txt")
         val source = FakeWorkspaceSource()
@@ -94,7 +141,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun relativeThenAbsoluteAToBToAHitsTheResolvedPathCache() = runBlocking {
+    fun relativeThenAbsoluteAToBToAHitsTheResolvedPathCache() {
         val session = MutableFileSession(body = "unused")
         session.pathBodies["/srv/a.txt"] = "A original"
         session.pathBodies["/srv/b.txt"] = "B body"
@@ -109,14 +156,30 @@ class FileViewerWorkspaceTest {
 
         session.pathBodies["/srv/a.txt"] = "A CHANGED"
         val downloadsBefore = session.downloads.get()
+        // #2339: the property under test is an ORDER — the resolved-path cache
+        // paints FIRST, the live re-fetch replaces it after. Sampling
+        // `state.value` right after `bind` proved nothing: whether the cache or
+        // the fetch was showing depended on which real thread got there first,
+        // and the fetch won often enough to red the class. Gate the reopen's
+        // download inside the fake session so the live body provably CANNOT
+        // have landed at the moment we sample the paint.
+        session.blockNextDownload = true
         vm.bind(request("/srv/a.txt"))
-        val immediate = vm.state.value
+        settle()
         assertTrue(
-            "absolute reopen of a relative-opened file must paint the resolved-path cache, was $immediate",
-            immediate is FileViewerUiState.TextContent &&
-                immediate.displayPath.endsWith("/a.txt") &&
-                immediate.content == "A original",
+            "the reopen's live fetch must be in flight and still gated before the paint is sampled",
+            session.downloadStarted.isCompleted && !session.releaseDownload.isCompleted,
         )
+        val gatedPaint = vm.state.value
+        assertTrue(
+            "absolute reopen of a relative-opened file must paint the resolved-path " +
+                "cache while the live fetch is still gated, was $gatedPaint",
+            gatedPaint is FileViewerUiState.TextContent &&
+                gatedPaint.displayPath.endsWith("/a.txt") &&
+                gatedPaint.content == "A original",
+        )
+
+        session.releaseDownload.complete(Unit)
         val fresh = vm.state.awaitText { it.displayPath.endsWith("/a.txt") && it.content == "A CHANGED" }
         assertEquals("A CHANGED", fresh.content)
         assertTrue(
@@ -127,7 +190,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun openFilesRestoresTabsAndActiveAfterVmRecreation() = runBlocking {
+    fun openFilesRestoresTabsAndActiveAfterVmRecreation() {
         val session = MutableFileSession(body = "unused")
         session.pathBodies["/srv/a.txt"] = "A"
         session.pathBodies["/srv/b.txt"] = "B"
@@ -157,7 +220,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun closeActiveSelectsRightThenEmpty() = runBlocking {
+    fun closeActiveSelectsRightThenEmpty() {
         val source = FakeWorkspaceSource()
         val vm = viewModel(source)
         vm.bind(request("/srv/a.txt"))
@@ -177,17 +240,17 @@ class FileViewerWorkspaceTest {
         vm.state.awaitText { it.displayPath.endsWith("/a.txt") }
 
         vm.closeTab(vm.workspace.value.orderedTabs.single())
-        val deadline = System.currentTimeMillis() + 5_000
-        while (System.currentTimeMillis() < deadline && vm.state.value !is FileViewerUiState.EmptyWorkspace) {
-            kotlinx.coroutines.delay(20)
-        }
-        assertTrue(vm.state.value is FileViewerUiState.EmptyWorkspace)
+        settle()
+        assertTrue(
+            "closing the last tab must land on EmptyWorkspace; was ${vm.state.value}",
+            vm.state.value is FileViewerUiState.EmptyWorkspace,
+        )
         assertTrue(vm.workspace.value.orderedTabs.isEmpty())
         vm.close()
     }
 
     @Test
-    fun missingRestoredFileKeepsTheTab() = runBlocking {
+    fun missingRestoredFileKeepsTheTab() {
         val session = MutableFileSession(body = "unused")
         session.pathBodies["/srv/a.txt"] = "A"
         val source = FakeWorkspaceSource(
@@ -209,7 +272,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun reusedViewModelRehydratesWhenHostChanges() = runBlocking {
+    fun reusedViewModelRehydratesWhenHostChanges() {
         val source = SequencedWorkspaceSource(
             listOf(
                 FileWorkspaceResult(
@@ -248,7 +311,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun editedHostProfileWithSameIdDoesNotReuseWorkspaceOrCachedContent() = runBlocking {
+    fun editedHostProfileWithSameIdDoesNotReuseWorkspaceOrCachedContent() {
         val source = SequencedWorkspaceSource(
             listOf(
                 FileWorkspaceResult(
@@ -277,7 +340,11 @@ class FileViewerWorkspaceTest {
         session.body.set("host B")
         session.blockNextDownload = true
         vm.bind(request("/srv/shared.txt", hostId = 7L, hostname = "host-b"))
-        session.awaitDownloadStarted()
+        settle()
+        assertTrue(
+            "the edited-host reopen must have entered the gated download",
+            session.downloadStarted.isCompleted && !session.releaseDownload.isCompleted,
+        )
 
         assertEquals("a changed endpoint must hydrate a fresh workspace", 2, source.getCalls)
         assertTrue(
@@ -298,7 +365,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun unavailableWorkspaceExplainsHostUpdateAndRetryRestoresTabs() = runBlocking {
+    fun unavailableWorkspaceExplainsHostUpdateAndRetryRestoresTabs() {
         val session = MutableFileSession(body = "unused")
         session.pathBodies["/srv/restored.md"] = "restored"
         val source = FakeWorkspaceSource().apply { available = false }
@@ -321,7 +388,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun relativeActiveTabStillBlocksCloseWithPendingReview() = runBlocking {
+    fun relativeActiveTabStillBlocksCloseWithPendingReview() {
         val source = FakeWorkspaceSource()
         val vm = viewModel(source)
         vm.bind(request("a.txt", cwd = "/srv"))
@@ -346,24 +413,30 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun workspaceWritesAreSerializedSoOlderSnapshotCannotWin() = runBlocking {
+    fun workspaceWritesAreSerializedSoOlderSnapshotCannotWin() {
         val source = OrderedWriteWorkspaceSource()
         val vm = viewModel(source)
         vm.bind(request("/srv/a.txt"))
         vm.state.awaitText { it.displayPath.endsWith("/a.txt") }
-        source.firstWriteStarted.await()
+        settle()
+        assertTrue("A's workspace write must have started", source.firstWriteStarted.isCompleted)
 
         vm.bind(request("/srv/b.txt"))
         vm.state.awaitText { it.displayPath.endsWith("/b.txt") }
-        kotlinx.coroutines.delay(100)
+        // A full drain of the shared scheduler: if B's write has not started
+        // after it, nothing except A's still-parked write can be holding it.
+        settle()
         assertFalse(
             "the second host write must wait for the first snapshot",
             source.secondWriteStarted.isCompleted,
         )
 
         source.releaseFirstWrite.complete(Unit)
-        source.secondWriteStarted.await()
-        kotlinx.coroutines.delay(100)
+        settle()
+        assertTrue(
+            "releasing the first write must let the queued second write run",
+            source.secondWriteStarted.isCompleted,
+        )
         assertEquals(
             "the latest workspace snapshot must be the durable winner",
             "/srv/b.txt",
@@ -373,7 +446,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun rejectedWorkspaceWriteIsObservableInsteadOfSilentlyIgnored() = runBlocking {
+    fun rejectedWorkspaceWriteIsObservableInsteadOfSilentlyIgnored() {
         val source = FakeWorkspaceSource().apply { upsertResult = false }
         val vm = viewModel(source)
         vm.bind(request("/srv/rejected.txt"))
@@ -388,12 +461,13 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun workspaceWriteSurvivesViewModelClearUntilProcessScopeFinishes() = runBlocking {
+    fun workspaceWriteSurvivesViewModelClearUntilProcessScopeFinishes() {
         val source = OrderedWriteWorkspaceSource()
         val pair = viewModel(source)
         pair.vm.bind(request("/srv/process-death.txt"))
         pair.vm.state.awaitText { it.displayPath.endsWith("/process-death.txt") }
-        source.firstWriteStarted.await()
+        settle()
+        assertTrue("the workspace write must be in flight", source.firstWriteStarted.isCompleted)
 
         // Activity/ViewModel recreation clears the VM, but must not cancel the
         // process-scoped write queue before its host acknowledgement lands.
@@ -411,7 +485,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun dirtyBackQueuesBackActionAndDiscardReturnsIt() = runBlocking {
+    fun dirtyBackQueuesBackActionAndDiscardReturnsIt() {
         val source = FakeWorkspaceSource()
         val vm = viewModel(source)
         vm.bind(request("/srv/dirty-back.txt"))
@@ -426,7 +500,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun pendingReviewBlocksSwitchUntilDiscard() = runBlocking {
+    fun pendingReviewBlocksSwitchUntilDiscard() {
         val source = FakeWorkspaceSource()
         val vm = viewModel(source)
         vm.bind(request("/srv/a.txt"))
@@ -459,7 +533,7 @@ class FileViewerWorkspaceTest {
     }
 
     @Test
-    fun capEvictsOldestInactiveOnThirteenthOpen() = runBlocking {
+    fun capEvictsOldestInactiveOnThirteenthOpen() {
         val session = MutableFileSession(body = "unused")
         val source = FakeWorkspaceSource()
         val vm = viewModel(source, session)
@@ -485,7 +559,20 @@ class FileViewerWorkspaceTest {
     ): PairVm {
         val leaseManager = SshLeaseManager(
             connector = CountingConnector(session),
+            // #2339: the manager's OWN scopes are pinned to the shared test
+            // scheduler too, so nothing this class exercises can land on a real
+            // thread pool. The idle-close job (`delay(idleTtlMillis)`) therefore
+            // never fires, because [settle] deliberately never advances virtual
+            // time — which is what we want: a lease that closes itself
+            // mid-class would be another source of run-to-run divergence.
+            scope = CoroutineScope(SupervisorJob() + StandardTestDispatcher(scheduler)),
             idleTtlMillis = 30_000L,
+            // The owned dial and its abort must share the caller's clock: the
+            // acquire wraps `dial.await()` in `withTimeoutOrNull`, so a dial on a
+            // REAL dispatcher raced against a virtual-time bound (see the
+            // SshLeaseManager constructor KDoc).
+            connectTimeoutContext = StandardTestDispatcher(scheduler),
+            abortTimeoutContext = StandardTestDispatcher(scheduler),
         )
         val vm = FileViewerViewModel(
             context,
@@ -493,6 +580,9 @@ class FileViewerWorkspaceTest {
             workspaceSource = source,
         ).also {
             it.nowMillis = { clock.getAndIncrement().toLong() }
+            // Shape A: the ViewModel's blocking SSH hop resolves on the test
+            // scheduler instead of Dispatchers.IO (#2339).
+            it.ioDispatcher = StandardTestDispatcher(scheduler)
         }
         val writeScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         vm.workspaceWriteScope = writeScope
@@ -525,47 +615,45 @@ class FileViewerWorkspaceTest {
         }
     }
 
-    private suspend fun StateFlow<FileWorkspaceWriteState>.awaitState(
+    private fun StateFlow<FileWorkspaceWriteState>.awaitState(
         predicate: (FileWorkspaceWriteState) -> Boolean,
     ): FileWorkspaceWriteState {
-        val deadline = System.currentTimeMillis() + 10_000
-        while (System.currentTimeMillis() < deadline) {
-            if (predicate(value)) return value
-            kotlinx.coroutines.delay(20)
-        }
-        error("workspace write never reached the expected state; was $value")
+        settle()
+        val current = value
+        assertTrue(
+            "workspace write never reached the expected state; was $current",
+            predicate(current),
+        )
+        return current
     }
 
-    private suspend fun StateFlow<FileViewerUiState>.awaitText(
+    private fun StateFlow<FileViewerUiState>.awaitText(
         predicate: (FileViewerUiState.TextContent) -> Boolean = { true },
     ): FileViewerUiState.TextContent {
-        val deadline = System.currentTimeMillis() + 10_000
-        while (System.currentTimeMillis() < deadline) {
-            val s = value
-            if (s is FileViewerUiState.TextContent && predicate(s)) return s
-            kotlinx.coroutines.delay(20)
-        }
-        error("viewer never reached the expected TextContent state; was $value")
+        settle()
+        val current = value
+        assertTrue(
+            "viewer never reached the expected TextContent state; was $current",
+            current is FileViewerUiState.TextContent && predicate(current),
+        )
+        return current as FileViewerUiState.TextContent
     }
 
-    private suspend fun StateFlow<FileViewerUiState>.awaitCannotPreview(): FileViewerUiState.CannotPreview {
-        val deadline = System.currentTimeMillis() + 10_000
-        while (System.currentTimeMillis() < deadline) {
-            val s = value
-            if (s is FileViewerUiState.CannotPreview) return s
-            kotlinx.coroutines.delay(20)
-        }
-        error("viewer never reached CannotPreview; was $value")
+    private fun StateFlow<FileViewerUiState>.awaitCannotPreview(): FileViewerUiState.CannotPreview {
+        settle()
+        val current = value
+        assertTrue("viewer never reached CannotPreview; was $current", current is FileViewerUiState.CannotPreview)
+        return current as FileViewerUiState.CannotPreview
     }
 
-    private suspend fun StateFlow<FileViewerUiState>.awaitWorkspaceUnavailable(): FileViewerUiState.WorkspaceUnavailable {
-        val deadline = System.currentTimeMillis() + 10_000
-        while (System.currentTimeMillis() < deadline) {
-            val s = value
-            if (s is FileViewerUiState.WorkspaceUnavailable) return s
-            kotlinx.coroutines.delay(20)
-        }
-        error("viewer never reached WorkspaceUnavailable; was $value")
+    private fun StateFlow<FileViewerUiState>.awaitWorkspaceUnavailable(): FileViewerUiState.WorkspaceUnavailable {
+        settle()
+        val current = value
+        assertTrue(
+            "viewer never reached WorkspaceUnavailable; was $current",
+            current is FileViewerUiState.WorkspaceUnavailable,
+        )
+        return current as FileViewerUiState.WorkspaceUnavailable
     }
 
     private fun request(
@@ -672,6 +760,14 @@ class FileViewerWorkspaceTest {
         val pathBodies = mutableMapOf<String, String>()
         val missing = mutableSetOf<String>()
         val downloads = AtomicInteger(0)
+
+        /**
+         * #2339 — the deterministic seam that makes "the cache paints before the
+         * live fetch lands" an ORDER the test controls rather than a race it
+         * hopes to win. Set it before the bind whose download must be observed
+         * mid-flight; the download then parks on [releaseDownload] until the
+         * test completes it.
+         */
         var blockNextDownload: Boolean = false
         val downloadStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
         val releaseDownload = kotlinx.coroutines.CompletableDeferred<Unit>()
@@ -694,15 +790,6 @@ class FileViewerWorkspaceTest {
             }
             val text = pathBodies[remotePath] ?: body.get()
             return text.toByteArray(Charsets.UTF_8)
-        }
-
-        suspend fun awaitDownloadStarted() {
-            val deadline = System.currentTimeMillis() + 10_000
-            while (System.currentTimeMillis() < deadline) {
-                if (downloadStarted.isCompleted) return
-                kotlinx.coroutines.delay(20)
-            }
-            error("viewer did not start the guarded download")
         }
 
         override suspend fun listDirectory(remotePath: String, maxEntries: Int): RemoteListing =

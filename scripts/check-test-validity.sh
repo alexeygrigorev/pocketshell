@@ -417,20 +417,46 @@ timing1_in_scope() {
     app/src/androidTest/java/com/pocketshell/app/hosts/*) return 0 ;;
     app/src/test/java/com/pocketshell/app/projects/*) return 0 ;;
     app/src/androidTest/java/com/pocketshell/app/projects/*) return 0 ;;
+    # Issue #2339: five JVM fileviewer classes drove a ViewModel whose blocking
+    # SSH hop ran on a real Dispatchers.IO pool from hand-rolled 10 s / 5 s
+    # `System.currentTimeMillis()` pumps. That is the exact #708/#882/#1048
+    # virtual-clock-vs-real-dispatcher shape, and it reddened the required Unit
+    # check on `main` with a DIFFERENT member failing on each run of the same
+    # tree — but the guard was blind to the whole root, so nothing caught it.
+    # Deliberately JVM-only, like portfwd/prefs above: the sibling
+    # app/src/androidTest/.../fileviewer classes are emulator+Docker journeys
+    # with no virtual clock at all, so their wall-clock deadlines are the
+    # legitimate real-device wait, not this smell.
+    app/src/test/java/com/pocketshell/app/fileviewer/*) return 0 ;;
   esac
   return 1
 }
 
-# Load-bearing scope contract (#2026). The guard runs this every time, so
-# deleting either newly-required branch cannot read as a clean scan merely
-# because today's two offending pumps have already been migrated.
+# Load-bearing scope contract (#2026, extended #2339). The guard runs this every
+# time, so deleting any newly-required branch cannot read as a clean scan merely
+# because today's offending pumps have already been migrated.
+#
+# BOTH predicates are pinned, because they gate different halves of the check and
+# only their INTERSECTION catches the #2339 class: the offenders are plain
+# `runBlocking` Robolectric tests, so `timing1_has_run_test` skips them and
+# `timing1_in_scope` alone would stay silent. It is
+# `timing1_uses_shared_pump_only_scope` that turns a hand-rolled deadline pump in
+# that root into a HARD FAIL.
 declare -a TIMING1_SCOPE_ERRORS=()
 validate_timing1_scope_contract() {
   local probe
   for probe in \
     "app/src/test/java/com/pocketshell/app/portfwd/Timing1ScopeProbeTest.kt" \
-    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt"; do
+    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt" \
+    "app/src/test/java/com/pocketshell/app/fileviewer/Timing1ScopeProbeTest.kt"; do
     timing1_in_scope "$probe" || TIMING1_SCOPE_ERRORS+=("$probe -> required root is not scanned")
+  done
+  for probe in \
+    "app/src/test/java/com/pocketshell/app/portfwd/Timing1ScopeProbeTest.kt" \
+    "app/src/test/java/com/pocketshell/app/prefs/Timing1ScopeProbeTest.kt" \
+    "app/src/test/java/com/pocketshell/app/fileviewer/Timing1ScopeProbeTest.kt"; do
+    timing1_uses_shared_pump_only_scope "$probe" ||
+      TIMING1_SCOPE_ERRORS+=("$probe -> required root is not hand-rolled-pump enforced")
   done
 }
 
@@ -1066,14 +1092,23 @@ timing1_has_code_smell() {
 }
 
 # #2026's offenders are ordinary JUnit/Robolectric tests, not runTest tests.
-# Keep this hard rule deliberately limited to the two newly-added roots whose
-# contract is "use the one audited settle helper; do not own another wall-clock
-# pump". Other TIMING1 roots retain their existing Shape-A/Shape-B semantics,
-# including the documented advanceSchedulerUntil exception.
+# Keep this hard rule deliberately limited to the roots whose contract is "use
+# the one audited settle helper; do not own another wall-clock pump". Other
+# TIMING1 roots retain their existing Shape-A/Shape-B semantics, including the
+# documented advanceSchedulerUntil exception.
+#
+# #2339 adds the JVM fileviewer root for exactly the #2026 reason: its five
+# classes are `runBlocking` Robolectric tests (so the runTest branch below never
+# sees them) that polled a ViewModel driven by a real Dispatchers.IO pool behind
+# hand-rolled `System.currentTimeMillis()` deadlines. All five now pin every
+# owned hop — Main, FileViewerViewModel.ioDispatcher, and the SshLeaseManager
+# scope/timeout contexts — to one TestCoroutineScheduler and settle with
+# `runCurrent()`, so a reintroduced deadline pump here is a hard fail.
 timing1_uses_shared_pump_only_scope() {
   case "$1" in
     app/src/test/java/com/pocketshell/app/portfwd/*) return 0 ;;
     app/src/test/java/com/pocketshell/app/prefs/*) return 0 ;;
+    app/src/test/java/com/pocketshell/app/fileviewer/*) return 0 ;;
   esac
   return 1
 }
@@ -1906,7 +1941,7 @@ print_list "J1 — JUSTIFIED local CI_JOURNEY_SUITE_JUSTIFIED exemption [advisor
 print_list "J1 — STALE unwired baseline entry [HARD FAIL]" "${J1_STALE_BASELINE[@]:-}"
 print_list "J1 — PARSER failure reading ci-journey-suite.sh [HARD FAIL]" "${J1_PARSER_FAILURE[@]:-}"
 print_list "TIMING1 — NEW bare Thread.sleep(N) before a load-bearing assert, no bounded loop [HARD FAIL]" "${TIMING1_NEW_HARD[@]:-}"
-print_list "TIMING1 — hand-rolled wall-clock deadline pump in portfwd/prefs [HARD FAIL]" "${TIMING1_HAND_ROLLED_PUMPS[@]:-}"
+print_list "TIMING1 — hand-rolled wall-clock deadline pump in portfwd/prefs/fileviewer [HARD FAIL]" "${TIMING1_HAND_ROLLED_PUMPS[@]:-}"
 print_list "TIMING1 — REQUIRED scan root missing [HARD FAIL]" "${TIMING1_SCOPE_ERRORS[@]:-}"
 print_list "TIMING1 — NEW runTest over a real dispatcher/thread without a pinned seam or bounded pump [advisory]" "${TIMING1_FINDINGS[@]:-}"
 print_list "TIMING1 — KNOWN baseline (real-dispatcher/thread runTest catalogued; seam adoption is per-test follow-up) [advisory]" "${TIMING1_KNOWN[@]:-}"

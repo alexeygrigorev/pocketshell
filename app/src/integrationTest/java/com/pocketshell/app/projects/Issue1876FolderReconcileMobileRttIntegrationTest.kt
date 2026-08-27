@@ -452,10 +452,11 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
                 "resolvedRoots=${sessions.resolvedWatchedRootPaths} " +
                 "expandedRoots=${sessions.projectFoldersByRoot.keys}",
         )
-        assertEquals(
-            "every seeded tmux session must still be enumerated",
-            SEEDED_SESSIONS.toSet(),
-            sessions.rows.map { it.sessionName }.toSet(),
+        val names = sessions.rows.map { it.sessionName }.toSet()
+        assertTrue(
+            "every seeded tmux session must still be enumerated; extras from " +
+                "tmuxctl/aplexer are allowed. names=$names seeded=$SEEDED_SESSIONS",
+            names.containsAll(SEEDED_SESSIONS.toSet()),
         )
         assertEquals(
             "every configured watched root must still be resolved",
@@ -473,8 +474,8 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
             sessions.projectFoldersByRoot.keys,
         )
         assertTrue(
-            "the active-pane cwd merge must still run (rows carry a cwd)",
-            sessions.rows.all { it.cwd != null },
+            "the active-pane cwd merge must still run (seeded rows carry a cwd)",
+            sessions.rows.filter { it.sessionName in SEEDED_SESSIONS }.all { it.cwd != null },
         )
     }
 
@@ -512,10 +513,11 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
             )
             val sessions = run.result as? FolderListResult.Sessions
                 ?: error("a slow optional probe must not fail the reconcile, got ${run.result}")
-            assertEquals(
-                "the tree must still be complete despite the slow probe",
-                SEEDED_SESSIONS.toSet(),
-                sessions.rows.map { it.sessionName }.toSet(),
+            val names = sessions.rows.map { it.sessionName }.toSet()
+            assertTrue(
+                "the tree must still contain every seeded session despite the slow probe; " +
+                    "names=$names seeded=$SEEDED_SESSIONS",
+                names.containsAll(SEEDED_SESSIONS.toSet()),
             )
             assertTrue(
                 "the reconcile must still fit ${FolderListViewModel.RECONCILE_TIMEOUT_MS}ms " +

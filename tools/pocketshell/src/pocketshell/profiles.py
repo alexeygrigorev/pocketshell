@@ -44,11 +44,11 @@ stats a handful of dirs and reads marker *names* — it never reads inside a
 config dir (those hold ``auth.json`` / ``.env``). ``profiles list`` emits
 ``{name, engine, config_dir, default}`` and nothing else.
 
-Aplexer integration (Phase A1, #2341): when the ``aplexer`` Python package
-is importable, ``discover_profiles`` also calls ``Client.profiles()`` in
-*shadow mode* — it logs sibling divergence and still returns the native
-result. See ``docs/aplexer-integration.md``. Set
-``POCKETSHELL_APLEXER_PROFILES=0`` to disable the probe.
+Aplexer integration (Phase A1, #2341): when the ``a`` binary is on PATH,
+``discover_profiles`` also probes ``a profiles --json`` in *shadow mode* —
+it logs sibling divergence and still returns the native result. See
+``docs/aplexer-integration.md``. Set ``POCKETSHELL_APLEXER_PROFILES=0`` to
+disable the probe.
 """
 
 from __future__ import annotations
@@ -56,6 +56,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -103,9 +105,12 @@ _KNOWN_ALIASES: dict[str, str] = {
     "zlaude": "Claude (Z.AI)",
 }
 
-# Aplexer Phase A1 (#2341): shadow-mode listing via ``aplexer.Client``.
-# `POCKETSHELL_APLEXER_PROFILES=0` forces the native path.
+# Aplexer Phase A1 (#2341): shadow-mode listing. Probe is on when `a` is
+# found; `POCKETSHELL_APLEXER_PROFILES=0` forces the native path. See
+# docs/aplexer-integration.md.
 _LOG = logging.getLogger("pocketshell.profiles")
+_APLEXER_PROFILES_TIMEOUT_S = 2.0
+_APLEXER_BIN_ENV = "APLEXER_BIN"
 _APLEXER_PROFILES_KILL_SWITCH = "POCKETSHELL_APLEXER_PROFILES"
 _APLEXER_CONFIG_DIR_ENV = {
     "claude": "CLAUDE_CONFIG_DIR",
@@ -182,11 +187,19 @@ def _env_map(env: Optional[dict[str, str]] = None) -> dict[str, str]:
     return merged
 
 
-def _aplexer_client():
-    """Return an ``aplexer.Client``. Tests patch this."""
-    from aplexer import Client
+def _aplexer_cli(env: Optional[dict[str, str]] = None) -> Optional[str]:
+    """Return the ``a`` binary to probe, or None to skip.
 
-    return Client()
+    Skip when ``POCKETSHELL_APLEXER_PROFILES=0``. Otherwise prefer
+    ``APLEXER_BIN``, then ``PATH``.
+    """
+    source = _env_map(env)
+    if source.get(_APLEXER_PROFILES_KILL_SWITCH) == "0":
+        return None
+    explicit = source.get(_APLEXER_BIN_ENV)
+    if explicit:
+        return explicit
+    return shutil.which("a", path=source.get("PATH"))
 
 
 def _profiles_from_aplexer_json(payload: Any) -> Optional[list[Profile]]:
@@ -224,13 +237,26 @@ def _profiles_from_aplexer_json(payload: Any) -> Optional[list[Profile]]:
 def _aplexer_profiles(
     env: Optional[dict[str, str]] = None,
 ) -> Optional[list[Profile]]:
-    """Call ``aplexer.Client.profiles()``. None on skip or any failure."""
-    source = _env_map(env)
-    if source.get(_APLEXER_PROFILES_KILL_SWITCH) == "0":
+    """Run ``a profiles --json``. None on skip or any failure."""
+    cli = _aplexer_cli(env)
+    if cli is None:
         return None
     try:
-        payload = _aplexer_client().profiles()
-    except Exception:
+        completed = subprocess.run(
+            [cli, "profiles", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_APLEXER_PROFILES_TIMEOUT_S,
+            env=_env_map(env),
+        )
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
         return None
     return _profiles_from_aplexer_json(payload)
 

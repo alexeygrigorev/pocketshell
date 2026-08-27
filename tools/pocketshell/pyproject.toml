@@ -73,7 +73,6 @@ dependencies = [
     # per-session-server migration so every caller resolves sessions the same
     # way.
     "tmuxctl>=0.3.5",
-    "aplexer",
 ]
 
 [project.scripts]
@@ -126,9 +125,6 @@ exclude = [
 # releases (quse 0.0.14 and tmuxctl 0.3.5); this exact value is also the
 # `uv.lock` options cutoff and must be used when checking this lock.
 exclude-newer = "2026-08-27T22:00:00Z"
-
-[tool.uv.sources]
-aplexer = { path = "/home/alexey/git/aplexer/python", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

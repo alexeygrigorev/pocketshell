@@ -57,21 +57,19 @@ class FolderListGatewaySshLeaseTest {
         val jsonEnumerator = ReposRemoteSource.pathAwareCommand(
             SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND,
         )
-        assertEquals(
-            listOf(
-                ENUMERATION_COMMAND,
-                "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
-                "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
-                "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
-                jsonEnumerator,
-                ENUMERATION_COMMAND,
-                "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
-                "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
-                "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
-                jsonEnumerator,
-            ),
-            session.execCommands,
+        val portScans = listOf(
+            "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
+            "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
+            "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
         )
+        // execBounded hops to Dispatchers.IO, so the JSON enumerator and the
+        // concurrent port scan can interleave; the contract is counts on one
+        // reused lease, not a frozen interleaving.
+        assertEquals(2, session.execCommands.count { it == ENUMERATION_COMMAND })
+        assertEquals(2, session.execCommands.count { it == jsonEnumerator })
+        assertEquals(6, session.execCommands.count { it in portScans })
+        assertEquals(10, session.execCommands.size)
+        assertTrue(session.execCommands.none { it.contains("sessions list --by") })
     }
 
     private val ENUMERATION_COMMAND: String = ReposRemoteSource.pathAwareCommand(

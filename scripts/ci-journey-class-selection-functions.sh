@@ -143,6 +143,41 @@ select_effective_journey_classes() {
     done
     echo ">>> CI journey shard ${JOURNEY_CI_SHARD_INDEX}/${JOURNEY_CI_SHARD_TOTAL} (issues #835, #1862): running ${#EFFECTIVE_JOURNEY_CLASSES[@]} of ${#JOURNEY_CLASSES[@]} journey classes (partitioned by class-name hash, so registering a journey does not re-roll the others); the core-terminal proofs are partitioned by the same hash (issue #2110)"
   fi
+
+  # ---------------------------------------------------------------------------
+  # Issue #2353: optional additional intersection with the #2063 scoped
+  # test-selection plan (scripts/select-test-areas.sh) for a `main`-push
+  # event. POCKETSHELL_JOURNEY_SCOPED is UNSET/EMPTY for every
+  # local run, every existing self-test/fixture, PR (this job never runs for
+  # PRs), schedule, and workflow_dispatch — so this block is a no-op and
+  # EFFECTIVE_JOURNEY_CLASSES is exactly the shard partition computed above,
+  # byte-identical to before this issue. The workflow only sets it to a
+  # non-empty, comma-separated FQCN list when `main`-push's OWN plan is
+  # SCOPED (never when it is FULL — a force-full push still runs every class
+  # its shard owns). When set, only classes in BOTH this shard's partition AND
+  # the scoped plan run: a shard whose intersection with the scoped plan is
+  # empty logs zero classes and exits promptly instead of idling out its
+  # per-shard budget on a run the taxonomy says this push cannot affect.
+  if [[ -n "${POCKETSHELL_JOURNEY_SCOPED:-}" ]]; then
+    local -A _scoped_ci_classes=()
+    local -a _scoped_ci_list=()
+    local _scoped_ci_entry
+    IFS=',' read -ra _scoped_ci_list <<< "${POCKETSHELL_JOURNEY_SCOPED}"
+    for _scoped_ci_entry in "${_scoped_ci_list[@]}"; do
+      [[ -n "$_scoped_ci_entry" ]] && _scoped_ci_classes["$_scoped_ci_entry"]=1
+    done
+    local -a _scoped_ci_filtered=()
+    local _scoped_ci_class_only
+    for _shard_class in "${EFFECTIVE_JOURNEY_CLASSES[@]}"; do
+      # An entry may carry a `#method` suffix; the scoped plan
+      # (select-test-areas.sh journey_registry_classes) lists bare class FQCNs,
+      # so match on the class part only.
+      _scoped_ci_class_only="${_shard_class%%#*}"
+      [[ -n "${_scoped_ci_classes[$_scoped_ci_class_only]:-}" ]] && _scoped_ci_filtered+=("$_shard_class")
+    done
+    echo ">>> CI journey scoped-plan filter (issue #2353): ${#_scoped_ci_filtered[@]} of ${#EFFECTIVE_JOURNEY_CLASSES[@]} shard-selected classes are in the #2063 scoped plan for this push"
+    EFFECTIVE_JOURNEY_CLASSES=("${_scoped_ci_filtered[@]}")
+  fi
 }
 
 print_journey_class_selection() {

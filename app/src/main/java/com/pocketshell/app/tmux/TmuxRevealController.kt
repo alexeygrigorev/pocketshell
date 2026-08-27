@@ -4,6 +4,7 @@ import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionTarget
 import com.pocketshell.core.connection.ConnectionState as CoreConnectionState
 import com.pocketshell.core.connection.ConnectionProjection
 import com.pocketshell.core.connection.HostKey
+import com.pocketshell.core.connection.RevealIdentityAdoption
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.RevealStateMachine
 import com.pocketshell.core.connection.Seed
@@ -27,6 +28,12 @@ internal class TmuxRevealController(
     private val revealStateMachine: RevealStateMachine = RevealStateMachine()
 
     val state: StateFlow<RevealState> = revealStateMachine.state
+
+    /**
+     * Issue #2338: the reducer's last identity handoff, so the rendered screen
+     * can follow an adoption of ITS OWN route id (and only that one).
+     */
+    val identityAdoption: StateFlow<RevealIdentityAdoption?> = revealStateMachine.identityAdoption
 
     fun onConnectionState(state: CoreConnectionState) {
         revealStateMachine.onConnectionState(state)

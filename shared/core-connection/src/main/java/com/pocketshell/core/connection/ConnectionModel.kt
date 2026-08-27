@@ -33,6 +33,27 @@ data class HostKey(val value: String)
 data class SessionId(val value: String)
 
 /**
+ * Issue #2338: a record that the reveal reducer re-keyed the CURRENT session
+ * from one [SessionId] to another without renavigating.
+ *
+ * Identity adoption happens when the first authoritative `list-panes` proves the
+ * navigation id incomplete (name-only) or stale (an exact generation that is no
+ * longer the live one). The reducer, the connection controller and every seed
+ * move to [to] at that moment, but the SCREEN still holds the route id it was
+ * composed with — so without this record the fused surface state sees
+ * `reveal.targetId != screen targetId` and holds the terminal forever (the
+ * #2338 "terminal never attaches on the 2nd+ launch" wedge).
+ *
+ * [from] is the identity the screen was navigated with, so a screen may follow
+ * [to] only when its own route id equals [from]. Any other screen keeps its own
+ * identity and stays behind the #686 stale-id fence.
+ */
+data class RevealIdentityAdoption(
+    val from: SessionId,
+    val to: SessionId,
+)
+
+/**
  * An id-tagged pane capture produced by the connection core. The screen (#686)
  * drops any [Seed] whose [targetId] != the current target, so a late seed from a
  * superseded switch never paints. `frame` is the captured pane content as an

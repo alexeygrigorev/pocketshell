@@ -60,8 +60,9 @@ internal class RealSshPortForward(
     /**
      * Serialises pair ownership and copy-thread registration with close().
      * Once [running] is false, no new copy thread may be registered. This
-     * makes the snapshots used by close() complete: a thread cannot appear
-     * after close has taken its join set.
+     * lets close() take complete pair and copy-thread snapshots before it
+     * starts teardown: a thread cannot appear after close has taken its join
+     * set.
      */
     private val lifecycleLock = Any()
 
@@ -258,18 +259,20 @@ internal class RealSshPortForward(
      * diagnostic; it never silently detaches a live thread from [copyThreads].
      */
     override fun close() {
-        // Seal the lifecycle transition and pair snapshot together. A copy
+        // Seal the lifecycle transition and both snapshots together. A copy
         // callback that reaches closePairAndUntrack concurrently must either
         // claim the pair before this block or observe that close() owns it;
-        // it cannot mutate activePairs between the snapshot and clear.
-        val pairs = synchronized(lifecycleLock) {
+        // it cannot mutate activePairs or copyThreads between the snapshots
+        // and teardown.
+        val (pairs, threadsToJoin) = synchronized(lifecycleLock) {
             // `running` is written under the same lock that serialises every
             // activePairs mutation and snapshot. This also makes the
             // post-close startCopyThread check a single lifecycle decision.
             if (!running.compareAndSet(true, false)) return
-            val snapshot = ArrayList(activePairs)
+            val pairSnapshot = ArrayList(activePairs)
             activePairs.clear()
-            snapshot
+            val threadSnapshot = ArrayList(copyThreads)
+            pairSnapshot to threadSnapshot
         }
         runCatching { serverSocket.close() }
         // Close every accepted-connection pair we still own. Copy
@@ -291,7 +294,6 @@ internal class RealSshPortForward(
         // calling close() — unusual but cheap to guard).
         val self = Thread.currentThread()
         val deadlineNanos = System.nanoTime() + CLOSE_JOIN_TIMEOUT_MS * NANOS_PER_MILLI
-        val threadsToJoin = synchronized(lifecycleLock) { ArrayList(copyThreads) }
         for (t in threadsToJoin) {
             if (t === self) continue
             val remainingMillis = (deadlineNanos - System.nanoTime()) / NANOS_PER_MILLI

@@ -1,5 +1,20 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.core.connection.RevealIdentityAdoption
+import kotlinx.coroutines.flow.StateFlow
+
+/**
+ * Issue #2338: the reveal reducer's exact-generation identity handoff, published
+ * so the screen keyed to the SUPERSEDED route id can follow it instead of
+ * holding the terminal behind the #686 stale-id fence forever.
+ *
+ * Lives here (with the adoption that produces it) rather than on the VM: the
+ * god object is byte-ratcheted downward and this is identity-promotion state,
+ * not another VM responsibility.
+ */
+public val TmuxSessionViewModel.revealIdentityAdoption: StateFlow<RevealIdentityAdoption?>
+    get() = revealController.identityAdoption
+
 internal data class ParsedPaneApplyResult(
     val newPanes: List<TmuxPaneState>,
     val refreshGuard: RuntimeRefreshGuard?,

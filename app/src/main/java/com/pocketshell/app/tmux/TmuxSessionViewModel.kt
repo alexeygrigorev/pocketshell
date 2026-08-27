@@ -1536,7 +1536,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /** Id-keyed session reveal projection; the screen renders strictly from [revealState]. */
-    private val revealController: TmuxRevealController =
+    internal val revealController: TmuxRevealController =
         TmuxRevealController(
             hostKeyForTarget = { target -> hostKeyFor(target.toSshLeaseTarget().leaseKey) },
         )

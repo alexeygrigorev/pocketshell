@@ -44,6 +44,19 @@ class RevealStateMachine {
     /** The single source the view renders name + surface from. */
     val state: StateFlow<RevealState> = _state.asStateFlow()
 
+    private val _identityAdoption = MutableStateFlow<RevealIdentityAdoption?>(null)
+
+    /**
+     * Issue #2338: the LAST [adoptTargetId] handoff, or null when the current
+     * reveal identity is exactly the one [navigate] supplied.
+     *
+     * The render fence needs the `from` half: a screen whose route id equals
+     * [RevealIdentityAdoption.from] is the SAME session the reducer re-keyed,
+     * so it must follow [RevealIdentityAdoption.to]; every other screen keeps
+     * its own route identity and stays fenced.
+     */
+    val identityAdoption: StateFlow<RevealIdentityAdoption?> = _identityAdoption.asStateFlow()
+
     /** The current target id — the drop-by-id reference for all inputs. Null only
      *  before the first [navigate]. */
     private val currentTargetId: SessionId?
@@ -106,6 +119,10 @@ class RevealStateMachine {
         }
         panes.clear()
         agentName = null
+        // Issue #2338: a genuine renavigation ends any previous identity handoff.
+        // Keeping a stale adoption would let the render fence retarget a screen
+        // whose route was never the adopted `from`.
+        _identityAdoption.value = null
         _state.value = RevealState.Navigating(targetId, targetName)
     }
 
@@ -127,6 +144,13 @@ class RevealStateMachine {
         panes.clear()
         panes.addAll(adoptedPanes)
         _state.value = _state.value.withTargetId(to, adoptedPanes)
+        // Issue #2338: publish WHICH navigation id this reveal was adopted FROM.
+        // Without it the render fence cannot distinguish "the pane listing proved
+        // MY route's generation stale" (follow the adopted id) from "the reveal
+        // happens to hold some other generation of a same-named session" (stay
+        // fenced) — and defaulting to the fence wedges every attach whose route
+        // carried a stale exact generation.
+        _identityAdoption.value = RevealIdentityAdoption(from = from, to = to)
     }
 
     /**

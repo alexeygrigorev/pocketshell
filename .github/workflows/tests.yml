@@ -834,26 +834,12 @@ jobs:
             scripts/test-nightly-failure-recurrence.sh
           scripts/test-nightly-failure-recurrence.sh
 
-      # Issue #1581: gate the Build workflow's corrupted-NDK-download retry
-      # wrapper (scripts/ci-assemble-with-ndk-retry.sh) so its clear-and-retry
-      # logic cannot silently regress. Fast, JVM-free shell test (fake build cmd,
-      # temp dirs, no Gradle/SDK/network) proving: attempt-1 corrupted-NDK
-      # failure -> CLEAR partial download -> attempt-2 success (self-healed);
-      # that the clear is load-bearing (retry alone, with the clear stubbed off,
-      # still fails); and that a non-NDK failure is NOT retried (a real
-      # regression is never masked). Cheap (< 5 s), no emulator.
-      - name: Build NDK-download retry guard (issue #1581)
+      # Rationale + both guards live in the script (issues #1581 and the local
+      # assemble-debug profile); tests.yml stays under its size ratchet.
+      - name: Build NDK-retry and assemble-debug profile guards (#1581)
         run: |
-          chmod +x scripts/ci-assemble-with-ndk-retry.sh scripts/test-ci-ndk-retry.sh
-          scripts/test-ci-ndk-retry.sh
-
-      # Local APK assemble must stay on the fast profile (daemon + cache +
-      # multi-worker) and must not silently pick up the release-gate
-      # --no-daemon/--no-build-cache/--max-workers=1 flags. Cheap, no Gradle.
-      - name: Local assemble-debug profile guard
-        run: |
-          chmod +x scripts/assemble-debug.sh scripts/test-assemble-debug.sh
-          scripts/test-assemble-debug.sh
+          chmod +x scripts/ci-build-profile-guards.sh
+          scripts/ci-build-profile-guards.sh
 
   # ---------------------------------------------------------------------------
   # Issue #2067: the #2063 test-area coverage guards, as a DEDICATED job. Reached

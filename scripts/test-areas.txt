@@ -3,9 +3,25 @@
 # This taxonomy exists to make coverage MECHANICALLY CHECKABLE (is every class
 # mapped, reachable, and actually executed within a bounded window — the
 # #1851/#1853/#1859/#1509 class), and it scopes CI selection as a by-product.
-# It is not a speed feature: measured over 104 `main` commits it is 1.09x on the
-# emulator lane and neutral-to-slightly-negative on Unit. docs/testing.md has
-# the numbers. Edit this file to keep the map honest, not to chase a runtime.
+# Measured over 104 `main` commits it was 1.09x on the emulator lane and
+# neutral-to-slightly-negative on Unit — deliberately conservative, because a
+# scoped run was the ONLY signal: an under-selection there was a silent
+# coverage hole with nothing to catch it. docs/testing.md has the numbers.
+#
+# ISSUE #2355 CHANGED THE PRECONDITION THAT MADE THAT CONSERVATISM NECESSARY.
+# Phase 1 of epic #2350 added a scheduled FULL-suite run on `main` on a fixed
+# ~8h cadence (independent of what any push selects) plus stop-the-line +
+# revert-first (D36): a selection miss is now caught within <=8h with
+# attribution bounded to that window, and recovery is a revert, not a 2-day
+# forward-fix. That backstop is what makes deliberately TIGHTENING this
+# manifest — narrower `full` globs, fewer/narrower `couple` edges — safe now,
+# where it was not before Phase 1 existed. #2355 narrowed the two dominant
+# force-full contributors (measured: `scripts/*` and the "test-infrastructure"
+# non-*Test-file rule; see the FORCE-FULL section and docs/testing.md for the
+# before/after numbers) on exactly that basis. The map must still stay HONEST
+# — this file remains data reflecting real blast radius, not a knob tuned to
+# hit a target percentage — but selectivity is now a deliberate secondary goal
+# for genuinely narrow-blast-radius paths, not something to avoid discussing.
 #
 # ONE data file drives all four consumers, so the taxonomy cannot drift:
 #   * scripts/select-test-areas.sh            — changed paths -> areas -> what to run
@@ -155,8 +171,71 @@ area   host-cli             changed  The host-side `pocketshell` Python CLI
 # here is a deliberate cost, and every one is cheaper than a missed regression.
 # ---------------------------------------------------------------------------
 full   .github/*                     CI workflow definitions decide what runs at all
-full   scripts/*                     the gate harnesses, including this manifest and its consumers
-full   tests/*                       Docker fixtures and shell harnesses every journey depends on
+# scripts/* WAS one blanket row here (measured #2355: over 30 sampled commits
+# it alone caused 53 of 75 total force-full glob hits — by far the dominant
+# contributor, matching docs/testing.md's "scripts/* (18 commits)" finding).
+# `scripts/` holds ~170 files, and the overwhelming majority are release/
+# workbench/dev-loop tooling with NO bearing on which Kotlin/journey tests a
+# push needs — most already carry their OWN unconditional self-test, run every
+# push by the SEPARATE `guards-static`/`guards-ci-harness`/`guards-test-
+# selection` CI jobs regardless of what this manifest selects (see
+# .github/workflows/tests.yml; `scripts/ci-test-selection-guards.sh` is that
+# job's body for the taxonomy's own guards). Narrowing this row does not lose
+# that protection — it was never provided BY force-full in the first place.
+# What stays `full` below is the set that is genuinely taxonomy-self-
+# referential (the manifest cannot verify itself if the thing checking it is
+# stale) or that changes the MECHANICS of how connected/journey tests execute,
+# where a bug would not be caught by that class's own narrow self-test alone.
+# Everything else in scripts/ falls through to the `src scripts/* ci-harness`
+# catch-all near the bottom of this section.
+full   scripts/test-areas.txt                       the manifest itself — the whole taxonomy, as data
+full   scripts/lib/test-areas.sh                    the classification engine every consumer reads
+full   scripts/select-test-areas.sh                 the selection/coverage-guard engine itself
+full   scripts/select-test-areas-selftest.sh        its own red/green self-test
+full   scripts/ci-test-selection-guards.sh          wires the #2063 guards into the unconditional guards-test-selection job
+full   scripts/ci-journey-suite.sh                  the journey registry — defines what "every journey" means
+full   scripts/nightly-extensive-suite.sh           the nightly wholesale-run premise the unconventional-file exemptions rest on
+full   scripts/test-unconventional-test-files.txt   the unconventional-@Test exemption baseline this manifest's own guard checks
+full   scripts/check-test-execution-ledger.sh       proves every registered class actually executes
+full   scripts/check-test-execution-ledger-selftest.sh
+full   scripts/check-test-execution-ledger-wiring.py
+full   scripts/ci-record-test-execution-ledger.sh
+full   scripts/check-ci-unit-forced-execution.py    asserts the full Unit run stays forced/uncached
+full   scripts/check-executed-test-counts.sh        the anti-vacuous-green test-count guard (issue #1646)
+full   scripts/check-ci-docker-integration-execution.py
+full   scripts/check-ci-journey-harness.sh          the journey registry's own wiring guard
+full   scripts/check-ci-journey-harness-selftest.sh
+full   scripts/check-test-validity.sh               D32/#657 regression-proof-validity guard
+full   scripts/check-test-validity-selftest.sh
+full   scripts/check-tests-referenced.sh            proves every tests/scripts/* harness has a live caller
+full   scripts/check-script-interpreter-hygiene.sh  proves every script runs under its own shebang's interpreter (issue #2066)
+full   scripts/connected-test.sh                    how every connected/journey test physically runs (AVD lock, applicationIdSuffix)
+full   scripts/agents-pool.sh                       Docker agents-fixture allocation every parallel journey lane depends on
+full   scripts/ci-journey-retry-budget.sh           journey-suite retry/budget mechanics
+full   scripts/ci-journey-infra-signature.sh        infra-vs-real-failure classification (G5) the quarantine mechanism reuses
+full   scripts/ci-journey-infra-signature.py
+full   scripts/pr-journey-smoke-plan.sh             Phase 2's own consumer of this plan (issue #2354)
+full   scripts/ci-journey-summary-functions.sh      per-push journey suite pass/fail + evidence-section mechanics
+full   scripts/ci-journey-class-loop-functions.sh   per-push journey suite retry-once/flake mechanics
+full   scripts/ci-journey-budget-functions.sh       per-push journey suite budget/timeout/shard mechanics
+full   scripts/ci-journey-class-selection-functions.sh  per-push journey suite class/shard selection mechanics
+full   scripts/ci-journey-core-terminal-functions.sh    per-push journey suite core-terminal proof registry
+full   scripts/journey-quarantine.txt               the flake-quarantine list itself (issue #2355 / D36)
+full   scripts/lib/journey-quarantine.sh            the quarantine list's parsing/consumption library
+full   scripts/check-journey-quarantine-expiry.sh   the quarantine expiry guard (issue #2355 / D36)
+full   scripts/report-journey-flake.sh              the semi-automated auto-file/quarantine helper (issue #2355 / D36)
+# tests/* WAS one blanket row here too (measured #2355: only 4 of 75 hits, far
+# behind scripts/*, but still narrowed on the same basis). `tests/docker/*`
+# stays FULL: it is the Docker fixture (fake agent CLIs, sshd config, compose
+# topology) that essentially every connection-core/terminal/tmux/agent journey
+# across EVERY app area depends on — narrowing that specific subtree would
+# need a per-fixture blast-radius audit this round did not do, and getting it
+# wrong is exactly the #1509/#847 "fixture changed, the test it protects did
+# not re-run" shape. `tests/scripts/*` (shell harnesses that test scripts/*,
+# invoked from the app.scripts Kotlin test package via ProcessBuilder — see
+# `test app/src/*/java/.../scripts/*` below) is the tests/ sibling of the
+# scripts/* case above and narrows the same way.
+full   tests/docker/*                Docker fixtures every connection/terminal/tmux/agent journey depends on
 full   gradle/*                      version catalogue and wrapper properties
 full   */gradle/*                    nested gradle directories
 full   gradlew*                      the wrapper entry points
@@ -257,6 +336,17 @@ src    app/src/main/java/com/pocketshell/app/snippets/*       diagnostics-crash 
 
 # -- host CLI --
 src    tools/pocketshell/*           host-cli             full
+
+# -- CI/dev-tooling scripts NOT covered by an explicit `full` row above
+#    (issue #2355). Most have their own unconditional self-test (a sibling
+#    `guards-static`/`guards-ci-harness` CI step, independent of this
+#    manifest's selection) or, for the tests/scripts/* shell harnesses
+#    specifically, a `test app/src/*/java/.../scripts/*` Kotlin caller below
+#    that ProcessBuilder-invokes them directly — that Kotlin package IS this
+#    row's real regression coverage, which is why it maps here rather than to
+#    `noop` (these files are not provably inert; they are covered elsewhere).
+src    scripts/*                     ci-harness           full
+src    tests/scripts/*               ci-harness           full
 
 # ---------------------------------------------------------------------------
 # TEST PATHS -> AREA. Ordered specific-before-general.

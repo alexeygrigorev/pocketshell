@@ -433,10 +433,72 @@ commits, reproduced independently by the reviewer:
 | Unit lane | **neutral to slightly negative** — ~14% of unit test-case time saved on the 42% of commits that scope, against the guards' own cost on the rest |
 | the guards' own cost | **~170–195 s per Unit variant** on a loaded box, i.e. **+6.1 min on a full Unit run** |
 
-Nothing here is over-force-fulling: the big buckets (`scripts/*`, a non-`*Test`
-file in a test source set) are coarse but each is defensible, and no bucket has
-an obvious narrower correct answer. The selection is simply *nearly full* on a
-typical commit, because this codebase's production graph is strongly connected.
+Nothing here was over-force-fulling at the time: the big buckets (`scripts/*`,
+a non-`*Test` file in a test source set) were coarse but each was defensible,
+and the taxonomy stayed deliberately conservative because a scoped run was the
+ONLY signal — an under-selection was a silent coverage hole with nothing to
+catch it.
+
+**Issue #2355 changed that precondition.** Phase 1 of epic #2350 (already
+merged) added a scheduled FULL-suite run on `main` on a fixed ~8h cadence,
+independent of what any push selects, plus stop-the-line + revert-first
+(D36): a selection miss is now caught within <=8h with attribution bounded to
+that window, and recovery is a revert rather than a multi-day forward-fix.
+That backstop is what makes deliberately tightening the manifest safe now,
+where it was not when the numbers above were measured. #2355 narrowed the
+`scripts/*` and `tests/*` force-full globs (measured over a 30-commit real
+sample, `scripts/*` alone caused 53 of 75 total force-full glob hits — by far
+the dominant contributor) down to an explicit taxonomy/mechanics-critical
+allowlist plus a `ci-harness`-area catch-all for everything else, on the
+reasoning that most of `scripts/`'s ~170 files already carry their own
+unconditional self-test (a `guards-static`/`guards-ci-harness`/`guards-test-
+selection` CI step that runs every push regardless of what this manifest
+selects) and gain nothing from force-full.
+
+Measured effect of that narrowing, same methodology, two independent 30-commit
+samples (`git log --no-merges`, evenly spaced so as not to cherry-pick):
+
+| Measurement | Sample A (recent, CI-tooling-heavy) | Sample B (older, wider window) |
+|---|---|---|
+| force-full, before | 20/30 = 66% | 20/30 = 66% |
+| force-full, after | 17/30 = 56% | 19/30 = 63% |
+| journey selection, median | 100% (unchanged) | 100% (unchanged) |
+| journey selection, average | 89% -> 84% | 89% -> 88% |
+
+**This is real, but it did not reach the `<20%` force-full / `<33%` median
+journey-selection targets #2355 set out to hit.** Sample A shows a bigger
+apparent win than sample B because it happens to be drawn from a period
+unusually concentrated in CI/test-infrastructure commits (this same epic), so
+narrowing `scripts/*` helps it disproportionately; sample B is the more
+representative number. Two things account for the remaining gap, both
+deliberately NOT narrowed this round because doing so would trade real safety
+for a target percentage:
+
+1. **The other force-full globs stayed put** (DI/nav/startup/layout, `res/*`,
+   both manifests, `app/src/debug/*`, every Gradle/build-config file, the
+   `TmuxSessionViewModel.kt` D28 seam) — each is independently defensible per
+   its own comment in the FORCE-FULL section below, and #2355 did not re-audit
+   them.
+2. **The "test-infrastructure" rule** (`pocketshell_test_area_classify`'s rule
+   2 in `scripts/lib/test-areas.sh` — "any non-`*Test` file inside a Gradle
+   test source set forces full") is a STABLE ~23% contributor in both samples
+   (7 of 30 commits each) and is the single largest remaining lever. It is a
+   CLASSIFICATION-ENGINE rule, not manifest data — narrowing it correctly
+   (e.g. "force full only for genuinely widely-shared fixtures like
+   `app/src/*/java/.../proof/*` and `shared/test-support/*`; a package-scoped
+   fixture should resolve to its own package's area like a sibling `*Test.kt`
+   file would") needs its own careful round: verifying no fixture the manifest
+   currently treats as "obviously shared" is actually narrow, and re-running
+   the full guard suite including the I8 independent blast-radius re-scan.
+   #2355 scoped this out rather than rush a change to the fail-safe direction
+   under time pressure; it is the natural next step and is filed as a
+   follow-up (see the issue for the tracking link).
+
+A commit that touches ONLY product code (no scripts, no shared test fixtures,
+no build config) sees a much bigger relative win than either sample average
+suggests, since it never hits any of the remaining force-full triggers at
+all — the two samples above are weighted toward exactly the kind of commit
+most likely to still force full.
 
 **What earns the merge is the safety half.** Building this found, mechanically,
 coverage holes nothing else in the repo could see: 183 of 1047 classes resolving
@@ -477,9 +539,84 @@ Two consequences, stated so nobody has to re-derive them:
   (a host-CLI change whose consumer is reachable only through one of the four
   would select a narrow set and genuinely not run the protecting test — the
   #847 / v0.4.10 class). Re-weigh all four *for skipping* before enabling it.
-- The remaining speed is in narrowing the `scripts/*` (18 commits) and
-  test-infrastructure (15) force-full rules — 41 of the 65 force-fulls. That is
-  its own issue with its own escape oracle, not a widening inside this one.
+- **Issue #2355 narrowed the `scripts/*` and `tests/*` force-full rules** —
+  see "What this is worth, measured" above for the before/after numbers and
+  what deliberately stayed force-full. The `test-infrastructure` (non-`*Test`
+  file in a test source set) rule remains the largest lever not yet narrowed;
+  it needs a classification-ENGINE change (`scripts/lib/test-areas.sh`), not a
+  manifest-data change, and is scoped as a follow-up rather than attempted
+  under time pressure in the same round as the flake-quarantine mechanism.
+
+### Flake quarantine (issue #2355, policy D36)
+
+D36 (process.md, "Main health: stop-the-line, revert-first, ownership, and
+flake quarantine") states the POLICY: a flaking journey class is auto-filed as
+an issue on first occurrence, moved into a non-blocking lane within 24h, and
+carries an expiry so it cannot sit forgotten. #2355 builds the MECHANISM.
+
+**The signal already existed.** `scripts/ci-journey-class-loop-functions.sh`'s
+per-push retry-once loop (issue #712) already detects and names the exact D36
+flake definition — a class that fails attempt 1 and passes attempt 2 with no
+code change — printing `JOURNEY_FLAKE_RECOVERED: <fqcn> ...`. Quarantine builds
+on that signal rather than inventing a second one.
+
+**The list.** `scripts/journey-quarantine.txt` — one TAB-separated row per
+quarantined class: `<FQCN><TAB><issue><TAB><added><TAB><expires><TAB><reason>`.
+Format and fail-safe direction documented in its header and in
+`scripts/lib/journey-quarantine.sh` (the shared load/lookup library). Fail-safe
+direction is the same as the sibling taxonomy: if the list cannot be parsed, NO
+class is treated as quarantined — every failure blocks, never fewer.
+
+**Consumption — non-blocking, not "removed from coverage".** A quarantined
+class runs on every push exactly like any other selected journey class;
+nothing upstream of the suite's final pass/fail decision changes. Only
+`scripts/ci-journey-summary-functions.sh::finish_ci_journey_suite` changes: a
+class that fails BOTH attempts is split into `BLOCKING_FAILED_CLASSES` (drives
+the exit code and the `Failed BOTH attempts` / `JOURNEY_FAILED` section the
+workflow's classify step greps for) and `QUARANTINED_BLOCKED_CLASSES` (gets its
+own "Quarantined failures" section — still named, still tied to its tracking
+issue and reason — worded so it never matches the classify step's trigger
+strings). A quarantined class still executes on every future push, including
+the Phase 1 tier-3 scheduled full-suite cadence — quarantine only changes
+whether ITS OWN failure blocks THAT run's exit code, never whether it runs.
+`scripts/test-journey-quarantine-non-blocking.sh` is the self-test: it drives
+the real `finish_ci_journey_suite` (no Gradle, no emulator) through a
+quarantined-only failure (must be green, non-triggering wording), a
+non-quarantined failure (must still block), and a mixed case (the real failure
+still blocks; the quarantined one is named but does not).
+
+**Expiry.** `scripts/check-journey-quarantine-expiry.sh` (self-test:
+`--self-test`) fails CI when: the list does not parse; an entry names a class
+that is no longer a registered journey (renamed/removed and the row was not
+cleaned up); `added`/`expires` are not real dates or `expires` is not after
+`added`; or `expires` has already passed. Resolve an expired entry by deleting
+its row (fixed/removed) or re-triaging it (a fresh row with a new
+`added`/`expires` and reason). Wired into the unconditional
+`guards-test-selection` job via `scripts/ci-test-selection-guards.sh` — it runs
+every push, independent of what this manifest selects, exactly like the
+sibling `#2063` guards.
+
+**Auto-file on first flake — semi-automated this round, not a fully wired CI
+step.** `scripts/report-journey-flake.sh` is the real, tested mechanism (its
+own `--self-test`): given a flaky class it previews or files/updates a
+de-duplicated tracking issue (`--file-issue`, via `gh`), and separately appends
+a quarantine row (`--quarantine --issue REF --reason TEXT [--days N]`, refuses
+a duplicate). It is deliberately NOT wired to fire unattended from inside
+`tests.yml`/`pr-journey-smoke.yml` this round — see the script's own header for
+the reasoning (duplicate-issue risk, single-flake-vs-genuine-pattern
+judgment, `gh` auth inside the emulator-journey job, de-dup across concurrent
+shards). An on-call/human runs it after seeing `JOURNEY_FLAKE_RECOVERED` (or a
+repeated failure-then-recovery across otherwise-unrelated pushes) — the
+runbook is in the script's own header comment. Fully automating the trigger is
+a natural, separately-scoped follow-up once this has run for real occurrences.
+
+*(Process note on this script's own history: its first self-test round had a
+variable-plumbing bug — the "gh absent" case's override missed a stale
+top-level variable — that let the self-test silently file a REAL GitHub issue
+instead of exercising the not-found branch. That issue (#2364) was deleted
+immediately on discovery, the resolution was fixed to read the override fresh
+per call, and the self-test now also asserts that fix's own presence in the
+source so the same regression shape cannot silently ship again.)*
 
 ### The five pieces
 

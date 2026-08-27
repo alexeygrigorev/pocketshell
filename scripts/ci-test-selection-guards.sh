@@ -55,7 +55,9 @@ chmod +x scripts/select-test-areas.sh \
          scripts/check-test-execution-ledger-wiring.py \
          scripts/ci-record-test-execution-ledger.sh \
          scripts/ci-nightly-execution-ledger.sh \
-         scripts/dev-fast-gate-parity-selftest.sh
+         scripts/dev-fast-gate-parity-selftest.sh \
+         scripts/check-journey-quarantine-expiry.sh \
+         scripts/test-journey-quarantine-non-blocking.sh
 
 TIMINGS="$(mktemp)"
 trap 'rm -f "$TIMINGS"' EXIT
@@ -102,6 +104,16 @@ run_guard "check-test-execution-ledger-wiring" \
 # dev-fast-gate's classifier still agrees with the shared manifest.
 run_guard "dev-fast-gate-parity-selftest" \
   bash scripts/dev-fast-gate-parity-selftest.sh
+
+# Issue #2355 (D36 flake quarantine): the quarantine list itself is clean
+# (parses, names only real registered journey classes, no entry sits past its
+# expiry) and its non-blocking consumption mechanism does what it claims.
+run_guard "check-journey-quarantine-expiry-selftest" \
+  bash scripts/check-journey-quarantine-expiry.sh --self-test
+run_guard "check-journey-quarantine-expiry" \
+  bash scripts/check-journey-quarantine-expiry.sh
+run_guard "test-journey-quarantine-non-blocking" \
+  bash scripts/test-journey-quarantine-non-blocking.sh
 
 suite_end=$(date +%s)
 printf '%-46s %4ss\n' "TOTAL" "$((suite_end - suite_start))" >> "$TIMINGS"

@@ -15,6 +15,11 @@ wheels = [
 ]
 
 [[package]]
+name = "aplexer"
+version = "0.1.0"
+source = { editable = "/home/alexey/git/aplexer/python" }
+
+[[package]]
 name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -317,6 +322,7 @@ name = "pocketshell"
 version = "0.4.44"
 source = { editable = "." }
 dependencies = [
+    { name = "aplexer" },
     { name = "click" },
     { name = "google-auth" },
     { name = "pyyaml" },
@@ -341,6 +347,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aplexer", editable = "/home/alexey/git/aplexer/python" },
     { name = "click", specifier = ">=8.2.0" },
     { name = "google-auth", specifier = ">=2.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },

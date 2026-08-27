@@ -15,9 +15,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
-import stat
-import time
 
 import pytest
 import yaml
@@ -67,57 +64,24 @@ def fake_home(tmp_path, monkeypatch):
     return home
 
 
-def _install_fake_a(
-    tmp_path,
-    monkeypatch,
-    *,
-    payload=None,
-    exit_code=0,
-    sleep=0,
-    stdout=None,
-    marker=None,
-):
-    """Write an executable-shaped ``a`` and point ``APLEXER_BIN`` at it."""
-    script = tmp_path / "a"
-    lines = ["#!/bin/sh"]
-    if marker:
-        lines.append(f"touch {shlex.quote(str(marker))}")
-    if sleep:
-        lines.append(f"sleep {sleep}")
-    elif exit_code:
-        lines.extend(["echo fail >&2", f"exit {exit_code}"])
-    elif stdout is not None:
-        lines.extend(["cat <<'EOF'", stdout, "EOF"])
-    else:
-        lines.extend(
-            [
-                "cat <<'EOF'",
-                json.dumps(payload if payload is not None else {}),
-                "EOF",
-            ]
-        )
-    body = "\n".join(lines) + "\n"
-    script.write_text(body, encoding="utf-8")
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.setenv("APLEXER_BIN", str(script))
+class _FakeAplexerClient:
+    def __init__(self, *, payload=None, error=None, calls=None):
+        self.payload = payload if payload is not None else {}
+        self.error = error
+        self.calls = calls if calls is not None else []
+
+    def profiles(self):
+        self.calls.append("profiles")
+        if self.error is not None:
+            raise self.error
+        return self.payload
+
+
+def _install_fake_client(monkeypatch, *, payload=None, error=None, calls=None):
+    fake = _FakeAplexerClient(payload=payload, error=error, calls=calls)
+    monkeypatch.setattr(profiles, "_aplexer_client", lambda: fake)
     monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "1")
-    return script
-
-
-def _install_ambient_a(tmp_path, monkeypatch, marker):
-    """Put a marker-only ``a`` on PATH without opting into the probe."""
-    script = tmp_path / "a"
-    script.write_text(
-        "#!/bin/sh\n"
-        f"touch {shlex.quote(str(marker))}\n",
-        encoding="utf-8",
-    )
-    script.chmod(script.stat().st_mode | stat.S_IEXEC)
-    monkeypatch.delenv("APLEXER_BIN", raising=False)
-    monkeypatch.setenv(
-        "PATH", os.pathsep.join([str(tmp_path), os.environ.get("PATH", "")])
-    )
-    return marker
+    return fake
 
 
 # ---------------------------------------------------------------------------
@@ -163,17 +127,14 @@ def test_stray_dir_without_marker_is_not_a_profile(fake_home):
     assert all(".notclaude" not in (p.config_dir or "") for p in discovered)
 
 
-def test_missing_default_dir_yields_no_default_profile(tmp_path, monkeypatch):
-    marker = _install_ambient_a(tmp_path, monkeypatch, tmp_path / "a-called")
+def test_missing_default_dir_yields_no_default_profile(tmp_path):
     home = tmp_path / "empty-home"
     home.mkdir()
     discovered = profiles.discover_profiles({"HOME": str(home)})
     assert discovered == []
-    assert not marker.exists(), "native fake-HOME discovery must not invoke ambient a"
 
 
-def test_humanises_unknown_sibling_stem(tmp_path, monkeypatch):
-    marker = _install_ambient_a(tmp_path, monkeypatch, tmp_path / "a-called")
+def test_humanises_unknown_sibling_stem(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     _make_claude_dir(home / ".claude")
@@ -181,7 +142,6 @@ def test_humanises_unknown_sibling_stem(tmp_path, monkeypatch):
     discovered = profiles.discover_profiles({"HOME": str(home)})
     names = {p.name for p in discovered if p.engine == "claude"}
     assert "Work Claude" in names
-    assert not marker.exists(), "native fake-HOME discovery must not invoke ambient a"
 
 
 # ---------------------------------------------------------------------------
@@ -416,29 +376,23 @@ def test_aplexer_mapping_rejects_non_object():
     assert profiles._profiles_from_aplexer_json(["not", "an", "object"]) is None
 
 
-def test_kill_switch_skips_probe(fake_home, tmp_path, monkeypatch):
-    _install_fake_a(tmp_path, monkeypatch, payload=_zlaude_payload(fake_home))
+def test_kill_switch_skips_probe(fake_home, monkeypatch):
+    _install_fake_client(monkeypatch, payload=_zlaude_payload(fake_home))
     monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "0")
     assert profiles._aplexer_profiles({"HOME": str(fake_home)}) is None
 
 
 def test_shadow_mode_still_returns_native(
-    fake_home, tmp_path, monkeypatch, caplog
+    fake_home, monkeypatch, caplog
 ):
-    marker = fake_home / "aplexer-called"
-    _install_fake_a(
-        tmp_path,
-        monkeypatch,
-        payload=_zlaude_payload(fake_home),
-        marker=marker,
-    )
+    fake = _install_fake_client(monkeypatch, payload=_zlaude_payload(fake_home))
     caplog.set_level(logging.DEBUG, logger="pocketshell.profiles")
     monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "0")
     expected = profiles.discover_profiles({"HOME": str(fake_home)})
     monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "1")
     caplog.clear()
     discovered = profiles.discover_profiles({"HOME": str(fake_home)})
-    assert marker.is_file(), "the matching shadow test must invoke the a probe"
+    assert fake.calls == ["profiles"]
     assert discovered == expected
     assert not [
         record
@@ -448,10 +402,10 @@ def test_shadow_mode_still_returns_native(
 
 
 def test_shadow_mode_logs_missing_sibling_and_returns_native(
-    fake_home, tmp_path, monkeypatch, caplog
+    fake_home, monkeypatch, caplog
 ):
     # A valid empty aplexer listing must not remove native siblings.
-    _install_fake_a(tmp_path, monkeypatch, payload={})
+    _install_fake_client(monkeypatch, payload={})
     caplog.set_level(logging.WARNING, logger="pocketshell.profiles")
     monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "0")
     expected = profiles.discover_profiles({"HOME": str(fake_home)})
@@ -463,11 +417,10 @@ def test_shadow_mode_logs_missing_sibling_and_returns_native(
 
 
 def test_shadow_mode_logs_missing_extra_and_differing_siblings(
-    fake_home, tmp_path, monkeypatch, caplog
+    fake_home, monkeypatch, caplog
 ):
     _make_claude_dir(fake_home / ".alt-claude")
-    _install_fake_a(
-        tmp_path,
+    _install_fake_client(
         monkeypatch,
         payload={
             "renamed": {
@@ -494,59 +447,45 @@ def test_shadow_mode_logs_missing_extra_and_differing_siblings(
     assert "differing=['Claude (Z.AI)->Renamed']" in caplog.text
 
 
-def test_probe_timeout_falls_back_to_native(fake_home, tmp_path, monkeypatch):
-    marker = fake_home / "aplexer-called"
-    _install_fake_a(tmp_path, monkeypatch, sleep=5, marker=marker)
-    started = time.monotonic()
+def test_probe_error_falls_back_to_native(fake_home, monkeypatch):
+    _install_fake_client(monkeypatch, error=TimeoutError("timed out"))
     discovered = profiles.discover_profiles({"HOME": str(fake_home)})
-    elapsed = time.monotonic() - started
-    assert marker.is_file(), "the timeout test must invoke the configured a executable"
-    assert elapsed < 3.5
     assert {p.name for p in discovered} == {"Claude", "Claude (Z.AI)", "Codex"}
 
 
-def test_aplexer_profile_probe_uses_a_on_path(
-    fake_home, tmp_path, monkeypatch
-):
-    script = _install_fake_a(
-        tmp_path,
+def test_aplexer_profile_probe_uses_python_client(fake_home, monkeypatch):
+    _install_fake_client(
         monkeypatch,
         payload={
             "remote-laude": {
                 "engine": "claude",
                 "env": {"CLAUDE_CONFIG_DIR": "/srv/remote-laude"},
             }
-        }
+        },
     )
-    monkeypatch.delenv("APLEXER_BIN", raising=False)
-    environment = {
-        "HOME": str(fake_home),
-        "PATH": os.pathsep.join([str(script.parent), os.environ["PATH"]]),
-        "POCKETSHELL_APLEXER_PROFILES": "1",
-    }
-    mapped = profiles._aplexer_profiles(environment)
+    mapped = profiles._aplexer_profiles({"HOME": str(fake_home)})
     assert mapped is not None
     assert [(item.name, item.config_dir) for item in mapped] == [
         ("Remote Laude", "/srv/remote-laude")
     ]
 
 
-def test_probe_bad_json_falls_back_to_native(fake_home, tmp_path, monkeypatch):
-    _install_fake_a(tmp_path, monkeypatch, stdout="not-json")
+def test_probe_bad_payload_falls_back_to_native(fake_home, monkeypatch):
+    _install_fake_client(monkeypatch, payload=["not", "an", "object"])
     discovered = profiles.discover_profiles({"HOME": str(fake_home)})
     assert {p.name for p in discovered} == {"Claude", "Claude (Z.AI)", "Codex"}
 
 
-def test_probe_nonzero_exit_falls_back_to_native(fake_home, tmp_path, monkeypatch):
-    _install_fake_a(tmp_path, monkeypatch, exit_code=2)
+def test_probe_client_failure_falls_back_to_native(fake_home, monkeypatch):
+    _install_fake_client(monkeypatch, error=RuntimeError("fail"))
     discovered = profiles.discover_profiles({"HOME": str(fake_home)})
     assert {p.name for p in discovered} == {"Claude", "Claude (Z.AI)", "Codex"}
 
 
 def test_cli_shape_unchanged_with_shadow_probe(
-    fake_home, tmp_path, monkeypatch, capsys
+    fake_home, monkeypatch, capsys
 ):
-    _install_fake_a(tmp_path, monkeypatch, payload=_zlaude_payload(fake_home))
+    _install_fake_client(monkeypatch, payload=_zlaude_payload(fake_home))
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     rc = main(["profiles", "list", "--json"])

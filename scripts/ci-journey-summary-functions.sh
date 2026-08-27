@@ -146,23 +146,53 @@ finish_ci_journey_suite() {
 
   SUITE_ELAPSED=$((SECONDS - SUITE_START))
 
-  # The job is red iff at least one class failed BOTH attempts, OR any
-  # registered core-terminal proof failed, OR the suite-level budget was
-  # exhausted (issue #835). A budget timeout is NOT green — it still turns the
-  # job red — and the exact list-sessions attribution is added only when the
-  # attempt-local proof below establishes it.
+  # Issue #2355 (D36 flake quarantine): a class that failed BOTH attempts but
+  # currently has a well-formed row in scripts/journey-quarantine.txt does not
+  # block the suite. Nothing above this point changes — the class still ran,
+  # still retried once, and is still IN `FAILED_CLASSES` — this only splits
+  # that list into what blocks the exit code (BLOCKING_FAILED_CLASSES) and
+  # what does not (QUARANTINED_BLOCKED_CLASSES), and both stay visible below
+  # (each gets its own summary section; quarantine changes whether a failure
+  # blocks, never whether it is reported). Fail-safe: if the quarantine file
+  # cannot be loaded, nothing is treated as quarantined, so every failure
+  # blocks — the same always-widen-toward-more-scrutiny direction
+  # scripts/lib/test-areas.sh uses for the sibling coverage taxonomy.
+  QUARANTINED_BLOCKED_CLASSES=()
+  BLOCKING_FAILED_CLASSES=()
+  if [[ -n "${REPO_ROOT:-}" && -f "$REPO_ROOT/scripts/lib/journey-quarantine.sh" ]]; then
+    # shellcheck source=scripts/lib/journey-quarantine.sh
+    source "$REPO_ROOT/scripts/lib/journey-quarantine.sh"
+    pocketshell_journey_quarantine_load "${POCKETSHELL_JOURNEY_QUARANTINE_FILE:-}" >/dev/null 2>&1 || true
+  fi
+  local __qc
+  for __qc in "${FAILED_CLASSES[@]}"; do
+    if declare -F pocketshell_journey_quarantine_contains >/dev/null 2>&1 \
+       && pocketshell_journey_quarantine_contains "$__qc"; then
+      QUARANTINED_BLOCKED_CLASSES+=("$__qc")
+    else
+      BLOCKING_FAILED_CLASSES+=("$__qc")
+    fi
+  done
+
+  # The job is red iff at least one class failed BOTH attempts and is NOT
+  # quarantined, OR any registered core-terminal proof failed, OR the
+  # suite-level budget was exhausted (issue #835). A budget timeout is NOT
+  # green — it still turns the job red — and the exact list-sessions
+  # attribution is added only when the attempt-local proof below establishes
+  # it. Core-terminal proofs are never quarantine-eligible (issue #2355 scopes
+  # quarantine to registered journey CLASSES only).
   #
   # Issue #1827: the proof half of both conditions is derived from the ONE
   # CORE_TERMINAL_PROOFS registry that also drives the failed-both bullets, so a
   # proof cannot redden the suite while writing no evidence.
-  if [[ "${#FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 ]] \
+  if [[ "${#BLOCKING_FAILED_CLASSES[@]}" -eq 0 && "$STEP_TIMEOUT_HIT" -eq 0 ]] \
      && ci_journey_core_terminal_all_passed; then
     JOURNEY_EXIT=0
     journey_status="PASS"
-  elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#FAILED_CLASSES[@]}" -eq 0 ]] \
+  elif [[ "$STEP_TIMEOUT_HIT" -eq 1 && "${#BLOCKING_FAILED_CLASSES[@]}" -eq 0 ]] \
        && ci_journey_core_terminal_none_failed; then
-    # Only the budget timeout fired (no class failed BOTH attempts on its own
-    # merits): a pure suite-budget casualty.
+    # Only the budget timeout fired (no non-quarantined class failed BOTH
+    # attempts on its own merits): a pure suite-budget casualty.
     JOURNEY_EXIT=1
     journey_status="STEP_TIMEOUT"
   else
@@ -174,7 +204,7 @@ finish_ci_journey_suite() {
   echo "Per-push CI journey suite — done (elapsed ${SUITE_ELAPSED}s, exit ${JOURNEY_EXIT}, status ${journey_status})"
   echo "  passed first try: ${#PASSED_FIRST_TRY[@]}"
   echo "  recovered on retry: ${#RECOVERED_CLASSES[@]}"
-  echo "  failed twice: ${#FAILED_CLASSES[@]}"
+  echo "  failed twice: ${#FAILED_CLASSES[@]} (blocking: ${#BLOCKING_FAILED_CLASSES[@]}, quarantined non-blocking — issue #2355: ${#QUARANTINED_BLOCKED_CLASSES[@]})"
   echo "  budget-timeout (issue #835): ${#BUDGET_TIMEOUT_CLASSES[@]}"
   echo "  of which the shared SSH/tmux fixture was wedged (issue #2143 SETUP failure): ${#FIXTURE_WEDGED_CLASSES[@]}"
   echo "=========================================================="
@@ -280,16 +310,24 @@ finish_ci_journey_suite() {
       fi
     fi
     # Emit the `JOURNEY_FAILED` / "Failed BOTH attempts" section whenever ANY
-    # load-bearing check failed twice — the journey classes AND/OR any registered
-    # core-terminal proof. The workflow's classify step
-    # (.github/workflows/tests.yml "Classify emulator-journey result") greps this
-    # summary for `JOURNEY_FAILED|Failed BOTH attempts` to distinguish a genuine
-    # test regression from a #771 EMULATOR INFRA UNAVAILABLE abort, and its `awk`
-    # extracts the failing class names from under this exact header. If a proof
-    # failed but all journey classes passed, FAILED_CLASSES is empty — so we MUST
-    # still write the header (with that proof's class) here, otherwise a
-    # proof-only regression falls through to the grep's else-branch and is
-    # mislabeled as an infra abort, burying the real cause.
+    # load-bearing check failed twice and is NOT quarantined — the journey
+    # classes AND/OR any registered core-terminal proof. The workflow's
+    # classify step (.github/workflows/tests.yml "Classify emulator-journey
+    # result") greps this summary for `JOURNEY_FAILED|Failed BOTH attempts` to
+    # distinguish a genuine test regression from a #771 EMULATOR INFRA
+    # UNAVAILABLE abort, and its `awk` extracts the failing class names from
+    # under this exact header. If a proof failed but all journey classes
+    # passed, BLOCKING_FAILED_CLASSES is empty — so we MUST still write the
+    # header (with that proof's class) here, otherwise a proof-only regression
+    # falls through to the grep's else-branch and is mislabeled as an infra
+    # abort, burying the real cause.
+    #
+    # Issue #2355: a quarantined-but-failed class is deliberately EXCLUDED from
+    # this section (and from the condition below) — it gets its own section
+    # below instead, worded so it never matches the classifier's grep. Both
+    # sections are always written together with FAILED_CLASSES-derived data, so
+    # a quarantine entry never removes a failure from the summary — it only
+    # moves it out of the section the classifier treats as job-red.
     #
     # Issue #1827: BOTH the condition and the bullets come from the same
     # CORE_TERMINAL_PROOFS registry as the red condition above, so this section
@@ -298,13 +336,41 @@ finish_ci_journey_suite() {
     # #1233's SHELL_SNAPSHOT_STATUS were never added to it — a failure in either
     # reddened the suite while writing no section, and the classifier typed the
     # shard INFRA (green run) instead of RED.
-    if [[ "${#FAILED_CLASSES[@]}" -gt 0 ]] || ci_journey_core_terminal_any_failed; then
+    if [[ "${#BLOCKING_FAILED_CLASSES[@]}" -gt 0 ]] || ci_journey_core_terminal_any_failed; then
       echo
       echo "Failed BOTH attempts (\`JOURNEY_FAILED\` — job red):"
-      for c in "${FAILED_CLASSES[@]}"; do
+      for c in "${BLOCKING_FAILED_CLASSES[@]}"; do
         echo "- \`$c\`"
       done
       ci_journey_core_terminal_failed_bullets
+    fi
+    # Issue #2355 (D36 flake quarantine): a class that failed BOTH attempts but
+    # is quarantined gets its own section — still visible, still named, still
+    # tied to the tracking issue and reason — but this wording deliberately
+    # avoids every phrase ci_journey_assert_red_has_evidence's grep (and the
+    # workflow classifier's) key on: `JOURNEY_FAILED`, `Failed BOTH attempts`,
+    # `JOURNEY_STEP_TIMEOUT`, `Suite step time budget exhausted`,
+    # `JOURNEY_ENUMERATION_STALL`. A class here still ran (nothing upstream of
+    # `finish_ci_journey_suite` changed) and still executes on every future push
+    # exactly like any other selected journey class, including the tier-3
+    # scheduled full-suite cadence — quarantine only changes whether ITS OWN
+    # failure blocks THIS run's exit code.
+    if [[ "${#QUARANTINED_BLOCKED_CLASSES[@]}" -gt 0 ]]; then
+      echo
+      echo "Quarantined failures (non-blocking — issue #2355 / policy D36):"
+      for c in "${QUARANTINED_BLOCKED_CLASSES[@]}"; do
+        local __qi __issue="?" __expires="?" __reason="(no reason on record)"
+        if __qi="$(pocketshell_journey_quarantine_entry_index "$c" 2>/dev/null)"; then
+          __issue="${POCKETSHELL_JQ_ISSUE[$__qi]:-?}"
+          __expires="${POCKETSHELL_JQ_EXPIRES[$__qi]:-?}"
+          __reason="${POCKETSHELL_JQ_REASON[$__qi]:-(no reason on record)}"
+        fi
+        echo "- \`$c\` (tracked: $__issue, expires: $__expires) — $__reason"
+      done
+      echo
+      echo "See scripts/journey-quarantine.txt. A quarantine entry does not delete or skip the"
+      echo "class — it still ran above and still runs on the tier-3 scheduled full-suite cadence."
+      echo "scripts/check-journey-quarantine-expiry.sh fails CI once an entry's expiry has passed."
     fi
     # Issue #2143: name a SETUP failure for what it is. This section is ADDITIVE
     # — every class above stays in the red list and the job stays red — but it

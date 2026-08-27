@@ -1,0 +1,18 @@
+# Flake quarantine list — issue #2355, policy D36 (process.md, "Main health:
+# stop-the-line, revert-first, ownership, and flake quarantine").
+#
+# Read scripts/lib/journey-quarantine.sh's header before editing this file —
+# it documents the format, the fail-safe direction, and exactly what changes
+# (and what does NOT change) for a class listed here.
+#
+# One row per quarantined class, TAB-separated:
+#   <FQCN><TAB><issue><TAB><added YYYY-MM-DD><TAB><expires YYYY-MM-DD><TAB><reason>
+#
+# scripts/check-journey-quarantine-expiry.sh fails CI once `expires` has
+# passed. Resolve an entry by DELETING its row (the class is fixed or removed)
+# or by RE-TRIAGING it (replace the row with a fresh `added`/`expires` and a
+# reason that says why it is still flaking) — never let a row sit expired.
+#
+# Empty today: no journey class is currently known to flake. The first entry
+# added here should be filed the same way scripts/report-journey-flake.sh
+# templates it (see that script's header for the semi-automated procedure).

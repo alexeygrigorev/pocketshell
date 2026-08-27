@@ -35,9 +35,12 @@ acts: green -> ping `main` to tag; infra flake (captured signature) -> re-run
 the failed job and re-watch; real failure -> fix it if small and commit-bound,
 else report to `main`. **If something breaks, the on-call fixes it, not the
 orchestrator.** The orchestrator, meanwhile, keeps the backlog moving (dispatch
-implementers/reviewers, integrate, file issues) or ends the turn. "I'll poll it
-every few minutes" is the banned anti-pattern. Every agent that needs to wait on
-CI uses `scripts/watch-ci.py`, never a hand-rolled poll loop or an LLM-turn wait.
+implementers/reviewers, review completed worktrees, file issues) or ends the
+turn — this is never license to MERGE onto a red `main`: a red scheduled
+full-suite run is a feature-merge freeze until green (stop-the-line, D36
+below). "I'll poll it every few minutes" is the banned anti-pattern. Every
+agent that needs to wait on CI uses `scripts/watch-ci.py`, never a hand-rolled
+poll loop or an LLM-turn wait.
 
 **Every on-call gets its OWN worktree and its OWN log paths — concurrent
 on-calls sharing the root checkout silently corrupt each other's work
@@ -163,6 +166,89 @@ isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
 - **Release freeze.** During an intermediate release or pre-release, hold
   non-critical merges to `main`. Release-blocker / CI fixes stay allowed because
   they stabilize the cut.
+
+## Main health: stop-the-line, revert-first, ownership, and flake quarantine (locked principle D36)
+
+The v0.4.45 release took 13 days because `main` sat red on the batched
+full-suite run for 11 straight days while merges kept landing on top of the
+failure, and fixing forward through the full implementer/reviewer loop took
+about 2 days per blocker where a revert would have taken 15 minutes (epic
+#2350). These four rules exist so `main` returns to green in hours, not days,
+without weakening any existing gate — D31/D32/D33 stay exactly as strict as
+before; nothing here waives red→green proof, class coverage, or reviewer
+rigor. The mechanisms that PRODUCE the "scheduled full test-suite run" signal
+these rules react to (the tier-3 cadence, the pre-merge batch gate, the
+quarantine lane/list) land in later phases of #2350 (#2353–#2356) and are
+explicitly out of scope here; these four rules define the CONTRACT those
+mechanisms must satisfy once built, and they already apply today to any full
+run of the suite, however it is currently produced (including a manually
+triggered full run).
+
+**(1) Stop-the-line.** When a scheduled FULL test-suite run on `main` (the
+tier-3 cadence landing in #2353) goes red, that is a **feature-merge freeze**:
+no new feature/product PR merges to `main` until the suite is green again.
+This does NOT freeze backlog work — implementers and reviewers keep writing,
+testing, and completing review rounds in their own worktrees exactly as
+normal; nothing about a freeze pauses that loop. It freezes only what the
+orchestrator MERGES to `main`. The only merges allowed during a freeze are
+**(a)** a revert of the offending commit, or **(b)** a forward-fix for the
+exact regression that is already reviewer-`APPROVED` and ready to merge. This
+is an explicit carve-out on the "keep the backlog moving" guidance elsewhere
+in this document (see "Never babysit CI" above and "Local Confidence Before
+CI" below): "keep moving" has never meant "keep merging onto a red `main`",
+and this rule makes that non-negotiable rather than implicit.
+
+**(2) Revert-first with a time box.** When a regression on `main` is bisected
+to a specific merge, the default response is to **revert that merge within 4
+hours** — not to fix forward through the full implementer/reviewer loop while
+`main` stays red. A revert is minutes of work; a full-rigor forward fix
+averaged about 2 days in the v0.4.45 data, and every hour `main` stays red is
+an hour of merges piling up on a base nobody can trust. The only exception:
+skip the revert if a forward fix for that exact regression is already
+reviewer-`APPROVED` and ready to merge at the moment the revert would happen
+— landing an already-approved fix is strictly faster than reverting and
+redoing the work. After a revert, the reverted change **re-enters the normal
+implementer → reviewer loop at full rigor** — the same D31/D32/D33 gates
+apply unchanged, with no shortcut for "it was already approved once."
+Reverting is not abandoning the work; it is getting `main` green again before
+continuing it.
+
+**(3) Red-main ownership and metrics.** The on-call dispatched after a push
+(see "Never babysit CI" above and the `oncall-engineer` role definition) is
+explicitly accountable for **time-to-green** whenever `main` is red on a
+scheduled full-suite run — not just for triaging the one push that happened
+to prompt its dispatch. Two informal targets are recorded here for the
+orchestrator and on-call to track going forward, as targets to aim for, not
+as a monitoring system this rule builds: **`main` red time should stay under
+24 hours**, and **merges landed while `main` is red should be approximately
+zero** (only the revert/approved-fix merges rule (1) allows). These targets
+will be reviewed once the tier-3 cadence (#2353) is live and producing
+regular signal; until then they are not backed by automated measurement, only
+by the on-call's own accounting on the red-`main` incident issue it files.
+
+**(4) Flake-quarantine policy.** When a journey/test class flakes (fails,
+then passes on a rerun with no code change), it must be: **(a)** auto-filed
+as a GitHub issue on first occurrence, **(b)** moved to a designated
+non-blocking "quarantine" lane within 24 hours so it can no longer void an
+otherwise-green run while it is investigated, and **(c)** given an
+**expiry** — a quarantine entry that is not resolved or re-triaged within a
+bounded window (2 weeks by default) escalates or reopens rather than sitting
+forgotten forever. This section states the POLICY the flake-quarantine
+mechanism (#2355) must satisfy; the actual list, lane, and expiry tracking is
+built in that later phase, not by this document. Quarantine is a queue with a
+deadline, never a graveyard — a flaky test that never gets fixed, deleted, or
+re-escalated is exactly the kind of silent erosion D31/D32 exist to prevent
+in the review gates, and the same discipline applies here to the suite
+itself.
+
+Cross-refs: **D28** (the connection core's "rewrite over patches-on-patches"
+instinct — the same bias toward a clean, fast reset over endless in-place
+patching applies to a red `main`), **D31/D32/D33** (durable-fix gate,
+universal approval gates, definition of done — all unchanged and unweakened
+by these rules), **#2350** (the "release in one hour" epic these rules are
+Phase 0 of).
+
+This is locked decision **D36** in `docs/decisions.md`.
 
 ## No backwards-compatibility (locked principle)
 
@@ -782,7 +868,9 @@ CI policy after issue-branch push:
   targeted manual heavy check before merge when the specific PR needs that
   evidence.
 - If a pipeline is merely running, the orchestrator's default next action is to
-  keep the backlog moving locally. Only release cuts, red CI investigation, or a
+  keep the backlog moving locally — dispatching, reviewing, and preparing the
+  next gate, never merging onto a `main` a scheduled full-suite run has marked
+  red (stop-the-line, D36). Only release cuts, red CI investigation, or a
   direct dependency on that exact pipeline justify blocking on it.
 - If CI fails despite the local gate, treat it as a process miss: identify which
   local check would have caught it, add or document that check, then send the

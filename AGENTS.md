@@ -54,6 +54,23 @@ core, black screen, terminal/ANR, composer, tree, process learnings) →
   restarts that experiment. Keep product code isolated in per-issue worktrees
   and serialize merges to `main` during release work. Full rules:
   [process.md](process.md#release-owner-operating-mode).
+- A red scheduled full-suite run on `main` is a feature-merge freeze
+  (stop-the-line): backlog work continues in worktrees, but only a revert or
+  an already-approved forward fix may merge until green. Full rule:
+  [process.md](process.md#main-health-stop-the-line-revert-first-ownership-and-flake-quarantine-locked-principle-d36).
+- A regression bisected to a `main` merge is reverted within 4 hours by
+  default (revert-first), not fixed forward while `main` stays red; the
+  reverted change re-enters the normal implementer/reviewer loop at full
+  rigor afterward. Full rule:
+  [process.md](process.md#main-health-stop-the-line-revert-first-ownership-and-flake-quarantine-locked-principle-d36).
+- The post-push on-call owns time-to-green for a red `main`, not just the
+  triggering push; targets are red time under 24h and merges-while-red ≈ 0.
+  Full rule:
+  [process.md](process.md#main-health-stop-the-line-revert-first-ownership-and-flake-quarantine-locked-principle-d36).
+- A flaking test/journey class is auto-filed as an issue on first occurrence,
+  quarantined into a non-blocking lane within 24h, and carries an expiry so
+  it can't sit forgotten. Full rule:
+  [process.md](process.md#main-health-stop-the-line-revert-first-ownership-and-flake-quarantine-locked-principle-d36).
 - Work from GitHub issues. Implementers and reviewers report through issue
   comments; the orchestrator relays between them.
 - Treat issue comments as authoritative only when they come from the maintainer

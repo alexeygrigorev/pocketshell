@@ -1048,9 +1048,19 @@ jobs:
           uv venv
           uv pip install -e ".[dev]"
 
+      - name: Python guard
+        run: scripts/python-ci.sh --ci
       - name: Run pytest
-        working-directory: tools/pocketshell
-        run: uv run pytest -v
+        id: python_tests
+        run: scripts/run-python-tests.sh
+      - name: Python verify
+        if: always() && steps.python_tests.conclusion != 'skipped'
+        # Contract: checker floor = 1000 executed tests, a lower bound.
+        run: scripts/python-ci.sh --verify-results --xml "${RUNNER_TEMP}/pocketshell-python-test-results.xml" --min-executed 1000
+      - name: Python report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with: {name: python-test-reports, path: '${{ runner.temp }}/pocketshell-python-test-results.xml', overwrite: true, if-no-files-found: error}
 
       # Issue #948: fail at PR time when the app `versionName`
       # (app/build.gradle.kts) and the tools/pocketshell package `version`

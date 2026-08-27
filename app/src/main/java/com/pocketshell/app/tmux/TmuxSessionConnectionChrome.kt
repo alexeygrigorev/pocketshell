@@ -266,6 +266,44 @@ internal fun shouldMountPullToReconnect(
     !sessionLive && canReconnect && surfaceOwnsPrimary
 
 /**
+ * Issue #2357: whether the skippable [TmuxTerminalPager] AndroidView stays in
+ * composition so a Live pane produces a placed Termux `TerminalView` without a
+ * user gesture.
+ *
+ * The wait used by every connect journey is
+ * `decorView.findTerminalView()?.currentSession != null && mEmulator != null`.
+ * CI run 33100430182 hung that wait for 150s on
+ * `BackgroundGraceReconnectE2eTest` after tmux was already Live with
+ * `paneCount=1` (`Attaching -> Live` at 753ms, then nothing). The pager never
+ * entered composition, so swiftshader never placed the interop child.
+ *
+ * The hole was unmounting on [terminalHeld]. A reveal-identity mismatch
+ * (stale route generation vs live `$N` after list-panes, the #2338 class)
+ * can keep the fusion held AFTER [sessionLive] is true. Unmounting then
+ * leaves a Live pane with no `TerminalView` until some later gesture
+ * recomposes the surface — which CI never sends.
+ *
+ * A Live connection with at least one pane therefore mounts regardless of
+ * the hold. The hold still paints [SessionSurfaceMaskPlaceholder] on top,
+ * and the pager's `paneIsForTarget` mask still fences a non-target pane
+ * (#686). The one-frame Conversation → Terminal swap latch (#605) and the
+ * empty-pane case stay unmounted: there is no pane to attach, and the swap
+ * must not contend with IME teardown in the same frame.
+ *
+ * Extracted as a pure function so the Live+held CI mutation is pinned by a
+ * JVM test rather than only by the 150s emulator wait.
+ */
+internal fun shouldKeepTerminalMounted(
+    terminalHeld: Boolean,
+    deferTerminalAttachForSwap: Boolean,
+    hasPanes: Boolean,
+    sessionLive: Boolean,
+): Boolean {
+    if (deferTerminalAttachForSwap || !hasPanes) return false
+    return sessionLive || !terminalHeld
+}
+
+/**
  * Issue #822: the breadcrumb connection pill/dot must report the CONNECTION, not
  * the retained frame. [SessionSurfaceState.Live] maps to a green `Connected` pill
  * ([toUiStatus]) — correct while the wire is up, a lie during the within-grace

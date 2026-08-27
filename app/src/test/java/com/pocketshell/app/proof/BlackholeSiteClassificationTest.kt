@@ -1,6 +1,7 @@
 package com.pocketshell.app.proof
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
@@ -39,6 +40,49 @@ class BlackholeSiteClassificationTest {
     }
 
     @Test
+    fun inventorySeesAndroidTestSitesWhenCheckoutLivesUnderBuildDirectory() {
+        // Issue #2357: the release-gate isolated copy lives at
+        // `build/pre-release-confidence-gate/.../worktree/`. Filtering
+        // `File.walk` on the ABSOLUTE path's `/build/` drops every site and
+        // the allowlist assertion compares expected vs `[]`.
+        val tmp = kotlin.io.path.createTempDirectory("ps-blackhole-build-root")
+        try {
+            val checkout = File(
+                tmp.toFile(),
+                "build/pre-release-confidence-gate/run/worktree",
+            )
+            val siteRel =
+                "app/src/androidTest/java/com/pocketshell/app/proof/FakeWedge.kt"
+            val site = File(checkout, siteRel)
+            site.parentFile.mkdirs()
+            site.writeText("fun test() { addBlackhole() }\n")
+            val generated = File(checkout, "app/build/generated/FakeGenerated.kt")
+            generated.parentFile.mkdirs()
+            generated.writeText("fun generated() { addBlackhole() }\n")
+
+            assertTrue(
+                "vacuity: the absolute /build/ filter matches this isolated checkout",
+                site.invariantSeparatorsPath.contains("/build/"),
+            )
+            assertTrue(
+                "relative walk must still inventory app/src/androidTest " +
+                    "when the checkout itself lives under a build/ directory",
+                isInventoriedKotlinSource(site, checkout),
+            )
+            assertFalse(
+                "a generated file under the checkout's own build/ stays skipped",
+                isInventoriedKotlinSource(generated, checkout),
+            )
+            assertEquals(
+                listOf(siteRel),
+                blackholeCalls(checkout).map { it.relativePath },
+            )
+        } finally {
+            tmp.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun stallIntendedSitesUseHealableHalfOpenStallNotBlackhole() {
         val missingStall = mutableListOf<String>()
         val stillBlackhole = mutableListOf<String>()
@@ -63,18 +107,30 @@ class BlackholeSiteClassificationTest {
         )
     }
 
-    private fun blackholeCalls(): List<CallSite> {
-        val root = projectRoot()
+    private fun blackholeCalls(): List<CallSite> = blackholeCalls(projectRoot())
+
+    private fun blackholeCalls(root: File): List<CallSite> {
         return SOURCE_ROOTS
             .map { File(root, it) }
             .filter { it.isDirectory }
             .flatMap { dir ->
                 dir.walkTopDown()
-                    .filter { it.isFile && it.extension == "kt" }
-                    .filter { !it.invariantSeparatorsPath.contains("/build/") }
+                    .filter { isInventoriedKotlinSource(it, root) }
                     .flatMap { file -> callsIn(file, root) }
             }
             .sortedWith(compareBy(CallSite::relativePath, CallSite::line))
+    }
+
+    /**
+     * Issue #2357: skip generated `build/` trees relative to [root], never
+     * by the file's absolute path. An isolated checkout whose absolute path
+     * contains `/build/` (release-gate worktree) must still inventory
+     * `app/src/androidTest`.
+     */
+    private fun isInventoriedKotlinSource(file: File, root: File): Boolean {
+        if (!file.isFile || file.extension != "kt") return false
+        val relative = file.relativeTo(root).invariantSeparatorsPath
+        return relative.split('/').none { it == "build" }
     }
 
     private fun callsIn(file: File, root: File): List<CallSite> {

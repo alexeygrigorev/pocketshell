@@ -1396,9 +1396,16 @@ private fun ColumnScope.TmuxSessionSurfaceRegion(
         surfaceOwnsPrimary = surfaceOwnsPrimary,
     )
     val surfaceContent: @Composable () -> Unit = {
-        val keepTerminalMounted = !terminalHeld &&
-            !deferTerminalAttachForSwap &&
-            unifiedPanes.isNotEmpty()
+        // Issue #2357: a Live pane must keep the Termux AndroidView composed
+        // so CI swiftshader (and a user with no extra gesture) can place it.
+        // See [shouldKeepTerminalMounted] — unmounting on `terminalHeld` left
+        // BackgroundGrace hanging 150s after tmux was already Live.
+        val keepTerminalMounted = shouldKeepTerminalMounted(
+            terminalHeld = terminalHeld,
+            deferTerminalAttachForSwap = deferTerminalAttachForSwap,
+            hasPanes = unifiedPanes.isNotEmpty(),
+            sessionLive = sessionLive,
+        )
         if (keepTerminalMounted) {
             val terminalIsAgentPane = tmuxSessionIsAgentPane(
                 hasLiveDetection = currentDetection != null,

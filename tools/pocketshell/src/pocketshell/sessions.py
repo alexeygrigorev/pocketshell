@@ -28,13 +28,11 @@ Subcommand coverage:
 
 - `pocketshell sessions list` -> `tmuxctl list`
 
-`tmuxctl list` currently emits its human table only; it does not support a
-structured/`--json` mode. The wrapper keeps its existing transparent
-forwarding of unknown arguments, so a caller that supplies an unsupported
-flag receives the underlying tmuxctl exit code and stderr unchanged. The
-Android folder fallback therefore uses its own bounded raw-tmux format probe
-when it needs the exact `@ps_agent_kind` value; it does not pretend that
-`pocketshell sessions list --json` is supported.
+`tmuxctl list` currently emits its human table only. `pocketshell sessions
+list --json` is implemented HERE (not forwarded): it emits the combined
+tmuxctl + aplexer name set so the Android list matches the terminal
+enumerator (`tmuxctl list` / `t`) instead of a default-socket
+`tmux list-sessions` subset. Unknown extra flags still forward to tmuxctl.
 """
 
 from __future__ import annotations
@@ -48,6 +46,7 @@ from typing import Any, Optional, Sequence
 import click
 
 from . import resume as _resume
+from . import session_enum as _session_enum
 
 
 def _resolve_tmuxctl_binary() -> Optional[str]:
@@ -114,12 +113,13 @@ def _try_daemon_sessions_list(
     *,
     sort_by: Optional[str],
     extra_args: Sequence[str],
+    as_json: bool = False,
 ) -> Optional[dict[str, Any]]:
     """Dispatch ``sessions.list`` through the shared typed daemon boundary."""
     from pocketshell import daemon as _daemon
 
     socket_path = _daemon.resolve_socket_path()
-    params: dict[str, Any] = {"extra_args": list(extra_args)}
+    params: dict[str, Any] = {"extra_args": list(extra_args), "as_json": as_json}
     if sort_by:
         params["sort_by"] = sort_by
 
@@ -132,6 +132,43 @@ def _try_daemon_sessions_list(
     )
 
 
+def _list_envelope(
+    *,
+    sort_by: Optional[str],
+    extra_args: Sequence[str],
+    as_json: bool,
+) -> dict[str, Any]:
+    """Build the sessions.list stdout envelope (human table or JSON)."""
+    args: list[str] = ["list"]
+    if sort_by:
+        args.extend(["--by", sort_by])
+    args.extend(extra_args)
+    tmuxctl = _run_tmuxctl_capture(args)
+    tmux_stdout = str(tmuxctl.get("stdout") or "")
+    tmux_ok = int(tmuxctl.get("returncode", 0)) == 0
+    sessions = _session_enum.enumerate_live_sessions(
+        tmuxctl_stdout=tmux_stdout if tmux_ok else None,
+    )
+    if as_json:
+        import json as _json
+
+        return {
+            "stdout": _json.dumps(_session_enum.json_payload(sessions), indent=2)
+            + "\n",
+            "stderr": "" if tmux_ok else str(tmuxctl.get("stderr") or ""),
+            "returncode": 0 if sessions or tmux_ok else int(tmuxctl.get("returncode", 1)),
+        }
+    appendix = _session_enum.format_aplexer_table(sessions)
+    stdout = tmux_stdout
+    if appendix:
+        stdout = tmux_stdout.rstrip("\n") + "\n" + appendix
+    return {
+        "stdout": stdout,
+        "stderr": str(tmuxctl.get("stderr") or ""),
+        "returncode": int(tmuxctl.get("returncode", 0)),
+    }
+
+
 def daemon_handler_list(params: dict[str, Any]) -> dict[str, Any]:
     """JSON-RPC handler for ``sessions.list``.
 
@@ -139,14 +176,19 @@ def daemon_handler_list(params: dict[str, Any]) -> dict[str, Any]:
     one-shot subprocess path so the CLI can preserve byte-identical
     output while moving the process spawn into the daemon.
     """
-    args: list[str] = ["list"]
     sort_by = params.get("sort_by")
-    if isinstance(sort_by, str) and sort_by:
-        args.extend(["--by", sort_by])
     extra_args = params.get("extra_args")
-    if isinstance(extra_args, list):
-        args.extend(str(item) for item in extra_args if isinstance(item, str))
-    return _run_tmuxctl_capture(args)
+    extras = (
+        [str(item) for item in extra_args if isinstance(item, str)]
+        if isinstance(extra_args, list)
+        else []
+    )
+    as_json = bool(params.get("as_json"))
+    return _list_envelope(
+        sort_by=sort_by if isinstance(sort_by, str) and sort_by else None,
+        extra_args=extras,
+        as_json=as_json,
+    )
 
 
 @click.group(
@@ -185,23 +227,37 @@ def sessions_group() -> None:
     default=None,
     help="Sort by session creation time or last activity (forwarded to `tmuxctl list --by`).",
 )
+@click.option(
+    "--json",
+    "as_json",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit the combined tmuxctl + aplexer session list as JSON. "
+        "This is owned by pocketshell (tmuxctl has no --json list mode)."
+    ),
+)
 @click.pass_context
-def sessions_list(ctx: click.Context, sort_by: Optional[str]) -> None:
-    """List tmux sessions on the host (delegates to `tmuxctl list`).
+def sessions_list(
+    ctx: click.Context, sort_by: Optional[str], as_json: bool
+) -> None:
+    """List live sessions on the host.
 
-    Output is byte-identical to `tmuxctl list` so the Android-side
-    `HostTmuxSessionListParser` (anchored on the trailing
-    `YYYY-MM-DD HH:MM:SS` timestamp; see issue #200) keeps working.
+    Human output still starts as the `tmuxctl list` table so
+    `HostTmuxSessionListParser` keeps working. Aplexer rows are appended
+    under an APLEXER heading when that manager is present. `--json` is the
+    structured form the Android list prefers: names match `tmuxctl list`
+    (not a default-socket `tmux list-sessions` subset) and each row is
+    tagged with its manager.
     """
-    args: list[str] = ["list"]
-    if sort_by:
-        args.extend(["--by", sort_by])
-    # `ctx.args` holds any extras we ignored. Forward verbatim, position
-    # preserved, and let the installed tmuxctl decide whether they exist.
-    args.extend(ctx.args)
-    envelope = _try_daemon_sessions_list(sort_by=sort_by, extra_args=ctx.args)
+    extras = [arg for arg in ctx.args if arg not in {"--json", "-json"}]
+    envelope = _try_daemon_sessions_list(
+        sort_by=sort_by, extra_args=extras, as_json=as_json
+    )
     if envelope is None:
-        envelope = _run_tmuxctl_capture(args)
+        envelope = _list_envelope(
+            sort_by=sort_by, extra_args=extras, as_json=as_json
+        )
     _emit_envelope(ctx, envelope)
 
 

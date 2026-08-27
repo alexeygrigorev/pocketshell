@@ -399,4 +399,95 @@ class HostTmuxSessionListParserTest {
         assertNull(parser.parseTmuxListSessionsRow("name\tcreated"))
         assertNull(parser.parseTmuxListSessionsRow("\t1\t2\t0"))
     }
+
+    @Test
+    fun parsePocketshellSessionsListNameSetEqualsTmuxctlEnumeratorIncludingLongNames() {
+        val table = """
+            IDX  SESSION               CREATED
+            1    git-pocketshell-release 2026-08-27 09:22:55
+            2    git-aplexer-2         2026-08-26 19:05:34
+            3    git-dataops-2         2026-08-26 16:14:33
+            4    git-pocketshell-2     2026-08-26 15:51:07
+            5    git-dtc-website-4     2026-08-26 15:23:22
+            6    git-dtc-website-3     2026-08-26 15:09:26
+            7    git-zoom-calls        2026-08-26 13:48:17
+            8    git-aplexer           2026-08-26 13:09:26
+            9    git-game-tester       2026-08-26 07:12:25
+            10   git-ai-shipping-labs  2026-08-25 17:28:03
+            11   git-dtc-website       2026-08-24 12:26:03
+            12   git-pocketshell       2026-08-24 12:26:02
+
+            Join a session: tmuxctl <id> or tmuxctl <session>
+        """.trimIndent()
+        val names = parser.parsePocketshellSessionsList(table).map { it.name }.toSet()
+        assertEquals(12, names.size)
+        assertTrue(names.contains("git-pocketshell-release"))
+        val defaultSocketOnly = setOf("git-dtc-website", "git-game-tester", "git-pocketshell")
+        assertTrue(names.containsAll(defaultSocketOnly))
+        assertTrue(names.size > defaultSocketOnly.size)
+    }
+
+    @Test
+    fun parsePocketshellSessionsJsonUnionsTmuxAndAplexerManagers() {
+        val json = """
+            {
+              "managers": ["tmux", "aplexer"],
+              "sessions": [
+                {"name": "git-pocketshell", "manager": "tmux"},
+                {"name": "git-aplexer-2", "manager": "tmux"},
+                {
+                  "name": "toyaikit:codex",
+                  "manager": "aplexer",
+                  "id": "b3feff71-4a78-4055-a2d3-6c99187ecffb",
+                  "workspace": "/home/alexey/git/toyaikit",
+                  "engine": "codex",
+                  "attach": "a attach b3feff71-4a78-4055-a2d3-6c99187ecffb"
+                }
+              ]
+            }
+        """.trimIndent()
+        val rows = parser.parsePocketshellSessionsJson(json)
+        assertEquals(listOf("git-pocketshell", "git-aplexer-2", "toyaikit:codex"), rows?.map { it.name })
+        assertEquals(listOf("tmux", "tmux", "aplexer"), rows?.map { it.manager })
+        assertEquals("b3feff71-4a78-4055-a2d3-6c99187ecffb", rows?.get(2)?.aplexerId)
+        assertEquals("/home/alexey/git/toyaikit", rows?.get(2)?.path)
+    }
+
+    @Test
+    fun unionLiveSessionRowsUsesTmuxctlAuthorityNotDefaultSocketSubset() {
+        val overlay = parser.parseTmuxListSessions(
+            "git-dtc-website::1::1::1::0:::/home/alexey/git/dtc-website\n" +
+                "git-game-tester::1::1::1::0:::/home/alexey/git/game-tester\n" +
+                "git-pocketshell::1::1::1::0:::/home/alexey/git/pocketshell\n",
+        )
+        val authority = parser.parsePocketshellSessionsJson(
+            """
+            {"managers":["tmux"],"sessions":[
+              {"name":"git-pocketshell-release","manager":"tmux"},
+              {"name":"git-aplexer-2","manager":"tmux"},
+              {"name":"git-dtc-website","manager":"tmux"},
+              {"name":"git-game-tester","manager":"tmux"},
+              {"name":"git-pocketshell","manager":"tmux"}
+            ]}
+            """.trimIndent(),
+        )!!
+        val unioned = parser.unionLiveSessionRows(authority, overlay)
+        assertEquals(
+            listOf(
+                "git-pocketshell-release",
+                "git-aplexer-2",
+                "git-dtc-website",
+                "git-game-tester",
+                "git-pocketshell",
+            ),
+            unioned.map { it.name },
+        )
+        assertEquals("/home/alexey/git/pocketshell", unioned.last().path)
+        assertTrue(unioned.size > overlay.size)
+    }
+
+    @Test
+    fun parsePocketshellSessionsJsonRejectsHumanTable() {
+        assertNull(parser.parsePocketshellSessionsJson("IDX  SESSION               CREATED\n"))
+    }
 }

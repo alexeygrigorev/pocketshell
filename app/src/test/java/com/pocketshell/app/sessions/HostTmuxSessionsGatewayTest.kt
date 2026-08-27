@@ -163,7 +163,7 @@ class HostTmuxSessionsGatewayTest {
                     SshHostTmuxSessionsGateway.LIST_SESSIONS_COMMAND,
                     SshHostTmuxSessionsGateway.LIST_SESSIONS_COMMAND,
                 ).map { ReposRemoteSource.pathAwareCommand(it) },
-                session.execCommands,
+                session.execCommands.filter { it.contains("list-sessions") },
             )
         } finally {
             manager.close()
@@ -429,6 +429,9 @@ class HostTmuxSessionsGatewayTest {
                 awaitCancellation()
             }
             execCommands += command
+            if (command.contains("pocketshell sessions list")) {
+                return ExecResult(stdout = "", stderr = "", exitCode = 1)
+            }
             return responses.removeFirstOrNull()
                 ?: ExecResult(stdout = "", stderr = "", exitCode = 0)
         }

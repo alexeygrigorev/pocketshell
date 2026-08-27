@@ -1174,6 +1174,8 @@ class FolderListGatewayFallbackTest {
                         exitCode = 1,
                     )
                 }
+                command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND) ->
+                    ExecResult(stdout = "", stderr = "", exitCode = 1)
                 command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) -> pocketshellResult
                 else -> ExecResult(stdout = "", stderr = "unexpected command: $command", exitCode = 1)
             }

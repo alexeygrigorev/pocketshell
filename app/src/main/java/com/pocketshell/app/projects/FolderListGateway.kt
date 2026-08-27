@@ -140,6 +140,9 @@ data class FolderSessionRow(
      * [tmuxSessionId].
      */
     val sessionCreated: Long? = null,
+    /** `tmux` or `aplexer`. Default keeps existing tmux-only rows unchanged. */
+    val sessionManager: String = "tmux",
+    val aplexerId: String? = null,
 )
 
 /**
@@ -955,7 +958,12 @@ class SshFolderListGateway internal constructor(
                 // sole kind authority; foreign sessions get the one-shot daemon
                 // guess. No output-parsing detection on this list path.
                 val annotated = annotateAgentKinds(session, merged)
-                probes.sessions(annotated)
+                // Bare `tmux list-sessions` only sees the default socket (the
+                // 3 leftover sessions). tmuxctl/t walks every tmuxctl-* socket.
+                // Union the pocketshell enumerator so the phone matches the
+                // terminal, and fold in aplexer rows as a second manager.
+                val enumerator = fetchPocketshellEnumerator(session, familyForRawId)
+                probes.sessions(SshFolderListGateway.unionFolderSessionRows(enumerator, annotated))
             }
         }
     }
@@ -990,11 +998,90 @@ class SshFolderListGateway internal constructor(
         )
     }
 
+    private suspend fun fetchPocketshellEnumerator(
+        session: SshSession,
+        familyForRawId: (String?) -> SessionAgentKind? = { null },
+    ): List<FolderSessionRow> {
+        val json = try {
+            session.execBounded(pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        if (json != null && json.exitCode == 0) {
+            val parsed = sessionListParser.parsePocketshellSessionsJson(json.stdout)
+            if (parsed != null) {
+                return parsed.map { it.asFolderSessionRow() }
+            }
+        }
+        val human = try {
+            session.execBounded(pathAware(POCKETSHELL_SESSIONS_COMMAND))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        if (human != null && human.exitCode == 0) {
+            return parsePocketshellSessionsRows(human.stdout, sessionListParser)
+        }
+        return emptyList()
+    }
+
+    private fun HostTmuxSessionRow.asFolderSessionRow(): FolderSessionRow =
+        FolderSessionRow(
+            sessionName = name,
+            lastActivity = lastActivity,
+            attached = attached,
+            cwd = path,
+            agentKind = agentKind,
+            recordedKind = recordedKind,
+            recordedKindId = recordedKindId,
+            agentStateRaw = agentStateRaw,
+            agentStateUpdatedAt = agentStateUpdatedAt,
+            tmuxSessionId = tmuxSessionId,
+            sessionCreated = createdAt,
+            sessionManager = manager,
+            aplexerId = aplexerId,
+        )
+
     private suspend fun listSessionsWithFolderFromPocketshell(
         session: SshSession,
         probes: ReconcileSideProbes,
         familyForRawId: (String?) -> SessionAgentKind? = { null },
     ): FolderListResult.Sessions? {
+        val json = try {
+            session.execBounded(pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        val jsonRows = json
+            ?.takeIf { it.exitCode == 0 }
+            ?.let { sessionListParser.parsePocketshellSessionsJson(it.stdout) }
+            ?.map { it.asFolderSessionRow() }
+        if (!jsonRows.isNullOrEmpty()) {
+            val structured = try {
+                session.execBounded(pathAware(POCKETSHELL_SESSIONS_TMUX_COMMAND))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
+            val structuredRows = structured
+                ?.takeIf { it.exitCode == 0 }
+                ?.let {
+                    parsePocketshellSessionsTmuxRows(
+                        stdout = it.stdout,
+                        familyForRawId = familyForRawId,
+                        parser = sessionListParser,
+                    )
+                }
+            return probes.sessions(
+                mergePocketshellSessionRows(jsonRows, structuredRows),
+            )
+        }
         val pocketshell = session.execBounded(pathAware(POCKETSHELL_SESSIONS_COMMAND))
         if (pocketshell.exitCode != 0) {
             if (pocketshell.isTmuxServerAbsent()) {
@@ -2146,6 +2233,7 @@ class SshFolderListGateway internal constructor(
                 "printf '%s\\n' \"\$__ps_n\""
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
+        const val POCKETSHELL_SESSIONS_JSON_COMMAND: String = "pocketshell sessions list --json"
         /**
          * Optional raw-id enrichment for the legacy pocketshell fallback.
          * This is a bounded, directly supported tmux format probe rather than
@@ -2246,7 +2334,33 @@ class SshFolderListGateway internal constructor(
                 agentStateUpdatedAt = agentStateUpdatedAt,
                 tmuxSessionId = tmuxSessionId,
                 sessionCreated = createdAt,
+                sessionManager = manager,
+                aplexerId = aplexerId,
             )
+
+        /**
+         * [authority] is the tmuxctl + aplexer enumerator; [overlay] is the
+         * default-socket `tmux list-sessions` parse. Empty authority keeps
+         * overlay (older hosts without `pocketshell sessions list --json`).
+         */
+        internal fun unionFolderSessionRows(
+            authority: List<FolderSessionRow>,
+            overlay: List<FolderSessionRow>,
+        ): List<FolderSessionRow> {
+            if (authority.isEmpty()) return overlay
+            val overlayByName = overlay.associateBy { it.sessionName }
+            val merged = authority.map { row ->
+                val extra = overlayByName[row.sessionName] ?: return@map row
+                extra.copy(
+                    sessionName = row.sessionName,
+                    sessionManager = row.sessionManager,
+                    aplexerId = row.aplexerId ?: extra.aplexerId,
+                    cwd = extra.cwd ?: row.cwd,
+                )
+            }
+            val seen = authority.mapTo(HashSet()) { it.sessionName }
+            return merged + overlay.filter { it.sessionName !in seen }
+        }
 
         /**
          * Keep the human list authoritative for ordering and compatibility,

@@ -100,6 +100,7 @@ def _install_fake_a(
     script.write_text(body, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("APLEXER_BIN", str(script))
+    monkeypatch.setenv("POCKETSHELL_APLEXER", "1")
     monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "1")
     return script
 
@@ -374,7 +375,7 @@ def test_cli_profiles_list_emits_no_secrets(fake_home, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# Aplexer Phase A1: shadow-mode `a profiles --json` (#2341)
+# Aplexer Phase A: prefer `a profiles --json` siblings (#2341)
 # ---------------------------------------------------------------------------
 
 
@@ -422,7 +423,7 @@ def test_kill_switch_skips_probe(fake_home, tmp_path, monkeypatch):
     assert profiles._aplexer_profiles({"HOME": str(fake_home)}) is None
 
 
-def test_shadow_mode_still_returns_native(
+def test_prefer_matching_probe_keeps_defaults_and_mapped_siblings(
     fake_home, tmp_path, monkeypatch, caplog
 ):
     marker = fake_home / "aplexer-called"
@@ -438,8 +439,10 @@ def test_shadow_mode_still_returns_native(
     monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "1")
     caplog.clear()
     discovered = profiles.discover_profiles({"HOME": str(fake_home)})
-    assert marker.is_file(), "the matching shadow test must invoke the a probe"
-    assert discovered == expected
+    assert marker.is_file(), "the matching prefer test must invoke the a probe"
+    assert {p.name for p in discovered} == {p.name for p in expected}
+    assert {p.name for p in discovered} == {"Claude", "Claude (Z.AI)", "Codex"}
+    assert [p.name for p in discovered if p.default] == ["Claude", "Codex"]
     assert not [
         record
         for record in caplog.records
@@ -447,22 +450,19 @@ def test_shadow_mode_still_returns_native(
     ]
 
 
-def test_shadow_mode_logs_missing_sibling_and_returns_native(
+def test_prefer_empty_aplexer_keeps_native_defaults_only(
     fake_home, tmp_path, monkeypatch, caplog
 ):
-    # A valid empty aplexer listing must not remove native siblings.
     _install_fake_a(tmp_path, monkeypatch, payload={})
     caplog.set_level(logging.WARNING, logger="pocketshell.profiles")
-    monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "0")
-    expected = profiles.discover_profiles({"HOME": str(fake_home)})
-    monkeypatch.setenv("POCKETSHELL_APLEXER_PROFILES", "1")
     discovered = profiles.discover_profiles({"HOME": str(fake_home)})
-    assert discovered == expected
+    assert {p.name for p in discovered} == {"Claude", "Codex"}
+    assert all(p.default for p in discovered)
     assert "aplexer profile shadow divergence" in caplog.text
     assert "Claude (Z.AI)" in caplog.text
 
 
-def test_shadow_mode_logs_missing_extra_and_differing_siblings(
+def test_prefer_logs_missing_extra_and_differing_siblings(
     fake_home, tmp_path, monkeypatch, caplog
 ):
     _make_claude_dir(fake_home / ".alt-claude")
@@ -482,13 +482,12 @@ def test_shadow_mode_logs_missing_extra_and_differing_siblings(
     )
     caplog.set_level(logging.WARNING, logger="pocketshell.profiles")
     discovered = profiles.discover_profiles({"HOME": str(fake_home)})
-    native = [
-        profiles.Profile("Claude", "claude", None, True),
-        profiles.Profile("Alt Claude", "claude", str(fake_home / ".alt-claude")),
-        profiles.Profile("Claude (Z.AI)", "claude", str(fake_home / ".zlaude")),
-        profiles.Profile("Codex", "codex", None, True),
-    ]
-    assert discovered == native
+    names = [p.name for p in discovered]
+    assert names[0] == "Claude"
+    assert "Codex" in names
+    assert "Renamed" in names
+    assert "Remote Laude" in names
+    assert "Alt Claude" not in names
     assert "missing=['Alt Claude']" in caplog.text
     assert "extra=['Remote Laude']" in caplog.text
     assert "differing=['Claude (Z.AI)->Renamed']" in caplog.text

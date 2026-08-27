@@ -40,6 +40,13 @@ data class HostTmuxSessionRow(
      * absent or the source shape did not carry it.
      */
     val agentStateUpdatedAt: Long? = null,
+    /**
+     * Session manager that owns this row: `tmux` (tmuxctl enumerator) or
+     * `aplexer`. Default `tmux` so legacy parsers keep working.
+     */
+    val manager: String = "tmux",
+    /** Aplexer session UUID when [manager] is `aplexer`. */
+    val aplexerId: String? = null,
 )
 
 data class HostTmuxSessionPickerRequest(

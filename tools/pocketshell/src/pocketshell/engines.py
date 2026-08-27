@@ -22,6 +22,8 @@ from typing import Mapping, Optional
 
 import click
 
+from pocketshell import aplexer
+
 try:  # pragma: no cover - import guard
     import yaml
 except ImportError:  # pragma: no cover - yaml is a hard dependency
@@ -452,6 +454,81 @@ def _manifest_from_mapping(
     )
 
 
+# Engines aplexer lists that must not appear in the PocketShell agent picker.
+_HIDDEN_APLEXER_ENGINES = frozenset({"shell"})
+
+
+def _aplexer_engine_rows(
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[list[Mapping[str, object]]]:
+    payload = aplexer.run_json(["engines"], env=env, feature="engines")
+    if not isinstance(payload, list):
+        return None
+    return [row for row in payload if isinstance(row, Mapping)]
+
+
+def _overlay_aplexer_engines(
+    manifests: dict[str, EngineManifest],
+    env: Optional[Mapping[str, str]] = None,
+) -> set[str]:
+    """Overlay argv / env_unset / available from ``a engines --json``.
+
+    Presentation fields (label, family, provider_mark, skip_permissions_argv)
+    stay PocketShell's. Unknown aplexer engines (``shell``, ``gemini`` unless
+    already in this registry) are not added. Returns ids that aplexer
+    already availability-probed so ``load_registry`` can skip a second PATH
+    check.
+    """
+    rows = _aplexer_engine_rows(env)
+    if rows is None:
+        return set()
+    overlayed: set[str] = set()
+    for row in rows:
+        name = row.get("name")
+        if not isinstance(name, str) or name in _HIDDEN_APLEXER_ENGINES:
+            continue
+        item = manifests.get(name)
+        if item is None:
+            continue
+        command = row.get("command")
+        argv = (
+            tuple(str(part) for part in command if str(part).strip())
+            if isinstance(command, list) and command
+            else item.launch.argv
+        )
+        unset = row.get("env_unset")
+        env_unset = (
+            tuple(str(part) for part in unset if str(part).strip())
+            if isinstance(unset, list)
+            else item.launch.env_unset
+        )
+        launch = LaunchSpec(
+            argv=argv,
+            skip_permissions_argv=item.launch.skip_permissions_argv,
+            env_unset=env_unset,
+            env_set=item.launch.env_set,
+            profile_env=item.launch.profile_env,
+            profile=item.launch.profile,
+        )
+        available = row.get("available")
+        if isinstance(available, bool) and not item.availability_overridden:
+            item = replace(
+                item,
+                launch=launch,
+                available=available,
+                unavailable_reason=(
+                    None
+                    if available
+                    else f"`{item.harness}` is not installed on this host (not on PATH)."
+                ),
+            )
+            overlayed.add(name)
+        else:
+            item = replace(item, launch=launch)
+        manifests[name] = item
+    return overlayed
+
+
 def load_registry(
     env: Optional[Mapping[str, str]] = None,
     *,
@@ -464,11 +541,18 @@ def load_registry(
     CLI emits the full registry, including disabled/unavailable entries, so
     the picker can hide only entries that are not createable while existing
     sessions continue to render from their recorded identity.
+
+    When ``a`` is present, argv / env_unset / available for matching ids come
+    from ``a engines --json`` (Phase A2). ``engines.yaml`` still wins on
+    presentation and can add engines aplexer does not know.
     """
     manifests: dict[str, EngineManifest] = {
         item.id: item for item in builtin_manifests()
     }
     order = list(manifests)
+    # Aplexer supplies argv/env_unset/available for known ids; user yaml
+    # still wins if it then overrides the same id.
+    overlayed = _overlay_aplexer_engines(manifests, env)
     for raw in _read_config(env):
         item = _manifest_from_mapping(raw, manifests.get(str(raw.get("id", "")).lower()))
         if item is None:
@@ -476,12 +560,17 @@ def load_registry(
         if item.id not in manifests:
             order.append(item.id)
         manifests[item.id] = item
+        overlayed.discard(item.id)
 
     source = os.environ if env is None else env
     out: list[EngineManifest] = []
     for engine_id in order:
         item = manifests[engine_id]
-        if probe and not item.availability_overridden:
+        if (
+            probe
+            and not item.availability_overridden
+            and engine_id not in overlayed
+        ):
             found = shutil.which(item.harness, path=source.get("PATH"))
             item = replace(
                 item,

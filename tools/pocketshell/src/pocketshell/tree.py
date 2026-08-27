@@ -313,11 +313,10 @@ def _live_session_names(env: Optional[Mapping[str, str]] = None) -> Optional[set
     reconcile must NOT prune anything (treating an enumeration failure as "all
     sessions gone" would wipe the held tree on a transient hiccup).
 
-    Uses the SAME ``tmuxctl list`` enumeration ``sessions.list`` proxies. The
-    output is the fixed-width ``IDX  SESSION  CREATED`` table; the SESSION name
-    is the second whitespace-delimited token on each data row (tmux session
-    names cannot contain whitespace, so this is unambiguous). The header row and
-    any blank lines are skipped.
+    Uses the SAME ``tmuxctl list`` enumeration ``sessions.list`` proxies and
+    the timestamp-anchored parser in :mod:`pocketshell.session_enum` (the
+    same rule as Android ``HostTmuxSessionListParser``), so overflowed long
+    names are not dropped.
     """
     tmuxctl_path = _resolve_tmuxctl_binary()
     if tmuxctl_path is None:
@@ -338,26 +337,9 @@ def _live_session_names(env: Optional[Mapping[str, str]] = None) -> Optional[set
 
 def _parse_session_names(stdout: str) -> set[str]:
     """Parse session names from the ``tmuxctl list`` fixed-width table."""
-    names: set[str] = set()
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        tokens = stripped.split()
-        if not tokens:
-            continue
-        # Skip the header row ("IDX  SESSION  CREATED").
-        if tokens[0].upper() == "IDX":
-            continue
-        # The IDX column is numeric on data rows; the SESSION name is token[1].
-        if len(tokens) < 2:
-            continue
-        if not tokens[0].isdigit():
-            # Defensive: a row whose first token is not an index is not a
-            # recognisable data row; skip it rather than mis-key a name.
-            continue
-        names.add(tokens[1])
-    return names
+    from pocketshell.session_enum import parse_tmuxctl_list_names
+
+    return set(parse_tmuxctl_list_names(stdout))
 
 
 # ---------------------------------------------------------------------------

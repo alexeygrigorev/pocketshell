@@ -165,3 +165,67 @@ def test_generic_click_wrapper_resolves_and_launches_custom_engine(
     ]
     assert launched["env"]["TEST_MODE"] == "registry"
     assert "OPENAI_API_KEY" not in launched["env"]
+
+
+def test_aplexer_overlay_takes_command_env_unset_and_available(
+    tmp_path, monkeypatch, install_fake_a
+):
+    install_fake_a(
+        engines=[
+            {
+                "name": "claude",
+                "command": ["claude", "--from-aplexer"],
+                "available": False,
+                "env_unset": ["OPENAI_API_KEY", "CUSTOM_UNSET"],
+            },
+            {"name": "shell", "command": ["/bin/bash", "-l"], "available": True},
+            {"name": "gemini", "command": ["gemini"], "available": True},
+        ]
+    )
+    registry = engines.load_registry(probe=False)
+    ids = [item.id for item in registry]
+    assert "shell" not in ids
+    assert "gemini" not in ids
+    claude = next(item for item in registry if item.id == "claude")
+    assert claude.launch.argv == ("claude", "--from-aplexer")
+    assert claude.label == "Claude"
+    assert claude.family == "claude"
+    assert "CUSTOM_UNSET" in claude.launch.env_unset
+    assert "OPENAI_API_KEY" in claude.launch.env_unset
+    assert claude.available is False
+    assert claude.launch.skip_permissions_argv == (
+        "--dangerously-skip-permissions",
+    )
+
+
+def test_yaml_override_still_wins_over_aplexer(
+    tmp_path, monkeypatch, install_fake_a
+):
+    _engine_config(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    install_fake_a(
+        engines=[
+            {
+                "name": "claude",
+                "command": ["claude", "--from-aplexer"],
+                "available": True,
+                "env_unset": ["OPENAI_API_KEY"],
+            }
+        ]
+    )
+    registry = engines.load_registry(probe=False)
+    assert any(item.id == "test-engine" for item in registry)
+    claude = next(item for item in registry if item.id == "claude")
+    # No yaml override for claude → aplexer argv sticks.
+    assert claude.launch.argv == ("claude", "--from-aplexer")
+
+
+def test_aplexer_engine_probe_failure_keeps_builtins(install_fake_a):
+    install_fake_a(exit_code=2)
+    registry = engines.load_registry(probe=False)
+    assert [item.id for item in registry] == [
+        "claude",
+        "codex",
+        "opencode",
+        "grok",
+    ]

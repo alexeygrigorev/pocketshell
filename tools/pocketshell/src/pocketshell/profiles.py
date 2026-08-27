@@ -44,25 +44,25 @@ stats a handful of dirs and reads marker *names* — it never reads inside a
 config dir (those hold ``auth.json`` / ``.env``). ``profiles list`` emits
 ``{name, engine, config_dir, default}`` and nothing else.
 
-Aplexer integration (Phase A1, #2341): when the ``a`` binary is on PATH,
-``discover_profiles`` also probes ``a profiles --json`` in *shadow mode* —
-it logs sibling divergence and still returns the native result. See
-``docs/aplexer-integration.md``. Set ``POCKETSHELL_APLEXER_PROFILES=0`` to
-disable the probe.
+Aplexer integration (Phase A, #2341): when the ``a`` binary is on PATH,
+``discover_profiles`` probes ``a profiles --json`` and **prefers** those
+sibling profiles, keeping native ``Claude``/``Codex`` defaults. Native
+discovery is the fallback when ``a`` is missing, the probe fails, or
+``POCKETSHELL_APLEXER=0`` / ``POCKETSHELL_APLEXER_PROFILES=0`` is set.
+See ``docs/aplexer-integration.md``.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 import click
+
+from pocketshell import aplexer
 
 try:  # pragma: no cover - import guard
     import yaml
@@ -105,13 +105,10 @@ _KNOWN_ALIASES: dict[str, str] = {
     "zlaude": "Claude (Z.AI)",
 }
 
-# Aplexer Phase A1 (#2341): shadow-mode listing. Probe is on when `a` is
-# found; `POCKETSHELL_APLEXER_PROFILES=0` forces the native path. See
-# docs/aplexer-integration.md.
+# Aplexer Phase A (#2341): prefer `a profiles --json` siblings when the
+# probe succeeds. Kill switches: POCKETSHELL_APLEXER=0 /
+# POCKETSHELL_APLEXER_PROFILES=0. See docs/aplexer-integration.md.
 _LOG = logging.getLogger("pocketshell.profiles")
-_APLEXER_PROFILES_TIMEOUT_S = 2.0
-_APLEXER_BIN_ENV = "APLEXER_BIN"
-_APLEXER_PROFILES_KILL_SWITCH = "POCKETSHELL_APLEXER_PROFILES"
 _APLEXER_CONFIG_DIR_ENV = {
     "claude": "CLAUDE_CONFIG_DIR",
     "codex": "CODEX_HOME",
@@ -187,21 +184,6 @@ def _env_map(env: Optional[dict[str, str]] = None) -> dict[str, str]:
     return merged
 
 
-def _aplexer_cli(env: Optional[dict[str, str]] = None) -> Optional[str]:
-    """Return the ``a`` binary to probe, or None to skip.
-
-    Skip when ``POCKETSHELL_APLEXER_PROFILES=0``. Otherwise prefer
-    ``APLEXER_BIN``, then ``PATH``.
-    """
-    source = _env_map(env)
-    if source.get(_APLEXER_PROFILES_KILL_SWITCH) == "0":
-        return None
-    explicit = source.get(_APLEXER_BIN_ENV)
-    if explicit:
-        return explicit
-    return shutil.which("a", path=source.get("PATH"))
-
-
 def _profiles_from_aplexer_json(payload: Any) -> Optional[list[Profile]]:
     """Map ``a profiles --json`` onto PocketShell ``Profile`` objects.
 
@@ -238,25 +220,8 @@ def _aplexer_profiles(
     env: Optional[dict[str, str]] = None,
 ) -> Optional[list[Profile]]:
     """Run ``a profiles --json``. None on skip or any failure."""
-    cli = _aplexer_cli(env)
-    if cli is None:
-        return None
-    try:
-        completed = subprocess.run(
-            [cli, "profiles", "--json"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_APLEXER_PROFILES_TIMEOUT_S,
-            env=_env_map(env),
-        )
-    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
-        return None
-    if completed.returncode != 0:
-        return None
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError:
+    payload = aplexer.run_json(["profiles"], env=env, feature="profiles")
+    if payload is None:
         return None
     return _profiles_from_aplexer_json(payload)
 
@@ -304,9 +269,9 @@ def discover_profiles(
     profile (``config_dir=None``, ``default=True``); matching sibling dirs →
     non-default profiles with their absolute ``config_dir``.
 
-    When ``a`` is available, also probes ``a profiles --json`` in shadow mode:
-    divergence is logged, but this native result is returned unchanged. Set
-    ``POCKETSHELL_APLEXER_PROFILES=0`` to skip the probe.
+    When ``a`` is available, prefers sibling profiles from ``a profiles --json``
+    and keeps native engine defaults. Probe failure / kill switch returns this
+    native result unchanged.
     """
     home = _home_dir(env)
     out: list[Profile] = []
@@ -357,9 +322,11 @@ def discover_profiles(
         out.extend(siblings)
 
     mapped = _aplexer_profiles(env)
-    if mapped is not None:
-        _log_profile_divergence(out, mapped)
-    return out
+    if mapped is None:
+        return out
+    _log_profile_divergence(out, mapped)
+    defaults = [profile for profile in out if profile.default]
+    return defaults + mapped
 
 
 def _expand_config_dir(raw: Optional[str], env: Optional[dict[str, str]]) -> Optional[str]:

@@ -6,7 +6,6 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.assertIsDisplayed
 import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
-import com.pocketshell.app.tmux.TMUX_PULL_TO_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
@@ -223,5 +222,4 @@ internal val DEFAULT_SESSION_RECOVERY_INDICATOR_TAGS: Set<String> = setOf(
     TMUX_SESSION_ERROR_TAG,
     TMUX_SESSION_RECONNECT_TAG,
     TMUX_SURFACE_RECONNECT_BUTTON_TAG,
-    TMUX_PULL_TO_RECONNECT_TAG,
 )

@@ -97,6 +97,68 @@ class RevealStateMachineTest {
         assertEquals(RevealState.Navigating(b, "session-B"), m.state.value)
     }
 
+    // --- issue #2338: the identity handoff must be observable -------------
+
+    @Test
+    fun `adoption publishes the navigation id it re-keyed away from`() {
+        val m = RevealStateMachine()
+        val exact = SessionId("tmux:7:\$0:1700000003")
+        m.navigate(a, "session-A")
+        assertNull("no handoff before any adoption", m.identityAdoption.value)
+
+        m.adoptTargetId(from = a, to = exact)
+
+        assertEquals(
+            "the screen composed with `a` must be able to recognise this handoff as its own",
+            RevealIdentityAdoption(from = a, to = exact),
+            m.identityAdoption.value,
+        )
+    }
+
+    @Test
+    fun `a rejected adoption publishes no handoff`() {
+        val m = RevealStateMachine()
+        val exactA = SessionId("tmux:7:\$0:1700000003")
+        m.navigate(b, "session-B")
+
+        m.adoptTargetId(from = a, to = exactA)
+
+        assertNull(
+            "a late adoption for another runtime must not advertise a handoff",
+            m.identityAdoption.value,
+        )
+    }
+
+    @Test
+    fun `a genuine renavigation ends the previous handoff`() {
+        val m = RevealStateMachine()
+        val exact = SessionId("tmux:7:\$0:1700000003")
+        m.navigate(a, "session-A")
+        m.adoptTargetId(from = a, to = exact)
+        assertEquals(RevealIdentityAdoption(a, exact), m.identityAdoption.value)
+
+        m.navigate(b, "session-B")
+
+        assertNull(
+            "session B's screen must never inherit session A's identity handoff",
+            m.identityAdoption.value,
+        )
+    }
+
+    @Test
+    fun `an idempotent renavigation keeps the handoff`() {
+        val m = RevealStateMachine()
+        val exact = SessionId("tmux:7:\$0:1700000003")
+        m.navigate(a, "session-A")
+        m.adoptTargetId(from = a, to = exact)
+
+        // The VM re-announces the (now adopted) target — same id, so this is a
+        // no-op that must not drop the handoff the screen still needs.
+        m.navigate(exact, "session-A")
+
+        assertEquals(RevealIdentityAdoption(a, exact), m.identityAdoption.value)
+    }
+
     // --- a foreign seed is dropped, never revealed ------------------------
 
     @Test

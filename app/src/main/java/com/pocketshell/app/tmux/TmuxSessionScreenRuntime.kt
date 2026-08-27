@@ -17,6 +17,7 @@ import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.connection.RevealIdentityAdoption
 import com.pocketshell.core.connection.RevealState
 import com.pocketshell.core.connection.SessionId
 import com.pocketshell.core.connection.SessionSurfaceState
@@ -75,10 +76,19 @@ internal class TmuxSessionConnectionRuntime(
  * A cold deep link can carry only a mutable tmux name. The first authoritative
  * pane listing then rekeys [reveal] to tmux's exact generation, so the screen
  * must follow that same reveal identity or [sessionSurfaceState] will correctly
- * hold an otherwise valid live frame as superseded. An explicit route
- * generation always wins; for a name-only route, adopt only an exact reveal
- * whose host and target name match this route. The fusion below remains the
- * final stale-id fence.
+ * hold an otherwise valid live frame as superseded. For a name-only route,
+ * adopt only an exact reveal whose host and target name match this route. The
+ * fusion below remains the final stale-id fence.
+ *
+ * Issue #2338: a route that DOES carry a generation is not automatically
+ * authoritative — a route id is only ever as fresh as whatever produced it
+ * (persisted last-session record, cached session tree, deep link), and tmux
+ * session names are unique per server, so a route generation that disagrees
+ * with the live pane listing is simply stale. When the reducer publishes an
+ * [adoption] whose `from` is EXACTLY this route's id, the pane listing proved
+ * that and the screen must follow `to`. Without a matching adoption the route
+ * stays authoritative, so a held reveal from another generation still cannot
+ * retarget this screen (the #686 wrong-session fence).
  */
 internal fun tmuxSessionSurfaceTargetId(
     routeTargetId: SessionId,
@@ -87,10 +97,14 @@ internal fun tmuxSessionSurfaceTargetId(
     routeTmuxSessionId: String?,
     routeSessionCreated: Long?,
     reveal: RevealState,
+    adoption: RevealIdentityAdoption? = null,
 ): SessionId {
-    // A route with a generation is already authoritative. Never let a held
-    // reveal from another generation replace an explicit route identity.
-    if (tmuxSessionGenerationOrNull(routeTmuxSessionId, routeSessionCreated) != null) {
+    // A route with a generation stays authoritative unless the reducer re-keyed
+    // THIS route's identity. Never let a merely-held reveal from another
+    // generation replace an explicit route identity.
+    if (tmuxSessionGenerationOrNull(routeTmuxSessionId, routeSessionCreated) != null &&
+        adoption?.from != routeTargetId
+    ) {
         return routeTargetId
     }
 
@@ -128,13 +142,18 @@ internal fun rememberTmuxSessionConnectionRuntime(
     // the rendered screen state is a pure function of that id (`RevealStateMachine`),
     // so a late/stale frame from the previous session can NEVER paint.
     val revealState by viewModel.revealState.collectAsState()
+    // Issue #2338: the reducer's identity handoff must be an observed state read
+    // here, not a snapshot peeked during composition, or the screen would not
+    // recompose onto the adopted identity.
+    val revealIdentityAdoption by viewModel.revealIdentityAdoption.collectAsState()
     val routeTargetSessionId = remember(hostId, sessionName, tmuxSessionId, sessionCreated) {
         tmuxTargetSessionId(hostId, sessionName, tmuxSessionId, sessionCreated)
     }
     // Issue #2294: a name-only cold route is intentionally enriched by the
     // authoritative exact id carried by the reveal reducer after list-panes.
-    // Explicit route generations stay fixed, and the selector's name/host
-    // checks leave the fusion's strict stale-id fence intact.
+    // Issue #2338: a route carrying a STALE exact generation is enriched the
+    // same way, but only when the reducer adopted this exact route id; the
+    // selector's name/host checks leave the fusion's stale-id fence intact.
     val targetSessionId = tmuxSessionSurfaceTargetId(
         routeTargetId = routeTargetSessionId,
         routeHostId = hostId,
@@ -142,6 +161,7 @@ internal fun rememberTmuxSessionConnectionRuntime(
         routeTmuxSessionId = tmuxSessionId,
         routeSessionCreated = sessionCreated,
         reveal = revealState,
+        adoption = revealIdentityAdoption,
     )
     val activeSessionCardsTargetKey = remember(hostId, host, port, user, keyPath, sessionName) {
         sessionCardsTargetKey(

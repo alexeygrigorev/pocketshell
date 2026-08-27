@@ -14,10 +14,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -40,6 +38,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
+import com.pocketshell.uikit.components.ConfirmDialog
 import com.pocketshell.uikit.components.DisclosureIcon
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
@@ -293,40 +292,20 @@ private fun OutboundQueueBanner(
     }
     val confirmingItem = items.firstOrNull { it.id == resendConfirmationId }
     if (confirmingItem != null) {
-        AlertDialog(
-            onDismissRequest = { resendConfirmationId = null },
+        ConfirmDialog(
+            title = "Send again anyway?",
+            message = "The prompt may already have landed in the pane. Sending it again " +
+                "can create a duplicate.",
+            confirmLabel = "Send again",
+            onConfirm = {
+                resendConfirmationId = null
+                onResend(confirmingItem.id)
+            },
+            onDismiss = { resendConfirmationId = null },
             modifier = Modifier.testTag(composerOutboundQueueResendDialogRootTestTag(confirmingItem.id)),
-            title = {
-                Text(
-                    text = "Send again anyway?",
-                    modifier = Modifier.testTag(
-                        composerOutboundQueueResendDialogTitleTestTag(confirmingItem.id),
-                    ),
-                )
-            },
-            text = {
-                Text(
-                    text = "The prompt may already have landed in the pane. Sending it again " +
-                        "can create a duplicate.",
-                    modifier = Modifier.testTag(
-                        composerOutboundQueueResendDialogBodyTestTag(confirmingItem.id),
-                    ),
-                )
-            },
-            dismissButton = {
-                TextButton(onClick = { resendConfirmationId = null }) { Text("Cancel") }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        resendConfirmationId = null
-                        onResend(confirmingItem.id)
-                    },
-                    modifier = Modifier.testTag(
-                        composerOutboundQueueResendDialogConfirmTestTag(confirmingItem.id),
-                    ),
-                ) { Text("Send again") }
-            },
+            confirmTestTag = composerOutboundQueueResendDialogConfirmTestTag(confirmingItem.id),
+            titleTestTag = composerOutboundQueueResendDialogTitleTestTag(confirmingItem.id),
+            messageTestTag = composerOutboundQueueResendDialogBodyTestTag(confirmingItem.id),
         )
     }
 }

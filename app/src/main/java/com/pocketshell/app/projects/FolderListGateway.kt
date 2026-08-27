@@ -1014,6 +1014,13 @@ class SshFolderListGateway internal constructor(
             if (parsed != null) {
                 return parsed.map { it.asFolderSessionRow() }
             }
+            // Exit 0 with a blank body is an empty enumerator, not a prompt
+            // to fall through to the human table (that second exec was
+            // stealing the next queued fake response and breaking lease-reuse
+            // command accounting).
+            if (json.stdout.isBlank()) {
+                return emptyList()
+            }
         }
         val human = try {
             session.execBounded(pathAware(POCKETSHELL_SESSIONS_COMMAND))

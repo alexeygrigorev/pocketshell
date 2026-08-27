@@ -17,6 +17,7 @@ context; the README and current feature docs track released behavior.
 | [server-setup.md](server-setup.md) | Server-side `pocketshell` helper install, PATH, and troubleshooting |
 | [ux-rules.md](ux-rules.md) | Placement + transition rules across journeys (codified from #163); cite from every UX-touching issue |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
+| [aplexer-integration.md](aplexer-integration.md) | Becoming an aplexer client: phases A–C, current slice A1 (#2341) |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
 | [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
@@ -41,3 +42,4 @@ context; the README and current feature docs track released behavior.
 | `../../agent-log-explorer/` | Separate tool for browsing historical agent conversations. PocketShell does *current session* view directly; agent-log-explorer remains for *all history* search. |
 | `../../heru/` | Historical provider quota reference; current app usage polling goes through `pocketshell usage --json`. |
 | `../../litehive/` | Per-engine local invocation counters. Alternative data source for the usage panel. |
+| `../../aplexer/` | Intended session runtime and engine/profile/launch registry. PocketShell becomes a client; see [aplexer-integration.md](aplexer-integration.md). |

@@ -43,14 +43,24 @@ Security: a profile references **config_dirs only, never keys**. Discovery
 stats a handful of dirs and reads marker *names* — it never reads inside a
 config dir (those hold ``auth.json`` / ``.env``). ``profiles list`` emits
 ``{name, engine, config_dir, default}`` and nothing else.
+
+Aplexer integration (Phase A1, #2341): when the ``a`` binary is on PATH,
+``discover_profiles`` also probes ``a profiles --json`` in *shadow mode* —
+it logs sibling divergence and still returns the native result. See
+``docs/aplexer-integration.md``. Set ``POCKETSHELL_APLEXER_PROFILES=0`` to
+disable the probe.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import os
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import click
 
@@ -93,6 +103,18 @@ _ENGINE_DEFAULT_DISPLAY: dict[str, str] = {
 # maintainer's ``~/.zlaude`` is the Z.AI-routed Claude profile.
 _KNOWN_ALIASES: dict[str, str] = {
     "zlaude": "Claude (Z.AI)",
+}
+
+# Aplexer Phase A1 (#2341): shadow-mode listing. Probe is on when `a` is
+# found; `POCKETSHELL_APLEXER_PROFILES=0` forces the native path. See
+# docs/aplexer-integration.md.
+_LOG = logging.getLogger("pocketshell.profiles")
+_APLEXER_PROFILES_TIMEOUT_S = 2.0
+_APLEXER_BIN_ENV = "APLEXER_BIN"
+_APLEXER_PROFILES_KILL_SWITCH = "POCKETSHELL_APLEXER_PROFILES"
+_APLEXER_CONFIG_DIR_ENV = {
+    "claude": "CLAUDE_CONFIG_DIR",
+    "codex": "CODEX_HOME",
 }
 
 
@@ -157,6 +179,121 @@ def _config_file_path(env: Optional[dict[str, str]] = None) -> Path:
     return base / "pocketshell" / "profiles.yaml"
 
 
+def _env_map(env: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """Process env overlaid with an optional injected map (tests pass HOME)."""
+    merged = dict(os.environ)
+    if env:
+        merged.update(env)
+    return merged
+
+
+def _aplexer_cli(env: Optional[dict[str, str]] = None) -> Optional[str]:
+    """Return the ``a`` binary to probe, or None to skip.
+
+    Skip when ``POCKETSHELL_APLEXER_PROFILES=0``. Otherwise prefer
+    ``APLEXER_BIN``, then ``PATH``.
+    """
+    source = _env_map(env)
+    if source.get(_APLEXER_PROFILES_KILL_SWITCH) == "0":
+        return None
+    explicit = source.get(_APLEXER_BIN_ENV)
+    if explicit:
+        return explicit
+    return shutil.which("a", path=source.get("PATH"))
+
+
+def _profiles_from_aplexer_json(payload: Any) -> Optional[list[Profile]]:
+    """Map ``a profiles --json`` onto PocketShell ``Profile`` objects.
+
+    Aplexer emits an object keyed by dir stem. Listings never carry
+    ``env``. Default-dir profiles are not in this payload (aplexer omits
+    ``~/.claude`` / ``~/.codex``); callers keep synthesizing those natively.
+    """
+    if not isinstance(payload, dict):
+        return None
+    out: list[Profile] = []
+    for stem, entry in payload.items():
+        if not isinstance(stem, str) or not isinstance(entry, dict):
+            continue
+        engine = entry.get("engine")
+        if engine not in PROFILE_ENGINES:
+            continue
+        env_block = entry.get("env") if isinstance(entry.get("env"), dict) else {}
+        env_key = _APLEXER_CONFIG_DIR_ENV.get(str(engine))
+        raw_dir = env_block.get(env_key) if env_key else None
+        config_dir = str(raw_dir) if raw_dir else None
+        out.append(
+            Profile(
+                name=_display_name_for_sibling(str(engine), stem),
+                engine=str(engine),
+                config_dir=config_dir,
+                default=False,
+                env={},
+            )
+        )
+    return out
+
+
+def _aplexer_profiles(
+    env: Optional[dict[str, str]] = None,
+) -> Optional[list[Profile]]:
+    """Run ``a profiles --json``. None on skip or any failure."""
+    cli = _aplexer_cli(env)
+    if cli is None:
+        return None
+    try:
+        completed = subprocess.run(
+            [cli, "profiles", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_APLEXER_PROFILES_TIMEOUT_S,
+            env=_env_map(env),
+        )
+    except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return None
+    return _profiles_from_aplexer_json(payload)
+
+
+def _profile_key(profile: Profile) -> tuple[str, Optional[str]]:
+    """Compare native vs aplexer siblings by engine + config_dir."""
+    path = profile.config_dir
+    if path is None:
+        return (profile.engine, None)
+    try:
+        return (profile.engine, str(Path(path).resolve()))
+    except OSError:
+        return (profile.engine, path)
+
+
+def _log_profile_divergence(native: list[Profile], aplexer: list[Profile]) -> None:
+    """Log missing/extra/differing siblings; defaults are native-only."""
+    native_siblings = [p for p in native if not p.default]
+    aplexer_by_key = {_profile_key(p): p for p in aplexer}
+    native_by_key = {_profile_key(p): p for p in native_siblings}
+    missing = sorted(set(native_by_key) - set(aplexer_by_key))
+    extra = sorted(set(aplexer_by_key) - set(native_by_key))
+    differing = []
+    for key, native_profile in native_by_key.items():
+        other = aplexer_by_key.get(key)
+        if other is not None and other.name != native_profile.name:
+            differing.append((native_profile.name, other.name, key))
+    if not missing and not extra and not differing:
+        return
+    _LOG.warning(
+        "aplexer profile shadow divergence: missing=%s extra=%s differing=%s",
+        [native_by_key[k].name for k in missing],
+        [aplexer_by_key[k].name for k in extra],
+        [f"{old}->{new}" for old, new, _ in differing],
+    )
+
+
 def discover_profiles(
     env: Optional[dict[str, str]] = None,
 ) -> list[Profile]:
@@ -166,6 +303,10 @@ def discover_profiles(
     file (see module docstring). The default dir → the engine default
     profile (``config_dir=None``, ``default=True``); matching sibling dirs →
     non-default profiles with their absolute ``config_dir``.
+
+    When ``a`` is available, also probes ``a profiles --json`` in shadow mode:
+    divergence is logged, but this native result is returned unchanged. Set
+    ``POCKETSHELL_APLEXER_PROFILES=0`` to skip the probe.
     """
     home = _home_dir(env)
     out: list[Profile] = []
@@ -215,6 +356,9 @@ def discover_profiles(
             )
         out.extend(siblings)
 
+    mapped = _aplexer_profiles(env)
+    if mapped is not None:
+        _log_profile_divergence(out, mapped)
     return out
 
 

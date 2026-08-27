@@ -91,6 +91,9 @@ public class SshLeaseManager(
         linkedMapOf()
     private var closed: Boolean = false
     private var nextEntryId: Long = 1L
+    private var nextStateEventSequence: Long = 1L
+    /** Test seam used to place collector cancellation after tryEmit, before its publication decision. */
+    internal var stateEventAfterTryEmitHookForTest: (() -> Unit)? = null
     private var processStarted: Boolean = true
     private val _stateEvents = MutableSharedFlow<SshLeaseStateEvent>(
         extraBufferCapacity = STATE_EVENT_BUFFER_CAPACITY,
@@ -100,8 +103,15 @@ public class SshLeaseManager(
     // [emitStateLocked] can keep [stateEvents] a true transport-state EDGE stream
     // and not re-announce a transport that was already up. Only mutated under
     // [mutex] (every [emitStateLocked] call site holds it), so no extra
-    // synchronisation is needed. A key drops out of the map only on a `Closed`
-    // edge (transport gone), so a fresh dial after a close re-emits `Connected`.
+    // synchronisation is needed. Issue #2314: a non-suppressed state is written
+    // here ONLY after [_stateEvents.tryEmit] succeeds and the post-publication
+    // subscriber check still sees an active collector (SharedFlow otherwise
+    // returns true while discarding at replay=0). A failed `Closed` attempt is
+    // the sole cleanup exception: its previous published value is captured in
+    // immediate drop telemetry first, then the dead key is forgotten so this
+    // historical bookkeeping cannot grow and a future real dial is not
+    // mistaken for reuse. Forgetting is lifecycle cleanup, not a claim that
+    // `Closed` was published.
     private val lastPublishedState: MutableMap<SshLeaseKey, SshLeaseConnectionState> =
         hashMapOf()
     private val connectScope = CoroutineScope(SupervisorJob() + connectTimeoutContext)
@@ -750,26 +760,71 @@ public class SshLeaseManager(
             if (prior == SshLeaseConnectionState.Connected ||
                 prior == SshLeaseConnectionState.Idle
             ) {
-                // Transport was already up; this acquire merely reused it. No
-                // edge — but keep the published state pinned at `Connected`.
-                lastPublishedState[key] = SshLeaseConnectionState.Connected
+                // Transport was already up; this acquire merely reused it. This
+                // is an intentional semantic suppression, not a publication, so
+                // [lastPublishedState] remains exactly what collectors last saw.
                 return
             }
         }
-        if (state == SshLeaseConnectionState.Closed) {
-            // Transport gone: forget the key so a future reconnect counts as a
-            // genuine transition back into `Connected`.
-            lastPublishedState.remove(key)
-        } else {
-            lastPublishedState[key] = state
-        }
-        _stateEvents.tryEmit(
+        val previousState = lastPublishedState[key]
+        val sequence = nextStateEventSequence++
+        val accepted = _stateEvents.tryEmit(
             SshLeaseStateEvent(
                 key = key,
                 state = state,
                 closeReason = closeReason,
+                sequence = sequence,
+                previousState = previousState,
             ),
         )
+        // The test seam cancels a collector at the actual post-tryEmit boundary.
+        // Keeping this boundary explicit makes the publication linearization
+        // proof executable rather than relying on a timing race.
+        stateEventAfterTryEmitHookForTest?.invoke()
+        // A replay=0 SharedFlow's `tryEmit=true` with no subscriber is a
+        // discard. Checking after the call contains the cancellation race:
+        // cancellation before the tryEmit linearization is diagnosed as a
+        // drop; cancellation after this check is after the publication point.
+        val hasSubscriberAfterEmit = _stateEvents.subscriptionCount.value > 0
+        val published = accepted && hasSubscriberAfterEmit
+        if (published) {
+            if (state == SshLeaseConnectionState.Closed) {
+                lastPublishedState.remove(key)
+            } else {
+                lastPublishedState[key] = state
+            }
+            return
+        }
+
+        // Issue #2314: Connected and Closed are recovery-affecting transport
+        // up/down edges. Connecting and Idle are diagnostic lease-use states;
+        // they remain bounded best-effort and may be inferred from sequence
+        // gaps. Never suspend, launch, or invoke the installed sink while
+        // holding [mutex]: [recordNonBlocking] performs only a bounded queue
+        // offer, so this records the critical miss without blocking SSH IO or
+        // tying delivery to a collector job that may already be cancelled.
+        if (state.isCriticalTransportEdge) {
+            SshDiagnostics.recordNonBlocking(
+                event = "lease_state_edge_dropped",
+                "key" to key.hashCode().toLong(),
+                "host" to key.host,
+                "port" to key.port,
+                "user" to key.user,
+                "credentialId" to key.credentialId,
+                "knownHostsCredentialId" to key.knownHostsId,
+                "previousState" to previousState?.name,
+                "intendedState" to state.name,
+                "closeReason" to closeReason?.name,
+                "sequence" to sequence,
+                "dropReason" to if (hasSubscriberAfterEmit) "buffer_saturated" else "no_subscribers",
+            )
+        }
+        if (state == SshLeaseConnectionState.Closed) {
+            // The transport no longer exists. Keep the failed publication
+            // observable above, then forget historical state so memory remains
+            // bounded and a later dial can publish a genuine Connected edge.
+            lastPublishedState.remove(key)
+        }
     }
 
     private class Entry(
@@ -824,10 +879,21 @@ public class SshLeaseManager(
     }
 }
 
+/**
+ * One attempted lease-state publication that reached [SshLeaseManager.stateEvents].
+ *
+ * [sequence] is manager-local and increases for every non-suppressed publication
+ * attempt, including attempts rejected by the bounded shared-flow buffer. A gap
+ * therefore marks best-effort diagnostic loss; critical Connected/Closed gaps
+ * are also recorded immediately by `lease_state_edge_dropped` telemetry with the
+ * same sequence, [previousState], and intended [state].
+ */
 public data class SshLeaseStateEvent(
     val key: SshLeaseKey,
     val state: SshLeaseConnectionState,
     val closeReason: SshLeaseCloseReason? = null,
+    val sequence: Long = 0L,
+    val previousState: SshLeaseConnectionState? = null,
 )
 
 public enum class SshLeaseConnectionState {
@@ -841,6 +907,9 @@ public enum class SshLeaseConnectionState {
     Idle,
     Closed,
 }
+
+private val SshLeaseConnectionState.isCriticalTransportEdge: Boolean
+    get() = this == SshLeaseConnectionState.Connected || this == SshLeaseConnectionState.Closed
 
 public enum class SshLeaseCloseReason {
     IdleExpired,

@@ -88,6 +88,7 @@ from urllib.parse import quote
 
 import click
 
+from pocketshell import aplexer
 from pocketshell.engines import builtin_engine_ids, engine_for, load_registry
 from pocketshell.env import merged_exports
 
@@ -809,6 +810,84 @@ def record_agent_source(
     return True
 
 
+def _aplexer_profile_id(config_dir: Optional[str]) -> Optional[str]:
+    """Dir-stem aplexer uses as the profile id (``zlaude`` from ``~/.zlaude``)."""
+    if not config_dir:
+        return None
+    stem = Path(config_dir).name.lstrip(".")
+    return stem or None
+
+
+def _aplexer_launch_spec(
+    kind: str,
+    cwd: str,
+    *,
+    skip_permissions: bool,
+    config_dir: Optional[str],
+) -> Optional[dict]:
+    """``a launch-spec --json`` or None on skip/failure.
+
+    PocketShell still owns folder ``.env`` merge, Claude trust seeding, and
+    ``@ps_*`` tmux options; this is only argv + provider-strip + engine env.
+    """
+    args = ["launch-spec", "--engine", kind, "--cwd", cwd]
+    if not skip_permissions:
+        args.append("--no-skip-permissions")
+    profile_id = _aplexer_profile_id(config_dir)
+    if profile_id:
+        args.extend(["--profile", profile_id])
+    payload = aplexer.run_json(
+        args, feature="launch", timeout=aplexer.LAUNCH_TIMEOUT_S
+    )
+    if not isinstance(payload, dict):
+        return None
+    argv = payload.get("argv")
+    if not isinstance(argv, list) or not argv:
+        return None
+    return payload
+
+
+def _ordered_env_unset(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            name for group in groups for name in group if str(name).strip()
+        )
+    )
+
+
+def _env_from_launch_spec(
+    spec: dict,
+    *,
+    folder_exports: dict[str, str],
+    extra_env: Optional[dict[str, str]],
+    config_dir: Optional[str],
+    profile_env: Optional[str],
+) -> dict[str, str]:
+    """Layer PocketShell env on top of a launch-spec, then strip keys.
+
+    Always unions the host-wide provider strip with ``spec.env_unset`` so a
+    partial/mutant spec cannot leave subscription keys in the child env.
+    """
+    env = dict(os.environ)
+    env.update(folder_exports)
+    if extra_env:
+        env.update(extra_env)
+    env_set = spec.get("env_set")
+    if isinstance(env_set, dict):
+        env.update({str(k): str(v) for k, v in env_set.items()})
+    if config_dir and profile_env:
+        env[profile_env] = config_dir
+    raw_unset = spec.get("env_unset")
+    spec_unset = (
+        tuple(str(name) for name in raw_unset)
+        if isinstance(raw_unset, list)
+        else ()
+    )
+    for name in _ordered_env_unset(PROVIDER_ENV_UNSET_VARS, spec_unset):
+        env.pop(name, None)
+    return env
+
+
 def launch_agent(
     ctx: click.Context,
     kind: str,
@@ -871,14 +950,30 @@ def launch_agent(
     resolved_dir = str(path)
 
     folder_exports = merged_exports(path)
-    env = build_env(
+    spec = _aplexer_launch_spec(
         kind,
-        dict(os.environ),
-        folder_exports,
+        resolved_dir,
+        skip_permissions=skip_permissions,
         config_dir=config_dir,
-        extra_env=extra_env,
     )
-    argv = build_argv(kind, skip_permissions=skip_permissions)
+    if spec is not None:
+        argv = [str(part) for part in spec["argv"]]
+        env = _env_from_launch_spec(
+            spec,
+            folder_exports=folder_exports,
+            extra_env=extra_env,
+            config_dir=config_dir,
+            profile_env=manifest.launch.profile_env,
+        )
+    else:
+        env = build_env(
+            kind,
+            dict(os.environ),
+            folder_exports,
+            config_dir=config_dir,
+            extra_env=extra_env,
+        )
+        argv = build_argv(kind, skip_permissions=skip_permissions)
 
     # Preflight: confirm the agent CLI is on PATH *before* os.chdir + exec.
     # Without this, a missing `claude`/`codex`/`opencode` makes os.execvpe

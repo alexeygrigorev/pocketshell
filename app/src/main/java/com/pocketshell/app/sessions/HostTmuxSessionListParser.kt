@@ -3,6 +3,7 @@ package com.pocketshell.app.sessions
 import com.pocketshell.uikit.model.parseAgentStateUpdatedAtEpochSec
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.sessionAgentKindFromOption
+import org.json.JSONObject
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -13,6 +14,69 @@ class HostTmuxSessionListParser @Inject constructor() {
         stdout.lineSequence()
             .mapNotNull(::parsePocketshellSessionsListRow)
             .toList()
+
+    /**
+     * Structured enumerator from `pocketshell sessions list --json`.
+     * Null when the payload is not that object (older hosts, or the human
+     * table). Empty list is a valid "no sessions" result.
+     */
+    fun parsePocketshellSessionsJson(stdout: String): List<HostTmuxSessionRow>? {
+        val trimmed = stdout.trim()
+        if (!trimmed.startsWith("{")) return null
+        return runCatching {
+            val root = JSONObject(trimmed)
+            val array = root.optJSONArray("sessions") ?: return null
+            buildList {
+                for (index in 0 until array.length()) {
+                    val obj = array.optJSONObject(index) ?: continue
+                    val name = obj.optString("name").trim()
+                    if (name.isEmpty()) continue
+                    val manager = obj.optString("manager").trim().ifEmpty { "tmux" }
+                    val ident = obj.optString("id").trim().ifEmpty { null }
+                    val workspace = obj.optString("workspace").trim().ifEmpty { null }
+                    val engine = obj.optString("engine").trim().ifEmpty { null }
+                    val createdEpoch = obj.optLong("created_epoch", Long.MIN_VALUE)
+                        .takeIf { it != Long.MIN_VALUE && it > 0L }
+                    add(
+                        HostTmuxSessionRow(
+                            name = name,
+                            createdAt = createdEpoch,
+                            lastActivity = createdEpoch,
+                            path = workspace,
+                            recordedKindId = engine,
+                            manager = manager,
+                            aplexerId = ident.takeIf { manager == "aplexer" },
+                        ),
+                    )
+                }
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * [authority] is the tmuxctl + aplexer enumerator (the name set the
+     * terminal shows). [overlay] is a `tmux list-sessions` parse (default
+     * socket, often a subset). Result is authority order, with overlay
+     * metadata copied onto matching names, then any overlay-only names.
+     */
+    fun unionLiveSessionRows(
+        authority: List<HostTmuxSessionRow>,
+        overlay: List<HostTmuxSessionRow>,
+    ): List<HostTmuxSessionRow> {
+        if (authority.isEmpty()) return overlay
+        val overlayByName = overlay.associateBy { it.name }
+        val merged = authority.map { row ->
+            val extra = overlayByName[row.name] ?: return@map row
+            extra.copy(
+                name = row.name,
+                manager = row.manager,
+                aplexerId = row.aplexerId ?: extra.aplexerId,
+                path = extra.path ?: row.path,
+            )
+        }
+        val seen = authority.mapTo(HashSet()) { it.name }
+        return merged + overlay.filter { it.name !in seen }
+    }
 
     fun parseTmuxListSessions(
         stdout: String,

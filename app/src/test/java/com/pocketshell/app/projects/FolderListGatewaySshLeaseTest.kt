@@ -50,21 +50,26 @@ class FolderListGatewaySshLeaseTest {
         // Issue #692: `list-sessions` + `list-panes` are now fetched in ONE
         // chained shell exec (a single SSH round-trip) instead of two serial
         // probes. The port scan is unchanged (3 commands inside PortScanner).
-        // Two polls => 2 enumeration round-trips + 2x3 port-scan = 8 execs
-        // (was 10 before the batch).
-        assertEquals(
-            listOf(
-                ENUMERATION_COMMAND,
-                "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
-                "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
-                "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
-                ENUMERATION_COMMAND,
-                "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
-                "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
-                "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
-            ),
-            session.execCommands,
+        // After tmuxctl per-session sockets the folder list also asks
+        // `pocketshell sessions list --json` once per poll so the name set
+        // matches `tmuxctl list` / `t`. Two polls => 2 enumerations + 2 json
+        // enumerators + 2x3 port-scan = 10 execs on ONE reused lease.
+        val jsonEnumerator = ReposRemoteSource.pathAwareCommand(
+            SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND,
         )
+        val portScans = listOf(
+            "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
+            "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
+            "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
+        )
+        // execBounded hops to Dispatchers.IO, so the JSON enumerator and the
+        // concurrent port scan can interleave; the contract is counts on one
+        // reused lease, not a frozen interleaving.
+        assertEquals(2, session.execCommands.count { it == ENUMERATION_COMMAND })
+        assertEquals(2, session.execCommands.count { it == jsonEnumerator })
+        assertEquals(6, session.execCommands.count { it in portScans })
+        assertEquals(10, session.execCommands.size)
+        assertTrue(session.execCommands.none { it.contains("sessions list --by") })
     }
 
     private val ENUMERATION_COMMAND: String = ReposRemoteSource.pathAwareCommand(

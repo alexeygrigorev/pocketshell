@@ -140,6 +140,9 @@ data class FolderSessionRow(
      * [tmuxSessionId].
      */
     val sessionCreated: Long? = null,
+    /** `tmux` or `aplexer`. Default keeps existing tmux-only rows unchanged. */
+    val sessionManager: String = "tmux",
+    val aplexerId: String? = null,
 )
 
 /**
@@ -955,7 +958,19 @@ class SshFolderListGateway internal constructor(
                 // sole kind authority; foreign sessions get the one-shot daemon
                 // guess. No output-parsing detection on this list path.
                 val annotated = annotateAgentKinds(session, merged)
-                probes.sessions(annotated)
+                // Bare `tmux list-sessions` only sees the default socket (the
+                // 3 leftover sessions). tmuxctl/t walks every tmuxctl-* socket.
+                // Union the pocketshell enumerator so the phone matches the
+                // terminal, and fold in aplexer rows as a second manager.
+                val enumerator = FolderListPocketshellEnumerator.fetch(
+                    parser = sessionListParser,
+                    exec = { command -> session.execBounded(command) },
+                    jsonCommand = pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND),
+                    humanCommand = pathAware(POCKETSHELL_SESSIONS_COMMAND),
+                )
+                probes.sessions(
+                    FolderListPocketshellEnumerator.unionFolderSessionRows(enumerator, annotated),
+                )
             }
         }
     }
@@ -995,6 +1010,38 @@ class SshFolderListGateway internal constructor(
         probes: ReconcileSideProbes,
         familyForRawId: (String?) -> SessionAgentKind? = { null },
     ): FolderListResult.Sessions? {
+        val json = try {
+            session.execBounded(pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+        val jsonRows = json
+            ?.takeIf { it.exitCode == 0 }
+            ?.let { sessionListParser.parsePocketshellSessionsJson(it.stdout) }
+            ?.map { with(FolderListPocketshellEnumerator) { it.toFolderSessionRow() } }
+        if (!jsonRows.isNullOrEmpty()) {
+            val structured = try {
+                session.execBounded(pathAware(POCKETSHELL_SESSIONS_TMUX_COMMAND))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                null
+            }
+            val structuredRows = structured
+                ?.takeIf { it.exitCode == 0 }
+                ?.let {
+                    parsePocketshellSessionsTmuxRows(
+                        stdout = it.stdout,
+                        familyForRawId = familyForRawId,
+                        parser = sessionListParser,
+                    )
+                }
+            return probes.sessions(
+                mergePocketshellSessionRows(jsonRows, structuredRows),
+            )
+        }
         val pocketshell = session.execBounded(pathAware(POCKETSHELL_SESSIONS_COMMAND))
         if (pocketshell.exitCode != 0) {
             if (pocketshell.isTmuxServerAbsent()) {
@@ -2146,6 +2193,7 @@ class SshFolderListGateway internal constructor(
                 "printf '%s\\n' \"\$__ps_n\""
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
+        const val POCKETSHELL_SESSIONS_JSON_COMMAND: String = "pocketshell sessions list --json"
         /**
          * Optional raw-id enrichment for the legacy pocketshell fallback.
          * This is a bounded, directly supported tmux format probe rather than
@@ -2223,7 +2271,9 @@ class SshFolderListGateway internal constructor(
             stdout: String,
             parser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
         ): List<FolderSessionRow> =
-            parser.parsePocketshellSessionsList(stdout).map { it.toFolderSessionRow() }
+            parser.parsePocketshellSessionsList(stdout).map {
+                with(FolderListPocketshellEnumerator) { it.toFolderSessionRow() }
+            }
 
         internal fun parsePocketshellSessionsTmuxRows(
             stdout: String,
@@ -2231,22 +2281,7 @@ class SshFolderListGateway internal constructor(
             parser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
         ): List<FolderSessionRow> =
             parser.parseTmuxListSessions(stdout, familyForRawId)
-                .map { it.toFolderSessionRow() }
-
-        private fun HostTmuxSessionRow.toFolderSessionRow(): FolderSessionRow =
-            FolderSessionRow(
-                sessionName = name,
-                lastActivity = lastActivity,
-                attached = attached,
-                cwd = path,
-                agentKind = agentKind,
-                recordedKind = recordedKind,
-                recordedKindId = recordedKindId,
-                agentStateRaw = agentStateRaw,
-                agentStateUpdatedAt = agentStateUpdatedAt,
-                tmuxSessionId = tmuxSessionId,
-                sessionCreated = createdAt,
-            )
+                .map { with(FolderListPocketshellEnumerator) { it.toFolderSessionRow() } }
 
         /**
          * Keep the human list authoritative for ordering and compatibility,

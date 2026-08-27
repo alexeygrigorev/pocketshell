@@ -343,6 +343,19 @@ def test_parse_session_names_from_tmuxctl_table() -> None:
     assert names == {"git-tmuxcli", "git-ai-engineering", "git-raw-guard"}
 
 
+def test_parse_session_names_keeps_overflowed_long_names() -> None:
+    table = (
+        "IDX  SESSION               CREATED\n"
+        "1    git-pocketshell-release 2026-08-27 09:22:55 \n"
+        "5    git-ai-shipping-labs-workshops-raw-guard 2026-05-20 17:41:29 \n"
+    )
+    names = tree_mod._parse_session_names(table)
+    assert names == {
+        "git-pocketshell-release",
+        "git-ai-shipping-labs-workshops-raw-guard",
+    }
+
+
 def test_parse_session_names_skips_header_and_blanks() -> None:
     assert tree_mod._parse_session_names("") == set()
     assert tree_mod._parse_session_names("IDX  SESSION  CREATED\n\n") == set()

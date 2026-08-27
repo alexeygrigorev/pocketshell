@@ -160,4 +160,25 @@ class ConfirmDialogTest {
         composeRule.onNodeWithText("Share").performClick()
         composeRule.runOnIdle { assertEquals(1, confirmed) }
     }
+
+    @Test
+    fun optionalTestTagsLandOnTitleMessageAndConfirm() {
+        composeRule.setContent {
+            PocketShellTheme {
+                ConfirmDialog(
+                    title = "Send again anyway?",
+                    message = "The prompt may already have landed.",
+                    confirmLabel = "Send again",
+                    onConfirm = {},
+                    onDismiss = {},
+                    confirmTestTag = "confirm-tag",
+                    titleTestTag = "title-tag",
+                    messageTestTag = "body-tag",
+                )
+            }
+        }
+        composeRule.onNodeWithTag("title-tag").assertIsDisplayed()
+        composeRule.onNodeWithTag("body-tag").assertIsDisplayed()
+        composeRule.onNodeWithTag("confirm-tag").assertIsDisplayed()
+    }
 }

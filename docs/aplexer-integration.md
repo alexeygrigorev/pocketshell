@@ -10,17 +10,17 @@ commit — treat this file as authoritative for *what PocketShell will do*,
 and the aplexer CLI/`--json` shapes as authoritative for *what exists
 today*).
 
-**Current slice: Phase A / A1 — shadow-mode profile listing.** (#2341)
+**Current slice: Phase A complete; listing both session managers.** (#2341)
 
 ```text
 Phase 0   aplexer registry surface          DONE (in aplexer)
-Phase A   engines / profiles / launch       IN PROGRESS
-  A1      shadow-mode `a profiles --json`   ← YOU ARE HERE  (#2341)
-  A2      engine listing via `a engines`
-  A3      launch via `a launch-spec`
-  A4      Electron presentation follow-through
-Phase B   aplexer PTY hosts selected sessions   NOT READY
-Phase C   aplexer default; tmux demoted         blocked on B
+Phase A   engines / profiles / launch       DONE
+  A1      prefer `a profiles --json` siblings   DONE
+  A2      engine listing via `a engines`        DONE
+  A3      launch via `a launch-spec`            DONE
+  A4      Electron presentation follow-through  inherited
+Phase B   aplexer PTY attach quality        NOT READY (list both managers anyway)
+Phase C   aplexer default; tmux demoted     blocked on B
 ```
 
 The integration seam is the **host CLI** (`tools/pocketshell/`), not the
@@ -34,15 +34,16 @@ inherits Phase A the same day the helper does.
 
 | Phase | Ready? | Meaning |
 | --- | --- | --- |
-| **A** — aplexer owns engines/profiles/launch; tmux still hosts terminals | **Yes — start now** | Host-CLI swap. Zero Kotlin/Electron attach changes. |
+| **A** — aplexer owns engines/profiles/launch; tmux still hosts terminals | **Done** | Host-CLI swap. Attach stays tmux `-CC`. |
 | **B** — aplexer PTY hosts selected sessions; both backends live | **Not shippable** | Runtime exists, but reattach, agent-state badges, and identity mapping are not. |
 | **C** — aplexer default; tmux demoted | Blocked on B | Plus leftover helper features (`jobs`, cards, usage) aplexer will not own. |
 
 Verified against aplexer HEAD (`87a4b89`): `a profiles --json`,
 `a engines --json`, `a launch-spec` / `a launch-exec`, forced
 `env_unset`, `opencode`, `a watch --jsonl`, and `a transcript` all exist.
-There is still no `aplexer` reference in this repo's production code
-(until A1).
+Host CLI probes `a` for profiles, engines, launch-spec, and session listing.
+Kill switches: `POCKETSHELL_APLEXER=0` plus per-feature `*_PROFILES` /
+`*_ENGINES` / `*_LAUNCH` / `*_SESSIONS`.
 
 ---
 
@@ -74,14 +75,15 @@ Aplexer polish that helps A3 but must not gate A1:
 `pocketshell agent <kind> …` into a tmux pane. Attach, `-CC`, session
 names, `@ps_*` options stay.
 
-### A1 — shadow-mode profile listing  ← current
+### A1 — prefer aplexer profile listing
 
 Issue: #2341.
 
 In `profiles.py`, probe `a profiles --json` when `a` is on PATH (or
 `$APLEXER_BIN`). Map entries onto `Profile` objects. Log divergence
-against native discovery. **Return native.** Kill switch:
-`POCKETSHELL_APLEXER_PROFILES=0`.
+against native discovery. **Prefer mapped siblings**; keep native
+`Claude`/`Codex` defaults. Native discovery is the fallback. Kill
+switches: `POCKETSHELL_APLEXER=0` / `POCKETSHELL_APLEXER_PROFILES=0`.
 
 Adapter (aplexer shape → PocketShell shape):
 
@@ -134,8 +136,11 @@ only then.
 
 ## Phase B — aplexer PTY hosts selected sessions; both backends supported
 
-**Do not start.** Aplexer has `a start` / `attach` / `snapshot` / `watch`,
-but PocketShell attach is not shippable on that runtime yet.
+**Attach quality is not shippable.** Listing both managers is required:
+`pocketshell sessions list --json` unions `tmuxctl list` names with
+`a snapshot` / `a list --json` rows tagged `manager=tmux|aplexer`. Tmux
+rows still attach over `-CC`. Aplexer rows carry `a attach <id>` for when
+reattach is ready. Do not feed `a attach` into a tmux control stream.
 
 | Blocker | Why it matters here |
 | --- | --- |

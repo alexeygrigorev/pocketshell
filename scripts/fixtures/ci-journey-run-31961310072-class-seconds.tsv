@@ -265,3 +265,11 @@ com.pocketshell.app.voice.VoiceGestureCoachmarkLauncherProofTest	43
 # ca1510f2d226f63b24bd2d07e29faaa877572b7c26219afbc2ec79464aa8d332.
 com.pocketshell.app.proof.Issue1700StaleFlushJourneyE2eTest	79
 com.pocketshell.app.composer.PromptComposerOutboundQueueProductionDeleteDockerTest	260
+
+# Issue #2297: SessionCaptureContractTest is a small on-device Compose
+# fixture in the same package as TerminalViewportCaptureTest (21s). An
+# isolated `scripts/connected-test.sh --suffix i2345` invocation on
+# 2026-08-27 spent 216s wrapper wall (APK install + class) on a contended
+# AVD; that is not the in-suite cost. Use the sibling capture fixture's
+# measured 21s plus one extra test method.
+com.pocketshell.app.proof.signals.SessionCaptureContractTest	22

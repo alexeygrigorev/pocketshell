@@ -53,6 +53,8 @@ import com.pocketshell.uikit.theme.PocketShellTypography
  *   hooks after migrating onto [ConfirmDialog] (e.g. a "Stop"/"Clear" confirm).
  * @param dismissTestTag optional `testTag` on the dismiss (Cancel) button, same
  *   migration rationale as [confirmTestTag].
+ * @param titleTestTag optional `testTag` on the title [Text].
+ * @param messageTestTag optional `testTag` on the body [Text].
  */
 @Composable
 fun ConfirmDialog(
@@ -66,6 +68,8 @@ fun ConfirmDialog(
     dismissLabel: String = "Cancel",
     confirmTestTag: String? = null,
     dismissTestTag: String? = null,
+    titleTestTag: String? = null,
+    messageTestTag: String? = null,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -75,6 +79,7 @@ fun ConfirmDialog(
                 text = title,
                 color = PocketShellColors.Text,
                 style = PocketShellTypography.titleMedium,
+                modifier = if (titleTestTag != null) Modifier.testTag(titleTestTag) else Modifier,
             )
         },
         text = {
@@ -82,6 +87,7 @@ fun ConfirmDialog(
                 text = message,
                 color = PocketShellColors.TextSecondary,
                 style = PocketShellTypography.bodyMedium,
+                modifier = if (messageTestTag != null) Modifier.testTag(messageTestTag) else Modifier,
             )
         },
         confirmButton = {

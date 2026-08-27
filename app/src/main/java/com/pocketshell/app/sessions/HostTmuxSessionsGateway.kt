@@ -115,11 +115,15 @@ class SshHostTmuxSessionsGateway internal constructor(
             ) { session ->
                 val tmux = session.execTmuxListSessions(pathAware(LIST_SESSIONS_COMMAND))
                 when {
-                    tmux.exitCode == 0 -> HostTmuxSessionListResult.Sessions(
-                        parser.parseTmuxListSessions(tmux.stdout) { rawId ->
+                    tmux.exitCode == 0 -> {
+                        val overlay = parser.parseTmuxListSessions(tmux.stdout) { rawId ->
                             enginesGateway?.familyForRawId(host.id, rawId)
-                        },
-                    )
+                        }
+                        val enumerator = enumeratorFromPocketshell(session)
+                        HostTmuxSessionListResult.Sessions(
+                            parser.unionLiveSessionRows(enumerator, overlay),
+                        )
+                    }
                     tmux.exitCode == 127 || tmux.stderr.contains("not found", ignoreCase = true) ->
                         HostTmuxSessionListResult.ToolUnavailable
                     tmux.stderr.contains("no server running", ignoreCase = true) ->
@@ -150,6 +154,22 @@ class SshHostTmuxSessionsGateway internal constructor(
 
     private fun pathAware(command: String): String =
         ReposRemoteSource.pathAwareCommand(command)
+
+    private suspend fun enumeratorFromPocketshell(session: SshSession): List<HostTmuxSessionRow> {
+        val json = runCatching {
+            session.execTmuxListSessions(pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND))
+        }.getOrNull()
+        if (json != null && json.exitCode == 0) {
+            parser.parsePocketshellSessionsJson(json.stdout)?.let { return it }
+        }
+        val human = runCatching {
+            session.execTmuxListSessions(pathAware(POCKETSHELL_SESSIONS_COMMAND))
+        }.getOrNull()
+        if (human != null && human.exitCode == 0) {
+            return parser.parsePocketshellSessionsList(human.stdout)
+        }
+        return emptyList()
+    }
 
     override suspend fun listSessionsFromLiveClient(
         host: HostEntity,
@@ -242,6 +262,11 @@ class SshHostTmuxSessionsGateway internal constructor(
          * [com.pocketshell.app.projects.SshFolderListGateway.LIST_SESSIONS_COMMAND].
          * See [com.pocketshell.core.tmux.TmuxRead].
          */
+        const val POCKETSHELL_SESSIONS_COMMAND: String =
+            "pocketshell sessions list --by activity"
+        const val POCKETSHELL_SESSIONS_JSON_COMMAND: String =
+            "pocketshell sessions list --json"
+
         const val LIST_SESSIONS_COMMAND: String =
             "${TmuxRead.CLIENT} list-sessions -F " +
                 "'#{session_id}::#{session_name}::#{session_created}::" +

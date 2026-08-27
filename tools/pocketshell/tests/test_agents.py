@@ -1366,3 +1366,127 @@ def test_cli_agent_profile_env_block_reaches_child(tmp_path, monkeypatch):
     assert captured["env"]["ZAI_ROUTE"] == "https://api.z.ai/anthropic"
     # ... but a provider API key in the env: block is still stripped (#703).
     assert "ANTHROPIC_API_KEY" not in captured["env"]
+
+
+def test_launch_spec_supplies_argv_and_env_unset(
+    tmp_path, monkeypatch, install_fake_a
+):
+    captured = {}
+
+    def fake_execvpe(file, argv, env):
+        captured["file"] = file
+        captured["argv"] = list(argv)
+        captured["env"] = dict(env)
+
+    install_fake_a(
+        launch={
+            "engine": "claude",
+            "profile": None,
+            "argv": ["claude", "--from-aplexer", "--dangerously-skip-permissions"],
+            "env_set": {"FROM_SPEC": "1"},
+            "env_unset": ["OPENAI_API_KEY"],
+            "cwd": str(tmp_path),
+        }
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "live-key")
+    (tmp_path / ".env").write_text("FOLDER_VAR=from-folder\n", encoding="utf-8")
+    agents.launch_agent(
+        _FakeCtx(),
+        "claude",
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        execvpe=fake_execvpe,
+    )
+    assert captured["argv"] == [
+        "claude",
+        "--from-aplexer",
+        "--dangerously-skip-permissions",
+    ]
+    assert captured["env"]["FROM_SPEC"] == "1"
+    assert captured["env"]["FOLDER_VAR"] == "from-folder"
+    assert "OPENAI_API_KEY" not in captured["env"]
+
+
+def test_launch_spec_empty_unset_still_strips_provider_keys(
+    tmp_path, monkeypatch, install_fake_a
+):
+    captured = {}
+
+    def fake_execvpe(file, argv, env):
+        captured["env"] = dict(env)
+        captured["argv"] = list(argv)
+
+    install_fake_a(
+        launch={
+            "engine": "claude",
+            "argv": ["claude"],
+            "env_set": {},
+            "env_unset": [],
+            "cwd": str(tmp_path),
+        }
+    )
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "live-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "also-live")
+    agents.launch_agent(
+        _FakeCtx(),
+        "claude",
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        execvpe=fake_execvpe,
+    )
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "OPENAI_API_KEY" not in captured["env"]
+    assert captured["argv"] == ["claude"]
+
+
+def test_launch_spec_failure_falls_back_to_native(
+    tmp_path, monkeypatch, install_fake_a
+):
+    captured = {}
+
+    def fake_execvpe(file, argv, env):
+        captured["argv"] = list(argv)
+
+    install_fake_a(exit_code=2)
+    agents.launch_agent(
+        _FakeCtx(),
+        "codex",
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        execvpe=fake_execvpe,
+    )
+    assert captured["argv"][0] == "codex"
+    assert "check_for_update_on_startup=false" in captured["argv"]
+
+
+def test_launch_spec_still_seeds_claude_trust(
+    tmp_path, monkeypatch, install_fake_a
+):
+    install_fake_a(
+        launch={
+            "engine": "claude",
+            "argv": ["claude"],
+            "env_set": {},
+            "env_unset": [],
+            "cwd": str(tmp_path),
+        }
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    agents.launch_agent(
+        _FakeCtx(),
+        "claude",
+        str(tmp_path),
+        skip_permissions=True,
+        config_dir=None,
+        execvpe=lambda *a, **k: None,
+    )
+    data = json.loads((tmp_path / ".claude.json").read_text(encoding="utf-8"))
+    assert data["projects"][str(tmp_path)]["hasTrustDialogAccepted"] is True
+
+
+def test_aplexer_profile_id_from_config_dir():
+    assert agents._aplexer_profile_id("/home/me/.zlaude") == "zlaude"
+    assert agents._aplexer_profile_id(None) is None

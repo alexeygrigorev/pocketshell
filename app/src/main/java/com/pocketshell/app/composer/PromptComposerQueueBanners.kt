@@ -14,13 +14,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,6 +66,9 @@ internal fun PromptComposerQueueBanners(
     onDeleteOutboundItem: (String) -> Unit,
     onRetryOutboundItem: (String) -> Unit,
     onResendAllOutbound: () -> Unit,
+    onCheckOutboundItem: (String) -> Unit = {},
+    onMarkOutboundHandled: (String) -> Unit = {},
+    onResendOutboundItem: (String) -> Unit = {},
 ) {
     if (pendingItems.isNotEmpty()) {
         PendingTranscriptionsBanner(
@@ -88,6 +95,9 @@ internal fun PromptComposerQueueBanners(
             onDelete = onDeleteOutboundItem,
             onRetry = onRetryOutboundItem,
             onResendAll = onResendAllOutbound,
+            onCheck = onCheckOutboundItem,
+            onMarkHandled = onMarkOutboundHandled,
+            onResend = onResendOutboundItem,
         )
         Spacer(modifier = Modifier.height(8.dp))
     }
@@ -110,7 +120,11 @@ private fun OutboundQueueBanner(
     onDelete: (String) -> Unit,
     onRetry: (String) -> Unit,
     onResendAll: () -> Unit,
+    onCheck: (String) -> Unit,
+    onMarkHandled: (String) -> Unit,
+    onResend: (String) -> Unit,
 ) {
+    var resendConfirmationId by remember { mutableStateOf<String?>(null) }
     val collapsedRetryItem = if (expanded) null else retryableOutboundQueueItem(items)
     val queueProgress by AttachmentUploadProgressPort.queueProgress.collectAsState()
     val uploadingProgress = items.singleOrNull()
@@ -219,9 +233,7 @@ private fun OutboundQueueBanner(
                     .background(PocketShellColors.BorderSoft),
             )
             val heldCount = items.count { it.isComposerQueueHeldForReview() }
-            val resendableCount = items.count {
-                it.state == OutboundState.Queued || it.state == OutboundState.Failed
-            }
+            val resendableCount = items.count { it.isComposerQueueRetryable() }
             val batchCount = if (heldCount > 0) heldCount else resendableCount
             if (batchCount >= 2) {
                 val resendEnabled = wireWritable && !retryBlockedByHealthyOwner && retryingIds.isEmpty()
@@ -272,9 +284,50 @@ private fun OutboundQueueBanner(
                     ),
                     onDelete = { onDelete(item.id) },
                     onRetry = { onRetry(item.id) },
+                    onCheck = { onCheck(item.id) },
+                    onMarkHandled = { onMarkHandled(item.id) },
+                    onResend = { resendConfirmationId = item.id },
                 )
             }
         }
+    }
+    val confirmingItem = items.firstOrNull { it.id == resendConfirmationId }
+    if (confirmingItem != null) {
+        AlertDialog(
+            onDismissRequest = { resendConfirmationId = null },
+            modifier = Modifier.testTag(composerOutboundQueueResendDialogRootTestTag(confirmingItem.id)),
+            title = {
+                Text(
+                    text = "Send again anyway?",
+                    modifier = Modifier.testTag(
+                        composerOutboundQueueResendDialogTitleTestTag(confirmingItem.id),
+                    ),
+                )
+            },
+            text = {
+                Text(
+                    text = "The prompt may already have landed in the pane. Sending it again " +
+                        "can create a duplicate.",
+                    modifier = Modifier.testTag(
+                        composerOutboundQueueResendDialogBodyTestTag(confirmingItem.id),
+                    ),
+                )
+            },
+            dismissButton = {
+                TextButton(onClick = { resendConfirmationId = null }) { Text("Cancel") }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        resendConfirmationId = null
+                        onResend(confirmingItem.id)
+                    },
+                    modifier = Modifier.testTag(
+                        composerOutboundQueueResendDialogConfirmTestTag(confirmingItem.id),
+                    ),
+                ) { Text("Send again") }
+            },
+        )
     }
 }
 
@@ -284,6 +337,9 @@ private fun OutboundQueueRow(
     retryAction: OutboundRetryActionState,
     onDelete: () -> Unit,
     onRetry: () -> Unit,
+    onCheck: () -> Unit,
+    onMarkHandled: () -> Unit,
+    onResend: () -> Unit,
 ) {
     val statusLayoutRegistration = PromptComposerQueueStatusLayoutTestObserver.observerForComposition()
     val statusLayoutBinding = remember(statusLayoutRegistration, item.id) {
@@ -342,7 +398,8 @@ private fun OutboundQueueRow(
                     text = retryAction.status ?: outboundQueueStateLabel(item, uploadProgress),
                     color = if (
                         item.state == OutboundState.Failed ||
-                        item.state == OutboundState.HeldForReview
+                        item.state == OutboundState.HeldForReview ||
+                        item.isComposerQueueHostAckUnknown()
                     ) {
                         PocketShellColors.Amber
                     } else {
@@ -376,23 +433,61 @@ private fun OutboundQueueRow(
             item.state == OutboundState.HeldForReview
         ) {
             Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-            ) {
-                PendingActionButton(
-                    label = "Delete",
-                    primary = false,
-                    onClick = onDelete,
-                    modifier = Modifier.testTag(composerOutboundQueueDeleteTestTag(item.id)),
-                )
-                PendingActionButton(
-                    label = retryAction.label,
-                    primary = true,
-                    enabled = retryAction.enabled,
-                    onClick = onRetry,
-                    modifier = Modifier.testTag(composerOutboundQueueRetryTestTag(item.id)),
-                )
+            if (item.isComposerQueueHostAckUnknown()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                ) {
+                    PendingActionButton(
+                        label = "Check pane",
+                        primary = false,
+                        onClick = onCheck,
+                        modifier = Modifier.testTag(composerOutboundQueueCheckTestTag(item.id)),
+                    )
+                    PendingActionButton(
+                        label = "Mark handled",
+                        primary = false,
+                        onClick = onMarkHandled,
+                        modifier = Modifier.testTag(composerOutboundQueueHandledTestTag(item.id)),
+                    )
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                ) {
+                    PendingActionButton(
+                        label = "Discard",
+                        primary = false,
+                        onClick = onDelete,
+                        modifier = Modifier.testTag(composerOutboundQueueDeleteTestTag(item.id)),
+                    )
+                    PendingActionButton(
+                        label = "Send again anyway",
+                        primary = true,
+                        onClick = onResend,
+                        modifier = Modifier.testTag(composerOutboundQueueResendTestTag(item.id)),
+                    )
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                ) {
+                    PendingActionButton(
+                        label = "Delete",
+                        primary = false,
+                        onClick = onDelete,
+                        modifier = Modifier.testTag(composerOutboundQueueDeleteTestTag(item.id)),
+                    )
+                    PendingActionButton(
+                        label = retryAction.label,
+                        primary = true,
+                        enabled = retryAction.enabled,
+                        onClick = onRetry,
+                        modifier = Modifier.testTag(composerOutboundQueueRetryTestTag(item.id)),
+                    )
+                }
             }
         }
     }
@@ -569,12 +664,17 @@ private fun PendingActionButton(
     val contentColor = if (primary) PocketShellColors.OnAccent else PocketShellColors.Text
     val alpha = if (enabled) 1f else 0.5f
     Box(
-        modifier = modifier
+        modifier = Modifier
             .clickable(
                 enabled = enabled,
                 role = Role.Button,
                 onClick = onClick,
             )
+            // Keep action test tags on the clickable node. Several queue
+            // actions are rendered in an unmerged semantics tree by the
+            // journey gate, so placing the caller modifier before clickable
+            // can expose a tag without the action it is meant to invoke.
+            .then(modifier)
             .background(
                 color = containerColor.copy(alpha = alpha),
                 shape = ComposerQueueButtonShape,
@@ -623,6 +723,12 @@ internal const val OUTBOUND_DELIVERY_UNCONFIRMED_SUMMARY: String = "Sent — del
 internal const val OUTBOUND_DELIVERY_UNCONFIRMED_MESSAGE: String =
     "Sent, but delivery could not be confirmed — check the terminal before retrying"
 
+/** Issue #2240: host journal unresolved; this is not an ordinary retryable failure. */
+internal const val OUTBOUND_HOST_ACK_UNKNOWN_SUMMARY: String = "Delivery unknown"
+
+internal const val OUTBOUND_HOST_ACK_UNKNOWN_MESSAGE: String =
+    "Delivery is unknown — the prompt may already have landed in the pane. Check the pane before sending again."
+
 internal data class OutboundQueueSummary(
     val primary: String,
     val preview: String? = null,
@@ -642,6 +748,9 @@ internal fun outboundQueueSummary(
         ?: outboundAttachmentCountLabel(oldest.attachments.size).takeIf { oldest.attachments.isNotEmpty() }
     val preview = previewText?.let { "“$it”" }
     if (items.size == 1) {
+        if (oldest.isComposerQueueHostAckUnknown()) {
+            return OutboundQueueSummary(OUTBOUND_HOST_ACK_UNKNOWN_SUMMARY, preview, attention = true)
+        }
         if (oldest.isComposerQueueDeliveryUnconfirmed()) {
             return OutboundQueueSummary(OUTBOUND_DELIVERY_UNCONFIRMED_SUMMARY, preview, attention = true)
         }
@@ -665,14 +774,18 @@ internal fun outboundQueueSummary(
     }
 
     val unconfirmedCount = items.count { it.isComposerQueueDeliveryUnconfirmed() }
+    val hostUnknownCount = items.count { it.isComposerQueueHostAckUnknown() }
     val heldCount = items.count { it.isComposerQueueHeldForReview() }
     val failedCount = items.count { it.state == OutboundState.Failed }
-    if (unconfirmedCount > 0) {
+    if (hostUnknownCount > 0 || unconfirmedCount > 0) {
         return OutboundQueueSummary(
             primary = "${items.size} queued",
             preview = preview,
             attention = true,
-            attentionSuffix = "$unconfirmedCount unconfirmed",
+            attentionSuffix = buildList {
+                if (hostUnknownCount > 0) add("$hostUnknownCount delivery unknown")
+                if (unconfirmedCount > 0) add("$unconfirmedCount unconfirmed")
+            }.joinToString(", "),
         )
     }
     if (heldCount > 0) {
@@ -703,9 +816,9 @@ internal fun outboundQueueSummary(
 internal fun outboundQueueStateLabel(
     item: OutboundItem,
     uploadProgress: AttachmentTransferProgress? = null,
-): String = if (
-    item.isComposerQueueDeliveryUnconfirmed()
-) {
+): String = if (item.isComposerQueueHostAckUnknown()) {
+    OUTBOUND_HOST_ACK_UNKNOWN_MESSAGE
+} else if (item.isComposerQueueDeliveryUnconfirmed()) {
     OUTBOUND_DELIVERY_UNCONFIRMED_MESSAGE
 } else when (item.state) {
     OutboundState.Queued -> PromptComposerViewModel.WILL_SEND_WHEN_RECONNECTED_MESSAGE
@@ -741,6 +854,11 @@ internal fun outboundRetryActionState(
     blockedByHealthyOwner: Boolean,
     wireWritable: Boolean,
 ): OutboundRetryActionState = when {
+    item.isComposerQueueHostAckUnknown() -> OutboundRetryActionState(
+        label = "Check pane",
+        enabled = false,
+        status = OUTBOUND_HOST_ACK_UNKNOWN_MESSAGE,
+    )
     item.isComposerQueueHeldForReview() -> when {
         !wireWritable -> OutboundRetryActionState(
             label = "Send now",
@@ -783,11 +901,7 @@ internal fun outboundAttachmentCountLabel(count: Int): String =
 
 internal fun retryableOutboundQueueItem(items: List<OutboundItem>): OutboundItem? =
     items
-        .filter {
-            it.state == OutboundState.Queued ||
-                it.state == OutboundState.Failed ||
-                it.state == OutboundState.HeldForReview
-        }
+        .filter { it.isComposerQueueRetryable() || it.isComposerQueueHeldForReview() }
         .minByOrNull { it.createdAtMs }
 
 internal fun isComposerResendMode(
@@ -859,6 +973,28 @@ internal fun composerOutboundQueueDeleteTestTag(id: String): String =
 
 internal fun composerOutboundQueueRetryTestTag(id: String): String =
     "prompt-composer-outbound-queue-retry:$id"
+
+internal fun composerOutboundQueueCheckTestTag(id: String): String =
+    "prompt-composer-outbound-queue-check:$id"
+
+internal fun composerOutboundQueueHandledTestTag(id: String): String =
+    "prompt-composer-outbound-queue-handled:$id"
+
+internal fun composerOutboundQueueResendTestTag(id: String): String =
+    "prompt-composer-outbound-queue-resend:$id"
+
+internal fun composerOutboundQueueResendDialogTitleTestTag(id: String): String =
+    "prompt-composer-outbound-queue-resend-dialog-title:$id"
+
+internal fun composerOutboundQueueResendDialogBodyTestTag(id: String): String =
+    "prompt-composer-outbound-queue-resend-dialog-body:$id"
+
+internal fun composerOutboundQueueResendDialogConfirmTestTag(id: String): String =
+    "prompt-composer-outbound-queue-resend-dialog-confirm:$id"
+
+internal fun composerOutboundQueueResendDialogRootTestTag(id: String): String =
+    "prompt-composer-outbound-queue-resend-dialog-root:$id"
+
 
 internal fun composerOutboundQueueStatusTestTag(id: String): String =
     "prompt-composer-outbound-queue-status:$id"

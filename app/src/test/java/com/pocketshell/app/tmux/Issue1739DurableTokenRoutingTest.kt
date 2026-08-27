@@ -307,28 +307,29 @@ class Issue1739DurableTokenRoutingTest {
     private suspend fun dispatch(
         request: PromptComposerViewModel.SendRequest,
         calls: MutableList<WireCall>,
-        sendAgentPayload: suspend (
-            paneId: String,
-            text: String,
-            agent: AgentKind,
-            sendToken: String,
-            durableRow: DurableOutboundRowIdentity?,
-            deliveryProof: AgentSubmitDeliveryProof,
-        ) -> ComposerSendResult = { paneId, text, _, sendToken, durableRow, deliveryProof ->
-            calls += WireCall("agent-payload", paneId, text, sendToken, durableRow, deliveryProof)
-            ComposerSendResult.Delivered
-        },
+            sendAgentPayload: suspend (
+                paneId: String,
+                text: String,
+                agent: AgentKind,
+                sendToken: String,
+                durableRow: DurableOutboundRowIdentity?,
+                deliveryProof: AgentSubmitDeliveryProof,
+                resendInterrupted: Boolean,
+            ) -> ComposerSendResult = { paneId, text, _, sendToken, durableRow, deliveryProof, _ ->
+                calls += WireCall("agent-payload", paneId, text, sendToken, durableRow, deliveryProof)
+                ComposerSendResult.Delivered
+            },
     ): ComposerSendResult =
         tmuxComposerSendResult(
             request = request,
             targetSessionId = SESSION_ID,
             fallbackPaneId = "%fallback",
             sendAgentPayload = sendAgentPayload,
-            sendToAgent = { paneId, text, sendToken, durableRow ->
+            sendToAgent = { paneId, text, sendToken, durableRow, _ ->
                 calls += WireCall("agent-echo", paneId, text, sendToken, durableRow)
                 ComposerSendResult.Delivered
             },
-            sendRawBytes = { paneId, bytes, sendToken, durableRow ->
+            sendRawBytes = { paneId, bytes, sendToken, durableRow, _ ->
                 calls += WireCall(
                     lane = "raw-bytes",
                     paneId = paneId,
@@ -354,8 +355,9 @@ class Issue1739DurableTokenRoutingTest {
         String,
         DurableOutboundRowIdentity?,
         AgentSubmitDeliveryProof,
+        Boolean,
     ) -> ComposerSendResult =
-        { paneId, text, _, sendToken, durableRow, _ ->
+        { paneId, text, _, sendToken, durableRow, _, _ ->
             calls += WireCall("agent-payload", paneId, text, sendToken, durableRow)
             when (
                 verifyBeforeAgentResend(

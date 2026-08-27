@@ -206,6 +206,11 @@ public fun PromptComposerSheet(
     // Tests may override this seam; production defaults to the owning VM's
     // resendAllQueued, which re-arms every resendable row to Queued in FIFO order.
     onResendAllOutbound: (() -> Unit)? = null,
+    // Issue #2240: HostAck unknown-row actions. The host screen supplies a
+    // pane-scoped read-only check; standalone sheets keep the action truthful.
+    onCheckOutboundItem: ((String) -> Unit)? = null,
+    onMarkOutboundHandled: ((String) -> Unit)? = null,
+    onResendOutboundItem: ((String) -> Unit)? = null,
     // Issue #585: open the composer WITH recording already started. Set true only
     // when the session launcher's hold+swipe-up ENTRY gesture opened this sheet; a
     // plain-tap open leaves it false (no recording). The effect below fires ONCE
@@ -491,6 +496,12 @@ public fun PromptComposerSheet(
             onDeleteOutboundItem = viewModel::discardOutboundItem,
             onRetryOutboundItem = onRetryOutboundItem ?: viewModel::retryOutboundItem,
             onResendAllOutbound = onResendAllOutbound ?: { viewModel.resendAllQueuedOrApproveHeld(); Unit },
+            onCheckOutboundItem = onCheckOutboundItem ?: viewModel::showHostAckCheckUnavailable,
+            onMarkOutboundHandled = onMarkOutboundHandled ?: viewModel::markOutboundHandled,
+            onResendOutboundItem = onResendOutboundItem ?: {
+                viewModel.resendUnknownOutboundItem(it)
+                Unit
+            },
             agentKind = agentKind,
             // Issue #1272: the durable undelivered-transcript retry surface.
             undeliveredTranscripts = undelivered.transcripts,
@@ -765,6 +776,9 @@ internal fun SheetContent(
     onDeleteOutboundItem: (String) -> Unit = {},
     onRetryOutboundItem: (String) -> Unit = {},
     onResendAllOutbound: () -> Unit = {},
+    onCheckOutboundItem: (String) -> Unit = {},
+    onMarkOutboundHandled: (String) -> Unit = {},
+    onResendOutboundItem: (String) -> Unit = {},
     // Issue #767: detected engine for the focused pane — selects the
     // `AgentCommandCatalog` the `/`-autocomplete dropdown filters. Null on a
     // shell pane / preview, where the dropdown is never shown.
@@ -1231,6 +1245,9 @@ internal fun SheetContent(
                 onDeleteOutboundItem = onDeleteOutboundItem,
                 onRetryOutboundItem = onRetryOutboundItem,
                 onResendAllOutbound = onResendAllOutbound,
+                onCheckOutboundItem = onCheckOutboundItem,
+                onMarkOutboundHandled = onMarkOutboundHandled,
+                onResendOutboundItem = onResendOutboundItem,
             )
 
             // Issue #745: connection-lost indicator. Surfaced the moment the host

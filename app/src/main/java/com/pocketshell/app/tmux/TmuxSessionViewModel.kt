@@ -692,7 +692,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * extra capacity) so a tap that happens while no collector is bound is not
      * lost.
      */
-    private val _redrawFeedback: MutableSharedFlow<String> =
+    internal val _redrawFeedback: MutableSharedFlow<String> =
         MutableSharedFlow(extraBufferCapacity = 4)
     public val redrawFeedback: SharedFlow<String> =
         _redrawFeedback.asSharedFlow()
@@ -1965,7 +1965,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    private var clientRef: TmuxClient? = null
+    internal var clientRef: TmuxClient? = null
     private var clientRegistration: ActiveTmuxClients.Registration? = null
     private var registeredHostId: Long? = null
     // Issue #235: hostId under which we registered application-scoped
@@ -2534,7 +2534,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // Reuse pane rows across reconciles so the attached TerminalSurfaceState
     // (and its emulator scrollback) survives layout-change events. Keyed by
     // pane ID; entries are removed when tmux drops the pane.
-    private val paneRows: MutableMap<String, TmuxPaneState> = ConcurrentHashMap()
+    internal val paneRows: MutableMap<String, TmuxPaneState> = ConcurrentHashMap()
 
     // Track per-pane producer jobs so we cancel them when the pane goes
     // away. The jobs are children of bridgeScope; cancelling the parent
@@ -3193,7 +3193,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
     }
 
-    private fun isCurrentRuntime(guard: RuntimeRefreshGuard): Boolean {
+    internal fun isCurrentRuntime(guard: RuntimeRefreshGuard): Boolean {
         // During the initial attach the client can be live while the target is
         // still held only by the connecting intent. Keep the existing
         // generation/client/session fences, but recognize that in-flight
@@ -3399,7 +3399,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // IO is now dispatched through the single [graceEffects] owner (no dual-write, D22).
     private var processForegroundForClearedOverrideForTest: Boolean? = null
     internal var latestConnectIntent: ConnectIntent? = null
-    private var connectGeneration: Long = 0L
+    internal var connectGeneration: Long = 0L
 
     // Issue #257: the in-flight fire-and-forget `detach-client` of the
     // PREVIOUS tmux client during a same-host session switch. The clean
@@ -11754,7 +11754,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
-    private suspend fun healActivePaneIfStaleRender(
+    internal suspend fun healActivePaneIfStaleRender(
         client: TmuxClient,
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard?,
@@ -14068,7 +14068,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         text: String,
         sendToken: String? = null,
-        durableRow: DurableOutboundRowIdentity? = null,
+        durableRow: DurableOutboundRowIdentity? = null, retry: Boolean = false
     ): Result<Unit> =
         sendToAgentPaneResult(
             paneId = paneId,
@@ -14076,6 +14076,7 @@ public class TmuxSessionViewModel @Inject constructor(
             keepFailedOptimisticOnDeliveryFailure = false,
             sendToken = sendToken,
             durableRow = durableRow,
+            retry
         )
 
     private suspend fun sendToAgentPaneResult(
@@ -14083,7 +14084,7 @@ public class TmuxSessionViewModel @Inject constructor(
         text: String,
         keepFailedOptimisticOnDeliveryFailure: Boolean,
         sendToken: String? = null,
-        durableRow: DurableOutboundRowIdentity? = null,
+        durableRow: DurableOutboundRowIdentity? = null, retry: Boolean = false
     ): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
@@ -14125,6 +14126,7 @@ public class TmuxSessionViewModel @Inject constructor(
             detection.agent,
             sendToken ?: optimisticId,
             durableRow,
+            retry = retry
         )
         if (result.isFailure) {
             if (keepFailedOptimisticOnDeliveryFailure) {
@@ -14195,7 +14197,7 @@ public class TmuxSessionViewModel @Inject constructor(
         payload: String,
         agent: AgentKind,
         sendToken: String = newOutboundDeliveryToken(),
-        durableRow: DurableOutboundRowIdentity? = null, deliveryProof: AgentSubmitDeliveryProof = AgentSubmitDeliveryProof.AgentTurnover,
+        durableRow: DurableOutboundRowIdentity? = null, deliveryProof: AgentSubmitDeliveryProof = AgentSubmitDeliveryProof.AgentTurnover, retry: Boolean = false
     ): Result<Unit> {
         if (durableAgentQueueSendMustDefer(durableRow, isSendTransportWritable())) {
             return Result.failure(IllegalStateException("Session is disconnected; kept queued."))
@@ -14208,7 +14210,7 @@ public class TmuxSessionViewModel @Inject constructor(
             payload,
             agent,
             sendToken,
-            durableRow, deliveryProof,
+            durableRow, deliveryProof, retry
         )
     }
 
@@ -14286,7 +14288,7 @@ public class TmuxSessionViewModel @Inject constructor(
         payload: String,
         agent: AgentKind,
         sendToken: String,
-        durableRow: DurableOutboundRowIdentity?, deliveryProof: AgentSubmitDeliveryProof,
+        durableRow: DurableOutboundRowIdentity?, deliveryProof: AgentSubmitDeliveryProof, retry: Boolean
     ): Result<Unit> {
         val payloadBytes = payload.toByteArray(Charsets.UTF_8)
         val runtimeIdentity = snapshotAgentSendRuntime(client)
@@ -14296,7 +14298,7 @@ public class TmuxSessionViewModel @Inject constructor(
         if (!isCurrentAgentSendRuntime(runtimeIdentity, paneId)) {
             return Result.failure(IllegalStateException("Agent send target is stale or foreign."))
         }
-        if (hostAck.active) return hostAck.sendAgentPayload(paneId, payload, sendToken)
+        hostAck.sendIf(paneId, payload, sendToken, retry)?.let { return it }
         val boundedCapture = boundedPaneCapture(runtimeIdentity)
         if (outboundDeliveryLedger.resolveLateAuthoritativeSubmitAck(agentTranscriptAuthority, paneId, payload, sendToken, durableRow, boundedCapture)) return Result.success(Unit).also { requestReconcile(client, paneId, ReconcileReason.Send) }
         // Issue #1526 S1 (verify-before-resend): a PRIOR ambiguous attempt for THIS send —
@@ -15444,14 +15446,14 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         bytes: ByteArray,
         sendToken: String = newOutboundDeliveryToken(),
-        durableRow: DurableOutboundRowIdentity? = null,
+        durableRow: DurableOutboundRowIdentity? = null, retry: Boolean = false
     ): Result<Unit> {
         if (bytes.isEmpty()) return Result.success(Unit)
         val client = awaitLiveTmuxClientForSend()
         if (client == null) {
             return Result.failure(IllegalStateException("Session is disconnected."))
         }
-        return writeInputToPaneResult(client, paneId, bytes, sendToken, durableRow)
+        return writeInputToPaneResult(client, paneId, bytes, sendToken, durableRow, retry)
     }
 
     // Issue #1586: RawBytes lane rides the verify-before-resend ledger (H1b); #1529: per-send token.
@@ -15460,8 +15462,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         bytes: ByteArray,
         sendToken: String,
-        durableRow: DurableOutboundRowIdentity? = null,
-    ): Result<Unit> = hostAck.sendRawBytesOrNull(paneId, bytes, sendToken, durableRow)
+        durableRow: DurableOutboundRowIdentity? = null, retry: Boolean = false
+    ): Result<Unit> = hostAck.sendRawBytesOrNull(paneId, bytes, sendToken, durableRow, retry)
         ?: deliverRawInputWithGuard(
         ledger = outboundDeliveryLedger,
         client = client,

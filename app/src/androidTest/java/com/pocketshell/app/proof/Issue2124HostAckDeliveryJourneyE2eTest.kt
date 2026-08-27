@@ -1,6 +1,7 @@
 package com.pocketshell.app.proof
 
 import android.os.SystemClock
+import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -9,7 +10,11 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.ViewModelProvider
 import androidx.room.Room
@@ -18,15 +23,33 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.bootstrap.HOST_BOOTSTRAP_SKIP_TAG
 import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
+import com.pocketshell.app.composer.COMPOSER_OUTBOUND_QUEUE_BANNER_TAG
+import com.pocketshell.app.composer.COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
+import com.pocketshell.app.composer.OutboundDeliveryOutcome
+import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.app.composer.OutboundRoute
+import com.pocketshell.app.composer.OutboundState
+import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
+import com.pocketshell.app.composer.composerOutboundQueueCheckTestTag
+import com.pocketshell.app.composer.composerOutboundQueueHandledTestTag
+import com.pocketshell.app.composer.composerOutboundQueueItemRowTestTag
+import com.pocketshell.app.composer.composerOutboundQueueResendTestTag
+import com.pocketshell.app.composer.composerOutboundQueueResendDialogBodyTestTag
+import com.pocketshell.app.composer.composerOutboundQueueResendDialogConfirmTestTag
+import com.pocketshell.app.composer.composerOutboundQueueResendDialogRootTestTag
+import com.pocketshell.app.composer.composerOutboundQueueResendDialogTitleTestTag
+import com.pocketshell.app.composer.composerOutboundQueueRetryTestTag
 import com.pocketshell.app.composer.outboundQueueSummary
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.TreeClientCache
+import com.pocketshell.app.projects.TreeRemoteSource
 import com.pocketshell.app.tmux.DurableOutboundRowIdentity
 import com.pocketshell.app.tmux.HOST_CLI_UPGRADE_HINT
 import com.pocketshell.app.tmux.HostAckSendFailedException
+import com.pocketshell.app.tmux.HostAckPaneRefreshProbe
 import com.pocketshell.app.tmux.HostAckSendProbe
 import com.pocketshell.app.tmux.OutboundLegacyStackProbe
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
@@ -105,6 +128,7 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
 
     private lateinit var fixtureKey: String
     private lateinit var hostRowTag: String
+    private lateinit var fixtureHostName: String
     private var seededPort: Int = DEFAULT_PORT
 
     /**
@@ -125,6 +149,12 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
         } else {
             DEFAULT_PORT
         }
+        // TreeClientCache is keyed by HostEntity.name. This journey recreates the
+        // same tmux session across methods and intentionally switches endpoints,
+        // so a stable display name would make one method's exact generation an
+        // explicit route for the next method. Give every seeded host its own
+        // cache namespace; the journey still exercises the real host/port path.
+        fixtureHostName = "$HOST_NAME_PREFIX ${testName.methodName} ${System.currentTimeMillis()}"
         fixtureKey = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(fixtureKey), port = seededPort)
         seedFramedFakeAgentSession(fixtureKey, seededPort)
@@ -149,6 +179,7 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
     fun workingAgentSendIsAcknowledgedAndTheRowClears() {
         val paneId = attachAndResolvePane()
         val vm = currentViewModel()
+        val composer = currentComposerViewModel()
         val store = SharedPrefsOutboundQueueStore(
             InstrumentationRegistry.getInstrumentation().targetContext,
         )
@@ -294,6 +325,7 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
      */
     @Test
     fun oldHostCliWithoutSendFailsClosedAndNeverStrandsTheRow() {
+        assertFixtureCacheDoesNotReuseLegacyExactGeneration()
         val paneId = attachAndResolvePane()
         val vm = currentViewModel()
         val store = SharedPrefsOutboundQueueStore(
@@ -359,6 +391,219 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
         )
     }
 
+    /**
+     * Issue #2240's real ambiguity boundary: the repository host CLI has already
+     * pasted the payload and is killed immediately after tmux accepts Enter. The
+     * durable journal therefore remains `pending` with a dead owner. A plain
+     * production queue dispatch must read the host's real exit 5, park the row as
+     * typed UnknownMayHaveLanded, leave a healthy tail free to drain, and never
+     * issue a second host send for the unknown head.
+     */
+    @Test
+    fun realSendInterruptedJournalParksUnknownLeavesTailDrainingAndSurvivesStoreRestart() {
+        val paneId = attachAndResolvePane()
+        val composer = currentComposerViewModel()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val store = SharedPrefsOutboundQueueStore(context)
+        val sessionKey = currentQueueSessionKey()
+        val suffix = System.currentTimeMillis().toString(36).takeLast(7)
+        val headPayload = "PS2240H$suffix possible head"
+        val tailPayload = "PS2240T$suffix healthy tail"
+        val head = enqueueRawRow(store, sessionKey, paneId, headPayload, "head-$suffix")
+        val tail = enqueueRawRow(store, sessionKey, paneId, tailPayload, "tail-$suffix")
+
+        val seed = runBlocking {
+            seedRealInterruptedJournal(
+                key = fixtureKey,
+                port = seededPort,
+                paneId = paneId,
+                token = head.id,
+                payload = headPayload,
+            )
+        }
+        writeText("issue2240-unknown-01-real-seed.txt", seed)
+        assertTrue(
+            "the real host seed must leave a pending journal record after tmux accepted Enter:\n$seed",
+            seed.contains("\"state\": \"pending\"") || seed.contains("\"state\":\"pending\""),
+        )
+        assertTrue(
+            "the real seed must name the durable row token:\n$seed",
+            seed.contains(head.id),
+        )
+
+        // Refreshes the production collector only after the real pending record
+        // exists. No direct send method is injected for this queue proof.
+        compose.runOnUiThread { composer.refreshOutboundQueueItemsFor(sessionKey) }
+        compose.waitUntil(timeoutMillis = QUEUE_DRAIN_TIMEOUT_MS) {
+            store.item(head.id)?.hostAckOutcome == OutboundDeliveryOutcome.UnknownMayHaveLanded &&
+                store.item(tail.id) == null
+        }
+
+        val unknown = requireNotNull(store.item(head.id))
+        assertEquals(OutboundState.Queued, unknown.state)
+        assertEquals(OutboundDeliveryOutcome.UnknownMayHaveLanded, unknown.hostAckOutcome)
+        assertFalse("HostAck unknown must not set the legacy inference bit", unknown.wireOutcomeUnknown)
+        assertEquals("the unknown head and healthy tail each use one host send", 2L, HostAckSendProbe.count())
+
+        // Recreating the production SharedPreferences store is the process-death /
+        // restart boundary. The typed outcome, not a volatile VM flag, must survive.
+        val restartedStore = SharedPrefsOutboundQueueStore(context)
+        val afterRestart = requireNotNull(restartedStore.item(head.id))
+        assertEquals(OutboundDeliveryOutcome.UnknownMayHaveLanded, afterRestart.hostAckOutcome)
+        assertEquals(OutboundState.Queued, afterRestart.state)
+        assertNull("ordinary Retry must not re-arm an unknown host token", restartedStore.requeueForRetry(head.id))
+        compose.runOnUiThread { composer.retryOutboundItem(head.id) }
+        SystemClock.sleep(1_000)
+        assertEquals("ordinary Retry must not dispatch the unknown head", 2L, HostAckSendProbe.count())
+
+        val afterDrain = runBlocking { remoteCapture(fixtureKey, seededPort, paneId) }
+        val submitLedger = runBlocking { remoteSubmitLedger(fixtureKey, seededPort) }
+        writeText("issue2240-unknown-02-head-tail-capture.txt", afterDrain)
+        writeText("issue2240-unknown-02-head-tail-submit-ledger.txt", submitLedger)
+        // capture-pane intentionally shows only the fake agent's latest visible
+        // turn. The ledger is the fixture's append-only ground truth for every
+        // real tmux Enter, so it proves the unknown head was injected once by
+        // the seed, the healthy tail once by the production drain, and that no
+        // ordinary retry injected the head again.
+        assertEquals(
+            "the ledger must contain exactly the seed and tail submissions, including empty entries",
+            2,
+            countLedgerSubmissions(submitLedger),
+        )
+        assertEquals(1, countLedgerPayload(submitLedger, headPayload))
+        assertEquals(1, countLedgerPayload(submitLedger, tailPayload))
+        assertEquals(1, countOccurrences(afterDrain, tailPayload.substringBefore(' ')))
+
+        openComposerQueue(head.id)
+        assertTrue(hasTag(composerOutboundQueueCheckTestTag(head.id)))
+        assertTrue(hasTag(composerOutboundQueueHandledTestTag(head.id)))
+        assertTrue(hasTag(composerOutboundQueueResendTestTag(head.id)))
+        assertFalse(
+            "an unknown row must not render the ordinary Retry action",
+            hasTag(composerOutboundQueueRetryTestTag(head.id)),
+        )
+
+        HostAckPaneRefreshProbe.reset()
+        performVisibleQueueAction(composerOutboundQueueCheckTestTag(head.id))
+        try {
+            compose.waitUntil(timeoutMillis = QUEUE_DRAIN_TIMEOUT_MS) {
+                HostAckPaneRefreshProbe.count() >= 1L
+            }
+        } catch (failure: Throwable) {
+            writeText("issue2240-unknown-03-check-probe.txt", HostAckPaneRefreshProbe.snapshot())
+            throw failure
+        }
+        assertEquals(paneId, HostAckPaneRefreshProbe.lastPaneId())
+        assertEquals("Check pane is read-only and must not run another send", 2L, HostAckSendProbe.count())
+
+        val afterCheck = runBlocking { remoteCapture(fixtureKey, seededPort, paneId) }
+        val afterCheckLedger = runBlocking { remoteSubmitLedger(fixtureKey, seededPort) }
+        writeText("issue2240-unknown-03-after-check.txt", afterCheck)
+        writeText("issue2240-unknown-03-after-check-submit-ledger.txt", afterCheckLedger)
+        assertEquals(
+            "a read-only Check must not add even an empty ledger submission",
+            2,
+            countLedgerSubmissions(afterCheckLedger),
+        )
+        assertEquals(1, countLedgerPayload(afterCheckLedger, headPayload))
+        assertEquals(1, countLedgerPayload(afterCheckLedger, tailPayload))
+
+        openComposerQueue(head.id)
+        performVisibleQueueAction(composerOutboundQueueHandledTestTag(head.id))
+        compose.waitUntil(timeoutMillis = QUEUE_DRAIN_TIMEOUT_MS) {
+            store.item(head.id) == null
+        }
+        writeText(
+            "issue2240-unknown-04-final-queue.txt",
+            "head=${store.item(head.id)}\ntail=${store.item(tail.id)}\n" +
+                "hostAckSends=${HostAckSendProbe.count()}\n",
+        )
+    }
+
+    /**
+     * The only path that may inject a second copy is the confirmed, dialog-gated
+     * explicit resend. This drives the same real pending journal left by the test
+     * above, then proves the warning, `--resend-interrupted`, journal promotion,
+     * and the resulting two physical occurrences in the pane.
+     */
+    @Test
+    fun explicitResendAfterRealSendInterruptedRequiresWarningAndAcceptsDuplicateRisk() {
+        val paneId = attachAndResolvePane()
+        val composer = currentComposerViewModel()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val store = SharedPrefsOutboundQueueStore(context)
+        val sessionKey = currentQueueSessionKey()
+        val suffix = System.currentTimeMillis().toString(36).takeLast(7)
+        val payload = "PS2240R$suffix resend explicitly"
+        val row = enqueueRawRow(store, sessionKey, paneId, payload, "resend-$suffix")
+
+        val seed = runBlocking {
+            seedRealInterruptedJournal(
+                key = fixtureKey,
+                port = seededPort,
+                paneId = paneId,
+                token = row.id,
+                payload = payload,
+            )
+        }
+        writeText("issue2240-resend-01-real-seed.txt", seed)
+        assertTrue(
+            "the resend test must start from the real pending journal:\n$seed",
+            seed.contains("\"state\": \"pending\"") || seed.contains("\"state\":\"pending\""),
+        )
+
+        compose.runOnUiThread { composer.refreshOutboundQueueItemsFor(sessionKey) }
+        compose.waitUntil(timeoutMillis = QUEUE_DRAIN_TIMEOUT_MS) {
+            store.item(row.id)?.hostAckOutcome == OutboundDeliveryOutcome.UnknownMayHaveLanded
+        }
+        assertEquals(1L, HostAckSendProbe.count())
+
+        openComposerQueue(row.id)
+        performVisibleQueueAction(composerOutboundQueueResendTestTag(row.id))
+        try {
+            compose.waitUntil(timeoutMillis = COMPOSER_TIMEOUT_MS) {
+                hasDirectTag(composerOutboundQueueResendDialogRootTestTag(row.id)) &&
+                    hasDirectTag(composerOutboundQueueResendDialogTitleTestTag(row.id)) &&
+                    hasDirectTag(composerOutboundQueueResendDialogBodyTestTag(row.id)) &&
+                    hasDirectTag(composerOutboundQueueResendDialogConfirmTestTag(row.id))
+            }
+        } catch (failure: Throwable) {
+            writeText(
+                "issue2240-resend-01-dialog-probe.txt",
+                "root=${hasDirectTag(composerOutboundQueueResendDialogRootTestTag(row.id))}\n" +
+                    "title=${hasDirectTag(composerOutboundQueueResendDialogTitleTestTag(row.id))}\n" +
+                    "body=${hasDirectTag(composerOutboundQueueResendDialogBodyTestTag(row.id))}\n" +
+                    "confirm=${hasDirectTag(composerOutboundQueueResendDialogConfirmTestTag(row.id))}\n",
+            )
+            throw failure
+        }
+        compose.onNodeWithTag(
+            composerOutboundQueueResendDialogConfirmTestTag(row.id),
+            useUnmergedTree = true,
+        ).performClick()
+
+        compose.waitUntil(timeoutMillis = QUEUE_DRAIN_TIMEOUT_MS) {
+            store.item(row.id) == null && HostAckSendProbe.count() == 2L
+        }
+        val record = runBlocking { remoteJournalRecord(fixtureKey, seededPort, row.id) }
+        val capture = runBlocking { remoteCapture(fixtureKey, seededPort, paneId) }
+        val submitLedger = runBlocking { remoteSubmitLedger(fixtureKey, seededPort) }
+        writeText("issue2240-resend-02-delivered-record.txt", record)
+        writeText("issue2240-resend-03-duplicate-risk-capture.txt", capture)
+        writeText("issue2240-resend-03-duplicate-risk-submit-ledger.txt", submitLedger)
+        assertTrue("explicit resend must promote the real journal", record.contains("\"state\": \"delivered\"") || record.contains("\"state\":\"delivered\""))
+        assertEquals(
+            "only the explicit duplicate-risk action may create the second occurrence",
+            2,
+            countLedgerPayload(submitLedger, payload),
+        )
+        assertEquals(
+            "explicit resend must create exactly two total submissions, including empty entries",
+            2,
+            countLedgerSubmissions(submitLedger),
+        )
+    }
+
     // ------------------------------------------------------------- harness
 
     /** The durable-queue key the composer enqueues under for the live session. */
@@ -367,8 +612,32 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
             "a live session target is required to read the composer queue"
         }
 
+    private fun enqueueRawRow(
+        store: SharedPrefsOutboundQueueStore,
+        sessionKey: String,
+        paneId: String,
+        payload: String,
+        sendKey: String,
+    ): OutboundItem = store.enqueue(
+        sessionKey = sessionKey,
+        cleanText = payload,
+        paneId = paneId,
+        route = OutboundRoute.RawBytes,
+        sendKey = "issue2240-$sendKey",
+    )
+
     private fun hasTag(tag: String): Boolean = runCatching {
         compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+    }.getOrDefault(false)
+
+    private fun hasDirectTag(tag: String): Boolean = runCatching {
+            compose.onNodeWithTag(tag).fetchSemanticsNode()
+        true
+    }.getOrDefault(false)
+
+    private fun hasText(text: String): Boolean = runCatching {
+        compose.onAllNodesWithText(text, substring = true, useUnmergedTree = true)
+            .fetchSemanticsNodes().isNotEmpty()
     }.getOrDefault(false)
 
     private fun sendEnabled(): Boolean = runCatching {
@@ -380,6 +649,13 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
 
     /** Type into the production composer and tap its Send — no seam, no shortcut. */
     private fun openComposerAndSend(payload: String) {
+        openComposer()
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true).performTextInput(payload)
+        compose.waitUntil(timeoutMillis = COMPOSER_TIMEOUT_MS) { sendEnabled() }
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true).performClick()
+    }
+
+    private fun openComposer() {
         compose.waitUntil(timeoutMillis = COMPOSER_TIMEOUT_MS) {
             hasTag(SESSION_COMPOSER_LAUNCHER_TAG) || hasTag(COMPOSER_DRAFT_TAG)
         }
@@ -388,9 +664,36 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
                 .performClick()
             compose.waitUntil(timeoutMillis = COMPOSER_TIMEOUT_MS) { hasTag(COMPOSER_DRAFT_TAG) }
         }
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG, useUnmergedTree = true).performTextInput(payload)
-        compose.waitUntil(timeoutMillis = COMPOSER_TIMEOUT_MS) { sendEnabled() }
-        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG, useUnmergedTree = true).performClick()
+    }
+
+    private fun openComposerQueue(itemId: String) {
+        openComposer()
+        compose.waitUntil(timeoutMillis = COMPOSER_TIMEOUT_MS) {
+            hasTag(COMPOSER_OUTBOUND_QUEUE_BANNER_TAG)
+        }
+        val rowTag = composerOutboundQueueItemRowTestTag(itemId)
+        if (!hasTag(rowTag)) {
+            compose.onNodeWithTag(COMPOSER_OUTBOUND_QUEUE_TOGGLE_TAG, useUnmergedTree = true)
+                .performClick()
+        }
+        compose.waitUntil(timeoutMillis = COMPOSER_TIMEOUT_MS) { hasTag(rowTag) }
+        compose.onNodeWithTag(rowTag, useUnmergedTree = true).assertExists()
+    }
+
+    /**
+     * Queue action tags are attached to the physical button, but the status
+     * region is independently vertically scrollable. Match the merged
+     * clickable node, scroll that node into the viewport, and only then invoke
+     * it. A bare tag lookup can select an unmerged tag node whose bounds are
+     * clipped while the real clickable ancestor remains below the fold.
+     */
+    private fun performVisibleQueueAction(tag: String) {
+        val action = compose.onNode(
+            hasTestTag(tag) and hasClickAction(),
+            useUnmergedTree = false,
+        )
+        action.performScrollTo().assertIsDisplayed()
+        action.performClick()
     }
 
     private fun attachAndResolvePane(): String {
@@ -448,6 +751,14 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
         return requireNotNull(vm) { "TmuxSessionViewModel not available" }
     }
 
+    private fun currentComposerViewModel(): PromptComposerViewModel {
+        var vm: PromptComposerViewModel? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            vm = ViewModelProvider(activity)[PromptComposerViewModel::class.java]
+        }
+        return requireNotNull(vm) { "PromptComposerViewModel not available" }
+    }
+
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()
             .context.assets.open("test_key").bufferedReader().use { it.readText() }
@@ -467,7 +778,7 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
             )
             val hostId = db.hostDao().insert(
                 HostEntity(
-                    name = "Issue2124 Host Ack",
+                    name = fixtureHostName,
                     hostname = DEFAULT_HOST,
                     port = port,
                     username = DEFAULT_USER,
@@ -491,11 +802,13 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
         val script = buildString {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
+            appendLine("rm -f /tmp/issue2240-submit-ledger")
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_NAME)} -x 80 -y 40 " +
                     shellQuote(
                         "POCKETSHELL_FAKE_AGENT_RENDER_MODE=" +
                             Issue2056InducedSubmitAmbiguity.FRAMED_INPUT_RENDER_MODE +
+                            " POCKETSHELL_FAKE_AGENT_SUBMIT_LEDGER=/tmp/issue2240-submit-ledger" +
                             " exec /usr/local/bin/pocketshell-fake-agent",
                     ),
             )
@@ -536,6 +849,88 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
             "ls -1 \"\${XDG_STATE_HOME:-\$HOME/.local/state}\"/pocketshell/sends 2>/dev/null || true",
         )
 
+    private suspend fun remoteSubmitLedger(key: String, port: Int): String =
+        remoteExec(key, port, "cat /tmp/issue2240-submit-ledger 2>/dev/null || true")
+
+    /**
+     * Run the repository's real `pocketshell send`, not the deterministic fixture
+     * shim, and kill its owning Python process after the tmux send-keys call
+     * returns. The shell survives to print the record, making the precondition
+     * observable: one payload occurrence plus a genuine dead-owner `pending`
+     * journal. The app's next ordinary call then has to receive the real exit 5.
+     */
+    private suspend fun seedRealInterruptedJournal(
+        key: String,
+        port: Int,
+        paneId: String,
+        token: String,
+        payload: String,
+    ): String {
+        val payloadFile = "/tmp/issue2240-real-payload"
+        val stdoutFile = "/tmp/issue2240-real-stdout"
+        val stderrFile = "/tmp/issue2240-real-stderr"
+        val script = buildString {
+            appendLine("set +e")
+            appendLine("state_dir=\"\${XDG_STATE_HOME:-\$HOME/.local/state}/pocketshell/sends\"")
+            appendLine("mkdir -p \"\$state_dir\"")
+            appendLine(
+                "record=\"\$state_dir/\$(printf %s ${shellQuote(token)} | " +
+                    "sha256sum | cut -d' ' -f1).json\"",
+            )
+            appendLine("rm -f \"\$record\" $payloadFile $stdoutFile $stderrFile /tmp/pocketshell-kill-after-enter")
+            appendLine("printf %s ${shellQuote(payload)} > $payloadFile")
+            appendLine("touch /tmp/pocketshell-kill-after-enter")
+            appendLine(
+                "/usr/local/bin/pocketshell-real-send send --pane ${shellQuote(paneId)} " +
+                    "--token ${shellQuote(token)} --enter --timeout 10 < $payloadFile > $stdoutFile 2> $stderrFile",
+            )
+            appendLine("seed_rc=\$?")
+            appendLine("rm -f /tmp/pocketshell-kill-after-enter $payloadFile")
+            appendLine("printf '%s\\n' \"seed_rc=\$seed_rc\"")
+            appendLine("printf '%s\\n' 'seed_stdout_begin'")
+            appendLine("cat $stdoutFile 2>/dev/null || true")
+            appendLine("printf '%s\\n' 'seed_stderr_begin'")
+            appendLine("cat $stderrFile 2>/dev/null || true")
+            appendLine("printf '%s\\n' 'seed_record_begin'")
+            appendLine("printf '%s\\n' \"record=\$record\"")
+            appendLine("cat \"\$record\" 2>/dev/null || printf '%s\\n' record_missing")
+            appendLine("rm -f $stdoutFile $stderrFile")
+        }
+        return remoteExec(key, port, script)
+    }
+
+    private suspend fun remoteJournalRecord(key: String, port: Int, token: String): String {
+        val digest = "printf %s ${shellQuote(token)} | sha256sum | cut -d' ' -f1"
+        val record = "\$state_dir/\$($digest).json"
+        return remoteExec(
+            key,
+            port,
+            "state_dir=\"\${XDG_STATE_HOME:-\$HOME/.local/state}/pocketshell/sends\"; " +
+                "record=\"$record\"; cat \"\$record\" 2>/dev/null || printf '%s\\n' record_missing",
+        )
+    }
+
+    private fun countOccurrences(text: String, needle: String): Int {
+        if (needle.isEmpty()) return 0
+        var count = 0
+        var start = 0
+        while (true) {
+            val found = text.indexOf(needle, start)
+            if (found < 0) return count
+            count += 1
+            start = found + needle.length
+        }
+    }
+
+    private fun countLedgerPayload(ledger: String, payload: String): Int {
+        val encoded = Base64.encodeToString(payload.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+        return ledger.lineSequence().count { it.substringAfter('|', missingDelimiterValue = "") == encoded }
+    }
+
+    /** Every `counter|payload` row counts, including the empty-payload `counter|` row. */
+    private fun countLedgerSubmissions(ledger: String): Int =
+        ledger.lineSequence().count { it.contains('|') }
+
     private suspend fun cleanupRemoteTmuxSession(key: String, port: Int) {
         remoteExec(key, port, "tmux kill-session -t ${shellQuote(SESSION_NAME)} 2>/dev/null || true")
     }
@@ -564,10 +959,52 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
+    /**
+     * Load-bearing #2240 fixture guard. A prior run stored the recreated
+     * session's exact tmux generation under the old shared display name. If
+     * this journey ever goes back to that name-only namespace, the old host
+     * bind can hydrate that generation before the authoritative list-panes
+     * result, producing the Attaching -> Live-without-reveal failure. The
+     * assertion is deliberately against the real cache implementation and an
+     * exact-generation node, not a timing/wait heuristic.
+     */
+    private fun assertFixtureCacheDoesNotReuseLegacyExactGeneration() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val cache = TreeClientCache(context)
+        val legacyHostName = LEGACY_HOST_NAME
+        cache.write(
+            legacyHostName,
+            TreeClientCache.CachedTree(
+                nodes = listOf(
+                    TreeRemoteSource.TreeNode(
+                        session = SESSION_NAME,
+                        order = 0,
+                        folderPath = "/tmp/issue2240",
+                        collapsed = false,
+                        tmuxSessionId = "\$7",
+                        sessionCreated = 1_700_000_038L,
+                    ),
+                ),
+            ),
+        )
+        try {
+            assertNull(
+                "the #2240 fixture host must not hydrate the legacy shared-name " +
+                    "exact generation; hostName=$fixtureHostName",
+                cache.peek(fixtureHostName),
+            )
+        } finally {
+            cache.write(legacyHostName, TreeClientCache.CachedTree(nodes = emptyList()))
+            cache.write(fixtureHostName, TreeClientCache.CachedTree(nodes = emptyList()))
+        }
+    }
+
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue2124-host-ack"
         const val SESSION_NAME: String = "issue2124-framed-agent"
+        const val HOST_NAME_PREFIX: String = "Issue2124 Host Ack"
+        const val LEGACY_HOST_NAME: String = HOST_NAME_PREFIX
         const val QUEUE_SESSION_KEY: String = "issue2124/hostack"
 
         /** `agents-old-cli` — the fixture whose `pocketshell` has no `send`. */

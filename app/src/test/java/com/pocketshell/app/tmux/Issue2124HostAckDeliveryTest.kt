@@ -1,22 +1,36 @@
 package com.pocketshell.app.tmux
 
 import android.content.Context
+import androidx.lifecycle.SavedStateHandle
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.ComposerSendResult
+import com.pocketshell.app.composer.OutboundDeliveryOutcome
 import com.pocketshell.app.composer.OutboundItem
 import com.pocketshell.app.composer.OutboundRoute
+import com.pocketshell.app.composer.OutboundQueueStore
+import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.composer.SharedPrefsOutboundQueueStore
+import com.pocketshell.app.composer.collectPromptComposerSendRequests
 import com.pocketshell.app.composer.outboundQueueSummary
+import com.pocketshell.app.composer.resendUnknownOutboundItem
+import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.OutboundDeliveryAuthority
+import com.pocketshell.app.settings.VoiceTranscriptionProvider
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.voice.WhisperClient
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -64,11 +78,70 @@ import org.robolectric.annotation.Config
 class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
 
     private val context: Context = ApplicationProvider.getApplicationContext()
+    private val createdComposerViewModels = mutableListOf<PromptComposerViewModel>()
 
     @Before
     fun resetProbe() {
         OutboundLegacyStackProbe.reset()
         HostAckSendProbe.reset()
+    }
+
+    @After
+    fun clearComposerViewModels() {
+        createdComposerViewModels.forEach { it.clearForTest() }
+        createdComposerViewModels.clear()
+    }
+
+    private class MinimalMicCapture : PromptComposerViewModel.MicCapture {
+        override fun start() = Unit
+        override fun stop(): ByteArray = ByteArray(0)
+        override fun currentAmplitude(): Float = 0f
+    }
+
+    private class MinimalVoiceSettings : PromptComposerViewModel.VoiceSettingsSnapshot {
+        override fun silenceWindowMs(): Long = PromptComposerViewModel.SILENCE_WINDOW_MS
+        override fun whisperLanguageHint(): String? = null
+        override fun transcriptionProvider(): VoiceTranscriptionProvider =
+            VoiceTranscriptionProvider.OpenAiWhisper
+    }
+
+    private class FakeComposerVault : PromptComposerViewModel.ApiKeyVault {
+        private var key: CharArray? = "sk-2240".toCharArray()
+
+        override fun save(key: CharArray) {
+            this.key = key.copyOf()
+        }
+
+        override fun load(): CharArray? = key?.copyOf()
+
+        override fun clear() {
+            key = null
+        }
+    }
+
+    private fun newComposerViewModel(store: OutboundQueueStore): PromptComposerViewModel {
+        val dispatcher = StandardTestDispatcher(scheduler)
+        return PromptComposerViewModel(
+            audioRecorder = MinimalMicCapture(),
+            whisperClientFactory = WhisperClientFactory {
+                object : WhisperClient {
+                    override suspend fun transcribe(
+                        audio: ByteArray,
+                        language: String?,
+                    ): Result<String> = Result.success("unused")
+                }
+            },
+            apiKeyStorage = FakeComposerVault(),
+            voiceSettings = MinimalVoiceSettings(),
+            outboundQueueStore = store,
+            savedStateHandle = SavedStateHandle(),
+        ).also { composerViewModel ->
+            composerViewModel.samplerDispatcher = dispatcher
+            composerViewModel.outboundQueueDispatcher = dispatcher
+            composerViewModel.setSendWatchdogTimeoutForTest(null)
+            composerViewModel.setTransportWritableProbe { true }
+            createdComposerViewModels += composerViewModel
+        }
     }
 
     private companion object {
@@ -351,19 +424,124 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
     }
 
     /**
-     * Acceptance criterion 3: retry after **any** failure produces a REAL delivery
-     * attempt — a fresh host round trip that returns a real answer, never the
-     * ledger-gated no-op the old stack produced — and the token keeps the pane to
-     * at most ONE occurrence, whatever the first answer was.
+     * Issue #2240 review regression: an explicit resend carries the HostAck
+     * duplicate-risk opt-in even when the persisted authority is currently the
+     * legacy escape hatch. The explicit action must reach the production VM
+     * send boundary, where HostAck rejects the unsafe combination; it must not
+     * fall through to the legacy capture/turnover oracle and inject a second
+     * copy.
      *
-     * Every documented failure class is exercised, not one convenient case (G2):
-     * the pre-claim rejections (bad usage, absent CLI), the definitive rollbacks
-     * (`pane-not-found`, `tmux-failed`, `journal-failed`), and the genuinely
-     * ambiguous ones that keep the claim (`send-interrupted`, `timeout`, and a
-     * lost answer).
+     * Mutation that must redden this test: change the production branch from
+     * `hostAck.active || resendInterrupted` back to `hostAck.active`. The
+     * request then returns `AuthoritativeAckPending`, reads capture-pane, and
+     * increments [OutboundLegacyStackProbe] instead of producing the typed
+     * HostAck unknown result asserted below.
      */
     @Test
-    fun retryAfterAnyFailureIsARealAttemptAndNeverDuplicates() = runTest(scheduler) {
+    fun explicitUnknownResendCannotFallThroughToLegacyWhenAuthorityIsLegacy() =
+        runTest(scheduler) {
+            val session = "tmux:2240/legacy-explicit-resend"
+            val payload = "possible duplicate after a lost host answer"
+            val store = SharedPrefsOutboundQueueStore(context)
+            store.clearSession(session)
+            val row = newRow(store, session, payload)
+            assertEquals(
+                OutboundDeliveryOutcome.UnknownMayHaveLanded,
+                store.markHostAckUnknown(row.id)?.hostAckOutcome,
+            )
+
+            val client = FakeTmuxClient().also {
+                it.defaultCaptureResponse = workingFrame(payload)
+            }
+            val tmuxViewModel = newVm(
+                applicationContext = context,
+                outboundQueueStore = store,
+            )
+            tmuxViewModel.attachClientForTest(client)
+            // This is the persisted settings value the screen may have loaded;
+            // the test override is the existing deterministic settings seam.
+            tmuxViewModel.hostAck.authorityOverrideForTest =
+                OutboundDeliveryAuthority.TerminalInference
+            var hostAckExecCalled = false
+            tmuxViewModel.hostAck.execOverrideForTest = HostAckSendExec { _, _ ->
+                hostAckExecCalled = true
+                ExecResult("delivered\n", "", 0)
+            }
+            tmuxViewModel.setAgentSubmitEnterDelayForTest(0)
+            tmuxViewModel.setAgentSubmitAckTimeoutForTest(50)
+
+            val composerViewModel = newComposerViewModel(store)
+            val resultsByRow = mutableMapOf<String, MutableList<ComposerSendResult>>()
+            var observedResendInterrupted = false
+            var observedHostAckFailure: Throwable? = null
+            backgroundScope.launch(UnconfinedTestDispatcher(scheduler)) {
+                collectPromptComposerSendRequests(
+                    viewModel = composerViewModel,
+                    onSend = { request ->
+                        observedResendInterrupted = request.resendInterrupted
+                        val rowId = requireNotNull(request.outboundQueueItemId)
+                        val result = tmuxViewModel.sendAgentPayloadToPaneResult(
+                            paneId = request.sendTarget.paneId,
+                            payload = request.text,
+                            agent = AgentKind.ClaudeCode,
+                            sendToken = rowId,
+                            durableRow = DurableOutboundRowIdentity(session, rowId),
+                            retry = request.resendInterrupted,
+                        )
+                        observedHostAckFailure = result.exceptionOrNull()
+                        result.toComposerSendResult().also {
+                            resultsByRow.getOrPut(rowId) { mutableListOf() } += it
+                        }
+                    },
+                )
+            }
+            runCurrent()
+            composerViewModel.onComposerTargetChanged(session)
+            assertEquals(
+                OutboundDeliveryOutcome.UnknownMayHaveLanded,
+                composerViewModel.outboundQueueItems.value.single().hostAckOutcome,
+            )
+
+            assertTrue(composerViewModel.resendUnknownOutboundItem(row.id))
+            advanceUntilIdle()
+
+            assertTrue("the production action must carry the opt-in", observedResendInterrupted)
+            assertTrue(
+                "legacy authority must reject explicit resend at the HostAck boundary",
+                observedHostAckFailure is HostAckSendUnknownException,
+            )
+            assertEquals(
+                listOf(ComposerSendResult.UnknownMayHaveLanded),
+                resultsByRow[row.id],
+            )
+            assertFalse("legacy authority must not execute a host send", hostAckExecCalled)
+            assertEquals(
+                "explicit unknown resend must not consult legacy inference: " +
+                    OutboundLegacyStackProbe.snapshot(),
+                0L,
+                OutboundLegacyStackProbe.total(),
+            )
+            assertTrue("no legacy tmux injection is allowed", client.sentCommands.isEmpty())
+            assertEquals(
+                OutboundDeliveryOutcome.UnknownMayHaveLanded,
+                store.item(row.id)?.hostAckOutcome,
+            )
+        }
+
+    /**
+     * Acceptance criterion 3: retry after a **safe** failure produces a REAL
+     * delivery attempt — a fresh host round trip that returns a real answer,
+     * never the ledger-gated no-op the old stack produced — and the token keeps
+     * the pane to at most ONE occurrence. Host-ack unknown answers are excluded:
+     * the queue integration test owns the stronger #2240 rule that ordinary
+     * Retry must not dispatch them at all.
+     *
+     * Every safe retry class is exercised, not one convenient case (G2): the
+     * pre-claim rejections (bad usage, absent CLI) and the definitive rollbacks
+     * (`pane-not-found`, `tmux-failed`, `journal-failed`).
+     */
+    @Test
+    fun retryAfterSafeFailureIsARealAttemptAndNeverDuplicates() = runTest(scheduler) {
         val failures: List<Pair<String, ExecResult?>> = listOf(
             "bad-usage" to ExecResult("bad-usage\n", "--pane is required", 2),
             "old-cli" to ExecResult("", "Error: No such command 'send'.", 2),
@@ -396,11 +574,29 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
                 )
             }
             advanceUntilIdle()
+            val firstResult = first.await().toComposerSendResult()
             assertEquals(
-                "$name must be a plain retryable Failed",
-                ComposerSendResult.Failed,
-                first.await().toComposerSendResult(),
+                "$name must enter its documented typed lane",
+                when (name) {
+                    "send-interrupted", "timeout", "no-answer" ->
+                        ComposerSendResult.UnknownMayHaveLanded
+                    else -> ComposerSendResult.Failed
+                },
+                firstResult,
             )
+
+            if (firstResult == ComposerSendResult.UnknownMayHaveLanded) {
+                assertEquals(
+                    "$name: an unknown answer is not an ordinary retry candidate",
+                    1,
+                    host.commands.size,
+                )
+                assertFalse(
+                    "$name: the unknown answer must not use the legacy bit",
+                    store.item(row.id)?.wireOutcomeUnknown ?: false,
+                )
+                return@forEach
+            }
 
             val retry = async {
                 vm.sendAgentPayloadToPaneResult(
@@ -416,7 +612,7 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
                 host.commands.size,
             )
             assertNotEquals(
-                "$name: a retry may never produce the absorbing 'unconfirmed' state",
+                "$name: a retry may never produce the legacy absorbing state",
                 ComposerSendResult.AuthoritativeAckPending,
                 retryResult,
             )
@@ -507,8 +703,8 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
             identityDuringCut,
         )
         assertEquals(
-            "a lost answer across the dropped link is an honest Failed, never an unknown",
-            ComposerSendResult.Failed,
+            "a lost answer across the dropped link is unknown until the host journal answers",
+            ComposerSendResult.UnknownMayHaveLanded,
             first.await().toComposerSendResult(),
         )
 
@@ -607,7 +803,7 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
             vm.currentTargetSessionKeyForTest(),
         )
         assertEquals(
-            ComposerSendResult.Failed,
+            ComposerSendResult.UnknownMayHaveLanded,
             first.await().toComposerSendResult(),
         )
 
@@ -646,8 +842,8 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
      *    so the relaunched app's retry reads `already-delivered` and converges;
      *  - the host process died too, after the paste ⇒ the record is an unresolved
      *    claim with a dead owner, so a plain retry reads exit 5 `send-interrupted`
-     *    — an honest retryable `Failed`, never an "unconfirmed" row, and still
-     *    NOT a second injection (this client never passes `--resend-interrupted`).
+     *    — an honest `UnknownMayHaveLanded` row, and still NOT a second injection
+     *    (ordinary sends never pass `--resend-interrupted`).
      *
      * Mutation that must redden it: let the retry inject when the claim is
      * unresolved, and the second arm's `injections` becomes two.
@@ -688,7 +884,7 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
                 "the durable row must survive the process boundary"
             }
             assertFalse(
-                "an app kill must not leave the row unconfirmed",
+                "an app kill must not leave the legacy row unconfirmed",
                 recovered.wireOutcomeUnknown,
             )
             val relaunchedVm =
@@ -763,8 +959,8 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
             }
             advanceUntilIdle()
             assertEquals(
-                "an unresolved claim with a dead owner is an honest retryable Failed",
-                ComposerSendResult.Failed,
+                "an unresolved claim with a dead owner is explicitly unknown",
+                ComposerSendResult.UnknownMayHaveLanded,
                 retryB.await().toComposerSendResult(),
             )
             assertEquals(
@@ -773,7 +969,7 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
                 hostB.injections,
             )
             assertFalse(
-                "and never an 'unconfirmed' row",
+                "and never the legacy 'unconfirmed' row",
                 requireNotNull(relaunchedStoreB.item(rowB.id)).wireOutcomeUnknown,
             )
         }
@@ -785,8 +981,9 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
      * arrives, so the second really does meet a LIVE claim — the exit 8
      * `send-in-progress` branch of the CLI.
      *
-     * Mutation that must redden it: answer the concurrent second call `delivered`
-     * instead of `send-in-progress` and `injections` becomes two.
+     * Mutation that must redden it: remove the bounded status reads or answer the
+     * concurrent second call `delivered` instead of `send-in-progress` and the
+     * owner/result distinction disappears.
      */
     @Test
     fun doubleTapRetryDoesNotDuplicateThePayloadOrTheEnter() = runTest(scheduler) {
@@ -834,13 +1031,13 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
         }
         advanceUntilIdle()
         assertEquals(
-            "the second tap must reach the host WHILE the first is in flight",
-            2,
+            "the second tap must perform only bounded status reads while the first is in flight",
+            1 + HOST_ACK_SEND_STATUS_RETRIES,
             host.commands.size,
         )
         assertEquals(
-            "a live sibling owns the outcome: an honest retryable Failed, never an unknown",
-            ComposerSendResult.Failed,
+            "a live sibling owns the outcome: bounded reads remain InProgress, never unknown",
+            ComposerSendResult.InProgress,
             secondTap.await().toComposerSendResult(),
         )
 
@@ -880,16 +1077,13 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
     }
 
     /**
-     * Acceptance criterion 5: with the flag on new, `wireOutcomeUnknown` is
-     * UNREACHABLE and no UI path can display "unconfirmed" — for EVERY documented
-     * failure exit, not just the one convenient case (G2 class coverage).
-     *
-     * `AuthoritativeAckPending` is the sole producer of `wireOutcomeUnknown`
-     * (`PromptComposerOutboundSend.kt`'s `when (result)`), so asserting that no
-     * exit can produce it is the proof.
+     * Acceptance criterion 5: HostAck's typed exits never enter the LEGACY
+     * `wireOutcomeUnknown`/`AuthoritativeAckPending` lane. Exit 5 has its own
+     * durable `UnknownMayHaveLanded` state; it must not be laundered into the
+     * legacy terminal-inference wording (G2 class coverage).
      */
     @Test
-    fun everyDocumentedFailureExitIsAPlainRetryableFailedAndNeverUnconfirmed() =
+    fun everyDocumentedFailureExitUsesItsTypedLaneAndNeverUsesLegacyUnconfirmed() =
         runTest(scheduler) {
             val cases: List<Pair<String, ExecResult?>> = listOf(
                 "bad-usage" to ExecResult("bad-usage\n", "--pane is required", 2),
@@ -930,9 +1124,14 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
 
                 val result = sent.await().toComposerSendResult()
                 assertEquals(
-                    "$name must be a plain retryable Failed, never AuthoritativeAckPending " +
-                        "(the sole producer of the absorbing 'unconfirmed' row)",
-                    ComposerSendResult.Failed,
+                    "$name must use its documented typed lane, never the legacy " +
+                        "AuthoritativeAckPending row",
+                    when (name) {
+                        "send-interrupted", "timeout", "no-answer" ->
+                            ComposerSendResult.UnknownMayHaveLanded
+                        "send-in-progress" -> ComposerSendResult.InProgress
+                        else -> ComposerSendResult.Failed
+                    },
                     result,
                 )
                 assertEquals(
@@ -1021,8 +1220,12 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
      */
     @Test
     fun serverLedgerEqualsPrunedRowsAndNothingIsUnconfirmed() = runTest(scheduler) {
-        val session = "sessConverge"
+        val session = "tmux:2240/\$9/1900"
         val store = SharedPrefsOutboundQueueStore(context)
+        // This suite intentionally uses a durable store. Clear only this named
+        // fixture session so a prior failed run cannot leave a parked HostAck
+        // head in front of the rows created by the current run.
+        store.clearSession(session)
         // The SECOND row's answer is lost mid-way; every other call answers
         // normally. (Round one had `if (call == 2) null else null`, i.e. an
         // unconditional null, so the comment described a journey the script did
@@ -1038,30 +1241,56 @@ class Issue2124HostAckDeliveryTest : TmuxSessionViewModelTestBase() {
         vm.hostAck.authorityOverrideForTest = OutboundDeliveryAuthority.HostCliAck
         vm.hostAck.execOverrideForTest = host
 
+        val composerViewModel = newComposerViewModel(store)
+        val resultsByRow = mutableMapOf<String, MutableList<ComposerSendResult>>()
+        backgroundScope.launch(UnconfinedTestDispatcher(scheduler)) {
+            collectPromptComposerSendRequests(
+                viewModel = composerViewModel,
+                onSend = { request ->
+                    val rowId = requireNotNull(request.outboundQueueItemId)
+                    val result = vm.sendAgentPayloadToPaneResult(
+                        paneId = request.sendTarget.paneId,
+                        payload = request.text,
+                        agent = AgentKind.ClaudeCode,
+                        sendToken = rowId,
+                        durableRow = DurableOutboundRowIdentity(session, rowId),
+                        retry = request.resendInterrupted,
+                    ).toComposerSendResult()
+                    resultsByRow.getOrPut(rowId) { mutableListOf() } += result
+                    result
+                },
+            )
+        }
+        runCurrent()
+        composerViewModel.onComposerTargetChanged(session)
+
         val pruned = mutableSetOf<String>()
         listOf("first prompt", "second prompt", "third prompt").forEach { text ->
             val row = newRow(store, session, text)
-            var result: ComposerSendResult
-            // A real journey retries a failed row; the loop is bounded so a
-            // never-resolving row would FAIL the convergence assertion below
-            // rather than spin.
-            var attempt = 0
-            do {
-                attempt += 1
-                val sent = async {
-                    vm.sendAgentPayloadToPaneResult(
-                        "%0",
-                        text,
-                        AgentKind.ClaudeCode,
-                        sendToken = row.id,
-                        durableRow = DurableOutboundRowIdentity(session, row.id),
-                    )
-                }
+            composerViewModel.refreshOutboundQueueItemsFor(session)
+            assertEquals(row.id, composerViewModel.retryNextOutboundItem())
+            advanceUntilIdle()
+
+            val rowResults = resultsByRow[row.id].orEmpty()
+            if (rowResults.singleOrNull() == ComposerSendResult.UnknownMayHaveLanded) {
+                // The production collector has now durably stamped the typed
+                // unknown. Only the user-confirmed duplicate-risk action may
+                // clear it and dispatch the same row with --resend-interrupted.
+                assertTrue(
+                    "$text must be rearmed by the production explicit-resend action",
+                    composerViewModel.resendUnknownOutboundItem(row.id),
+                )
                 advanceUntilIdle()
-                result = sent.await().toComposerSendResult()
-            } while (result == ComposerSendResult.Failed && attempt < 3)
-            assertEquals("$text must converge", ComposerSendResult.Delivered, result)
-            assertTrue(store.markDelivered(row.id))
+                assertTrue(
+                    "$text must carry the explicit duplicate-risk host opt-in",
+                    host.commands.last().contains("--resend-interrupted"),
+                )
+            }
+            assertEquals(
+                "$text must converge through the production collector",
+                ComposerSendResult.Delivered,
+                resultsByRow[row.id]?.last(),
+            )
             pruned += row.id
         }
 

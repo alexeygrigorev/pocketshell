@@ -1169,6 +1169,8 @@ public class PromptComposerViewModel @Inject constructor(
         // may well have landed). Recorded durably on the row so the drain stops
         // re-dispatching it and the UI stops claiming it is "sending next".
         deliveryOutcomeUnknown: Boolean = false,
+        // #2240: typed HostAck unresolved outcome, separate from legacy inference.
+        hostAckOutcome: OutboundDeliveryOutcome = OutboundDeliveryOutcome.None,
     ) {
         if (!claimOutboundTerminalCallback(request)) return
         clearOutboundRetrying(request.outboundQueueItemId)
@@ -1188,6 +1190,7 @@ public class PromptComposerViewModel @Inject constructor(
             return
         }
         if (deliveryOutcomeUnknown) outboundQueueStore.markDeliveryOutcomeUnknown(requeued.id)
+        if (hostAckOutcome != OutboundDeliveryOutcome.None) outboundQueueStore.markHostAckUnknown(requeued.id)
         requeued.recordQueueRowState("InFlight", "Queued", "deferred") // #1682
         DiagnosticEvents.record(
             "action",
@@ -1586,9 +1589,8 @@ public class PromptComposerViewModel @Inject constructor(
         return requeued
     }
 
-    internal fun dispatchOutboundItem(id: String): Boolean {
-        return dispatchOutboundItemThroughDrain(id)
-    }
+    internal fun dispatchOutboundItem(id: String, resendInterrupted: Boolean = false): Boolean =
+        dispatchOutboundItemThroughDrain(id, resendInterrupted)
 
     internal fun launchOutboundDrain(block: suspend () -> Unit) {
         viewModelScope.launch(outboundQueueDispatcher) { block() }
@@ -1598,9 +1600,10 @@ public class PromptComposerViewModel @Inject constructor(
         id: String,
         drainLease: OutboundDrainLease,
         consumerGeneration: Long?,
+        resendInterrupted: Boolean = false,
     ): Boolean {
         if (!uploadSidecarsForOutboundItem(id)) return false
-        return claimAndEmitOutboundItem(id, drainLease, consumerGeneration)
+        return claimAndEmitOutboundItem(id, drainLease, consumerGeneration, resendInterrupted)
     }
 
     private suspend fun uploadSidecarsForOutboundItem(id: String): Boolean {
@@ -1698,6 +1701,7 @@ public class PromptComposerViewModel @Inject constructor(
         id: String,
         drainLease: OutboundDrainLease,
         consumerGeneration: Long?,
+        resendInterrupted: Boolean = false,
     ): Boolean {
         // Issue #929: the claim lost the race (row already claimed/delivered/
         // gone). Non-delivering exit — clear the in-flight gates so the next
@@ -1733,6 +1737,7 @@ public class PromptComposerViewModel @Inject constructor(
                 tmuxSessionCreated = active.tmuxSessionCreated,
             ),
             outboundQueueItemId = active.id,
+            resendInterrupted = resendInterrupted,
             outboundDrainLeaseToken = drainLease.token,
             outboundConsumerGeneration = consumerGeneration,
         )
@@ -3174,6 +3179,8 @@ public class PromptComposerViewModel @Inject constructor(
          */
         val sendTarget: SendTargetSnapshot = SendTargetSnapshot(),
         val outboundQueueItemId: String? = null,
+        /** #2240: explicit confirmed resend only. */
+        val resendInterrupted: Boolean = false,
         internal val outboundDrainLeaseToken: Long? = null,
         internal val outboundConsumerGeneration: Long? = null,
     )

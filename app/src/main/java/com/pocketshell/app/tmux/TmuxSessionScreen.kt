@@ -55,8 +55,10 @@ import com.pocketshell.app.conversation.ConversationImageViewModel
 import com.pocketshell.app.conversation.LocalConversationImageLoader
 import com.pocketshell.app.conversation.rememberConversationToTerminalSwapLatch
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.composer.markOutboundHandled
 import com.pocketshell.app.composer.outboundLauncherBadge
 import com.pocketshell.app.composer.promoteFallbackOutboundIdentity
+import com.pocketshell.app.composer.resendUnknownOutboundItem
 import com.pocketshell.app.composer.setOutboundQueueRemoteCleaner
 import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.layout.rememberTmuxImeLayoutState
@@ -2062,7 +2064,7 @@ private fun TmuxSessionSheetsRegion(
             request = request,
             targetSessionId = composerQueueSessionKey,
             fallbackPaneId = surfacePane?.paneId.orEmpty(),
-            sendAgentPayload = { paneId, text, agentKind, sendToken, durableRow, deliveryProof ->
+            sendAgentPayload = { paneId, text, agentKind, sendToken, durableRow, deliveryProof, resendInterrupted ->
                 val result = viewModel.sendAgentPayloadToPaneResult(
                     paneId,
                     text,
@@ -2070,24 +2072,27 @@ private fun TmuxSessionSheetsRegion(
                     sendToken,
                     durableRow,
                     deliveryProof,
+                    resendInterrupted,
                 )
                 result.toComposerSendResult()
             },
-            sendToAgent = { paneId, text, sendToken, durableRow ->
+            sendToAgent = { paneId, text, sendToken, durableRow, resendInterrupted ->
                 val result = viewModel.sendToAgentPaneResult(
                     paneId,
                     text,
                     sendToken,
                     durableRow,
+                    resendInterrupted,
                 )
                 result.toComposerSendResult()
             },
-            sendRawBytes = { paneId, bytes, sendToken, durableRow ->
+            sendRawBytes = { paneId, bytes, sendToken, durableRow, resendInterrupted ->
                 viewModel.writeInputToPaneResult(
                     paneId,
                     bytes,
                     sendToken,
                     durableRow,
+                    resendInterrupted,
                 ).toComposerSendResult()
             },
         ) { onTuiCommandNoticeChange(it) }
@@ -2188,6 +2193,29 @@ private fun TmuxSessionSheetsRegion(
         onSend = composerSendHandler,
         composerHostId = hostId.takeIf { it != 0L },
         onStageAttachments = viewModel::stagePromptAttachments,
+        onCheckOutboundItem = { rowId ->
+            val rowPaneId = promptComposerViewModel.outboundQueueStore.item(rowId)
+                ?.paneId
+                ?.takeIf { it.isNotBlank() }
+            // Check is a read-only refresh of the exact pane recorded on the
+            // durable row. Never substitute the currently visible pane after a
+            // session switch.
+            rowPaneId?.let { paneId ->
+                viewModel.refreshPaneForOutboundCheck(paneId) {
+                    // Keep the sheet alive until the read-only capture has
+                    // completed. Closing it synchronously can supersede the
+                    // guarded refresh before its completion is observable.
+                    viewModel.selectSessionTab(paneId, SessionTab.Terminal)
+                    overlay.showMicSheet = false
+                    overlay.micSheetAutoStartRecording = false
+                }
+            }
+        },
+        onMarkOutboundHandled = { rowId -> promptComposerViewModel.markOutboundHandled(rowId) },
+        onResendOutboundItem = { rowId ->
+            promptComposerViewModel.resendUnknownOutboundItem(rowId)
+            Unit
+        },
         showSnippetPicker = overlay.showSnippetPicker,
         snippetsHostId = hostId,
         snippetKindFilter = if (currentDetection != null) {

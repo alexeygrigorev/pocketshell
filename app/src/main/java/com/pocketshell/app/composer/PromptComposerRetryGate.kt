@@ -83,7 +83,15 @@ internal fun PromptComposerViewModel.activeSendIsWedged(nowMs: Long = clock()): 
  */
 internal fun PromptComposerViewModel.retryOutboundItemThroughGate(id: String) {
     val item = outboundQueueStore.item(id) ?: return
-    if (item.isComposerQueueHeldForReview()) {
+    if (item.isComposerQueueHostAckUnknown()) {
+        _uiState.update { current ->
+            current.copy(
+                error = "Delivery is unknown. The prompt may already be in the pane. " +
+                    "Check the pane before sending again.",
+            )
+        }
+        return
+    } else if (item.isComposerQueueHeldForReview()) {
         sendHeldOutboundItemNow(id)
         return
     } else if (!item.isComposerQueueRetryable()) {

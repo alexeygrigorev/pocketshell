@@ -44,4 +44,17 @@ if [ "$control_mode" = true ] && [ -f "$HOME/.pocketshell-hang-tmux-control" ]; 
   done
 fi
 
+# Issue #2240: the real host-send regression seed asks this shim to kill the
+# owning Python CLI immediately after tmux has accepted Enter. That leaves the
+# real journal in `pending` with a dead owner, so the next plain call returns
+# exit 5 without injecting a second copy. The flag is removed by the caller
+# before any production send is attempted.
+if [ "$verb" = "send-keys" ] && [ -f /tmp/pocketshell-kill-after-enter ]; then
+  /usr/bin/tmux.real "$@"
+  kill -9 "$PPID"
+  # The seed has already injected the Enter. Do not fall through and replay
+  # the same tmux command after the owning CLI is killed.
+  exit 0
+fi
+
 exec /usr/bin/tmux.real "$@"

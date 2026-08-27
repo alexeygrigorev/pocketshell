@@ -72,12 +72,14 @@ case "${1:-}" in
     #
     #   0 delivered | already-delivered   2 bad-usage
     #   3 pane-not-found                  4 tmux-failed
+    #   5 send-interrupted               6 timeout
+    #   7 journal-failed                 8 send-in-progress
     #
-    # It is a fixture, not a port: the real CLI's two-phase pending/owner-
-    # liveness record (exits 5/8) is not modelled, because a connected journey
-    # exercises the delivered / already-delivered / pane-not-found paths, and
-    # the 5/8 classifications are pinned by JVM unit tests against the exact
-    # documented exit codes.
+    # Issue #2240 closes the old fixture gap: use the repository's real host
+    # implementation for this verb. The deterministic wrapper still owns every
+    # other probe below, while this arm exercises the actual two-phase journal,
+    # owner liveness, and --resend-interrupted contract on the Docker wire.
+    exec /usr/local/bin/pocketshell-real-send "$@"
     shift
     send_pane=""
     send_token=""

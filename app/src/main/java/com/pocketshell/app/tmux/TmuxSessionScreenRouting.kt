@@ -20,6 +20,8 @@ internal data class PortForwardNavigationTarget(
 
 internal fun Result<Unit>.toComposerSendResult(): ComposerSendResult = when {
     isSuccess -> ComposerSendResult.Delivered
+    exceptionOrNull() is HostAckSendUnknownException -> ComposerSendResult.UnknownMayHaveLanded
+    exceptionOrNull() is HostAckSendInProgressException -> ComposerSendResult.InProgress
     exceptionOrNull() is AgentSubmitTurnoverNotProvenException -> ComposerSendResult.AuthoritativeAckPending
     else -> ComposerSendResult.Failed
 }
@@ -674,18 +676,21 @@ internal suspend fun tmuxComposerSendResult(
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
         deliveryProof: AgentSubmitDeliveryProof,
+        resendInterrupted: Boolean,
     ) -> ComposerSendResult,
     sendToAgent: suspend (
         paneId: String,
         text: String,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
+        resendInterrupted: Boolean,
     ) -> ComposerSendResult,
     sendRawBytes: suspend (
         paneId: String,
         bytes: ByteArray,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
+        resendInterrupted: Boolean,
     ) -> ComposerSendResult,
     setTuiNotice: (String) -> Unit,
 ): ComposerSendResult {
@@ -719,9 +724,17 @@ internal suspend fun tmuxComposerSendResult(
                 request.text,
                 target.agentKind,
                 { text, agent, deliveryProof ->
-                    sendAgentPayload(paneId, text, agent, sendToken, durableRow, deliveryProof)
+                    sendAgentPayload(
+                        paneId,
+                        text,
+                        agent,
+                        sendToken,
+                        durableRow,
+                        deliveryProof,
+                        request.resendInterrupted,
+                    )
                 },
-                { text -> sendToAgent(paneId, text, sendToken, durableRow) },
+                { text -> sendToAgent(paneId, text, sendToken, durableRow, request.resendInterrupted) },
                 setTuiNotice,
             )
         OutboundRoute.AgentPayload ->
@@ -733,6 +746,7 @@ internal suspend fun tmuxComposerSendResult(
                     sendToken,
                     durableRow,
                     AgentSubmitDeliveryProof.AgentTurnover,
+                    request.resendInterrupted,
                 )
             } ?: ComposerSendResult.Failed
         OutboundRoute.RawBytes -> {
@@ -742,6 +756,7 @@ internal suspend fun tmuxComposerSendResult(
                 payload.toByteArray(Charsets.UTF_8),
                 sendToken,
                 durableRow,
+                request.resendInterrupted,
             )
         }
     }

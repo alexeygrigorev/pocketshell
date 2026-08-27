@@ -332,6 +332,14 @@ public interface OutboundQueueStore {
     ): OutboundItem?
 
     /**
+     * Issue #2240: explicitly accept duplicate risk for a HostAck unknown row.
+     * This is the only queue transition that clears [OutboundItem.hostAckOutcome]
+     * and makes that row claimable again; ordinary Retry/reconnect paths return
+     * `null` for it.
+     */
+    public fun requeueForExplicitHostAckResend(id: String): OutboundItem?
+
+    /**
      * Issue #1700: atomically move every unowned stale-unapproved row for
      * [sessionKey] to [OutboundState.HeldForReview]. Auto-flush cannot claim a
      * held row; [approveStaleForSend] is the only re-arm. Returns the held rows
@@ -452,6 +460,9 @@ public interface OutboundQueueStore {
      * unknown or already-delivered row. Returns the updated row, or `null`.
      */
     public fun markDeliveryOutcomeUnknown(id: String): OutboundItem?
+
+    /** Issue #2240: durably record the host's unresolved outcome. */
+    public fun markHostAckUnknown(id: String): OutboundItem?
 
     /** Transcript authority captured by the same synchronous pre-Enter write-ahead. */
     public fun wireSubmitTranscriptBaseline(
@@ -623,7 +634,7 @@ public fun OutboundQueueStore.asWireAttemptDurableStore(): OutboundWireAttemptDu
  * @property wireCollapsedMarkerBaselineCount issue #1739: the pre-send count of
  *   Claude's collapsed multiline-paste chips. A retry may treat a higher current
  *   count as proof that the ambiguous paste landed, then submit Enter-only.
- * @property wireOutcomeUnknown issue #2056: the LAST delivery attempt resolved with a
+ * @property wireOutcomeUnknown issue #2056: the LAST legacy delivery attempt resolved with a
  *   genuinely UNPROVABLE outcome — the payload may well have landed (it usually has),
  *   but no authority could confirm it. This is a first-class user-visible state, not a
  *   failure and not "still sending": the drain must not keep re-dispatching the row
@@ -682,7 +693,14 @@ public data class OutboundItem(
     val staleApprovedAtMs: Long? = null,
     /** Issue #2240: HostAck could not prove whether the payload landed. */
     val hostAckOutcome: OutboundDeliveryOutcome = OutboundDeliveryOutcome.None,
-)
+) {
+    /** Readable alias for callers that do not need to know the wire lane name. */
+    public val deliveryOutcome: OutboundDeliveryOutcome
+        get() = hostAckOutcome
+
+    public val hostAckUnknownMayHaveLanded: Boolean
+        get() = hostAckOutcome == OutboundDeliveryOutcome.UnknownMayHaveLanded
+}
 
 /** Issue #900: persisted send route selected before an item entered the durable queue. */
 public enum class OutboundRoute {
@@ -696,6 +714,10 @@ public enum class OutboundDeliveryOutcome {
     None,
     UnknownMayHaveLanded,
 }
+
+/** Issue #2240: an unresolved HostAck answer is never an ordinary retry. */
+internal fun OutboundItem.isHostAckOrdinaryRetryAllowed(): Boolean =
+    hostAckOutcome == OutboundDeliveryOutcome.None
 
 /**
  * Issue #900: the per-item state machine.
@@ -731,14 +753,6 @@ public enum class OutboundState {
     public val isExplicitlyDiscardable: Boolean
         get() = this == Queued || this == Failed || this == HeldForReview
 }
-
-/**
- * Issue #2240: an unprovable HostAck outcome is not an ordinary retryable
- * failure. The queue-selection slice uses this narrow predicate to keep that
- * row out of its ordinary retry lane.
- */
-internal fun OutboundItem.isHostAckOrdinaryRetryAllowed(): Boolean =
-    hostAckOutcome == OutboundDeliveryOutcome.None
 
 /**
  * Issue #900: in-memory [OutboundQueueStore] — the production store's test
@@ -883,6 +897,7 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             .filter {
                 it.sessionKey == sessionKey &&
                     it.state == OutboundState.Queued &&
+                    it.isHostAckOrdinaryRetryAllowed() &&
                     !it.isStaleUnapproved(nowMillis)
             }
             .minByOrNull { it.createdAtMs }
@@ -898,7 +913,7 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             items[existing.id] = existing.heldForReview()
             return null
         }
-        if (!existing.state.isExactClaimable) return null
+        if (!existing.state.isExactClaimable || !existing.isHostAckOrdinaryRetryAllowed()) return null
         val claimed = existing.claimedForAttempt()
         items[claimed.id] = claimed
         claimed
@@ -908,6 +923,7 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         val existing = items[id] ?: return null
         if (existing.state == OutboundState.Delivered ||
             existing.state == OutboundState.Failed ||
+            !existing.isHostAckOrdinaryRetryAllowed() ||
             existing.state == OutboundState.HeldForReview
         ) {
             return existing
@@ -928,7 +944,7 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             items[held.id] = held
             return null
         }
-        if (!existing.state.isExactClaimable) return null
+        if (!existing.state.isExactClaimable || !existing.isHostAckOrdinaryRetryAllowed()) return null
         val updated = existing.copy(
             state = OutboundState.Uploading,
             lastAttemptAtMs = lastAttemptAtMs,
@@ -942,7 +958,10 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         attachments: List<DurableAttachmentRef>,
     ): OutboundItem? = synchronized(lock) {
         val existing = items[id] ?: return null
-        if (existing.state != OutboundState.Queued && existing.state != OutboundState.Uploading) {
+        if (
+            !existing.isHostAckOrdinaryRetryAllowed() ||
+            (existing.state != OutboundState.Queued && existing.state != OutboundState.Uploading)
+        ) {
             return existing
         }
         val updated = existing.copy(
@@ -998,6 +1017,7 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         val existing = items[id] ?: return null
         if (existing.state == OutboundState.Delivered) return null
         if (existing.state == OutboundState.HeldForReview) return existing
+        if (!existing.isHostAckOrdinaryRetryAllowed()) return null
         val updated = existing.copy(
             state = OutboundState.Queued,
             lastError = null,
@@ -1006,6 +1026,20 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
             // budget reset) discards the previous attempt's unprovable verdict so the
             // row is genuinely re-dispatched instead of staying permanently unknown.
             wireOutcomeUnknown = if (resetAttempts) false else existing.wireOutcomeUnknown,
+        )
+        items[updated.id] = updated
+        updated
+    }
+
+    override fun requeueForExplicitHostAckResend(id: String): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return null
+        if (!existing.hostAckUnknownMayHaveLanded || existing.state == OutboundState.Delivered) return null
+        val updated = existing.copy(
+            state = OutboundState.Queued,
+            lastError = null,
+            attemptCount = 0,
+            hostAckOutcome = OutboundDeliveryOutcome.None,
+            wireOutcomeUnknown = false,
         )
         items[updated.id] = updated
         updated
@@ -1115,6 +1149,21 @@ public open class InMemoryOutboundQueueStore : OutboundQueueStore {
         updated
     }
 
+    override fun markHostAckUnknown(id: String): OutboundItem? = synchronized(lock) {
+        val existing = items[id] ?: return null
+        if (existing.state == OutboundState.Delivered) return existing
+        val updated = existing.copy(
+            state = OutboundState.Queued,
+            lastError = null,
+            // HostAck owns this unresolved fact; do not leave a stale legacy
+            // inference bit beside it and let two uncertainty lanes compete.
+            wireOutcomeUnknown = false,
+            hostAckOutcome = OutboundDeliveryOutcome.UnknownMayHaveLanded,
+        )
+        items[updated.id] = updated
+        updated
+    }
+
     override fun wireSubmitTranscriptBaseline(
         sessionKey: String,
         itemId: String,
@@ -1189,6 +1238,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
     override fun acknowledgeLateDelivered(id: String, sendKey: String, wireAttemptGeneration: Int): Boolean = false
     override fun markFailed(id: String, lastError: String?, lastAttemptAtMs: Long): OutboundItem? = null
     override fun requeueForRetry(id: String, resetAttempts: Boolean, attemptDelta: Int): OutboundItem? = null
+    override fun requeueForExplicitHostAckResend(id: String): OutboundItem? = null
     override fun holdStaleUnapproved(sessionKey: String, nowMillis: Long): List<OutboundItem> = emptyList()
     override fun approveStaleForSend(id: String, nowMillis: Long): OutboundItem? = null
     override fun requeueStaleInFlight(sessionKey: String, cutoffMs: Long): List<OutboundItem> = emptyList()
@@ -1212,6 +1262,7 @@ public object DisabledOutboundQueueStore : OutboundQueueStore {
 
     override fun hasWireSubmitAttempt(sessionKey: String, itemId: String): Boolean = false
     override fun markDeliveryOutcomeUnknown(id: String): OutboundItem? = null
+    override fun markHostAckUnknown(id: String): OutboundItem? = null
     override fun wireSubmitTranscriptBaseline(
         sessionKey: String,
         itemId: String,
@@ -1437,7 +1488,9 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         holdStaleInList(sessionKey, list, nowMillis)
         val next = list
             .filter {
-                it.state == OutboundState.Queued && !it.isStaleUnapproved(nowMillis)
+                it.state == OutboundState.Queued &&
+                    it.isHostAckOrdinaryRetryAllowed() &&
+                    !it.isStaleUnapproved(nowMillis)
             }
             .minByOrNull { it.createdAtMs }
             ?: return null
@@ -1454,7 +1507,7 @@ public class SharedPrefsOutboundQueueStore internal constructor(
             replaceAndStore(sessionKey, list, existing.heldForReview())
             return null
         }
-        if (!existing.state.isExactClaimable) return null
+        if (!existing.state.isExactClaimable || !existing.isHostAckOrdinaryRetryAllowed()) return null
         val claimed = existing.claimedForAttempt()
         replaceAndStore(sessionKey, list, claimed)
         claimed
@@ -1466,11 +1519,28 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         val existing = list.firstOrNull { it.id == id } ?: return null
         if (existing.state == OutboundState.Delivered ||
             existing.state == OutboundState.Failed ||
+            !existing.isHostAckOrdinaryRetryAllowed() ||
             existing.state == OutboundState.HeldForReview
         ) {
             return existing
         }
         val updated = existing.claimedForAttempt()
+        replaceAndStore(sessionKey, list, updated)
+        updated
+    }
+
+    override fun requeueForExplicitHostAckResend(id: String): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return null
+        val list = loadSession(sessionKey)
+        val existing = list.firstOrNull { it.id == id } ?: return null
+        if (!existing.hostAckUnknownMayHaveLanded || existing.state == OutboundState.Delivered) return null
+        val updated = existing.copy(
+            state = OutboundState.Queued,
+            lastError = null,
+            attemptCount = 0,
+            hostAckOutcome = OutboundDeliveryOutcome.None,
+            wireOutcomeUnknown = false,
+        )
         replaceAndStore(sessionKey, list, updated)
         updated
     }
@@ -1487,7 +1557,7 @@ public class SharedPrefsOutboundQueueStore internal constructor(
             replaceAndStore(sessionKey, list, existing.heldForReview())
             return null
         }
-        if (!existing.state.isExactClaimable) return null
+        if (!existing.state.isExactClaimable || !existing.isHostAckOrdinaryRetryAllowed()) return null
         val updated = existing.copy(
             state = OutboundState.Uploading,
             lastAttemptAtMs = lastAttemptAtMs,
@@ -1503,7 +1573,10 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         val sessionKey = sessionOf(id) ?: return null
         val list = loadSession(sessionKey)
         val existing = list.firstOrNull { it.id == id } ?: return null
-        if (existing.state != OutboundState.Queued && existing.state != OutboundState.Uploading) {
+        if (
+            !existing.isHostAckOrdinaryRetryAllowed() ||
+            (existing.state != OutboundState.Queued && existing.state != OutboundState.Uploading)
+        ) {
             return existing
         }
         val updated = existing.copy(
@@ -1569,6 +1642,7 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         val existing = list.firstOrNull { it.id == id } ?: return null
         if (existing.state == OutboundState.Delivered) return null
         if (existing.state == OutboundState.HeldForReview) return existing
+        if (!existing.isHostAckOrdinaryRetryAllowed()) return null
         val updated = existing.copy(
             state = OutboundState.Queued,
             lastError = null,
@@ -1721,6 +1795,23 @@ public class SharedPrefsOutboundQueueStore internal constructor(
         val existing = list.firstOrNull { it.id == id } ?: return null
         if (existing.state == OutboundState.Delivered) return existing
         val updated = existing.copy(wireOutcomeUnknown = true)
+        replaceAndStore(sessionKey, list, updated)
+        updated
+    }
+
+    override fun markHostAckUnknown(id: String): OutboundItem? = synchronized(lock) {
+        val sessionKey = sessionOf(id) ?: return null
+        val list = loadSession(sessionKey)
+        val existing = list.firstOrNull { it.id == id } ?: return null
+        if (existing.state == OutboundState.Delivered) return existing
+        val updated = existing.copy(
+            state = OutboundState.Queued,
+            lastError = null,
+            // HostAck owns this unresolved fact; do not leave a stale legacy
+            // inference bit beside it and let two uncertainty lanes compete.
+            wireOutcomeUnknown = false,
+            hostAckOutcome = OutboundDeliveryOutcome.UnknownMayHaveLanded,
+        )
         replaceAndStore(sessionKey, list, updated)
         updated
     }

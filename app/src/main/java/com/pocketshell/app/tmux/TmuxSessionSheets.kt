@@ -29,6 +29,9 @@ internal fun TmuxSessionSheets(
     onSend: suspend (PromptComposerViewModel.SendRequest) -> ComposerSendResult,
     composerHostId: Long?,
     onStageAttachments: suspend (List<Uri>) -> Result<List<String>>,
+    onCheckOutboundItem: (String) -> Unit = {},
+    onMarkOutboundHandled: (String) -> Unit = {},
+    onResendOutboundItem: (String) -> Unit = {},
     showSnippetPicker: Boolean,
     snippetsHostId: Long,
     snippetKindFilter: SnippetKind,
@@ -60,6 +63,9 @@ internal fun TmuxSessionSheets(
             collectSendRequests = false,
             hostId = composerHostId,
             onStageAttachments = onStageAttachments,
+            onCheckOutboundItem = onCheckOutboundItem,
+            onMarkOutboundHandled = onMarkOutboundHandled,
+            onResendOutboundItem = onResendOutboundItem,
         )
     }
 

@@ -12,7 +12,11 @@ import kotlinx.coroutines.launch
  */
 internal fun PromptComposerViewModel.discardOutboundItemThroughLifecycleCoordinator(id: String) {
     val item = outboundQueueStore.item(id) ?: return
-    if (!item.isComposerQueueRetryable() && !item.isComposerQueueHeldForReview()) return
+    if (
+        !item.isComposerQueueRetryable() &&
+        !item.isComposerQueueHeldForReview() &&
+        !item.isComposerQueueHostAckUnknown()
+    ) return
     val coordinator = outboundQueueLifecycleCoordinator ?: return
     val ownership = outboundDrainOwnership.tryAcquireDisposal(id) ?: return
     viewModelScope.launch {
@@ -219,7 +223,10 @@ internal fun PromptComposerViewModel.retryNextOutboundItemThroughPlan(
  * [PromptComposerViewModel.SendRequest] is emitted, its terminal callback owns
  * the lease instead.
  */
-internal fun PromptComposerViewModel.dispatchOutboundItemThroughDrain(id: String): Boolean {
+internal fun PromptComposerViewModel.dispatchOutboundItemThroughDrain(
+    id: String,
+    resendInterrupted: Boolean = false,
+): Boolean {
     fun reject(reason: String): Boolean {
         ComposerQueueDiagnostics.dispatchRejected(
             itemId = id,
@@ -248,9 +255,9 @@ internal fun PromptComposerViewModel.dispatchOutboundItemThroughDrain(id: String
         try {
             val hasSidecars = outboundAttachmentSidecarStore?.refsFor(id)?.isNotEmpty() == true
             handedOff = if (hasSidecars) {
-                dispatchPreparedOutboundItem(id, lease, consumerGeneration)
+                dispatchPreparedOutboundItem(id, lease, consumerGeneration, resendInterrupted)
             } else {
-                claimAndEmitOutboundItem(id, lease, consumerGeneration)
+                claimAndEmitOutboundItem(id, lease, consumerGeneration, resendInterrupted)
             }
         } catch (cancelled: CancellationException) {
             clearStrandedSendInFlight()
@@ -264,6 +271,10 @@ internal fun PromptComposerViewModel.dispatchOutboundItemThroughDrain(id: String
             if (!handedOff) {
                 outboundDrainOwnership.release(lease)
                 clearOutboundRetrying(id)
+                if (resendInterrupted) {
+                    outboundQueueStore.markHostAckUnknown(id)
+                    refreshOutboundQueueItemsFor(outboundQueueStore.item(id)?.sessionKey.orEmpty())
+                }
                 wakeOutboundDrainAfterOwnerResolution(
                     excludingId = id,
                     approvedOnly = true,

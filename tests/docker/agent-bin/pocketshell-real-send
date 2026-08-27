@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+# Issue #2240: run the repository's real Python `pocketshell` package inside
+# the deterministic agents image. The normal fixture remains the authority for
+# all non-send probes; this helper is only used by the fixture's `send` arm and
+# by the test seeding command that deliberately dies after Enter.
+real_src=/opt/pocketshell-real/src
+if [ -n "${PYTHONPATH:-}" ]; then
+  export PYTHONPATH="$real_src:$PYTHONPATH"
+else
+  export PYTHONPATH="$real_src"
+fi
+exec python3 -m pocketshell "$@"

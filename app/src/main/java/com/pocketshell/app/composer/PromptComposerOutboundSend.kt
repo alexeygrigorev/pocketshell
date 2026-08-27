@@ -52,6 +52,10 @@ internal data class ComposerHandoffAcceptance(
 public enum class ComposerSendResult {
     Delivered,
     AuthoritativeAckPending,
+    /** HostAck says the payload may already have landed; no ordinary retry. */
+    UnknownMayHaveLanded,
+    /** HostAck owner remained live after bounded status reads. */
+    InProgress,
     Failed,
 }
 
@@ -167,6 +171,7 @@ internal suspend fun collectPromptComposerSendRequests(
                 viewModel.markOutboundSendDeferred(
                     request,
                     resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                    hostAckOutcome = request.hostAckOutcomeAfterInterruptedHandoff(),
                 )
                 throw CancellationException("Prompt composer send consumer was superseded")
             }
@@ -177,11 +182,19 @@ internal suspend fun collectPromptComposerSendRequests(
                 val result = try {
                     withTimeoutOrNull(PromptComposerViewModel.SEND_TIMEOUT_MS) {
                         onSend(request)
-                    } ?: ComposerSendResult.Failed
+                    } ?: if (request.resendInterrupted) {
+                        ComposerSendResult.UnknownMayHaveLanded
+                    } else {
+                        ComposerSendResult.Failed
+                    }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Throwable) {
-                    ComposerSendResult.Failed
+                    if (request.resendInterrupted) {
+                        ComposerSendResult.UnknownMayHaveLanded
+                    } else {
+                        ComposerSendResult.Failed
+                    }
                 }
                 when (result) {
                     ComposerSendResult.Delivered -> {
@@ -207,6 +220,19 @@ internal suspend fun collectPromptComposerSendRequests(
                             resetAttemptBudget = true,
                             deliveryOutcomeUnknown = true,
                         )
+                    ComposerSendResult.UnknownMayHaveLanded ->
+                        viewModel.markOutboundSendDeferred(
+                            request,
+                            resetAttemptBudget = true,
+                            hostAckOutcome = OutboundDeliveryOutcome.UnknownMayHaveLanded,
+                        )
+                    ComposerSendResult.InProgress ->
+                        viewModel.markOutboundSendDeferred(
+                            request,
+                            noRowFallbackMessage =
+                                "Another send is still in progress. Check the pane before sending again.",
+                            resetAttemptBudget = false,
+                        )
                     ComposerSendResult.Failed ->
                         viewModel.markOutboundSendDeferred(
                             request,
@@ -221,6 +247,7 @@ internal suspend fun collectPromptComposerSendRequests(
                     viewModel.markOutboundSendDeferred(
                         request,
                         resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                        hostAckOutcome = request.hostAckOutcomeAfterInterruptedHandoff(),
                     )
                     terminalCallbackApplied = true
                 }
@@ -233,6 +260,7 @@ internal suspend fun collectPromptComposerSendRequests(
                     viewModel.markOutboundSendDeferred(
                         request,
                         resetAttemptBudget = !viewModel.isSendTransportWritable(),
+                        hostAckOutcome = request.hostAckOutcomeAfterInterruptedHandoff(),
                     )
                 }
             }
@@ -241,6 +269,14 @@ internal suspend fun collectPromptComposerSendRequests(
         viewModel.outboundSendConsumers.unregister(consumerGeneration)
     }
 }
+
+/** A cancelled explicit resend still has duplicate risk and must remain parked. */
+private fun SendRequest.hostAckOutcomeAfterInterruptedHandoff(): OutboundDeliveryOutcome =
+    if (resendInterrupted) {
+        OutboundDeliveryOutcome.UnknownMayHaveLanded
+    } else {
+        OutboundDeliveryOutcome.None
+    }
 
 internal fun PromptComposerViewModel.composerRevision(target: String): Long =
     composerRevisionTracker.revision(target)

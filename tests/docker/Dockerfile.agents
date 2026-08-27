@@ -10,6 +10,7 @@ FROM alpine:latest
 # journey (`TmuxKeyBarCtrlComboE2eTest`) opens a real nano buffer and drives
 # `^O`/`^X` from the hotkeys panel, so the fixture must ship a real `nano`.
 RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git nano \
+    python3 py3-click \
     && mv /usr/bin/tmux /usr/bin/tmux.real \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
@@ -23,6 +24,11 @@ COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
 # compose healthcheck. The private key is a committed test fixture.
 COPY tests/docker/test_key /root/test_key
 COPY tests/docker/agent-bin/ /usr/local/bin/
+# Issue #2240: the standard fixture keeps its deterministic probes, but the
+# acknowledged send verb delegates to the real host implementation so a
+# connected test can leave and reread a genuine pending journal record.
+COPY tools/pocketshell/src/ /opt/pocketshell-real/src/
+COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
 # Issue #1302/#1208: the recovery-journey fixture scripts ship here too. They
 # REUSE this `agents` service (host port 2222) — NO new service/port is needed:
 # the composite recovery journey seeds a tmux session whose new-session PAYLOAD
@@ -49,6 +55,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-fake-agent \
         /usr/local/bin/pocketshell-agent-entrypoint \
+        /usr/local/bin/pocketshell-real-send \
     && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
     && test -n "$version" \

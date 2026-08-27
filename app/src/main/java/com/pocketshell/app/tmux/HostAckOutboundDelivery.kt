@@ -4,6 +4,7 @@ import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.ssh.ExecResult
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.delay
 
 /**
  * Issue #2124 (step 1b of epic #2121) — the ACKNOWLEDGED outbound delivery lane.
@@ -22,10 +23,11 @@ import java.util.concurrent.atomic.AtomicLong
  * **`Delivered` = the host CLI acknowledged injection into the exact pane.**
  * Acceptance — whether the agent produced a turn — is no longer part of a row's
  * lifecycle (it stays an opportunistic checkmark in the Conversation view). The
- * row state machine is therefore `Queued → InFlight → Delivered | Failed` and
- * `OutboundItem.wireOutcomeUnknown` is UNREACHABLE on this path: a timed-out or
- * failed exec is a plain retryable `Failed`, safe to retry because the token
- * makes the host side idempotent.
+ * row state machine is therefore `Queued → InFlight → Delivered | Failed`,
+ * plus a durable HostAck outcome when the host says that the payload may already
+ * have landed. That outcome is separate from the legacy
+ * `OutboundItem.wireOutcomeUnknown` inference bit: exit 5 is a host-protocol
+ * fact, not a terminal transport failure.
  *
  * ## Reading the exit table correctly (issue #2136 — this is subtle)
  *
@@ -36,20 +38,16 @@ import java.util.concurrent.atomic.AtomicLong
  *    is free": under `--resend-interrupted` a rolled-back pre-existing record is
  *    restored byte-for-byte, so the journal is *unchanged*, not *empty*. "A
  *    retry cannot duplicate" holds; "a retry will inject" does not.
- *  - **This client NEVER passes `--resend-interrupted`.** That is the single
- *    decision that keeps every retry safe: the duplicate-injection path #2136's
- *    reproduction exercises is only reachable by opting in, and we never do.
- *    A plain retry either delivers, reports `already-delivered`, or reports an
- *    honest failure — it can never paste twice.
- *  - **exit 5 (`send-interrupted`) is not a new "unknown" state.** It is a
- *    terminal, honest `Failed` naming a partial delivery (payload in the pane,
- *    Enter not delivered / delivery genuinely unknown). The row stays a normal
- *    retryable `Failed` row the user can retry or discard; every retry is a real
- *    host round trip that returns a real answer. It is deliberately NOT mapped
- *    to anything the auto-flush skips — that is exactly the absorbing state this
- *    epic exists to delete.
- *  - **exit 8 (`send-in-progress`) is retryable and bounded by owner liveness.**
- *    Nothing is unknown: a live sibling owns the outcome. Retry reads it.
+ *  - **Ordinary sends never pass `--resend-interrupted`.** That flag is reserved
+ *    for the explicit user action that accepts duplicate risk.
+ *  - **exit 5 (`send-interrupted`) is `UnknownMayHaveLanded`.** The host has
+ *    journaled an unresolved token after the payload/Enter boundary. A plain
+ *    same-token retry cannot inject or resolve it, so the row parks for an
+ *    explicit user decision instead of showing ordinary Retry.
+ *  - **exit 6 (`timeout`) is also unknown when no stronger journal answer is
+ *    available.** A timeout can happen after the paste boundary.
+ *  - **exit 8 (`send-in-progress`) is distinct and bounded.** A live sibling
+ *    owns the outcome; this lane performs bounded same-token status reads.
  *
  * ## Runtime lockstep — fail CLOSED, never hang, never invent a state
  *
@@ -63,7 +61,8 @@ import java.util.concurrent.atomic.AtomicLong
  *    'send'.` → exit 2 with an empty stdout reason) and a **genuinely absent**
  *    `pocketshell` (the [PocketshellCommand.wrap] resolver's exit 127) both map
  *    to a plain retryable `Failed` carrying [HOST_CLI_UPGRADE_HINT];
- *  - nothing on this path can produce a hang or a new "unknown" row state.
+ *  - nothing on this path can produce a hang; unknown is produced only from the
+ *    host's explicit unresolved/ambiguous answers.
  *
  * ## The stdin-pipe trap (issue #847)
  *
@@ -85,6 +84,12 @@ internal const val HOST_ACK_SEND_EXEC_TIMEOUT_MS: Long = 15_000L
  * with no answer at all.
  */
 internal const val HOST_ACK_SEND_CLI_TIMEOUT_SECONDS: Int = 10
+
+/** Number of bounded same-token status reads after an exit-8 owner answer. */
+internal const val HOST_ACK_SEND_STATUS_RETRIES: Int = 3
+
+/** Small delay between exit-8 status reads; tests use virtual time. */
+internal const val HOST_ACK_SEND_STATUS_RETRY_DELAY_MS: Long = 100L
 
 /** Bounded-exec attribution token for the acknowledged send. */
 internal const val HOST_ACK_SEND_CALLER_SITE: String = "outbound_host_ack_send"
@@ -115,10 +120,20 @@ internal const val HOST_ACK_EXIT_CLI_ABSENT: Int = 127
 internal const val HOST_ACK_REASON_DELIVERED: String = "delivered"
 internal const val HOST_ACK_REASON_ALREADY_DELIVERED: String = "already-delivered"
 internal const val HOST_ACK_REASON_BAD_USAGE: String = "bad-usage"
+internal const val HOST_ACK_REASON_SEND_INTERRUPTED: String = "send-interrupted"
+internal const val HOST_ACK_REASON_TIMEOUT: String = "timeout"
+internal const val HOST_ACK_REASON_SEND_IN_PROGRESS: String = "send-in-progress"
+
+/** Feedback for the read-only HostAck unknown-row pane check. */
+internal const val HOST_ACK_PANE_REFRESHED_MESSAGE: String = "Pane refreshed"
+
+internal const val HOST_ACK_PANE_REFRESH_UNAVAILABLE_MESSAGE: String =
+    "Can't check pane — reconnecting…"
 
 /**
- * The verdict of ONE acknowledged send. There is no `Unknown` member, and that
- * absence is the whole point of the epic — see the file header.
+ * The verdict of ONE acknowledged send. The unknown member is intentionally
+ * typed: it is not interchangeable with a safe retryable failure, and callers
+ * must not turn it into an ordinary Retry or automatic resend.
  */
 internal sealed interface HostAckSendOutcome {
     /** The host acknowledged injection into the exact pane by THIS call. */
@@ -127,12 +142,14 @@ internal sealed interface HostAckSendOutcome {
     /** The token was already journaled — exactly one occurrence exists. */
     data object AlreadyDelivered : HostAckSendOutcome
 
-    /**
-     * An honest, retryable failure. [reason] is the CLI's machine-readable
-     * stdout token (or a synthesised one when the CLI never answered);
-     * [message] is what the row surfaces.
-     */
-    data class Failed(val reason: String, val message: String) : HostAckSendOutcome
+    /** A failure known to have happened before the payload mutation boundary. */
+    data class FailedSafeToRetry(val reason: String, val message: String) : HostAckSendOutcome
+
+    /** A live host process currently owns this token. */
+    data class InProgress(val reason: String, val message: String) : HostAckSendOutcome
+
+    /** The host crossed the payload boundary but could not resolve final landing. */
+    data class UnknownMayHaveLanded(val reason: String, val message: String) : HostAckSendOutcome
 
     val delivered: Boolean
         get() = this is Delivered || this is AlreadyDelivered
@@ -161,12 +178,14 @@ internal fun buildHostAckSendCommand(
     payload: String,
     withEnter: Boolean,
     cliTimeoutSeconds: Int = HOST_ACK_SEND_CLI_TIMEOUT_SECONDS,
+    resendInterrupted: Boolean = false,
 ): String {
     val args = buildString {
         append("send --pane ")
         append(hostAckShellQuote(paneId))
         append(" --token ")
         append(hostAckShellQuote(token))
+        if (resendInterrupted) append(" --resend-interrupted")
         if (withEnter) append(" --enter")
         append(" --timeout ")
         append(cliTimeoutSeconds)
@@ -180,16 +199,17 @@ internal fun hostAckShellQuote(value: String): String =
 /**
  * Classify ONE `pocketshell send` exec result.
  *
- * [result] is null when the bounded exec never produced an answer (the abandoned
- * slow exec of [com.pocketshell.app.ssh.BoundedSessionExec]) — an honest
- * retryable failure, never a hang and never an "unknown" row state.
+ * [result] is null when the bounded exec never produced an answer. Without a
+ * journal answer that is also ambiguous: the host may have crossed the paste
+ * boundary before the transport answer disappeared, so it is unknown rather
+ * than a definite safe-to-retry failure.
  */
 internal fun classifyHostAckSend(result: ExecResult?): HostAckSendOutcome {
     if (result == null) {
-        return HostAckSendOutcome.Failed(
+        return HostAckSendOutcome.UnknownMayHaveLanded(
             reason = HOST_ACK_REASON_NO_ANSWER,
-            message = "The host did not answer the send within " +
-                "${HOST_ACK_SEND_EXEC_TIMEOUT_MS / 1000}s. Retry.",
+            message = "The host answer was lost; the prompt may already have landed. " +
+                "Check the pane before sending again.",
         )
     }
     val reason = result.stdout.trim().substringBefore('\n').trim().substringBefore(' ')
@@ -208,25 +228,40 @@ internal fun classifyHostAckSend(result: ExecResult?): HostAckSendOutcome {
         // print `bad-usage` on stdout. That is the discriminator; both are a
         // plain retryable Failed, but only the mismatch names the upgrade.
         HOST_ACK_EXIT_BAD_USAGE -> if (reason == HOST_ACK_REASON_BAD_USAGE) {
-            HostAckSendOutcome.Failed(HOST_ACK_REASON_BAD_USAGE, detail.ifBlank { "Send rejected by the host." })
+            HostAckSendOutcome.FailedSafeToRetry(HOST_ACK_REASON_BAD_USAGE, detail.ifBlank { "Send rejected by the host." })
         } else {
-            HostAckSendOutcome.Failed(HOST_ACK_REASON_CLI_TOO_OLD, HOST_CLI_UPGRADE_HINT)
+            HostAckSendOutcome.FailedSafeToRetry(HOST_ACK_REASON_CLI_TOO_OLD, HOST_CLI_UPGRADE_HINT)
         }
-        HOST_ACK_EXIT_CLI_ABSENT -> HostAckSendOutcome.Failed(
+        HOST_ACK_EXIT_CLI_ABSENT -> HostAckSendOutcome.FailedSafeToRetry(
             HOST_ACK_REASON_CLI_TOO_OLD,
             HOST_CLI_UPGRADE_HINT,
         )
         HOST_ACK_EXIT_PANE_NOT_FOUND,
         HOST_ACK_EXIT_TMUX_FAILED,
-        HOST_ACK_EXIT_SEND_INTERRUPTED,
-        HOST_ACK_EXIT_TIMEOUT,
         HOST_ACK_EXIT_JOURNAL_FAILED,
-        HOST_ACK_EXIT_SEND_IN_PROGRESS,
-        -> HostAckSendOutcome.Failed(
+        -> HostAckSendOutcome.FailedSafeToRetry(
             reason.ifBlank { "exit-${result.exitCode}" },
             detail.ifBlank { "Send failed on the host (exit ${result.exitCode})." },
         )
-        else -> HostAckSendOutcome.Failed(
+        HOST_ACK_EXIT_SEND_INTERRUPTED -> HostAckSendOutcome.UnknownMayHaveLanded(
+            reason = HOST_ACK_REASON_SEND_INTERRUPTED,
+            message = detail.ifBlank {
+                "The prompt may already have landed, but the host could not confirm Enter. " +
+                    "Check the pane before sending again."
+            },
+        )
+        HOST_ACK_EXIT_TIMEOUT -> HostAckSendOutcome.UnknownMayHaveLanded(
+            reason = HOST_ACK_REASON_TIMEOUT,
+            message = detail.ifBlank {
+                "The host timed out after the send boundary; the prompt may already have landed. " +
+                    "Check the pane before sending again."
+            },
+        )
+        HOST_ACK_EXIT_SEND_IN_PROGRESS -> HostAckSendOutcome.InProgress(
+            reason = HOST_ACK_REASON_SEND_IN_PROGRESS,
+            message = detail.ifBlank { "Another host send is still in progress. Checking again." },
+        )
+        else -> HostAckSendOutcome.FailedSafeToRetry(
             reason.ifBlank { "exit-${result.exitCode}" },
             detail.ifBlank { "Send failed on the host (exit ${result.exitCode})." },
         )
@@ -285,12 +320,9 @@ internal fun frameForWire(payload: String): String {
 /**
  * Run ONE acknowledged send and translate it into the row-lifecycle answer.
  *
- * Success (delivered or already-delivered) is `Result.success`; every failure is
- * `Result.failure(`[HostAckSendFailedException]`)`, which
- * [com.pocketshell.app.tmux.toComposerSendResult] maps to
- * [com.pocketshell.app.composer.ComposerSendResult.Failed]. Nothing here can
- * produce [com.pocketshell.app.composer.ComposerSendResult.AuthoritativeAckPending],
- * which is what makes `wireOutcomeUnknown` unreachable on this path.
+ * Success (delivered or already-delivered) is `Result.success`; typed failures
+ * remain distinct through dedicated exceptions so the queue can persist a HostAck
+ * unknown without entering the legacy inference bit.
  */
 internal suspend fun deliverViaHostAck(
     exec: HostAckSendExec,
@@ -298,14 +330,22 @@ internal suspend fun deliverViaHostAck(
     token: String,
     payload: String,
     withEnter: Boolean,
+    resendInterrupted: Boolean = false,
 ): Result<Unit> {
     val command = buildHostAckSendCommand(
         paneId = paneId,
         token = token,
         payload = payload,
         withEnter = withEnter,
+        resendInterrupted = resendInterrupted,
     )
-    val outcome = classifyHostAckSend(exec.run(command, HOST_ACK_SEND_EXEC_TIMEOUT_MS))
+    var statusReads = 0
+    var outcome = classifyHostAckSend(exec.run(command, HOST_ACK_SEND_EXEC_TIMEOUT_MS))
+    while (outcome is HostAckSendOutcome.InProgress && statusReads < HOST_ACK_SEND_STATUS_RETRIES - 1) {
+        statusReads += 1
+        delay(HOST_ACK_SEND_STATUS_RETRY_DELAY_MS)
+        outcome = classifyHostAckSend(exec.run(command, HOST_ACK_SEND_EXEC_TIMEOUT_MS))
+    }
     DiagnosticEvents.record(
         "action",
         "outbound_host_ack_send",
@@ -315,25 +355,47 @@ internal suspend fun deliverViaHostAck(
         "outcome" to when (outcome) {
             is HostAckSendOutcome.Delivered -> HOST_ACK_REASON_DELIVERED
             is HostAckSendOutcome.AlreadyDelivered -> HOST_ACK_REASON_ALREADY_DELIVERED
-            is HostAckSendOutcome.Failed -> outcome.reason
+            is HostAckSendOutcome.FailedSafeToRetry -> outcome.reason
+            is HostAckSendOutcome.InProgress -> outcome.reason
+            is HostAckSendOutcome.UnknownMayHaveLanded -> outcome.reason
         },
     )
     return if (outcome.delivered) {
         Result.success(Unit)
     } else {
-        Result.failure(HostAckSendFailedException(outcome as HostAckSendOutcome.Failed))
+        when (outcome) {
+            is HostAckSendOutcome.FailedSafeToRetry ->
+                Result.failure(HostAckSendFailedException(outcome))
+            is HostAckSendOutcome.InProgress ->
+                Result.failure(HostAckSendInProgressException(outcome))
+            is HostAckSendOutcome.UnknownMayHaveLanded ->
+                Result.failure(HostAckSendUnknownException(outcome))
+            is HostAckSendOutcome.Delivered,
+            is HostAckSendOutcome.AlreadyDelivered,
+            -> error("unreachable non-delivered outcome: $outcome")
+        }
     }
 }
 
 /**
- * An honest, retryable delivery failure. Deliberately NOT an
+ * An honest, safe-to-retry delivery failure. Deliberately NOT an
  * [AgentSubmitTurnoverNotProvenException]: that type is what
  * [toComposerSendResult] turns into `AuthoritativeAckPending`, i.e. the
  * "unconfirmed" absorbing state. On the acknowledged path there is no such
  * state, so a failure must never be able to reach it.
  */
 internal class HostAckSendFailedException(
-    val outcome: HostAckSendOutcome.Failed,
+    val outcome: HostAckSendOutcome.FailedSafeToRetry,
+) : IllegalStateException(outcome.message)
+
+/** The host still owns the token after the bounded status-read budget. */
+internal class HostAckSendInProgressException(
+    val outcome: HostAckSendOutcome.InProgress,
+) : IllegalStateException(outcome.message)
+
+/** The host crossed the payload boundary but could not resolve the final landing. */
+internal class HostAckSendUnknownException(
+    val outcome: HostAckSendOutcome.UnknownMayHaveLanded,
 ) : IllegalStateException(outcome.message)
 
 /**
@@ -360,6 +422,52 @@ internal object HostAckSendProbe {
     fun reset() = sends.set(0)
 
     fun count(): Long = sends.get()
+}
+
+/** Test-visible proof that the HostAck "Check pane" action reached the host lane. */
+internal object HostAckPaneRefreshProbe {
+    private val requests = AtomicLong(0)
+    private val completions = AtomicLong(0)
+    @Volatile private var lastStage: String? = null
+    @Volatile private var lastPane: String? = null
+    @Volatile private var lastHealOutcome: HealOutcome? = null
+    @Volatile private var lastFeedback: String? = null
+
+    fun reset() {
+        requests.set(0)
+        completions.set(0)
+        lastStage = null
+        lastPane = null
+        lastHealOutcome = null
+        lastFeedback = null
+    }
+
+    fun recordStage(paneId: String, stage: String) {
+        lastPane = paneId
+        lastStage = stage
+        requests.incrementAndGet()
+    }
+
+    /** Record only after the asynchronous capture/reseed and feedback emission completed. */
+    fun recordCompletion(paneId: String, outcome: HealOutcome, feedback: String) {
+        lastPane = paneId
+        lastStage = "completed"
+        lastHealOutcome = outcome
+        lastFeedback = feedback
+        completions.incrementAndGet()
+    }
+
+    fun count(): Long = completions.get()
+
+    fun snapshot(): String =
+        "requests=${requests.get()} completions=${completions.get()} " +
+            "lastPane=$lastPane stage=$lastStage outcome=$lastHealOutcome feedback=$lastFeedback"
+
+    fun lastPaneId(): String? = lastPane
+
+    fun lastOutcome(): HealOutcome? = lastHealOutcome
+
+    fun lastFeedback(): String? = lastFeedback
 }
 
 /**
@@ -484,8 +592,21 @@ internal class HostAckDeliveryPort(
      * the CLI deliberately does NOT frame — the client owns framing, and framing
      * twice put the literal `\e[200~` markers into the receiving program (#1854).
      */
-    suspend fun sendAgentPayload(paneId: String, payload: String, sendToken: String): Result<Unit> =
-        deliver(paneId, sendToken, frameForWire(payload), withEnter = true)
+    suspend fun sendAgentPayload(
+        paneId: String,
+        payload: String,
+        sendToken: String,
+        resendInterrupted: Boolean = false,
+    ): Result<Unit> {
+        if (resendInterrupted && !active) return explicitResendRequiresHostAck()
+        return deliver(
+            paneId,
+            sendToken,
+            frameForWire(payload),
+            withEnter = true,
+            resendInterrupted = resendInterrupted,
+        )
+    }
 
     /**
      * Deliver one composer-owned RAW-BYTES (shell route) send, or `null` when
@@ -502,7 +623,9 @@ internal class HostAckDeliveryPort(
         bytes: ByteArray,
         sendToken: String,
         durableRow: DurableOutboundRowIdentity?,
+        resendInterrupted: Boolean = false,
     ): Result<Unit>? {
+        if (resendInterrupted && !active) return explicitResendRequiresHostAck()
         if (!active || durableRow == null) return null
         val full = String(bytes, Charsets.UTF_8)
         val payload = full.trimEnd('\r', '\n')
@@ -519,14 +642,32 @@ internal class HostAckDeliveryPort(
         // stack.
         val withEnter = full.length > payload.length
         if (payload.isEmpty() && !withEnter) return Result.success(Unit)
-        return deliver(paneId, sendToken, frameForWire(payload), withEnter = withEnter)
+        return deliver(
+            paneId,
+            sendToken,
+            frameForWire(payload),
+            withEnter = withEnter,
+            resendInterrupted = resendInterrupted,
+        )
     }
+
+    /** Do not let an explicit resend silently fall through to terminal inference. */
+    private fun explicitResendRequiresHostAck(): Result<Unit> = Result.failure(
+        HostAckSendUnknownException(
+            HostAckSendOutcome.UnknownMayHaveLanded(
+                reason = HOST_ACK_REASON_NO_ANSWER,
+                message = "Host acknowledgement is unavailable; the prompt may already have landed. " +
+                    "Check the pane before sending again.",
+            ),
+        ),
+    )
 
     private suspend fun deliver(
         paneId: String,
         sendToken: String,
         payload: String,
         withEnter: Boolean,
+        resendInterrupted: Boolean = false,
     ): Result<Unit> {
         // Issue #2124 (reviewer round 2): count the ATTEMPT, not the exec, and
         // count it BEFORE the transport guard. The probe is the safety net that
@@ -539,7 +680,7 @@ internal class HostAckDeliveryPort(
         if (liveSession() == null && execOverrideForTest == null) {
             return Result.failure(
                 HostAckSendFailedException(
-                    HostAckSendOutcome.Failed("no-transport", "Session is disconnected."),
+                    HostAckSendOutcome.FailedSafeToRetry("no-transport", "Session is disconnected."),
                 ),
             )
         }
@@ -549,6 +690,7 @@ internal class HostAckDeliveryPort(
             token = sendToken,
             payload = payload,
             withEnter = withEnter,
+            resendInterrupted = resendInterrupted,
         )
         // Issue #941/#1353 R4: after a submit a full-screen agent TUI can
         // overpaint the pane partial-black; the guarded heal re-checks and

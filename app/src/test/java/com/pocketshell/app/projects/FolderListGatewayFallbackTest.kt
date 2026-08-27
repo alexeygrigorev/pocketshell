@@ -13,8 +13,9 @@ import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.TmuxRead
 import com.pocketshell.uikit.model.SessionAgentKind
-import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -56,6 +57,119 @@ class FolderListGatewayFallbackTest {
         assertEquals(listOf(null, null), rows.map { it.cwd })
         assertEquals(listOf(false, false), rows.map { it.attached })
         assertTrue(session.execCommands.any { it.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) })
+    }
+
+    @Test
+    fun nativeTmuxFallbackUsesNonEmptyJsonRowsWithoutStructuredProbe() = runTest {
+        val json = """
+            {"managers":["tmux","aplexer"],"sessions":[
+              {"name":"json-tmux","manager":"tmux","workspace":"/json/tmux",
+               "engine":"claude","created_epoch":1700000001},
+              {"name":"json-aplexer","manager":"aplexer",
+               "id":"aplexer-json-id","workspace":"/json/aplexer",
+               "engine":"codex","created_epoch":1700000002}
+            ]}
+        """.trimIndent()
+        val session = FakeSshSession(
+            pocketshellResult = ExecResult(
+                stdout = "IDX  SESSION               CREATED\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+            jsonResult = ExecResult(stdout = json, stderr = "", exitCode = 0),
+            // A base implementation that performs the redundant structured
+            // probe would overwrite the JSON tmux row with these values. This
+            // makes the metadata assertions fail as well as the command oracle.
+            structuredResult = ExecResult(
+                stdout = "\$99::json-tmux::999::888::1::wrong-engine::/structured\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+        )
+        val gateway = SshFolderListGateway()
+        val probes = ReconcileSideProbes(
+            expansion = CompletableDeferred(WatchedRootProjectExpansion()),
+            ports = CompletableDeferred(emptyList()),
+        )
+
+        val result = gateway.listSessionsFromNativeOrPocketshell(
+            session = session,
+            listSessions = ExecResult(
+                stdout = "",
+                stderr = "tmux: not found",
+                exitCode = 127,
+            ),
+            probes = probes,
+        )
+
+        assertTrue(result is FolderListResult.Sessions)
+        val rows = (result as FolderListResult.Sessions).rows
+        assertEquals(listOf("json-tmux", "json-aplexer"), rows.map { it.sessionName })
+        assertEquals(listOf("tmux", "aplexer"), rows.map { it.sessionManager })
+        assertEquals(listOf("/json/tmux", "/json/aplexer"), rows.map { it.cwd })
+        assertEquals(listOf("claude", "codex"), rows.map { it.recordedKindId })
+        assertEquals("aplexer-json-id", rows[1].aplexerId)
+        assertEquals(listOf(1700000001L, 1700000002L), rows.map { it.lastActivity })
+
+        val jsonCommand = ReposRemoteSource.pathAwareCommand(
+            FolderListPocketshellEnumerator.JSON_EXEC_BODY,
+        )
+        assertEquals(
+            "the successful non-empty JSON response owns this fallback probe",
+            listOf(jsonCommand),
+            session.execCommands,
+        )
+    }
+
+    @Test
+    fun nativeTmuxFallbackEmptyJsonObjectDoesNotFallThroughToHuman() = runTest {
+        val session = FakeSshSession(
+            pocketshellResult = ExecResult(
+                stdout = "IDX  SESSION               CREATED\n" +
+                    "1    should-not-appear     2026-05-30 00:20:01\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+            jsonResult = ExecResult(
+                stdout = """{"sessions":[]}""",
+                stderr = "",
+                exitCode = 0,
+            ),
+            structuredResult = ExecResult(
+                stdout = "\$1::should-not-appear::1::1::0::::/tmp\n",
+                stderr = "",
+                exitCode = 0,
+            ),
+        )
+        val gateway = SshFolderListGateway()
+        val probes = ReconcileSideProbes(
+            expansion = CompletableDeferred(WatchedRootProjectExpansion()),
+            ports = CompletableDeferred(emptyList()),
+        )
+
+        val result = gateway.listSessionsFromNativeOrPocketshell(
+            session = session,
+            listSessions = ExecResult(
+                stdout = "",
+                stderr = "tmux: not found",
+                exitCode = 127,
+            ),
+            probes = probes,
+        )
+
+        assertTrue(result is FolderListResult.Sessions)
+        assertEquals(
+            emptyList<String>(),
+            (result as FolderListResult.Sessions).rows.map { it.sessionName },
+        )
+        val jsonCommand = ReposRemoteSource.pathAwareCommand(
+            FolderListPocketshellEnumerator.JSON_EXEC_BODY,
+        )
+        assertEquals(
+            "mutation: treating {\"sessions\":[]} as a miss and running human/tmux reddens this",
+            listOf(jsonCommand),
+            session.execCommands,
+        )
     }
 
     @Test
@@ -1156,6 +1270,7 @@ class FolderListGatewayFallbackTest {
 
     private class FakeSshSession(
         private val pocketshellResult: ExecResult,
+        private val jsonResult: ExecResult = ExecResult("", "", 1),
         private val structuredResult: ExecResult? = null,
         private val blockStructuredProbe: Boolean = false,
     ) : SshSession {
@@ -1175,7 +1290,7 @@ class FolderListGatewayFallbackTest {
                     )
                 }
                 command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND) ->
-                    ExecResult(stdout = "", stderr = "", exitCode = 1)
+                    jsonResult
                 command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) -> pocketshellResult
                 else -> ExecResult(stdout = "", stderr = "unexpected command: $command", exitCode = 1)
             }

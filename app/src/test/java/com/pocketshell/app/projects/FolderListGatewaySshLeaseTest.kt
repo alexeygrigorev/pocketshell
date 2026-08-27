@@ -55,7 +55,7 @@ class FolderListGatewaySshLeaseTest {
         // matches `tmuxctl list` / `t`. Two polls => 2 enumerations + 2 json
         // enumerators + 2x3 port-scan = 10 execs on ONE reused lease.
         val jsonEnumerator = ReposRemoteSource.pathAwareCommand(
-            SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND,
+            FolderListPocketshellEnumerator.JSON_EXEC_BODY,
         )
         val portScans = listOf(
             "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
@@ -272,7 +272,7 @@ class FolderListGatewaySshLeaseTest {
         private val cancelOnExec: Boolean = false,
         private val resultForCommand: (String) -> ExecResult = { ExecResult(stdout = "", stderr = "", exitCode = 0) },
     ) : SshSession {
-        val execCommands: MutableList<String> = mutableListOf()
+        val execCommands: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
         var closed: Boolean = false
         var uploadedRemotePath: String? = null
 

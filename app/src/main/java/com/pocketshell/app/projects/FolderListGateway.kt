@@ -648,6 +648,10 @@ class SshFolderListGateway internal constructor(
                         )
                         probes.sessions(annotated)
                     } else {
+                        // Issue #2348: start the tmuxctl+aplexer JSON enumerator
+                        // alongside the required landing batch. A serial extra hop
+                        // after list-sessions is what blew the 12s mobile bound.
+                        val enumeratorDeferred = async { fetchPocketshellEnumerator(session) }
                         val required = landingProbeOwner.executeRequired(
                             watchedRoots = watchedRoots,
                             includeEnumeration = true,
@@ -678,6 +682,7 @@ class SshFolderListGateway internal constructor(
                                 enginesGateway?.familyForRawId(host.id, rawId)
                             },
                             probes = probes,
+                            pocketshellEnumerator = { enumeratorDeferred.await() },
                         )
                     }
                 }
@@ -916,21 +921,36 @@ class SshFolderListGateway internal constructor(
         // own probes via [serialSideProbes].
         familyForRawId: (String?) -> SessionAgentKind? = { null },
         probes: ReconcileSideProbes,
+        pocketshellEnumerator: (suspend () -> FolderListPocketshellEnumerator.Fetch)? = null,
     ): FolderListResult {
+        val loadEnumerator: suspend () -> FolderListPocketshellEnumerator.Fetch =
+            pocketshellEnumerator ?: { fetchPocketshellEnumerator(session) }
         return when {
             listSessions.exitCode == 127 ||
                 listSessions.stderr.contains("not found", ignoreCase = true) ->
-                listSessionsWithFolderFromPocketshell(session, probes, familyForRawId)
-                    ?: FolderListResult.ToolUnavailable
+                listSessionsWithFolderFromPocketshell(
+                    session,
+                    probes,
+                    familyForRawId,
+                    loadEnumerator(),
+                ) ?: FolderListResult.ToolUnavailable
             listSessions.isTmuxServerAbsent() ->
-                listSessionsWithFolderFromPocketshell(session, probes, familyForRawId)
-                    ?: probes.sessions(emptyList())
+                listSessionsWithFolderFromPocketshell(
+                    session,
+                    probes,
+                    familyForRawId,
+                    loadEnumerator(),
+                ) ?: probes.sessions(emptyList())
             listSessions.exitCode != 0 ->
-                listSessionsWithFolderFromPocketshell(session, probes, familyForRawId)
-                    ?: FolderListResult.Failed(
-                        listSessions.stderr.ifBlank { listSessions.stdout }
-                            .ifBlank { "tmux exited ${listSessions.exitCode}" },
-                    )
+                listSessionsWithFolderFromPocketshell(
+                    session,
+                    probes,
+                    familyForRawId,
+                    loadEnumerator(),
+                ) ?: FolderListResult.Failed(
+                    listSessions.stderr.ifBlank { listSessions.stdout }
+                        .ifBlank { "tmux exited ${listSessions.exitCode}" },
+                )
             else -> {
                 val baseRows = parseListSessionsRows(
                     stdout = listSessions.stdout,
@@ -962,14 +982,12 @@ class SshFolderListGateway internal constructor(
                 // 3 leftover sessions). tmuxctl/t walks every tmuxctl-* socket.
                 // Union the pocketshell enumerator so the phone matches the
                 // terminal, and fold in aplexer rows as a second manager.
-                val enumerator = FolderListPocketshellEnumerator.fetch(
-                    parser = sessionListParser,
-                    exec = { command -> session.execBounded(command) },
-                    jsonCommand = pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND),
-                    humanCommand = pathAware(POCKETSHELL_SESSIONS_COMMAND),
-                )
+                val enumerator = loadEnumerator()
                 probes.sessions(
-                    FolderListPocketshellEnumerator.unionFolderSessionRows(enumerator, annotated),
+                    FolderListPocketshellEnumerator.unionFolderSessionRows(
+                        enumerator.rows,
+                        annotated,
+                    ),
                 )
             }
         }
@@ -1005,60 +1023,33 @@ class SshFolderListGateway internal constructor(
         )
     }
 
+    private suspend fun fetchPocketshellEnumerator(
+        session: SshSession,
+    ): FolderListPocketshellEnumerator.Fetch =
+        FolderListPocketshellEnumerator.fetch(
+            parser = sessionListParser,
+            exec = { command -> session.execBounded(command) },
+            jsonCommand = pathAware(FolderListPocketshellEnumerator.JSON_EXEC_BODY),
+            humanCommand = pathAware(POCKETSHELL_SESSIONS_COMMAND),
+        )
+
     private suspend fun listSessionsWithFolderFromPocketshell(
         session: SshSession,
         probes: ReconcileSideProbes,
         familyForRawId: (String?) -> SessionAgentKind? = { null },
+        enumerator: FolderListPocketshellEnumerator.Fetch? = null,
     ): FolderListResult.Sessions? {
-        val json = try {
-            session.execBounded(pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND))
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            null
+        val fetched = enumerator ?: fetchPocketshellEnumerator(session)
+        when (fetched) {
+            is FolderListPocketshellEnumerator.Fetch.Json,
+            FolderListPocketshellEnumerator.Fetch.Empty,
+            -> return probes.sessions(fetched.rows)
+            FolderListPocketshellEnumerator.Fetch.Failed -> return null
+            is FolderListPocketshellEnumerator.Fetch.Human -> Unit
         }
-        val jsonRows = json
-            ?.takeIf { it.exitCode == 0 }
-            ?.let { sessionListParser.parsePocketshellSessionsJson(it.stdout) }
-            ?.map { with(FolderListPocketshellEnumerator) { it.toFolderSessionRow() } }
-        if (!jsonRows.isNullOrEmpty()) {
-            val structured = try {
-                session.execBounded(pathAware(POCKETSHELL_SESSIONS_TMUX_COMMAND))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Throwable) {
-                null
-            }
-            val structuredRows = structured
-                ?.takeIf { it.exitCode == 0 }
-                ?.let {
-                    parsePocketshellSessionsTmuxRows(
-                        stdout = it.stdout,
-                        familyForRawId = familyForRawId,
-                        parser = sessionListParser,
-                    )
-                }
-            return probes.sessions(
-                mergePocketshellSessionRows(jsonRows, structuredRows),
-            )
-        }
-        val pocketshell = session.execBounded(pathAware(POCKETSHELL_SESSIONS_COMMAND))
-        if (pocketshell.exitCode != 0) {
-            if (pocketshell.isTmuxServerAbsent()) {
-                return probes.sessions(emptyList())
-            }
-            return null
-        }
-
-        val humanRows = parsePocketshellSessionsRows(pocketshell.stdout, sessionListParser)
-        // `pocketshell sessions list` is intentionally kept as the compatible
-        // baseline: older hosts only have the human table. A single bounded
-        // raw-tmux enrichment probe is the only extra attempt. Its result is
-        // merged by session name, so an unavailable/malformed/partial probe
-        // can never make an otherwise valid human row disappear. This is
-        // deliberately NOT `pocketshell sessions list --json`: the current
-        // wrapper forwards that unknown flag to tmuxctl, whose list command
-        // rejects it.
+        // Older hosts only have the human table. One bounded raw-tmux
+        // enrichment is the only extra attempt, and only on that fallback —
+        // JSON already owns `--json` (0.4.45) and must not spend a second hop.
         val structured = try {
             session.execBounded(pathAware(POCKETSHELL_SESSIONS_TMUX_COMMAND))
         } catch (e: CancellationException) {
@@ -1076,7 +1067,7 @@ class SshFolderListGateway internal constructor(
                 )
             }
         return probes.sessions(
-            mergePocketshellSessionRows(humanRows, structuredRows),
+            mergePocketshellSessionRows(fetched.rows, structuredRows),
         )
     }
 
@@ -2195,12 +2186,10 @@ class SshFolderListGateway internal constructor(
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
         const val POCKETSHELL_SESSIONS_JSON_COMMAND: String = "pocketshell sessions list --json"
         /**
-         * Optional raw-id enrichment for the legacy pocketshell fallback.
-         * This is a bounded, directly supported tmux format probe rather than
-         * an invented `--json` flag on `pocketshell sessions`/`tmuxctl`. The
-         * seven fields match the parser's identity-bearing shape and retain
-         * the exact `@ps_agent_kind` value. Hosts without a usable tmux client
-         * simply keep the human-table rows above.
+         * Optional raw-id enrichment for the *human-table* old-host fallback
+         * only. JSON success must not issue this second hop (#2348). The seven
+         * fields match the parser's identity-bearing shape and keep the exact
+         * `@ps_agent_kind` value.
          */
         const val POCKETSHELL_SESSIONS_TMUX_FORMAT: String =
             "'#{session_id}$FIELD_SEP#{session_name}$FIELD_SEP#{session_created}" +

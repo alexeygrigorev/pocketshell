@@ -1028,59 +1028,12 @@ maintainer/process cleanups use the direct-to-main lane instead.
 
 Parallelism is issue-scoped, not role-skipping:
 
-### Required Codex subagent model (locked, 2026-07-15)
-
-Backlog implementers, reviewers, researchers, and on-call workers default to
-Codex subagents on **`gpt-5.6-sol` with High reasoning effort**. Do not replace
-them with shell-launched Claude sessions or an unspecified/default-effort
-agent. A maintainer may explicitly authorize a different reasoning effort for
-a named run when the built-in launcher cannot honor High; record that exception
-in the live handoff and still verify the child's actual model/effort before
-work.
-
-The normal dispatch call deliberately omits a model override: the child
-inherits the orchestrator's live model setting. Every handoff must make that
-source explicit (for example, “default agent; inherits `gpt-5.6-sol` / High”)
-and name the role being launched (implementer, reviewer, researcher, or
-on-call). If an override or maintainer-authorized exception is used, record the
-requested and observed model/effort in the handoff instead of describing it as
-the default. The same rule applies when a maintainer explicitly chooses a
-different model for an active run: record the exception rather than implying
-that the policy default was effective.
-
-Set the persistent local defaults in `~/.codex/config.toml`:
-
-```toml
-model = "gpt-5.6-sol"
-model_reasoning_effort = "high"
-```
-
-In an already-running app/CLI task, the parent thread's live model setting is
-reapplied to spawned children and can override newly edited config. Before the
-first dispatch, use the composer model selector (**Advanced → `gpt-5.6-sol` →
-High**) or CLI `/model`; otherwise restart/open a new task so config reloads.
-Verify the first child's recorded/effective model and effort before allowing it
-to edit. If it is not `gpt-5.6-sol` High, interrupt it immediately, preserve the
-worktree, correct the parent/config setting, and redispatch only after reload.
-
-- Use the built-in Codex subagent workflow for all role dispatches.
-- Keep the normal isolated-worktree and implementer → reviewer state machine;
-  model selection does not waive any process gate.
-- Project/personal custom agent TOML files may pin `model` and
-  `model_reasoning_effort`, but newly added agent/config files still require a
-  new task or restart when the active parent retains a live override.
-- Treat the child's recorded turn metadata as authoritative. On 2026-07-15 the
-  built-in collaboration launcher still forced `reasoning_effort = "medium"`
-  even when the parent and an exactly named custom agent profile both recorded
-  `gpt-5.6-sol` / `high`; the launch API exposed no effort override. Interrupt
-  that child before work and report the launcher limitation. Do not relabel it
-  High, fall back to Medium, or replace it with a shell-launched agent.
-- **Current explicit exception (2026-07-15):** after the High override repeated,
-  the maintainer authorized Medium Codex subagents for the active backlog run.
-  This clears that run's effort blocker only; `gpt-5.6-sol`, built-in subagents,
-  isolated worktrees, implementer → reviewer separation, and all normal gates
-  remain mandatory.
-
+- The orchestrator picks whichever agent type/model fits a given dispatch;
+  process.md does not mandate one. Record the model actually used in the
+  handoff/status comment so review and later audits know what ran.
+- Keep the normal isolated-worktree and implementer → reviewer state machine
+  regardless of which agent type/model does the work — model choice does not
+  waive any process gate (D31/D32/D33 apply unchanged).
 - Each active issue keeps its own implementer/reviewer loop.
 - Reviewers may run in parallel for different issues.
 - A reviewer finding for issue A goes back to an implementer assigned to issue A, even if issue B is also active.

@@ -51,7 +51,7 @@ UPLOAD_STEP_NAME = "Python report"
 CHECK_WRAPPER = "scripts/python-ci.sh"
 TEST_RUNNER_COMMAND = "scripts/run-python-tests.sh"
 TEST_RUNNER_WORKING_DIRECTORY = 'cd "$ROOT_DIR/tools/pocketshell"'
-MINIMUM_CONTRACT_COMMENT = "# Contract: checker floor = 1000 executed tests, a lower bound."
+MINIMUM_CONTRACT_COMMENT = "# Contract: --min-executed 1000 is a lower bound."
 
 # These strings are part of the workflow contract.  RUNNER_TEMP is expanded by
 # the shell in run steps; runner.temp is the same runner-owned directory in the
@@ -665,12 +665,18 @@ def self_test() -> None:
         (
             "missing positive minimum",
             "--min-executed",
-            canonical.replace(f" --min-executed {MIN_EXPECTED_EXECUTED_TESTS}", ""),
+            canonical.replace(
+                f" --min-executed {MIN_EXPECTED_EXECUTED_TESTS}\n",
+                "\n",
+            ),
         ),
         (
             "zero minimum",
             "positive",
-            canonical.replace(f"--min-executed {MIN_EXPECTED_EXECUTED_TESTS}", "--min-executed 0"),
+            canonical.replace(
+                f" --min-executed {MIN_EXPECTED_EXECUTED_TESTS}\n",
+                " --min-executed 0\n",
+            ),
         ),
         (
             "failure-only upload",

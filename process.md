@@ -1389,6 +1389,48 @@ If two approved worktrees touch the same file, do NOT attempt a manual
 back to a fresh implementer round to rebase onto the updated `main`
 (re-create the worktree off the new `main` if needed).
 
+### Batching >=2 approved PRs through one integration worktree (issue #2354)
+
+For 2-3 already reviewer-`APPROVED`, independent PRs ready close together —
+especially touching connection/terminal/session/composer — the orchestrator
+MAY run one combined pre-merge check instead of merging each on faith that
+per-PR checks alone catch a cross-PR interaction. Manual extension of the
+integration-worktree pattern above, not new CI infrastructure:
+
+1. `git worktree add .worktrees/batch-<date> origin/main`.
+2. `git merge --no-ff <branch>` each approved PR into it, in review order. A
+   real conflict sends that PR back to rebase (same rule as above), never a
+   manual 3-way resolution in the batch worktree.
+3. From the batch worktree, run the union scoped plan against the pre-batch
+   `origin/main` sha: `scripts/select-test-areas.sh --base <pre-batch-sha>
+   --print-plan-only` — with every PR's diff present, this is naturally the
+   union of what each PR's own checks would have selected.
+4. Run the plan's selected unit tasks/filters; when the union crosses
+   connection/terminal/session/composer or the plan is `MODE=full`, also run
+   the load-bearing journey smoke set locally (`scripts/ci-journey-suite.sh`
+   with `POCKETSHELL_JOURNEY_SCOPED` set to the plan's `JOURNEY_CLASSES`, via
+   `scripts/connected-test.sh`).
+5. Only on green does the orchestrator merge each PR individually through its
+   normal protected-`main` flow — the batch worktree is validation-only and
+   is never pushed itself, so per-PR review/audit and required checks are
+   unchanged; the batch just adds one combined check first.
+6. On red, bisect by dropping PRs one at a time until green, merge the
+   passing subset, and return the culprit to the implementer/reviewer loop
+   with the failure evidence.
+
+**Merge-queue feasibility (evaluated, not enabled — issue #2354).** GitHub's
+native `merge_group` queue is technically available (public repo => free
+tier; the orchestrator's `gh` token carries repo `admin`, confirmed via
+`gh api repos/.../branches/main/protection`), so a future maintainer
+decision could enable it instead. Not enabled this round: it changes the
+live merge workflow every future PR goes through (queued + a synthetic
+merge-group commit, instead of today's direct squash-merge) — a
+cross-cutting behavioral change to the release process, the class of call
+this document reserves for the maintainer ("Release-owner operating mode").
+If adopted, add a `merge_group` trigger to `tests.yml`/`pr-journey-smoke.yml`
+with the same required-check names `pull_request` uses today, and retire
+this manual procedure.
+
 ## Briefing Rules
 
 Implementer briefs include:

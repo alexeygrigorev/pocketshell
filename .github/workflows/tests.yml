@@ -21,10 +21,11 @@ on:
       - "docs/**"
       - "chat/**"
   workflow_dispatch:
+  schedule: [{cron: "0 0,8,16 * * *"}]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('ref-{0}', github.ref) }}
-  cancel-in-progress: true
+  group: ${{ github.event_name=='schedule'&&'sched'||format('{0}-{1}',github.workflow,github.event_name=='pull_request'&&format('pr-{0}',github.event.pull_request.number)||format('ref-{0}',github.ref)) }}
+  cancel-in-progress: ${{ github.event_name!='schedule' }}
 
 jobs:
   # Issue #2060 (CI Phase A): the ~25 SERIAL guard steps this job used to carry in
@@ -841,6 +842,8 @@ jobs:
           chmod +x scripts/ci-build-profile-guards.sh
           scripts/ci-build-profile-guards.sh
 
+      - run: scripts/test-ci-cadence.sh
+
   # ---------------------------------------------------------------------------
   # Issue #2067: the #2063 test-area coverage guards, as a DEDICATED job. Reached
   # through a JVM test they were paid TWICE per push (both variants) on the Unit
@@ -1089,6 +1092,15 @@ jobs:
           .venv/bin/pocketshell --help
           .venv/bin/pocketshell usage --help
 
+  sg:
+    if: github.event_name=='push'
+    runs-on: ubuntu-latest
+    outputs:
+      c: ${{steps.p.outputs.SCOPED_CLASSES}}
+    steps:
+      - {uses: actions/checkout@v6, with: {fetch-depth: 0}}
+      - {id: p, run: "scripts/ci-plan.sh --before ${{github.event.before}}"}
+
   integration:
     name: Integration tests (Docker)
     if: github.event_name != 'pull_request'
@@ -1180,7 +1192,7 @@ jobs:
 
   emulator-journey:
     name: Emulator journey subset (load-bearing, Docker agents)
-    if: github.event_name != 'pull_request'
+    if: ${{!cancelled()&&github.event_name!='pull_request'&&needs.dex.result=='success'&&needs.python.result=='success'&&needs.sg.result!='failure'}}
     # Issue #2090: Checks-API publisher for last-completed-class telemetry.
     # actions: write keeps the existing artifact uploads working once this job
     # names its token scopes.
@@ -1209,7 +1221,7 @@ jobs:
     # spends the runners. Bounded — `main` pushes already passed the required
     # `Unit tests` check on their PR head (G7), and the main-push concurrency
     # group cancels superseded runs.
-    needs: [dex, python]
+    needs: [dex, python, sg]
     runs-on: ubuntu-latest
     # Issue #835 (REOPENED, SHARD): the right-size-only fix (#1055, 45->95 cap +
     # 4200s budget + Gradle daemon reuse) STILL could not finish the full
@@ -1260,6 +1272,7 @@ jobs:
       # hash into (index % total). _TOTAL must equal len(matrix.shard).
       POCKETSHELL_JOURNEY_CI_SHARD_INDEX: ${{ matrix.shard }}
       POCKETSHELL_JOURNEY_CI_SHARD_TOTAL: 6
+      POCKETSHELL_JOURNEY_SCOPED: ${{needs.sg.outputs.c}}
     # Issue #835 (REOPENED, RIGHT-SIZE): raised 45 -> 95 originally so the FULL
     # serial selection could finish; with sharding each leg runs ~1/N the classes
     # (#2060: ~38 min modelled worst leg at 6) and finishes well under this cap.

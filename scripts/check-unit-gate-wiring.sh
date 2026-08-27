@@ -84,6 +84,7 @@ EXEMPT_JOBS=(
   "integration"              # batched Docker lane, not a per-PR blocker
   "emulator-journey"         # batched emulator lane, verdict-gated below
   "emulator-journey-verdict" # the emulator lane's own aggregate verdict
+  "sg"                       # issue #2353: scoped-push plan gate, not a per-PR job
 )
 
 # C9: the #2063 coverage guards belong to `guards-test-selection`, never to a

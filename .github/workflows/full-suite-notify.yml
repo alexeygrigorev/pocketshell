@@ -1,0 +1,64 @@
+name: Full-suite red-run notify
+
+# Issue #2353 (Phase 1 of epic #2350): on a RED scheduled full-suite run of
+# the Tests workflow (.github/workflows/tests.yml `schedule:` trigger), file
+# (or update) ONE tracking issue with the failure signature and the bounded
+# list of `main` commits since the last known-green scheduled run — the
+# fast-attribution mechanism the v0.4.45 release postmortem (#2338/#2294, 11
+# days red `main`) was missing.
+#
+# Deliberately a SEPARATE workflow, triggered by `workflow_run` once Tests
+# concludes, rather than a job inside tests.yml: `.github/workflows/tests.yml`
+# is under a hard file-size ratchet (scripts/check-file-size-hygiene.sh) with
+# essentially no headroom left, and this notify logic needs no job-level
+# `needs:` access into Tests' jobs anyway — it re-derives everything it needs
+# (which top-level job failed, the last known-green scheduled run's SHA) from
+# the GitHub API against the now-completed run, via
+# scripts/ci-run-jobs.sh and scripts/ci-skip-check.sh respectively.
+#
+# Only fires for a SCHEDULED Tests run that concluded failure — never for a
+# push/PR/workflow_dispatch run (those have no "last known green scheduled
+# run" concept to bisect against) and never for a green run.
+
+on:
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+
+jobs:
+  notify:
+    name: File/update red scheduled-run tracking issue
+    if: github.event.workflow_run.event == 'schedule' && github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+        with: { fetch-depth: 0 }
+
+      - id: jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci-run-jobs.sh --repo "${{ github.repository }}" --run-id "${{ github.event.workflow_run.id }}"
+
+      - id: green
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci-skip-check.sh --repo "${{ github.repository }}" --sha "${{ github.event.workflow_run.head_sha }}"
+
+      - name: File or update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          scripts/ci-red-issue.sh \
+            --repo "${{ github.repository }}" \
+            --run-url "${{ github.event.workflow_run.html_url }}" \
+            --sha "${{ github.event.workflow_run.head_sha }}" \
+            --last-green-sha "${{ steps.green.outputs.last_green_sha }}" \
+            --unit-gate "${{ steps.jobs.outputs.unit_gate }}" \
+            --python "${{ steps.jobs.outputs.python }}" \
+            --integration "${{ steps.jobs.outputs.integration }}" \
+            --emulator-journey-verdict "${{ steps.jobs.outputs.emulator_journey_verdict }}"

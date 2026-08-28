@@ -86,10 +86,30 @@ usage() {
   sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# True if $1 is inside a usable git work tree with a `git` binary on PATH.
-git_usable() {
+# True when $1 is a checkout that carries its OWN git, and git can read it.
+#
+# Anchoring matters more than it looks. git's repository discovery ascends
+# through parent directories, so a COPY of this tree nested inside another
+# checkout derives the PARENT repository's tags. The pre-release confidence
+# gate makes exactly such a copy at
+# `<checkout>/build/pre-release-confidence-gate/<run>/worktree` and re-execs
+# there, and whether discovery escaped depended on nothing but filesystem
+# layout — it stops at a mount boundary, so the identical commit derived
+# `0.4.44-186-gbec69185` from a release worktree on /data and the documented
+# `0.0.0-dev` placeholder from the root checkout (whose `build/` is a
+# separate filesystem). The release gate compares that derived version
+# against the Docker `agents` fixture's baked version for exact equality, so
+# the gate passed or hard-failed on layout alone.
+#
+# A tree with no git of its own has no version to derive: fall back to the
+# documented placeholder rather than answering with a different repository's
+# history. `.git` is checked with -e, not -d, because in a git WORKTREE it is
+# a FILE holding `gitdir: ...` (docs/release.md cuts every release in one).
+git_tree_usable() {
+  local repo="$1"
   command -v git >/dev/null 2>&1 || return 1
-  git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1
+  [[ -e "$repo/.git" ]] || return 1
+  git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1
 }
 
 # Echoes the derived versionCode (a positive integer) for --ref (default
@@ -101,7 +121,7 @@ derive_version_code() {
     echo "$VERSION_CODE_OFFSET"
     return
   fi
-  if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! git_tree_usable "$repo"; then
     echo "$VERSION_CODE_OFFSET"
     return
   fi
@@ -119,7 +139,7 @@ derive_version_name() {
     echo "0.0.0-dev"
     return
   fi
-  if ! git -C "$repo" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if ! git_tree_usable "$repo"; then
     echo "0.0.0-dev"
     return
   fi
@@ -226,6 +246,33 @@ run_self_test() {
   local vc4
   vc4="$(derive_version_code "$repo" HEAD)"
   check "stray non-v* tag ignored" "$vc4" "$vc3"
+
+  # A COPY of the tree nested inside the repo must NOT inherit the repo's
+  # tags. This is the shape the pre-release confidence gate creates when it
+  # rsyncs the checkout to `<repo>/build/.../worktree` and re-execs there; git
+  # discovery would otherwise ascend out of the copy and answer with the
+  # PARENT repository's history, so the same commit derived a tag version or
+  # the placeholder depending only on whether a mount boundary happened to sit
+  # in between. Without this case the anchoring can be reverted silently.
+  local nested="$repo/build/pre-release-confidence-gate/self-test/worktree"
+  mkdir -p "$nested"
+  local nested_name nested_code
+  nested_name="$(derive_version_name "$nested" HEAD)"
+  check "nested copy does not inherit the parent repo's versionName" \
+    "$nested_name" "0.0.0-dev"
+  nested_code="$(derive_version_code "$nested" HEAD)"
+  check "nested copy does not inherit the parent repo's versionCode" \
+    "$nested_code" "$VERSION_CODE_OFFSET"
+  # Same nested path, but now a real worktree-style `.git` FILE: it DOES carry
+  # its own git, so it must derive normally. Proves the guard keys on the tree
+  # owning a git, not on the path looking generated, and that a `.git` file
+  # (every release worktree) is accepted alongside a `.git` directory.
+  printf 'gitdir: %s\n' "$repo/.git" > "$nested/.git"
+  local nested_linked_name
+  nested_linked_name="$(derive_version_name "$nested" HEAD)"
+  check "nested tree with its own .git FILE derives normally" \
+    "$nested_linked_name" "$(derive_version_name "$repo" HEAD)"
+  rm -rf "$repo/build"
 
   # git binary unavailable: must fall back to the placeholder, never crash.
   # Exercised by pointing at a PATH with no git.

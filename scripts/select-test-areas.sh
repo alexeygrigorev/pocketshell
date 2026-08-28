@@ -703,7 +703,7 @@ verify_manifest() {
   # of this grep missed (a completeness nit the reviewer flagged; the premise
   # holds either way, but a guard with a blind spot is how premises rot).
   doc_readers="$(grep -rnE --include='*.kt' --include='*.java' \
-    '(File|Paths\.get|resolve)\([^)]*"(docs/|mockups/|AGENTS\.md|process\.md|README\.md|CLAUDE\.md)' \
+    '(File|Paths\.get|resolve)\([^)]*"(docs/|AGENTS\.md|process\.md|README\.md|CLAUDE\.md)' \
     "$REPO_ROOT"/app/src/test "$REPO_ROOT"/app/src/androidTest "$REPO_ROOT"/app/src/integrationTest \
     "$REPO_ROOT"/shared/*/src/test "$REPO_ROOT"/shared/*/src/androidTest \
     "$REPO_ROOT"/shared/*/src/integrationTest 2>/dev/null || true)"

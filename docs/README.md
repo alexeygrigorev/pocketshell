@@ -19,17 +19,20 @@ context; the README and current feature docs track released behavior.
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [aplexer-integration.md](aplexer-integration.md) | Becoming an aplexer client: phases A–C; Phase A done, both managers listed |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
+| [release.md](release.md) | How we cut, stabilize, tag, and merge back a release (release-owner agent) |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
 | [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
 | [walkthrough-visual-pass.md](walkthrough-visual-pass.md) | Real emulator screenshot capture workflow for visual review |
 | [screenshots/](screenshots/) | Curated README screenshot assets captured from the visual-audit workflow |
 | [tmux-socket-recovery.md](tmux-socket-recovery.md) | Default tmux socket split-brain detection, safe recovery, and automation namespace guardrails |
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
-| [handoff-2026-08-13-release.md](handoff-2026-08-13-release.md) | v0.4.44 release handoff: stop boundary, deferred blockers, validation, tag, and publication plan |
-| [audit-2026-07-03.md](audit-2026-07-03.md) | Stability + UX jobs-to-be-done audit (5 parallel auditors); issue map #1222–#1243 |
-| [audit-2026-08-23-comprehensive-session-management.md](audit-2026-08-23-comprehensive-session-management.md) | Session tree/connection/data/release audit consolidation; live owners and deduplicated issue plan |
-| [black-screen-handoff.md](black-screen-handoff.md) | Black-screen elimination campaign: root-cause verdict, work queue #1294–#1298, diagnostics disambiguation — the implementing agent's brief |
+| [audit-2026-08-23-comprehensive-session-management.md](audit-2026-08-23-comprehensive-session-management.md) | Session-tree/connection audit and issue plan — delete once #2222, #2241–#2243, #2247, #2264, #2295 all close; no unique content will remain |
+| [worktrees.md](worktrees.md) | Agent worktree layout, creation, and merge-back mechanics |
+| [ci-pitfalls.md](ci-pitfalls.md) | Catalogue of ways a CI/gate run can look green while proving nothing — check before trusting a result |
+| [review-standards.md](review-standards.md) | Reviewer acceptance bars for terminal/session/visual/journey work |
+| [lessons-learned.md](lessons-learned.md) | Durable, recurring operational lessons not tied to any one epic |
 | [../AGENTS.md](../AGENTS.md) | Primary project + agent instructions (imported by [../CLAUDE.md](../CLAUDE.md)) |
+| [../process.md](../process.md) | The implementer/reviewer/orchestrator process contract |
 | [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |
 
 ## Related projects

@@ -191,9 +191,10 @@ class SessionNameDerivationTest {
     // `customNameCollisionWalksUpUntilFreeSlot`.
     //
     // The `-2`/`-3` walk itself is NOT untested — it moved to where it now runs:
-    // the host-side resolver (`FolderListGatewayFallbackTest`'s
-    // `freeSessionNameCommand` + UniqueOnHost cases, incl. the exact-match
-    // assertion) and the connected `TmuxInSessionNewSessionCollisionDockerTest`.
+    // the host-side resolver (`FolderListGatewayFallbackTest`'s socket-sweep +
+    // UniqueOnHost cases, incl. the exact-match assertion; #2378 moved the walk
+    // itself into `TmuxSocketSweep.nextFreeSessionName`) and the connected
+    // `TmuxInSessionNewSessionCollisionDockerTest`.
     //
     // `emptyExistingNamesDerivesTheBareCollidingBase` (#976) survives below as
     // `derivationNeverDisambiguatesEvenForAKnownLiveBase`: its point — the

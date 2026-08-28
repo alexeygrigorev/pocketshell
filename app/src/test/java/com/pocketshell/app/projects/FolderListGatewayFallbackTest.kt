@@ -1001,9 +1001,15 @@ class FolderListGatewayFallbackTest {
     @Test
     fun plainRepickWithNoLaunchKeepsIdempotentAttachOrCreate() = runTest {
         // A plain re-pick (no startCommand) must KEEP the idempotent
-        // attach-or-create semantics (#642/#429) — it does NOT probe has-session
-        // and does NOT refuse on an existing name (the collision guard is scoped
-        // to the LAUNCH case only, so the re-pick UX is unchanged).
+        // attach-or-create semantics (#642/#429): it is never REFUSED for an
+        // existing name — the collision guard stays scoped to the LAUNCH case,
+        // so the re-pick UX is unchanged.
+        //
+        // Issue #2378: the re-pick DOES now ask the host which socket holds the
+        // name, because that probe is what stops a same-named orphan being
+        // created on the default socket next to a live tmuxctl session. So the
+        // contract pinned here is "never refuses, still creates", not "never
+        // probes".
         val session = CreateSessionFake(
             results = listOf(
                 CreateSessionFake.Rule(match = "create-detached", result = ok()),
@@ -1011,7 +1017,7 @@ class FolderListGatewayFallbackTest {
         )
         val gateway = SshFolderListGateway()
 
-        gateway.createSessionOnSession(
+        val outcome = gateway.createSessionOnSession(
             session = session,
             sessionName = SESSION_NAME,
             cwd = CWD,
@@ -1019,9 +1025,10 @@ class FolderListGatewayFallbackTest {
             namePolicy = SessionNamePolicy.ExactName,
         )
 
-        assertFalse(
-            "a no-launch re-pick must not probe has-session",
-            session.execCommands.any { it.contains("has-session") },
+        assertEquals(
+            "a no-launch re-pick must succeed, never be refused",
+            SessionCreateOutcome.Created(SESSION_NAME),
+            outcome,
         )
         assertTrue(
             "a no-launch re-pick must still run the idempotent create",
@@ -1049,11 +1056,22 @@ class FolderListGatewayFallbackTest {
         // The host answers the free-name probe with the `-2` variant, i.e. the
         // requested base is already live there. Every downstream step must use
         // THAT name — this is the load-bearing assertion for #1820.
+        // Issue #2378: the host answers the SOCKET SWEEP with the live session
+        // names (here the requested base is already live), and the locate probe
+        // with the Absent sentinel for the resolved `-2` name.
         val session = CreateSessionFake(
             results = listOf(
                 CreateSessionFake.Rule(
-                    match = "__ps_n=",
-                    result = ExecResult(stdout = "$SESSION_NAME-2\n", stderr = "", exitCode = 0),
+                    match = "list-sessions",
+                    result = ExecResult(stdout = "$SESSION_NAME\n", stderr = "", exitCode = 0),
+                ),
+                CreateSessionFake.Rule(
+                    match = "__ps_want=",
+                    result = ExecResult(
+                        stdout = "${TmuxSocketSweep.NO_SOCKET_SENTINEL}\n",
+                        stderr = "",
+                        exitCode = 0,
+                    ),
                 ),
                 CreateSessionFake.Rule(match = "create-detached", result = ok()),
             ),
@@ -1084,13 +1102,27 @@ class FolderListGatewayFallbackTest {
         // host resolving the name, the launch proceeds into the NEW session.
         val session = CreateSessionFake(
             results = listOf(
+                // Issue #2378: `<base>` and `<base>-2` are already live on the
+                // host's sockets, so the walk resolves `-3`.
                 CreateSessionFake.Rule(
-                    match = "__ps_n=",
-                    result = ExecResult(stdout = "$SESSION_NAME-3\n", stderr = "", exitCode = 0),
+                    match = "list-sessions",
+                    result = ExecResult(
+                        stdout = "$SESSION_NAME\n$SESSION_NAME-2\n",
+                        stderr = "",
+                        exitCode = 0,
+                    ),
                 ),
-                // has-session on the RESOLVED name: free, so the #976 guard
-                // passes and the launch is allowed to proceed.
-                CreateSessionFake.Rule(match = "has-session", result = ExecResult("", "", 1)),
+                // The socket locate on the RESOLVED name: on no socket, so the
+                // #976 guard passes and the launch proceeds. The launch then
+                // re-locates it (created on the default socket by the fake).
+                CreateSessionFake.Rule(
+                    match = "__ps_want=",
+                    result = ExecResult(
+                        stdout = "${TmuxSocketSweep.NO_SOCKET_SENTINEL}\n",
+                        stderr = "",
+                        exitCode = 0,
+                    ),
+                ),
                 CreateSessionFake.Rule(match = "agent --help", result = ok()),
                 CreateSessionFake.Rule(match = "create-detached", result = ok()),
                 CreateSessionFake.Rule(match = "send-keys", result = ok()),
@@ -1123,10 +1155,13 @@ class FolderListGatewayFallbackTest {
             "the launch must NOT target the colliding base, got: $sendKeys",
             sendKeys.contains("'=$SESSION_NAME:'"),
         )
-        val guard = session.execCommands.single { it.contains("has-session") && !it.contains("__ps_n=") }
+        // Issue #2378: the #976 guard is now the cross-socket locate probe, and
+        // it must still ask about the RESOLVED name by EXACT match.
+        val guard = session.execCommands.first { it.contains("__ps_want=") }
         assertTrue(
             "the #976 guard must probe the resolved name by EXACT match, got: $guard",
-            guard.contains("'=$SESSION_NAME-3'"),
+            guard.contains("__ps_want=${escapedInWrapper("$SESSION_NAME-3")}") &&
+                guard.contains("has-session -t \"=\$__ps_want\""),
         )
     }
 
@@ -1149,8 +1184,9 @@ class FolderListGatewayFallbackTest {
 
         assertEquals(SessionCreateOutcome.Created(SESSION_NAME), resolved)
         assertFalse(
-            "ExactName must not run the free-name walk",
-            session.execCommands.any { it.contains("__ps_n=") },
+            "ExactName must not run the free-name walk (#2378: the socket-wide " +
+                "name sweep that feeds it)",
+            session.execCommands.any { it.contains("list-sessions") },
         )
     }
 
@@ -1162,7 +1198,7 @@ class FolderListGatewayFallbackTest {
         val session = CreateSessionFake(
             results = listOf(
                 CreateSessionFake.Rule(
-                    match = "__ps_n=",
+                    match = "list-sessions",
                     result = ExecResult(stdout = "", stderr = "tmux: not found", exitCode = 127),
                 ),
                 CreateSessionFake.Rule(match = "create-detached", result = ok()),
@@ -1186,22 +1222,51 @@ class FolderListGatewayFallbackTest {
     }
 
     @Test
-    fun freeSessionNameCommandUsesExactMatchAndABoundedWalk() {
-        // `-t "=$n"` is load-bearing: without the `=`, tmux falls back to prefix
-        // matching, so probing `foo` while only `foo-2` exists answers "taken"
-        // and the walk skips a genuinely free name. The bound stops a
-        // pathological host spinning the remote shell forever.
-        val command = SshFolderListGateway.freeSessionNameCommand("'work session'")
-
-        assertTrue("must exact-match: $command", command.contains("has-session -t \"=\$__ps_n\""))
-        assertTrue("must seed from the quoted base: $command", command.contains("__ps_n='work session'"))
-        assertTrue("must build the suffix from the quoted base: $command", command.contains("__ps_n='work session'-\$__ps_i"))
-        assertTrue("must start at -2: $command", command.contains("__ps_i=2"))
+    fun theSocketSweepCommandsCoverEverySocketAndExactMatchTheName() {
+        // Issue #2378 (replacing #1820's default-socket-only walk): the name
+        // sweep must glob the whole tmux socket directory — tmuxctl's
+        // per-session servers live there, and a bare `tmux` cannot see them —
+        // and the locate probe must exact-match (`=<name>`), or a live
+        // `<base>-2` makes a free `<base>` read as taken (#1820).
+        val names = TmuxSocketSweep.liveSessionNamesCommand()
+        assertTrue("must glob the tmux socket directory: $names", names.contains("tmux-\$(id -u)\"/*"))
+        assertTrue("must skip non-sockets: $names", names.contains("[ -S \"\$__ps_sock\" ]"))
         assertTrue(
-            "must bound the walk: $command",
-            command.contains("-gt ${SshFolderListGateway.FREE_SESSION_NAME_MAX_SUFFIX}"),
+            "must list each socket's sessions: $names",
+            names.contains("-S \"\$__ps_sock\" list-sessions -F '#{session_name}'"),
         )
-        assertTrue("must emit the chosen name: $command", command.contains("printf '%s\\n' \"\$__ps_n\""))
+        assertTrue("an empty host must not fail the probe: $names", names.trimEnd().endsWith("exit 0"))
+
+        val locate = TmuxSocketSweep.sessionSocketCommand("'work session'")
+        assertTrue("must seed from the quoted name: $locate", locate.contains("__ps_want='work session'"))
+        assertTrue("must exact-match: $locate", locate.contains("has-session -t \"=\$__ps_want\""))
+        assertTrue(
+            "dedicated sockets must be probed before the default one: $locate",
+            locate.indexOf("*/default) continue") < locate.indexOf("printf '%s\\n' 'default'"),
+        )
+        assertTrue(
+            "a session on no socket must answer the Absent sentinel: $locate",
+            locate.contains("printf '%s\\n' '${TmuxSocketSweep.NO_SOCKET_SENTINEL}'"),
+        )
+
+        // The `<base>`/`-2`/`-3` walk itself, bounded so a pathological host
+        // cannot spin it forever.
+        assertEquals(
+            "work session-3",
+            TmuxSocketSweep.nextFreeSessionName(
+                "work session",
+                setOf("work session", "work session-2"),
+            ),
+        )
+        assertEquals(
+            "work session",
+            TmuxSocketSweep.nextFreeSessionName(
+                "work session",
+                (1..TmuxSocketSweep.MAX_SESSION_NAME_SUFFIX + 1)
+                    .map { if (it == 1) "work session" else "work session-$it" }
+                    .toSet(),
+            ),
+        )
     }
 
     /**

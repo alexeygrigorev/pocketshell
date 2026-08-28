@@ -20,9 +20,26 @@ on:
         required: false
         default: false
         type: boolean
+  # Issue #2356 (Phase 4 of epic #2350): the "validated RC" nightly trigger.
+  # Rather than a SEPARATE `schedule:` cron re-deriving "the newest main SHA
+  # with a green Phase-1 scheduled full-suite run" from scratch (a second
+  # query racing the first), this workflow reacts to that exact signal --
+  # `workflow_run` fires once .github/workflows/tests.yml's OWN `schedule:`
+  # run (issue #2353's ~8h full-suite cadence) concludes, and the
+  # `emulator-release-validation` job below only actually runs when that run
+  # was itself green (see its `if:`). This is simpler and more reliable than
+  # a second cron: one signal, one reaction, no clock-skew between two
+  # independent schedules, and `github.event.workflow_run.head_sha` gives the
+  # EXACT validated SHA directly instead of re-querying for it.
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
 
 # Manual release validation owns a long emulator runner; queue one per ref
-# instead of letting duplicate dispatches pile up.
+# instead of letting duplicate dispatches pile up. The nightly workflow_run
+# trigger shares the same group (github.ref here is this workflow's own
+# ref, effectively `main`), so a manual dispatch and the nightly run never
+# overlap on the one long-lived emulator runner either.
 concurrency:
   group: release-emulator-validation-${{ github.ref }}
   cancel-in-progress: false
@@ -32,6 +49,17 @@ jobs:
     name: Emulator-only release validation
     runs-on: ubuntu-latest
     timeout-minutes: 180
+
+    # Issue #2356: only run automatically for a GREEN scheduled Tests run
+    # (the Phase-1 tier-3 full-suite cadence) -- never for a push/PR/red
+    # Tests completion, which is not the "validated RC" signal this trigger
+    # exists to react to. A manual workflow_dispatch always runs (unchanged
+    # from before this issue).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'schedule' &&
+       github.event.workflow_run.conclusion == 'success')
 
     # Issue #851: the nightly-fault release guard queries the latest "Nightly
     # Extensive Tests" run via `gh run list` / `gh run view`, which needs read
@@ -61,8 +89,18 @@ jobs:
         -Pkotlin.daemon.jvmargs=-Xmx3072m
 
     steps:
+      # Issue #2356: on the nightly workflow_run trigger, check out the
+      # EXACT SHA the green Tests run validated
+      # (github.event.workflow_run.head_sha), not whatever `main` has moved
+      # to since -- the validated-rc marker recorded at the end of this run
+      # must name the SHA this run actually exercised. On workflow_dispatch
+      # that expression is empty, so actions/checkout falls back to its
+      # normal default ref (unchanged from before this issue).
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || '' }}
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -264,3 +302,78 @@ jobs:
         run: |
           docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
           docker compose -f tests/docker/real-agent/compose.yml down --volumes --remove-orphans || true
+
+  # Issue #2356 (Phase 4 of epic #2350), Part A step 2: on a GREEN nightly
+  # run only, record the "validated RC" marker -- see
+  # scripts/ci-nightly-rc-mark.sh for why a force-updated annotated
+  # `validated-rc` git tag is the chosen mechanism (one command to query,
+  # SHA + run URL + timestamp in the tag message, unambiguous by
+  # construction since there is only ever one). Restricted to the
+  # workflow_run/schedule path (never a manual workflow_dispatch) so an
+  # ad-hoc manual run of this workflow against an arbitrary ref can never
+  # move the release-readiness pointer.
+  record-validated-rc:
+    name: Record validated-rc marker
+    needs: emulator-release-validation
+    if: >-
+      needs.emulator-release-validation.result == 'success' &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Record validated-rc marker
+        run: |
+          chmod +x scripts/ci-nightly-rc-mark.sh
+          scripts/ci-nightly-rc-mark.sh \
+            --sha "${{ github.event.workflow_run.head_sha }}" \
+            --run-url "${{ github.event.workflow_run.html_url }}"
+
+  # Issue #2356, Part A step 3: on TWO CONSECUTIVE infra failures of the
+  # nightly run (never a single flaky blip), auto-file/update ONE tracking
+  # issue -- mirrors the pattern .github/workflows/full-suite-notify.yml
+  # already established for the scheduled-full-suite red-run tracker
+  # (issue #2353). Also restricted to the workflow_run/schedule path.
+  notify-nightly-rc-red:
+    name: File/update red nightly-RC tracking issue
+    needs: emulator-release-validation
+    if: >-
+      needs.emulator-release-validation.result == 'failure' &&
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.event == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: streak
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/ci-nightly-rc-consecutive-check.sh
+          scripts/ci-nightly-rc-consecutive-check.sh \
+            --repo "${{ github.repository }}" \
+            --exclude-run-id "${{ github.run_id }}"
+
+      - name: File or update the tracking issue on a two-in-a-row streak
+        if: steps.streak.outputs.consecutive_failures == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x scripts/ci-nightly-rc-issue.sh
+          scripts/ci-nightly-rc-issue.sh \
+            --repo "${{ github.repository }}" \
+            --run-url "${{ github.event.workflow_run.html_url }}" \
+            --sha "${{ github.event.workflow_run.head_sha }}"

@@ -474,39 +474,54 @@ maintainer cuts an Android release tag (`vX.Y.Z`), the
 [`Build`](../../.github/workflows/build.yml) workflow assembles the APK
 and **also** builds the Python sdist + wheel and publishes them to PyPI.
 
-### Version coupling
+### Version coupling (tag-derived, issue #2356)
 
-Two files must agree on the release version:
+Neither side is a hand-maintained literal any more. Both derive from the git
+tag being built, via the single shared script
+[`scripts/derive-version.sh`](../../scripts/derive-version.sh):
 
-- `app/build.gradle.kts` -> `versionName = "X.Y.Z"`
-- `tools/pocketshell/pyproject.toml` -> `version = "X.Y.Z"`
+- `app/build.gradle.kts` computes `versionCode`/`versionName` at Gradle
+  configuration time by shelling out to `scripts/derive-version.sh`.
+- `tools/pocketshell/pyproject.toml`'s committed `version` field is a
+  placeholder. The release workflow's "Stamp pyproject.toml version from
+  tag" step overwrites it (in the ephemeral CI checkout, never committed)
+  from `scripts/derive-version.sh version-name --ref <tag>` immediately
+  before building the sdist/wheel.
 
+[`scripts/check-version-coupling.sh`](../../scripts/check-version-coupling.sh)
+verifies the derivation script is the SOLE source of truth (its own
+self-test, Gradle's resolved version matching a direct script invocation,
+and both consumers referencing the script by path rather than an
+independent reimplementation) — it runs per-push in `tests.yml`.
 [`scripts/check-pypi-version.sh`](../../scripts/check-pypi-version.sh)
-enforces this. The release workflow runs it with `--check-tag vX.Y.Z`
-before publishing, so a tag pushed with mismatched versions fails the
-job loudly before anything reaches PyPI.
-
-Run it locally before tagging:
+verifies, at tag-publish time, that the freshly-stamped
+`pyproject.toml` version equals what `scripts/derive-version.sh` derives
+for the tag being published:
 
 ```bash
-scripts/check-pypi-version.sh                  # local match check
 scripts/check-pypi-version.sh --check-tag vX.Y.Z
 ```
 
-### Bumping a release
+### Cutting a release
+
+There is no version-bump commit or PR. The tag itself is the version
+declaration:
 
 1. Pick the next semantic version after the latest GitHub Release/tag.
-2. Update **both** version sources in the same commit:
-   - `app/build.gradle.kts` -> bump `versionName` (and `versionCode`).
-   - `tools/pocketshell/pyproject.toml` -> bump `version` to the
-     same value as `versionName`.
-3. Run `scripts/check-pypi-version.sh` to confirm they match.
-4. Commit the bump on `main`, push, and run the emulator release
-   validation gate (`scripts/release-emulator-validation.sh`) as
-   described in [`process.md`](../../process.md) -> "Release Builds".
-5. Push the tag with `scripts/push-release-tag.sh`. The tag-triggered
+2. Run the emulator release validation gate
+   (`scripts/release-emulator-validation.sh`) against the current `main`
+   HEAD, as described in [`process.md`](../../process.md) -> "Release
+   Builds".
+3. Push the tag with `scripts/push-release-tag.sh vX.Y.Z ...`. It creates
+   the tag locally FIRST and verifies `scripts/derive-version.sh` derives
+   the expected `versionName` (and a strictly-monotonic `versionCode`
+   versus the previous tag) from it before pushing — so a derivation bug
+   is caught before the tag ever reaches `origin`. The tag-triggered
    `Build` workflow then:
-   - builds and uploads the APK + creates the GitHub Release
+   - builds and uploads the APK (its `versionCode`/`versionName` come from
+     the tag via `app/build.gradle.kts`'s own derivation) + creates the
+     GitHub Release
+   - stamps `tools/pocketshell/pyproject.toml`'s version from the tag
    - runs `scripts/check-pypi-version.sh --check-tag vX.Y.Z`
    - builds the Python sdist + wheel
    - publishes them to PyPI via OIDC trusted publishing

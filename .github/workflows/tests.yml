@@ -892,8 +892,13 @@ jobs:
     timeout-minutes: 30
 
     steps:
+      # #2356: fetch-depth 0 — below's Gradle cross-check needs real v* tags,
+      # else derive-version.sh silently falls back to the dev path and the
+      # guard can never catch a real regression (reviewer finding).
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -913,6 +918,12 @@ jobs:
 
       - name: Make gradlew executable
         run: chmod +x ./gradlew
+
+      # #2356: Gradle half of check-version-coupling.sh (python: runs the rest).
+      - name: "Version-coupling guard, Gradle cross-check (issue #2356)"
+        run: |
+          chmod +x scripts/check-version-coupling.sh
+          scripts/check-version-coupling.sh
 
       # Issue #1685: dex register-pressure ratchet for the TmuxSessionScreen
       # composable family. TmuxSessionScreen is the app's MAIN screen and a single
@@ -1065,25 +1076,16 @@ jobs:
       # proves the guard's own red->green logic, then the bare run checks the
       # real tree. Cheap (~1s); kept in this cheap Python job, not the emulator
       # job.
-      - name: "Version-coupling guard (issue #948)"
+      - name: "Version-coupling guard (issue #948, restructured for #2356)"
         run: |
           chmod +x scripts/check-version-coupling.sh
           scripts/check-version-coupling.sh --self-test
-          scripts/check-version-coupling.sh
+          # No JDK/SDK here; `dex` job runs the full (Gradle) check.
+          scripts/check-version-coupling.sh --skip-gradle
 
-      # Issue #1669: fail at push time when the app versionName leads the newest
-      # origin release tag by more than one release — the "bumped but never
-      # tagged" miss that stranded v0.4.38 (the maintainer had to git ls-remote to
-      # discover the phone's build did not match any release). --self-test first
-      # proves the guard's own red->green logic on synthetic fixtures, then the
-      # bare run checks the real tree against origin's tags. Cheap (~1s), kept in
-      # this cheap Python job. `fetch-tags`/`ls-remote` provides the tag list even
-      # in the shallow checkout.
-      - name: "Stranded-release guard (issue #1669)"
-        run: |
-          chmod +x scripts/check-stranded-release.sh
-          scripts/check-stranded-release.sh --self-test
-          scripts/check-stranded-release.sh
+      # #1669's "stranded release" was RETIRED by #2356 (versionName is now
+      # tag-derived, no bump step to strand); check-stranded-release.sh
+      # deleted (D22).
 
       - name: Smoke-test installed CLI
         working-directory: tools/pocketshell

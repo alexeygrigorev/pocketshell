@@ -1,3 +1,5 @@
+import java.util.concurrent.TimeUnit
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -41,6 +43,68 @@ val duplicateJavaResourceExcludes = listOf(
     "META-INF/notice.txt",
 )
 
+// Issue #2356 (Phase 4 of epic #2350): versionCode/versionName are DERIVED
+// from the git tag being built rather than hand-maintained literals, so a
+// release requires no version-bump commit — the tag pushed by
+// scripts/push-release-tag.sh IS the version declaration. The single source
+// of truth for the derivation is scripts/derive-version.sh (shared with the
+// tools/pocketshell PyPI publish step in .github/workflows/build.yml so the
+// two sides can never independently drift — see
+// scripts/check-version-coupling.sh).
+//
+// MUST NEVER fail/hang the build: any error (script missing, git missing,
+// shallow/tagless checkout, timeout) falls back to a safe placeholder
+// (versionCode=1, versionName="0.0.0-dev") rather than throwing. This is
+// exercised by every ordinary local `scripts/assemble-debug.sh` run and every
+// per-PR CI job, none of which check out full tag history.
+data class PocketshellDerivedVersion(val code: Int, val name: String)
+
+fun derivePocketshellVersion(): PocketshellDerivedVersion {
+    val fallback = PocketshellDerivedVersion(1, "0.0.0-dev")
+    return try {
+        val script = rootProject.file("scripts/derive-version.sh")
+        if (!script.exists()) return fallback
+        val process = ProcessBuilder("bash", script.absolutePath, "both")
+            .directory(rootProject.projectDir)
+            .redirectErrorStream(false)
+            .start()
+        val stdout = process.inputStream.bufferedReader().readText()
+        val finished = process.waitFor(15, TimeUnit.SECONDS)
+        if (!finished) {
+            process.destroyForcibly()
+            return fallback
+        }
+        if (process.exitValue() != 0) return fallback
+
+        var code = fallback.code
+        var name = fallback.name
+        var sawCode = false
+        var sawName = false
+        stdout.lineSequence().forEach { line ->
+            when {
+                line.startsWith("VERSION_CODE=") ->
+                    line.removePrefix("VERSION_CODE=").trim().toIntOrNull()?.let {
+                        code = it
+                        sawCode = true
+                    }
+                line.startsWith("VERSION_NAME=") -> {
+                    val value = line.removePrefix("VERSION_NAME=").trim()
+                    if (value.isNotEmpty()) {
+                        name = value
+                        sawName = true
+                    }
+                }
+            }
+        }
+        if (!sawCode || !sawName) return fallback
+        PocketshellDerivedVersion(code, name)
+    } catch (e: Exception) {
+        fallback
+    }
+}
+
+val pocketshellDerivedVersion = derivePocketshellVersion()
+
 android {
     namespace = "com.pocketshell.app"
     compileSdk = 36
@@ -65,8 +129,9 @@ android {
         applicationId = "com.pocketshell.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 92
-        versionName = "0.4.45"
+        // Issue #2356: tag-derived, see derivePocketshellVersion() above.
+        versionCode = pocketshellDerivedVersion.code
+        versionName = pocketshellDerivedVersion.name
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -398,5 +463,19 @@ project.afterEvaluate {
             .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
             .get()
         systemProperty("api.version", apiVersion)
+    }
+}
+
+// Issue #2356: lets scripts/check-version-coupling.sh assert that Gradle's
+// resolved versionCode/versionName (via the exec wiring above) agrees with a
+// DIRECT invocation of scripts/derive-version.sh — a structural check that
+// the exec wiring hasn't drifted from the shared derivation, since there is
+// no longer a static literal to compare against.
+tasks.register("printPocketshellVersion") {
+    group = "help"
+    description = "Prints VERSION_CODE=/VERSION_NAME= as resolved by defaultConfig (issue #2356)."
+    doLast {
+        println("VERSION_CODE=${pocketshellDerivedVersion.code}")
+        println("VERSION_NAME=${pocketshellDerivedVersion.name}")
     }
 }

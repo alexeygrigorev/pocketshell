@@ -1,24 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Version coupling guard for issue #223.
+# Version coupling guard for issue #223, RESTRUCTURED for #2356 (Phase 4 of
+# epic #2350).
 #
-# Compares the Android `versionName` (app/build.gradle.kts) against the
-# `pocketshell` Python package `version` (tools/pocketshell/pyproject.toml).
-# Optionally also compares both against a release tag passed as $1
-# (with or without the leading `v`). Exits non-zero on mismatch.
+# BEFORE #2356: compared the Android `versionName` (parsed as a string
+# literal from app/build.gradle.kts) against the `pocketshell` Python package
+# `version` (tools/pocketshell/pyproject.toml), optionally also against the
+# release tag being built.
 #
-# The release flow uses this to fail loudly when the maintainer bumps one
-# side but forgets the other before pushing a tag. The GitHub Actions
-# `build.yml` calls this in --check-tag mode on every tag push so the
-# PyPI publish step never runs against a stale pyproject.toml version.
+# AFTER #2356: app/build.gradle.kts's versionName is no longer a string
+# literal — it is derived at configuration time by
+# scripts/derive-version.sh (the git-tag-derived value), so there is nothing
+# left to `sed`-parse out of the Gradle file. This guard now:
+#   1. Derives the EXPECTED versionName for the given tag directly via
+#      `scripts/derive-version.sh version-name --ref <tag>` (the same script
+#      app/build.gradle.kts calls — never a second, independently-written
+#      implementation).
+#   2. Compares that expected value against `tools/pocketshell/pyproject.toml`
+#      `version`, which .github/workflows/build.yml's publish-pypi job stamps
+#      from the SAME script immediately before this guard runs (see the
+#      "Stamp pyproject.toml version from tag" step) — so under normal
+#      operation this is a proof that the stamping step didn't silently
+#      diverge from the derivation, not two hand-maintained numbers.
 #
 # Usage:
-#   scripts/check-pypi-version.sh                 # local match check
-#   scripts/check-pypi-version.sh --check-tag vX  # also check against tag
-#   scripts/check-pypi-version.sh --dry-run       # exit 0 even on mismatch,
-#                                                 # but print what *would*
-#                                                 # have failed (smoke test)
+#   scripts/check-pypi-version.sh --check-tag vX.Y.Z  # the release flow
+#   scripts/check-pypi-version.sh --dry-run --check-tag vX.Y.Z
+#                                                      # exit 0 even on
+#                                                      # mismatch, but print
+#                                                      # what *would* have
+#                                                      # failed (smoke test)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
@@ -28,16 +40,13 @@ TAG=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/check-pypi-version.sh [--dry-run] [--check-tag <tag>]
+Usage: scripts/check-pypi-version.sh --check-tag <vX.Y.Z> [--dry-run]
 
-Verifies that the Android `versionName` in app/build.gradle.kts equals
-the `pocketshell` Python package `version` in
-tools/pocketshell/pyproject.toml. When --check-tag <vX.Y.Z> is
-passed, also asserts that both equal the tag (with the leading `v`
-stripped).
-
-Exits 0 on match, non-zero on mismatch. --dry-run swallows the failure
-exit so the smoke path can be exercised without breaking CI.
+Verifies that tools/pocketshell/pyproject.toml `version` equals what
+scripts/derive-version.sh would derive as versionName for the given release
+tag (with the leading `v` stripped). Exits 0 on match, non-zero on mismatch.
+--dry-run swallows the failure exit so the smoke path can be exercised
+without breaking CI.
 USAGE
 }
 
@@ -76,44 +85,39 @@ fail() {
   exit 1
 }
 
-GRADLE_FILE="app/build.gradle.kts"
+if [[ -z "$TAG" ]]; then
+  usage >&2
+  fail "--check-tag is required"
+fi
+
+DERIVE_SCRIPT="scripts/derive-version.sh"
 PYPROJECT_FILE="tools/pocketshell/pyproject.toml"
 
-[[ -f "$GRADLE_FILE" ]] || fail "missing $GRADLE_FILE"
+[[ -f "$DERIVE_SCRIPT" ]] || fail "missing $DERIVE_SCRIPT"
 [[ -f "$PYPROJECT_FILE" ]] || fail "missing $PYPROJECT_FILE"
 
-VERSION_NAME="$(
-  sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$GRADLE_FILE" |
-    head -n 1
-)"
-[[ -n "$VERSION_NAME" ]] || fail "could not parse versionName from $GRADLE_FILE"
+EXPECTED="${TAG#v}"
 
-# Pull the first `version = "..."` under [project] from pyproject.toml.
-# Hatchling pyproject.toml has both [build-system] (no `version` key) and
-# [project] (the one we want), so grabbing the first hit is reliable
-# enough for our single-package layout.
+DERIVED="$(bash "$DERIVE_SCRIPT" version-name --ref "$TAG" 2>/dev/null || true)"
+[[ -n "$DERIVED" ]] || fail "scripts/derive-version.sh could not derive a versionName for tag $TAG"
+
+printf 'Release tag:              %s (expects %s)\n' "$TAG" "$EXPECTED"
+printf 'derive-version.sh output: %s\n' "$DERIVED"
+
+if [[ "$DERIVED" != "$EXPECTED" ]]; then
+  fail "scripts/derive-version.sh derived '$DERIVED' for tag $TAG, expected an EXACT match '$EXPECTED'. This means the tag ref was not checked out with its tag object reachable (shallow checkout?) or derive-version.sh has a bug — either way, do not publish."
+fi
+
 PYPI_VERSION="$(
   sed -n 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$PYPROJECT_FILE" |
     head -n 1
 )"
 [[ -n "$PYPI_VERSION" ]] || fail "could not parse version from $PYPROJECT_FILE"
 
-printf 'Android versionName:    %s\n' "$VERSION_NAME"
-printf 'pocketshell PyPI version: %s\n' "$PYPI_VERSION"
+printf 'pocketshell PyPI version:  %s\n' "$PYPI_VERSION"
 
-if [[ "$VERSION_NAME" != "$PYPI_VERSION" ]]; then
-  fail "versionName ($VERSION_NAME) != pyproject.toml version ($PYPI_VERSION). Bump both in lockstep before tagging."
+if [[ "$PYPI_VERSION" != "$EXPECTED" ]]; then
+  fail "pyproject.toml version ($PYPI_VERSION) does not match release tag $TAG (expected $EXPECTED). The 'Stamp pyproject.toml version from tag' step in build.yml must run before this guard."
 fi
 
-if [[ -n "$TAG" ]]; then
-  EXPECTED="${TAG#v}"
-  printf 'Release tag:             %s (expects %s)\n' "$TAG" "$EXPECTED"
-  if [[ "$VERSION_NAME" != "$EXPECTED" ]]; then
-    fail "versionName ($VERSION_NAME) does not match release tag $TAG"
-  fi
-  if [[ "$PYPI_VERSION" != "$EXPECTED" ]]; then
-    fail "pyproject.toml version ($PYPI_VERSION) does not match release tag $TAG"
-  fi
-fi
-
-printf 'OK: versions are aligned\n'
+printf 'OK: versions are aligned (tag-derived, issue #2356)\n'

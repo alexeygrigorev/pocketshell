@@ -120,14 +120,26 @@ class DockerAgentFixtureContractTest {
         error("Could not locate tests/docker/docker-compose.yml from user.dir=${System.getProperty("user.dir")}")
     }
 
+    /**
+     * Issue #2356 (Phase 4 of epic #2350): `app/build.gradle.kts` no longer
+     * has a literal `versionName = "X.Y.Z"` to regex out — it is derived at
+     * Gradle configuration time from `scripts/derive-version.sh` (the git
+     * tag being built). This shells out to that SAME script, matching how
+     * `app/build.gradle.kts` itself resolves the value (see
+     * `derivePocketshellVersion()`), rather than carrying a second,
+     * independently-written derivation that could silently drift.
+     */
     private fun androidVersionName(): String {
-        val versionRegex = Regex("^\\s*versionName\\s*=\\s*\"([^\"]+)\"")
-        return projectRoot.resolve("app/build.gradle.kts").toFile()
-            .useLines { lines ->
-                lines.firstNotNullOfOrNull { line ->
-                    versionRegex.find(line)?.groupValues?.get(1)
-                }
-            }
-            ?: error("Could not parse app versionName")
+        val script = projectRoot.resolve("scripts/derive-version.sh")
+        val process = ProcessBuilder("bash", script.toString(), "version-name")
+            .directory(projectRoot.toFile())
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        val completed = process.waitFor(5, TimeUnit.SECONDS)
+        if (!completed || process.exitValue() != 0) {
+            error("Could not derive app versionName via $script (output: $output)")
+        }
+        return output.trim().ifEmpty { error("derive-version.sh produced an empty versionName") }
     }
 }

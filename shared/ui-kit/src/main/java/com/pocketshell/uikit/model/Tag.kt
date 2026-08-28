@@ -1,9 +1,9 @@
 package com.pocketshell.uikit.model
 
 /**
- * Small mixed-case chip rendered inside a `SessionRow`. Originally
- * matched the `.tag` block in `docs/mockups/styles.css` (uppercase
- * letter-spaced). Per issue #202 the labels are now rendered
+ * Small mixed-case chip rendered inside a `SessionRow`. The original static
+ * prototype rendered this tag uppercase and letter-spaced. Per issue #202 the
+ * labels are now rendered
  * mixed-case so a first-time user can read them without decoding —
  * "Claude" instead of "CLAUDE CODE", "Detached" instead of "ATTACHED".
  *

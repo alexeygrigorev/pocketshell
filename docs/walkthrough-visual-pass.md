@@ -88,8 +88,9 @@ evidence screenshots are written:
 
 ## Audit Checklist
 
-Compare the screenshot set against [docs/design-language.md](design-language.md)
-and the static targets in [docs/mockups](mockups/):
+Compare the screenshot set against [docs/design-language.md](design-language.md),
+[docs/design-system.md](design-system.md), and any reference attached to the
+issue:
 
 - Dark navy/charcoal surface is preserved; no pure black screen chrome.
 - Cards and sheets use restrained borders/elevation and consistent corner

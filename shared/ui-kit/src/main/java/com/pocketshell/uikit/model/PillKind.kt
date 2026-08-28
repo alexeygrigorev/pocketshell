@@ -1,8 +1,7 @@
 package com.pocketshell.uikit.model
 
 /**
- * Variant for the `Pill` component. Matches `.pill.ok` / `.pill.warn` /
- * `.pill.blocked` / `.pill.error` in `docs/mockups/styles.css`.
+ * Variant for the `Pill` component: ok, warning, blocked, and error.
  *
  * - [Ok] — green text on green-12%-alpha background. Used for healthy
  *   usage windows.

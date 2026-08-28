@@ -2,7 +2,7 @@
 
 Voice-first, tmux-native, agent-aware Android SSH client.
 
-PocketShell is in active development and daily use as the maintainer's primary way of working on a dev box from a phone. Work is tracked as GitHub issues across phases 0-4. The visual specification is the Pixel 7 HTML mockups in `docs/mockups/`; locked design decisions live in `docs/decisions.md`.
+PocketShell is in active development and daily use as the maintainer's primary way of working on a dev box from a phone. Work is tracked as GitHub issues across phases 0-4. The visual specification lives in the shared UI-kit and design docs; locked design decisions live in `docs/decisions.md`.
 
 ## Key docs
 
@@ -20,7 +20,6 @@ PocketShell is in active development and daily use as the maintainer's primary w
 - [docs/review-standards.md](docs/review-standards.md) - reviewer acceptance bars for terminal/session/visual work
 - [docs/lessons-learned.md](docs/lessons-learned.md) - durable operational lessons
 - [docs/release.md](docs/release.md) - release cut/stabilize/tag/merge-back procedure
-- [docs/mockups/index.html](docs/mockups/index.html) - Pixel 7 mockups; serve with `python3 -m http.server --directory docs/mockups`
 
 Issues: <https://github.com/alexeygrigorev/pocketshell/issues>. Milestones: <https://github.com/alexeygrigorev/pocketshell/milestones>.
 

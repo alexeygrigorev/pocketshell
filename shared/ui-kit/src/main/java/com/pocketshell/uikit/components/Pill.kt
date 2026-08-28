@@ -15,9 +15,8 @@ import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellShapes
 
 /**
- * Small uppercase status pill. Matches `.pill.ok` / `.pill.warn` /
- * `.pill.blocked` / `.pill.error` in `docs/mockups/styles.css` (the
- * provider state badges in `docs/mockups/usage.html`).
+ * Small uppercase status pill for provider ok, warning, blocked, and error
+ * states.
  *
  * Visual recipe (CSS reference + the #461 token migration that snaps it onto
  * the design ladder, matching the sibling [Badge] in the same pill family):

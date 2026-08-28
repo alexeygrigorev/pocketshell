@@ -27,8 +27,8 @@ import com.pocketshell.uikit.theme.PocketShellType
 /**
  * The core compact list row — the one source of truth for every dense row in
  * the app (host list, sessions, settings, conversation list, port-forward
- * panel, …). Encodes the mockup's row pattern
- * (`folder-tree-target-20260604.png`) and the design language locked on #479:
+ * panel, …). Encodes the issue #489 row pattern and the design language locked
+ * on #479:
  *
  * ```
  * ┌──────────────────────────────────────────────────────┐

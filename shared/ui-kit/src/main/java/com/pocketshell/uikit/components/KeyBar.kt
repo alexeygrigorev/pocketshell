@@ -46,12 +46,10 @@ import com.pocketshell.uikit.theme.PocketShellColors
 private typealias ModifierState = KeyModifierState
 
 /**
- * Bottom-of-screen key strip — the 8-slot row above the system
- * keyboard in `docs/mockups/session.html`. Matches `.keybar` and `.key`
- * (with `.key.active` for armed modifiers and `.key.arrow` for the
- * directional keys) in `docs/mockups/styles.css`.
+ * Bottom-of-screen key strip — the 8-slot row above the system keyboard, with
+ * active treatment for armed modifiers and compact directional keys.
  *
- * Visual recipe (per the CSS):
+ * Visual recipe:
  * - `surface` background, 1dp `border` top edge
  * - 8dp horizontal + vertical padding, 5dp gap between keys
  * - Each key: 38dp tall, equal-flex width, `surface-elev` background,

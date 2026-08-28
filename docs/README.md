@@ -34,16 +34,14 @@ context; the README and current feature docs track released behavior.
 | [documentation-guide.md](documentation-guide.md) | How these docs are organized and kept lazy-loaded; read before restructuring/adding/pruning any doc |
 | [../AGENTS.md](../AGENTS.md) | Primary project + agent instructions (imported by [../CLAUDE.md](../CLAUDE.md)) |
 | [../process.md](../process.md) | The implementer/reviewer/orchestrator process contract |
-| [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |
 
 ## Related projects
 
-| Path | Role |
+| Project | Role |
 |---|---|
-| `../../ssh-auto-forward-android/` | Existing Kotlin/Compose app. Source of extractable SSH + port-forward modules. |
-| `../../tmuxcli/` | Python CLI. PocketShell mirrors its job/session semantics through the server-side `pocketshell` helper. |
-| `../../ssh-auto-forward/` | Python TUI. Reference for `ss -tlnp` parsing and reconnect/backoff logic. |
-| `../../agent-log-explorer/` | Separate tool for browsing historical agent conversations. PocketShell does *current session* view directly; agent-log-explorer remains for *all history* search. |
-| `../../heru/` | Historical provider quota reference; current app usage polling goes through `pocketshell usage --json`. |
-| `../../litehive/` | Per-engine local invocation counters. Alternative data source for the usage panel. |
-| `../../aplexer/` | Intended session runtime and engine/profile/launch registry. PocketShell becomes a client; see [aplexer-integration.md](aplexer-integration.md). |
+| [ssh-auto-forward-android](https://github.com/alexeygrigorev/ssh-auto-forward-android) | Existing Kotlin/Compose app. Source of extractable SSH + port-forward modules. |
+| [tmuxctl](https://github.com/alexeygrigorev/tmuxctl) | Python CLI (checked out locally as `tmuxcli`). PocketShell mirrors its job/session semantics through the server-side `pocketshell` helper. |
+| [ssh-auto-forward](https://github.com/alexeygrigorev/ssh-auto-forward) | Python TUI. Reference for `ss -tlnp` parsing and reconnect/backoff logic. |
+| `agent-log-explorer` | Separate local tool with no published GitHub remote. PocketShell does *current session* view directly; agent-log-explorer remains for *all history* search. |
+| [heru](https://github.com/alexeygrigorev/heru) | Historical provider quota reference; current app usage polling goes through `pocketshell usage --json`. |
+| [aplexer](https://github.com/alexeygrigorev/aplexer) | Intended session runtime and engine/profile/launch registry. PocketShell becomes a client; see [aplexer-integration.md](aplexer-integration.md). |

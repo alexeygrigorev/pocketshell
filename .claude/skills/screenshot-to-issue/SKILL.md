@@ -73,10 +73,8 @@ rm "<image-path>"
 
 ## Notes
 
-- This supersedes committing feedback images under `docs/` — no repo push for
-  screenshots. (Genuine design-reference mockups that belong in the docs set
-  may still be committed deliberately, but routine feedback screenshots use the
-  release-asset path.)
+- This supersedes committing feedback or design-reference images under `docs/` —
+  attach them to the issue through the release-asset path instead.
 - If the same image updates, re-upload with `--clobber` (same asset name keeps
   the URL stable).
 - See [[loom-feedback]] for the video-feedback flow; this skill is its

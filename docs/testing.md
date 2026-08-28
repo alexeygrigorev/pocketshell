@@ -15,7 +15,7 @@ Standard Android Studio AVDs. Recommended set:
 
 | AVD | API | Why |
 |---|---|---|
-| Pixel 7 | 34 (Android 14) | Matches design target (412 × 915 dp, same as mockups in `docs/mockups/`) |
+| Pixel 7 | 34 (Android 14) | Canonical design target (412 × 915 dp) |
 | Pixel 7 | 26 (Android 8.0) | Minimum supported; spot-check before releases |
 
 ### Running
@@ -69,8 +69,9 @@ involvement when relevant, and observed result in the issue.
 
 1. Start from the latest implementer status for the scoped issue
 2. `scripts/cgroup-run.sh -- ./gradlew installDebug`, or use the issue's documented walkthrough command
-3. Compare side-by-side with `docs/mockups/<screen>.html` open in Chrome at
-   412 × 915
+3. Compare side-by-side with the issue's attached design reference, when one
+   exists, and check the result against `docs/design-system.md` and
+   `docs/design-language.md`
 4. Capture reviewer evidence:
    `adb exec-out screencap -p > /tmp/screen.png`
 5. Post the command, screenshot or artifact path, and observed result in the
@@ -2330,7 +2331,8 @@ For testing-specific work, the minimum local checks are:
 
 1. `scripts/assemble-debug.sh` — does it build?
 2. `scripts/cgroup-run.sh -- ./gradlew check` — do unit tests pass?
-3. For UI changes: install on emulator, eyeball against the matching mockup
+3. For UI changes: install on emulator and compare against the design docs and
+   any reference attached to the issue
 4. For SSH / tmux / agent / usage changes: run the relevant Testcontainers
    integration test
 5. For user-facing Android, terminal/input, SSH/tmux/agent, setup, or

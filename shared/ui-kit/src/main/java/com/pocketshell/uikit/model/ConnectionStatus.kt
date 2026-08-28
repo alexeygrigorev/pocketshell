@@ -1,8 +1,7 @@
 package com.pocketshell.uikit.model
 
 /**
- * Connection state rendered by `StatusDot`. Matches `.status-dot`
- * variants in `docs/mockups/styles.css`.
+ * Connection state rendered by `StatusDot`.
  *
  * Distinct from `HostStatus` — host-list rows have a "Disconnected"
  * (known-but-offline) state; status dots used elsewhere (breadcrumb

@@ -107,8 +107,8 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.supervisorScope
 
 /**
- * The Phase 1 prompt composer (issue #15). Visual target:
- * `docs/mockups/composer.html`.
+ * The Phase 1 prompt composer (issue #15), implemented from the original
+ * static composer prototype.
  *
  * Layout, top to bottom inside the [ModalBottomSheet]:
  *
@@ -1822,8 +1822,8 @@ private fun ComposerEditingToolsGroup(
  * Issue #701 (visual polish): the earlier #453 iteration stripped Send down to
  * a borderless cyan text+arrow, which the maintainer found weak — it read as a
  * plain link, not the row's primary commit action, and left the controls row
- * looking unfinished. The composer mockup (`docs/mockups/composer.html`,
- * `.btn.primary`) renders the submit action as a FILLED accent pill. We restore
+ * looking unfinished. The original composer prototype renders the submit
+ * action as a FILLED accent pill. We restore
  * that here: an enabled Send is a solid `Accent` pill with `OnAccent` ink + the
  * send arrow, matching the recording-state [StopSendButton] (so the two Send
  * affordances finally look like the same button) and giving the row a clear

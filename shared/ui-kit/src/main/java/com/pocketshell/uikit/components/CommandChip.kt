@@ -26,9 +26,7 @@ import com.pocketshell.uikit.theme.PocketShellShapes
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Tappable monospace pill used in the in-session chip row. Matches
- * `.chip` and `.chip.icon-chip` from `docs/mockups/styles.css` and the
- * `chip-row` element in `docs/mockups/session.html` (`git status`,
+ * Tappable monospace pill used in the in-session chip row (`git status`,
  * `tmux ls`, etc., plus the accented `● dictate` icon chip).
  *
  * Tokens (#461 §3.5 chip/pill pattern): `small`(8) shape,

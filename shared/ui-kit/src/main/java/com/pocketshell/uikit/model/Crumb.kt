@@ -1,9 +1,8 @@
 package com.pocketshell.uikit.model
 
 /**
- * A single segment in a `Breadcrumb`. Matches `.breadcrumb .crumb` /
- * `.breadcrumb .crumb.current` in `docs/mockups/styles.css` and the
- * `host > session > pane` chain at the top of `docs/mockups/session.html`.
+ * A single segment in a `Breadcrumb`, including the current segment in the
+ * `host > session > pane` chain.
  *
  * Each crumb is independently tappable so the user can jump to any
  * ancestor (e.g. host root from a deep pane). The terminal crumb has

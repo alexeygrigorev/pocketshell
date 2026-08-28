@@ -154,5 +154,3 @@ This needs to be first-class onboarding, not a hidden prerequisite. If we skip t
 | Quick send panel | Send snippet or schedule recurring (delegates to remote `pocketshell jobs add`) |
 | Port panel | Slide-in panel on a host — the existing `ssh-auto-forward-android` table, absorbed |
 | Connection setup | SSH config import, key gen + push via paste/QR, biometric unlock for passphrases |
-
-Detailed mockups live in `mockups/` (TBD — see roadmap).

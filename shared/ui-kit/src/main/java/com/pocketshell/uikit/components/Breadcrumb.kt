@@ -28,12 +28,10 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
 /**
- * Top-of-screen breadcrumb for the session view and similar
- * sub-screens. Matches `.breadcrumb` in `docs/mockups/styles.css` and
- * the `host > session > pane` strip at the top of
- * `docs/mockups/session.html`.
+ * Top-of-screen `host > session > pane` breadcrumb for the session view and
+ * similar sub-screens.
  *
- * Layout (per the CSS):
+ * Layout:
  * - 56dp tall, 4dp left / 8dp right padding
  * - 36dp circular "back" button at the leading edge (`‹`)
  * - Optional green live dot (`box-shadow` glow) when [liveDot] is true

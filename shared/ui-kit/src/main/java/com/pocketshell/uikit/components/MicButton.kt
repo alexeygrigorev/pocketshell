@@ -27,10 +27,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
 
 /**
  * Round microphone button at the leading edge of the prompt composer.
- * Matches `.mic-btn` in `docs/mockups/styles.css` and the recording
- * button in `docs/mockups/composer.html`.
  *
- * Visual recipe (per the CSS):
+ * Visual recipe:
  * - 56dp diameter, fully round (28dp radius)
  * - Accent (cyan) background, dark on-accent foreground glyph
  * - Soft accent-coloured drop shadow on the idle/recording states,

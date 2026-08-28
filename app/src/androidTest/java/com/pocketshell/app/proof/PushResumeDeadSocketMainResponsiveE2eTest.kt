@@ -250,7 +250,34 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
             setForceLivenessProbeDead(false)
             proxy.clearToxics()
             val settled = waitForConnectedOrDisconnectBand(SETTLE_WINDOW_MS)
-            captureViewport("issue1139-03-settled")
+            // Issue #2389: this capture used to race the surface. When the session
+            // settles back to Connected the screen still has to release its recovery
+            // hold and re-mount the Termux AndroidView (the VM flips Connected
+            // FIRST), and the raw-view capture never drove the Compose frame clock,
+            // so it found no TerminalView and hard-failed with the `#2135`
+            // `viewFound=false` — the same ONE root cause as
+            // NatIdleMappingSurvivalE2eTest (see [RecoveredTerminalViewport]). Wait
+            // for the viewport to come back (bounded, hard-failing). A settled
+            // DISCONNECTED band legitimately has
+            // no TerminalView, so that branch captures the whole session frame
+            // instead — the evidence stays authoritative either way.
+            val settledConnected =
+                currentConnectionStatus() is TmuxSessionViewModel.ConnectionStatus.Connected
+            val restoredMs = if (settledConnected) {
+                RecoveredTerminalViewport.awaitRestored(
+                    compose = compose,
+                    scenario = launchedActivity,
+                    label = "settled",
+                    recordTiming = ::recordTiming,
+                )
+            } else {
+                -1L
+            }
+            if (settledConnected) {
+                captureViewport("issue1139-03-settled")
+            } else {
+                captureSessionFrame("issue1139-03-settled-disconnect-band")
+            }
             assertTrue(
                 "after the fault cleared the session must reconnect (Connected) or show a " +
                     "Disconnected band — not a permanently frozen UI (status=" +
@@ -271,6 +298,8 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
                     "main_probe_samples=${result.sampleCount}",
                     "main_responsive=${result.responsive}",
                     "settled_after_clear=$settled",
+                    "settled_connected=$settledConnected",
+                    "settled_viewport_restored_ms=$restoredMs",
                     "expectation=Main stall < budget (no 2-4s ANR); session " +
                         "reconnects-or-Disconnected after clear",
                 ),
@@ -356,6 +385,29 @@ class PushResumeDeadSocketMainResponsiveE2eTest : NetworkFaultProofBase() {
     }
 
     // ---- artifacts -----------------------------------------------------------------
+
+    /**
+     * Issue #2389: the settled-DISCONNECTED-band branch legitimately has no
+     * `TerminalView` (the band replaces the surface), so its evidence is the whole
+     * session frame. Still hard-fails when nothing can be captured.
+     */
+    private fun captureSessionFrame(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+        var bitmap: Bitmap? = null
+        launchedActivity?.onActivity { activity ->
+            bitmap = com.pocketshell.app.proof.signals.captureSessionFrameToBitmap(
+                activity.window.decorView,
+                name,
+            )
+        }
+        val captured = checkNotNull(bitmap) {
+            "activity was not available to capture session frame '$name' (#2389)"
+        }
+        writeBitmap("$name-session-frame", captured)
+        captured.recycle()
+    }
 
     private fun captureViewport(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

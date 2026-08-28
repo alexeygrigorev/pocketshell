@@ -13,6 +13,65 @@ checkout on `main` whose `HEAD` already equals `origin/main` — it does not
 accept a release-branch worktree, so tagging always happens after that
 branch's SHA has reached `main`, never before.
 
+## The nightly fault gate blocks the tag, full stop (D37)
+
+`scripts/release-emulator-validation.sh` runs
+`scripts/check-nightly-fault-run.sh` as its first required step. That guard
+reads the `Fault-injection safety verdict` job of the latest
+`Nightly Extensive Tests` run — the toxiproxy network-fault proofs plus the
+bootstrap setup-scenario matrix, with the flaky journey suite and the #822
+expected-fail lane excluded. It BLOCKS when that verdict is red, cancelled,
+stale (the run tested a line that does not contain the release HEAD), or
+missing.
+
+**Nothing you can put in the environment changes that verdict.** No
+environment variable, no `workflow_dispatch` input, no "deliberately waived
+release" branch — they were removed by decision D37 (`docs/decisions.md`),
+because waiving the gate had become routine: v0.4.31–v0.4.38 and v0.4.45 all
+shipped with the fault verdict un-enforced, and #1671 traced the #1610
+reconnect storm reaching the maintainer to exactly that. A gate the
+release-owner can opt out of is not a gate.
+
+Concretely, `scripts/check-nightly-fault-run.sh` reads *no* environment
+variable. Its offline test knobs (`--fixture`, `--workflow`, `--job-needle`)
+are command-line flags precisely so that an exported variable cannot reach
+them, and `gh` is pinned to this checkout's origin repository with `--repo`
+(with `GH_REPO`/`GH_HOST` scrubbed) so the query cannot be redirected at a
+greener repository. A `--fixture` run prints `[FIXTURE DRY RUN]` on every
+line and is never a release verdict; `scripts/release-emulator-validation.sh`
+passes only `--release-head`, and the per-push guard fails if it ever passes
+anything else.
+
+Be precise about what that does and does not claim: it means no *environment*
+can fabricate a verdict, and no flag exists to skip one. It does not mean the
+script is tamper-proof against someone editing the working tree or
+hand-writing a release summary — nothing enforceable would be. If you find
+yourself wanting to, that is the signal to read the two options below instead.
+
+When the guard blocks, there are exactly two ways forward:
+
+1. **Fix the failing test or journey**, re-run
+   `Nightly Extensive Tests` (`workflow_dispatch`, `force_run=true`) on the
+   release commit, and re-run the release gate once the fault-verdict job is
+   green.
+2. **Quarantine the offending test/journey class** through the existing
+   D36(4) flake mechanism — auto-filed issue, moved into the non-blocking
+   lane, 2-week expiry — so the verdict covers a genuinely smaller but still
+   real suite. Quarantine is a recorded, expiring narrowing of *what* the
+   gate checks; it is never a skip of the whole verdict.
+
+"Nightly Extensive is broken by infra" is not a third option: a missing
+verdict means there is no safety signal to release on, so re-run the nightly
+until there is one. If a release is blocked for longer than that is
+tolerable, the fix belongs in #1671 (make the fault gate reliably green),
+not in a new escape hatch.
+
+`scripts/check-release-gate-bypass-absent.sh` (per push, in the
+`guards-static` job) fails if either deleted bypass name reappears under
+`scripts/`, `.github/workflows/` or `.github/actions/` (C1), if the fault
+guard starts honouring them again (C2/C3), or if a fabricated verdict can be
+injected through the environment or a test-only flag in the release path (C4).
+
 ## Fast path: tag the nightly validated-RC (preferred, check this first)
 
 Issue #2356 (Phase 4 of epic #2350) added a nightly marker: a green
@@ -115,9 +174,15 @@ Green means, for this candidate SHA:
 
 - `scripts/release-emulator-validation.sh` (run from the worktree) wrote a
   summary whose `Commit SHA` is exactly this SHA and `Automated status: PASS`.
+  Its first required step is the nightly fault gate — see
+  [The nightly fault gate blocks the tag, full stop](#the-nightly-fault-gate-blocks-the-tag-full-stop-d37).
+  If you run `scripts/check-nightly-fault-run.sh` by hand, run it with no
+  arguments (or `--release-head <sha>`): a run carrying `[FIXTURE DRY RUN]`
+  came from `--fixture` and is a test dry run, not a release verdict.
 - Visual-audit screenshots were inspected.
 
 Don't fake a PASS. Don't treat a cancelled or in-progress Tests run as green.
+Don't look for a way around the nightly fault gate — there isn't one.
 
 ### 4. Merge the candidate back to `main`
 

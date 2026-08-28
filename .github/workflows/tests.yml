@@ -386,6 +386,18 @@ jobs:
           scripts/check-release-gate-execution-profile.sh --self-test
           scripts/check-release-gate-execution-profile.sh
 
+      # Issue #2379 / decision D37: the nightly fault-injection release gate has
+      # no off switch — not the deleted names (C1/C2/C3), and nothing injectable
+      # through the environment on the release path (C4). Waiving it was routine
+      # (v0.4.31-v0.4.38, v0.4.45) and #1671 traced the #1610 reconnect storm
+      # reaching the maintainer to exactly that. Rationale: the script header
+      # and docs/release.md; don't restate it here.
+      - name: "Release-gate bypass guard (issue #2379, D37)"
+        run: |
+          chmod +x scripts/check-release-gate-bypass-absent.sh
+          scripts/check-release-gate-bypass-absent.sh --self-test
+          scripts/check-release-gate-bypass-absent.sh
+
       # Issue #2064: fail-closed proofs for one gate-built APK pair, exact-SHA
       # sharded CI evidence reuse, and measured/provenance-rich summaries.
       - name: Release identity and evidence guards (issue #2064)

@@ -548,9 +548,10 @@ jobs:
               echo "not complete — most likely genuine nightly-infra breakage such as"
               echo "an emulator boot / Docker-fixture failure). There is NO fault"
               echo "signal to release on. Investigate the shard-0 logs; if it is"
-              echo "genuine infra breakage, re-run the nightly, or use the #1056"
-              echo "escape hatch (NIGHTLY_FAULT_GATE_DISABLED=1) for a deliberately"
-              echo "infra-waived release."
+              echo "genuine infra breakage, re-run the nightly. There is no"
+              echo "release-side waiver for a missing verdict (D37, issue #2379):"
+              echo "fix the failure, or quarantine the offending class through the"
+              echo "D36(4) flake mechanism."
             } | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi

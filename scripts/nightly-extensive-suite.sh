@@ -176,7 +176,8 @@ NETWORK_FAULT_CLASSES=(
 # controller-owned reconnect ladder (Slice C) lands". They are DESIGNED red until
 # those slices land. They are NOT fault-suite regressions, so they must NOT poison
 # the fault-injection safety verdict the release gate reads (that is exactly what
-# forced every recent release to waive the gate with NIGHTLY_FAULT_GATE_DISABLED=1).
+# forced every recent release to waive the gate — a waiver D37/#2379 has since
+# removed, so poisoning the verdict now simply blocks the release).
 #
 # They still RUN nightly (their tracking value — their artifacts/timings are still
 # uploaded and their status is still shown in the summary), but in their OWN phase

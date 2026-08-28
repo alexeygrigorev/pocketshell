@@ -315,6 +315,28 @@ if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-
     --exclude='.gradle/' \
     --exclude='build/' \
     "$ROOT_DIR/" "$isolated_root/"
+  # Issue #2381: the copy has no git, so scripts/derive-version.sh inside it
+  # derived the `0.0.0-dev` / versionCode=1 placeholder — and EVERY APK the
+  # release chain validates, journeys against and publishes is built in here.
+  # The whole release gate was therefore validating a binary that cannot
+  # express a release version: HostBootstrapScenarioSuiteTest's setup-detection
+  # profiles compare the app's version against the host CLI's, and at a `0.0.0`
+  # core every one of them is meaningless (they only "passed" because the
+  # fixture was reset to the same placeholder string, so a string-equality
+  # comparison matched two placeholders). Stamp the version the OUTER checkout
+  # — the tagged one this gate was invoked on — derives, so the copy is
+  # version-identical to its source. `--exclude='.git'` still applies: the copy
+  # gets the ANSWER, never the history.
+  # `fail()` is not defined this early (it needs $RUN_DIR-scoped summary state),
+  # so this uses the same explicit printf+exit shape as the admission checks
+  # above; `early_release_exit` is already trapped and does the cleanup.
+  if ! bash "$ROOT_DIR/scripts/derive-version.sh" write-pin "$isolated_root" >/dev/null; then
+    printf 'REFUSING: could not stamp the isolated worktree copy with %s'"'"'s derived version (issue #2381). Without the pin the copy builds a 0.0.0-dev / versionCode=1 APK and the whole release chain validates, journeys against and publishes a binary that cannot express a release version.\n' \
+      "$ROOT_DIR" >&2
+    exit 1
+  fi
+  printf 'Isolated worktree version pin: %s (issue #2381)\n' \
+    "$(bash "$isolated_root/scripts/derive-version.sh" both | tr '\n' ' ')"
   export POCKETSHELL_GATE_ISOLATED_COPY=1
   # Normally the outer release checkout is the exact clean/pushed source of
   # truth. Preserve an explicit source root for pre-merge reviewer validation,
@@ -1978,6 +2000,23 @@ fi
 run_bash_step "gradle-compile-unit" \
   "'$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-ksp-hilt' -- ./gradlew $GRADLE_FLAGS :app:kspDebugKotlin :app:kspReleaseKotlin :app:kspDebugAndroidTestKotlin :app:kspDebugUnitTestKotlin :app:kspReleaseUnitTestKotlin :app:hiltJavaCompileDebug :app:hiltJavaCompileRelease :app:hiltJavaCompileDebugAndroidTest --stacktrace && '$ROOT_DIR/scripts/cgroup-run.sh' --unit 'pocketshell-pre-release-$(pocketshell_unit_token "$RUN_ID")-assemble-check' -- ./gradlew $GRADLE_FLAGS $GATE_COMPILE_UNIT_TASKS --stacktrace"
 
+# Issue #2381 — stamp the `agents` fixture with the SAME versionName this gate
+# asserts a few lines below (docker-agents-pocketshell-version) and that the APK
+# it installs reports. Since #2356 the version is derived from git rather than a
+# literal in app/build.gradle.kts, so the fixture can no longer parse it out of
+# the build context; it is passed in through the environment instead (see
+# scripts/lib/agents-fixture-version.sh). Without this the fixture reports its
+# baked `0.0.0-dev`, this gate's own version assertion hard-fails on every
+# STANDALONE invocation (the one docs/docker-emulator-runbook.md documents), and
+# every app screen it drives sits under the bootstrap "Host setup needed" sheet.
+#
+# Pinning to $APP_VERSION_NAME rather than re-deriving makes "what we stamp" and
+# "what we assert" the same value by construction, in both the plain-checkout
+# and the isolated-copy (git-less, `0.0.0-dev`) gate modes.
+POCKETSHELL_AGENT_FIXTURE_VERSION="$APP_VERSION_NAME"
+# shellcheck source=scripts/lib/agents-fixture-version.sh
+source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
+export_agents_fixture_version
 run_step "docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
 # Issue #150: wait on the compose `healthcheck:` block via
 # `docker inspect`. The follow-up SSH sanity check still verifies the

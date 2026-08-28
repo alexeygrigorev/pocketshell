@@ -82,3 +82,9 @@ app/google-services.json
 # any full pytest run rewrote it and dirtied every worktree)
 __pycache__/
 *.pyc
+
+# Issue #2381: scripts/derive-version.sh write-pin's output. It only ever
+# belongs in a DETACHED copy of a checkout (the pre-release gate's `.git`-less
+# rsync worktree, which already lives under build/); committing one would
+# freeze this repo's derived version at whatever it happened to be.
+.pocketshell-version-pin

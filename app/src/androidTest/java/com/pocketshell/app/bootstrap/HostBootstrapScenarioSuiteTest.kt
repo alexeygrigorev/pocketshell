@@ -142,7 +142,17 @@ class HostBootstrapScenarioSuiteTest {
         assertSetupRows(CLI_UPDATE_ROW_TITLE)
         compose.onNodeWithText("path /usr/local/bin/pocketshell", substring = true).assertExists()
         compose.onNodeWithText("remote 0.1.0", substring = true).assertExists()
-        compose.onNodeWithText("expected ${targetAppVersion()}", substring = true).assertExists()
+        // Issue #2381: the sheet names the version the app actually asks the
+        // host installer for — the RELEASE CORE of this build's versionName,
+        // which is what `pocketshell==<version>` can resolve. The raw
+        // git-derived `versionName` (`0.4.45-4-g9b1d784e`) is neither a
+        // published release nor meaningful to a user. Before #2356 the two
+        // were the same string, which is why this oracle could read the raw
+        // versionName and still pass.
+        compose.onNodeWithText(
+            "expected ${expectedHostCliVersion(targetAppVersion())}",
+            substring = true,
+        ).assertExists()
         compose.onNodeWithText("uv at /usr/local/bin/uv", substring = true).assertExists()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
@@ -355,8 +365,57 @@ class HostBootstrapScenarioSuiteTest {
         }
     } }
 
+    /**
+     * Issue #2381: every scenario below derives its fixture's reported CLI
+     * version from the APK's own [targetAppVersion] — that is the whole point
+     * of the suite (the app compares the host CLI against the version it was
+     * built for). Since #2356 that version is DERIVED from the git tag, and a
+     * tagless/shallow checkout derives `0.0.0-dev+<sha>`.
+     *
+     * `0.0.0` is below every real CLI version, so the uv-upgrade scenarios
+     * cannot express "the host CLI is outdated" at all and the setup-detection
+     * signal is meaningless. On 2026-08-28 that is exactly what happened and
+     * it surfaced as eight unrelated-looking 20 s Compose timeouts. Fail once,
+     * loudly, with the actual diagnosis instead — and HARD-fail rather than
+     * `Assume`-skip, because a silently skipped release gate is worse than a
+     * red one.
+     *
+     * The message must name the cause that actually applies, because there are
+     * two very different ones and only one of them is fixed by re-checking-out.
+     * The release chain hits the SECOND: `.github/workflows/release-emulator-
+     * validation.yml` already checks out with `fetch-depth: 0`, and
+     * `scripts/pre-release-confidence-gate.sh` then rsyncs that checkout to a
+     * deliberately `.git`-less copy and builds every release-chain APK inside
+     * it — so the tag history is present in CI and absent where the binary is
+     * produced. Telling that operator to "fetch tags" sends them looking for a
+     * problem that is not there.
+     */
+    private fun assertApkCarriesARealReleaseVersion() {
+        val versionName = targetAppVersion()
+        val core = versionName.trim().removePrefix("v").substringBefore('+').substringBefore('-')
+        assertTrue(
+            "the APK under test reports versionName='$versionName', whose release core is " +
+                "'$core'. scripts/derive-version.sh emits that placeholder only when it cannot " +
+                "reach a v* tag, so this build cannot express host-CLI version relationships " +
+                "and every setup-detection scenario is vacuous. Two causes, two different " +
+                "fixes: (1) the CHECKOUT is shallow/tagless — check out with full tag history " +
+                "(actions/checkout fetch-depth: 0) or `git fetch --tags`; (2) the APK was built " +
+                "inside a DETACHED COPY that has no git of its own — scripts/" +
+                "pre-release-confidence-gate.sh rsyncs the checkout to build/" +
+                "pre-release-confidence-gate/<run>/worktree with --exclude='.git' and builds the " +
+                "whole release chain's APK there, so fetching tags in the outer checkout changes " +
+                "nothing. That copy must be stamped by `scripts/derive-version.sh write-pin " +
+                "<copy>`, which the gate does immediately after the rsync; a missing/malformed " +
+                ".pocketshell-version-pin in the copy is the failure. Guards: " +
+                "tests/scripts/gate-isolated-copy-version-test.sh (the pin) and " +
+                "scripts/check-emulator-apk-version-wiring.sh (the fixture stamp) — #2381.",
+            core.isNotEmpty() && core != "0.0.0",
+        )
+    }
+
     private fun scenario(name: String, block: ScenarioContext.() -> Unit) = runBlocking {
         assumeScenariosEnabled()
+        assertApkCarriesARealReleaseVersion()
         val definition = requireNotNull(SCENARIOS[name]) { "unknown bootstrap scenario: $name" }
         val key = testKey()
         val context = ScenarioContext(name = name, definition = definition, key = key)

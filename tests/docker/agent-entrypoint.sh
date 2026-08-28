@@ -4,6 +4,29 @@ set -eu
 fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
 encoded_cwd="-workspace-pocketshell"
 
+# Issue #2381: keep the fixture's `pocketshell --version` in lockstep with the
+# APK under test. The app treats its own versionName's release core as the CLI
+# version it expects on the host, so a fixture pinned to a different release
+# reports VersionMismatch and the bootstrap "Host setup needed" sheet takes
+# over EVERY journey against this fixture.
+#
+# Before #2356 the Dockerfile sed'd the `versionName = "X.Y.Z"` literal out of
+# app/build.gradle.kts at image-build time and the two matched by construction.
+# That literal is gone (the version is derived from the git tag), and the git
+# history the derivation needs is not in the Docker build context — so the
+# caller passes the derived version in instead, and we stamp it here at
+# container start rather than at image build: `docker compose up -d` without
+# `--build` then still picks it up, and a changed value does not bust the
+# image layer cache.
+#
+# The env var itself cannot reach the app's probe: it arrives over sshd, which
+# does not inherit the entrypoint's environment. Writing the file is what makes
+# it visible (same mechanism as Dockerfile.agents-old-cli's #847 fixture).
+version_file="${POCKETSHELL_AGENT_FIXTURE_VERSION_FILE:-/opt/pocketshell-agent-fixture-version}"
+if [ -n "${POCKETSHELL_AGENT_FIXTURE_VERSION:-}" ]; then
+  printf '%s\n' "$POCKETSHELL_AGENT_FIXTURE_VERSION" > "$version_file"
+fi
+
 install -d -o testuser -g testuser "/home/testuser/.claude/projects/${encoded_cwd}"
 install -d -o testuser -g testuser "/home/testuser/.codex/sessions/2026/05/22"
 install -d -o testuser -g testuser "/home/testuser/.local/share/opencode"

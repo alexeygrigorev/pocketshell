@@ -12,6 +12,11 @@ source "$ROOT_DIR/scripts/lib/release-validation-storage.sh"
 # every downstream stage installs it, publish_validated_apk ships it, and each
 # hop re-checks the sha256.
 source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+# Issue #2381: the deterministic `agents` fixture must report the same
+# `pocketshell --version` as the APK this gate validates, or the bootstrap
+# "Host setup needed" sheet takes over the long-running stability journey.
+source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
+export_agents_fixture_version
 
 # Issue #2054: apply and assert the release build resource profile ONCE, at the
 # top of the whole validation, before the ~30-60 minute run takes the shared AVD
@@ -142,6 +147,42 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   exit 0
 fi
 
+# Issue #2381: a tagless checkout reaching this script is an ANOMALY, not a
+# supported mode, and it must say so before the ~40-minute gate rather than
+# after it.
+#
+# Everything this chain exists to prove is version-relative: the setup-detection
+# matrix drives HostBootstrapScenarioSuiteTest, whose seven profiles all compare
+# the app's version against the `pocketshell` CLI the Docker host reports
+# ("up to date", "update available", "app too old"). At the `0.0.0` core that
+# scripts/derive-version.sh emits with no reachable `v*` tag, none of those
+# relationships is expressible and every profile is vacuous — and the artifact
+# publish_validated_apk ships would be stamped versionCode=1 / 0.0.0-dev.
+# Before this check the symptom was seven identical, cause-free
+# `java.lang.AssertionError`s inside instrumentation, after the ~40-minute
+# pre-release gate had already run.
+#
+# A function, not an inline block, so tests/scripts/gate-isolated-copy-version-
+# test.sh can drive THIS code (not a copy of it) red and green without starting
+# a release run — the same extract-and-source idiom
+# tests/scripts/pre-release-version-test.sh uses for the gate's fixture check.
+release_chain_version_preflight() {
+  local root_dir="$1"
+  local version_name core
+  version_name="$(bash "$root_dir/scripts/derive-version.sh" version-name 2>/dev/null || true)"
+  core="${version_name#v}"
+  core="${core%%+*}"
+  core="${core%%-*}"
+  if [[ -z "$core" || "$core" == "0.0.0" ]]; then
+    printf 'REFUSING: %s derives versionName=%s, whose release core is %s (issue #2381).\n' \
+      "$root_dir" "${version_name:-<empty>}" "${core:-<empty>}" >&2
+    printf 'The release validation chain is entirely version-relative — every setup-detection profile compares the app version against the host `pocketshell` CLI version — so at a 0.0.0 core it proves nothing, and publish_validated_apk would ship a versionCode=1 / 0.0.0-dev artifact.\n' >&2
+    printf 'Fix the CHECKOUT, not this script: check out with full tag history (actions/checkout fetch-depth: 0, which .github/workflows/release-emulator-validation.yml already does) or `git fetch --tags` so at least one v* tag is reachable from HEAD.\n' >&2
+    return 1
+  fi
+  printf 'Release chain version: %s (core %s) — issue #2381 preflight\n' "$version_name" "$core"
+}
+
 pocketshell_release_validation_require_run_id "$RUN_ID" ||
   exit "$POCKETSHELL_RELEASE_DISK_PREFLIGHT_FAIL_RC"
 
@@ -163,6 +204,11 @@ else
     printf 'Release storage contract satisfied: canonical generated root authenticated; 24 GiB floor available.\n'
     exit 0
   fi
+  # Issue #2381: last of the cheap fail-closed preconditions, in the same zone
+  # as the storage/disk checks above and still before the shared AVD lock, the
+  # isolated rsync copy and every minute of Gradle. `--check-storage` has
+  # already exited; `--verify-apk-identity` never reaches here.
+  release_chain_version_preflight "$ROOT_DIR" || exit 1
 fi
 
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
@@ -856,6 +902,16 @@ run_required \
 # rebuild inside terminal-lab is also what OOM-killed release attempt r1, 58
 # minutes in.
 export_validated_apk_identity
+
+# Issue #2381: every stage from here on installs the pair the pre-release gate
+# built INSIDE its `.git`-less isolated rsync copy, so that APK's versionName is
+# the isolated copy's derivation, not this tagged checkout's. The top-of-script
+# derivation was only right for the stages before this point; re-pin the
+# `agents` fixture stamp to the binary that is actually installed, or every
+# downstream journey runs against a host CLI version the app disagrees with.
+export_agents_fixture_version "$APP_APK"
+printf 'Validated-APK agents fixture stamp: %s (issue #2381)\n' \
+  "${POCKETSHELL_AGENT_FIXTURE_VERSION:-<empty: image default 0.0.0-dev>}"
 
 if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
   run_required \

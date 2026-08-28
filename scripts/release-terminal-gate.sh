@@ -437,6 +437,14 @@ run_ssh_smoke_step() {
     printf 'selector: %s\n' \
       'com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias'
     printf '\n# bringing up deterministic agents Docker fixture\n'
+    # Issue #2381: the fixture's `pocketshell --version` must equal the
+    # versionName of the installed APK, or the SSH smoke test lands on the
+    # bootstrap "Host setup needed" sheet instead of the session it asserts.
+    # The pair this step runs against was built from THIS checkout by the first
+    # workbench step above (FIRST_WORKBENCH_BUILD_APKS=1), so derive.
+    # shellcheck source=scripts/lib/agents-fixture-version.sh
+    source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
+    export_agents_fixture_version_for_run 1 ""
     docker compose -f "$DETERMINISTIC_COMPOSE_FILE" up -d --build agents
     printf '\n# Docker compose ps\n'
     docker compose -f "$DETERMINISTIC_COMPOSE_FILE" ps

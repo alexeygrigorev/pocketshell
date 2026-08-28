@@ -173,8 +173,18 @@ jobs:
     continue-on-error: true
 
     steps:
+      # Issue #2381: fetch-depth 0. The APK's versionName is DERIVED from the
+      # git tag (#2356) and the app treats its release core as the
+      # `pocketshell` CLI version it expects on the host. A shallow checkout
+      # derives the `0.0.0-dev+<sha>` placeholder, which sits below every real
+      # CLI version — phase 3's uv-upgrade scenarios then cannot express "the
+      # host CLI is outdated" at all and the setup-detection gate is
+      # untestable. Same reason tests.yml's dex job already checks out full
+      # history.
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -239,6 +249,12 @@ jobs:
       # port is unforwarded, so they are started and health-waited like the rest.
       - name: Start Docker fixtures (agents, flaky-agent, tmux + toxiproxy + bootstrap + old-cli + daemon)
         run: |
+          # Issue #2381: publish the derived version into the `agents` fixture
+          # so its `pocketshell --version` matches the APK under test. Without
+          # it the app reports VersionMismatch against the fixture and the
+          # bootstrap sheet takes over every journey using it.
+          source scripts/lib/agents-fixture-version.sh
+          export_agents_fixture_version
           docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps \
             agents flaky-agent tmux network-fault-proxy packet-loss-proxy \
             bootstrap-ready bootstrap-uv-install bootstrap-uv-upgrade \

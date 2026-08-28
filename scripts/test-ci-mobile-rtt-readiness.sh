@@ -55,20 +55,23 @@ PY
 
 sandbox="$(mktemp -d)"
 trap 'rm -rf "$sandbox"' EXIT
-mkdir -p "$sandbox/repo/tests/docker" "$sandbox/repo/scripts" "$sandbox/bin"
+mkdir -p "$sandbox/repo/tests/docker" "$sandbox/repo/scripts/lib" "$sandbox/bin"
 cp "$REPO_ROOT/tests/docker/test_key" "$sandbox/repo/tests/docker/test_key"
 chmod 0644 "$sandbox/repo/tests/docker/test_key"
 
 # Issue #2095: the extracted production block now calls the bounded fixture
 # retry helper. Copy the real helper, not a no-op stub, so this sandbox exercises
 # its command dispatch and success artifact as production does. The helper is
-# self-contained; its external utilities continue to come from the normal PATH.
+# self-contained; its external utilities continue to come from the normal PATH,
+# except issue #2381's agents-fixture-version.sh, which it sources directly and
+# which must be copied alongside it or the sandbox run fails on "No such file".
 fixture_retry_source="$REPO_ROOT/scripts/ci-journey-fixture-retry.sh"
 fixture_retry_sandbox="$sandbox/repo/scripts/ci-journey-fixture-retry.sh"
 [[ -f "$fixture_retry_source" ]] \
   || fail "repository fixture-retry wrapper not found: $fixture_retry_source"
 cp "$fixture_retry_source" "$fixture_retry_sandbox"
 chmod +x "$fixture_retry_sandbox"
+cp "$REPO_ROOT/scripts/lib/agents-fixture-version.sh" "$sandbox/repo/scripts/lib/agents-fixture-version.sh"
 [[ -x "$fixture_retry_sandbox" ]] \
   || fail "mobile-RTT sandbox is missing the executable fixture-retry wrapper"
 cmp -s "$fixture_retry_source" "$fixture_retry_sandbox" \

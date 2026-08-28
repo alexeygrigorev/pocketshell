@@ -59,16 +59,39 @@
 #     reachable at all, or the bare placeholder `0.0.0-dev` when git itself is
 #     unavailable/not a repo.
 #
+#   * A DETACHED COPY of a checkout (issue #2381) carries the version of the
+#     checkout it was copied from, via a PIN FILE, not a second derivation.
+#     scripts/pre-release-confidence-gate.sh rsyncs the release checkout to
+#     `<checkout>/build/pre-release-confidence-gate/<run>/worktree` with
+#     `--exclude='.git'` and re-execs there; every APK the release chain then
+#     validates, journeys against and publishes is built INSIDE that copy. With
+#     no git of its own the copy derived the `0.0.0-dev`/versionCode=1
+#     placeholder, so the whole release gate — nightly validated-RC included —
+#     validated a binary that could not express a release version at all
+#     (HostBootstrapScenarioSuiteTest's setup-detection scenarios compare the
+#     app's version against the host CLI's, and every one of them is vacuous at
+#     `0.0.0`). `write-pin` closes that: the SOURCE checkout, which does have
+#     tag history, derives once and stamps the answer into the copy, and the
+#     pin is consulted AHEAD of the git derivation (not as a fallback behind
+#     it — D22 hard cut). Invariant: a pinned copy derives EXACTLY what the
+#     checkout it was copied from derives.
+#
 # USAGE
 #   derive-version.sh version-code [--ref REF]
 #   derive-version.sh version-name [--ref REF]
 #   derive-version.sh both [--ref REF]     (default; prints both, KEY=VALUE)
+#   derive-version.sh write-pin TARGET_DIR [--ref REF]
 #   derive-version.sh --self-test
 #
 # --ref defaults to HEAD. Passing an explicit ref lets a caller derive the
 # version for a commit/tag other than the current checkout (e.g. a throwaway
 # worktree, or scripts/push-release-tag.sh deriving against a not-yet-pushed
 # local tag it just created).
+#
+# write-pin derives against THIS script's own checkout and writes
+# `TARGET_DIR/.pocketshell-version-pin` (the same `KEY=VALUE` shape `both`
+# prints). Any later `version-code`/`version-name`/`both` run whose repo root
+# is TARGET_DIR answers from that file instead of asking git.
 #
 # Self-test: run this script with --self-test (builds synthetic git repos
 # under mktemp, never touches this repo's own tags).
@@ -83,7 +106,45 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly VERSION_CODE_OFFSET=1
 
 usage() {
-  sed -n '2,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  # Ends at the last line of the header comment block; keep in sync when the
+  # block grows (the pre-#2381 range stopped one section short of USAGE).
+  sed -n '2,97p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# Issue #2381: the pin file a detached copy carries instead of git history.
+# Deliberately a repo-root dotfile and NOT under `build/`: the gate's copy runs
+# `clean`/`--rerun-tasks` builds, and a version that can be wiped mid-gate is
+# exactly the silent-placeholder failure this closes.
+readonly VERSION_PIN_FILE_NAME=".pocketshell-version-pin"
+
+# Echoes "<code> <name>" from $1/.pocketshell-version-pin when that file exists
+# AND parses; echoes nothing otherwise. A malformed pin is reported on stderr
+# and ignored rather than fataled: derive-version.sh's top design constraint is
+# that it never fails a build, and Gradle's derivePocketshellVersion() swallows
+# a non-zero exit into the same placeholder anyway, so exiting here would only
+# make the failure quieter. The loud half lives downstream, where it can name
+# the consequence — HostBootstrapScenarioSuiteTest.assertApkCarriesARealRelease
+# Version() and release-emulator-validation.sh's preflight both hard-fail on a
+# `0.0.0` core.
+read_version_pin() {
+  local repo="$1"
+  local pin_file="$repo/$VERSION_PIN_FILE_NAME"
+  [[ -f "$pin_file" ]] || return 1
+
+  local code="" name="" line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      VERSION_CODE=*) code="${line#VERSION_CODE=}" ;;
+      VERSION_NAME=*) name="${line#VERSION_NAME=}" ;;
+    esac
+  done < "$pin_file"
+
+  if [[ ! "$code" =~ ^[1-9][0-9]*$ || -z "$name" ]]; then
+    printf 'derive-version.sh: ignoring malformed version pin at %s (VERSION_CODE=%s VERSION_NAME=%s)\n' \
+      "$pin_file" "${code:-<missing>}" "${name:-<missing>}" >&2
+    return 1
+  fi
+  printf '%s %s\n' "$code" "$name"
 }
 
 # True when $1 is a checkout that carries its OWN git, and git can read it.
@@ -117,6 +178,11 @@ git_tree_usable() {
 # the OFFSET floor (1) when git/tags are unavailable.
 derive_version_code() {
   local repo="$1" ref="$2"
+  local pin
+  if pin="$(read_version_pin "$repo")"; then
+    printf '%s\n' "${pin%% *}"
+    return
+  fi
   if ! command -v git >/dev/null 2>&1; then
     echo "$VERSION_CODE_OFFSET"
     return
@@ -135,6 +201,11 @@ derive_version_code() {
 # HEAD) inside the repo at $1 (default ROOT_DIR). Never fails.
 derive_version_name() {
   local repo="$1" ref="$2"
+  local pin
+  if pin="$(read_version_pin "$repo")"; then
+    printf '%s\n' "${pin#* }"
+    return
+  fi
   if ! command -v git >/dev/null 2>&1; then
     echo "0.0.0-dev"
     return
@@ -165,6 +236,50 @@ derive_version_name() {
   fi
 
   echo "0.0.0-dev"
+}
+
+# Issue #2381: stamp $2 (a detached copy) with the version $1 (the source
+# checkout) derives. Unlike the derivation itself this DOES fail loudly — it is
+# an explicit caller-facing command, not the never-fail build path, and a
+# silently skipped pin is precisely the release-gate placeholder it exists to
+# prevent.
+write_version_pin() {
+  local source_repo="$1" target_dir="$2" ref="$3"
+
+  if [[ ! -d "$target_dir" ]]; then
+    printf 'derive-version.sh write-pin: target directory does not exist: %s\n' "$target_dir" >&2
+    return 1
+  fi
+
+  local source_real target_real
+  source_real="$(cd "$source_repo" && pwd -P)" || return 1
+  target_real="$(cd "$target_dir" && pwd -P)" || return 1
+  if [[ "$source_real" == "$target_real" ]]; then
+    # Pinning a live checkout would freeze its version at whatever it happened
+    # to be, and the next commit/tag would silently keep reporting the old one.
+    printf 'derive-version.sh write-pin: refusing to pin a checkout to itself (%s). The pin is for a DETACHED copy that has no git of its own.\n' \
+      "$target_real" >&2
+    return 1
+  fi
+
+  local code name
+  code="$(derive_version_code "$source_real" "$ref")"
+  name="$(derive_version_name "$source_real" "$ref")"
+  if [[ ! "$code" =~ ^[1-9][0-9]*$ || -z "$name" ]]; then
+    printf 'derive-version.sh write-pin: source %s derived an unusable version (code=%s name=%s)\n' \
+      "$source_real" "${code:-<empty>}" "${name:-<empty>}" >&2
+    return 1
+  fi
+
+  local pin_file="$target_real/$VERSION_PIN_FILE_NAME"
+  {
+    printf '# Generated by scripts/derive-version.sh write-pin (issue #2381).\n'
+    printf '# This tree is a detached copy of %s and has no git history of its\n' "$source_real"
+    printf '# own; without this file it would derive the 0.0.0-dev placeholder.\n'
+    printf 'VERSION_CODE=%s\n' "$code"
+    printf 'VERSION_NAME=%s\n' "$name"
+  } > "$pin_file" || return 1
+  printf '%s\n' "$pin_file"
 }
 
 run_self_test() {
@@ -285,11 +400,104 @@ run_self_test() {
   no_git_name="$(PATH="$empty_path_dir" bash -c "source '${BASH_SOURCE[0]}' 2>/dev/null; derive_version_name '$repo' HEAD" 2>/dev/null || echo "0.0.0-dev")"
   check "no-git PATH versionName fallback" "$no_git_name" "0.0.0-dev"
 
+  # ---- Issue #2381: the detached-copy version pin ------------------------
+  # The gate's `.git`-less rsync copy is where every release-chain APK is
+  # actually built. Red half first, so this block can never pass vacuously.
+  local pinned="$sandbox/gate-copy"
+  mkdir -p "$pinned"
+  check "detached copy WITHOUT a pin is the placeholder (the #2381 bug)" \
+    "$(derive_version_name "$pinned" HEAD)" "0.0.0-dev"
+  check "detached copy WITHOUT a pin floors the versionCode (the #2381 bug)" \
+    "$(derive_version_code "$pinned" HEAD)" "$VERSION_CODE_OFFSET"
+
+  local expected_name expected_code
+  expected_name="$(derive_version_name "$repo" HEAD)"
+  expected_code="$(derive_version_code "$repo" HEAD)"
+  local pin_path
+  pin_path="$(write_version_pin "$repo" "$pinned" HEAD)"
+  check "write-pin reports the file it wrote" \
+    "$pin_path" "$pinned/$VERSION_PIN_FILE_NAME"
+  check "pinned copy derives the SOURCE checkout's versionName" \
+    "$(derive_version_name "$pinned" HEAD)" "$expected_name"
+  check "pinned copy derives the SOURCE checkout's versionCode" \
+    "$(derive_version_code "$pinned" HEAD)" "$expected_code"
+  # Guard against a degenerate green: the source must not itself be the
+  # placeholder, or the two checks above would pass while proving nothing.
+  if [[ "$expected_name" == "0.0.0-dev" || "$expected_code" == "$VERSION_CODE_OFFSET" ]]; then
+    printf '  FAIL: pin cases are vacuous — the self-test source repo derived the placeholder (%s/%s)\n' \
+      "$expected_code" "$expected_name" >&2
+    failures=$((failures + 1))
+  else
+    printf '  ok: pin cases are non-vacuous (source derives %s/%s, not the placeholder)\n' \
+      "$expected_code" "$expected_name"
+  fi
+
+  # The pin is consulted AHEAD of git, not as a fallback behind it (D22 hard
+  # cut). A tree that has BOTH must answer from the pin, otherwise the gate's
+  # copy would silently revert to the parent's history the day git discovery
+  # reaches it again.
+  local pinned_with_git="$sandbox/pinned-with-git"
+  mkdir -p "$pinned_with_git"
+  git -C "$pinned_with_git" init --quiet -b main
+  git -C "$pinned_with_git" config user.email "test@example.com"
+  git -C "$pinned_with_git" config user.name "Self Test"
+  git -C "$pinned_with_git" commit --quiet --allow-empty -m "c1"
+  git -C "$pinned_with_git" tag v9.9.9
+  check "sanity: that tree derives its OWN tag before pinning" \
+    "$(derive_version_name "$pinned_with_git" HEAD)" "9.9.9"
+  printf 'VERSION_CODE=7\nVERSION_NAME=1.2.3\n' > "$pinned_with_git/$VERSION_PIN_FILE_NAME"
+  check "pin wins over a usable git tree (precedence, not fallback)" \
+    "$(derive_version_name "$pinned_with_git" HEAD)" "1.2.3"
+  check "pin wins over a usable git tree (versionCode)" \
+    "$(derive_version_code "$pinned_with_git" HEAD)" "7"
+
+  # A malformed pin must not silently become a wrong version: it is reported
+  # and ignored, and the tree falls back to its documented derivation.
+  local malformed="$sandbox/malformed-pin"
+  mkdir -p "$malformed"
+  printf 'VERSION_NAME=\nVERSION_CODE=not-a-number\n' > "$malformed/$VERSION_PIN_FILE_NAME"
+  local malformed_stderr
+  malformed_stderr="$(derive_version_name "$malformed" HEAD 2>&1 >/dev/null)"
+  check "malformed pin falls back to the placeholder" \
+    "$(derive_version_name "$malformed" HEAD 2>/dev/null)" "0.0.0-dev"
+  if [[ "$malformed_stderr" == *"ignoring malformed version pin"* ]]; then
+    printf '  ok: malformed pin is reported on stderr, not swallowed\n'
+  else
+    printf '  FAIL: malformed pin produced no stderr diagnostic (got: %s)\n' "$malformed_stderr" >&2
+    failures=$((failures + 1))
+  fi
+  # versionCode 0 is not a legal Android versionCode and must be rejected too.
+  printf 'VERSION_CODE=0\nVERSION_NAME=1.2.3\n' > "$malformed/$VERSION_PIN_FILE_NAME"
+  check "pin with versionCode=0 is rejected" \
+    "$(derive_version_code "$malformed" HEAD 2>/dev/null)" "$VERSION_CODE_OFFSET"
+
+  # write-pin refuses to freeze a live checkout at its current version.
+  if write_version_pin "$repo" "$repo" HEAD >/dev/null 2>&1; then
+    printf '  FAIL: write-pin pinned a checkout to itself\n' >&2
+    failures=$((failures + 1))
+    rm -f "$repo/$VERSION_PIN_FILE_NAME"
+  else
+    printf '  ok: write-pin refuses to pin a checkout to itself\n'
+  fi
+  if [[ -e "$repo/$VERSION_PIN_FILE_NAME" ]]; then
+    printf '  FAIL: write-pin left a pin file in the source checkout\n' >&2
+    failures=$((failures + 1))
+    rm -f "$repo/$VERSION_PIN_FILE_NAME"
+  else
+    printf '  ok: the refused self-pin wrote nothing\n'
+  fi
+  if write_version_pin "$repo" "$sandbox/does-not-exist" HEAD >/dev/null 2>&1; then
+    printf '  FAIL: write-pin accepted a non-existent target directory\n' >&2
+    failures=$((failures + 1))
+  else
+    printf '  ok: write-pin rejects a non-existent target directory\n'
+  fi
+
   if [[ "$failures" -ne 0 ]]; then
     printf 'SELF-TEST FAILED: %d case(s) behaved incorrectly.\n' "$failures" >&2
     return 1
   fi
-  printf 'SELF-TEST OK: version-code monotonic across tags, version-name matches convention, both fall back cleanly with no tags / no git.\n'
+  printf 'SELF-TEST OK: version-code monotonic across tags, version-name matches convention, both fall back cleanly with no tags / no git, and a detached copy carries its source checkout'"'"'s version through the pin (#2381).\n'
   return 0
 }
 
@@ -297,8 +505,19 @@ main() {
   local cmd="${1:-both}"
   [[ "$cmd" == "--self-test" ]] && { run_self_test; exit $?; }
   [[ "$cmd" == "-h" || "$cmd" == "--help" ]] && { usage; exit 0; }
+  local pin_target=""
   case "$cmd" in
     version-code|version-name|both) shift || true ;;
+    write-pin)
+      shift || true
+      pin_target="${1:-}"
+      if [[ -z "$pin_target" ]]; then
+        echo "write-pin requires a TARGET_DIR" >&2
+        usage >&2
+        exit 2
+      fi
+      shift
+      ;;
     *) echo "unknown command: $cmd" >&2; usage >&2; exit 2 ;;
   esac
 
@@ -320,6 +539,9 @@ main() {
     both)
       printf 'VERSION_CODE=%s\n' "$(derive_version_code "$ROOT_DIR" "$ref")"
       printf 'VERSION_NAME=%s\n' "$(derive_version_name "$ROOT_DIR" "$ref")"
+      ;;
+    write-pin)
+      write_version_pin "$ROOT_DIR" "$pin_target" "$ref" || exit 1
       ;;
   esac
 }

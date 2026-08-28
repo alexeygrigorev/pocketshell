@@ -212,8 +212,12 @@ public class HostPocketshellUpgrade {
         private fun pinnedSpec(requestedVersion: String): String {
             val version = requestedVersion.trim()
             if (version.isEmpty()) return "pocketshell"
-            // versionName is dotted-numeric from our own APK; still quote so a
-            // surprising character cannot break the /bin/sh -c wrapping.
+            // The caller passes the RELEASE CORE of our own APK's versionName
+            // (issue #2381 — `expectedHostCliVersion`), so this is a real
+            // published `tools/pocketshell` version rather than the raw
+            // git-derived `0.4.45-4-g9b1d784e` that no index can resolve.
+            // Still filtered so a surprising character cannot break the
+            // /bin/sh -c wrapping.
             val safe = version.filter { it.isLetterOrDigit() || it == '.' || it == '-' || it == '_' }
             if (safe.isEmpty()) return "pocketshell"
             return "pocketshell==$safe"

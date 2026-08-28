@@ -177,19 +177,28 @@ public sealed interface HooksStatus {
 }
 
 /**
- * Compare two dotted-numeric versions (`MAJOR.MINOR.PATCH`, any number of
- * components) numerically. Returns a negative number when [a] < [b], zero
- * when equal, a positive number when [a] > [b], or `null` when either side
- * is not a clean dotted-numeric version (so callers can fall back to the
- * conservative mismatch path instead of guessing).
+ * Compare two versions by their RELEASE CORE (`MAJOR.MINOR.PATCH`, any number
+ * of dotted numeric components). Returns a negative number when [a] < [b],
+ * zero when equal, a positive number when [a] > [b], or `null` when either
+ * side has no parseable core (so callers can fall back to the conservative
+ * mismatch path instead of guessing).
  *
  * Issue #514: a plain string `==` / `compareTo` mis-orders multi-digit
  * components ("0.3.10" < "0.3.9" as strings) and cannot tell "remote is
  * newer" from "remote is older". This pure numeric compare fixes both.
+ *
+ * Issue #2381: it compares CORES, not raw strings, because since #2356 the
+ * app's own `versionName` — which is what the caller passes as the expected
+ * version — can carry a git-describe qualifier and/or semver build metadata
+ * (`0.4.45-4-g9b1d784e`, `0.0.0-dev+525c87a`). Comparing those raw made this
+ * function return `null` for every non-tag build, dropping the caller into a
+ * string-equality fallback that labelled a perfectly current host
+ * `VersionMismatch` and a genuinely newer host `VersionMismatch` instead of
+ * `AppUpdateRequired`. See [releaseVersionCoreComponents].
  */
 internal fun compareSemver(a: String, b: String): Int? {
-    val left = parseSemverComponents(a) ?: return null
-    val right = parseSemverComponents(b) ?: return null
+    val left = releaseVersionCoreComponents(a) ?: return null
+    val right = releaseVersionCoreComponents(b) ?: return null
     val size = maxOf(left.size, right.size)
     for (i in 0 until size) {
         val l = left.getOrElse(i) { 0 }
@@ -197,20 +206,6 @@ internal fun compareSemver(a: String, b: String): Int? {
         if (l != r) return l.compareTo(r)
     }
     return 0
-}
-
-private fun parseSemverComponents(version: String): List<Int>? {
-    val trimmed = version.trim()
-    if (trimmed.isEmpty()) return null
-    val parts = trimmed.split('.')
-    val components = ArrayList<Int>(parts.size)
-    for (part in parts) {
-        if (part.isEmpty()) return null
-        val value = part.toIntOrNull() ?: return null
-        if (value < 0) return null
-        components += value
-    }
-    return components
 }
 
 public sealed interface PocketshellDaemonStatus {
@@ -1070,7 +1065,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             this is ToolStatus.AppUpdateRequired
 
     public companion object {
-        private val VERSION_PATTERN: Regex = Regex("""\b(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b""")
+        // Issue #2381: the qualifier class must include `+` (semver build
+        // metadata). Without it `0.0.0-dev+525c87a` — the versionName a
+        // tagless CI checkout derives (#2356), and therefore what the CI
+        // fixture reports back as its `pocketshell --version` — was truncated
+        // to `0.0.0-dev` here, and the caller then compared that truncated
+        // parse of the app's OWN version against the untruncated original and
+        // called them different.
+        private val VERSION_PATTERN: Regex = Regex("""\b(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.+-]+)?)\b""")
 
         // Issue #1236: extract every `"installed": true|false` from
         // `pocketshell hooks status --json`. A tolerant regex avoids pulling

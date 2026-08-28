@@ -232,6 +232,13 @@ require_command rg
 [[ -f "$ROOT_DIR/$SSH_KEY" ]] || fail "SSH key was not found at $ROOT_DIR/$SSH_KEY"
 
 prepare_verify_root
+# Issue #2381: the fixture's `pocketshell --version` must equal the versionName
+# of the APK this run installs, or every screen it drives sits under the
+# bootstrap "Host setup needed" sheet. This script always rebuilds the pair from
+# THIS checkout at step 04, so the checkout derivation is the right answer.
+# shellcheck source=scripts/lib/agents-fixture-version.sh
+source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
+export_agents_fixture_version_for_run 1 ""
 run_logged "01-docker-agents-up" docker compose -f "$ROOT_DIR/$COMPOSE_FILE" up -d --build agents
 wait_for_docker_ssh
 wait_for_emulator

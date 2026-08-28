@@ -149,6 +149,15 @@ shift
 shift
 (( $# > 0 )) || usage
 
+# Issue #2381: every fixture this wrapper starts is started for a run that then
+# installs the app, so the `agents` fixture's reported `pocketshell --version`
+# must track the APK built from this same checkout. Exporting here covers both
+# CI callers (tests.yml's emulator-journey and pr-journey-smoke.yml) at one
+# point; only the `agents` service reads the variable.
+# shellcheck source=scripts/lib/agents-fixture-version.sh
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/agents-fixture-version.sh"
+export_agents_fixture_version
+
 artifact_root="${CI_JOURNEY_SETUP_ARTIFACT_ROOT:-$DEFAULT_ARTIFACT_ROOT}"
 fixture_dir="$artifact_root/$fixture"
 retry_delay_seconds="${CI_JOURNEY_FIXTURE_RETRY_DELAY_SECONDS:-5}"

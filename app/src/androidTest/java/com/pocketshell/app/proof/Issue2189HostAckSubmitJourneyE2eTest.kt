@@ -320,14 +320,31 @@ class Issue2189HostAckSubmitJourneyE2eTest {
                     .isNotEmpty()
             }.getOrDefault(false)
         }
-        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
+        // Host-list taps are gated by beginHostOpen; a background Unknown
+        // reprobe can drop the first tap. Re-tap like a user until the
+        // seeded session row is actually composed.
+        val sessionDeadline = SystemClock.elapsedRealtime() +
+            TerminalTestTimeouts.terminalVisibilityTimeoutMs()
+        while (SystemClock.elapsedRealtime() < sessionDeadline) {
+            if (sessionRowVisible()) break
+            if (runCatching {
+                    compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }.getOrDefault(false)
+            ) {
+                runCatching {
+                    compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+                }
+            }
             runCatching {
-                compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }.getOrDefault(false)
+                compose.waitUntil(timeoutMillis = 5_000) { sessionRowVisible() }
+            }
         }
+        assertTrue(
+            "seeded session row $SESSION_NAME did not appear after host taps",
+            sessionRowVisible(),
+        )
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
         compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
             runCatching {
@@ -339,6 +356,13 @@ class Issue2189HostAckSubmitJourneyE2eTest {
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
     }
+
+    private fun sessionRowVisible(): Boolean =
+        runCatching {
+            compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }.getOrDefault(false)
 
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
@@ -409,6 +433,7 @@ class Issue2189HostAckSubmitJourneyE2eTest {
                 name = "issue2189-submit-key-${System.currentTimeMillis()}",
                 content = key,
             )
+            val now = System.currentTimeMillis()
             val hostId = db.hostDao().insert(
                 HostEntity(
                     name = "Issue2189 HostAck Submit",
@@ -417,7 +442,12 @@ class Issue2189HostAckSubmitJourneyE2eTest {
                     username = DEFAULT_USER,
                     keyId = storedKey.id,
                     tmuxInstalled = true,
-                    lastBootstrapAt = System.currentTimeMillis(),
+                    lastBootstrapAt = now,
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = now,
+                    pocketshellVersionCompatible = true,
+                    pocketshellDaemonRunning = true,
+                    pocketshellDaemonEnabled = true,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId

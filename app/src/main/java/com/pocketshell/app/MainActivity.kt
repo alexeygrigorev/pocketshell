@@ -13,7 +13,9 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.annotation.VisibleForTesting
 import androidx.core.content.ContextCompat
+
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
@@ -250,6 +252,15 @@ class MainActivity : FragmentActivity() {
     private var currentTopDestination: AppDestination = AppDestination.HostList
     private var currentComposerDraft: String = ""
     private var restoredTmuxDestination: AppDestination.TmuxSession? = null
+
+    /**
+     * Testing accessor over the navigator's authoritative top destination.
+     * Same value [AppNavigator] reports through [onCurrentDestinationChanged];
+     * not a semantics or screenshot inference.
+     */
+    @VisibleForTesting
+    internal fun currentDestinationForTest(): AppDestination = currentTopDestination
+
 
     /**
      * Issue #177: the composer draft restored alongside a recent

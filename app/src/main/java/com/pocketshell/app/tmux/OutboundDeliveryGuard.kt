@@ -47,14 +47,24 @@ import kotlinx.coroutines.withContext
 internal enum class DeliveryProbeOutcome { AlreadyLanded, NotLanded, Unknown }
 
 /**
- * Issue #1529: an opaque, monotonic per-send-attempt delivery token for a send that has
- * no durable outbound-queue row id to use (a non-queue-backed send). It is unique per
- * call, so two DISTINCT sends never share ledger identity; a send whose retry must dedup
- * threads a STABLE id (the durable row id, or the conversation turn id) instead.
+ * Issue #1529 / #2323 / #2295: an opaque per-send-attempt delivery token for a
+ * send that has no durable outbound-queue row id. Unique per call, so two
+ * DISTINCT sends never share ledger identity; a retry that must dedup threads
+ * a STABLE id (the durable row id, or the conversation turn id) instead.
+ *
+ * Namespace: cryptographically random UUID. The host journal
+ * (`$XDG_STATE_HOME/pocketshell/sends/<sha256(token)>.json`) is durable and
+ * keyed only by that hash, so a process-local counter (`d1`, `d2`, …) restarts
+ * at `d1` after every app process recreation and suppresses a genuinely new
+ * payload as `already-delivered`. UUID tokens do not repeat across restarts,
+ * reinstalls, or multiple clients sharing one host within a practical
+ * horizon. `already-delivered` remains a real host answer for a RETRY of the
+ * same token, never a success for an unknown new payload.
+ *
+ * Durable queue rows keep using their existing UUID row id as the send token
+ * ([TmuxSessionScreenRouting]).
  */
-private val deliveryTokenCounter = java.util.concurrent.atomic.AtomicLong(0)
-
-internal fun newOutboundDeliveryToken(): String = "d${deliveryTokenCounter.incrementAndGet()}"
+internal fun newOutboundDeliveryToken(): String = java.util.UUID.randomUUID().toString()
 
 /**
  * Issue #1526 test seams (#780 synthetic-injection model). Production never arms

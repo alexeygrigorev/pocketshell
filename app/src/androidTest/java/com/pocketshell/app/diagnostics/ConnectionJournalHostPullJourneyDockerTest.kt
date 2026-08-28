@@ -5,6 +5,7 @@ import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -12,6 +13,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
@@ -21,6 +23,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.App
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
+import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
@@ -168,7 +171,7 @@ class ConnectionJournalHostPullJourneyDockerTest {
             clearRemoteJournal()
 
             val handshakesBeforeTap = SSH_HANDSHAKE_ATTEMPTS.get()
-            openSettingsFromLiveSession()
+            openSettingsFromLiveSession(app)
             scrollToJournalRow()
             compose.onNodeWithTag(
                 DIAGNOSTICS_MIRROR_CONNECTION_JOURNAL_TAG,
@@ -319,11 +322,24 @@ class ConnectionJournalHostPullJourneyDockerTest {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = SESSION_TIMEOUT_MS) {
-            compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
-                .fetchSemanticsNodes().isNotEmpty()
+        val sessionDeadline = SystemClock.elapsedRealtime() + SESSION_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < sessionDeadline) {
+            if (sessionRowVisible()) break
+            if (compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+            ) {
+                runCatching {
+                    compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+                }
+            }
+            runCatching {
+                compose.waitUntil(timeoutMillis = 5_000) { sessionRowVisible() }
+            }
         }
+        assertTrue(
+            "seeded session row $SESSION_NAME did not appear after host taps",
+            sessionRowVisible(),
+        )
         compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         compose.waitUntil(timeoutMillis = SESSION_TIMEOUT_MS) {
@@ -336,13 +352,17 @@ class ConnectionJournalHostPullJourneyDockerTest {
         }
     }
 
+    private fun sessionRowVisible(): Boolean =
+        compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
+            .fetchSemanticsNodes().isNotEmpty()
+
     private fun waitForConnected(vm: TmuxSessionViewModel) {
         compose.waitUntil(timeoutMillis = SESSION_TIMEOUT_MS) {
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected
         }
     }
 
-    private fun openSettingsFromLiveSession() {
+    private suspend fun openSettingsFromLiveSession(app: App) {
         val moreTags = listOf(
             TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
             TMUX_FULL_CHROME_MORE_BUTTON_TAG,
@@ -351,9 +371,127 @@ class ConnectionJournalHostPullJourneyDockerTest {
             compose.onAllNodesWithTag(tag, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         } ?: error("no live-session More button")
-        compose.onNodeWithTag(moreTag, useUnmergedTree = true).performClick()
-        compose.onNodeWithTag(TMUX_SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
-        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG).assertExists()
+
+        val startedAt = SystemClock.elapsedRealtime()
+        var stage = "before-more-tap"
+        var settingsDestinationAt: Long? = null
+        var settingsContainerAt: Long? = null
+        try {
+            compose.onNodeWithTag(moreTag, useUnmergedTree = true).performClick()
+            stage = "after-more-tap"
+            compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+                compose.onAllNodesWithTag(
+                    TMUX_SETTINGS_BUTTON_TAG,
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().size == 1
+            }
+            compose.onNodeWithTag(
+                TMUX_SETTINGS_BUTTON_TAG,
+                useUnmergedTree = true,
+            ).performScrollTo().assertIsDisplayed().performClick()
+            stage = "after-settings-tap"
+
+            compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+                currentDestinationForTest() == AppDestination.Settings
+            }
+            settingsDestinationAt = SystemClock.elapsedRealtime()
+            stage = "settings-destination-reached"
+
+            compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+                settingsContainerNodeCount() == 1
+            }
+            settingsContainerAt = SystemClock.elapsedRealtime()
+            stage = "settings-primary-container-reached"
+            compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG).assertExists()
+            writeSettingsNavigationEvidence(
+                app = app,
+                startedAt = startedAt,
+                stage = stage,
+                settingsDestinationAt = settingsDestinationAt,
+                settingsContainerAt = settingsContainerAt,
+                failure = null,
+            )
+        } catch (failure: Throwable) {
+            val evidence = writeSettingsNavigationEvidence(
+                app = app,
+                startedAt = startedAt,
+                stage = stage,
+                settingsDestinationAt = settingsDestinationAt,
+                settingsContainerAt = settingsContainerAt,
+                failure = failure,
+            )
+            throw AssertionError(
+                "live Settings navigation failed at $stage; evidence=${evidence.absolutePath}",
+                failure,
+            )
+        }
+    }
+
+    private fun currentDestinationForTest(): AppDestination {
+        var destination: AppDestination? = null
+        compose.activityRule.scenario.onActivity { activity ->
+            destination = activity.currentDestinationForTest()
+        }
+        return requireNotNull(destination) { "MainActivity destination was unavailable" }
+    }
+
+    private fun settingsContainerNodeCount(): Int =
+        compose.onAllNodesWithTag(
+            SETTINGS_LAZY_COLUMN_TAG,
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes().size
+
+    private suspend fun writeSettingsNavigationEvidence(
+        app: App,
+        startedAt: Long,
+        stage: String,
+        settingsDestinationAt: Long?,
+        settingsContainerAt: Long?,
+        failure: Throwable?,
+    ): File {
+        val destination = runCatching { currentDestinationForTest().toString() }
+            .getOrElse { "unavailable:${it::class.simpleName}:${it.message}" }
+        val settingsNodeCount = runCatching { settingsContainerNodeCount() }
+            .getOrElse { -1 }
+        val settingsButtonCount = runCatching {
+            compose.onAllNodesWithTag(
+                TMUX_SETTINGS_BUTTON_TAG,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().size
+        }.getOrElse { -1 }
+        val routeEvents = app.diagnosticRecorder.readEvents(
+            DiagnosticEventFilter(category = "navigation", name = "route_changed"),
+        ).map { event ->
+            "sequence=${event.sequence} monotonicNanos=${event.monotonicTimestampNanos} " +
+                "route=${event.metadata["route"]}"
+        }
+        val dir = settingsNavigationArtifactDir()
+        File(dir, "summary.txt").writeText(
+            buildString {
+                appendLine("issue=2323")
+                appendLine("stage=$stage")
+                appendLine("destination=$destination")
+                appendLine("settings_container_node_count=$settingsNodeCount")
+                appendLine("settings_menu_item_node_count=$settingsButtonCount")
+                appendLine("tap_to_destination_ms=${settingsDestinationAt?.minus(startedAt)}")
+                appendLine("tap_to_primary_container_ms=${settingsContainerAt?.minus(startedAt)}")
+                appendLine("failure=${failure?.let { "${it::class.qualifiedName}: ${it.message}" } ?: "none"}")
+                appendLine("route_events:")
+                routeEvents.forEach(::appendLine)
+            },
+        )
+        runCatching { captureFullDevice(File(dir, "settings-navigation.png")) }
+            .onFailure { File(dir, "capture-error.txt").appendText("screenshot=${it}\n") }
+        runCatching { captureLogcat(File(dir, "settings-navigation-logcat.txt")) }
+            .onFailure { File(dir, "capture-error.txt").appendText("logcat=${it}\n") }
+        println("ISSUE2323_NAVIGATION_ARTIFACT_DIR ${dir.absolutePath}")
+        return dir
+    }
+
+    private fun settingsNavigationArtifactDir(): File {
+        val dir = File(artifactDir(), "settings-navigation")
+        check(dir.exists() || dir.mkdirs()) { "could not create ${dir.absolutePath}" }
+        return dir
     }
 
     private fun scrollToJournalRow() {
@@ -404,6 +542,7 @@ class ConnectionJournalHostPullJourneyDockerTest {
                 name = "issue1710-key-${System.currentTimeMillis()}",
                 content = fixtureKey,
             )
+            val now = System.currentTimeMillis()
             val hostId = db.hostDao().insert(
                 HostEntity(
                     name = "Issue 1710 Journal Pull",
@@ -412,7 +551,12 @@ class ConnectionJournalHostPullJourneyDockerTest {
                     username = DEFAULT_USER,
                     keyId = key.id,
                     tmuxInstalled = true,
-                    lastBootstrapAt = System.currentTimeMillis(),
+                    lastBootstrapAt = now,
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = now,
+                    pocketshellVersionCompatible = true,
+                    pocketshellDaemonRunning = true,
+                    pocketshellDaemonEnabled = true,
                 ),
             )
             "$HOST_ROW_TAG_PREFIX$hostId"

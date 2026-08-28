@@ -7,6 +7,7 @@ PocketShell is in active development and daily use as the maintainer's primary w
 ## Key docs
 
 - [docs/README.md](docs/README.md) - full doc index
+- [docs/documentation-guide.md](docs/documentation-guide.md) - read before restructuring, adding, or pruning docs; has the situation-to-doc lazy-load map
 - [docs/architecture.md](docs/architecture.md) - modules, sshj, tmux `-CC`, per-pane rendering
 - [docs/roadmap.md](docs/roadmap.md) - phased build and sizing
 - [docs/decisions.md](docs/decisions.md) - locked decisions, open questions, rejected alternatives

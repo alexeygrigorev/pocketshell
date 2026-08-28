@@ -31,6 +31,7 @@ context; the README and current feature docs track released behavior.
 | [ci-pitfalls.md](ci-pitfalls.md) | Catalogue of ways a CI/gate run can look green while proving nothing — check before trusting a result |
 | [review-standards.md](review-standards.md) | Reviewer acceptance bars for terminal/session/visual/journey work |
 | [lessons-learned.md](lessons-learned.md) | Durable, recurring operational lessons not tied to any one epic |
+| [documentation-guide.md](documentation-guide.md) | How these docs are organized and kept lazy-loaded; read before restructuring/adding/pruning any doc |
 | [../AGENTS.md](../AGENTS.md) | Primary project + agent instructions (imported by [../CLAUDE.md](../CLAUDE.md)) |
 | [../process.md](../process.md) | The implementer/reviewer/orchestrator process contract |
 | [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |

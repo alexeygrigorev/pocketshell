@@ -96,10 +96,46 @@
 # the matrix total from scripts/ci-journey-shard-count.sh, and requires every
 # leg's retry headroom to exceed one twice-failing class (~420s).
 #
+# Issue #2374 — a DENIAL now names WHICH condition it is.
+#
+# On 2026-08-28 all six shards on `main` reported `insufficient_remaining_budget`
+# and the run was triaged as a recurrence of #1833/#1850. It was not. Every one
+# of those shards had already written a `Failed BOTH attempts` summary: 4 to 11
+# journey classes per shard genuinely failing, each paying TWO full 420s
+# per-class attempts. That is what drove suite elapsed to 2674-4206s — LONGER
+# than the three-shard suites (1867-3017s) #1850 diagnosed as overload, on HALF
+# the classes per leg — and it is the suite elapsed the model above consumes. No
+# constant here moved; the shard's own failures ate the wall.
+#
+# The two conditions want OPPOSITE responses:
+#
+#   gate_capacity                  the shard failed NO journey and still cannot
+#                                  afford a retry. This is #1833/#1850's loss of
+#                                  resilience; the levers are the shard count,
+#                                  the class distribution, and this estimate.
+#   journey_failure_inflated_suite the shard's first attempt already failed
+#                                  journeys. Its suite is long BECAUSE of them.
+#                                  Nothing here is the lever — fix the classes.
+#                                  Tuning a budget for this case buys a second
+#                                  60-minute cold boot that re-fails the same
+#                                  classes and still ends RED.
+#
+# #1833 shipped `retry_shortfall_ms` so an operator could tell them apart by eye
+# (its own header: "denied by 224s" versus "denied by 22 minutes"). Nothing
+# CLASSIFIED on it, so the next occurrence was read as its own cause. The caller
+# already computes the discriminator — the workflow's `journey_summary` step
+# greps the first attempt's own summary for `JOURNEY_FAILED` / `Failed BOTH
+# attempts` — so this is an exact reading, not a heuristic on the shortfall.
+#
+# It is REPORTING ONLY: `retry_denial_class` is an additional output line and
+# changes no decision, no other field, and no exit code. An absent or malformed
+# reading reports `unknown` rather than guessing, because guessing either way
+# re-creates the misdiagnosis this exists to end.
+#
 # Usage:
 #   ci-journey-retry-budget.sh JOB_START_EPOCH_MS NOW_EPOCH_MS \
 #     [FIRST_ATTEMPT_START_EPOCH_MS] [FIRST_SUITE_ELAPSED_SECS] \
-#     [FIRST_WARM_BUILD_SECS]
+#     [FIRST_WARM_BUILD_SECS] [FIRST_ATTEMPT_JOURNEY_FAILURE]
 #
 # Output is GitHub-step-output-compatible key=value lines. Invalid/missing clock
 # input fails safe by denying the retry while returning success, so the workflow
@@ -124,6 +160,31 @@ RETRY_COST_MODEL="worst_case"
 # 0 whenever the warm-build reading was absent or unusable, i.e. whenever the
 # emitted requirement is #1800's unmodified one.
 RETRY_WARM_BUILD_DEDUCTED_MS=0
+# Issue #2374: which of the two denial conditions this is. `none` while the
+# retry is allowed; `unknown` when the caller supplied no usable reading of
+# whether the first attempt genuinely failed journeys.
+RETRY_DENIAL_CLASS=none
+# The caller's reading of whether the FIRST attempt already failed journeys.
+# Set once per decision; every emit path (including the malformed-clock
+# fail-safes) classifies from it, so no branch can emit an unclassified denial.
+FIRST_ATTEMPT_JOURNEY_FAILURE=""
+
+# journey_failure_denial_class <allowed> <first_attempt_journey_failure>
+#
+# Pure and total: every input maps to exactly one of the four tokens, and
+# anything the caller cannot vouch for maps to `unknown` rather than to a guess.
+journey_failure_denial_class() {
+  local allowed="$1" first_failure="${2-}"
+  if [[ "$allowed" == "true" ]]; then
+    printf 'none'
+    return 0
+  fi
+  case "$first_failure" in
+    true)  printf 'journey_failure_inflated_suite' ;;
+    false) printf 'gate_capacity' ;;
+    *)     printf 'unknown' ;;
+  esac
+}
 
 emit_decision() {
   local allowed="$1" reason="$2" remaining="$3" shortfall=0
@@ -135,6 +196,9 @@ emit_decision() {
   if [[ "$allowed" != "true" ]] && (( RETRY_REQUIRED_MS > remaining )); then
     shortfall=$((RETRY_REQUIRED_MS - remaining))
   fi
+  RETRY_DENIAL_CLASS="$(
+    journey_failure_denial_class "$allowed" "$FIRST_ATTEMPT_JOURNEY_FAILURE"
+  )"
   printf 'retry_allowed=%s\n' "$allowed"
   printf 'retry_reason=%s\n' "$reason"
   printf 'retry_remaining_ms=%s\n' "$remaining"
@@ -142,6 +206,7 @@ emit_decision() {
   printf 'retry_cost_model=%s\n' "$RETRY_COST_MODEL"
   printf 'retry_shortfall_ms=%s\n' "$shortfall"
   printf 'retry_warm_build_deducted_ms=%s\n' "$RETRY_WARM_BUILD_DEDUCTED_MS"
+  printf 'retry_denial_class=%s\n' "$RETRY_DENIAL_CLASS"
 }
 
 canonical_decimal() {
@@ -243,10 +308,19 @@ epoch_out_of_range() {
 journey_retry_budget_decision() {
   local start="${1-}" now="${2-}"
   local attempt_start="${3-}" suite_secs="${4-}" warm_secs="${5-}"
+  local first_failure="${6-}"
 
   RETRY_REQUIRED_MS="$JOURNEY_RETRY_REQUIRED_MS"
   RETRY_COST_MODEL="worst_case"
   RETRY_WARM_BUILD_DEDUCTED_MS=0
+  # Issue #2374: only the two exact tokens the caller's own summary grep can
+  # produce are accepted. Anything else — unset, empty, `TRUE`, `1`, a shell
+  # expansion that silently blanked — is an unusable reading and must classify
+  # `unknown`, never a guess in either direction.
+  case "$first_failure" in
+    true | false) FIRST_ATTEMPT_JOURNEY_FAILURE="$first_failure" ;;
+    *)            FIRST_ATTEMPT_JOURNEY_FAILURE="" ;;
+  esac
 
   if [[ -z "$start" ]]; then
     emit_decision false missing_job_start 0
@@ -325,5 +399,5 @@ journey_retry_budget_decision() {
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-  journey_retry_budget_decision "${1-}" "${2-}" "${3-}" "${4-}" "${5-}"
+  journey_retry_budget_decision "${1-}" "${2-}" "${3-}" "${4-}" "${5-}" "${6-}"
 fi

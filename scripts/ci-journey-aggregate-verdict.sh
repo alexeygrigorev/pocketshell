@@ -91,6 +91,14 @@ cold_build_shards=()
 # Issue #1833: shards that reached their verdict unable to start a cold-boot
 # retry, i.e. shards whose result came from ONE attempt.
 one_shot_shards=()
+# Issue #2374: one-shot shards split by WHICH denial they were. `gate_capacity`
+# is #1833/#1850's condition and must stay loud; `journey_failure_inflated_suite`
+# is a shard whose own failing classes doubled its suite, where the budget is not
+# the lever. An unstamped/unclassifiable token belongs to neither bucket and must
+# never be counted as evidence that the capacity condition is absent.
+capacity_one_shot_shards=()
+inflated_one_shot_shards=()
+unclassified_one_shot_shards=()
 # #2095 external setup INFRA deliberately fails its shard job so GitHub's
 # failed-job retry re-runs only that shard. Its precise token reason explains
 # the otherwise-fail-closed upstream matrix failure.
@@ -165,15 +173,67 @@ if [[ -d "$verdict_dir" ]]; then
     [[ "$tok_shortfall" =~ ^[0-9]+$ ]] || tok_shortfall="?"
     tok_retry_reason="$(sed -n 's/^retry_denied_reason=//p' "$f" 2>/dev/null | head -n 1)"
     [[ -n "$tok_retry_reason" ]] || tok_retry_reason="unspecified"
+    # Issue #2374: WHICH denial. Absent on a token written before this stamp,
+    # which reads `unknown` and is bucketed as unclassified.
+    tok_denial_class="$(sed -n 's/^retry_denial_class=//p' "$f" 2>/dev/null | head -n 1)"
+    case "$tok_denial_class" in
+      none | gate_capacity | journey_failure_inflated_suite) ;;
+      *) tok_denial_class="unknown" ;;
+    esac
+    # Issue #2374: the build attribution, carried independently of the verdict
+    # reason. Absent on a token written before this stamp existed (and on any
+    # shard with no build evidence), which reads `none`.
+    tok_build_attribution="$(sed -n 's/^build_attribution=//p' "$f" 2>/dev/null | head -n 1)"
+    case "$tok_build_attribution" in
+      none | cold_build_timeout | build_level_failure) ;;
+      *) tok_build_attribution="none" ;;
+    esac
 
     provenance_line="shard ${tok_shard}: ${token} — run ${tok_run}, ${origin}, reason ${tok_reason}"
     if [[ "$tok_affordable" == "false" ]]; then
-      provenance_line+=", ONE-SHOT (no cold-boot retry affordable: ${tok_retry_reason}, short by ${tok_shortfall}ms)"
-      one_shot_shards+=("shard ${tok_shard} (${token}, short by ${tok_shortfall}ms)")
+      provenance_line+=", ONE-SHOT (no cold-boot retry affordable: ${tok_retry_reason}, short by ${tok_shortfall}ms, class ${tok_denial_class})"
+      one_shot_shards+=("shard ${tok_shard} (${token}, short by ${tok_shortfall}ms, ${tok_denial_class})")
+      case "$tok_denial_class" in
+        gate_capacity)
+          capacity_one_shot_shards+=("shard ${tok_shard} (${token}, short by ${tok_shortfall}ms)") ;;
+        journey_failure_inflated_suite)
+          inflated_one_shot_shards+=("shard ${tok_shard} (${token}, short by ${tok_shortfall}ms)") ;;
+        *)
+          unclassified_one_shot_shards+=("shard ${tok_shard} (${token}, short by ${tok_shortfall}ms)") ;;
+      esac
     fi
     provenance+=("$provenance_line")
+    # Issue #1814's rollup, kept whole across #2374's precedence change: a shard
+    # carries cold-build evidence when that IS its verdict reason, OR when the
+    # reason went to an unrelated genuine journey failure and the build evidence
+    # rode the separate `build_attribution` stamp instead. Reading only the
+    # reason is what made the notice disappear from the aggregate (and therefore
+    # from the step summary a release owner reads) in exactly the mixed shape
+    # this issue is about.
+    #
+    # The stamp branch is gated on the shard's FINAL verdict being RED, and that
+    # gate is load-bearing. The classify step computes `SHARD_BUILD_ATTRIBUTION`
+    # before EVERY write_verdict branch, and ci-journey-build-phase-timeout.sh
+    # deliberately reads the PRESERVED first-attempt tree so a retry cannot hide
+    # attempt 1's evidence. Both are right — but together they mean a shard whose
+    # attempt 1 was cut mid-Gradle-build and whose RETRY THEN PASSED writes
+    # `CLEAN` + `build_attribution=cold_build_timeout`. Keying the rollup on the
+    # stamp alone would put an "#1814 … investigate the build cost" heading on a
+    # GREEN aggregate — the artifact a release owner reads before tagging
+    # `validated-rc` — which is a fresh instance of the very misread this issue
+    # exists to remove. A shard that self-healed via its retry SUCCEEDED: its
+    # attempt-1 build hiccup is diagnostic, not a cause of any failure, and it is
+    # not lost — that shard's own unconditional `::warning … (#1814)` from
+    # ci-journey-build-attribution-notice.sh still names it in the job log. The
+    # rollup speaks only where the build cost actually contributed to a RED.
+    # The reason branch needs no such gate: `cold_build_timeout` only ever
+    # reaches a token through `verdict_reason_for`, which is called exclusively
+    # from RED branches. Pinned both ways by (c5)/(c8)/(c9) in
+    # scripts/test-ci-journey-warm-build.sh.
     if [[ "$tok_reason" == "cold_build_timeout" ]]; then
-      cold_build_shards+=("shard ${tok_shard} (${token})")
+      cold_build_shards+=("shard ${tok_shard} (${token}, verdict reason ${tok_reason})")
+    elif [[ "$tok_build_attribution" == "cold_build_timeout" && "$token" == "RED" ]]; then
+      cold_build_shards+=("shard ${tok_shard} (${token}, verdict reason ${tok_reason}, build attribution carried separately — issue #2374)")
     fi
 
     count=$((count + 1))
@@ -254,7 +314,7 @@ fi
 # investigation after a healthy journey class. The verdict's SEVERITY is
 # untouched (naming a failure is not softening it); only its readability is.
 if (( ${#cold_build_shards[@]} > 0 )); then
-  echo "::notice title=Emulator journey verdict — includes a cold-BUILD-phase timeout (#1814)::${#cold_build_shards[@]} shard verdict(s) were reported with reason 'cold_build_timeout': ${cold_build_shards[*]}. At least one attempt there hit its per-class wall cap while Gradle was still BUILDING — instrumentation never started and no JUnit XML exists, so the zero-test outer timeout is a BUILD-COST artefact, not evidence that the named journey is broken. Investigate the build cost (the cold build is paid up front by the suite's warm-build step), not the journey."
+  echo "::notice title=Emulator journey verdict — includes a cold-BUILD-phase timeout (#1814)::${#cold_build_shards[@]} shard verdict(s) carry cold-BUILD-phase evidence, either as the verdict reason or — when the same shard ALSO failed unrelated journeys (issue #2374) — on the token's separate 'build_attribution' stamp: ${cold_build_shards[*]}. At least one attempt there hit its per-class wall cap while Gradle was still BUILDING — instrumentation never started and no JUnit XML exists, so the zero-test outer timeout is a BUILD-COST artefact, not evidence that the named journey is broken. Investigate the build cost (the cold build is paid up front by the suite's warm-build step), not the journey — but where the shard's verdict reason names a genuine journey failure, that failure is a separate, real cause and is not explained by this notice."
 fi
 
 # Issue #1833: a verdict reached WITHOUT the cold-boot retry available must say
@@ -266,6 +326,20 @@ fi
 # resilience produced it.
 if (( ${#one_shot_shards[@]} > 0 )); then
   echo "::notice title=Emulator journey verdict — ${#one_shot_shards[@]} shard(s) ran ONE-SHOT, no cold-boot retry (#1833)::${one_shot_shards[*]} reached their verdict unable to start a second cold boot, so their result comes from a SINGLE attempt. The cold-boot retry is what normally absorbs a #788-class environmental flake; without it such a flake reddens this aggregate instead of recovering. Read a RED from a one-shot shard with that in mind, and read a CLEAN as having had less protection than usual."
+fi
+
+# Issue #2374: WHICH denial, because the two want opposite responses and until
+# now they shared one label. Run 33181062826's six one-shot shards were read as a
+# recurrence of #1833/#1850's capacity loss; every one of them had already failed
+# journeys, so its own suite is what ate the wall and no matrix change would have
+# helped. Both branches below are reporting only — no verdict, count or exit code
+# depends on them.
+if (( ${#capacity_one_shot_shards[@]} > 0 )); then
+  echo "::warning title=Emulator journey — ${#capacity_one_shot_shards[@]} shard(s) lost the cold-boot retry to GATE CAPACITY (#1833/#1850)::${capacity_one_shot_shards[*]} failed NO journey on their first attempt and still could not afford a second cold boot. This is the resilience loss #1833 reports and #1850 sized the matrix against: the levers are the shard count, the class distribution, and the retry-cost estimate — NOT the failing classes, because there were none. Re-check the per-leg headroom derivation in scripts/ci-journey-shard-count.sh against these shards' measured suite elapsed."
+fi
+if (( ${#inflated_one_shot_shards[@]} > 0 && ${#capacity_one_shot_shards[@]} == 0 \
+      && ${#unclassified_one_shot_shards[@]} == 0 )); then
+  echo "::notice title=Emulator journey — every ONE-SHOT shard was inflated by its OWN failing journeys, not a gate-capacity loss (#2374)::${inflated_one_shot_shards[*]} reached their verdict one-shot, but each had already written a 'Failed BOTH attempts' summary. A class that fails pays TWO full per-class attempts, so those failures are what pushed suite elapsed past what a retry could fit. This is NOT a recurrence of #1833/#1850 and no budget, shard count or cost estimate is the lever here — fix the classes each shard's own summary names. Raising a budget would buy a second hour of re-failing them and still end RED."
 fi
 
 if (( ${#carried_over[@]} > 0 )); then
@@ -305,11 +379,23 @@ emit_summary() {
       fi
       if (( ${#cold_build_shards[@]} > 0 )); then
         echo
-        echo "**Cold-build-phase timeout (issue #1814):** ${cold_build_shards[*]} — an attempt there was cut while Gradle was still BUILDING (no instrumentation, no JUnit XML). That is a build-cost artefact, not a defect in the named journey."
+        echo "**Cold-build-phase timeout (issue #1814):** ${cold_build_shards[*]} — an attempt there was cut while Gradle was still BUILDING (no instrumentation, no JUnit XML). That is a build-cost artefact, not a defect in the named journey. Where the shard's verdict reason names a genuine journey failure instead, that failure is a separate real cause this line does not explain (issue #2374)."
       fi
       if (( ${#one_shot_shards[@]} > 0 )); then
         echo
         echo "**Ran ONE-SHOT — no cold-boot retry (issue #1833):** ${one_shot_shards[*]} — these shards reached their verdict unable to start a second cold boot, so their result comes from a SINGLE attempt and a #788-class environmental flake there reddens this aggregate instead of recovering."
+      fi
+      if (( ${#capacity_one_shot_shards[@]} > 0 )); then
+        echo
+        echo "**Denial class \`gate_capacity\` (issues #1833/#1850):** ${capacity_one_shot_shards[*]} — these failed no journey and still could not retry. The lever is the matrix/estimate."
+      fi
+      if (( ${#inflated_one_shot_shards[@]} > 0 )); then
+        echo
+        echo "**Denial class \`journey_failure_inflated_suite\` (issue #2374):** ${inflated_one_shot_shards[*]} — these had already failed journeys, so their own doubled classes consumed the wall. The lever is those classes, not the retry budget."
+      fi
+      if (( ${#unclassified_one_shot_shards[@]} > 0 )); then
+        echo
+        echo "**Denial class \`unknown\`:** ${unclassified_one_shot_shards[*]} — token predates the #2374 stamp or carried no usable reading; do not read these as either condition."
       fi
     } >> "$GITHUB_STEP_SUMMARY"
   fi

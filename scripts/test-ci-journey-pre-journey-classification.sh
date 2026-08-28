@@ -96,7 +96,8 @@ classify_expressions() {
   "steps.journey_retry_budget.outputs.retry_required_ms": "5400000",
   "steps.journey_retry_budget.outputs.retry_cost_model": "worst_case",
   "steps.journey_retry_budget.outputs.retry_shortfall_ms": "0",
-  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "0"
+  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "0",
+  "steps.journey_retry_budget.outputs.retry_denial_class": "none"
 }
 JSONEOF
 }

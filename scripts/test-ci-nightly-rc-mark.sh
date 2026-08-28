@@ -71,4 +71,68 @@ tag_count="$(git -C "$SANDBOX/repo" tag -l 'validated-rc' | wc -l | tr -d ' ')"
 [[ "$tag_count" -eq 1 ]] || fail "expected exactly one validated-rc tag, found $tag_count"
 pass "second mark force-moves validated-rc (one moving pointer, not two tags)"
 
+# --- issue #2374: the marker must be creatable with NO ambient git identity ---
+#
+# THE GAP THIS CLOSES. Every case above inherits the running user's
+# `~/.gitconfig`, so `git tag -a` always had a tagger. A GitHub hosted runner
+# does not: actions/checkout sets no `user.name`/`user.email` and git rejects its
+# own auto-detected `runner@host.(none)`. `record-validated-rc` would therefore
+# have failed on every nightly run — and #2356's marker has in fact never been
+# created once. This case runs the real script in an environment where git can
+# form no identity at all.
+#
+# The precondition is PROVEN LIVE first: a bare `git tag -a` in the same
+# environment must fail. Without that, a host whose git CAN auto-detect an
+# identity would make this case pass vacuously, which is exactly how the gap
+# survived in the first place.
+noident_home="$SANDBOX/noident-home"
+mkdir -p "$noident_home"
+# GIT_CONFIG_NOSYSTEM drops /etc/gitconfig; the empty HOME drops ~/.gitconfig;
+# the empty COMMITTER vars defeat auto-detection on ANY host, so the failure is
+# reproducible everywhere rather than only where the hostname has no domain.
+noident_env=(
+  env -i
+  "PATH=$PATH"
+  "HOME=$noident_home"
+  GIT_CONFIG_NOSYSTEM=1
+  GIT_COMMITTER_NAME=
+  GIT_COMMITTER_EMAIL=
+)
+if (cd "$SANDBOX/repo" && "${noident_env[@]}" git tag -f -a ident-probe "$sha_a" -m probe) >/dev/null 2>&1; then
+  git -C "$SANDBOX/repo" tag -d ident-probe >/dev/null 2>&1 || true
+  fail "the no-identity precondition is not reproducible on this host — a bare 'git tag -a' succeeded, so the #2374 case below would pass vacuously"
+fi
+pass "#2374 precondition is live: a bare annotated 'git tag -a' fails with no git identity"
+
+git -C "$SANDBOX/repo" tag -d validated-rc >/dev/null 2>&1 || true
+git -C "$SANDBOX/repo" push --quiet --delete origin validated-rc >/dev/null 2>&1 || true
+noident_log="$SANDBOX/noident.log"
+if ! (cd "$SANDBOX/repo" && "${noident_env[@]}" bash "$TARGET" \
+        --sha "$sha_a" --run-url "https://example/run/3") > "$noident_log" 2>&1; then
+  cat "$noident_log"
+  fail "#2374: ci-nightly-rc-mark.sh cannot record the marker without an ambient git identity — this is what blocks record-validated-rc on every hosted runner"
+fi
+noident_resolved="$(git -C "$SANDBOX/repo" rev-list -n1 validated-rc)"
+[[ "$noident_resolved" == "$sha_a" ]] \
+  || fail "#2374: validated-rc does not resolve to the requested SHA after an identity-less run (got $noident_resolved)"
+noident_clone="$SANDBOX/clone-noident"
+git clone --quiet "$SANDBOX/remote.git" "$noident_clone"
+git -C "$noident_clone" fetch --quiet --tags origin
+[[ "$(git -C "$noident_clone" rev-list -n1 validated-rc)" == "$sha_a" ]] \
+  || fail "#2374: the identity-less run did not push validated-rc to origin"
+pass "#2374 the marker is created and pushed with no ambient git identity (the hosted-runner case)"
+
+# The fallback must be NARROW: a caller that HAS an identity keeps it, so a
+# local `--dry-run`/manual mark is still attributable to the person who ran it.
+git -C "$SANDBOX/repo" tag -d validated-rc >/dev/null 2>&1 || true
+git -C "$SANDBOX/repo" push --quiet --delete origin validated-rc >/dev/null 2>&1 || true
+( cd "$SANDBOX/repo" && GIT_COMMITTER_NAME="Real Person" \
+    GIT_COMMITTER_EMAIL="real@example.com" \
+    bash "$TARGET" --sha "$sha_b" --run-url "https://example/run/4" >/dev/null ) \
+  || fail "#2374: the script failed for a caller that DOES have an identity"
+tagger="$(git -C "$SANDBOX/repo" for-each-ref --format='%(taggeremail)' refs/tags/validated-rc)"
+[[ "$tagger" == "<real@example.com>" ]] \
+  || fail "#2374: the CI fallback overrode a caller's real identity (tagger $tagger); it must only apply when git has none"
+pass "#2374 a caller with a real git identity keeps it — the fallback is narrow"
+
 echo "ALL $pass_count CHECKS PASSED"

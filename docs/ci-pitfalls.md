@@ -189,6 +189,80 @@ that it passes under swiftshader frame timing. Run any newly-registered
 journey class on a real emulator (`scripts/connected-test.sh --suffix
 i<issue>`) before merge.
 
+## A DERIVED failure signature recurs whenever its cause does
+
+Some gate signatures are computed from the run's own measurements, so they
+reappear for any upstream cause that moves those measurements — matching on
+the string re-files the wrong issue. The emulator gate's
+`insufficient_remaining_budget` is the worked example: it is a function of
+observed suite elapsed, so it recurs whenever the suite is long, whether that
+is per-shard overload (#1833/#1850, the matrix is the lever) or genuine
+journey failures each paying two full per-class attempts (#2374, the failing
+classes are the lever). Run 33181062826 was triaged as a recurrence of #1833
+on a byte-identical string while all six shards had in fact already written a
+`Failed BOTH attempts` summary; no budget constant had moved.
+
+Before treating a repeated signature as a repeated cause, check the
+discriminator the gate emits alongside it — for this one,
+`retry_denial_class` (`gate_capacity` vs `journey_failure_inflated_suite`) on
+the shard verdict token and in the aggregate's annotations. A signature with
+no discriminator is a defect in the gate's evidence, not a mystery.
+
+## Untriggered guards: a self-test that runs nowhere proves nothing
+
+`scripts/test-*.sh` are ordinary scripts, not Gradle tests, so nothing runs
+one unless a workflow step names it. Two #2356 self-tests sat in the repo
+un-invoked by any job, and the one covering `ci-nightly-rc-mark.sh` also
+inherited the developer's ambient `~/.gitconfig` — so it never exercised the
+hosted-runner case where git has no tagger identity and `git tag -a` refuses.
+The result was a marker mechanism that had never worked and never could.
+Grep `.github/workflows/` for any self-test you rely on, and give a
+harness that depends on ambient machine state (git identity, `$HOME`, PATH
+tools, locale) an isolated environment plus a live-precondition assertion, or
+it will pass for a reason unrelated to the code.
+
+## An unterminated markdown-section scan silently annexes the next section
+
+Report parsers in the journey harness key on a header line and then read the
+`- ` bullets under it. Setting the "in section" flag on the header without ever
+CLEARING it makes the scan run to EOF, so every later section's bullets are
+read as if they were the first section's. `summary.md` keeps writing after
+`Failed BOTH attempts`: #2355's `Quarantined failures (non-blocking …)` and
+#2143's `Shared SSH/tmux fixture was WEDGED …` both follow it with bullets. An
+unterminated scan therefore reads a QUARANTINED (deliberately non-blocking)
+failure as a blocking one — re-coupling a classifier to exactly the section a
+previous issue decoupled it from, and doing it silently, because the wording
+that section avoids is the HEADER phrase, not the bullet syntax.
+
+Always clear the flag at the first non-bullet, non-blank line (`f && !/^- /
+&& NF { f = 0 }`), reduce each bullet to the identifier the consumer actually
+needs (an FQCN, not the bullet's trailing metadata), and build the fixture with
+the REAL summary writer rather than a hand-typed header — a handwritten header
+drifts out of sync with the producer and the guard then proves nothing.
+
+## A diagnostic stamp read as a verdict puts a failure heading on a GREEN run
+
+The inverse of a vacuous green: a run that passed but whose own artifact reads
+like it failed. Two individually-correct decisions compose into it. The
+emulator gate's classify step computes `SHARD_BUILD_ATTRIBUTION` *before* every
+`write_verdict` branch (so no branch can forget it), and
+`ci-journey-build-phase-timeout.sh` deliberately reads the *preserved
+attempt-1* tree (so a retry cannot hide what happened on the first attempt).
+Together they mean a shard cut mid-Gradle-build on attempt 1 whose retry then
+PASSED writes `CLEAN` + `build_attribution=cold_build_timeout`. An aggregate
+rollup keyed on the stamp alone then prints "investigate the build cost" into
+the step summary of a fully green run — the artifact a release owner reads
+before tagging `validated-rc`.
+
+Attempt-scoped evidence is not the run's outcome. Roll a diagnostic stamp up
+into a run-level notice only where it explains the FINAL verdict; leave it in
+the shard's own log otherwise, where it is still findable and cannot be
+mistaken for a cause. When adding such a branch, enumerate every
+`(verdict token x stamp value)` pair the producer can actually emit — including
+the recovered/CLEAN ones — and diff the notice count against the pre-change
+script for each; "the case I built it for changed and nothing else did" is a
+claim that needs the table, not an assumption.
+
 See also [worktrees.md](worktrees.md) for merge-mechanics pitfalls and
 [review-standards.md](review-standards.md) for reviewer-side acceptance
 bars this catalogue feeds into.

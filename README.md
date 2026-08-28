@@ -242,8 +242,9 @@ not build androidTest. The release/visual-audit wrappers still use
 The test matrix and Docker/emulator setup are in
 [docs/testing.md](docs/testing.md) and
 [docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md). The
-orchestrator/reviewer process and release flow are in
-[process.md](process.md).
+orchestrator/reviewer process is in [process.md](process.md). How we
+ship a version (candidate branch, stabilize, tag, merge back) is
+[docs/release.md](docs/release.md).
 
 ## Repository layout
 

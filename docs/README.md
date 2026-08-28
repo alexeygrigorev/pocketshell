@@ -19,6 +19,7 @@ context; the README and current feature docs track released behavior.
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [aplexer-integration.md](aplexer-integration.md) | Becoming an aplexer client: phases A–C; Phase A done, both managers listed |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
+| [release.md](release.md) | How we ship: freeze a `release/vX.Y.Z` candidate, stabilize it, tag it, merge back to `main` |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
 | [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
 | [walkthrough-visual-pass.md](walkthrough-visual-pass.md) | Real emulator screenshot capture workflow for visual review |

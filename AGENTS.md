@@ -21,6 +21,7 @@ across phases 0–4. The visual specification is the Pixel 7 HTML mockups in
 - [docs/usage-panel.md](docs/usage-panel.md) — provider quotas through
   server-side `quse`
 - [docs/testing.md](docs/testing.md) — Android emulator and Docker test setup
+- [docs/release.md](docs/release.md) — release candidate branch, stabilize, tag, merge back to `main`
 - [docs/mockups/index.html](docs/mockups/index.html) — Pixel 7 mockups; serve
   with `python3 -m http.server --directory docs/mockups`
 
@@ -107,10 +108,11 @@ core, black screen, terminal/ANR, composer, tree, process learnings) →
   docs/process-only changes may be committed directly from synced `main` with
   cheap relevant validation only; do not open a PR or queue emulator CI for
   no-behavior process/doc cleanup.
-- Release tags come only after the version bump is committed to `main`, pushed,
-  and confirmed with `HEAD == origin/main`; tags label stable reviewed `main`
-  commits. GitHub Actions validation summaries are acceptable release evidence
-  only when their `Commit SHA` equals the reviewed `origin/main` commit being
+- Releases follow [docs/release.md](docs/release.md): branch `release/vX.Y.Z`
+  from a reasonably stable `main`, stabilize **only on that branch**, tag that
+  SHA, then merge the candidate back to `main`. Do not tag a moving `main`
+  while other work is still landing. GitHub Actions validation summaries are
+  acceptable tag evidence only when their `Commit SHA` equals the commit being
   tagged.
 
 ## "Hetzner" — the maintainer's dev box

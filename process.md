@@ -1926,6 +1926,11 @@ emulator startup, and connected test commands:
 
 ## Release Builds
 
+**How we cut a version** — freeze a `release/vX.Y.Z` candidate off a
+reasonably stable `main`, stabilize only there, tag that SHA, merge the
+fixes back to `main` — is [docs/release.md](docs/release.md). Do not tag
+a live `main` while other work is still landing.
+
 APK release builds are created by pushing a version tag, not by relying on an
 ad-hoc workflow-dispatch build for the final artifact.
 
@@ -1945,16 +1950,14 @@ nothing needs bumping/committing before a release.
 
 Release build steps:
 
-1. Before starting an intermediate or normal release, check GitHub Actions for
-   the current `origin/main` HEAD. Do not tag or release if any relevant
-   CI run for that commit has failed or is still in progress. If CI is red,
-   inspect the failed jobs/logs first, fix or rerun until `origin/main` HEAD is
-   green, then continue the release. A passing branch run is not enough when
-   `main` has a later failed run.
+1. Follow [docs/release.md](docs/release.md): pick a reasonably stable
+   `origin/main` SHA, branch `release/vX.Y.Z` from it, and stabilize
+   **there**. Do not tag while Tests for the candidate SHA is red or still
+   running. Unrelated `main` merges must not join the candidate.
 2. Pick the next semantic version after the latest GitHub Release/tag.
-3. From that stable `origin/main` HEAD, run the emulator-only release validation.
-   Run it locally or through GitHub Actions, but the release summary must name
-   the exact commit that will be tagged:
+3. Run emulator-only release validation on the **candidate SHA** (the
+   commit that will be tagged), locally or through GitHub Actions. The
+   summary must name that exact SHA:
    - `scripts/pre-release-confidence-gate.sh`
    - `scripts/phone-walkthrough.sh terminal-lab`
    - `scripts/phone-walkthrough.sh tmux-existing-session`

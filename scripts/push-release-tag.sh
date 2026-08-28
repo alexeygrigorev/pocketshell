@@ -12,7 +12,9 @@ usage() {
 Usage: scripts/push-release-tag.sh [--dry-run] --visual-audit-inspected <tag> <validation-summary>
 
 Pushes a release tag only after emulator-only validation has passed on the
-current origin/main commit.
+commit being tagged. Run it from `main`, or from the `release/vX.Y.Z`
+candidate worktree the release is being cut on (docs/release.md); either
+way HEAD must equal that branch's pushed remote head.
 
 Issue #2356 (Phase 4 of epic #2350): there is no version-bump commit any
 more. app/build.gradle.kts and tools/pocketshell derive their version FROM
@@ -76,17 +78,22 @@ DERIVE_SCRIPT="scripts/derive-version.sh"
 [[ -f "$DERIVE_SCRIPT" ]] || fail "missing $DERIVE_SCRIPT"
 
 branch="$(git branch --show-current)"
-[[ "$branch" == "main" ]] || fail "release tags must be pushed from main, not '$branch'"
+# docs/release.md: the tagged commit is the validated release-candidate SHA,
+# which lives on a `release/vX.Y.Z` branch in its own worktree until the
+# post-tag merge back to `main`. Tagging is allowed from either line, and each
+# is held to its OWN pushed remote head — nothing local or unpushed is taggable.
+[[ "$branch" == "main" || "$branch" =~ ^release/v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+  fail "release tags must be pushed from main or a release/vX.Y.Z candidate branch, not '$branch'"
 git diff --quiet || fail "worktree has unstaged changes"
 git diff --cached --quiet || fail "index has staged changes"
 [[ -z "$(git ls-files --others --exclude-standard)" ]] ||
   fail "worktree has untracked files"
 
-git fetch --quiet --tags origin main
+git fetch --quiet --tags origin "$branch"
 local_sha="$(git rev-parse HEAD)"
-origin_sha="$(git rev-parse origin/main)"
+origin_sha="$(git rev-parse "origin/$branch")"
 [[ "$local_sha" == "$origin_sha" ]] ||
-  fail "HEAD ($local_sha) must match origin/main ($origin_sha)"
+  fail "HEAD ($local_sha) must match origin/$branch ($origin_sha)"
 
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   fail "local tag already exists: $TAG"
@@ -96,7 +103,7 @@ if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; the
 fi
 
 grep -Fxq "Commit SHA: $origin_sha" "$SUMMARY_PATH" ||
-  fail "validation summary was not produced for origin/main commit $origin_sha"
+  fail "validation summary was not produced for origin/$branch commit $origin_sha"
 grep -Fxq "Automated status: PASS" "$SUMMARY_PATH" ||
   fail "validation summary does not show automated emulator validation PASS"
 grep -Eq '^Visual audit inspected: (no|yes)$' "$SUMMARY_PATH" ||

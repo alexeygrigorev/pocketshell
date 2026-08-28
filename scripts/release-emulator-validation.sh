@@ -95,9 +95,10 @@ is running, this invocation blocks until that script exits. The lock is
 released automatically on script exit. See issue #182.
 
 Required state:
-  - current branch is main
+  - current branch is main, or a release/vX.Y.Z candidate branch checked out
+    in its own worktree (docs/release.md)
   - worktree and index are clean
-  - HEAD equals origin/main
+  - HEAD equals that branch's pushed remote head (origin/<branch>)
 
 Environment overrides:
   POCKETSHELL_AVD_LOCK_FILE
@@ -209,18 +210,24 @@ require_clean_pushed_main() {
 
   local branch
   branch="$(git branch --show-current)"
-  [[ "$branch" == "main" ]] || fail "release validation must run from main, not '$branch'"
+  # docs/release.md: a release is cut on a `release/vX.Y.Z` candidate branch
+  # checked out in its own worktree, and the root checkout never leaves
+  # `main`. Both are valid release lines. The guard is unchanged in substance
+  # — clean, and identical to the branch's OWN pushed remote head — it just
+  # no longer hardcodes `main` as the only branch that can be that line.
+  [[ "$branch" == "main" || "$branch" =~ ^release/v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    fail "release validation must run from main or a release/vX.Y.Z candidate branch, not '$branch'"
   git diff --quiet || fail "worktree has unstaged changes"
   git diff --cached --quiet || fail "index has staged changes"
   [[ -z "$(git ls-files --others --exclude-standard)" ]] ||
     fail "worktree has untracked files"
-  git fetch --quiet origin main
+  git fetch --quiet origin "$branch"
   local local_sha
   local local_origin_sha
   local_sha="$(git rev-parse HEAD)"
-  local_origin_sha="$(git rev-parse origin/main)"
+  local_origin_sha="$(git rev-parse "origin/$branch")"
   [[ "$local_sha" == "$local_origin_sha" ]] ||
-    fail "HEAD ($local_sha) must match origin/main ($local_origin_sha)"
+    fail "HEAD ($local_sha) must match origin/$branch ($local_origin_sha)"
 }
 
 write_summary_header() {

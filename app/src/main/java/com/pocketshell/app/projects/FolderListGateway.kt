@@ -1071,15 +1071,10 @@ class SshFolderListGateway internal constructor(
         )
     }
 
-    private fun ExecResult.isTmuxServerAbsent(): Boolean {
-        val output = "$stdout\n$stderr"
-        return output.contains("no server running", ignoreCase = true) ||
-            (
-                output.contains("error connecting to", ignoreCase = true) &&
-                    output.contains("tmux-", ignoreCase = true) &&
-                    output.contains("No such file or directory", ignoreCase = true)
-                )
-    }
+    // Issue #2378: one classifier, shared with the launch path's reason text —
+    // see [TmuxSocketSweep.isServerAbsentOutput].
+    private fun ExecResult.isTmuxServerAbsent(): Boolean =
+        TmuxSocketSweep.isServerAbsentOutput("$stdout\n$stderr")
 
     override suspend fun createSession(
         host: HostEntity,
@@ -1196,13 +1191,30 @@ class SshFolderListGateway internal constructor(
         // (possibly current) pane is exactly the #968-class misroute we refuse, so
         // surface a clear error rather than silently leaking keystrokes. A plain
         // shell/no-launch create keeps its idempotent attach-or-create semantics.
-        if (startCommand != null) {
-            val hasSession = session.execBounded(
+        //
+        // Issue #2378: the guard now asks EVERY tmux socket, not just the
+        // default one — tmuxctl runs one server per session, so a live
+        // same-named session usually sits where a bare `tmux has-session`
+        // cannot see it. See [TmuxSocketSweep].
+        val alreadyLive = when (locateSessionSocket(session, resolvedName)) {
+            is SessionSocket.Located -> true
+            SessionSocket.Absent -> false
+            // Sweep unusable on this host: degrade to the pre-#2378 probe.
+            SessionSocket.Unknown -> session.execBounded(
                 pathAware("tmux has-session -t ${shellQuote(TmuxTarget.session(resolvedName))}"),
-            )
-            if (hasSession.exitCode == 0) {
-                throw RuntimeException(launchTargetCollisionMessage(resolvedName))
-            }
+            ).exitCode == 0
+        }
+        if (startCommand != null && alreadyLive) {
+            throw RuntimeException(launchTargetCollisionMessage(resolvedName))
+        }
+        if (alreadyLive) {
+            // Issue #2378: a no-launch create of an ALREADY live name is the
+            // idempotent attach-or-create case (#642/#429) — answer with the
+            // existing session. Creating anyway targets the DEFAULT socket
+            // (where both the `create-detached` fallback layer and the raw
+            // `new-session -A -d` land) and produces a second, distinct
+            // same-named session on another socket: the reported orphan.
+            return SessionCreateOutcome.Created(resolvedName)
         }
         val createResult = session.execBounded(
             pathAware(cappedCreateSessionCommand(quotedName, quotedCwd)),
@@ -1292,6 +1304,16 @@ class SshFolderListGateway internal constructor(
             if (AgentLaunchVersionCheck.isAgentLaunchCommand(startCommand)) {
                 agentSubcommandUnavailableHint(session)?.let { return it }
             }
+            // Issue #2378: type the launch into the server the session is
+            // ACTUALLY on. A bare `tmux send-keys` talks to the default socket,
+            // while a session created through `tmuxctl create-detached` lives on
+            // its own `tmuxctl-<name>` socket — so the launch failed with
+            // `no server running on /tmp/tmux-1000/default` while the session
+            // sat healthy on another server. The sweep runs AFTER the create
+            // (the socket does not exist before it) and picks the client;
+            // Unknown falls back to the bare pre-#2378 form.
+            val location = locateSessionSocket(session, resolvedName)
+            val tmuxClient = (location as? SessionSocket.Located)?.tmuxClient ?: "tmux"
             // Issue #1820: EXACT pane target. A bare `-t <name>` prefix-matches,
             // so with `<name>-2` alive and `<name>` gone the launch line would be
             // typed into the NEIGHBOUR's pane — the #976 misroute, one line below
@@ -1299,13 +1321,21 @@ class SshFolderListGateway internal constructor(
             // for a pane target (see [TmuxTarget]).
             val sent = session.execBounded(
                 pathAware(
-                    "tmux send-keys -t ${shellQuote(TmuxTarget.pane(resolvedName))} " +
+                    "$tmuxClient send-keys -t ${shellQuote(TmuxTarget.pane(resolvedName))} " +
                         "${shellQuote(startCommand)} Enter",
                 ),
             )
             if (sent.exitCode == 0) return null
-            return sent.stderr.trim().ifBlank { sent.stdout.trim() }
+            val hostReason = sent.stderr.trim().ifBlank { sent.stdout.trim() }
                 .ifBlank { "tmux send-keys exited ${sent.exitCode}" }
+            // Issue #2378: report the REAL cause — when the sweep proved no
+            // socket holds this session, say that, not tmux's misleading
+            // default-socket `no server running`.
+            return if (location is SessionSocket.Absent) {
+                TmuxSocketSweep.launchTargetMissingDetail(resolvedName, hostReason)
+            } else {
+                hostReason
+            }
         } catch (cancellation: CancellationException) {
             throw cancellation
         } catch (error: Throwable) {
@@ -1314,42 +1344,40 @@ class SshFolderListGateway internal constructor(
         }
     }
 
-    /**
-     * Issue #1820: ask the HOST for a free session name, on the very
-     * [session] that is about to create it.
-     *
-     * The whole walk runs remotely in ONE exec, so the client never round-trips
-     * per candidate and the gap between "this name is free" and "create it" is a
-     * single command on one connection, rather than the seconds-wide (and
-     * sometimes simply WRONG) window a UI-cached session list gave us.
-     *
-     * `-t "=<name>"` forces tmux's EXACT session match. Without the `=`, tmux
-     * falls back to prefix and then fnmatch matching, so probing `foo` while
-     * `foo-2` exists answers "taken" — which would make this resolver skip a
-     * genuinely free `foo` (and, in the launch guard above, refuse a launch
-     * outright). The `=` is what makes both checks mean what they read as.
-     *
-     * Fail-safe by design: any non-zero exit or unparseable reply falls back to
-     * the requested base name, i.e. exactly the pre-#1820 behaviour. A create
-     * must never be BLOCKED by the uniqueness probe itself — if the probe cannot
-     * run, the create still runs and reports whatever the host says about it,
-     * and for a LAUNCH the #976 has-session guard still refuses rather than
-     * mistyping into a live pane.
-     */
+    /** Issue #1820/#2378: see [resolveFreeSessionNameOnHost]. */
     private suspend fun resolveFreeSessionName(
         session: SshSession,
         requestedName: String,
-    ): String {
-        val probe = runCatching {
-            session.execBounded(pathAware(freeSessionNameCommand(shellQuote(requestedName))))
-        }.getOrNull() ?: return requestedName
-        if (probe.exitCode != 0) return requestedName
-        return probe.stdout
-            .lineSequence()
-            .map { it.trim() }
-            .lastOrNull { it.isNotEmpty() }
-            ?: requestedName
+    ): String = resolveFreeSessionNameOnHost(
+        requestedName = requestedName,
+        exec = session.boundedExec(),
+        enumeratedNames = { enumeratedSessionNames(session) },
+    )
+
+    /** Issue #2378: the aplexer half of the taken-name union — see above. */
+    private suspend fun enumeratedSessionNames(session: SshSession): Set<String> {
+        val enumerated = try {
+            fetchPocketshellEnumerator(session)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            return emptySet()
+        }
+        return enumerated.rows.mapNotNull { it.sessionName.trim().ifBlank { null } }.toSet()
     }
+
+    /** Issue #2378: see [TmuxSocketSweep.locateSession]. */
+    private suspend fun locateSessionSocket(
+        session: SshSession,
+        sessionName: String,
+    ): SessionSocket = TmuxSocketSweep.locateSession(
+        exec = session.boundedExec(),
+        quotedName = shellQuote(sessionName),
+    )
+
+    /** The PATH-aware bounded exec [TmuxSocketSweep] probes run through. */
+    private fun SshSession.boundedExec(): suspend (String) -> ExecResult =
+        { command -> execBounded(pathAware(command)) }
 
     /**
      * Issue #759: pre-flight version guard for an agent launch. Probes the host
@@ -2151,37 +2179,10 @@ class SshFolderListGateway internal constructor(
         internal fun fallbackCreateSessionCommand(quotedName: String, quotedCwd: String): String =
             "tmux new-session -A -d -s $quotedName -c $quotedCwd"
 
-        /**
-         * Issue #1820: the ceiling on the `-2`/`-3`… walk in
-         * [freeSessionNameCommand]. A directory with 200 live sessions is not a
-         * real state; the bound exists only so a pathological host (or a
-         * `has-session` that somehow always answers 0) cannot spin the remote
-         * shell forever. On hitting it the walk returns its last candidate and
-         * the create falls back to its normal idempotent behaviour.
-         */
-        internal const val FREE_SESSION_NAME_MAX_SUFFIX: Int = 200
-
-        /**
-         * Issue #1820: emit the smallest free `<base>`, `<base>-2`, `<base>-3`…
-         * for [quotedBase], evaluated ENTIRELY on the host in one exec.
-         *
-         * `[quotedBase]` must already be shell-quoted by the caller (via
-         * [shellQuote]); it is concatenated with `-$i` in the loop, which is
-         * safe because POSIX sh concatenates adjacent quoted and unquoted words.
-         *
-         * `has-session -t "=$n"` is the EXACT-match form (see
-         * [resolveFreeSessionName] for why the `=` is load-bearing). `2>/dev/null`
-         * keeps "no server running" quiet — with no tmux server nothing is taken,
-         * the loop does not run, and the base name is returned.
-         */
-        internal fun freeSessionNameCommand(quotedBase: String): String =
-            "__ps_n=$quotedBase; __ps_i=2; " +
-                "while tmux has-session -t \"=\$__ps_n\" 2>/dev/null; do " +
-                "if [ \"\$__ps_i\" -gt $FREE_SESSION_NAME_MAX_SUFFIX ]; then break; fi; " +
-                "__ps_n=$quotedBase-\$__ps_i; " +
-                "__ps_i=\$((__ps_i+1)); " +
-                "done; " +
-                "printf '%s\\n' \"\$__ps_n\""
+        // Issue #2378 (hard cut, D22): the host-side `<base>`/`<base>-2`… walk
+        // (`freeSessionNameCommand`, #1820) is GONE — it probed the DEFAULT
+        // socket only, blind to tmuxctl's per-session servers. See
+        // [TmuxSocketSweep] and [resolveFreeSessionName].
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
         const val POCKETSHELL_SESSIONS_JSON_COMMAND: String = "pocketshell sessions list --json"

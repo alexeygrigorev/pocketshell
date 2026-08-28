@@ -108,8 +108,8 @@ class AppAssistantActionsTest {
      * host that already has [liveSessions]:
      *
      *  - [SessionNamePolicy.UniqueOnHost] → resolve the smallest free
-     *    `<base>`/`<base>-2`/`<base>-3`… (what `freeSessionNameCommand` does on
-     *    the host) and create it.
+     *    `<base>`/`<base>-2`/`<base>-3`… (what the gateway's socket-wide name
+     *    sweep resolves against the host, #1820/#2378) and create it.
      *  - [SessionNamePolicy.ExactName] → use the name verbatim; a LAUNCH
      *    (`startCommand != null`) onto a taken name is refused exactly as the
      *    #976 `has-session` routing guard refuses it, rather than typing into a

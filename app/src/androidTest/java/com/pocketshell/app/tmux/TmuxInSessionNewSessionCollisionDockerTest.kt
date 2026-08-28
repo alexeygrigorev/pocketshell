@@ -26,6 +26,7 @@ import com.pocketshell.app.projects.SESSION_TYPE_PICKER_SHELL_TAG
 import com.pocketshell.app.projects.SessionCreateOutcome
 import com.pocketshell.app.projects.SessionNamePolicy
 import com.pocketshell.app.projects.SshFolderListGateway
+import com.pocketshell.app.projects.TmuxSocketSweep
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
@@ -134,6 +135,14 @@ class TmuxInSessionNewSessionCollisionDockerTest {
     private val createdSessions = mutableSetOf<String>()
     private val createdFolders = mutableSetOf<String>()
 
+    /**
+     * Issue #2378: sockets this test started a tmux SERVER on, outside the
+     * default one. They are torn down whole (`kill-server`) — a per-session
+     * server has nothing else on it, and leaving one behind would leak a live
+     * process onto the shared fixture.
+     */
+    private val createdSockets = mutableSetOf<String>()
+
     @After
     fun tearDown() {
         launchedActivity?.close()
@@ -148,14 +157,165 @@ class TmuxInSessionNewSessionCollisionDockerTest {
                     val kill = createdSessions.joinToString("; ") {
                         "tmux kill-session -t '=$it' 2>/dev/null || true"
                     }
+                    val killServers = createdSockets.joinToString("; ") {
+                        "tmux -S '$it' kill-server 2>/dev/null || true; rm -f '$it' || true"
+                    }
                     val rm = createdFolders.joinToString("; ") {
                         "rm -rf '$it' 2>/dev/null || true"
                     }
-                    sshExec("$kill; $rm")
+                    sshExec("$kill; $killServers; $rm")
                 }
             }
         }
     }
+
+    /**
+     * Issue #2378 — a create whose name is already taken by a session on a
+     * DEDICATED tmux socket, against a real tmux over real SSH.
+     *
+     * ## The reported state
+     *
+     * tmuxctl runs one tmux server per session, each on its own
+     * `$TMUX_TMPDIR/tmux-<uid>/tmuxctl-<session>` socket. Everything the create
+     * path asked the host went to the DEFAULT socket, which knows nothing about
+     * those servers, so creating `git-pocketshell` while the maintainer's live
+     * tmuxctl-managed `git-pocketshell` was running produced no disambiguation,
+     * no new session, and a launch that failed with `no server running on
+     * /tmp/tmux-1000/default` while several servers were plainly running.
+     *
+     * ## Why this is here rather than only in a JVM fake
+     *
+     * The fix is a pair of POSIX-sh probes that glob the host's socket
+     * directory and talk to each server with `tmux -S`. Only a real host proves
+     * the glob finds a real per-session socket, that `tmux -S … has-session
+     * -t "=<name>"` answers about THAT server, and that a `tmux -S … send-keys`
+     * reaches a pane the default socket cannot see. The fixture that makes the
+     * bug reachable is created here directly — a second tmux server on its own
+     * socket — instead of depending on the Docker image's tmuxctl stub, which
+     * (like every fixture before this issue) puts everything on the default
+     * socket and therefore cannot reproduce it.
+     *
+     * PRE-FIX: the create resolves the COLLIDING base name, so `<base>` exists
+     * on two sockets at once — the orphan. POST-FIX: `<base>-2`, and the
+     * pre-existing session is untouched.
+     */
+    @Test
+    fun createCollidingWithASessionOnItsOwnSocketDisambiguatesInsteadOfOrphaning() { runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        val suffix = "issue2378-${System.nanoTime().toString().takeLast(6)}"
+        val folder = "/tmp/$suffix"
+        val baseName = "tmp-$suffix"
+        createdFolders += folder
+        listOf(baseName, "$baseName-2").forEach { createdSessions += it }
+
+        // 1) The fixture: a live session named `<base>` on its OWN socket,
+        //    exactly how tmuxctl runs one — invisible to a bare `tmux`.
+        val socketDir = sshExec("printf '%s' \"\${TMUX_TMPDIR:-/tmp}/tmux-\$(id -u)\"").trim()
+        val dedicatedSocket = "$socketDir/tmuxctl-$baseName"
+        createdSockets += dedicatedSocket
+        sshExec(
+            "mkdir -p '$folder' '$socketDir'; " +
+                "tmux -S '$dedicatedSocket' new-session -d -s '$baseName' -c '$folder' " +
+                "'while true; do sleep 60; done'",
+        )
+        assertEquals(
+            "[host] the seeded session must live on its dedicated socket",
+            listOf(baseName),
+            sessionsOnSocket(dedicatedSocket),
+        )
+        assertFalse(
+            "[host] and must be INVISIBLE to the default socket — otherwise this " +
+                "test is not reproducing the reported state",
+            listSessionsMatching(baseName).contains(baseName),
+        )
+        // Precondition, so a socket-directory mismatch fails by NAME instead of
+        // masquerading as the collision bug: the probe the gateway runs must see
+        // the seeded session on its dedicated socket before the create starts.
+        assertEquals(
+            "[host] the gateway's socket probe must see the seeded session",
+            dedicatedSocket,
+            sshExec(TmuxSocketSweep.sessionSocketCommand("'$baseName'")).trim(),
+        )
+
+        val gateway = SshFolderListGateway()
+        val summary = StringBuilder()
+
+        val resolved = withSshSession { session ->
+            labelled("dedicated-socket-collision-create") {
+                gateway.createSessionOnSession(
+                    session = session,
+                    sessionName = baseName,
+                    cwd = folder,
+                    startCommand = null,
+                    namePolicy = SessionNamePolicy.UniqueOnHost,
+                )
+            }
+        }
+        summary.appendLine("requested=$baseName resolved=$resolved socket=$dedicatedSocket")
+
+        // THE LOAD-BEARING ASSERTION (pre-fix: Created(<base>)).
+        assertEquals(
+            "[host] a name held by a session on another socket must disambiguate",
+            SessionCreateOutcome.Created("$baseName-2"),
+            resolved,
+        )
+        assertEquals(
+            "[host] the pre-existing session must be untouched on its own socket",
+            listOf(baseName),
+            sessionsOnSocket(dedicatedSocket),
+        )
+        val defaultSocketFamily = listSessionsMatching(baseName)
+        summary.appendLine("default_socket_sessions=$defaultSocketFamily")
+        assertFalse(
+            "[host] no same-named orphan may appear on another socket; got $defaultSocketFamily",
+            defaultSocketFamily.contains(baseName),
+        )
+
+        // 2) The launch half's mechanism on the real host: the socket locate
+        //    probe the gateway now runs must find the DEDICATED server, and a
+        //    `tmux -S` send-keys against it must actually reach that pane —
+        //    which the default socket cannot do at all.
+        val located = sshExec(TmuxSocketSweep.sessionSocketCommand("'$baseName'")).trim()
+        summary.appendLine("located=$located")
+        assertEquals(
+            "[host] the locate probe must name the session's own socket",
+            dedicatedSocket,
+            located,
+        )
+        val marker = "issue2378-$suffix-marker"
+        sshExec(
+            "tmux -S '$located' send-keys -t '=$baseName:' \"printf '%s\\n' $marker\" Enter",
+        )
+        SystemClock.sleep(1_000)
+        val pane = sshExec("tmux -S '$located' capture-pane -p -t '=$baseName:' 2>/dev/null || true")
+        summary.appendLine("pane_contains_marker=${pane.contains(marker)}")
+        assertTrue(
+            "[host] the launch must land in the pane on that socket; pane was: $pane",
+            pane.contains(marker),
+        )
+        val defaultSocketProbe = sshExec(
+            "tmux send-keys -t '=$baseName:' 'echo x' Enter 2>&1 || true",
+        )
+        summary.appendLine("default_socket_send_keys=${defaultSocketProbe.trim()}")
+
+        artifactFile("issue2378-socket-collision.txt").writeText(
+            buildString {
+                appendLine("host=$DEFAULT_HOST port=$DEFAULT_PORT user=$DEFAULT_USER")
+                appendLine("folder=$folder")
+                append(summary)
+            },
+        )
+        Log.i(LOG_TAG, "[host] issue2378 socket collision: $summary")
+    } }
+
+    /** Issue #2378: session names on ONE specific tmux socket. */
+    private suspend fun sessionsOnSocket(socket: String): List<String> =
+        sshExec("tmux -S '$socket' list-sessions -F '#{session_name}' 2>/dev/null || true")
+            .lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toList()
 
     @Test
     fun inSessionNewSessionInSameFolderGetsSuffixedSessionNotCollisionAllEntryPoints() { runBlocking {

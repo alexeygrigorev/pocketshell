@@ -79,6 +79,24 @@ mere layout participation, not viewport containment. But confirm the
   Compose actually consumed to `assertNodeFullyWithinSystemBarsContentArea`
   — don't assert against zero.
 
+## Fast design renders (Roborazzi) — fast first check, never the acceptance
+
+`scripts/render.sh` (optionally `scripts/render.sh <caseName>`) renders real
+composables under the actual `PocketShellTheme` to PNGs in seconds, no
+emulator — add/adjust a `@Test` case in
+`shared/ui-kit/src/test/java/com/pocketshell/uikit/render/DesignRenders.kt`.
+Both the implementer (before the emulator run) and the reviewer (as a fast
+first visual check, in addition to — never instead of — full emulator
+validation) should render the changed component and compare it to any
+linked mockup.
+
+Render PNGs are a side effect of test execution, not a declared Gradle task
+output — an exit-zero `FROM-CACHE`/`UP-TO-DATE` task is **not** render
+evidence. `scripts/render.sh` forces the render task fresh and validates the
+mapped PNG was recreated non-empty after a freshness boundary; never replace
+that with a blanket `--rerun-tasks`, and never accept a PNG merely listed
+from an earlier filter run.
+
 ## Regression-proof validity checklist (per PR, for layout/lifecycle/occlusion/keyboard fixes)
 
 - [ ] Asserts viewport **containment**, not `assertIsDisplayed()`, for the

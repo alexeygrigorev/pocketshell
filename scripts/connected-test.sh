@@ -415,7 +415,7 @@ if [[ "$CLEANUP_ONLY" != "1" ]]; then
       |*OutboundAttachmentOffsetResumeJourneyE2eTest*\
       |*SilentMidSessionDrop*|*ColdDialUnderBandwidth*|*RealisticWifiStability*\
       |*NatIdleMapping*|*MobileLatencyStorm*|*PushResumeDeadSocket*\
-      |*ConversationOpenLatency*)
+      |*ConversationOpenLatency*|*AttachNavigationMultiFolderE2eTest*)
       NETWORK_FAULT_RUN=1
       ;;
   esac

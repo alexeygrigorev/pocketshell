@@ -158,6 +158,20 @@ NETWORK_FAULT_CLASSES=(
   # it is enrolled here with its toxiproxy siblings. Reuses network-fault-proxy:2228
   # + toxiproxy API:8474 (no new fixture).
   "$FQCN_PREFIX.MobileLatencyStormSelfInflictedCloseE2eTest"
+  # Issue #2380: the END-TO-END guard for this phase's OWN shared setup navigation.
+  # On 2026-08-27 every proof below died in NetworkFaultProofBase.openSessionFromList
+  # ("expanded folder ::untracked:: … after 166-174 tap(s)") because the selector took
+  # the first hard-coded folder candidate whose row merely EXISTED, so phase 2 injected
+  # no Toxiproxy fault at all — a VACUOUS gate, not a red one. This class seeds the
+  # non-happy topology no other proof creates (target session in its own project
+  # folder, siblings in a second project folder and in /home/testuser) and proves the
+  # attach lands on the TARGET session, verified from inside the pane with
+  # `tmux display-message -p '#S'`. It is a NetworkFaultProofBase subclass, so it
+  # self-skips per-push (needs network-fault-proxy:2228 + toxiproxy API:8474 which
+  # tests.yml leaves down) and belongs here; no new fixture. The per-push half of the
+  # red→green (the selector over the same topology, rendered without Docker) is
+  # com.pocketshell.app.proof.FolderSessionRowNavigatorTest in ci-journey-suite.sh.
+  "$FQCN_PREFIX.AttachNavigationMultiFolderE2eTest"
 )
 
 # ---------------------------------------------------------------------------

@@ -23,10 +23,9 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.diagnostics.DiagnosticsEvent
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.projects.FolderListViewModel
+import com.pocketshell.app.projects.FOLDER_LIST_CONTENT_TAG
+import com.pocketshell.app.projects.FolderTreeProjection
 import com.pocketshell.app.projects.folderDetailRowTestTag
-import com.pocketshell.app.projects.folderHeaderClickTestTag
-import com.pocketshell.app.projects.folderRowTestTag
 import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECTION_STATUS_PILL_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
@@ -87,6 +86,14 @@ abstract class NetworkFaultProofBase {
 
     protected var launchedActivity: ActivityScenario<MainActivity>? = null
     protected val timings: MutableList<String> = mutableListOf()
+
+    /**
+     * Issue #2380 — session name -> the canonicalised folder path the host-detail
+     * tree will group that seeded session under (its real remote `pane_current_path`).
+     * Populated by the seeding helpers; consumed by [openSessionFromList] as the
+     * DETERMINISTIC first probe when it resolves which folder to expand.
+     */
+    private val seededFolderPaths: MutableMap<String, String> = mutableMapOf()
     private var networkFaultProofEnabled: Boolean = false
     private var diagnosticsRecordingWasEnabled: Boolean? = null
 
@@ -161,10 +168,11 @@ abstract class NetworkFaultProofBase {
         key: String,
         sessionName: String,
         readyText: String,
+        cwd: String? = null,
     ) {
         toxiproxy().reset()
         waitForSshFixtureReady(SshKey.Pem(key), port = DEFAULT_PORT)
-        seedTmuxSession(key, sessionName, readyText)
+        seedTmuxSession(key, sessionName, readyText, cwd)
         waitForSshFixtureReady(SshKey.Pem(key), port = NETWORK_FAULT_SSH_PORT)
     }
 
@@ -178,8 +186,9 @@ abstract class NetworkFaultProofBase {
         key: String,
         sessionName: String,
         readyText: String,
+        cwd: String? = null,
     ) {
-        seedTmuxSession(key, sessionName, readyText)
+        seedTmuxSession(key, sessionName, readyText, cwd)
     }
 
     protected suspend fun preparePacketLossProxyAndRemoteSession(
@@ -258,24 +267,25 @@ abstract class NetworkFaultProofBase {
      */
     protected fun openSessionFromList(hostName: String, sessionName: String) {
         val pickerTimeoutMs = TerminalTestTimeouts.terminalVisibilityTimeoutMs()
-        var folderPath = FolderListViewModel.UNTRACKED_PATH
         waitUntilWithDiagnostics(
-            label = "folder row for $sessionName",
+            label = "host-detail folder list for $hostName",
             timeoutMillis = pickerTimeoutMs,
             textProbes = listOf(hostName, sessionName),
-            tagProbes = NETWORK_FAULT_FOLDER_CANDIDATES.map(::folderRowTestTag),
+            tagProbes = listOf(FOLDER_LIST_CONTENT_TAG),
         ) {
-            val match = NETWORK_FAULT_FOLDER_CANDIDATES.firstOrNull { candidate ->
-                hasTag(folderRowTestTag(candidate))
-            }
-            if (match != null) {
-                folderPath = match
-                true
-            } else {
-                false
-            }
+            hasTag(FOLDER_LIST_CONTENT_TAG)
         }
-        expandFolderUntilSessionRowVisible(folderPath, sessionName, pickerTimeoutMs)
+        // Issue #2380: resolve the folder that ACTUALLY CONTAINS the session
+        // (verified by its child row appearing), preferring the seeded session's
+        // real remote cwd. The superseded selector took the first hard-coded
+        // candidate whose row merely existed, so it latched onto the `::untracked::`
+        // row once sessions started grouping under real project folders and every
+        // network-fault proof died in setup before injecting a single fault.
+        val folderPath = FolderSessionRowNavigator(compose, ::recordTiming).revealSessionRow(
+            sessionName = sessionName,
+            expectedFolderPath = seededFolderPaths[sessionName],
+            timeoutMillis = pickerTimeoutMs,
+        )
         val sessionRowTag = folderDetailRowTestTag(folderPath, sessionName)
         compose.onNodeWithTag(sessionRowTag, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -872,16 +882,42 @@ abstract class NetworkFaultProofBase {
         return File(dir, name)
     }
 
-    private suspend fun seedTmuxSession(key: String, sessionName: String, readyText: String) {
+    /**
+     * Seed one detached tmux session and RECORD the folder path the host-detail
+     * tree will group it under (issue #2380).
+     *
+     * [cwd] is the working directory the session is created in (`tmux new-session -c`);
+     * null keeps the historical behaviour of inheriting the SSH login directory. The
+     * seeded session's real `pane_current_path` is read back from tmux and stored,
+     * canonicalised exactly the way [FolderTreeProjection] canonicalises a grouping
+     * key, so [openSessionFromList] can target the folder the app WILL place this
+     * session in instead of guessing from a hard-coded candidate list. It stays an
+     * ORDERING hint only: the navigator still verifies the session's row actually
+     * appeared under the folder it selects.
+     */
+    private suspend fun seedTmuxSession(
+        key: String,
+        sessionName: String,
+        readyText: String,
+        cwd: String? = null,
+    ) {
         val script = buildString {
             appendLine("set -eu")
+            if (cwd != null) {
+                appendLine("mkdir -p ${shellQuote(cwd)}")
+            }
             appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
             appendLine(
                 "tmux new-session -d -s ${shellQuote(sessionName)} " +
+                    (if (cwd != null) "-c ${shellQuote(cwd)} " else "") +
                     "${shellQuote("printf '${escapeSingleQuotedForPrintf(readyText)}\\n'; exec sh -i")}",
             )
             appendLine("sleep 1")
             appendLine("tmux list-sessions")
+            appendLine(
+                "printf '$SEEDED_CWD_MARKER%s\\n' " +
+                    "\"\$(tmux display-message -p -t ${shellQuote(sessionName)} '#{pane_current_path}')\"",
+            )
         }
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
@@ -898,6 +934,20 @@ abstract class NetworkFaultProofBase {
             "expected tmux seeding to succeed; exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
             exec?.exitCode == 0,
         )
+        val reportedCwd = exec?.stdout
+            .orEmpty()
+            .lineSequence()
+            .firstOrNull { it.startsWith(SEEDED_CWD_MARKER) }
+            ?.removePrefix(SEEDED_CWD_MARKER)
+            ?.trim()
+            .orEmpty()
+        assertTrue(
+            "expected tmux to report a pane_current_path for the seeded session " +
+                "$sessionName so the host-detail folder can be targeted deterministically " +
+                "(#2380); stdout='${exec?.stdout?.take(400)}'",
+            reportedCwd.isNotBlank(),
+        )
+        seededFolderPaths[sessionName] = FolderTreeProjection.canonicalisePath(reportedCwd)
     }
 
     private suspend fun listClientsRaw(key: String, sessionName: String): String {
@@ -930,41 +980,6 @@ abstract class NetworkFaultProofBase {
             attached = view?.currentSession != null && view.mEmulator != null
         }
         return attached
-    }
-
-    private fun expandFolderUntilSessionRowVisible(
-        folderPath: String,
-        sessionName: String,
-        timeoutMillis: Long,
-    ) {
-        val detailTag = folderDetailRowTestTag(folderPath, sessionName)
-        val headerTag = folderHeaderClickTestTag(folderPath)
-        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
-        var taps = 0
-        while (SystemClock.elapsedRealtime() < deadline) {
-            compose.waitForIdle()
-            if (hasTag(detailTag)) {
-                recordTiming("attach_folder_expand_taps", taps.toLong())
-                return
-            }
-            if (hasTag(headerTag)) {
-                compose.onNodeWithTag(headerTag, useUnmergedTree = true).performClick()
-                taps += 1
-            }
-            SystemClock.sleep(250)
-        }
-        waitUntilWithDiagnostics(
-            label = "expanded folder $folderPath showing session row $sessionName after $taps tap(s)",
-            timeoutMillis = 5_000,
-            textProbes = listOf(sessionName, folderPath.substringAfterLast('/')),
-            tagProbes = listOf(
-                folderRowTestTag(folderPath),
-                folderHeaderClickTestTag(folderPath),
-                folderDetailRowTestTag(folderPath, sessionName),
-            ),
-        ) {
-            hasTag(detailTag)
-        }
     }
 
     private fun waitUntilWithDiagnostics(
@@ -1142,11 +1157,12 @@ abstract class NetworkFaultProofBase {
         /** Issue #1681 — the un-proxied sentinel exec-ping cadence. */
         const val SENTINEL_INTERVAL_MS: Long = 3_000L
 
-        val NETWORK_FAULT_FOLDER_CANDIDATES: List<String> = listOf(
-            FolderListViewModel.UNTRACKED_PATH,
-            "/home/testuser",
-            "~",
-        )
+        /**
+         * Issue #2380 — stdout marker the seeding script prints the seeded session's
+         * real `pane_current_path` behind, so the harness can target the folder the
+         * host-detail tree will group that session under.
+         */
+        const val SEEDED_CWD_MARKER: String = "POCKETSHELL_SEEDED_CWD="
     }
 }
 

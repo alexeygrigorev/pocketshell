@@ -107,6 +107,18 @@ KNOWN_UNWIRED_ANDROID_E2E_DOCKER_CLASSES=(
   "com.pocketshell.app.projects.FolderListSessionResumeDockerTest"
   "com.pocketshell.app.projects.FolderListTreeStopSessionDockerTest"
   "com.pocketshell.app.projects.WatchedFoldersE2eTest"
+  # Issue #2380: the END-TO-END attach-navigation guard for the nightly phase-2
+  # network-fault lane's own shared setup (the selector that made phase 2 vacuous by
+  # dying on the `::untracked::` row before any fault was injected). A
+  # NetworkFaultProofBase toxiproxy proof: it self-skips on CI
+  # (assumeNetworkFaultProofsEnabled -> tests.yml leaves network-fault-proxy:2228 +
+  # toxiproxy:8474 down), so wiring it into the per-PR ci-journey-suite.sh would only
+  # ALL-SKIP (the G3 vacuous-pass trap). It is enrolled in NETWORK_FAULT_CLASSES and
+  # runs via nightly-extensive.yml / scripts/nightly-extensive-suite.sh (proxy up).
+  # The per-push half of the same red->green is the Docker-free
+  # com.pocketshell.app.proof.FolderSessionRowNavigatorTest, which IS wired into
+  # scripts/ci-journey-suite.sh.
+  "com.pocketshell.app.proof.AttachNavigationMultiFolderE2eTest"
   "com.pocketshell.app.proof.CodexOverflowNoReconnectE2eTest"
   "com.pocketshell.app.proof.CodexRedrawOverflowReconnectE2eTest"
   "com.pocketshell.app.proof.CodexWindowStartupControlSequenceE2eTest"

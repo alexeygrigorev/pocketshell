@@ -287,3 +287,8 @@ com.pocketshell.app.proof.signals.SessionCaptureContractTest	22
 # emulator, not a GitHub Actions run — refresh with a real CI attempt-1
 # elapsed time once this class has run there.
 com.pocketshell.app.proof.Issue2338SecondLaunchTerminalAttachJourneyE2eTest	64
+# #2380: com.pocketshell.app.proof.FolderSessionRowNavigatorTest measured from
+# a local dev-box emulator (BUILD SUCCESSFUL in 39s, 5/5 executed, 0 failed) —
+# not yet a GitHub Actions run; refresh with a real CI attempt-1 elapsed time
+# once this class has run there, same convention as the Issue2338 row above.
+com.pocketshell.app.proof.FolderSessionRowNavigatorTest	39

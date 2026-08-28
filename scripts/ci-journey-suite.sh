@@ -371,6 +371,7 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.usage.Usage1318StrictSchemaRenderE2eTest"  # #1318 on-device render acceptance for the quse-v0.0.9 strict-schem…
   "com.pocketshell.app.usage.UsageResetCreditsLayoutTest"  # #1789 reset-credit inventory remains contained and scrollable on narrow / large-font layouts
   "$FQCN_PREFIX.InheritedFocusOwnerVerdictE2eTest"  # #2021 D31: an INHERITED app-owned focus window must not void a downstream journey's verdict (the state that voided 2 of 7 #1994 reopen arms), while an owner the journey itself leaks still hard-fails. No Docker fixture, ~15s.
+  "$FQCN_PREFIX.FolderSessionRowNavigatorTest"  # #2380 D32 G9: the network-fault proofs' shared attach selector over the fixture topology that made phase 2 VACUOUS (2 project folders + a `::untracked::` row that does not hold the target). Drives the real FolderListScreen + the real FolderSessionRowNavigator; no Docker, no toxiproxy, ~30s. The end-to-end sibling (AttachNavigationMultiFolderE2eTest) needs the opt-in toxiproxy fixture, so it lives in the nightly phase-2 list.
 )
 
 # CI-matrix journey class selection and banner logging live in a sourced helper.

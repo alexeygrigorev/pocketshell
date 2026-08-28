@@ -1,10 +1,10 @@
 # Agent Worktrees
 
 Implementer, reviewer, and release-owner agents never edit the orchestrator's
-main checkout. Every agent runs inside its own isolated git worktree branched
-from `main`, regardless of which tool runs it (Claude Code, Codex, opencode,
-a human pair). This keeps the root checkout clean, makes parallel work safe
-at the filesystem level, and means an abandoned agent run leaves no residue.
+main checkout. Every agent runs inside its own git worktree branched from
+`main`, regardless of which tool runs it (Claude Code, Codex, opencode, a
+human pair). This keeps the root checkout clean, makes parallel work safe at
+the filesystem level, and leaves no residue from an abandoned run.
 
 ## Layout
 
@@ -43,10 +43,9 @@ Only the orchestrator merges, and only after reviewer `APPROVED` + the
 verification checklist ([process.md](../process.md)) passes, via a protected
 PR. The mechanical parts that are easy to get wrong:
 
-1. **Capture the diff correctly.** `git diff` alone shows only unstaged
+1. Capture the diff correctly. `git diff` alone shows only unstaged
    changes — staged edits/deletions vanish. Use `git diff HEAD`. That still
-   **silently omits untracked new files** (commonly the new regression
-   test):
+   silently omits untracked new files (commonly the new regression test):
 
    ```bash
    WT=.worktrees/issue-<N>
@@ -62,14 +61,14 @@ PR. The mechanical parts that are easy to get wrong:
    instead — a commit-based diff includes new files, so this caveat doesn't
    apply: `git -C "$WT" diff --no-color main..HEAD`.
 
-2. **Apply plainly.** Use plain `git apply`, never `git apply --3way` — it
+2. Apply plainly: use plain `git apply`, never `git apply --3way` — it
    stages files and can pull stale base content, producing phantom compile
    breaks that don't exist on `origin/main`.
 
-3. **Diff against the merge-base**, not a `main` that has since moved, or
-   the patch can silently include the inverse of an intervening commit.
+3. Diff against the merge-base, not a `main` that has since moved, or the
+   patch can silently include the inverse of an intervening commit.
 
-4. **Commit on the issue branch**, push, open the PR (`Closes #N` only when
+4. Commit on the issue branch, push, open the PR (`Closes #N` only when
    fully complete), wait for the cheap required checks, merge, then:
 
    ```bash
@@ -79,11 +78,11 @@ PR. The mechanical parts that are easy to get wrong:
    git branch -D issue-<N>
    ```
 
-5. **Never `git worktree remove --force`** a worktree under an active agent
-   or with uncommitted work — it discards the diff with no recovery. Before
-   removing any worktree holding uncommitted work you intend to keep, push
-   its branch or save `.pickup/issue-<N>-*.patch` (tracked diff + a copy of
-   untracked files — `git diff` omits untracked files here too).
+5. Never `git worktree remove --force` a worktree under an active agent or
+   with uncommitted work — it discards the diff with no recovery. Before
+   removing a worktree holding work you intend to keep, push its branch or
+   save `.pickup/issue-<N>-*.patch` (tracked diff plus untracked files —
+   `git diff` omits those too).
 
 6. If two approved worktrees touch the same file, do not hand-merge in the
    orchestrator. Merge the first, then send the second back to a fresh

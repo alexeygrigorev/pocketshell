@@ -12,10 +12,10 @@ import org.junit.Test
 /**
  * Strict-schema parser tests (issue #1318). `pocketshell usage --json` emits
  * per-provider NDJSON flattened from quse's provider-keyed document. The
- * published quse 0.0.14 wheel is legacy `short_term` / `long_term`; the host
- * producer translates it before this parser sees canonical top-level
- * `windows`. A separate canonical producer contract may include providers such
- * as OpenCode Go. The key IS the window label. Non-applicable null-percent
+ * pinned quse 0.0.15 wheel (issue #2293) is itself the canonical producer —
+ * every record already carries the top-level `windows` map, including the
+ * `go` (OpenCode Go) provider — so the host boundary only injects the
+ * provider key and forwards the record. The key IS the window label. Non-applicable null-percent
  * spans are non-renderable and omitted; malformed entries still fail loudly.
  * The parser is fail-loud for schema drift (no details-window aliasing, no
  * per-record skip-resilience). The app ignores `details`.
@@ -25,13 +25,14 @@ class PocketshellUsageJsonParserTest {
     private val parser = PocketshellUsageJsonParser()
 
     /**
-     * Published quse's null-placeholder spans are handled at the host
-     * producer boundary and are not emitted on the canonical app wire.
+     * A canonical record with no renderable spans at all. Published quse
+     * FORWARDS its null-percent placeholders (see the 0.0.15 capture); this
+     * shorthand covers the separate "producer emitted no spans" case.
      */
     private val nullSpans =
         """"windows":{}"""
 
-    /** Four provider records in the real 0.0.14 wire shape, as `pocketshell
+    /** Four provider records in the real 0.0.15 wire shape, as `pocketshell
      * usage --json` emits them (key-is-label + ISO reset_at + rolling on 5h). */
     private val fourProviderNdjson = listOf(
         """{"provider":"claude","status":"ok","windows":{"5h":{"percent_remaining":91.0,"reset_at":"2026-07-07T23:19:59Z","rolling":false},"7d":{"percent_remaining":30.0,"reset_at":"2026-07-09T14:59:59Z"}},"error":null,"details":{"anything":true}}""",
@@ -79,7 +80,7 @@ class PocketshellUsageJsonParserTest {
 
     @Test
     fun parse_codexNo5hWindow_rendersWeeklyOnly_noPhantom5h_noGhostRow() {
-        // #1564 regression, 0.0.14 shape (issue #2274): Codex temporarily
+        // #1564 regression, 0.0.15 shape (issue #2293): Codex temporarily
         // removed its 5h window, so its weekly span renders under the unified
         // "7d" key. The host producer omits the null-percent source span.
         // The maintainer's v0.4.33 symptom was a "5h window · 53% · resets in
@@ -119,7 +120,7 @@ class PocketshellUsageJsonParserTest {
 
     @Test
     fun parse_weeklyOnlyGrok_rendersUnified7dWindow_displayNameIsGrokBuild() {
-        // #2195 live quse shape (0.0.14 form, issue #2274): only the weekly
+        // #2195 live quse shape (0.0.15 form, issue #2293): only the weekly
         // span carries a value, under the unified "7d" key; the host producer
         // omits the null-percent 5h/monthly placeholders. used =
         // 100 - percent_remaining.
@@ -304,51 +305,24 @@ class PocketshellUsageJsonParserTest {
         assertEquals("maintenance", record.rawStatus)
     }
 
-    // -- issue #2274: published quse 0.0.14 -> app wire normalization --------
+    // -- issue #2293: published quse 0.0.15 -> app wire (canonical passthrough)
 
     /**
-     * The REAL captured quse-0.0.14 `--json` document from the published
-     * wheel (same file as tools/pocketshell/tests/data/quse-0.0.14-usage.json).
+     * The REAL `pocketshell usage --json` output for the captured quse-0.0.15
+     * wheel document.
+     *
+     * This is NOT a Kotlin re-implementation of the producer: the resource is
+     * the byte-for-byte output of `normalize_usage_stdout()` applied to
+     * `tools/pocketshell/tests/data/quse-0.0.15-usage.json`, and
+     * `test_committed_producer_ndjson_matches_normalize_output` /
+     * `test_kotlin_test_resource_matches_the_python_producer_fixture` (both in
+     * `tools/pocketshell/tests/test_usage.py`) keep the two sides from
+     * drifting. So this test consumes exactly what a real host emits.
      */
-    private fun quse0014Document(): org.json.JSONObject {
-        val bytes = javaClass.getResourceAsStream("/quse-0.0.14-usage.json")?.readBytes()
-            ?: throw AssertionError("missing quse-0.0.14-usage.json test resource")
-        return org.json.JSONObject(bytes.decodeToString())
-    }
-
-    /** Apply the host producer's published short/long -> canonical windows
-     * translation, then inject each key as a top-level `provider`. */
-    private fun flattenProviderKeyed(doc: org.json.JSONObject): String = buildString {
-        for (key in doc.keys()) {
-            val line = org.json.JSONObject(doc.getJSONObject(key).toString())
-            val windows = org.json.JSONObject()
-            for (sourceKey in listOf("short_term", "long_term")) {
-                if (!line.has(sourceKey) || line.isNull(sourceKey)) continue
-                val sourceWindow = line.getJSONObject(sourceKey)
-                // Match the host producer: a published null percentage means
-                // that source span is unavailable, so it is omitted before
-                // canonical parser input is formed.
-                if (sourceWindow.isNull("percent_remaining")) continue
-                val label = if (sourceWindow.isNull("window")) {
-                    sourceKey
-                } else {
-                    sourceWindow.getString("window")
-                }
-                windows.put(
-                    label,
-                    org.json.JSONObject()
-                        .put("percent_remaining", sourceWindow.get("percent_remaining"))
-                        .put("reset_at", sourceWindow.get("reset_at")),
-                )
-            }
-            line.remove("short_term")
-            line.remove("long_term")
-            line.put("windows", windows)
-            line.put("provider", key)
-            append(line.toString())
-            append('\n')
-        }
-    }
+    private fun quse0015ProducerNdjson(): String =
+        javaClass.getResourceAsStream("/quse-0.0.15-usage.ndjson")?.readBytes()
+            ?.decodeToString()
+            ?: throw AssertionError("missing quse-0.0.15-usage.ndjson test resource")
 
     private fun windowOf(record: UsageProviderRecord, name: String): UsageWindow =
         record.windows.firstOrNull { it.name == name }
@@ -358,55 +332,70 @@ class PocketshellUsageJsonParserTest {
             )
 
     @Test
-    fun parse_quse0014PublishedCapture_rendersCanonicalWindowsForAllFiveProviders() {
-        val records = parser.parse(flattenProviderKeyed(quse0014Document()))
+    fun parse_quse0015PublishedCapture_rendersCanonicalWindowsForAllSixProviders() {
+        val records = parser.parse(quse0015ProducerNdjson())
         val byProvider = records.associateBy { it.provider }
 
-        // The published 0.0.14 release has five providers; the unreleased
-        // a86959e `go` provider is deliberately absent.
+        // The published 0.0.15 release has SIX providers — `go` (OpenCode on
+        // the Go backend) is the one the 0.0.14 pin could not report at all
+        // (#2293: `pocketshell usage go --json` answered "Unknown provider").
         assertEquals(
-            setOf("claude", "codex", "copilot", "grok", "zai"),
+            setOf("claude", "codex", "copilot", "go", "grok", "zai"),
             byProvider.keys,
         )
         records.forEach { assertEquals(UsageStatus.Ok, it.status) }
 
-        // claude: 5h + 7d renderable; monthly is a null-percent span → omitted.
+        // go: all three canonical spans are real on this capture, so the
+        // OpenCode Go card renders three rows with the producer's own labels.
+        val go = byProvider.getValue("go")
+        assertEquals("OpenCode Go", go.displayName)
+        assertEquals(listOf("5h", "7d", "monthly"), go.windows.map { it.name }.sorted())
+        assertEquals(64.0, windowOf(go, "5h").percent, 0.001) // 100 - 36
+        assertEquals(Instant.parse("2026-08-28T13:36:26Z"), windowOf(go, "5h").resetAt)
+        assertEquals(26.0, windowOf(go, "7d").percent, 0.001) // 100 - 74
+        assertEquals(Instant.parse("2026-08-31T00:00:00Z"), windowOf(go, "7d").resetAt)
+        assertEquals(14.0, windowOf(go, "monthly").percent, 0.001) // 100 - 86
+        assertEquals(Instant.parse("2026-09-22T06:20:28Z"), windowOf(go, "monthly").resetAt)
+        assertFalse("go at 64% used must not read blocked", go.isBlocked)
+        assertEquals(UsageThresholdState.Ok, go.thresholdState())
+
+        // claude: 5h + 7d renderable; monthly is a null-percent span the
+        // producer now FORWARDS, and this parser omits as non-renderable.
         val claude = byProvider.getValue("claude")
         assertEquals(listOf("5h", "7d"), claude.windows.map { it.name }.sorted())
-        assertEquals(1.0, windowOf(claude, "5h").percent, 0.001) // 100 - 99
-        assertEquals(Instant.parse("2026-08-22T15:49:59Z"), windowOf(claude, "5h").resetAt)
-        assertEquals(7.0, windowOf(claude, "7d").percent, 0.001) // 100 - 93
-        assertEquals(Instant.parse("2026-08-27T14:59:59Z"), windowOf(claude, "7d").resetAt)
+        assertEquals(6.0, windowOf(claude, "5h").percent, 0.001) // 100 - 94
+        assertEquals(Instant.parse("2026-08-28T16:20:00Z"), windowOf(claude, "5h").resetAt)
+        assertEquals(10.0, windowOf(claude, "7d").percent, 0.001) // 100 - 90
+        assertEquals(Instant.parse("2026-09-03T15:00:00Z"), windowOf(claude, "7d").resetAt)
 
-        // codex: weekly-only renderable — its 5h span carries null percent and
-        // must be omitted (no ghost row), same semantics as the 0.0.11 era.
+        // codex: weekly-only renderable — its 5h/monthly spans carry null
+        // percent and must be omitted (no ghost row).
         val codex = byProvider.getValue("codex")
         assertEquals(listOf("7d"), codex.windows.map { it.name })
-        assertEquals(44.0, windowOf(codex, "7d").percent, 0.001) // 100 - 56
-        assertEquals(Instant.parse("2026-08-27T03:30:22Z"), windowOf(codex, "7d").resetAt)
+        assertEquals(13.0, windowOf(codex, "7d").percent, 0.001) // 100 - 87
+        assertEquals(Instant.parse("2026-09-03T16:26:48Z"), windowOf(codex, "7d").resetAt)
 
-        // copilot: the published short-term span has a 100% value and no
-        // label, so the producer uses the generic short_term key alongside
-        // the real monthly window.
+        // copilot: only the monthly span applies on this capture.
         val copilot = byProvider.getValue("copilot")
-        assertEquals(listOf("monthly", "short_term"), copilot.windows.map { it.name }.sorted())
-        assertEquals(0.0, windowOf(copilot, "monthly").percent, 0.001) // 100 - 100
+        assertEquals(listOf("monthly"), copilot.windows.map { it.name })
+        assertEquals(100.0, windowOf(copilot, "monthly").percent, 0.001) // 100 - 0
         assertEquals(Instant.parse("2026-09-01T00:00:00Z"), windowOf(copilot, "monthly").resetAt)
+        assertTrue("copilot at 100% used must read blocked", copilot.isBlocked)
 
-        // grok: the published provider-owned weekly label remains weekly.
+        // grok: a86959e maps grok's weekly span onto the canonical 7d key.
         val grok = byProvider.getValue("grok")
-        assertEquals(listOf("weekly"), grok.windows.map { it.name })
-        assertEquals(100.0, windowOf(grok, "weekly").percent, 0.001) // 100 - 0
+        assertEquals(listOf("7d"), grok.windows.map { it.name })
+        assertEquals(100.0, windowOf(grok, "7d").percent, 0.001) // 100 - 0
         assertTrue("grok at 100% used must read blocked", grok.isBlocked)
 
-        // zai: 5h + weekly.
+        // zai: 5h + 7d.
         val zai = byProvider.getValue("zai")
-        assertEquals(setOf("5h", "weekly"), zai.windows.map { it.name }.toSet())
-        assertEquals(100.0, windowOf(zai, "weekly").percent, 0.001) // 100 - 0
+        assertEquals(setOf("5h", "7d"), zai.windows.map { it.name }.toSet())
+        assertEquals(45.0, windowOf(zai, "7d").percent, 0.001) // 100 - 55
     }
 
     @Test
-    fun parse_separateCanonicalGoContract_preservesWindowLabels() {
+    fun parse_canonicalGoRecord_preservesWindowLabels() {
         val record = parser.parse(
             """{"provider":"go","status":"ok","windows":{"5h":{"percent_remaining":97.0,"reset_at":"2026-08-22T11:21:36Z","rolling":true},"monthly":{"percent_remaining":94.0,"reset_at":"2026-09-22T06:20:28Z"}},"error":null,"details":{"max_used_percent":3.0}}""",
         ).single()
@@ -441,7 +430,7 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
-    fun parse_quse0014NonObjectWindows_failsLoud() {
+    fun parse_quse0015NonObjectWindows_failsLoud() {
         val error = assertThrows(UsageParseException::class.java) {
             parser.parse(
                 """{"provider":"x","status":"ok","windows":"drifted","error":null,"details":{}}""",
@@ -456,7 +445,7 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
-    fun parse_quse0014NullWindowEntry_failsLoud_insteadOfSkippingIt() {
+    fun parse_quse0015NullWindowEntry_failsLoud_insteadOfSkippingIt() {
         val error = assertThrows(UsageParseException::class.java) {
             parser.parse(
                 """{"provider":"x","status":"ok","windows":{"5h":null},"error":null,"details":{}}""",
@@ -475,7 +464,7 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
-    fun parse_quse0014MalformedPercentOrResetInWindow_failsLoud() {
+    fun parse_quse0015MalformedPercentOrResetInWindow_failsLoud() {
         assertThrows(UsageParseException::class.java) {
             parser.parse(
                 """{"provider":"x","status":"ok","windows":{"5h":{"percent_remaining":"not-a-number"}},"error":null,"details":{}}""",
@@ -490,11 +479,11 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
-    fun parse_quse0014CodexResetCredits_realDetailsShapeParsesWithExactMatchInvariant() {
-        // Fix-shape item: verify the real 0.0.14 `{expires_at, status, title}`
+    fun parse_quse0015CodexResetCredits_realDetailsShapeParsesWithExactMatchInvariant() {
+        // Fix-shape item: verify the real 0.0.15 `{expires_at, status, title}`
         // entry shape against the live capture, including the
         // availableCount == exact-available rows invariant (mismatch throws).
-        val codex = parser.parse(flattenProviderKeyed(quse0014Document()))
+        val codex = parser.parse(quse0015ProducerNdjson())
             .single { it.provider == "codex" }
         val credits = requireNotNull(codex.resetCredits)
         assertFalse(credits.unavailable)

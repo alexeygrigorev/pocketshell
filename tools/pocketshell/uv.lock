@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-08-27T22:00:00Z"
+exclude-newer = "2026-08-28T22:00:00Z"
 
 [[package]]
 name = "annotated-doc"
@@ -314,7 +314,7 @@ wheels = [
 
 [[package]]
 name = "pocketshell"
-version = "0.4.45"
+version = "0.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
@@ -346,7 +346,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "qrcode", extras = ["pil"], marker = "extra == 'qr'", specifier = ">=7.4" },
-    { name = "quse", specifier = "==0.0.14" },
+    { name = "quse", specifier = "==0.0.15" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.0" },
     { name = "tmuxctl", specifier = ">=0.3.5" },
 ]
@@ -487,14 +487,14 @@ pil = [
 
 [[package]]
 name = "quse"
-version = "0.0.14"
+version = "0.0.15"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/02/27/473a4f591cfb8923724830b3cc1d0b31b2fb2ac12375f35df3e1353f2f3a/quse-0.0.14.tar.gz", hash = "sha256:2103fdfe7d49a343e6903fc2611e8866ca71bd37fe3e9d8e114ec482f6c8e881", size = 69250, upload-time = "2026-08-20T06:28:19.317Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b5/9c/350becbcaf1c17c7f2cd88df871cd8452522784d3505c1bb90b4730d48a1/quse-0.0.15.tar.gz", hash = "sha256:00cb1427973ba78592c37f6991b4170db29392e29cb8ae0d1beb03c3ef755502", size = 72125, upload-time = "2026-08-28T12:09:08.169Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/c4/04/ff51aaaad8fd9a4100e359cd700a4a75dd232d5f999a1d561c17bf0790e0/quse-0.0.14-py3-none-any.whl", hash = "sha256:7b99a3db422f2a370a0786445c7ab89215b9a93174e63802913d83f8f1dd1b76", size = 31777, upload-time = "2026-08-20T06:28:18.235Z" },
+    { url = "https://files.pythonhosted.org/packages/68/05/ae749c530c9e0af12130914a112253eac6c3873723bf4ae391ea0ea674d5/quse-0.0.15-py3-none-any.whl", hash = "sha256:a9138ed2e4f12a01812103332fe27b94de9f96a2413212c59558052481815793", size = 35099, upload-time = "2026-08-28T12:09:07.098Z" },
 ]
 
 [[package]]

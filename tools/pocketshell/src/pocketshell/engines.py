@@ -280,7 +280,12 @@ def builtin_manifests() -> tuple[EngineManifest, ...]:
             harness="opencode",
             label="OpenCode",
             provider_mark="OpenCode",
-            usage_provider="opencode",
+            # Issue #2293: `usage_provider` names the quse provider whose quota
+            # belongs to this engine, and quse has no provider called
+            # "opencode" — the OpenCode-on-Go backend is reported as `go`
+            # (quse.opencode_go_quota). The old value would have made
+            # `pocketshell usage opencode` fail with "Unknown provider".
+            usage_provider="go",
             launch=LaunchSpec(argv=("opencode",)),
         ),
         EngineManifest(

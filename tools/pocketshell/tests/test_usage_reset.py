@@ -40,7 +40,7 @@ def _cache(
     reset_at: str | None = "2026-06-11T15:00:00Z",
     window: str = "5h",
 ) -> dict:
-    # quse 0.0.14 unified windows (issue #2274): the map key IS the label.
+    # quse 0.0.15 unified windows (issues #2274/#2293): the map key IS the label.
     return {
         "captured_at": captured_at,
         "records": [

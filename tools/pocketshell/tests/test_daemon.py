@@ -285,9 +285,12 @@ def test_usage_fetch_round_trip(
     provider-keyed output into per-provider NDJSON (issue #1318)."""
     fake_bin = tmp_path / "bin"
     python_exe = _fake_python_bin(fake_bin)
-    # Published quse 0.0.14 emits a provider-keyed short/long object; the
-    # daemon applies the producer-boundary canonical windows translation.
-    payload = '{"codex": {"status": "ok", "short_term": {"percent_remaining": 77.0, "reset_at": null, "window": "5h"}}}\n'
+    # Published quse 0.0.15 emits a provider-keyed CANONICAL object; the
+    # daemon injects the provider key and forwards the record unchanged.
+    payload = (
+        '{"codex": {"status": "ok", '
+        '"windows": {"5h": {"percent_remaining": 77.0, "reset_at": null, "rolling": false}}}}\n'
+    )
     _write_fake_quse(fake_bin, payload=payload)
 
     proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)
@@ -323,12 +326,15 @@ def test_two_concurrent_clients_cache_hit_is_faster(
     python_exe = _fake_python_bin(fake_bin)
     payload = (
         '{"codex": {"status": "ok", '
-        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
-        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+        '"windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, '
+        '"7d": {"percent_remaining": null, "reset_at": null}, '
+        '"monthly": {"percent_remaining": null, "reset_at": null}}}}\n'
     )
     # The daemon flattens the provider-keyed payload into NDJSON before
     # caching; the cold and warm responses both carry this flattened form.
-    flattened = '{"provider": "codex", "status": "ok", "windows": {}}\n'
+    flattened = (
+        '{"provider": "codex", "status": "ok", "windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, "7d": {"percent_remaining": null, "reset_at": null}, "monthly": {"percent_remaining": null, "reset_at": null}}}\n'
+    )
     _write_fake_quse(fake_bin, payload=payload, sleep_secs=0.3)
 
     proc = _spawn_daemon(sandbox_socket, python_exe=python_exe)
@@ -400,8 +406,9 @@ def test_no_cache_param_bypasses_cache(
         "n=$((n+1))\n"
         f'echo "$n" > {counter_file}\n'
         'printf \'{"x": {"status": "ok", "call": %s, '
-        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
-        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\\n\' "$n"\n'
+        '"windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, '
+        '"7d": {"percent_remaining": null, "reset_at": null}, '
+        '"monthly": {"percent_remaining": null, "reset_at": null}}}}\\n\' "$n"\n'
     )
     script.chmod(0o755)
 
@@ -519,13 +526,15 @@ def test_no_daemon_flag_skips_daemon_probe(
     # path answered (issue #1318: provider-keyed payloads).
     daemon_payload = (
         '{"fromdaemon": {"status": "ok", '
-        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
-        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+        '"windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, '
+        '"7d": {"percent_remaining": null, "reset_at": null}, '
+        '"monthly": {"percent_remaining": null, "reset_at": null}}}}\n'
     )
     subprocess_payload = (
         '{"fromsubprocess": {"status": "ok", '
-        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
-        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+        '"windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, '
+        '"7d": {"percent_remaining": null, "reset_at": null}, '
+        '"monthly": {"percent_remaining": null, "reset_at": null}}}}\n'
     )
     _write_fake_quse(fake_bin, payload=subprocess_payload)
 
@@ -569,13 +578,15 @@ def test_usage_uses_daemon_by_default(
     fake_bin.mkdir()
     daemon_payload = (
         '{"fromdaemon": {"status": "ok", '
-        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
-        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+        '"windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, '
+        '"7d": {"percent_remaining": null, "reset_at": null}, '
+        '"monthly": {"percent_remaining": null, "reset_at": null}}}}\n'
     )
     subprocess_payload = (
         '{"fromsubprocess": {"status": "ok", '
-        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
-        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+        '"windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, '
+        '"7d": {"percent_remaining": null, "reset_at": null}, '
+        '"monthly": {"percent_remaining": null, "reset_at": null}}}}\n'
     )
     _write_fake_quse(fake_bin, payload=subprocess_payload)
 
@@ -612,8 +623,9 @@ def test_usage_falls_through_when_daemon_absent(
     fake_bin.mkdir()
     payload = (
         '{"fromsubprocess": {"status": "ok", '
-        '"short_term": {"percent_remaining": null, "reset_at": null, "window": null}, '
-        '"long_term": {"percent_remaining": null, "reset_at": null, "window": null}}}\n'
+        '"windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, '
+        '"7d": {"percent_remaining": null, "reset_at": null}, '
+        '"monthly": {"percent_remaining": null, "reset_at": null}}}}\n'
     )
     _write_fake_quse(fake_bin, payload=payload)
     monkeypatch.setattr(

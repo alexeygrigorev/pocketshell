@@ -229,3 +229,35 @@ def test_aplexer_engine_probe_failure_keeps_builtins(install_fake_a):
         "opencode",
         "grok",
     ]
+
+
+def test_builtin_usage_providers_are_names_the_pinned_quse_actually_reports():
+    """#2293: every builtin `usage_provider` must exist in the PINNED quse.
+
+    `usage_provider` names the quse provider whose quota belongs to an engine.
+    quse has no provider literally called `opencode` — the OpenCode-on-Go
+    backend is reported as `go` (`quse.opencode_go_quota`) — so the shipped
+    `opencode` entry pointed at a provider name that `pocketshell usage
+    <provider>` would reject with "Unknown provider". Validate against what
+    the pinned wheel advertises rather than a second hardcoded list, so a
+    future engine (or a future quse rename) cannot reintroduce the drift.
+    """
+    from quse.usage import USAGE_PROVIDER_CHOICES
+
+    declared = {
+        manifest.id: manifest.usage_provider
+        for manifest in engines.builtin_manifests()
+        if manifest.usage_provider is not None
+    }
+    assert declared, "the builtin registry must declare usage providers"
+    unknown = {
+        engine_id: provider
+        for engine_id, provider in declared.items()
+        if provider not in USAGE_PROVIDER_CHOICES
+    }
+    assert not unknown, (
+        f"builtin engines name usage providers the pinned quse does not report: "
+        f"{unknown}; quse advertises {USAGE_PROVIDER_CHOICES}"
+    )
+    # Load-bearing specific: OpenCode's quota is quse's `go` provider.
+    assert declared["opencode"] == "go"

@@ -43,16 +43,19 @@ dependencies = [
     # Usage backend + single source of truth for the unified provider schema
     # (issue #1318). Pinned exactly: `pocketshell usage --json` expects quse's
     # provider-keyed `--json` document and fails loudly on schema drift, so the
-    # version is frozen, not a range. The published 0.0.14 wheel is the
-    # five-provider legacy shape with `short_term` / `long_term` records. The
-    # host boundary translates those records into canonical `windows`; it also
-    # accepts a separate top-level `windows` producer contract for newer or
-    # custom producers, without treating that shape as PyPI 0.0.14 provenance.
-    # Canonical-only providers such as OpenCode Go belong to that separate
-    # contract, not to the published-wheel provider list. 0.0.13 (#2195)
-    # historically added the `grok` provider; 0.0.11 (#1564) labeled each
-    # Codex window from its actual `limit_window_seconds`.
-    "quse==0.0.14",
+    # version is frozen, not a range. The published 0.0.15 wheel (upstream
+    # a86959e, issue #2293) is the six-provider CANONICAL producer: every
+    # record already carries the top-level `windows` map the Android parser
+    # reads, so the host boundary only injects the provider key and forwards
+    # the record unchanged. #2283's `short_term` / `long_term` translation for
+    # the older wheel is hard-cut (D22) — a legacy-shaped record now fails
+    # loudly. 0.0.15 is also the first published wheel that reports the `go`
+    # provider (OpenCode on the Go backend), so the OpenCode Go quota finally
+    # reaches the Usage panel; it is a provider of the pinned wheel, not a
+    # separate producer contract. 0.0.13 (#2195) historically added the `grok`
+    # provider; 0.0.11 (#1564) labeled each Codex window from its actual
+    # `limit_window_seconds`.
+    "quse==0.0.15",
     # FCM HTTP v1 push delivery (#690): service-account OAuth2 bearer minting
     # for `pocketshell push` / the `usage --capture` reset-push send. Imported
     # lazily and fail-soft — a host without it (or without a Firebase
@@ -128,9 +131,10 @@ exclude = [
 [tool.uv]
 # Keep the lockfile's reproducibility cutoff project-local. The host may have
 # a rolling global `exclude-newer` policy that predates deliberately pinned
-# releases (quse 0.0.14 and tmuxctl 0.3.5); this exact value is also the
-# `uv.lock` options cutoff and must be used when checking this lock.
-exclude-newer = "2026-08-27T22:00:00Z"
+# releases (quse 0.0.15 and tmuxctl 0.3.5); this exact value is also the
+# `uv.lock` options cutoff and must be used when checking this lock. Moved
+# past quse 0.0.15's 2026-08-28T12:09:07Z PyPI upload for issue #2293.
+exclude-newer = "2026-08-28T22:00:00Z"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

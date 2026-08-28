@@ -45,38 +45,42 @@ _NDJSON = (
     '"windows": {"5h": {"percent_remaining": 41.0, "reset_at": "2026-06-11T14:00:00Z"}}}\n'
 )
 
-# The published quse==0.0.14 provider-keyed `--json` document (old
-# `short_term` / `long_term` schema) — what `subprocess.run` returns when the
-# CLI capture path shells out to the pinned quse. The `usage --capture` flow
-# translates this at the producer boundary, then caches canonical NDJSON.
+# The published quse==0.0.15 provider-keyed `--json` document (canonical
+# top-level `windows` map, issue #2293) — what `subprocess.run` returns when
+# the CLI capture path shells out to the pinned quse. The `usage --capture`
+# flow injects the provider key and caches the records unchanged.
 _QUSE_KEYED = json.dumps(
     {
         "codex": {
             "status": "ok",
-            "short_term": {
-                "percent_remaining": 77.0,
-                "reset_at": "2026-06-11T15:00:00Z",
-                "window": "5h",
-            },
-            "long_term": {
-                "percent_remaining": 88.0,
-                "reset_at": "2026-06-18T15:00:00Z",
-                "window": "7d",
+            "windows": {
+                "5h": {
+                    "percent_remaining": 77.0,
+                    "reset_at": "2026-06-11T15:00:00Z",
+                    "rolling": False,
+                },
+                "7d": {
+                    "percent_remaining": 88.0,
+                    "reset_at": "2026-06-18T15:00:00Z",
+                },
+                "monthly": {"percent_remaining": None, "reset_at": None},
             },
             "error": None,
             "details": {},
         },
         "claude": {
             "status": "ok",
-            "short_term": {
-                "percent_remaining": 41.0,
-                "reset_at": "2026-06-11T14:00:00Z",
-                "window": "5h",
-            },
-            "long_term": {
-                "percent_remaining": 85.0,
-                "reset_at": "2026-06-18T14:00:00Z",
-                "window": "7d",
+            "windows": {
+                "5h": {
+                    "percent_remaining": 41.0,
+                    "reset_at": "2026-06-11T14:00:00Z",
+                    "rolling": False,
+                },
+                "7d": {
+                    "percent_remaining": 85.0,
+                    "reset_at": "2026-06-18T14:00:00Z",
+                },
+                "monthly": {"percent_remaining": None, "reset_at": None},
             },
             "error": None,
             "details": {},

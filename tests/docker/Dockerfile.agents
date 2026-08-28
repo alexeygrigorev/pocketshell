@@ -41,6 +41,17 @@ COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
 COPY app/build.gradle.kts /opt/pocketshell-app-build.gradle.kts
 
+# Issue #2356 (Phase 4 of epic #2350): app/build.gradle.kts's versionName is
+# no longer a `versionName = "X.Y.Z"` literal to sed out below -- it is
+# derived from the git tag (scripts/derive-version.sh), which needs full tag
+# history the Docker build context does not carry (only the single
+# build.gradle.kts file is COPYed in above, not .git). The sed in the RUN
+# below now always finds nothing; it falls back to a fixed placeholder
+# rather than hard-failing the image build (`test -n "$version"` used to
+# abort here). Making the fixture report the SAME derived dev version a
+# freshly-built connected-test APK would report is a larger follow-up (would
+# need a build-arg threaded through every docker-compose caller in this
+# repo) intentionally deferred, not attempted in this hotfix.
 RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/claude \
         /usr/local/bin/codex \
@@ -58,7 +69,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell-real-send \
     && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
-    && test -n "$version" \
+    && if [ -z "$version" ]; then version="0.0.0-dev"; fi \
     && printf '%s\n' "$version" > /opt/pocketshell-agent-fixture-version \
     && chown -R testuser:testuser /home/testuser/.ssh
 

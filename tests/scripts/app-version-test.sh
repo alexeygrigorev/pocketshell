@@ -20,18 +20,22 @@ source "$ROOT_DIR/scripts/lib/app-version.sh"
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-mkdir -p "$tmpdir/app"
-cat > "$tmpdir/app/build.gradle.kts" <<'GRADLE'
-android {
-    defaultConfig {
-        versionName = "9.8.7"
-    }
-}
-GRADLE
+# Issue #2356: versionName is tag-derived now (scripts/derive-version.sh),
+# not a Gradle-DSL string literal — so this fixture proves the DELEGATION
+# rather than a text-parse: a synthetic git repo, tagged v9.8.7, with a copy
+# of the real derive-version.sh, must report "9.8.7" via
+# pocketshell_app_version_name (an exact-tag build).
+mkdir -p "$tmpdir/scripts"
+cp "$ROOT_DIR/scripts/derive-version.sh" "$tmpdir/scripts/derive-version.sh"
+chmod +x "$tmpdir/scripts/derive-version.sh"
+git -C "$tmpdir" init --quiet -b main
+git -C "$tmpdir" -c user.email=t@t -c user.name=t add -A
+git -C "$tmpdir" -c user.email=t@t -c user.name=t commit --quiet -m "fixture"
+git -C "$tmpdir" tag v9.8.7
 
 parsed="$(pocketshell_app_version_name "$tmpdir")"
 [[ "$parsed" == "9.8.7" ]] || fail "expected 9.8.7, got $parsed"
-pass_case "parses versionName out of the Gradle DSL"
+pass_case "delegates to scripts/derive-version.sh for an exact-tag build"
 
 expected_fixture_line="$(pocketshell_agent_fixture_version_output 0.3.10)"
 [[ "$expected_fixture_line" == "pocketshell fixture 0.3.10" ]] ||

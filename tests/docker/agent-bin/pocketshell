@@ -27,11 +27,14 @@ fixture_version() {
     cat "$version_file"
     return 0
   fi
-  if [ -r "${POCKETSHELL_PROJECT_ROOT:-.}/app/build.gradle.kts" ]; then
-    parsed_version="$(
-      sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' \
-        "${POCKETSHELL_PROJECT_ROOT:-.}/app/build.gradle.kts" | head -n 1
-    )"
+  # Issue #2356 (Phase 4 of epic #2350): app/build.gradle.kts's versionName
+  # is no longer a literal to sed out of the DSL text -- it is derived from
+  # the git tag via scripts/derive-version.sh (the same script
+  # app/build.gradle.kts itself shells out to). Delegate to it instead of a
+  # second, independently-written derivation.
+  derive_script="${POCKETSHELL_PROJECT_ROOT:-.}/scripts/derive-version.sh"
+  if [ -r "$derive_script" ]; then
+    parsed_version="$(bash "$derive_script" version-name 2>/dev/null || true)"
     if [ -n "$parsed_version" ]; then
       printf '%s\n' "$parsed_version"
       return 0

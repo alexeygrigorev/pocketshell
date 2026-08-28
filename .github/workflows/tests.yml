@@ -401,15 +401,7 @@ jobs:
       # Issue #2064: fail-closed proofs for one gate-built APK pair, exact-SHA
       # sharded CI evidence reuse, and measured/provenance-rich summaries.
       - name: Release identity and evidence guards (issue #2064)
-        run: |
-          chmod +x scripts/test-release-apk-identity.sh scripts/test-reuse-ci-unit-evidence.sh scripts/test-release-gate-summary.sh scripts/test-release-branch-guard.sh
-          scripts/test-release-apk-identity.sh
-          scripts/test-reuse-ci-unit-evidence.sh
-          scripts/test-release-gate-summary.sh
-          # docs/release.md cuts a release on a release/vX.Y.Z worktree; both
-          # release gates must accept that line without opening up to any
-          # branch, and must bind their evidence to the candidate's own SHA.
-          scripts/test-release-branch-guard.sh
+        run: bash scripts/run-release-evidence-guards.sh
 
       # Issue #1761: the local forced full-JVM gate hit Kotlin compiler OOM when
       # Worker API sessions overlapped inside the 8 GiB scope. Keep its complete

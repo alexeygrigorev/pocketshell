@@ -30,8 +30,15 @@
 # a proof that no literal exists — its own header states what it cannot see.
 #
 # ---------------------------------------------------------------------------
-# HOW THE SHIPPED COUNT (6) WAS CHOSEN — the full derivation, kept here rather
-# than in the workflow because this file is what owns the number.
+# HOW THE SHIPPED COUNT (9) WAS CHOSEN — the full derivation, kept here rather
+# than in the workflow because this file is what owns the number. The 6-shard
+# derivation is kept below verbatim (it is still the reasoning FRAMEWORK); the
+# #2377 section at the end is why the answer moved 6 -> 9.
+#
+# --- (1) the #2060 derivation that picked 6, kept as the METHOD ------------
+# Historical in its numbers (registry of 173 entries, run 31292976490) but not in
+# its method: every claim below is how the count is still chosen. Read it first,
+# then section (2) for why the same method now answers 9.
 #
 # The critical path across a matrix is the MAX leg, not the mean, and the max is
 # set by TIME, not class count: membership is by class-name hash (#1862) and
@@ -118,6 +125,70 @@
 # the genuinely measured per-shard `retry_remaining_ms` at total=6 only exists
 # after the first 6-shard `main` run. Read those numbers before treating #1850's
 # AC2 as observed rather than projected.
+#
+# --- (2) issue #2377: the same method now answers 9 -------------------------
+# WHY IT MOVED. #2060's own closing line — "growth headroom at 6 is ~488s on the
+# tightest leg; that is the number to watch as the registry grows" — is exactly
+# what came due. The registry kept growing, and two classes added in the current
+# cycle (FolderSessionRowNavigatorTest 39s from #2380 and
+# Issue2377MultiSocketSessionListDockerTest 61s) pushed shard 3's #1850 margin to
+# 350757ms — UNDER the ~420s twice-failing-class bar. The #1850 hole reopens one
+# leg at a time as the list grows; it does not announce itself.
+#
+# THE ONLY LEVER IS THE TOTAL. Membership is by class-name hash (#1862), which
+# forbids rebalancing by renaming or reordering classes precisely so a hot leg
+# cannot be "fixed" into someone else's leg. Deferring or deleting a class is not
+# a balance fix either. So the question is only which total clears the bar.
+#
+# TWO BARS, NOT ONE, and they disagree. This is the same "heaviest leg by COUNT
+# is not the heaviest by TIME" trap section (1) records, now biting in the other
+# direction — so BOTH shipped-configuration guards have to be satisfied:
+#
+#   #1850 TIME bar   — scripts/test-ci-journey-retry-budget.sh (aa2): every
+#     leg's retry margin > 420000ms. Weighted by measured per-class SECONDS.
+#   #835 COUNT bar   — scripts/test-ci-journey-budget.sh (shard-balance): no leg
+#     over 125% of the ideal CLASS COUNT, plus a 3-sigma uniform band. Unweighted.
+#
+# MEASURED, by re-driving the PRODUCTION selector (and, for the time bar, the
+# PRODUCTION scripts/ci-journey-retry-budget.sh) over the CURRENT 224-class
+# registry and the current per-class fixture
+# (scripts/fixtures/ci-journey-run-31961310072-class-seconds.tsv), i.e. exactly
+# what those two cases assert, with the matrix swapped for each candidate total:
+#
+#   total  min #1850 margin (ms)  worst leg (s)  worst count / cap   verdict
+#     3    -2767743               3396            79 / 94            FAIL time
+#     5     -201543               2174            49 / 56            FAIL time
+#     6      350757               1911            43 / 47            FAIL time  (shipped until now)
+#     7      142857               2010            50 / 40            FAIL both
+#     8     1022757               1591            38 / 35            FAIL count
+#     9     1539357               1345            28 / 32            PASS
+#
+# SEVEN IS STILL WORSE THAN SIX, for the same reason #2060 recorded: the hash
+# clusters differently at every total, and at 7 it lands a 2010s / 50-class leg
+# that fails both bars. The ladder is not monotonic in EITHER metric — 10 and 12
+# fail the count cap again while 11 passes — so "just add one shard" is not a
+# valid move; each candidate has to be driven through the selector, which is
+# what the table above is.
+#
+# EIGHT LOOKS RIGHT AND IS NOT. It clears #1850 comfortably (1022757ms) and has
+# a lighter worst leg in SECONDS than 9 does in the tail, but its shard 7 draws
+# 38 of 224 classes against a 35 cap. Shipping 8 would have been green on the
+# retry-budget guard and red on the balance guard — the exact pair of numbers to
+# check together, not one at a time.
+#
+# NINE, on #2060's own rule: the FIRST total that clears EVERY bar. It also has
+# the better-conditioned count margin (28 vs a 32 cap, i.e. 4 classes of growth
+# headroom, against 11's single class) and takes the heaviest leg from 1911s to
+# 1345s. Peak `main`-push concurrency goes to ~13 of the budgeted 20 Actions
+# jobs. Headroom to watch next: 1539357ms of time margin, and 4 classes of count
+# margin on shard 8 — the COUNT bar is now the binding one, so it is what will
+# trip first as the registry grows. When it does, re-run BOTH ladders.
+#
+# The SAME honest caveat as above applies: this table is arithmetic over the
+# production selector and the production budget helper, not an observation of
+# nine shards, and the per-class costs for the two newest rows are local-emulator
+# measurements (see the TSV's own notes) rather than GitHub Actions attempt-1
+# elapsed times. Refresh both once they have run there.
 #
 # It fails CLOSED. An unreadable, missing, empty, or non-contiguous matrix is an
 # error, never a silent default — a helper that guessed would turn every caller

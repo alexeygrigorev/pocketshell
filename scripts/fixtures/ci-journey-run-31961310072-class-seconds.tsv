@@ -292,3 +292,31 @@ com.pocketshell.app.proof.Issue2338SecondLaunchTerminalAttachJourneyE2eTest	64
 # not yet a GitHub Actions run; refresh with a real CI attempt-1 elapsed time
 # once this class has run there, same convention as the Issue2338 row above.
 com.pocketshell.app.proof.FolderSessionRowNavigatorTest	39
+
+# Issue #2377: new selector, never run on GitHub Actions CI. Measured on
+# 2026-08-28 from a warm standalone :app:connectedDebugAndroidTest invocation
+# on the reviewed fix (issue-2377-impl branch, emulator-5554, Docker `agents`
+# fixture on :2222, rc=0, 3/3 passed) via `scripts/connected-test.sh --suffix
+# i2377tsv -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell
+# .app.projects.Issue2377MultiSocketSessionListDockerTest`. The wrapper
+# reported "BUILD SUCCESSFUL in 1m 1s"; this row uses ceil(wrapper wall
+# time)=61s, matching the JOURNEY_PASS wall-time convention used for #1700 and
+# #2338 above. JUnit suite time was 35.942s, and the full wrapper process wall
+# was 132s (AVD pool claim + #776 pre-run sweep + install), but neither is
+# substituted for the isolated Gradle invocation cost — see the #2297 note
+# above on why a contended wrapper wall is not the in-suite cost. Evidence XML
+# digest (sha256):
+# 8c674369431f715c02e2dd22a99645374be4edf26edaf6fbe801f1539a42c8c4. Like
+# #2338, this measurement is from a local dev-box emulator, not a GitHub
+# Actions run — refresh with a real CI attempt-1 elapsed time once this class
+# has run there. Calibration for that local-vs-CI gap, measured the same way on
+# the same emulator on 2026-08-28: the CI-measured sibling
+# FolderListOldCliHydrateDockerTest (24s in this file) reported "BUILD
+# SUCCESSFUL in 34s" locally (JUnit 9.571s), i.e. the local isolated Gradle
+# wall runs ~1.4x the in-suite CI cost. Even discounting by that factor this
+# class costs ~43s, well over the 28s that #1850's shard-3 leg could absorb at
+# the 6-shard matrix, so no defensible cost for it fitted there. That is what
+# moved the matrix to 9 shards (see scripts/ci-journey-shard-count.sh section
+# (2)); the cost below is NOT tuned to fit a total, the total was re-derived to
+# fit the measured costs.
+com.pocketshell.app.projects.Issue2377MultiSocketSessionListDockerTest	61

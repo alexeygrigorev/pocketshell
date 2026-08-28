@@ -2201,7 +2201,7 @@ plus its console timestamps (sum of per-task deltas = 1089s of a 1125s step):
 24 test tasks / 12362 tests. Both halves are close to balanced, and nearly all
 the non-test cost is variant-specific, so splitting by variant halves both.
 
-### The split, and why two shards and not six
+### The split, and why two shards and not more
 
 `unit` is a `strategy.matrix.variant: [Debug, Release]` job: one leg runs
 `./gradlew testDebugUnitTest`, the other `testReleaseUnitTest`. It is a matrix
@@ -2275,8 +2275,10 @@ manual dispatches, not on every pull request.
   The execution guard verifies fresh JUnit results for the complete task set.
 - **Per-push emulator journey subset** — on `main`/manual runs,
   `Emulator journey subset (load-bearing, Docker agents)` fans the journey
-  registry across six independent shards (`0` through `5`). Each shard gets a
-  cold API-35 Pixel 7 emulator and its Docker fixtures. The downstream
+  registry across nine independent shards (`0` through `8`, raised from six in
+  issue #2377 so every leg keeps its #1850 cold-boot retry margin and stays
+  under #835's 125% class-count cap). Each shard gets a cold API-35 Pixel 7
+  emulator and its Docker fixtures. The downstream
   `Emulator journey aggregate verdict` combines shard tokens into `CLEAN`,
   `RE-RUN`, or `RED`, with a real journey failure remaining release-blocking.
 

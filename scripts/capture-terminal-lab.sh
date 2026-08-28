@@ -146,6 +146,12 @@ if ! "$EMULATOR" -list-avds | grep -Fxq "$AVD_NAME"; then
   fail "AVD '$AVD_NAME' was not listed by $EMULATOR -list-avds"
 fi
 
+# Issue #2381: the fixture's `pocketshell --version` must equal the versionName
+# of the APK this run installs, or every screen it drives sits under the
+# bootstrap "Host setup needed" sheet.
+# shellcheck source=scripts/lib/agents-fixture-version.sh
+source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
+export_agents_fixture_version_for_run "$BUILD_APKS" "$APP_APK"
 run_logged "03-docker-agents-recreate" docker compose -f "$COMPOSE_FILE" up -d --build --force-recreate agents
 wait_for_host_ssh_fixture
 run_logged "05-emulator-readiness" bash -lc \

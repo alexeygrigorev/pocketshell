@@ -12,6 +12,7 @@ import com.pocketshell.app.bootstrap.BootstrapTool
 import com.pocketshell.app.bootstrap.PocketshellDaemonStatus
 import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
+import com.pocketshell.app.bootstrap.expectedHostCliVersion
 import com.pocketshell.app.bootstrap.cliUpdateFailureMessage
 import com.pocketshell.app.bootstrap.cliUpdateNoChangeMessage
 import com.pocketshell.app.bootstrap.compareSemver
@@ -1685,7 +1686,15 @@ class HostListViewModel internal constructor(
         )
     }
 
-    private fun expectedPocketshellVersion(): String = currentVersionName().orEmpty()
+    /**
+     * Issue #2381: the RELEASE CORE of the APK's `versionName`, not the raw
+     * string. Since #2356 `versionName` is derived from git
+     * (`0.4.45-4-g9b1d784e`, `0.0.0-dev+525c87a`, …), and the raw form is
+     * neither a version any host CLI can report back nor one that
+     * `pocketshell==<version>` can resolve on an index. See
+     * [expectedHostCliVersion].
+     */
+    private fun expectedPocketshellVersion(): String = expectedHostCliVersion(currentVersionName())
 
     private fun closeBootstrapSession() {
         val session = bootstrapSession ?: return

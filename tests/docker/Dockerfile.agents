@@ -39,19 +39,16 @@ COPY tools/pocketshell/pyproject.toml /opt/pocketshell-real/pyproject.toml
 #     grid; recovery must come from the reconciler).
 COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
-COPY app/build.gradle.kts /opt/pocketshell-app-build.gradle.kts
 
-# Issue #2356 (Phase 4 of epic #2350): app/build.gradle.kts's versionName is
-# no longer a `versionName = "X.Y.Z"` literal to sed out below -- it is
-# derived from the git tag (scripts/derive-version.sh), which needs full tag
-# history the Docker build context does not carry (only the single
-# build.gradle.kts file is COPYed in above, not .git). The sed in the RUN
-# below now always finds nothing; it falls back to a fixed placeholder
-# rather than hard-failing the image build (`test -n "$version"` used to
-# abort here). Making the fixture report the SAME derived dev version a
-# freshly-built connected-test APK would report is a larger follow-up (would
-# need a build-arg threaded through every docker-compose caller in this
-# repo) intentionally deferred, not attempted in this hotfix.
+# Issue #2381: the baked version is only the floor. #2356 removed the
+# `versionName = "X.Y.Z"` literal this image used to sed out of a COPYed
+# app/build.gradle.kts, so that COPY + sed silently degraded to a fixed
+# placeholder and the fixture stopped tracking the APK. Both are deleted here
+# (D22 hard cut, no dead fallback): the caller now passes the derived version
+# as POCKETSHELL_AGENT_FIXTURE_VERSION and the entrypoint stamps it into this
+# same file at container start. `0.0.0-dev` matches what
+# scripts/derive-version.sh yields for a tagless checkout, so an unset caller
+# and a tagless-checkout APK still agree.
 RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/claude \
         /usr/local/bin/codex \
@@ -68,9 +65,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell-agent-entrypoint \
         /usr/local/bin/pocketshell-real-send \
     && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
-    && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
-    && if [ -z "$version" ]; then version="0.0.0-dev"; fi \
-    && printf '%s\n' "$version" > /opt/pocketshell-agent-fixture-version \
+    && printf '%s\n' "0.0.0-dev" > /opt/pocketshell-agent-fixture-version \
     && chown -R testuser:testuser /home/testuser/.ssh
 
 EXPOSE 22

@@ -18,6 +18,7 @@ import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
+import com.pocketshell.app.bootstrap.expectedHostCliVersion
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.portfwd.ForwardingHostSnapshot
@@ -137,14 +138,20 @@ class FolderListViewModel internal constructor(
     // installed app `versionName` (app + CLI ship in lockstep on every release
     // tag — `tools/pocketshell/pyproject.toml`). Injectable so unit tests can
     // pin it deterministically without a real PackageManager.
+    // Issue #2381: it is the RELEASE CORE of `versionName`, not the raw
+    // string. Since #2356 `versionName` is git-derived and can carry a
+    // describe qualifier and/or build metadata (`0.4.45-4-g9b1d784e`,
+    // `0.0.0-dev+525c87a`) — shapes no host CLI reports and no index can
+    // resolve for the `pocketshell==<version>` upgrade pin. See
+    // [expectedHostCliVersion].
     private val expectedPocketshellVersionProvider: () -> String = expectedPocketshellVersionProvider@{
         val context = applicationContext ?: return@expectedPocketshellVersionProvider ""
         try {
-            context.packageManager
-                .getPackageInfo(context.packageName, 0)
-                .versionName
-                ?.trim()
-                .orEmpty()
+            expectedHostCliVersion(
+                context.packageManager
+                    .getPackageInfo(context.packageName, 0)
+                    .versionName,
+            )
         } catch (_: Throwable) {
             ""
         }

@@ -31,6 +31,12 @@ if ! declare -F pocketshell_avd_lock_path >/dev/null 2>&1; then
   source "${BASH_SOURCE[0]%/*}/avd-lock.sh"
 fi
 
+# Issue #2381: the derived `agents`-fixture version every lane must publish.
+if ! declare -F export_agents_fixture_version >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/agents-fixture-version.sh
+  source "${BASH_SOURCE[0]%/*}/agents-fixture-version.sh"
+fi
+
 # --- configuration --------------------------------------------------------
 
 # Candidate host ports, first-free wins. 2243-2245 sit clear of the existing
@@ -134,6 +140,13 @@ pocketshell_agents_compose_env_for_port() {
   if [[ -n "$project" ]]; then
     printf 'COMPOSE_PROJECT_NAME=%s\n' "$project"
   fi
+  # Issue #2381: every lane's fixture must report the same `pocketshell
+  # --version` as the APK built from this checkout, or the app raises the
+  # bootstrap "Host setup needed" sheet over whatever screen the journey is
+  # asserting. This is the single point every `docker compose ... agents`
+  # invocation in this file routes its environment through.
+  export_agents_fixture_version
+  printf 'POCKETSHELL_AGENT_FIXTURE_VERSION=%s\n' "${POCKETSHELL_AGENT_FIXTURE_VERSION:-}"
 }
 
 # ---------------------------------------------------------------------------

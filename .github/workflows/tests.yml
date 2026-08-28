@@ -1293,8 +1293,11 @@ jobs:
       - name: Record emulator-journey job start
         run: echo "JOURNEY_JOB_START_EPOCH_MS=$(date +%s%3N)" >> "$GITHUB_ENV"
 
+      # fetch-depth 0 (#2381): versionName derives from the git tag.
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       # Issue #2324: create the setup evidence root before any pre-journey
       # operation can fail. The Android SDK repair below writes its captured

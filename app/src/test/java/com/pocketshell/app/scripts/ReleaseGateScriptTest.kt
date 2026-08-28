@@ -68,6 +68,27 @@ class ReleaseGateScriptTest {
         )
     }
 
+    /**
+     * Issue #2381: the pre-release gate builds every release-chain APK inside a
+     * deliberately `.git`-less rsync copy, where scripts/derive-version.sh used
+     * to answer `0.0.0-dev` / versionCode=1 — so the release gate validated,
+     * journeyed against and published a binary that could not express a release
+     * version, and HostBootstrapScenarioSuiteTest's seven setup-detection
+     * profiles (all of which compare the app version against the host CLI's)
+     * were vacuous. The harness proves the copy is placeholder-versioned
+     * WITHOUT the pin and source-versioned with it, pins the pin's position
+     * between the rsync and the exec, and drives
+     * release-emulator-validation.sh's tagless preflight red then green.
+     */
+    @Test
+    fun preReleaseGateIsolatedCopyCarriesTheCheckoutsRealVersion() {
+        runShellHarness(
+            relativePath = "tests/scripts/gate-isolated-copy-version-test.sh",
+            expectedPassLine = "PASS: gate isolated-copy version pin (14 cases)",
+            timeoutSeconds = 120,
+        )
+    }
+
     /** #548 grace proof: the reconnect script must keep selecting the load-bearing test. */
     @Test
     fun reconnectAppSwitchScriptKeepsItsLoadBearingSelector() {

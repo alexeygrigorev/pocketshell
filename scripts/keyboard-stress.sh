@@ -151,6 +151,12 @@ if ! "$ADB" get-state >/dev/null 2>&1; then
     "${emulator_cmd[@]}"
 fi
 run_logged "01-wait-emulator" wait_for_emulator
+# Issue #2381: the fixture's `pocketshell --version` must equal the versionName
+# of the APK this run installs, or every screen it drives sits under the
+# bootstrap "Host setup needed" sheet.
+# shellcheck source=scripts/lib/agents-fixture-version.sh
+source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
+export_agents_fixture_version_for_run "$BUILD_APKS" "$APP_APK"
 run_logged "02-docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
 run_logged "03-docker-ssh-readiness" wait_for_ssh_fixture
 

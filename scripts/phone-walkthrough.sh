@@ -603,6 +603,21 @@ verify_emulator_booted() {
 # follow-up SSH probe so the readiness log still records the same
 # tool-availability sanity-check evidence reviewers look for.
 verify_docker_agents() {
+  # Issue #2381 — the fixture's `pocketshell --version` must match the APK this
+  # walkthrough installs. Since #2356 the APK's versionName is derived from git,
+  # so an unstamped fixture reports its baked `0.0.0-dev`, the app reads that as
+  # a version mismatch, and the bootstrap "Host setup needed" sheet covers every
+  # screen this visual-audit path is meant to capture.
+  #
+  # BUILD_APKS=0 is the release chain (#2064): the installed pair is the one the
+  # pre-release gate built inside its `.git`-less isolated copy, whose
+  # versionName is NOT what $ROOT_DIR derives — read it out of the APK itself.
+  # BUILD_APKS=1 rebuilds from THIS checkout a few steps below, so the checkout
+  # derivation is the right (and only correct) answer there; any APK sitting in
+  # app/build right now is about to be replaced.
+  # shellcheck source=scripts/lib/agents-fixture-version.sh
+  source "$ROOT_DIR/scripts/lib/agents-fixture-version.sh"
+  export_agents_fixture_version_for_run "$BUILD_APKS" "$APP_APK"
   run_logged "05-docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
   local log_file="$LOG_DIR/06-docker-ssh-readiness.log"
   if ! wait_for_container_healthy "$COMPOSE_FILE" agents "$log_file" 60; then

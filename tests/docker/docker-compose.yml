@@ -166,6 +166,15 @@ services:
       dockerfile: tests/docker/Dockerfile.agents
     image: pocketshell-test:agents
     container_name: ${AGENTS_CONTAINER_NAME:-pocketshell-test-agents}
+    # Issue #2381: the `pocketshell --version` this fixture reports must match
+    # the APK under test, or every journey against it lands on the bootstrap
+    # "Host setup needed" sheet instead of the screen it is asserting. The
+    # caller exports the value scripts/derive-version.sh produced for the same
+    # checkout that built the APK (see scripts/lib/agents-fixture-version.sh);
+    # unset falls through to the image's baked `0.0.0-dev`, which is what a
+    # tagless checkout's APK reports too.
+    environment:
+      POCKETSHELL_AGENT_FIXTURE_VERSION: ${POCKETSHELL_AGENT_FIXTURE_VERSION:-}
     ports:
       - "${AGENTS_HOST_PORT:-2222}:22"
     healthcheck: *ssh-healthcheck

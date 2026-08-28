@@ -215,6 +215,29 @@ run_self_test() {
   return 0
 }
 
+# Issue #2381: emulator-APK version wiring (see the delegated script's header
+# for the full failure story). Self-test first so a broken guard cannot pass
+# silently, then the real tree.
+check_emulator_apk_version_wiring() {
+  local root="$1"
+  local script="$root/scripts/check-emulator-apk-version-wiring.sh"
+
+  if [[ ! -f "$script" ]]; then
+    printf 'FAIL: missing %s (issue #2381)\n' "$script" >&2
+    return 1
+  fi
+
+  if ! bash "$script" --self-test; then
+    printf 'FAIL: check-emulator-apk-version-wiring.sh --self-test did not pass\n' >&2
+    return 1
+  fi
+
+  if ! bash "$script"; then
+    return 1
+  fi
+  return 0
+}
+
 main() {
   local skip_gradle=0
   case "${1:-}" in
@@ -250,6 +273,14 @@ main() {
 
   check_single_source_reference \
     "$ROOT_DIR/$GRADLE_REL" "$ROOT_DIR/$BUILD_WORKFLOW_REL" || ok=0
+
+  # Issue #2381: step 4 — the derived version is load-bearing PRODUCT input
+  # (the app expects the host `pocketshell` CLI to be on its own versionName's
+  # release core), so a CI job that builds an APK for an emulator must have
+  # the tag history to derive a real version, and the Docker `agents` fixture
+  # must be stamped with the same one. Delegated to a dedicated script so the
+  # rule can also be run on its own.
+  check_emulator_apk_version_wiring "$ROOT_DIR" || ok=0
 
   if [[ "$ok" -ne 1 ]]; then
     printf 'FAIL: version-coupling guard failed one or more checks above.\n' >&2

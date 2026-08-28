@@ -104,6 +104,11 @@ make_worktree() {
   mkdir -p "$root/scripts/lib" "$root/build" "$root/tests/docker"
   cp "$ROOT_DIR/scripts/lib/agents-pool.sh" "$root/scripts/lib/agents-pool.sh"
   cp "$ROOT_DIR/scripts/lib/avd-lock.sh" "$root/scripts/lib/avd-lock.sh"
+  # Issue #2381: agents-pool.sh also sources this to stamp the fixture's
+  # `pocketshell --version` with the APK's derived version. A synthetic
+  # worktree missing it makes every `source` in the harness print a
+  # "No such file" error, so keep the copied helper set complete.
+  cp "$ROOT_DIR/scripts/lib/agents-fixture-version.sh" "$root/scripts/lib/agents-fixture-version.sh"
   cp "$ROOT_DIR/tests/docker/docker-compose.yml" "$root/tests/docker/docker-compose.yml"
 }
 

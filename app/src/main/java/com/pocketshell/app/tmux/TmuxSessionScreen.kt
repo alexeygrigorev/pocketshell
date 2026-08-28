@@ -258,25 +258,15 @@ public fun TmuxSessionScreen(
         sessionLive = conn.sessionLive,
         wireWritable = viewModel.isSendTransportWritable(),
     )
-    // Issue #2173: the fused screen identity (`conn.targetSessionId`) is the
-    // generation reveal already adopted. A name-only route used to keep the
-    // composer on host/name until a pane row copied `sessionCreated`, which
-    // never happened for inline-reveal panes — CI then waited 60s on
-    // `composer=2/issue1526-exactly-once` while `tmux=tmux:2:$0:…`.
     val outboundQueueBinding = remember(
-        hostId, sessionName, conn.panes, tmuxSessionId, sessionCreated,
-        outboundGenerationIsSettled, conn.targetSessionId,
+        hostId, sessionName, conn.panes, tmuxSessionId, sessionCreated, outboundGenerationIsSettled,
     ) {
-        val adopted = parseDurableTmuxSessionIdentity(hostId, conn.targetSessionId.value)
         tmuxOutboundQueueBinding(
             hostId,
             sessionName,
             conn.panes,
-            adopted?.sessionId ?: tmuxSessionId,
-            adopted?.createdEpochSeconds ?: sessionCreated,
-            // Do not OR-in sessionLive alone: that bypasses the wire-oracle
-            // half of [outboundGenerationSettled] (#1944 / #1602) and was the
-            // #2173r suspicion for extra identity recomposition mid-swipe.
+            tmuxSessionId,
+            sessionCreated,
             outboundGenerationIsSettled,
         )
     }

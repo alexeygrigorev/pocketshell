@@ -1935,33 +1935,24 @@ not run the full test suite. Unit, Docker integration, and emulator smoke checks
 belong to the separate Tests workflow and the orchestrator's pre-tag
 verification gate.
 
+**Issue #2356 (Phase 4 of epic #2350): there is no version-bump commit or PR
+any more.** `app/build.gradle.kts`'s `versionCode`/`versionName` and the
+`tools/pocketshell` PyPI package version are both DERIVED from the git tag
+being built (`scripts/derive-version.sh`, the single source of truth for
+both sides — see `scripts/check-version-coupling.sh`). The tag pushed in
+step 4 below IS the version declaration; nothing else declares it, and
+nothing needs bumping/committing before a release.
+
 Release build steps:
 
 1. Before starting an intermediate or normal release, check GitHub Actions for
-   the current `origin/main` HEAD. Do not bump, tag, or release if any relevant
+   the current `origin/main` HEAD. Do not tag or release if any relevant
    CI run for that commit has failed or is still in progress. If CI is red,
    inspect the failed jobs/logs first, fix or rerun until `origin/main` HEAD is
    green, then continue the release. A passing branch run is not enough when
    `main` has a later failed run.
 2. Pick the next semantic version after the latest GitHub Release/tag.
-3. Update Android metadata before tagging:
-   - `versionName` must equal the tag without the leading `v`.
-   - `versionCode` must increase monotonically.
-   - **Bump `tools/pocketshell/pyproject.toml` `version` in LOCKSTEP with
-     `versionName`.** The `#948` version-coupling guard (`scripts/check-version-coupling.sh`,
-     run in the `Python utility tests` required check) hard-fails the bump PR if
-     the app `versionName` and the `tools/pocketshell` package version drift.
-     Bumping only `app/build.gradle.kts` leaves the guard red (empty-looking
-     `pytest`-passed job that fails at the guard step) — bump both, or the
-     release PR won't go green. Verify locally with
-     `bash scripts/check-version-coupling.sh` (exits 0 when aligned).
-4. Run the normal verification gate before committing the version bump.
-5. Commit the version bump on a release branch, open a PR to `main`, and merge
-   only after the required protected-`main` checks are green. Then fast-forward
-   local `main` and confirm the checkout is clean and `HEAD` equals
-   `origin/main` before creating or pushing any tag. A direct `main` push here
-   is only allowed through the documented admin/emergency bypass.
-6. From that stable pushed `main`, run the emulator-only release validation.
+3. From that stable `origin/main` HEAD, run the emulator-only release validation.
    Run it locally or through GitHub Actions, but the release summary must name
    the exact commit that will be tagged:
    - `scripts/pre-release-confidence-gate.sh`
@@ -1969,20 +1960,29 @@ Release build steps:
    - `scripts/phone-walkthrough.sh tmux-existing-session`
    - `scripts/phone-walkthrough.sh setup-detection`
    - visual-audit screenshot capture, then inspect the screenshots
-7. Prefer the wrapper that runs that sequence and writes the required summary:
+   Prefer the wrapper that runs that sequence and writes the required summary:
    `scripts/release-emulator-validation.sh`. (For the local pre-merge loop on a
    small, single-area change, `scripts/dev-fast-gate.sh` scopes the emulator
    stages by changed area — a developer convenience that NEVER substitutes for
    this release gate and cannot produce a taggable summary; see
    [docs/testing.md](docs/testing.md#developer-fast-path-scoped-by-changed-area).)
-8. For terminal/tmux-heavy releases, opt into the long-running evidence before
+4. For terminal/tmux-heavy releases, opt into the long-running evidence before
    tagging:
    `TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh`.
    Link `build/long-running-session/<run-id>-long-running/` from the release
    issue or PR. The hold remains optional for unrelated small releases.
-9. Push the matching tag with the guarded tag helper, for example
+5. Push the matching tag with the guarded tag helper, for example
    `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
-10. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+   It creates the tag LOCALLY first and verifies `scripts/derive-version.sh`
+   derives the expected `versionName` AND a strictly-monotonic `versionCode`
+   for it (versus the newest tag already reachable from `origin/main`) before
+   ever pushing — a derivation bug is caught here, not after the tag has
+   already reached `origin` and triggered the Build workflow.
+6. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+   `app/build.gradle.kts` derives its `versionCode`/`versionName` from the
+   pushed tag directly (no separate commit to wait for); the publish-pypi job
+   stamps the same derived version into its ephemeral checkout of
+   `tools/pocketshell/pyproject.toml` before publishing to PyPI.
 
 Two operational gotchas learned cutting v0.4.22 on the dev box:
 
@@ -2032,10 +2032,10 @@ Manual Release Emulator Validation can also be run from GitHub Actions when a
 local emulator is unavailable:
 
 1. Open Actions -> Release Emulator Validation -> Run workflow.
-2. Choose `main` for taggable release evidence after the version bump PR has
-   merged. A release-branch run is pre-merge evidence unless that exact commit
-   becomes `origin/main`; if the merge changes the SHA, rerun validation on
-   `main`. Optionally provide a `run_id`.
+2. Choose `main` for taggable release evidence. A release-branch run is
+   pre-merge evidence unless that exact commit becomes `origin/main`; if the
+   merge changes the SHA, rerun validation on `main`. Optionally provide a
+   `run_id`.
 3. Wait for the workflow to finish, then read the job summary.
 4. Download the `release-emulator-validation-<run-id>` artifact for logs,
    screenshots, and the release summary.

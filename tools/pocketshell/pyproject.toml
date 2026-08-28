@@ -4,11 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pocketshell"
-# Must equal `versionName` in app/build.gradle.kts on every release tag.
-# scripts/check-pypi-version.sh enforces this; .github/workflows/build.yml
-# runs that check before publishing to PyPI. See
-# tools/pocketshell/README.md ("Release flow") for the bump procedure.
-version = "0.4.45"
+# PLACEHOLDER (issue #2356, Phase 4 of epic #2350): this value is NEVER read
+# for a real release. The publish-pypi job in .github/workflows/build.yml
+# overwrites this field (in its ephemeral CI checkout only, never committed)
+# from `scripts/derive-version.sh version-name --ref <tag>` — the SAME
+# derivation app/build.gradle.kts uses for the Android versionName — right
+# before building the sdist/wheel, so both sides derive from the git tag
+# being released and can never independently drift.
+# scripts/check-pypi-version.sh enforces the stamped value matches the tag;
+# scripts/check-version-coupling.sh enforces the derivation itself is
+# single-sourced. See tools/pocketshell/README.md ("Version coupling").
+version = "0.0.0"
 description = "Unified server-side Python utility for the PocketShell Android client."
 readme = "README.md"
 requires-python = ">=3.11"

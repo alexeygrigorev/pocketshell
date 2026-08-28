@@ -17,8 +17,17 @@ jobs:
       contents: write
 
     steps:
+      # Issue #2356 (Phase 4 of epic #2350): FULL history + tags. Both this
+      # job's "Generate version" step and app/build.gradle.kts's own
+      # versionCode/versionName derivation (scripts/derive-version.sh) need
+      # `git tag --list 'v*' --merged HEAD` / `git describe` to see every
+      # prior release tag, not just the one commit a shallow checkout would
+      # fetch — a shallow checkout here would silently undercount tags and
+      # produce a WRONG (non-monotonic) versionCode for the real release APK.
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5
@@ -36,17 +45,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
+      # Issue #2356: reuse the SAME derivation app/build.gradle.kts uses
+      # (scripts/derive-version.sh) for the artifact filename, rather than a
+      # second independently-written "dev-<timestamp>-<sha>" scheme, so the
+      # uploaded APK filename always matches the version baked into the APK
+      # itself.
       - name: Generate version
         id: version
         run: |
-          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
-          SHORT_SHA=$(echo ${{ github.sha }} | cut -c 1-7)
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            VERSION="${{ github.ref_name }}"
-            VERSION="${VERSION#v}"
-          else
-            VERSION="dev-${TIMESTAMP}-${SHORT_SHA}"
-          fi
+          chmod +x scripts/derive-version.sh
+          VERSION="$(scripts/derive-version.sh version-name)"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Make gradlew executable
@@ -103,12 +111,33 @@ jobs:
       url: https://pypi.org/p/pocketshell
 
     steps:
+      # Issue #2356: full tag history — the stamp step below and
+      # scripts/check-pypi-version.sh both call scripts/derive-version.sh,
+      # which needs the tag object (and, for versionCode-adjacent checks,
+      # prior tags) reachable in this checkout.
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Verify Android versionName matches pyproject.toml and tag
-        # Hard cut (D22): publish must abort if the maintainer bumps one
-        # version-source-of-truth but forgets the other before tagging.
+      # Issue #2356 (Phase 4 of epic #2350): the committed
+      # tools/pocketshell/pyproject.toml `version` is a placeholder (see the
+      # comment in that file) — never published as-is. Stamp the REAL,
+      # tag-derived version into this ephemeral checkout only (never
+      # committed back) from the SAME script app/build.gradle.kts uses, so
+      # both sides can never independently drift (scripts/check-version-
+      # coupling.sh enforces this structurally at PR time).
+      - name: Stamp pyproject.toml version from tag
+        run: |
+          chmod +x scripts/derive-version.sh
+          DERIVED_VERSION="$(scripts/derive-version.sh version-name --ref "${{ github.ref_name }}")"
+          echo "Stamping tools/pocketshell/pyproject.toml version = ${DERIVED_VERSION}"
+          sed -i "0,/^version = \".*\"/s//version = \"${DERIVED_VERSION}\"/" tools/pocketshell/pyproject.toml
+          grep -m1 '^version = ' tools/pocketshell/pyproject.toml
+
+      - name: Verify stamped pyproject.toml version matches the tag
+        # Hard cut (D22): publish must abort if the derivation/stamp step
+        # ever diverges from the tag being published.
         run: |
           chmod +x scripts/check-pypi-version.sh
           scripts/check-pypi-version.sh --check-tag "${{ github.ref_name }}"

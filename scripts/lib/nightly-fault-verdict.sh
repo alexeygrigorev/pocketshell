@@ -19,8 +19,10 @@
 #
 # Because phase 1's chronic flakes and the #822 expected-fail lane are ALWAYS
 # red, the extensive job conclusion was essentially never `success`, so the
-# release gate had to be waived with NIGHTLY_FAULT_GATE_DISABLED=1 on every
-# recent release — a permanently-waived safety gate protects nothing.
+# release gate had to be waived on every recent release — a permanently-waived
+# safety gate protects nothing. (D37/#2379 has since removed the waiver flag
+# outright: the guard now has no off switch, which is only tenable because the
+# verdict this helper computes is narrow enough to be genuinely achievable.)
 #
 # This helper computes a verdict that reflects ONLY the fault-injection safety
 # phases (network-fault + bootstrap), EXCLUDING the flaky journey suite AND the

@@ -13,19 +13,58 @@ set -euo pipefail
 # bootstrap) with the flaky full journey/E2E suite AND the #822 Slice C/D
 # expected-fail lane (TDD specs for unbuilt features, designed RED). Reading the
 # whole extensive-job conclusion meant the job was essentially never `success`,
-# so every recent release had to WAIVE this gate (NIGHTLY_FAULT_GATE_DISABLED=1)
-# — a permanently-waived gate protects nothing. The suite now emits a
-# machine-readable fault verdict from the network-fault + bootstrap phases ONLY,
-# and the workflow exposes it as a dedicated, NON-continue-on-error
-# `Fault-injection safety verdict` job. This guard reads THAT job's conclusion,
-# so it GREENs when the fault phases passed even though an unrelated journey /
-# expected-fail test is red, and REDs only when a fault phase itself failed (or
-# no verdict was produced — genuine nightly-infra breakage, the #1056 escape
-# hatch case).
+# so every recent release had to WAIVE this gate — a permanently-waived gate
+# protects nothing. The suite now emits a machine-readable fault verdict from
+# the network-fault + bootstrap phases ONLY, and the workflow exposes it as a
+# dedicated, NON-continue-on-error `Fault-injection safety verdict` job. This
+# guard reads THAT job's conclusion, so it GREENs when the fault phases passed
+# even though an unrelated journey / expected-fail test is red, and REDs only
+# when a fault phase itself failed (or no verdict was produced — genuine
+# nightly-infra breakage).
 #
 # This guard makes the release gate FAIL when the latest nightly fault-verdict
 # run is red / cancelled / stale / missing. It is wired as an early required
 # step in scripts/release-emulator-validation.sh.
+#
+# ISSUE #2379 / DECISION D37 — THIS GUARD HAS NO OFF SWITCH.
+# There is deliberately NO environment variable, workflow input, or "deliberately
+# waived release" branch that skips this check. Waiving it was routine
+# (v0.4.31–v0.4.38, v0.4.45 all shipped with the fault verdict un-enforced) and
+# #1671 traced the #1610 reconnect storm reaching the maintainer to exactly that.
+# When this guard BLOCKS, the two sanctioned ways forward are:
+#   (a) fix the failing test/journey, or
+#   (b) quarantine the offending test/journey class through the D36(4) flake
+#       mechanism (auto-filed issue, non-blocking lane, 2-week expiry), so the
+#       verdict covers a genuinely smaller but still-real suite.
+# Never a skip of the whole verdict. Reintroducing a skip flag anywhere under
+# scripts/ or .github/workflows/ fails scripts/check-release-gate-bypass-absent.sh
+# on the next push.
+#
+# ISSUE #2379 ROUND 2 — AND NOTHING IN THE ENVIRONMENT CAN CHANGE THE VERDICT.
+# Deleting the named escape hatch was not enough. This guard used to take
+# NIGHTLY_FAULT_RUN_FIXTURE / _WORKFLOW / _JOB_NEEDLE / _RELEASE_HEAD from the
+# ENVIRONMENT, behind a comment claiming they only selected WHICH run is read.
+# That was false: the fixture does not select a run, it SUPPLIES THE ANSWER.
+#     NIGHTLY_FAULT_RUN_FIXTURE=green.json scripts/check-nightly-fault-run.sh
+#     -> "PASS: nightly fault-injection safety verdict is green ...", exit 0
+# and scripts/release-emulator-validation.sh inherited the caller's environment
+# straight into this script, so one exported variable plus a three-line JSON
+# file wrote a fabricated green into the release summary. That is WORSE than the
+# deleted hatch, which at least printed "SKIPPED: ... escape hatch" — a
+# fabricated fixture makes the release artifact lie about having checked.
+#
+# So: every one of those knobs is now a COMMAND-LINE FLAG and no environment
+# variable is read at all. Environment inheritance cannot set a flag, and the
+# release path passes only --release-head. `gh` is additionally pinned to this
+# checkout's origin repository with --repo and invoked with GH_REPO/GH_HOST
+# scrubbed, so the environment cannot point the query at some other green
+# repository either.
+#
+# Honest scope of that claim: this guard still trusts git, the checkout, and
+# `gh`'s credentials — an actor who can rewrite the working tree does not need a
+# bypass. What it no longer trusts is ANY variable in its environment.
+# scripts/check-release-gate-bypass-absent.sh (C4) asserts exactly this, per
+# push, by driving the guard with a hostile environment.
 #
 # Two layers, kept separate so the decision logic is unit-testable WITHOUT any
 # network/`gh` dependency:
@@ -47,20 +86,35 @@ set -euo pipefail
 # GREENs on a fault-verdict-green run and REDs on a fault-verdict-red run — this
 # is the dry-run rejection proof the issue asks for.
 #
-# Override env (for dry-runs / CI without `gh` creds):
-#   NIGHTLY_FAULT_RUN_FIXTURE   path to a JSON file shaped like one element of
-#                               `gh run list --json ...` PLUS a `jobConclusion`
-#                               field (the fault-verdict-job conclusion). When
-#                               set, the script reads this instead of calling `gh`.
-#   NIGHTLY_FAULT_RELEASE_HEAD  override the release HEAD SHA (default: HEAD).
-#   NIGHTLY_FAULT_WORKFLOW      workflow file (default: nightly-extensive.yml).
-#   NIGHTLY_FAULT_JOB_NEEDLE    substring identifying the fault-verdict job
-#                               (default: "Fault-injection safety verdict").
-#   NIGHTLY_FAULT_GATE_DISABLED=1  skip the guard entirely (escape hatch; the
-#                               release gate prints a loud SKIPPED note).
+# Usage:
+#   check-nightly-fault-run.sh [--release-head <sha>]     # the release path
+#   check-nightly-fault-run.sh --self-test                # offline proof matrix
+#
+# TEST-ONLY flags. They exist so the decision path can be proven offline (no
+# network, no `gh` creds). They are flags, not environment variables, precisely
+# so that no exported variable can reach them, and the release path passes none
+# of them — check-release-gate-bypass-absent.sh C4-static asserts that:
+#   --fixture <path>      read this JSON (one element of `gh run list --json ...`
+#                         PLUS a `jobConclusion` field carrying the fault-verdict
+#                         job's conclusion) instead of calling `gh`. Every line of
+#                         output is then marked "[FIXTURE DRY RUN]", so a fixture
+#                         verdict can never be pasted into, or mistaken for, a
+#                         release summary.
+#   --workflow <file>     workflow file (default: nightly-extensive.yml).
+#   --job-needle <needle> substring identifying the fault-verdict job
+#                         (default: "Fault-injection safety verdict").
+#
+# --release-head <sha> overrides the release HEAD (default: `git rev-parse HEAD`).
 
-WORKFLOW="${NIGHTLY_FAULT_WORKFLOW:-nightly-extensive.yml}"
-JOB_NEEDLE="${NIGHTLY_FAULT_JOB_NEEDLE:-Fault-injection safety verdict}"
+WORKFLOW="nightly-extensive.yml"
+JOB_NEEDLE="Fault-injection safety verdict"
+FIXTURE=""
+RELEASE_HEAD_OVERRIDE=""
+FIXTURE_PREFIX=""
+
+usage() {
+  sed -n '/^# Usage:/,/^# --release-head/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
 
 # ---------------------------------------------------------------------------
 # Layer 1: PURE decision function (no git, no gh, no I/O).
@@ -186,21 +240,32 @@ self_test() {
   # so this exercises exactly what the guard reads on a real run. headSha ==
   # release head so the ancestry short-circuit avoids any git dependency.
   # -------------------------------------------------------------------------
+  # Each case also pins the BLOCK/PASS REASON, not just the exit code: the
+  # round-1 "no verdict" case exited 1 through the STALE branch (the tab-split
+  # bug below) and no assertion noticed, so the branch it claimed to cover was
+  # never executed.
   local self_path="${BASH_SOURCE[0]}"
   fixture_dry_run() {
-    local label="$1" expect_rc="$2" job_conclusion="$3"
+    local label="$1" expect_rc="$2" job_conclusion="$3" reason_needle="$4"
     local sha="cccccccccccccccccccccccccccccccccccccccc"
     local tmp; tmp="$(mktemp)"
     printf '{"status":"completed","jobConclusion":"%s","headSha":"%s","databaseId":424242}\n' \
       "$job_conclusion" "$sha" > "$tmp"
+    # Flags, not environment variables — see the D37 round-2 note in the header.
     set +e
-    out="$(NIGHTLY_FAULT_RUN_FIXTURE="$tmp" NIGHTLY_FAULT_RELEASE_HEAD="$sha" \
-      bash "$self_path" 2>&1)"
+    out="$(bash "$self_path" --fixture "$tmp" --release-head "$sha" 2>&1)"
     rc=$?
     set -e
     rm -f "$tmp"
     if [[ "$rc" != "$expect_rc" ]]; then
       printf 'FAIL [%s]: expected guard rc=%s got rc=%s\n%s\n' "$label" "$expect_rc" "$rc" "$out"
+      failures=$((failures + 1))
+    elif ! printf '%s' "$out" | grep -qF -- "$reason_needle"; then
+      printf 'FAIL [%s]: rc=%s was right but the reason was not "%s"\n%s\n' \
+        "$label" "$rc" "$reason_needle" "$out"
+      failures=$((failures + 1))
+    elif ! printf '%s' "$out" | grep -qF -- "[FIXTURE DRY RUN]"; then
+      printf 'FAIL [%s]: fixture output was not marked as a dry run\n%s\n' "$label" "$out"
       failures=$((failures + 1))
     else
       printf 'ok   [%s] guard rc=%s :: %s\n' "$label" "$rc" "$(printf '%s' "$out" | tail -1)"
@@ -210,10 +275,15 @@ self_test() {
   echo "--- fixture-driven end-to-end guard dry run (issue #1201) ---"
   # Fault phases PASSED (verdict job success) while the extensive shard is red
   # from unrelated journey / #822 flakes -> the guard GREENs (exit 0). This is
-  # the exact case that used to force NIGHTLY_FAULT_GATE_DISABLED=1.
-  fixture_dry_run "fault-verdict-green-shard-red" 0 success
+  # the exact case that used to force a release-wide waiver of the gate.
+  fixture_dry_run "fault-verdict-green-shard-red" 0 success   "safety verdict is green"
   # A fault phase itself FAILED (verdict job failure) -> the guard BLOCKS (exit 1).
-  fixture_dry_run "fault-verdict-red"             1 failure
+  fixture_dry_run "fault-verdict-red"             1 failure   "safety verdict is RED"
+  # The fault-verdict job NEVER RAN (empty conclusion). Issue #2379 round 2: this
+  # must reach the "no fault signal" branch. Before the tab-split fix the empty
+  # middle field shifted headSha into job_conclusion and databaseId into
+  # run_head_sha, so this blocked as STALE with headSha=424242.
+  fixture_dry_run "fault-verdict-missing"         1 ""        "did not run the fault-verdict job"
 
   echo
   if [[ "$failures" -eq 0 ]]; then
@@ -228,32 +298,57 @@ self_test() {
 # Layer 2: fetch + resolve, then call the pure function.
 # ---------------------------------------------------------------------------
 
+# Pin `gh` to THIS checkout's repository (issue #2379 round 2). An unpinned
+# `gh run list` honours the inherited GH_REPO environment variable, which is the
+# same class of bypass as the fixture one: point the guard at a green fork and
+# the release gate reads someone else's verdict. Derived from remote.origin.url;
+# unresolvable means BLOCK, never "query unpinned".
+resolve_repo_slug() {
+  local url name rest owner
+  url="$(git config --get remote.origin.url 2>/dev/null || true)"
+  [[ -n "$url" ]] || return 1
+  url="${url%.git}"
+  url="${url%/}"
+  name="${url##*/}"
+  rest="${url%/*}"
+  owner="${rest##*[:/]}"
+  [[ -n "$owner" && -n "$name" && "$owner" != "$url" ]] || return 1
+  printf '%s/%s\n' "$owner" "$name"
+}
+
 # Resolve the latest nightly run that ACTUALLY ran the fault-verdict job, plus
 # that job's conclusion. Emits four tab-separated fields on stdout:
 #   <run_status>\t<job_conclusion>\t<run_head_sha>\t<databaseId>
 # job_conclusion is "" when no run ran a matching job.
 #
-# Reads NIGHTLY_FAULT_RUN_FIXTURE if set (a JSON object with the run fields PLUS
-# a `jobConclusion` field) — no `gh` call. Otherwise queries `gh`.
+# Reads the --fixture file when one was passed (a JSON object with the run fields
+# PLUS a `jobConclusion` field) — no `gh` call. Otherwise queries `gh`, pinned to
+# this repository and with GH_REPO/GH_HOST scrubbed out of the environment.
 resolve_latest_fault_run() {
-  if [[ -n "${NIGHTLY_FAULT_RUN_FIXTURE:-}" ]]; then
-    [[ -f "$NIGHTLY_FAULT_RUN_FIXTURE" ]] ||
-      { echo "fixture not found: $NIGHTLY_FAULT_RUN_FIXTURE" >&2; return 2; }
+  if [[ -n "$FIXTURE" ]]; then
+    [[ -f "$FIXTURE" ]] ||
+      { echo "fixture not found: $FIXTURE" >&2; return 2; }
     jq -r '[(.status // ""), (.jobConclusion // ""), (.headSha // ""), ((.databaseId // "") | tostring)] | @tsv' \
-      "$NIGHTLY_FAULT_RUN_FIXTURE"
+      "$FIXTURE"
     return 0
   fi
 
   command -v gh >/dev/null 2>&1 || { echo "gh CLI is required" >&2; return 2; }
   command -v jq >/dev/null 2>&1 || { echo "jq is required" >&2; return 2; }
 
+  local repo
+  repo="$(resolve_repo_slug)" || {
+    echo "could not derive owner/repo from remote.origin.url — refusing to query gh unpinned (an unpinned query trusts \$GH_REPO)" >&2
+    return 2
+  }
+
   # Pull recent runs. Walk newest→oldest and pick the FIRST whose fault-verdict
   # job exists (i.e. it was not guard-skipped). Guard-skipped runs only have the
   # cheap "Guard" job, so the fault suite never ran — those are not a signal.
   local runs
-  runs="$(gh run list --workflow="$WORKFLOW" --limit 15 \
+  runs="$(env -u GH_REPO -u GH_HOST gh run list --repo "$repo" --workflow="$WORKFLOW" --limit 15 \
     --json databaseId,headSha,status,conclusion,createdAt 2>/dev/null)" || {
-    echo "gh run list failed for workflow '$WORKFLOW'" >&2
+    echo "gh run list failed for workflow '$WORKFLOW' in $repo" >&2
     return 2
   }
 
@@ -267,7 +362,7 @@ resolve_latest_fault_run() {
 
     # Inspect this run's jobs; find the fault-verdict job by name needle.
     local jobs job_conclusion
-    jobs="$(gh run view "$id" --json jobs 2>/dev/null)" || continue
+    jobs="$(env -u GH_REPO -u GH_HOST gh run view --repo "$repo" "$id" --json jobs 2>/dev/null)" || continue
     job_conclusion="$(jq -r --arg needle "$JOB_NEEDLE" \
       'first(.jobs[] | select(.name | test($needle)) | .conclusion) // ""' \
       <<<"$jobs")"
@@ -290,13 +385,35 @@ main() {
     exit $?
   fi
 
-  if [[ "${NIGHTLY_FAULT_GATE_DISABLED:-0}" == "1" ]]; then
-    echo "SKIPPED: nightly-fault release guard disabled via NIGHTLY_FAULT_GATE_DISABLED=1 (escape hatch)."
-    exit 0
+  # D37 (#2379): no skip branch belongs here, and no environment variable is
+  # consulted anywhere in this script. A red / stale / cancelled / missing fault
+  # verdict on the release commit unconditionally fails. An unknown flag is a
+  # hard error rather than a silently-ignored argument (fail closed).
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --release-head) RELEASE_HEAD_OVERRIDE="${2:-}"; shift 2 ;;
+      --fixture)      FIXTURE="${2:-}";               shift 2 ;;
+      --workflow)     WORKFLOW="${2:-}";              shift 2 ;;
+      --job-needle)   JOB_NEEDLE="${2:-}";            shift 2 ;;
+      -h|--help)      usage; exit 0 ;;
+      *)
+        echo "unknown argument: $1" >&2
+        usage >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  # A fixture run is a DRY RUN, never a release verdict. Mark every line so the
+  # output cannot be pasted into (or mistaken for) a release summary — the round-1
+  # bypass produced a bare "PASS: ... verdict is green" from a fabricated file.
+  if [[ -n "$FIXTURE" ]]; then
+    FIXTURE_PREFIX="[FIXTURE DRY RUN] "
+    echo "${FIXTURE_PREFIX}TEST MODE: reading $FIXTURE instead of the real nightly run. This is NOT a release verdict (D37)."
   fi
 
   local release_head
-  release_head="${NIGHTLY_FAULT_RELEASE_HEAD:-$(git rev-parse HEAD)}"
+  release_head="${RELEASE_HEAD_OVERRIDE:-$(git rev-parse HEAD)}"
 
   local resolved
   resolved="$(resolve_latest_fault_run)" || {
@@ -304,8 +421,23 @@ main() {
     exit 1
   }
 
-  local run_status job_conclusion run_head_sha db_id
-  IFS=$'\t' read -r run_status job_conclusion run_head_sha db_id <<<"$resolved"
+  # Split the four tab-separated fields WITHOUT `IFS=$'\t' read`: tab is IFS
+  # whitespace, so bash collapses a run of delimiters and an empty middle field
+  # shifts every later field left. With an empty jobConclusion (the fault-verdict
+  # job never ran) that put the headSha into job_conclusion and the databaseId
+  # into run_head_sha, and the guard blocked as STALE instead of as "no fault
+  # signal" — right exit code, wrong reason, and a "no-verdict" test that passed
+  # without ever reaching the branch it claimed to cover (issue #2379 round 2).
+  local fields=()
+  mapfile -t fields < <(printf '%s\n' "${resolved//$'\t'/$'\n'}")
+  if [[ "${#fields[@]}" -ne 4 ]]; then
+    echo "${FIXTURE_PREFIX}BLOCK: could not parse the resolved nightly fault run (expected 4 tab-separated fields, got ${#fields[@]})." >&2
+    exit 1
+  fi
+  local run_status="${fields[0]}"
+  local job_conclusion="${fields[1]}"
+  local run_head_sha="${fields[2]}"
+  local db_id="${fields[3]}"
 
   # Does the run COVER the release HEAD? The nightly tested commit
   # `run_head_sha`; its result is valid for the release commit `release_head`
@@ -322,15 +454,15 @@ main() {
     fi
   fi
 
-  echo "Nightly fault run: workflow=$WORKFLOW id=${db_id:-none} status=${run_status:-?} fault-verdict-job-conclusion=${job_conclusion:-<none>} headSha=${run_head_sha:-<none>}"
-  echo "Release HEAD=$release_head head_is_ancestor=$head_is_ancestor"
+  echo "${FIXTURE_PREFIX}Nightly fault run: workflow=$WORKFLOW id=${db_id:-none} status=${run_status:-?} fault-verdict-job-conclusion=${job_conclusion:-<none>} headSha=${run_head_sha:-<none>}"
+  echo "${FIXTURE_PREFIX}Release HEAD=$release_head head_is_ancestor=$head_is_ancestor"
 
   local verdict rc
   set +e
   verdict="$(evaluate_nightly_fault_run "$run_status" "$job_conclusion" "$run_head_sha" "$release_head" "$head_is_ancestor")"
   rc=$?
   set -e
-  echo "$verdict"
+  echo "${FIXTURE_PREFIX}${verdict}"
   exit "$rc"
 }
 

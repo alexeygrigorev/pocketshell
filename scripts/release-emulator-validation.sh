@@ -106,12 +106,6 @@ Environment overrides:
   RELEASE_VALIDATION_SKIP_MAIN_GUARD=1
       Skip the clean pushed-main guard for CI workflow_dispatch runs where the
       checkout is intentionally detached.
-  NIGHTLY_FAULT_GATE_DISABLED=1
-      Skip the nightly-fault release guard (issue #851). The guard FAILS the
-      release when the latest "Nightly Extensive Tests" fault/bootstrap run is
-      red, cancelled, stale (tested an older sha than the release HEAD), or
-      missing. Use this escape hatch only for a deliberate fault-suite-waived
-      release; the summary records that it was skipped.
   TERMINAL_RELEASE_GATE=1
       Also run the optional high-confidence terminal release gate. This starts
       the real-agent Docker target, SSHes into it from the emulator, drives real
@@ -807,6 +801,11 @@ write_summary_header
 # conclusion. This guard inspects the EXTENSIVE-job conclusion (not the masked
 # workflow conclusion) AND that the run covers the release HEAD, so a stale /
 # cancelled / red fault run blocks the tag instead of silently passing.
+#
+# D37 (#2379): this guard is unconditional. There is no environment variable and
+# no workflow input that skips it — waiving it was routine and is how the #1610
+# reconnect storm shipped. Unblock by fixing the failure, or by quarantining that
+# test/journey class through the D36(4) flake mechanism.
 check_nightly_fault_run() {
   local log_dir="$RUN_DIR/nightly-fault-guard"
   mkdir -p "$log_dir"
@@ -814,9 +813,15 @@ check_nightly_fault_run() {
   printf '\n## Nightly fault/bootstrap run guard (issue #851)\n\n' >> "$SUMMARY_PATH"
   record_artifact "nightly fault guard log" "$log_file"
 
+  # D37 round 2 (#2379): pass ONLY --release-head. The guard's test-only knobs
+  # (--fixture / --workflow / --job-needle) are flags, not environment
+  # variables, exactly so this invocation cannot inherit a fabricated verdict
+  # from whatever the release-owner exported; adding one here — or reviving an
+  # `env NIGHTLY_FAULT_*=` prefix — fails
+  # scripts/check-release-gate-bypass-absent.sh (C4-static) on the next push.
   local rc=0
-  env NIGHTLY_FAULT_RELEASE_HEAD="$(git rev-parse HEAD)" \
-    scripts/check-nightly-fault-run.sh >"$log_file" 2>&1 || rc=$?
+  scripts/check-nightly-fault-run.sh --release-head "$(git rev-parse HEAD)" \
+    >"$log_file" 2>&1 || rc=$?
   cat "$log_file"
 
   {
@@ -827,7 +832,7 @@ check_nightly_fault_run() {
 
   if [[ "$rc" -ne 0 ]]; then
     sed -i 's/^Automated status: RUNNING$/Automated status: FAIL/' "$SUMMARY_PATH"
-    fail "nightly fault/bootstrap run guard BLOCKED the release (see $log_file). Re-run 'Nightly Extensive Tests' (workflow_dispatch, force_run=true) on the release commit and wait for the extensive job to go green, then re-run this gate. Override with NIGHTLY_FAULT_GATE_DISABLED=1 only for a deliberately fault-suite-waived release."
+    fail "nightly fault/bootstrap run guard BLOCKED the release (see $log_file). Re-run 'Nightly Extensive Tests' (workflow_dispatch, force_run=true) on the release commit and wait for the fault-verdict job to go green, then re-run this gate. There is no override (D37): fix the failing test/journey, or quarantine that class through the D36(4) flake mechanism (auto-filed issue, non-blocking lane, 2-week expiry)."
   fi
 }
 

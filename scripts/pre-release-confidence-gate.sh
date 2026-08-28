@@ -300,8 +300,18 @@ if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-
     "$LOG_ROOT" "$RUN_ID" "$POCKETSHELL_RELEASE_RETENTION_OWNER_PID"
   EARLY_RETENTION_ARMED=1
   printf 'Preparing isolated worktree copy: %s\n' "$isolated_root"
+  # No trailing slash on `.git`: in a git WORKTREE (docs/release.md cuts every
+  # release in one) `.git` is a FILE holding `gitdir: .../worktrees/<name>`,
+  # and `--exclude='.git/'` matches directories ONLY, so that file was copied
+  # in. The copy then resolved to the real gitdir — it was a live second
+  # checkout of the branch being released, so any `git` the gate ran inside
+  # the copy could reach the source worktree's index/HEAD, and
+  # scripts/derive-version.sh derived a tag-based version there while the
+  # Docker `agents` fixture still reports its baked `0.0.0-dev`, hard-failing
+  # docker-agents-pocketshell-version. Excluding both shapes makes a
+  # worktree-based gate run byte-for-byte equivalent to a plain-checkout one.
   rsync -a --delete \
-    --exclude='.git/' \
+    --exclude='.git' \
     --exclude='.gradle/' \
     --exclude='build/' \
     "$ROOT_DIR/" "$isolated_root/"

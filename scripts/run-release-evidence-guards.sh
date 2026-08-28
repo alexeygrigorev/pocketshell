@@ -31,3 +31,8 @@ bash scripts/test-release-gate-summary.sh
 # worktree. Both release gates must accept that line without opening up to any
 # branch, and must bind their evidence to the candidate's own SHA.
 bash scripts/test-release-branch-guard.sh
+
+# Same worktree flow, one layer down: the pre-release gate's "isolated" copy
+# must stay isolated when the source checkout is a worktree, where `.git` is a
+# file rather than a directory.
+bash scripts/test-release-gate-worktree-isolation.sh

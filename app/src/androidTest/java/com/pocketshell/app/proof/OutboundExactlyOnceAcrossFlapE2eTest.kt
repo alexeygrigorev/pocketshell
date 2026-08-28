@@ -11,21 +11,15 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasAnyAncestor
-import androidx.compose.ui.test.hasTestTag
-import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.performScrollTo
-import androidx.compose.ui.test.performTouchInput
-import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.performTextInput
-import androidx.compose.ui.test.performTextClearance
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.Lifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -49,13 +43,7 @@ import com.pocketshell.app.tmux.OutboundDeliverySeams
 import com.pocketshell.app.tmux.PasteChunkSeams
 import com.pocketshell.app.tmux.TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_CONVERSATION_PANE_TAG
-import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
-import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
-import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
-import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
-import com.pocketshell.app.tmux.TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
-import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_TAG
 import com.pocketshell.app.tmux.TMUX_TERMINAL_TAB_TAG
 import com.pocketshell.app.tmux.TMUX_UNIFIED_TERMINAL_PAGER_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
@@ -544,7 +532,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertTrue("A must open with its durable tree identity", originalDurableA.startsWith("tmux:"))
         val hostId = originalDurableA.removePrefix("tmux:").substringBefore(':').toLong()
         val renamedA = "$SESSION_NAME-renamed"
-        renameCurrentSessionThroughUi(renamedA)
+        compose.renameCurrentSessionThroughUi(renamedA, UI_TIMEOUT_MS)
         waitForConnected("rename navigation")
         val kindResult = execRemoteSetupUntilReady(
             key = SshKey.Pem(fixtureKey),
@@ -683,7 +671,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertFalse(serverWhileDown.contains(firstPayload))
         assertFalse(serverWhileDown.contains(secondPayload))
 
-        pressSystemBack()
+        compose.pressSystemBack()
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
         compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
         SystemClock.sleep(250)
@@ -704,7 +692,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertTrue("open-sheet CREATED must not submit", readFakeAgentSubmitLedger().isEmpty())
         compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
         val finalForegroundResumeAt = SystemClock.elapsedRealtime()
-        pressSystemBack()
+        compose.pressSystemBack()
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
 
         assertAuthoritativeLeaseOutageHeld(vm, outageA, outageAStartedAt, "A")
@@ -716,7 +704,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         vm.closeCurrentConnectionAndJoinForTest()
         val bBlockedBaseline = outageA.blockedAttemptCount
         val bOpenStartedAt = SystemClock.elapsedRealtime()
-        clickTmuxBack()
+        compose.clickTmuxBack(UI_TIMEOUT_MS)
         openSessionFromFolder(SESSION_B, waitForConnection = false)
         awaitBlockedNavigationSettled(vm, outageA, bBlockedBaseline, "B")
         assertEquals(SESSION_B, currentViewModel().latestRestoreIntentSnapshot()?.sessionName)
@@ -750,7 +738,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
         captureViewportArtifacts("issue1944-b-isolated")
         recordTiming("b_isolated_ui_ms", SystemClock.elapsedRealtime() - bOpenStartedAt)
-        pressSystemBack()
+        compose.pressSystemBack()
 
         val bVm = currentViewModel()
         val clientAtB = bVm.currentClientIdentityForTest()
@@ -758,7 +746,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         assertTrue("B must be reached through a fresh client", clientAtB != null && clientAtB != clientBeforeOutage)
         assertEquals("fresh-client wait must settle on B's active client", freshBClient, clientAtB)
         assertTrue("the reconnect generation must advance", generationAtB > generationBeforeOutage)
-        openSessionSwitcher(renamedA)
+        compose.openSessionSwitcher(renamedA, HOST_ROW_TIMEOUT_MS)
         val outageB = leaseConnector.beginSustainedOutageForLastLeaseForTest()
         assertEquals(outageA.leaseKey, outageB.leaseKey)
         val outageBStartedAt = SystemClock.elapsedRealtime()
@@ -771,9 +759,13 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
         val aReturnStartedAt = SystemClock.elapsedRealtime()
         val aBlockedBaseline = outageB.blockedAttemptCount
-        compose.onNodeWithTag(TMUX_SESSION_PAGER_TAG, useUnmergedTree = true)
-            .performTouchInput { swipeLeft() }
-        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
+        compose.clickNamedSessionSwitcherPage(renamedA)
+        waitForIssue1739Boundary(UI_TIMEOUT_MS, "offline switcher selected $renamedA", {
+            "intent=${currentViewModel().latestRestoreIntentSnapshot()?.sessionName} " +
+                "current=${currentViewModel().currentTargetSessionKeyForTest()} " +
+                "liveName=${compose.currentLiveSessionName()} " +
+                "status=${currentConnectionStatus()}"
+        }) {
             currentViewModel().latestRestoreIntentSnapshot()?.sessionName == renamedA
         }
         val offlineAIntent = requireNotNull(currentViewModel().latestRestoreIntentSnapshot())
@@ -844,7 +836,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             replacementDraft,
         )
         recordTiming("a_rows_visible_before_heal_ms", SystemClock.elapsedRealtime() - aReturnStartedAt)
-        pressSystemBack()
+        compose.pressSystemBack()
 
         val healStartedAt = SystemClock.elapsedRealtime()
         val activeAVm = currentViewModel()
@@ -885,7 +877,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
 
         assertTrue("both stable rows must be delivered+pruned", store.itemsFor(durableA).isEmpty())
-        pressSystemBack()
+        compose.pressSystemBack()
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
         compose.onNodeWithTag(SESSION_COMPOSER_LAUNCHER_TAG, useUnmergedTree = true).performClick()
         waitForComposerReady(expectQueue = false)
@@ -908,7 +900,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
             currentPromptComposerViewModel().composerDraftStore.load(fallbackA),
         )
         captureViewportArtifacts("issue1602-replacement-draft-preserved-after-heal")
-        pressSystemBack()
+        compose.pressSystemBack()
         compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(COMPOSER_DRAFT_TAG) }
         val clientAfterHeal = currentViewModel().currentClientIdentityForTest()
         val generationAfterHeal = currentViewModel().currentConnectGenerationForTest()
@@ -953,12 +945,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         val transcriptAcks = diagnostics!!.eventsNamed("agent_submit_transcript_ack")
         assertEquals("each row must bind to a new confirmed transcript event", 2, transcriptAcks.size)
         assertEquals(1, transcriptAcks.map { it.fields["sourceHash"] }.toSet().size)
-        assertTrue(
-            "transcript events must stay on the exact pane/Claude source binding; events=$transcriptAcks",
-            transcriptAcks.all {
-                it.fields["pane"] == "%0" && it.fields["agent"] == AgentKind.ClaudeCode.name
-            },
-        )
+        currentViewModel().assertTranscriptAcksBoundToLivePane(transcriptAcks)
         val secondSubmitted = waitForStableSidecarCapture(renamedA)
         val submitLedger = readFakeAgentSubmitLedger()
         writeText(
@@ -1565,11 +1552,7 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         )
     }
 
-    private fun hasNode(tag: String): Boolean = runCatching {
-        compose.onAllNodesWithTag(tag, useUnmergedTree = true)
-            .fetchSemanticsNodes()
-            .isNotEmpty()
-    }.getOrDefault(false)
+    private fun hasNode(tag: String): Boolean = compose.hasTaggedNode(tag)
 
     private suspend fun publishDelayedTranscript() {
         val publish = execRemoteSetupUntilReady(
@@ -1949,34 +1932,6 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         return requireNotNull(vm) { "PromptComposerViewModel not available" }
     }
 
-    private fun clickTmuxBack() {
-        val tag = listOf(TMUX_COMPACT_CHROME_BACK_BUTTON_TAG, TMUX_FULL_CHROME_BACK_BUTTON_TAG)
-            .firstOrNull { hasNode(it) }
-            ?: TMUX_FULL_CHROME_BACK_BUTTON_TAG
-        compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) { !hasNode(TMUX_SESSION_SCREEN_TAG) }
-    }
-
-    private fun renameCurrentSessionThroughUi(newName: String) {
-        val moreTag = listOf(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG, TMUX_FULL_CHROME_MORE_BUTTON_TAG)
-            .firstOrNull { hasNode(it) }
-            ?: TMUX_FULL_CHROME_MORE_BUTTON_TAG
-        compose.onNodeWithTag(moreTag, useUnmergedTree = true).performClick()
-        compose.onNodeWithText("Rename session", useUnmergedTree = true).performClick()
-        compose.onNode(hasSetTextAction(), useUnmergedTree = true)
-            .performTextClearance()
-        compose.onNode(hasSetTextAction(), useUnmergedTree = true)
-            .performTextInput(newName)
-        compose.onNodeWithTag(TMUX_LIFECYCLE_DIALOG_CONFIRM_TAG, useUnmergedTree = true)
-            .performClick()
-        compose.waitUntil(timeoutMillis = UI_TIMEOUT_MS) {
-            runCatching {
-                compose.onAllNodesWithText(newName, useUnmergedTree = true)
-                    .fetchSemanticsNodes().isNotEmpty()
-            }.getOrDefault(false)
-        }
-    }
-
     private fun openSessionFromFolder(sessionName: String, waitForConnection: Boolean = true) {
         compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
             runCatching {
@@ -1996,40 +1951,24 @@ class OutboundExactlyOnceAcrossFlapE2eTest {
         expectedDurableKey: String,
         waitForConnection: Boolean = true,
     ) {
-        openSessionSwitcher(sessionName)
-        selectSessionFromOpenSwitcher(expectedDurableKey)
+        compose.openSessionSwitcher(sessionName, HOST_ROW_TIMEOUT_MS)
+        selectSessionFromOpenSwitcher(sessionName, expectedDurableKey)
         if (waitForConnection) waitForConnected("switch to $sessionName")
     }
 
-    private fun openSessionSwitcher(sessionName: String) {
-        val moreTag = listOf(
-            TMUX_FULL_CHROME_MORE_BUTTON_TAG,
-            TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
-        ).firstOrNull { hasNode(it) } ?: TMUX_FULL_CHROME_MORE_BUTTON_TAG
-        compose.onNodeWithTag(moreTag, useUnmergedTree = true).performClick()
-        compose.onNodeWithText("Switch session", useUnmergedTree = true).performClick()
-        compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
-            compose.onAllNodesWithText(sessionName, useUnmergedTree = true)
-                .fetchSemanticsNodes().isNotEmpty()
-        }
-    }
-
-    private fun selectSessionFromOpenSwitcher(expectedDurableKey: String) {
-        // Session-switcher pages are current-first. Swipe to the adjacent live
-        // tmux page; tapping the offscreen Text semantics is not a real pager
-        // selection and does not settle the page/navigation effect.
-        compose.onNodeWithTag(TMUX_SESSION_PAGER_TAG, useUnmergedTree = true)
-            .performTouchInput { swipeLeft() }
-        compose.waitUntil(timeoutMillis = HOST_ROW_TIMEOUT_MS) {
+    private fun selectSessionFromOpenSwitcher(
+        sessionName: String,
+        expectedDurableKey: String,
+    ) {
+        compose.clickNamedSessionSwitcherPage(sessionName)
+        waitForIssue1739Boundary(HOST_ROW_TIMEOUT_MS, "switcher selected $sessionName", {
+            "expected=$expectedDurableKey " +
+                "current=${currentViewModel().currentTargetSessionKeyForTest()} " +
+                "liveName=${compose.currentLiveSessionName()} " +
+                "status=${currentConnectionStatus()}"
+        }) {
             currentViewModel().currentTargetSessionKeyForTest() == expectedDurableKey
         }
-    }
-
-    private fun pressSystemBack() {
-        compose.activityRule.scenario.onActivity { activity ->
-            activity.onBackPressedDispatcher.onBackPressed()
-        }
-        compose.waitForIdle()
     }
 
     private fun waitForComposerReady(expectQueue: Boolean) {

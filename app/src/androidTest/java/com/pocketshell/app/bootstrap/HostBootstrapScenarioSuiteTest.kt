@@ -108,14 +108,16 @@ class HostBootstrapScenarioSuiteTest {
 
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
-        assertSetupRows("pocketshell CLI update needed")
+        assertSetupRows(CLI_UPDATE_ROW_TITLE)
         // Issue #779: ONE clear action. The status badge says "Outdated" (a
         // state, not a verb) and the single action button says "Update" — the
         // old "Update" badge + "Upgrade" button pair read as two competing
         // buttons. The synonym verb "Upgrade" must NOT appear as a control.
-        compose.onNodeWithText("Outdated").assertExists()
-        compose.onNodeWithText("Update").assertExists()
-        compose.onAllNodesWithText("Upgrade").assertCountEquals(0)
+        // Scoped to the row (see withinSetupRow): the host list behind the
+        // sheet carries its own "Update" control during a release gate.
+        withinSetupRow(CLI_UPDATE_ROW_TITLE, "Outdated").assertExists()
+        withinSetupRow(CLI_UPDATE_ROW_TITLE, "Update").assertExists()
+        allWithinSetupRow(CLI_UPDATE_ROW_TITLE, "Upgrade").assertCountEquals(0)
         capture("02-cli-update-needed")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
@@ -137,7 +139,7 @@ class HostBootstrapScenarioSuiteTest {
 
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
-        assertSetupRows("pocketshell CLI update needed")
+        assertSetupRows(CLI_UPDATE_ROW_TITLE)
         compose.onNodeWithText("path /usr/local/bin/pocketshell", substring = true).assertExists()
         compose.onNodeWithText("remote 0.1.0", substring = true).assertExists()
         compose.onNodeWithText("expected ${targetAppVersion()}", substring = true).assertExists()
@@ -570,6 +572,28 @@ class HostBootstrapScenarioSuiteTest {
         hasText("Dismiss") and hasAnyAncestor(hasTestTag(ancestorTag)),
     )
 
+    /**
+     * A node carrying [text] INSIDE the named bootstrap-sheet setup row.
+     *
+     * The sheet's row labels ("Update", "Install", "Enable") are deliberately
+     * short verbs, and the host list behind the sheet renders its own controls
+     * with the same words — the #515 "New version available (vX.Y.Z)" banner
+     * has an `Update` button, and that banner is showing for the WHOLE of any
+     * release-gate run, because the build under validation is by definition
+     * older than the newest published release. A screen-wide
+     * `onNodeWithText("Update")` therefore matched two nodes and failed with
+     * "Expected exactly '1' node but found '2'" — a fixture collision, not a
+     * product defect. Scope row assertions to the row (same shape as
+     * [dismissActionWithin], issue #1958).
+     */
+    private fun withinSetupRow(rowTitle: String, text: String) = compose.onNode(
+        hasText(text) and hasAnyAncestor(hasTestTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + rowTitle)),
+    )
+
+    private fun allWithinSetupRow(rowTitle: String, text: String) = compose.onAllNodes(
+        hasText(text) and hasAnyAncestor(hasTestTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + rowTitle)),
+    )
+
     private fun assumeScenariosEnabled() {
         val enabled = InstrumentationRegistry.getArguments()
             .getString("pocketshellBootstrapScenarios")
@@ -754,6 +778,9 @@ class HostBootstrapScenarioSuiteTest {
                 "[{\"type\":\"command\",\"command\":\"my-preexisting-stop-hook\"}]}]}}"
     }
 }
+
+/** Title of the outdated-CLI setup row rendered by `HostBootstrapSheet`. */
+private const val CLI_UPDATE_ROW_TITLE: String = "pocketshell CLI update needed"
 
 private object BootstrapScenarioArtifacts {
     private const val DEVICE_DIR_NAME: String = "setup-detection"

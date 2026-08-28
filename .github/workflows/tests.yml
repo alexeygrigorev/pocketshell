@@ -15,11 +15,13 @@ on:
       - "**/*.md"
       - "docs/**"
       - "chat/**"
+      - "mockups/**"
   pull_request:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
       - "chat/**"
+      - "mockups/**"
   workflow_dispatch:
   schedule: [{cron: "0 0,8,16 * * *"}]
 

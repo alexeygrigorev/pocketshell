@@ -8,6 +8,7 @@ source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
 source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 
 # Issue #2064: `--verify-apk-identity` proves the release chain's APK contract
 # end to end — the exported environment, this script's own resolution of it, and
@@ -57,6 +58,9 @@ LOG_DIR="$RUN_DIR/logs"
 SCREENSHOT_ROOT="$RUN_DIR/screenshots"
 TIMING_DIR="$RUN_DIR/timings"
 DEVICE_ARTIFACT_ROOT="$RUN_DIR/device-artifacts"
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
 BUILD_APKS="${BUILD_APKS:-1}"
 PHONE_WALKTHROUGH_CLEAN_GENERATED="${PHONE_WALKTHROUGH_CLEAN_GENERATED:-${PHONE_DOGFOOD_CLEAN_GENERATED:-1}}"
@@ -309,8 +313,7 @@ run_logged() {
 
 instrumentation_success() {
   local log_file="$1"
-  grep -q "INSTRUMENTATION_CODE: -1" "$log_file" &&
-    grep -q "OK (" "$log_file" &&
+  pocketshell_instrumentation_has_positive_success "$log_file" &&
     ! grep -q "FAILURES!!!" "$log_file"
 }
 
@@ -409,6 +412,10 @@ run_instrumentation_with_retry() {
     crash_file="$(collect_instrumentation_attempt_diagnostics "$attempt_log" "$attempt_name")"
     logcat_file="$LOG_DIR/$attempt_name-logcat.txt"
     if [[ "$status" -eq 0 ]] && instrumentation_success "$attempt_log"; then
+      if [[ -n "${SELECTOR_ATTENDANCE_FILE:-}" ]]; then
+        pocketshell_record_release_selector_attendance \
+          "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$selector" "$attempt_log" >/dev/null || return 1
+      fi
       printf 'attempt=%s status=%s result=success log=%s logcat=%s\n' \
         "$attempt" "$status" "$(relpath "$attempt_log")" "$(relpath "$logcat_file")" >> "$summary_file"
       return 0
@@ -551,6 +558,40 @@ assert_selected_scenario_handlers_defined() {
       fail "selected scenario '$scenario' handler '$handler' is not defined; check phone-walkthrough function definitions before dispatch"
     fi
   done
+}
+
+release_selectors_for_scenarios() {
+  local scenario profile
+  for scenario in "${SCENARIOS[@]}"; do
+    case "$scenario" in
+      terminal-lab)
+        printf '%s\n' "$TERMINAL_LAB_TEST_CLASS"
+        ;;
+      tmux-existing-session)
+        printf '%s\n' "$TMUX_EXISTING_SESSION_TEST_SELECTOR"
+        ;;
+      visual-audit)
+        printf '%s\n' \
+          "$VISUAL_AUDIT_MAIN_TEST_CLASS" \
+          "$VISUAL_AUDIT_CONVERSATION_TEST_CLASS" \
+          "$VISUAL_AUDIT_COMPOSER_TEST_CLASS"
+        ;;
+      setup-detection|setup-detection:*)
+        while IFS= read -r profile; do
+          printf '%s#%s\n' "$SETUP_DETECTION_TEST_CLASS" "${SETUP_DETECTION_METHODS[$profile]}"
+        done < <(setup_detection_profiles_for_scenario "$scenario")
+        ;;
+    esac
+  done
+}
+
+initialize_release_selector_attendance() {
+  local -a selectors=()
+  mapfile -t selectors < <(release_selectors_for_scenarios)
+  pocketshell_initialize_release_selector_attendance \
+    "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$SELECTOR_RUN_START_MARKER" \
+    "${selectors[@]}"
+  printf '%s\n' "${selectors[@]}" > "$SELECTOR_REQUIRED_FILE"
 }
 
 verify_dispatch_only() {
@@ -770,7 +811,7 @@ assert_no_crash_diagnostics() {
 assert_instrumentation_success() {
   local log_file="$1"
   local selector="$2"
-  instrumentation_success "$log_file" ||
+  pocketshell_instrumentation_assert_log "$log_file" "$selector" >/dev/null ||
     fail "$selector did not report instrumentation success"
 }
 
@@ -1184,6 +1225,8 @@ if [[ "$PHONE_WALKTHROUGH_VERIFY_DISPATCH_ONLY" = "1" ]]; then
   exit 0
 fi
 
+initialize_release_selector_attendance
+
 printf 'PocketShell phone walkthrough\n'
 printf 'run-id: %s\n' "$RUN_ID"
 printf 'artifacts: %s\n' "$(relpath "$RUN_DIR")"
@@ -1206,3 +1249,11 @@ for scenario in "${SCENARIOS[@]}"; do
       ;;
   esac
 done
+
+pocketshell_run_release_selector_checker \
+  "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+  --verify-attendance \
+  --selected-file "$SELECTOR_REQUIRED_FILE" \
+  --attendance "$SELECTOR_ATTENDANCE_FILE" \
+  --run-id "$RUN_ID" \
+  --newer-than "$SELECTOR_RUN_START_MARKER"

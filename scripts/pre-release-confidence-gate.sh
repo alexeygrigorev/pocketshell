@@ -13,6 +13,9 @@ source "$ROOT_DIR/scripts/lib/release-validation-storage.sh"
 # downstream release stage installs and ships THESE bytes. See
 # scripts/lib/apk-identity.sh for why "same source" was not good enough.
 source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+# Issue #2300: every release selector is backed by a positive executed-test
+# count and a current-run raw-evidence attendance record.
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 # Issue #2054: the AVD lock is acquired further down, AFTER the execution-profile
 # assertion. Queuing behind another emulator-touching run can take an hour; an
 # under-resourced profile should be rejected in the first second, not after that
@@ -370,6 +373,9 @@ FOCUSED_STATUSES=()
 FOCUSED_LOGS=()
 FOCUSED_DIAGNOSTICS=()
 FOCUSED_LOGCATS=()
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 
 for _selector in "${FOCUSED_SELECTORS[@]}"; do
   FOCUSED_STATUSES+=("not_run")
@@ -467,6 +473,8 @@ write_summary() {
     printf 'Final data-preserving update install status: %s\n' "$FINAL_INSTALL_STATUS"
     printf 'Legacy v1 database migration status: %s\n' "$LEGACY_V1_DB_MIGRATION_STATUS"
     printf 'Legacy v1 database migration logcat: %s\n' "$LEGACY_V1_DB_MIGRATION_LOGCAT"
+    printf 'Release selector attendance: %s\n' "$SELECTOR_ATTENDANCE_FILE"
+    printf 'Release selector raw evidence: one digest-verified log per selector under %s\n' "$RUN_DIR"
     if [[ "$GATE_RESULT" != "PASS" ]]; then
       printf 'Failing step: %s\n' "${FAILING_STEP:-unknown}"
       printf 'Failure message: %s\n' "${FAILURE_MESSAGE:-unknown}"
@@ -878,15 +886,115 @@ require_command_or_executable() {
   fi
 }
 
-# Issue #749: selector-existence guard. Before doing any expensive work
+# Issue #749/#2300: selector-existence guard. Before doing any expensive work
 # (compile, emulator boot, APK install) verify that EVERY entry in
-# APP_WALKTHROUGH_TESTS resolves to a `fun <method>` in the matching
-# androidTest source file. A future deletion/rename of a referenced test must
-# fail this gate immediately with a clear, actionable message instead of
-# aborting deep into the run with a `ClassNotFoundException` on the device (the
-# #749 failure mode). Resolves against the androidTest source tree under the
-# current ROOT_DIR, which works both in the source workspace and in the
+# APP_WALKTHROUGH_TESTS resolves to an annotated `@Test fun <method>` in the
+# matching androidTest source file. A declaration without @Test compiles but
+# can produce `OK (0 tests)` on the device, so source existence alone is not
+# executable-test evidence. Resolves against the androidTest source tree under
+# the current ROOT_DIR, which works both in the source workspace and in the
 # rsynced isolated worktree copy (app/src is preserved by the rsync).
+androidtest_method_is_annotated_test() {
+  local source_file="$1"
+  local method="$2"
+  awk -v target="$method" '
+    function strip_comments_and_literals(line,    i,c,n1,n2,out) {
+      out = ""
+      i = 1
+      while (i <= length(line)) {
+        c = substr(line, i, 1)
+        n1 = substr(line, i + 1, 1)
+        n2 = substr(line, i + 2, 1)
+
+        if (block_comment_depth > 0) {
+          if (c == "/" && n1 == "*") {
+            block_comment_depth++
+            i += 2
+          } else if (c == "*" && n1 == "/") {
+            block_comment_depth--
+            i += 2
+          } else {
+            i++
+          }
+          continue
+        }
+        if (triple_quoted_string) {
+          if (c == "\"" && n1 == "\"" && n2 == "\"") {
+            triple_quoted_string = 0
+            i += 3
+          } else {
+            i++
+          }
+          continue
+        }
+        if (quoted_string) {
+          if (c == "\\") {
+            i += 2
+          } else if (c == "\"") {
+            quoted_string = 0
+            i++
+          } else {
+            i++
+          }
+          continue
+        }
+        if (char_literal) {
+          if (c == "\\") {
+            i += 2
+          } else if (c == "\047") {
+            char_literal = 0
+            i++
+          } else {
+            i++
+          }
+          continue
+        }
+        if (c == "/" && n1 == "/") {
+          break
+        }
+        if (c == "/" && n1 == "*") {
+          block_comment_depth = 1
+          i += 2
+          continue
+        }
+        if (c == "\"" && n1 == "\"" && n2 == "\"") {
+          triple_quoted_string = 1
+          i += 3
+          continue
+        }
+        if (c == "\"") {
+          quoted_string = 1
+          i++
+          continue
+        }
+        if (c == "\047") {
+          char_literal = 1
+          i++
+          continue
+        }
+        out = out c
+        i++
+      }
+      return out
+    }
+    {
+      line = strip_comments_and_literals($0)
+      if (line ~ /(^|[^[:alnum:]_])@Test([[:space:]]|\(|$)/) {
+        annotated = 1
+      }
+      if (line ~ ("(^|[[:space:]])fun[[:space:]]+" target "[[:space:]]*\\(")) {
+        found = 1
+        valid = annotated
+        exit
+      }
+      if (line ~ /(^|[[:space:]])fun[[:space:]]+/) {
+        annotated = 0
+      }
+    }
+    END { exit(found && valid ? 0 : 1) }
+  ' "$source_file"
+}
+
 assert_app_walkthrough_selectors_exist() {
   local androidtest_root="$ROOT_DIR/app/src/androidTest/java"
   local missing=()
@@ -905,6 +1013,8 @@ assert_app_walkthrough_selectors_exist() {
     fi
     if ! grep -Eq "fun[[:space:]]+${method}[[:space:]]*\(" "$relative_path"; then
       missing+=("$selector (referenced test method not found in $relative_path)")
+    elif ! androidtest_method_is_annotated_test "$relative_path" "$method"; then
+      missing+=("$selector (referenced method is not annotated with @Test in $relative_path)")
     fi
   done
 
@@ -1641,11 +1751,16 @@ run_app_walkthrough_script() {
   local selector="$1"
   local diagnostics_file="$2"
   local full_logcat_file="$3"
+  local selector_log_file="$4"
   cat <<RUN_SCRIPT
 set -euo pipefail
 
 diagnostics_file='$diagnostics_file'
 full_logcat_file='$full_logcat_file'
+selector_log_file='$selector_log_file'
+selector_attendance_file='$SELECTOR_ATTENDANCE_FILE'
+selector_run_id='$RUN_ID'
+source '$ROOT_DIR/scripts/lib/instrumentation-evidence.sh'
 
 dump_instrumentation_diagnostics() {
   local reason="\$1"
@@ -1779,14 +1894,18 @@ while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   output=\$('$ADB' shell am instrument -w -r -e class '$selector' com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner 2>&1)
   instrument_status=\$?
   set -e
+  printf '%s\n' "\$output" > "\${selector_log_file}.attempt-\$attempt"
+  cp "\${selector_log_file}.attempt-\$attempt" "\$selector_log_file" || true
   if [ "\$instrument_status" -ne 0 ]; then
     sleep 2
   fi
   '$ADB' logcat -d -v time -t 5000 > "\$full_logcat_file" 2>&1 || true
   printf '%s\n' "\$output"
   if [ "\$instrument_status" -eq 0 ] &&
-    printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1' &&
-    ! instrumentation_output_has_failure_markers; then
+    pocketshell_instrumentation_assert_log "\${selector_log_file}.attempt-\$attempt" '$selector' >/dev/null; then
+    cp "\${selector_log_file}.attempt-\$attempt" "\$selector_log_file"
+    pocketshell_record_release_selector_attendance \
+      "\$selector_attendance_file" "\$selector_run_id" '$selector' "\$selector_log_file" >/dev/null
     exit 0
   fi
   if [ "\$attempt" -eq 1 ] &&
@@ -1921,6 +2040,13 @@ fi
 # deleted/renamed walkthrough test fails fast with a clear message instead of a
 # ClassNotFoundException deep inside the on-device instrumentation loop.
 assert_app_walkthrough_selectors_exist
+
+pocketshell_initialize_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" \
+  "$RUN_ID" \
+  "$SELECTOR_RUN_START_MARKER" \
+  "${APP_WALKTHROUGH_TESTS[@]}"
+printf '%s\n' "${APP_WALKTHROUGH_TESTS[@]}" > "$SELECTOR_REQUIRED_FILE"
 
 run_step "android-sdk-paths" "$ADB" version
 run_step "available-avds" "$EMULATOR" -list-avds
@@ -2063,8 +2189,9 @@ for app_walkthrough_index in "${!APP_WALKTHROUGH_TESTS[@]}"; do
   app_walkthrough_step_index=$((STEP_INDEX + 1))
   app_walkthrough_diagnostics_file="$(printf '%s/%02d-connected-app-walkthrough-%s-diagnostics.log' "$RUN_DIR" "$app_walkthrough_step_index" "$app_walkthrough_safe_name")"
   app_walkthrough_full_logcat_file="$(printf '%s/%02d-connected-app-walkthrough-%s-full-logcat.log' "$RUN_DIR" "$app_walkthrough_step_index" "$app_walkthrough_safe_name")"
+  app_walkthrough_selector_log_file="$(printf '%s/%02d-connected-app-walkthrough-%s-raw-instrumentation.log' "$RUN_DIR" "$app_walkthrough_step_index" "$app_walkthrough_safe_name")"
   set_focused_status "$app_walkthrough_selector" "running" "" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
-  if run_bash_step "connected-app-walkthrough-$app_walkthrough_safe_name" "$(run_app_walkthrough_script "$app_walkthrough_selector" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file")"; then
+  if run_bash_step "connected-app-walkthrough-$app_walkthrough_safe_name" "$(run_app_walkthrough_script "$app_walkthrough_selector" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file" "$app_walkthrough_selector_log_file")"; then
     set_focused_status "$app_walkthrough_selector" "passed" "$RUN_DIR/$(printf '%02d-connected-app-walkthrough-%s.log' "$app_walkthrough_step_index" "$app_walkthrough_safe_name")" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
   else
     set_focused_status "$app_walkthrough_selector" "failed" "$RUN_DIR/$(printf '%02d-connected-app-walkthrough-%s.log' "$app_walkthrough_step_index" "$app_walkthrough_safe_name")" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
@@ -2073,6 +2200,15 @@ for app_walkthrough_index in "${!APP_WALKTHROUGH_TESTS[@]}"; do
     exit 1
   fi
 done
+
+run_step "verify-release-selector-attendance" \
+  pocketshell_run_release_selector_checker \
+  "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+  --verify-attendance \
+  --selected-file "$SELECTOR_REQUIRED_FILE" \
+  --attendance "$SELECTOR_ATTENDANCE_FILE" \
+  --run-id "$RUN_ID" \
+  --newer-than "$SELECTOR_RUN_START_MARKER"
 
 # Issue #2064: this step used to re-run `:app:assembleDebug` after
 # `build-app-test-apks` had already produced the APK — a fourth build of the

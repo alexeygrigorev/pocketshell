@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2

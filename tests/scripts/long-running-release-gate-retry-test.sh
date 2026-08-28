@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -160,6 +161,7 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
   fi
 
   {
+    printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
     printf 'INSTRUMENTATION_STATUS: stream=LONG_RUNNING_HEARTBEAT elapsed_ms=15000 next_tick_index=1 label=hold\n'
     printf 'INSTRUMENTATION_STATUS_CODE: 0\n'
     printf 'INSTRUMENTATION_CODE: -1\n'
@@ -221,6 +223,7 @@ run_long_running_with_mode() {
   mkdir -p "$run_dir"
 
   ADB="$fake_adb"
+  LONG_RUNNING_TEST_RUN_ID="test-$mode"
   LONG_RUNNING_TEST_RUN_DIR="$run_dir"
   LONG_RUNNING_TEST_CLASS="com.pocketshell.app.proof.LongRunningSessionStabilityTest"
   LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS=2

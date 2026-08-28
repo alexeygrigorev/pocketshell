@@ -12,6 +12,9 @@ source "$ROOT_DIR/scripts/lib/release-validation-storage.sh"
 # every downstream stage installs it, publish_validated_apk ships it, and each
 # hop re-checks the sha256.
 source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+# Issue #2300: release selectors require positive executed-count evidence and
+# current-run raw-log attendance, including the opt-in gates below.
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 
 # Issue #2054: apply and assert the release build resource profile ONCE, at the
 # top of the whole validation, before the ~30-60 minute run takes the shared AVD
@@ -378,8 +381,7 @@ publish_validated_apk() {
 
 real_agent_release_gate_instrumentation_log_has_success() {
   local log_file="$1"
-  grep -q 'INSTRUMENTATION_CODE: -1' "$log_file" &&
-    grep -q 'OK (' "$log_file"
+  pocketshell_instrumentation_has_positive_success "$log_file"
 }
 
 real_agent_release_gate_instrumentation_log_has_failure_markers() {
@@ -429,7 +431,14 @@ run_real_agent_release_gate_instrumentation() {
   local attempt_instrumentation_log
   local attempt_logcat
   local attempt_docker_log
+  local selector="$REAL_AGENT_RELEASE_GATE_TEST_CLASS"
+  local selected_file="$run_dir/required-selectors.txt"
+  local attendance_file="$run_dir/selector-attendance.tsv"
+  local start_marker="$run_dir/selector-run-start.marker"
   mkdir -p "$run_dir"
+  printf '%s\n' "$selector" > "$selected_file"
+  pocketshell_initialize_release_selector_attendance \
+    "$attendance_file" "$REAL_AGENT_RELEASE_GATE_RUN_ID" "$start_marker" "$selector"
 
   printf '\n[real-agent release gate instrumentation]\n'
   printf 'Test class: %s\n' "$REAL_AGENT_RELEASE_GATE_TEST_CLASS"
@@ -529,15 +538,40 @@ run_real_agent_release_gate_instrumentation() {
     print_failure_log_tail "$instrumentation_log"
     return "$instrumentation_status"
   fi
-  if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
-    printf 'FAIL: RealAgentReleaseGateTest did not report INSTRUMENTATION_CODE: -1\n' >&2
+  if ! pocketshell_instrumentation_assert_log "$instrumentation_log" "$selector" >/dev/null; then
+    printf 'FAIL: RealAgentReleaseGateTest did not produce positive executed selector evidence\n' >&2
     print_failure_log_tail "$instrumentation_log"
     return 1
   fi
-  if ! grep -q 'OK (' "$instrumentation_log"; then
-    printf 'FAIL: RealAgentReleaseGateTest did not report an OK summary\n' >&2
-    print_failure_log_tail "$instrumentation_log"
-    return 1
+  local attendance_status=0
+  if pocketshell_record_release_selector_attendance \
+    "$attendance_file" "$REAL_AGENT_RELEASE_GATE_RUN_ID" "$selector" "$instrumentation_log" >/dev/null; then
+    :
+  else
+    attendance_status="$?"
+  fi
+  if [[ "$attendance_status" -ne 0 ]]; then
+    printf 'FAIL: RealAgentReleaseGateTest could not record selector attendance (exit %s)\n' \
+      "$attendance_status" >&2
+    return "$attendance_status"
+  fi
+
+  local checker_status=0
+  if pocketshell_run_release_selector_checker \
+    "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+    --verify-attendance \
+    --selected-file "$selected_file" \
+    --attendance "$attendance_file" \
+    --run-id "$REAL_AGENT_RELEASE_GATE_RUN_ID" \
+    --newer-than "$start_marker"; then
+    :
+  else
+    checker_status="$?"
+  fi
+  if [[ "$checker_status" -ne 0 ]]; then
+    printf 'FAIL: RealAgentReleaseGateTest selector attendance checker failed (exit %s)\n' \
+      "$checker_status" >&2
+    return "$checker_status"
   fi
   return 0
 }
@@ -652,6 +686,13 @@ run_long_running_session_instrumentation() {
   local attempt_logcat
   local attempt_docker_log
   mkdir -p "$run_dir" "$artifacts_dir"
+  local selector="$LONG_RUNNING_TEST_CLASS"
+  local selected_file="$run_dir/required-selectors.txt"
+  local attendance_file="$run_dir/selector-attendance.tsv"
+  local start_marker="$run_dir/selector-run-start.marker"
+  printf '%s\n' "$selector" > "$selected_file"
+  pocketshell_initialize_release_selector_attendance \
+    "$attendance_file" "$LONG_RUNNING_TEST_RUN_ID" "$start_marker" "$selector"
 
   printf '\n[long-running session stability instrumentation]\n'
   printf 'Test class: %s\n' "$LONG_RUNNING_TEST_CLASS"
@@ -744,15 +785,40 @@ run_long_running_session_instrumentation() {
     print_failure_log_tail "$instrumentation_log"
     return "$instrumentation_status"
   fi
-  if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
-    printf 'FAIL: LongRunningSessionStabilityTest did not report INSTRUMENTATION_CODE: -1\n' >&2
+  if ! pocketshell_instrumentation_assert_log "$instrumentation_log" "$selector" >/dev/null; then
+    printf 'FAIL: LongRunningSessionStabilityTest did not produce positive executed selector evidence\n' >&2
     print_failure_log_tail "$instrumentation_log"
     return 1
   fi
-  if ! grep -q 'OK (' "$instrumentation_log"; then
-    printf 'FAIL: LongRunningSessionStabilityTest did not report an OK summary\n' >&2
-    print_failure_log_tail "$instrumentation_log"
-    return 1
+  local attendance_status=0
+  if pocketshell_record_release_selector_attendance \
+    "$attendance_file" "$LONG_RUNNING_TEST_RUN_ID" "$selector" "$instrumentation_log" >/dev/null; then
+    :
+  else
+    attendance_status="$?"
+  fi
+  if [[ "$attendance_status" -ne 0 ]]; then
+    printf 'FAIL: LongRunningSessionStabilityTest could not record selector attendance (exit %s)\n' \
+      "$attendance_status" >&2
+    return "$attendance_status"
+  fi
+
+  local checker_status=0
+  if pocketshell_run_release_selector_checker \
+    "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+    --verify-attendance \
+    --selected-file "$selected_file" \
+    --attendance "$attendance_file" \
+    --run-id "$LONG_RUNNING_TEST_RUN_ID" \
+    --newer-than "$start_marker"; then
+    :
+  else
+    checker_status="$?"
+  fi
+  if [[ "$checker_status" -ne 0 ]]; then
+    printf 'FAIL: LongRunningSessionStabilityTest selector attendance checker failed (exit %s)\n' \
+      "$checker_status" >&2
+    return "$checker_status"
   fi
   return 0
 }
@@ -834,6 +900,21 @@ run_required \
   "pre-release confidence gate" \
   "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/" \
   env LOG_ROOT="$PRE_RELEASE_GATE_LOG_ROOT" RUN_ID="$PRE_RELEASE_RUN_ID" PRE_RELEASE_MANAGE_EMULATOR=1 scripts/pre-release-confidence-gate.sh
+
+# Re-check the child artifact from the release wrapper as well as inside the
+# child gate. This keeps the release selector attendance contract at the exact
+# boundary that consumes the pre-release result, and prevents a rolling XML or
+# stale ledger from standing in for this run's raw selector evidence.
+run_required \
+  "pre-release selector attendance" \
+  "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/selector-attendance.tsv" \
+  pocketshell_run_release_selector_checker \
+    "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+  --verify-attendance \
+  --selected-file "$PRE_RELEASE_GATE_RUN_DIR/required-selectors.txt" \
+  --attendance "$PRE_RELEASE_GATE_RUN_DIR/selector-attendance.tsv" \
+  --run-id "$PRE_RELEASE_RUN_ID" \
+  --newer-than "$PRE_RELEASE_GATE_RUN_DIR/selector-run-start.marker"
 
 # Issue #2064: from here on, every stage installs the pair the gate just built
 # and validated. Before this, terminal-lab / tmux-existing-session /

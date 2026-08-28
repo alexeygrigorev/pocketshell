@@ -15,6 +15,7 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -27,6 +28,9 @@ SSH_PORT="${SSH_PORT:-2222}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/terminal-workbench}"
 RUN_ID="${RUN_ID:-issue-303-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 ARTIFACT_DIR="$RUN_DIR/artifacts/terminal-lab"
 BUILD_APKS="${BUILD_APKS:-1}"
 APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
@@ -202,6 +206,9 @@ validate_artifacts() {
 }
 
 mkdir -p "$RUN_DIR"
+pocketshell_initialize_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$SELECTOR_RUN_START_MARKER" "$TEST_SELECTOR"
+printf '%s\n' "$TEST_SELECTOR" > "$SELECTOR_REQUIRED_FILE"
 cp "$SSH_KEY" "$HOST_SSH_KEY"
 chmod 600 "$HOST_SSH_KEY"
 trap 'collect_diagnostics; pocketshell_release_all' EXIT
@@ -260,9 +267,20 @@ if [[ -d "$ARTIFACT_DIR" ]]; then
   run_logged "09-artifact-file-info" file "$RUN_DIR"/artifacts/terminal-lab/* || true
 fi
 
-grep -q "OK (" "$RUN_DIR/07-run-issue303-proof.log" &&
-  grep -q "INSTRUMENTATION_CODE: -1" "$RUN_DIR/07-run-issue303-proof.log" ||
-  fail "issue303 instrumentation did not pass"
+pocketshell_instrumentation_assert_log \
+  "$RUN_DIR/07-run-issue303-proof.log" "$TEST_SELECTOR" >/dev/null ||
+  fail "issue303 instrumentation did not produce positive executed selector evidence"
+pocketshell_record_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$TEST_SELECTOR" \
+  "$RUN_DIR/07-run-issue303-proof.log" >/dev/null ||
+  fail "issue303 selector attendance could not be recorded"
+pocketshell_run_release_selector_checker \
+  "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+  --verify-attendance \
+  --selected-file "$SELECTOR_REQUIRED_FILE" \
+  --attendance "$SELECTOR_ATTENDANCE_FILE" \
+  --run-id "$RUN_ID" \
+  --newer-than "$SELECTOR_RUN_START_MARKER"
 
 validate_artifacts
 

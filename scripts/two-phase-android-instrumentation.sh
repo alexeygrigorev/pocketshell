@@ -13,6 +13,15 @@ cd "$ROOT_DIR"
 # shellcheck source=scripts/lib/avd-lock.sh
 # shellcheck disable=SC1091
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+# Issue #2300: successful instrumentation must include a positive executed-test
+# count and the exact phase selector. The phase-specific checks below retain
+# this harness's one-test coverage floor and coherent status-code assertions.
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
+# This is the nightly process-boundary harness invoked by
+# scripts/nightly-extensive-suite.sh, not a release selector consumed by
+# scripts/release-emulator-validation.sh. It keeps its own exact per-phase
+# selector and one-test floor; the release-only attendance ledger is therefore
+# intentionally owned by the release wrappers instead.
 
 ANDROID_SDK="${ANDROID_SDK:-${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/home/alexey/Android/Sdk}}}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -380,13 +389,9 @@ validate_phase_process_marker() {
 validate_instrumentation_success() {
   local phase="$1" method="$2" log_file="$3" rc="$4"
   [[ "$rc" == "0" ]] || fail "phase $phase am instrument exited $rc"
-  grep -Fqx "INSTRUMENTATION_CODE: -1" "$log_file" \
-    || fail "phase $phase lacks instrumentation success code"
+  pocketshell_instrumentation_assert_log "$log_file" "$TEST_CLASS#$method" >/dev/null \
+    || fail "phase $phase lacks positive executed selector evidence for $TEST_CLASS#$method"
   grep -Fqx "OK (1 test)" "$log_file" || fail "phase $phase did not report exactly one passing test"
-  grep -Fqx "INSTRUMENTATION_STATUS: class=$TEST_CLASS" "$log_file" \
-    || fail "phase $phase did not execute $TEST_CLASS"
-  grep -Fqx "INSTRUMENTATION_STATUS: test=$method" "$log_file" \
-    || fail "phase $phase did not execute $method"
   [[ "$(grep -c '^INSTRUMENTATION_STATUS_CODE: 0$' "$log_file" || true)" == "1" ]] \
     || fail "phase $phase lacks one coherent completed-test status"
   if grep -Eq 'FAILURES!!!|INSTRUMENTATION_FAILED|INSTRUMENTATION_STATUS_CODE: -[12]|shortMsg=' "$log_file"; then

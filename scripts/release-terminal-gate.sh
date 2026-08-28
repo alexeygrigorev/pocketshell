@@ -44,6 +44,7 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -423,6 +424,13 @@ run_ssh_smoke_step() {
   mkdir -p "$step_run_dir"
   local artifact_dir="$step_run_dir/artifacts"
   mkdir -p "$artifact_dir"
+  local selector='com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias'
+  local selected_file="$step_run_dir/required-selectors.txt"
+  local attendance_file="$step_run_dir/selector-attendance.tsv"
+  local start_marker="$step_run_dir/selector-run-start.marker"
+  printf '%s\n' "$selector" > "$selected_file"
+  pocketshell_initialize_release_selector_attendance \
+    "$attendance_file" "$RUN_ID-$step_name" "$start_marker" "$selector"
 
   printf '\n[%s] starting SSH smoke step\n' "$step_name"
 
@@ -434,8 +442,7 @@ run_ssh_smoke_step() {
   set +e
   {
     printf '[%s] %s\n' "$(date -Is)" "$step_name"
-    printf 'selector: %s\n' \
-      'com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias'
+    printf 'selector: %s\n' "$selector"
     printf '\n# bringing up deterministic agents Docker fixture\n'
     docker compose -f "$DETERMINISTIC_COMPOSE_FILE" up -d --build agents
     printf '\n# Docker compose ps\n'
@@ -491,19 +498,46 @@ run_ssh_smoke_step() {
     return "$status"
   fi
 
-  if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
+  if ! pocketshell_instrumentation_assert_log "$instrumentation_log" "$selector" >/dev/null; then
     record_step "$step_name" "FAIL" "$step_log" "$artifact_dir" "" \
-      "EmulatorDockerSshSmokeTest did not report INSTRUMENTATION_CODE: -1."
+      "EmulatorDockerSshSmokeTest did not produce positive executed selector evidence."
     FAILING_STEP="$step_name"
-    FAILURE_REASON="EmulatorDockerSshSmokeTest did not report INSTRUMENTATION_CODE: -1"
+    FAILURE_REASON="EmulatorDockerSshSmokeTest did not produce positive executed selector evidence"
     return 1
   fi
-  if ! grep -q 'OK (' "$instrumentation_log"; then
+  local attendance_status=0
+  if pocketshell_record_release_selector_attendance \
+    "$attendance_file" "$RUN_ID-$step_name" "$selector" "$instrumentation_log" >/dev/null; then
+    :
+  else
+    attendance_status="$?"
+  fi
+  if [[ "$attendance_status" -ne 0 ]]; then
     record_step "$step_name" "FAIL" "$step_log" "$artifact_dir" "" \
-      "EmulatorDockerSshSmokeTest did not report 'OK (' summary."
+      "Could not record release selector attendance (exit $attendance_status)."
     FAILING_STEP="$step_name"
-    FAILURE_REASON="EmulatorDockerSshSmokeTest did not report OK"
-    return 1
+    FAILURE_REASON="Could not record SSH smoke selector attendance (exit $attendance_status)"
+    return "$attendance_status"
+  fi
+
+  local checker_status=0
+  if pocketshell_run_release_selector_checker \
+    "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+    --verify-attendance \
+    --selected-file "$selected_file" \
+    --attendance "$attendance_file" \
+    --run-id "$RUN_ID-$step_name" \
+    --newer-than "$start_marker"; then
+    :
+  else
+    checker_status="$?"
+  fi
+  if [[ "$checker_status" -ne 0 ]]; then
+    record_step "$step_name" "FAIL" "$step_log" "$artifact_dir" "" \
+      "Current-run release selector attendance check failed (exit $checker_status)."
+    FAILING_STEP="$step_name"
+    FAILURE_REASON="SSH smoke selector attendance checker failed (exit $checker_status)"
+    return "$checker_status"
   fi
 
   record_step "$step_name" "PASS" "$step_log" "$artifact_dir" "" \

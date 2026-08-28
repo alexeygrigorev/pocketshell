@@ -20,6 +20,7 @@ fi
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 # Issue #2064: when this workbench is a child of release validation it must
 # install the gate-recorded pair, not stale APKs from the root checkout.
 source "$ROOT_DIR/scripts/lib/apk-identity.sh"
@@ -76,6 +77,9 @@ case "$RUN_ID" in
     ;;
 esac
 RUN_DIR="$LOG_ROOT/$RUN_ID"
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 ARTIFACT_DIR="$RUN_DIR/artifacts/terminal-lab"
 BUILD_APKS="${BUILD_APKS:-1}"
 HOLD_MS="${HOLD_MS:-0}"
@@ -374,6 +378,9 @@ case "$RUN_DIR" in
 esac
 rm -rf -- "$RUN_DIR"
 mkdir -p "$RUN_DIR"
+pocketshell_initialize_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$SELECTOR_RUN_START_MARKER" "$TEST_SELECTOR"
+printf '%s\n' "$TEST_SELECTOR" > "$SELECTOR_REQUIRED_FILE"
 trap collect_diagnostics EXIT
 
 printf 'PocketShell terminal workbench\n'
@@ -441,8 +448,7 @@ fi
 
 instrumentation_log_has_success() {
   local log_file="$1"
-  grep -q "OK (" "$log_file" &&
-    grep -q "INSTRUMENTATION_CODE: -1" "$log_file"
+  pocketshell_instrumentation_has_positive_success "$log_file"
 }
 
 instrumentation_log_has_failure_markers() {
@@ -579,6 +585,21 @@ if instrumentation_log_has_success "$RUN_DIR/07-run-workbench.log"; then
 fi
 
 validate_terminal_artifacts
+
+pocketshell_instrumentation_assert_log \
+  "$RUN_DIR/07-run-workbench.log" "$TEST_SELECTOR" >/dev/null ||
+  fail "terminal workbench did not produce positive executed selector evidence"
+pocketshell_record_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$TEST_SELECTOR" \
+  "$RUN_DIR/07-run-workbench.log" >/dev/null ||
+  fail "terminal workbench selector attendance could not be recorded"
+pocketshell_run_release_selector_checker \
+  "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+  --verify-attendance \
+  --selected-file "$SELECTOR_REQUIRED_FILE" \
+  --attendance "$SELECTOR_ATTENDANCE_FILE" \
+  --run-id "$RUN_ID" \
+  --newer-than "$SELECTOR_RUN_START_MARKER"
 
 (( pull_status == 0 )) ||
   fail "terminal workbench artifact pull exited $pull_status"

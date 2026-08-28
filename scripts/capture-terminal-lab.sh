@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -16,6 +17,9 @@ COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/terminal-lab}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 BUILD_APKS="${BUILD_APKS:-1}"
 SHELL_SCREENCAP="${SHELL_SCREENCAP:-0}"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
@@ -64,6 +68,9 @@ run_logged() {
 }
 
 mkdir -p "$RUN_DIR"
+pocketshell_initialize_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$SELECTOR_RUN_START_MARKER" "$TEST_CLASS"
+printf '%s\n' "$TEST_CLASS" > "$SELECTOR_REQUIRED_FILE"
 
 collect_diagnostics() {
   local exit_code=$?
@@ -129,6 +136,26 @@ assert_artifacts_exist() {
   fi
 }
 
+# Keep the release-selector proof as one executable production path. The
+# self-test sources this function with a fixture root and a fake checker, so a
+# checker hidden behind dead code cannot satisfy the release gate's proof.
+verify_terminal_lab_selector_attendance() {
+  pocketshell_instrumentation_assert_log \
+    "$RUN_DIR/11-run-terminal-lab-instrumentation.log" "$TEST_CLASS" >/dev/null ||
+    fail "$TEST_CLASS did not report positive executed selector evidence"
+  pocketshell_record_release_selector_attendance \
+    "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$TEST_CLASS" \
+    "$RUN_DIR/11-run-terminal-lab-instrumentation.log" >/dev/null ||
+    fail "$TEST_CLASS selector attendance could not be recorded"
+  pocketshell_run_release_selector_checker \
+    "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+    --verify-attendance \
+    --selected-file "$SELECTOR_REQUIRED_FILE" \
+    --attendance "$SELECTOR_ATTENDANCE_FILE" \
+    --run-id "$RUN_ID" \
+    --newer-than "$SELECTOR_RUN_START_MARKER"
+}
+
 printf 'PocketShell terminal lab validation\n'
 printf 'Artifacts: %s\n' "$RUN_DIR"
 printf 'ADB: %s\n' "$ADB"
@@ -192,10 +219,7 @@ if [[ -d "$RUN_DIR/artifacts/terminal-lab" ]]; then
   run_logged "13-terminal-lab-artifact-file-info" file "$RUN_DIR"/artifacts/terminal-lab/* || true
 fi
 [[ "$instrumentation_status" -eq 0 ]] || fail "$TEST_CLASS instrumentation command exited with $instrumentation_status"
-grep -q "INSTRUMENTATION_CODE: -1" "$RUN_DIR/11-run-terminal-lab-instrumentation.log" &&
-  grep -q "OK (" "$RUN_DIR/11-run-terminal-lab-instrumentation.log" &&
-  ! grep -q "FAILURES!!!" "$RUN_DIR/11-run-terminal-lab-instrumentation.log" ||
-  fail "$TEST_CLASS did not report instrumentation success"
+verify_terminal_lab_selector_attendance
 assert_artifacts_exist
 
 printf '\nPASS: terminal lab validation completed\n'

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
@@ -66,6 +67,9 @@ if [[ "$*" == "shell am instrument"* ]]; then
     exit 1
   fi
 
+  printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.EmulatorDockerSshSmokeTest\n'
+  printf 'INSTRUMENTATION_STATUS: test=debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias\n'
+  printf 'INSTRUMENTATION_STATUS_CODE: 0\n'
   printf 'INSTRUMENTATION_CODE: -1\n'
   printf 'OK (1 test)\n'
   exit 0
@@ -91,12 +95,18 @@ run_generated_walkthrough() {
   FAKE_ADB_MODE="$mode"
   FAKE_ADB_STATE="$run_dir/adb-state"
   export FAKE_ADB_MODE FAKE_ADB_STATE
+  SELECTOR_ATTENDANCE_FILE="$run_dir/selector-attendance.tsv"
+  RUN_ID="test-$mode"
+  pocketshell_initialize_release_selector_attendance \
+    "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$run_dir/selector-run-start.marker" \
+    "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias"
 
   local generated_script
   generated_script="$(run_app_walkthrough_script \
     "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias" \
     "$run_dir/diagnostics.log" \
-    "$run_dir/full-logcat.log")"
+    "$run_dir/full-logcat.log" \
+    "$run_dir/raw-instrumentation.log")"
 
   bash -lc "$generated_script"
 }

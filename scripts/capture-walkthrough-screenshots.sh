@@ -8,6 +8,7 @@ source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
 source "$ROOT_DIR/scripts/lib/gradle-profile.sh"
 source "$ROOT_DIR/scripts/lib/apk-identity.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 
 # Issue #2064: see scripts/phone-walkthrough.sh — same contract, same
 # device-free verification mode, same reason it must not queue on the AVD lock.
@@ -37,6 +38,9 @@ COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/walkthrough-visual-pass}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
 DEVICE_SCREENSHOT_DIR="$DEVICE_OUTPUT_DIR/walkthrough-visual-pass"
 MAIN_TEST_CLASS="com.pocketshell.app.proof.WalkthroughVisualScreenshotTest"
@@ -158,6 +162,10 @@ run_logged() {
 }
 
 mkdir -p "$RUN_DIR"
+pocketshell_initialize_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$SELECTOR_RUN_START_MARKER" \
+  "$MAIN_TEST_CLASS" "$CONVERSATION_TEST_CLASS" "$COMPOSER_TEST_CLASS"
+printf '%s\n' "$MAIN_TEST_CLASS" "$CONVERSATION_TEST_CLASS" "$COMPOSER_TEST_CLASS" > "$SELECTOR_REQUIRED_FILE"
 
 collect_diagnostics() {
   local exit_code=$?
@@ -246,8 +254,7 @@ wait_for_instrumentation() {
 
 visual_audit_instrumentation_log_has_success() {
   local log_file="$1"
-  grep -q "INSTRUMENTATION_CODE: -1" "$log_file" &&
-    grep -q "OK (" "$log_file" &&
+  pocketshell_instrumentation_has_positive_success "$log_file" &&
     ! grep -q "FAILURES!!!" "$log_file"
 }
 
@@ -303,6 +310,13 @@ run_instrumentation_class() {
     attempt_logcat="$RUN_DIR/$attempt_step-logcat.txt"
     "$ADB" logcat -d -v threadtime -t 4000 > "$attempt_logcat" 2>&1 || true
     if visual_audit_instrumentation_log_has_success "$RUN_DIR/$attempt_step.log"; then
+      if [[ -n "${SELECTOR_ATTENDANCE_FILE:-}" ]]; then
+        pocketshell_instrumentation_assert_log "$RUN_DIR/$attempt_step.log" "$test_class" >/dev/null ||
+          fail "$test_class did not produce positive executed selector evidence"
+        pocketshell_record_release_selector_attendance \
+          "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$test_class" "$RUN_DIR/$attempt_step.log" >/dev/null ||
+          fail "$test_class selector attendance could not be recorded"
+      fi
       return 0
     fi
     if [[ "$attempt" -eq "$INSTRUMENTATION_ATTEMPTS" ]]; then
@@ -426,6 +440,14 @@ assert_screenshots_exist "conversation visual pass" "${MAIN_SCREENSHOTS[@]}" "${
 run_instrumentation_class "16-run-composer-visual-instrumentation" "$COMPOSER_TEST_CLASS"
 pull_device_screenshots "17-collect-composer-device-screenshots"
 assert_screenshots_exist "composer visual pass" "${MAIN_SCREENSHOTS[@]}" "${CONVERSATION_SCREENSHOTS[@]}" "${COMPOSER_SCREENSHOTS[@]}"
+
+pocketshell_run_release_selector_checker \
+  "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+  --verify-attendance \
+  --selected-file "$SELECTOR_REQUIRED_FILE" \
+  --attendance "$SELECTOR_ATTENDANCE_FILE" \
+  --run-id "$RUN_ID" \
+  --newer-than "$SELECTOR_RUN_START_MARKER"
 
 printf '\nPASS: walkthrough visual screenshots captured\n'
 printf 'Screenshots: %s/screenshots/walkthrough-visual-pass\n' "$RUN_DIR"

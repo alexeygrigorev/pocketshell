@@ -14,6 +14,7 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -29,6 +30,9 @@ SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/reconnect-app-switch}"
 RUN_ID="${RUN_ID:-issue-548-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 RUN_SSH_KEY="$RUN_DIR/test_key"
 BUILD_APKS="${BUILD_APKS:-1}"
 APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
@@ -118,9 +122,18 @@ collect_diagnostics() {
 
 validate_artifacts() {
   local instrumentation_log="$RUN_DIR/07-run-reconnect-app-switch.log"
-  grep -q "OK (" "$instrumentation_log" &&
-    grep -q "INSTRUMENTATION_CODE: -1" "$instrumentation_log" ||
-    fail "reconnect app-switch instrumentation did not pass"
+  pocketshell_instrumentation_assert_log "$instrumentation_log" "$TEST_SELECTOR" >/dev/null ||
+    fail "reconnect app-switch instrumentation did not produce positive executed selector evidence"
+  pocketshell_record_release_selector_attendance \
+    "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$TEST_SELECTOR" "$instrumentation_log" >/dev/null ||
+    fail "reconnect app-switch selector attendance could not be recorded"
+  pocketshell_run_release_selector_checker \
+    "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+    --verify-attendance \
+    --selected-file "$SELECTOR_REQUIRED_FILE" \
+    --attendance "$SELECTOR_ATTENDANCE_FILE" \
+    --run-id "$RUN_ID" \
+    --newer-than "$SELECTOR_RUN_START_MARKER"
 
   [[ -d "$ARTIFACT_DIR" ]] || fail "artifact directory missing at $ARTIFACT_DIR"
   [[ -s "$ARTIFACT_DIR/timings.txt" ]] || fail "timings.txt is missing or empty"
@@ -157,6 +170,9 @@ validate_artifacts() {
 }
 
 mkdir -p "$RUN_DIR"
+pocketshell_initialize_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$SELECTOR_RUN_START_MARKER" "$TEST_SELECTOR"
+printf '%s\n' "$TEST_SELECTOR" > "$SELECTOR_REQUIRED_FILE"
 trap 'collect_diagnostics; pocketshell_release_all' EXIT
 
 printf 'PocketShell short app-switch reconnect harness\n'

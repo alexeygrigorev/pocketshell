@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 source "$ROOT_DIR/scripts/lib/avd-lock.sh"
 source "$ROOT_DIR/scripts/lib/scope-run.sh"
+source "$ROOT_DIR/scripts/lib/instrumentation-evidence.sh"
 pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -18,6 +19,9 @@ SSH_USER="${SSH_USER:-testuser}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/issue78-phone-walkthrough}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
+SELECTOR_ATTENDANCE_FILE="$RUN_DIR/selector-attendance.tsv"
+SELECTOR_REQUIRED_FILE="$RUN_DIR/required-selectors.txt"
+SELECTOR_RUN_START_MARKER="$RUN_DIR/selector-run-start.marker"
 TEST_SELECTOR="com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
 DEVICE_ISSUE78_DIR="$DEVICE_OUTPUT_DIR/issue78-phone-walkthrough"
@@ -54,6 +58,9 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 fi
 
 mkdir -p "$RUN_DIR"
+pocketshell_initialize_release_selector_attendance \
+  "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$SELECTOR_RUN_START_MARKER" "$TEST_SELECTOR"
+printf '%s\n' "$TEST_SELECTOR" > "$SELECTOR_REQUIRED_FILE"
 
 fail() {
   printf '\nFAIL: %s\nArtifacts: %s\n' "$1" "$RUN_DIR" >&2
@@ -200,10 +207,19 @@ run_issue78_test() {
   "$ADB" logcat -d -v threadtime > "$RUN_DIR/10-full-logcat.log" 2>&1 || true
   rg -n 'ISSUE78_|PocketShellWalkthrough|AndroidRuntime|FATAL|Process: com[.]pocketshell[.]app' \
     "$RUN_DIR/10-full-logcat.log" "$instrumentation_log" > "$RUN_DIR/11-issue78-filtered-log.txt" 2>&1 || true
-  grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log" &&
-    grep -q 'OK (' "$instrumentation_log" &&
-    ! grep -q 'FAILURES!!!' "$instrumentation_log" ||
-    fail "issue #78 instrumentation did not report success"
+  pocketshell_instrumentation_assert_log \
+    "$instrumentation_log" "$TEST_SELECTOR" >/dev/null ||
+    fail "issue #78 instrumentation did not report positive executed selector evidence"
+  pocketshell_record_release_selector_attendance \
+    "$SELECTOR_ATTENDANCE_FILE" "$RUN_ID" "$TEST_SELECTOR" "$instrumentation_log" >/dev/null ||
+    fail "issue #78 selector attendance could not be recorded"
+  pocketshell_run_release_selector_checker \
+    "$ROOT_DIR/scripts/check-release-selector-execution.sh" \
+    --verify-attendance \
+    --selected-file "$SELECTOR_REQUIRED_FILE" \
+    --attendance "$SELECTOR_ATTENDANCE_FILE" \
+    --run-id "$RUN_ID" \
+    --newer-than "$SELECTOR_RUN_START_MARKER"
 }
 
 pull_artifacts() {

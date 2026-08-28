@@ -55,6 +55,8 @@ chmod +x scripts/select-test-areas.sh \
          scripts/check-test-execution-ledger-wiring.py \
          scripts/ci-record-test-execution-ledger.sh \
          scripts/ci-nightly-execution-ledger.sh \
+         scripts/check-release-selector-execution.sh \
+         tests/scripts/release-selector-execution-proof-test.sh \
          scripts/dev-fast-gate-parity-selftest.sh \
          scripts/check-journey-quarantine-expiry.sh \
          scripts/test-journey-quarantine-non-blocking.sh
@@ -92,6 +94,12 @@ run_guard "select-test-areas-selftest" \
 # Execution-ledger guard reds, synthetic AND real-tree.
 run_guard "check-test-execution-ledger-selftest" \
   bash scripts/check-test-execution-ledger-selftest.sh
+
+# Issue #2300: release selectors must have positive executed-test evidence and
+# current-run raw-log attendance; source declarations and rolling ledgers alone
+# are not sufficient.
+run_guard "release-selector-execution-proof" \
+  tests/scripts/release-selector-execution-proof-test.sh
 
 # Issue #2082: workflows actually invoke --record/--verify/attendance against
 # real JUnit artifacts. A ledger nobody calls is decoration; the self-test

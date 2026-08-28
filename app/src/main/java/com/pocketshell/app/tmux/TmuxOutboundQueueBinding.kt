@@ -33,16 +33,31 @@ internal fun tmuxOutboundQueueBinding(
     // generation evidence, but it is not enough to OWN the queue. Until a live
     // pane row confirms that generation, badge/composer/drain stay on host/name;
     // the screen effect promotes them atomically once this settles (#1944).
+    //
+    // Issue #2173: a live pane can confirm the session WITHOUT copying
+    // `sessionCreated` (inline-reveal / name-only attach). Reveal has already
+    // adopted `tmux:host:$N:created` as the fused screen identity, but the
+    // pane-only durable formula left composer/queue on host/name for 60s
+    // (`composer=2/issue1526-exactly-once` while `tmux=tmux:2:$0:…`). Own the
+    // adopted generation once a live pane exists and no pane contradicts it.
     val durable = paneGeneration?.takeIf { generationSettled }?.let {
         durableTmuxSessionKey(hostId, it.sessionId, it.sessionCreated)
-    }
+    } ?: adoptedDurableQueueKey(
+        hostId = hostId,
+        panes = panes,
+        sessionId = sessionId,
+        created = created,
+        generationSettled = generationSettled,
+    )
     val fallback = "$hostId/$sessionName"
     val expectedId = sessionId?.trim()?.takeIf(String::isNotEmpty)
     val paneIds = if (expectedId == null || created == null) {
         emptySet()
     } else {
-        panes.filter { it.sessionId == expectedId && it.sessionCreated == created }
-            .mapTo(linkedSetOf(), TmuxPaneState::paneId)
+        panes.filter {
+            it.sessionId == expectedId &&
+                (it.sessionCreated == null || it.sessionCreated == created)
+        }.mapTo(linkedSetOf(), TmuxPaneState::paneId)
     }
     return TmuxOutboundQueueBinding(
         targetKey = durable ?: fallback,
@@ -52,6 +67,32 @@ internal fun tmuxOutboundQueueBinding(
         sessionCreated = created,
         generationPaneIds = paneIds,
     )
+}
+
+/**
+ * Issue #2173: own the adopted `tmux:host:$N:created` key when a live pane
+ * exists for that session and no pane reports a *different* generation.
+ * Empty panes stay on host/name (#1944). A pane whose `sessionCreated` is
+ * still null is treated as confirming the session, not contradicting it.
+ */
+internal fun adoptedDurableQueueKey(
+    hostId: Long,
+    panes: List<TmuxPaneState>,
+    sessionId: String?,
+    created: Long?,
+    generationSettled: Boolean,
+): String? {
+    if (!generationSettled || panes.isEmpty()) return null
+    val candidate = durableTmuxSessionKey(hostId, sessionId, created) ?: return null
+    val expectedId = sessionId?.trim()?.takeIf(String::isNotEmpty) ?: return null
+    val contradicts = panes.any { pane ->
+        pane.sessionId.isNotBlank() &&
+            pane.sessionCreated != null &&
+            durableTmuxSessionKey(hostId, pane.sessionId, pane.sessionCreated) != candidate
+    }
+    if (contradicts) return null
+    if (panes.none { it.sessionId == expectedId }) return null
+    return candidate
 }
 
 internal fun knownSessionNavigationTarget(

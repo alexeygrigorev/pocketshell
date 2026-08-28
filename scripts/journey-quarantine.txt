@@ -16,3 +16,4 @@
 # Empty today: no journey class is currently known to flake. The first entry
 # added here should be filed the same way scripts/report-journey-flake.sh
 # templates it (see that script's header for the semi-automated procedure).
+com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest	#2391	2026-08-28	2026-09-11	the inSessionNewSessionInSameFolderGetsSuffixedSessionNotCollisionAllEntryPoints method times out: shared pocketshell-test-agents fixture carries 31+ leaked sibling sessions from prior runs, causing the collision-entry-point walk to time out; pre-existing on clean main, found during #2378 review

@@ -18,6 +18,24 @@ set -eu
 fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
 version_file="${POCKETSHELL_AGENT_FIXTURE_VERSION_FILE:-/opt/pocketshell-agent-fixture-version}"
 
+# Issue #2377: resolve the shared session enumerator NEXT TO THIS SCRIPT first.
+# This shim runs both from `/usr/local/bin` inside the image and straight out of
+# `tests/docker/agent-bin` under DockerAgentFixtureContractTest (and from
+# `/usr/local/lib/pocketshell-real-fixture` in the agents-old-cli image, where
+# the sibling is not next to it — hence the `/usr/local/bin` fallback).
+fixture_sessions_bin() {
+  if [ -n "${POCKETSHELL_FIXTURE_SESSIONS_BIN:-}" ]; then
+    printf '%s\n' "$POCKETSHELL_FIXTURE_SESSIONS_BIN"
+    return 0
+  fi
+  _fsb_dir="$(dirname "$0")"
+  if [ -x "$_fsb_dir/pocketshell-fixture-sessions" ]; then
+    printf '%s\n' "$_fsb_dir/pocketshell-fixture-sessions"
+    return 0
+  fi
+  printf '%s\n' "/usr/local/bin/pocketshell-fixture-sessions"
+}
+
 fixture_version() {
   if [ -n "${POCKETSHELL_AGENT_FIXTURE_VERSION:-}" ]; then
     printf '%s\n' "$POCKETSHELL_AGENT_FIXTURE_VERSION"
@@ -505,13 +523,31 @@ case "${1:-}" in
   sessions)
     shift
     if [ "${1:-}" = "list" ]; then
+      shift
+      # Issue #2377: `--json` is the enumerator the phone's folder list rides
+      # (`pocketshell sessions list --json`), and it must report the union of
+      # EVERY `tmuxctl-*` socket plus the aplexer manager — not just whatever
+      # the default socket (or a live `-CC` client, attached to one server)
+      # happens to hold. The helper below enumerates the seeded sockets and the
+      # `a` fixture for real; with nothing seeded it emits exactly the canned
+      # rows, so every pre-existing journey is byte-for-byte unchanged.
+      sessions_json=0
+      for sessions_arg in "$@"; do
+        case "$sessions_arg" in
+          --json) sessions_json=1 ;;
+        esac
+      done
+      if [ "$sessions_json" = "1" ]; then
+        exec "$(fixture_sessions_bin)" json \
+          "${fixture_dir}/pocketshell-sessions-list.txt"
+      fi
       # The app emits `pocketshell sessions list --by activity`; the
       # fixture ignores the sort flag and returns the canonical listing
       # so the trailing-timestamp parser sees a stable shape.
-      cat "${fixture_dir}/pocketshell-sessions-list.txt"
-      exit 0
+      exec "$(fixture_sessions_bin)" list \
+        "${fixture_dir}/pocketshell-sessions-list.txt"
     fi
-    printf 'pocketshell sessions fixture supports: list [--by created|activity]\n' >&2
+    printf 'pocketshell sessions fixture supports: list [--by created|activity] [--json]\n' >&2
     exit 64
     ;;
   jobs)

@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Live session enumerator for the Docker `agents` fixture (issue #2377).
+
+The real host CLI (`tools/pocketshell/src/pocketshell/session_enum.py`) unions
+two managers:
+
+  * ``tmux``    — every ``tmuxctl-*`` socket, one tmux server per session, which
+                  is why a bare default-socket ``tmux list-sessions`` (and a
+                  live ``-CC`` control client, which is attached to exactly ONE
+                  server) sees only a small subset;
+  * ``aplexer`` — rows reported by the ``a`` binary.
+
+The fixture used to fake all of that with one canned human table, so no journey
+could reproduce the maintainer's reported shape: 7 tmuxctl-managed sessions
+across 7 separate sockets plus 3 aplexer-managed ones, against a default socket
+holding only the session the app had just created. This script gives the fixture
+the real shape while staying byte-for-byte compatible with every existing
+journey:
+
+  * with NO ``tmuxctl-*`` socket and NO aplexer fixture seeded (the state every
+    other journey runs in) ``list`` emits the canned file verbatim and ``json``
+    carries exactly the canned rows;
+  * seeded sockets are enumerated live and appended after the canned rows;
+  * aplexer rows come from the ``a`` fixture binary.
+
+Usage: ``pocketshell-fixture-sessions {list|json} <canned-table-file>``
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime
+
+# The `agents` image renames the distro tmux to `tmux.real` and puts a
+# fault-injecting shim on the PATH; enumerate through the real binary so a
+# journey that arms a shim fault does not also blind the enumerator.
+#
+# `None` means "not inside the fixture image" — the shims are also executed
+# straight out of the repo by DockerAgentFixtureContractTest, and walking the
+# DEVELOPER's `/tmp/tmux-$UID/tmuxctl-*` sockets there would splice their real
+# sessions into a fixture payload. POCKETSHELL_FIXTURE_TMUX_BIN is the explicit
+# opt-in that test (and a local probe) uses.
+TMUX_REAL = os.environ.get("POCKETSHELL_FIXTURE_TMUX_BIN") or (
+    "/usr/bin/tmux.real" if os.path.exists("/usr/bin/tmux.real") else None
+)
+FIELD_SEP = "::"
+TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+LEADING_IDX = re.compile(r"^(\s*\d+\s+)")
+
+
+def read_canned(path: str) -> tuple[list[str], list[tuple[str, str]], list[str], int]:
+    """Split the canned table into (header lines, rows, trailer lines, width)."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return [], [], [], 0
+    header: list[str] = []
+    rows: list[tuple[str, str]] = []
+    trailer: list[str] = []
+    width = 0
+    for line in lines:
+        stamp = TIMESTAMP.search(line)
+        idx = LEADING_IDX.match(line) if stamp else None
+        if stamp and idx:
+            name = line[idx.end(): stamp.start()].rstrip()
+            width = max(width, stamp.start() - idx.end())
+            if name.strip():
+                rows.append((name.strip(), stamp.group(1)))
+            continue
+        if rows:
+            trailer.append(line)
+        else:
+            header.append(line)
+    return header, rows, trailer, width
+
+
+def socket_dir() -> str:
+    explicit = os.environ.get("POCKETSHELL_FIXTURE_TMUX_SOCKET_DIR")
+    if explicit:
+        return explicit
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return os.path.join(base, "tmux-%d" % os.getuid())
+
+
+def tmuxctl_socket_rows() -> list[tuple[str, str]]:
+    """Live sessions on every ``tmuxctl-*`` socket — one server per session."""
+    if not TMUX_REAL:
+        return []
+    directory = socket_dir()
+    try:
+        entries = sorted(
+            entry for entry in os.listdir(directory) if entry.startswith("tmuxctl-")
+        )
+    except OSError:
+        return []
+    rows: list[tuple[str, str]] = []
+    for entry in entries:
+        path = os.path.join(directory, entry)
+        try:
+            proc = subprocess.run(
+                [
+                    TMUX_REAL,
+                    "-S",
+                    path,
+                    "list-sessions",
+                    "-F",
+                    # NOT a literal tab: tmux's -F rewrites a raw tab to `_`
+                    # (verified on the fixture image), which would fold the
+                    # created-epoch into the session name. `::` is the same
+                    # separator the app's own reads use (FIELD_SEP).
+                    "#{session_name}%s#{session_created}" % FIELD_SEP,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        for line in proc.stdout.splitlines():
+            name, _, created = line.rpartition(FIELD_SEP)
+            if not name:
+                continue
+            name = name.strip()
+            if not name:
+                continue
+            try:
+                stamp = datetime.fromtimestamp(int(created.strip())).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            except (TypeError, ValueError):
+                stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            rows.append((name, stamp))
+    return rows
+
+
+def aplexer_rows() -> list[dict]:
+    """Rows from the `a` fixture binary (aplexer), or none when it is absent."""
+    if os.environ.get("POCKETSHELL_APLEXER") == "0":
+        return []
+    binary = os.environ.get("APLEXER_BIN") or "/usr/local/bin/a"
+    if not os.path.exists(binary):
+        return []
+    try:
+        proc = subprocess.run(
+            [binary, "--json", "sessions"], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    try:
+        payload = json.loads(proc.stdout)
+    except ValueError:
+        return []
+    sessions = payload.get("sessions")
+    if not isinstance(sessions, list):
+        return []
+    rows = []
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        row = {"name": name, "manager": "aplexer"}
+        for key in ("id", "workspace", "engine", "tag", "created", "created_epoch"):
+            if item.get(key) is not None:
+                row[key] = item[key]
+        rows.append(row)
+    return rows
+
+
+def tmux_rows(canned: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], bool]:
+    rows = list(canned)
+    seen = {name for name, _ in rows}
+    extra = False
+    for name, created in tmuxctl_socket_rows():
+        if name in seen:
+            continue
+        seen.add(name)
+        rows.append((name, created))
+        extra = True
+    return rows, extra
+
+
+def render_list(path: str) -> str:
+    header, canned, trailer, width = read_canned(path)
+    rows, extra = tmux_rows(canned)
+    if not extra:
+        # Byte-for-byte the committed fixture, so no pre-existing journey moves.
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read()
+    width = max([width] + [len(name) + 1 for name, _ in rows])
+    lines = list(header)
+    for index, (name, created) in enumerate(rows, start=1):
+        lines.append("%-4d %-*s%s" % (index, width, name, created))
+    lines.extend(trailer)
+    return "\n".join(lines) + "\n"
+
+
+def render_json(path: str) -> str:
+    _, canned, _, _ = read_canned(path)
+    rows, _ = tmux_rows(canned)
+    sessions = [
+        {
+            "name": name,
+            "manager": "tmux",
+            "created": created,
+            "attach": "tmux attach -t %s" % name,
+        }
+        for name, created in rows
+    ]
+    sessions.extend(aplexer_rows())
+    return (
+        json.dumps({"managers": ["tmux", "aplexer"], "sessions": sessions}, indent=2)
+        + "\n"
+    )
+
+
+def main(argv: list[str]) -> int:
+    verb = argv[1] if len(argv) > 1 else ""
+    path = argv[2] if len(argv) > 2 else ""
+    if verb == "list" and path:
+        sys.stdout.write(render_list(path))
+        return 0
+    if verb == "json" and path:
+        sys.stdout.write(render_json(path))
+        return 0
+    sys.stderr.write(
+        "pocketshell-fixture-sessions supports: {list|json} <canned-table-file>\n"
+    )
+    return 64
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

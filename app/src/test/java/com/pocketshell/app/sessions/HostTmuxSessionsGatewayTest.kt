@@ -35,8 +35,19 @@ class HostTmuxSessionsGatewayTest {
         SshOpenTelemetry.resetForTest()
     }
 
+    /**
+     * Issue #2377: this used to be `sameHostLiveClientListsSessionsWithoutOpeningSsh`
+     * and pinned the defect — the live `-CC` client's rows returned as the WHOLE
+     * picker list, with `SSH_SOURCE_SESSION_PICKER_LIST == 0` proving no lease was
+     * dialled at all. A control client sees ONE tmux server, so that shortcut is
+     * the undercount. What #692 actually bought on this surface, and what is
+     * asserted now, is that the warm path does strictly LESS lease work than the
+     * cold one: the live rows answer `tmux list-sessions`, so the lease only pays
+     * the one host-wide enumerator exec. The union itself is covered by
+     * [Issue2377SessionPickerUndercountTest].
+     */
     @Test
-    fun sameHostLiveClientListsSessionsWithoutOpeningSsh() = runTest {
+    fun sameHostLiveClientListsSessionsFromOneEnumeratorExec() = runTest {
         val client = FakeTmuxClient()
         client.responses += CommandResponse(
             number = 1L,
@@ -55,23 +66,43 @@ class HostTmuxSessionsGatewayTest {
             keyPath = KEY_PATH,
             client = client,
         )
-        val gateway = SshHostTmuxSessionsGateway(parser, activeTmuxClients)
-
-        val result = gateway.listSessions(HOST, KEY_PATH, passphrase = null)
-
-        assertTrue(result is HostTmuxSessionListResult.Sessions)
-        val rows = (result as HostTmuxSessionListResult.Sessions).rows
-        assertEquals(listOf("beta", "alpha"), rows.map { it.name })
-        assertEquals(listOf("\$2", "\$1"), rows.map { it.tmuxSessionId })
-        assertEquals(
-            listOf("/home/alexey/git/pocketshell", "/home/alexey/git/other"),
-            rows.map { it.path },
+        // The host has no working enumerator, so the live rows are the whole
+        // truth here — this test is about the SHAPE of the warm path, not the
+        // union (which Issue2377SessionPickerUndercountTest owns).
+        val session = FakeSshSession()
+        val manager = SshLeaseManager(
+            connector = CountingConnector(Result.success(session)),
+            scope = this,
+            idleTtlMillis = 30_000L,
         )
-        assertEquals(0, SshOpenTelemetry.count(SSH_SOURCE_SESSION_PICKER_LIST))
-        assertEquals(
-            listOf(SshHostTmuxSessionsGateway.LIVE_LIST_SESSIONS_COMMAND),
-            client.sentCommands,
-        )
+        val gateway = SshHostTmuxSessionsGateway(parser, activeTmuxClients, manager)
+
+        try {
+            val result = gateway.listSessions(HOST, KEY_PATH, passphrase = null)
+
+            assertTrue(result is HostTmuxSessionListResult.Sessions)
+            val rows = (result as HostTmuxSessionListResult.Sessions).rows
+            assertEquals(listOf("beta", "alpha"), rows.map { it.name })
+            assertEquals(listOf("\$2", "\$1"), rows.map { it.tmuxSessionId })
+            assertEquals(
+                listOf("/home/alexey/git/pocketshell", "/home/alexey/git/other"),
+                rows.map { it.path },
+            )
+            assertEquals(
+                listOf(SshHostTmuxSessionsGateway.LIVE_LIST_SESSIONS_COMMAND),
+                client.sentCommands,
+            )
+            // The load-bearing #692 property: the lease is NOT asked to redo the
+            // per-socket read the live client just answered.
+            assertEquals(
+                "the warm path must not re-run tmux list-sessions over the lease",
+                0,
+                session.execCommands.count { it.contains("list-sessions") },
+            )
+            assertEquals(1, SshOpenTelemetry.count(SSH_SOURCE_SESSION_PICKER_LIST))
+        } finally {
+            manager.close()
+        }
     }
 
     @Test
@@ -93,10 +124,15 @@ class HostTmuxSessionsGatewayTest {
             keyPath = KEY_PATH,
             client = client,
         )
+        // Issue #2377: the warm path now also reads the host-wide enumerator over
+        // the lease, so a connector that refuses to dial would surface
+        // ConnectFailed. This host simply has no enumerator (`Fetch.Failed`), so
+        // the live rows remain the whole answer and the recorded-kind mapping —
+        // the property under test — is unaffected by the union.
         val manager = SshLeaseManager(
-            connector = CountingConnector(Result.failure(SshException("live path must not dial"))),
+            connector = CountingConnector(Result.success(FakeSshSession())),
             scope = this,
-            idleTtlMillis = 0L,
+            idleTtlMillis = 30_000L,
         )
         val gateway = SshHostTmuxSessionsGateway(
             parser = parser,

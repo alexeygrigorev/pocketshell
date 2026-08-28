@@ -31,6 +31,18 @@ interface HostTmuxSessionsGateway {
      * keep the previously-known list rather than blocking on a handshake).
      * This is the data source for the in-session project switcher — using
      * it instead of [listSessions] is what keeps the switch "instant".
+     *
+     * Issue #2377 — READ THIS BEFORE REUSING IT. A `tmux -CC` control client
+     * is attached to exactly ONE tmux server, so these rows are ONE socket's
+     * `list-sessions`, never the host's session SET. On a tmuxctl host (one
+     * `tmuxctl-*` socket per session) plus aplexer, that is a severe
+     * undercount — the maintainer saw "1 session" against a host with 10.
+     * These rows are a metadata OVERLAY only; [listSessions] unions the
+     * host-wide enumerator over them and is the only correct source for a
+     * "these are the host's sessions" list.
+     *
+     * The in-session project switcher (`refreshProjectSiblings`) is the one
+     * deliberate exemption: see the note on that function.
      */
     suspend fun listSessionsFromLiveClient(
         host: HostEntity,
@@ -92,7 +104,27 @@ class SshHostTmuxSessionsGateway internal constructor(
         keyPath: String,
         passphrase: CharArray?,
     ): HostTmuxSessionListResult {
-        listSessionsFromLiveClient(host, keyPath)?.let { return it }
+        // Issue #2377 (hard cut, D22): this used to be
+        // `listSessionsFromLiveClient(host, keyPath)?.let { return it }` — the
+        // live `-CC` client's rows published as the WHOLE session-picker list.
+        // A control client is attached to exactly ONE tmux server, so on the
+        // maintainer's host (7 tmuxctl-managed sessions, one `tmuxctl-*` socket
+        // each, plus 3 aplexer-managed) the picker showed the 1 session on the
+        // socket the app happened to be attached to. Identical defect, identical
+        // trigger and identical class as the folder-list one this issue fixes:
+        // the moment the user is inside a session, a warm client exists.
+        //
+        // The live rows keep their job — they are the richest read of the
+        // ATTACHED server (session_path, recorded `@ps_agent_kind`, ids) and
+        // they cost no SSH — but they are now an OVERLAY, exactly like the
+        // `tmux list-sessions` overlay on the cold branch below. The tmuxctl +
+        // aplexer enumerator is the authority for the session SET on every
+        // branch. Having them means we can skip the cold branch's
+        // `tmux list-sessions` exec, so the warm path still does strictly less
+        // work than the cold one.
+        val liveOverlay =
+            (listSessionsFromLiveClient(host, keyPath) as? HostTmuxSessionListResult.Sessions)
+                ?.rows
 
         SshOpenTelemetry.record(
             source = SSH_SOURCE_SESSION_PICKER_LIST,
@@ -113,21 +145,35 @@ class SshHostTmuxSessionsGateway internal constructor(
                 target = host.toLeaseSessionTarget(keyPath, passphrase),
                 blockTimeoutMs = leaseBlockTimeoutMs,
             ) { session ->
+                if (liveOverlay != null) {
+                    // Warm branch: the live client already read the attached
+                    // server, so the only thing missing is the host-wide set.
+                    return@withSession unionedResult(
+                        enumerator = enumeratorFromPocketshell(session),
+                        overlay = liveOverlay,
+                    )
+                }
                 val tmux = session.execTmuxListSessions(pathAware(LIST_SESSIONS_COMMAND))
                 when {
                     tmux.exitCode == 0 -> {
                         val overlay = parser.parseTmuxListSessions(tmux.stdout) { rawId ->
                             enginesGateway?.familyForRawId(host.id, rawId)
                         }
-                        val enumerator = enumeratorFromPocketshell(session)
-                        HostTmuxSessionListResult.Sessions(
-                            parser.unionLiveSessionRows(enumerator, overlay),
+                        unionedResult(
+                            enumerator = enumeratorFromPocketshell(session),
+                            overlay = overlay,
                         )
                     }
                     tmux.exitCode == 127 || tmux.stderr.contains("not found", ignoreCase = true) ->
                         HostTmuxSessionListResult.ToolUnavailable
                     tmux.stderr.contains("no server running", ignoreCase = true) ->
-                        HostTmuxSessionListResult.Sessions(emptyList())
+                        // The DEFAULT socket has no server. That says nothing
+                        // about the tmuxctl sockets or aplexer, so ask the
+                        // enumerator rather than reporting "no sessions" (#2377).
+                        unionedResult(
+                            enumerator = enumeratorFromPocketshell(session),
+                            overlay = emptyList(),
+                        )
                     else -> HostTmuxSessionListResult.Failed(
                         tmux.stderr.ifBlank { tmux.stdout }.ifBlank { "tmux exited ${tmux.exitCode}" },
                     )
@@ -155,21 +201,51 @@ class SshHostTmuxSessionsGateway internal constructor(
     private fun pathAware(command: String): String =
         ReposRemoteSource.pathAwareCommand(command)
 
-    private suspend fun enumeratorFromPocketshell(session: SshSession): List<HostTmuxSessionRow> {
-        val json = runCatching {
-            session.execTmuxListSessions(pathAware(POCKETSHELL_SESSIONS_JSON_COMMAND))
-        }.getOrNull()
-        if (json != null && json.exitCode == 0) {
-            parser.parsePocketshellSessionsJson(json.stdout)?.let { return it }
+    /**
+     * Issue #2377: the shared host-wide enumerator, the same state machine the
+     * folder list runs (see [HostSessionEnumerator]) instead of this file's old
+     * private copy. The copy swallowed a transport throw into an empty list,
+     * which is indistinguishable from "the host really has no other sessions" —
+     * the conflation that lets a narrow list be published as the truth.
+     */
+    private suspend fun enumeratorFromPocketshell(
+        session: SshSession,
+    ): HostSessionEnumerator.Fetch =
+        HostSessionEnumerator.fetch(
+            parser = parser,
+            exec = { command -> session.execTmuxListSessions(command) },
+            jsonCommand = pathAware(
+                HostSessionEnumerator.jsonExecBody(POCKETSHELL_SESSIONS_JSON_COMMAND),
+            ),
+            humanCommand = pathAware(POCKETSHELL_SESSIONS_COMMAND),
+        )
+
+    /**
+     * Issue #2377: union the host-wide enumerator (AUTHORITY for which sessions
+     * exist) over a single-socket [overlay] (richer metadata for the sessions it
+     * can see) — the same rule, and the same [HostTmuxSessionListParser.unionLiveSessionRows]
+     * call, on every branch of [listSessions].
+     *
+     * [HostSessionEnumerator.Fetch.Unavailable] is the one case that must not
+     * fall back to the overlay: we did not read the host, so publishing the
+     * narrower list would be a confidently-wrong count (the reported defect).
+     * The picker renders [HostTmuxSessionListResult.Failed] as a retryable
+     * fallback sheet with this message, which is honest. A
+     * [HostSessionEnumerator.Fetch.Failed] (the host has no working `pocketshell`
+     * CLI at all, so it has no tmuxctl sockets or aplexer either) legitimately
+     * leaves the default socket as the whole truth.
+     */
+    private fun unionedResult(
+        enumerator: HostSessionEnumerator.Fetch,
+        overlay: List<HostTmuxSessionRow>,
+    ): HostTmuxSessionListResult =
+        if (enumerator is HostSessionEnumerator.Fetch.Unavailable) {
+            HostTmuxSessionListResult.Failed(ENUMERATOR_UNAVAILABLE_MESSAGE)
+        } else {
+            HostTmuxSessionListResult.Sessions(
+                parser.unionLiveSessionRows(enumerator.rows, overlay),
+            )
         }
-        val human = runCatching {
-            session.execTmuxListSessions(pathAware(POCKETSHELL_SESSIONS_COMMAND))
-        }.getOrNull()
-        if (human != null && human.exitCode == 0) {
-            return parser.parsePocketshellSessionsList(human.stdout)
-        }
-        return emptyList()
-    }
 
     override suspend fun listSessionsFromLiveClient(
         host: HostEntity,
@@ -266,6 +342,16 @@ class SshHostTmuxSessionsGateway internal constructor(
             "pocketshell sessions list --by activity"
         const val POCKETSHELL_SESSIONS_JSON_COMMAND: String =
             "pocketshell sessions list --json"
+
+        /**
+         * Issue #2377: user-visible reason for refusing to publish a session
+         * list we know is incomplete. Same wording as the folder list's
+         * `SshFolderListGateway.ENUMERATOR_UNAVAILABLE_MESSAGE` — one symptom,
+         * one message, whichever list the user is looking at.
+         */
+        const val ENUMERATOR_UNAVAILABLE_MESSAGE: String =
+            "Couldn't read the host session list (pocketshell sessions list did not respond). " +
+                "Not showing a partial list."
 
         const val LIST_SESSIONS_COMMAND: String =
             "${TmuxRead.CLIENT} list-sessions -F " +

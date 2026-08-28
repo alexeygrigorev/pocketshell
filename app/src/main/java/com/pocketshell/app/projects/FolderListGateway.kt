@@ -36,7 +36,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -591,17 +590,34 @@ class SshFolderListGateway internal constructor(
         // watched roots are configured. The enumeration is the picker-gating
         // probe (issue #470), and serving it from the already-open control
         // channel in ONE batched round-trip (`list-sessions` + `list-panes`
-        // chained, see [TmuxClient.sendChainedCommands]) avoids dialing a
-        // fresh multi-exec SSH lease and paying 2 serial exec round-trips on
-        // every poll. When no watched roots exist this is the WHOLE result;
-        // when roots exist we only open a lease for the (app-cached, optional)
-        // watched-root expansion and merge it onto the live-client rows,
-        // instead of re-running list-sessions/list-panes/agent-detect over the
-        // lease.
-        val liveRows = listSessionRowsFromLiveClient(host, keyPath)
-        if (liveRows != null && watchedRoots.isEmpty()) {
-            return FolderListResult.Sessions(rows = liveRows)
-        }
+        // chained, see [TmuxClient.sendChainedCommands]) avoids re-running
+        // list-sessions/list-panes/agent-detect over the SSH lease.
+        //
+        // Issue #2377 (hard cut, D22): the live-client rows are NOT the whole
+        // truth and this path used to `return` them as if they were whenever no
+        // watched roots existed. A `-CC` control client is attached to exactly
+        // ONE tmux server, so its `list-sessions` sees only that server's
+        // socket. On the maintainer's host — 7 tmuxctl-managed sessions across 7
+        // separate `tmuxctl-*` sockets plus 3 aplexer-managed ones — the app
+        // attached to the session it had just created on the default socket and
+        // rendered "1 active · 0 idle · 1 session" against a host that
+        // `pocketshell sessions list --json` reported as 10. That is the same
+        // default-socket-only enumeration #2348 explicitly forbade; the #2348
+        // fix only ever covered the no-live-client branch below.
+        //
+        // So the live client keeps owning the RICH per-window/pane metadata for
+        // the server it is attached to, but the tmuxctl+aplexer enumerator is
+        // the authority for the SET of sessions, on every branch. That costs one
+        // bounded exec on the (pooled, already-warm) lease — the same exec the
+        // no-live-client branch already pays — and correctness outranks skipping
+        // it.
+        val liveRows = FolderListLiveClientEnumerator.enumerate(
+            activeTmuxClients = activeTmuxClients,
+            host = host,
+            keyPath = keyPath,
+            liveEnumTimeoutMs = liveEnumTimeoutMs,
+            familyForRawId = { rawId -> enginesGateway?.familyForRawId(host.id, rawId) },
+        )
 
         return try {
             withLeaseSession(
@@ -623,6 +639,12 @@ class SshFolderListGateway internal constructor(
                         // just because a control client is attached (the control
                         // channel can't run the host-wide scan it needs), and it
                         // is INDEPENDENT of the expansion, so the two overlap.
+                        //
+                        // Issue #2377: the tmuxctl+aplexer enumerator starts
+                        // FIRST, alongside the required landing batch, exactly
+                        // like the no-live-client branch — a serial extra hop is
+                        // what blew the 12s mobile bound in #2348.
+                        val enumeratorDeferred = async { fetchPocketshellEnumerator(session) }
                         val required = landingProbeOwner.executeRequired(
                             watchedRoots = watchedRoots,
                             includeEnumeration = false,
@@ -646,7 +668,22 @@ class SshFolderListGateway internal constructor(
                             expansion = expansion,
                             ports = ports,
                         )
-                        probes.sessions(annotated)
+                        // Issue #2377: union the host-wide tmuxctl+aplexer
+                        // enumerator over the single-socket live-client rows,
+                        // with the enumerator as AUTHORITY — identical to the
+                        // no-live-client branch. The live rows stay the overlay
+                        // that contributes cwd/windows/kind for the sessions on
+                        // the attached server.
+                        val enumerator = enumeratorDeferred.await()
+                        if (enumerator is FolderListPocketshellEnumerator.Fetch.Unavailable) {
+                            return@supervisorScope enumeratorUnavailableResult()
+                        }
+                        probes.sessions(
+                            FolderListPocketshellEnumerator.unionFolderSessionRows(
+                                enumerator.rows,
+                                annotated,
+                            ),
+                        )
                     } else {
                         // Issue #2348: start the tmuxctl+aplexer JSON enumerator
                         // alongside the required landing batch. A serial extra hop
@@ -983,6 +1020,13 @@ class SshFolderListGateway internal constructor(
                 // Union the pocketshell enumerator so the phone matches the
                 // terminal, and fold in aplexer rows as a second manager.
                 val enumerator = loadEnumerator()
+                // Issue #2377: an enumerator that could not RUN is not "no extra
+                // sessions". Publishing the default-socket rows here would be a
+                // confidently-wrong undercount; surface a retryable failure so
+                // the view model keeps the last good tree instead.
+                if (enumerator is FolderListPocketshellEnumerator.Fetch.Unavailable) {
+                    return enumeratorUnavailableResult()
+                }
                 probes.sessions(
                     FolderListPocketshellEnumerator.unionFolderSessionRows(
                         enumerator.rows,
@@ -1023,6 +1067,21 @@ class SshFolderListGateway internal constructor(
         )
     }
 
+    /**
+     * Issue #2377: the host session enumerator could not be read this poll.
+     *
+     * The tempting alternative — publish whatever narrower enumeration we do
+     * have (default-socket `tmux list-sessions`, or a live `-CC` client bound to
+     * one tmuxctl socket) — is exactly the reported defect: the phone confidently
+     * showed 1 of the host's 10 sessions. A [FolderListResult.Failed] is the
+     * honest answer: on a screen that already has a tree the view model keeps it
+     * and shows the refresh-failed message (`preserveReadyOnRefresh`), and on a
+     * cold load it renders the retryable panel. Either way the user is never told
+     * a wrong count is the truth.
+     */
+    private fun enumeratorUnavailableResult(): FolderListResult.Failed =
+        FolderListResult.Failed(ENUMERATOR_UNAVAILABLE_MESSAGE)
+
     private suspend fun fetchPocketshellEnumerator(
         session: SshSession,
     ): FolderListPocketshellEnumerator.Fetch =
@@ -1038,12 +1097,17 @@ class SshFolderListGateway internal constructor(
         probes: ReconcileSideProbes,
         familyForRawId: (String?) -> SessionAgentKind? = { null },
         enumerator: FolderListPocketshellEnumerator.Fetch? = null,
-    ): FolderListResult.Sessions? {
+    ): FolderListResult? {
         val fetched = enumerator ?: fetchPocketshellEnumerator(session)
         when (fetched) {
             is FolderListPocketshellEnumerator.Fetch.Json,
             FolderListPocketshellEnumerator.Fetch.Empty,
             -> return probes.sessions(fetched.rows)
+            // Issue #2377: the enumerator is the ONLY source on this branch
+            // (native tmux is missing / errored), so an unreadable enumerator
+            // must not render as "this host has no sessions".
+            FolderListPocketshellEnumerator.Fetch.Unavailable ->
+                return enumeratorUnavailableResult()
             FolderListPocketshellEnumerator.Fetch.Failed -> return null
             is FolderListPocketshellEnumerator.Fetch.Human -> Unit
         }
@@ -1752,114 +1816,6 @@ class SshFolderListGateway internal constructor(
 
     private fun shellQuote(value: String): String = shellQuoteValue(value)
 
-    /**
-     * Issue #692: enumerate session + pane rows from the live `-CC` control
-     * client in ONE batched control-mode round-trip.
-     *
-     * Returns null when no matching live client is connected (the caller then
-     * opens an SSH lease) and when the enumeration errors (so the lease path
-     * can produce an accurate error). An EMPTY list is a valid result — it
-     * means a connected client with `no server running` (all sessions gone),
-     * which is distinct from "no client". The two probes (`list-sessions`,
-     * `list-panes`) are chained via [TmuxClient.sendChainedCommands] so the
-     * already-open channel pays a single wire round-trip instead of two
-     * serial commands.
-     */
-    private suspend fun listSessionRowsFromLiveClient(
-        host: HostEntity,
-        keyPath: String,
-    ): List<FolderSessionRow>? {
-        val entry = activeTmuxClients.clients.value[host.id]
-            ?.takeIf { it.matches(host, keyPath) }
-            ?.takeUnless { it.client.disconnected.value }
-            ?: return null
-        return try {
-            // Issue #702: bound the live-client enumeration so a wedged shared
-            // `-CC` control channel (single-flight mutex held by never-releasing
-            // in-session traffic) can't pin the picker. On timeout we return
-            // null and the caller falls through to the bounded SSH-lease
-            // enumeration (execBounded). `sendChainedCommands` itself also
-            // self-bounds its acquire (#702); this is the gateway-side defence.
-            val responses = withTimeoutOrNull(liveEnumTimeoutMs) {
-                entry.client.sendChainedCommands(
-                    listOf(CONTROL_LIST_SESSIONS_COMMAND, CONTROL_LIST_PANES_COMMAND),
-                )
-            } ?: run {
-                Log.w(
-                    PROBE_LOG_TAG,
-                    "live -CC enumeration wedged >${liveEnumTimeoutMs}ms; " +
-                        "falling through to bounded SSH-lease enumeration.",
-                )
-                return null
-            }
-            val listSessions = responses.getOrNull(0) ?: return null
-            val listPanes = responses.getOrNull(1)
-            when {
-                listSessions.isError &&
-                    listSessions.output.joinToString("\n").contains("no server running", ignoreCase = true) ->
-                    emptyList()
-                listSessions.isError -> null
-                else -> {
-                    val baseRows = parseListSessionsRows(
-                        stdout = listSessions.output.joinToString(separator = "\n"),
-                        familyForRawId = { rawId ->
-                            enginesGateway?.familyForRawId(host.id, rawId)
-                        },
-                    )
-                    val windowRows = if (listPanes != null && !listPanes.isError) {
-                        parseSessionWindowRows(listPanes.output.joinToString("\n"))
-                    } else {
-                        emptyList()
-                    }
-                    val paneRows = activePaneRowsBySession(windowRows)
-                    val windowsBySession = windowRows.groupBy { it.sessionName }
-
-                    baseRows.map { row ->
-                        val pane = paneRows[row.sessionName]
-                        // Epic #821: a recorded `@ps_agent_kind` (read back in
-                        // parseRow from CONTROL_LIST_SESSIONS_COMMAND) is the
-                        // authoritative kind for a session WE launched. This
-                        // live path runs no detector, so the recorded kind is
-                        // the only positive agent signal here for our sessions.
-                        val recorded = row.recordedKind
-                        val windows = windowsBySession[row.sessionName].orEmpty().map { window ->
-                            // Issue #716: the live-client path runs NO detector
-                            // (the control channel can't host the ps/candidate
-                            // scan), so resolve the raw kind affirmative-shell-
-                            // aware — an interactive-shell pane is a confirmed
-                            // Shell, anything else is presumed-agent Probing.
-                            // NEVER emit a raw `Shell` for an undetected window:
-                            // when watched roots are empty this path returns
-                            // WITHOUT annotation and feeds the maintained tree
-                            // directly, where a false `Shell` would downgrade a
-                            // sticky agent (#716). A recorded kind (#821) wins.
-                            window.copy(
-                                agentKind = recorded ?: resolveUndetectedKind(window.command),
-                            )
-                        }
-                        row.copy(
-                            cwd = pane?.cwd ?: row.cwd,
-                            agentKind = recorded ?: resolveUndetectedKind(
-                                (windows.firstOrNull { it.active } ?: windows.firstOrNull())?.command,
-                            ),
-                            windows = windows,
-                        )
-                    }
-                }
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Throwable) {
-            null
-        }
-    }
-
-    private fun ActiveTmuxClients.Entry.matches(host: HostEntity, keyPath: String): Boolean =
-        hostname == host.hostname &&
-            port == host.port &&
-            username == host.username &&
-            this.keyPath == keyPath
-
     private fun shellQuoteRemotePath(value: String): String =
         shellQuoteRemotePathValue(value)
 
@@ -2186,6 +2142,14 @@ class SshFolderListGateway internal constructor(
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
         const val POCKETSHELL_SESSIONS_JSON_COMMAND: String = "pocketshell sessions list --json"
+
+        /**
+         * Issue #2377: user-visible reason for refusing to publish a session
+         * list we know is incomplete.
+         */
+        const val ENUMERATOR_UNAVAILABLE_MESSAGE: String =
+            "Couldn't read the host session list (pocketshell sessions list did not respond). " +
+                "Not showing a partial list."
         /**
          * Optional raw-id enrichment for the *human-table* old-host fallback
          * only. JSON success must not issue this second hop (#2348). The seven

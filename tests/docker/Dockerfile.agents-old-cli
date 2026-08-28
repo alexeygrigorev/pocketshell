@@ -25,7 +25,14 @@ ARG OLD_CLI_FIXTURE_VERSION=0.4.9
 # responding connect-path host instead — covering the WHOLE connect-break class.
 ARG OLD_CLI_MODE=unknown
 
+# Issue #2377: python3 backs the shared `pocketshell-fixture-sessions` helper
+# that both `tmuxctl list` and the delegated `pocketshell sessions list` use to
+# walk the real `tmuxctl-*` sockets. The `agents` and `agents-daemon` images
+# already carried it; this one did not, and the helper is not optional — a
+# fixture that silently fell back to the canned table would be exactly the
+# "looks green, proves nothing" shape.
 RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git \
+        python3 \
     && mv /usr/bin/tmux /usr/bin/tmux.real \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
@@ -54,6 +61,8 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/codex \
         /usr/local/bin/opencode \
         /usr/local/bin/pocketshell \
+        /usr/local/bin/pocketshell-fixture-sessions \
+        /usr/local/bin/a \
         /usr/local/lib/pocketshell-real-fixture \
         /usr/local/bin/quse \
         /usr/local/bin/agent-log-explorer \

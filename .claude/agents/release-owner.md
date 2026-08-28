@@ -18,7 +18,7 @@ your role brief, not a duplicate of the mechanics.
 
 ## The one rule that matters most
 
-**You never check out or switch the branch of the repo root.** The root
+You never check out or switch the branch of the repo root. The root
 checkout stays on `main` for the entire release. All of your work — the
 `release/vX.Y.Z` branch, every stabilizing commit, validation runs, the tag
 — happens inside a dedicated worktree:

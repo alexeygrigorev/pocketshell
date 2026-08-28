@@ -130,8 +130,8 @@ fun SessionRow(
 }
 
 /**
- * Tag pill rendered inside a `SessionRow`. Originally matched the
- * uppercase `.tag` block in `docs/mockups/styles.css`; per issue #202
+ * Tag pill rendered inside a `SessionRow`. The original prototype used an
+ * uppercase tag; per issue #202
  * the label is now rendered mixed-case so a first-time user can read
  * it without decoding letter-spaced ALL-CAPS.
  *

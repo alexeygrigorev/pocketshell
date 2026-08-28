@@ -1,8 +1,7 @@
 package com.pocketshell.uikit.model
 
 /**
- * One slot in the `KeyBar` (the 8-key strip above the system keyboard
- * in `docs/mockups/session.html`).
+ * One slot in the `KeyBar` (the 8-key strip above the system keyboard).
  *
  * `kind` drives both visual treatment and tap behaviour:
  *

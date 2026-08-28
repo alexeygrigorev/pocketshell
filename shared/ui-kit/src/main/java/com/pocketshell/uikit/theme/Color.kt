@@ -5,11 +5,10 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 /**
- * PocketShell design tokens — ported verbatim from `docs/mockups/styles.css`'s
- * `:root` block (the visual source of truth) and `docs/design-language.md`.
+ * PocketShell design tokens — retained from the original static prototype and
+ * maintained alongside `docs/design-language.md`.
  *
- * Naming mirrors the CSS variables so a reviewer can `grep` between this file
- * and the mockup CSS and spot drift quickly:
+ * Naming mirrors the original CSS variables:
  *
  * - CSS `--bg` -> [Background]
  * - CSS `--surface` -> [Surface]

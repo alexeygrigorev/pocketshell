@@ -5,7 +5,7 @@ import androidx.compose.material3.Shapes
 import androidx.compose.ui.unit.dp
 
 /**
- * Corner-radius tokens, sourced from `docs/mockups/styles.css` `:root`:
+ * Corner-radius tokens retained from the original static prototype:
  *
  * - `--r-card: 14px` -> 14dp (`.host-row`, `.session-row`, `.job-row`, `.usage-card`)
  * - `--r-chip: 8px` -> 8dp (`.chip`, `.key`, tag pills)

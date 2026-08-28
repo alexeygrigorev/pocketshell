@@ -41,9 +41,8 @@ import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 
 /**
- * Row item for the "Hosts" section of the dashboard. Matches the
- * `.host-row` shape in `docs/mockups/dashboard.html` and the host-card
- * re-spec in `docs/design-system.md` §8:
+ * Row item for the "Hosts" section of the dashboard. Matches the host-card
+ * specification in `docs/design-system.md` §8:
  *
  * ```
  * ┌──────────────────────────────────────────────┐
@@ -305,9 +304,8 @@ internal fun resolveHostDotState(status: HostStatus, setupState: HostSetupState)
 /**
  * Single trailing status indicator for the host card. Replaces the old
  * `HostStatusChip` (a colour + **text** pill) and the inline
- * `HostSetupBadge` with one colour dot, matching the `.status-dot` in
- * `docs/mockups/dashboard.html` and design-system §6.2 ("No inline
- * labels"). The human-readable state lives in the dot's
+ * `HostSetupBadge` with one colour dot, matching design-system §6.2 ("No
+ * inline labels"). The human-readable state lives in the dot's
  * [contentDescription] so accessibility services and instrumentation can
  * still read it — it is just no longer painted as a row sibling that
  * competes with the host name.

@@ -115,4 +115,3 @@ For reviewers: a UX issue without a rule citation is underspecified — push bac
 - Design language (colour / type / spacing — separate concern): [design-language.md](design-language.md).
 - Material 3 motion spec: [m3.material.io/styles/motion/overview](https://m3.material.io/styles/motion/overview).
 - Material 3 component patterns: [m3.material.io/components](https://m3.material.io/components).
-- Mockups (Pixel 7 viewport): [mockups/index.html](mockups/index.html).

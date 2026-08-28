@@ -34,9 +34,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * (Surface / Text / Accent / Status / Terminal groups, each swatch labelled with
  * its `0xAARRGGBB` hex) had no equivalent, so it lives here now.
  *
- * The render lets a reviewer cross-reference every palette token in
- * `theme/Color.kt` against the hex literals in `docs/mockups/` without booting
- * Android Studio's preview renderer.
+ * The render lets a reviewer inspect every palette token in `theme/Color.kt`
+ * without booting Android Studio's preview renderer.
  */
 @Composable
 internal fun DesignTokenSwatchesRender() {

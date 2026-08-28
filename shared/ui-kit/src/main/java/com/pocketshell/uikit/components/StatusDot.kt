@@ -17,8 +17,7 @@ import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellSpacing
 
 /**
- * Small status indicator dot. Matches `.status-dot` and its variants
- * (`.connected`, `.connecting`, `.error`) in `docs/mockups/styles.css`.
+ * Small status indicator dot with connected, connecting, and error variants.
  *
  * Sizing: 8dp circle sourced from [PocketShellSpacing.sm] (the CSS uses
  * `width: 8px; height: 8px;`). Colours are sourced from the semantic role

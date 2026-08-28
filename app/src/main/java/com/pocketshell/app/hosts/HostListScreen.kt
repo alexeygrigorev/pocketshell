@@ -91,8 +91,8 @@ import kotlin.math.min
 import kotlin.math.sin
 
 /**
- * Landing screen — the list of saved hosts. Visual target is
- * `docs/mockups/dashboard.html` under the "Hosts" section. Only the
+ * Landing screen — the list of saved hosts. It follows the original
+ * dashboard prototype's "Hosts" section. Only the
  * Hosts section is rendered here; "Sessions" + "Scheduled" arrive in
  * later issues (#22 / #28).
  *

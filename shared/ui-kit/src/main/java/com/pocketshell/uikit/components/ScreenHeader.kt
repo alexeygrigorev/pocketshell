@@ -23,8 +23,8 @@ import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Shared screen header — the title block that sits atop the tree, host list,
- * sessions dashboard, settings, etc. Encodes the mockup's header pattern
- * (`folder-tree-target-20260604.png`) and the design language locked on #479:
+ * sessions dashboard, settings, etc. Encodes the issue #489 header pattern and
+ * the design language locked on #479:
  *
  * ```
  * ┌───────────────────────────────────────────────────────┐

@@ -720,7 +720,7 @@ class DesignRenders {
 
     /**
      * Issue #561: fast PNG target for the chat-style Conversation tab.
-     * This fixture mirrors the mockup (docs/mockups/conversation.html):
+     * This fixture mirrors the original conversation prototype:
      * full message blocks with role label header, multi-line body,
      * inline tool call cards, and right-aligned timestamps.
      */
@@ -1388,9 +1388,9 @@ class DesignRenders {
      * This is the fast visual check that the token migration is a no-/low-op:
      * Pill + the segment chips snap onto `PocketShellShapes.small` (8dp) and the
      * chip padding rung; the toggle/crumb labels snap onto the type ladder; the
-     * progress track keeps its deliberate sub-ladder micro radius. Compare
-     * against `docs/mockups/usage.html` (pills/progress) and `session.html`
-     * (breadcrumb).
+     * progress track keeps its deliberate sub-ladder micro radius. The usage
+     * pills/progress and session breadcrumb preserve their original prototype
+     * geometry.
      */
     @Test
     fun migratedPrimitives() = render("migrated-primitives") {

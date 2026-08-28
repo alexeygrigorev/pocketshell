@@ -15,11 +15,13 @@ on:
       - "**/*.md"
       - "docs/**"
       - "chat/**"
+      - "mockups/**"
   pull_request:
     paths-ignore:
       - "**/*.md"
       - "docs/**"
       - "chat/**"
+      - "mockups/**"
   workflow_dispatch:
   schedule: [{cron: "0 0,8,16 * * *"}]
 
@@ -226,18 +228,6 @@ jobs:
         run: |
           chmod +x scripts/render.sh scripts/render-selftest.sh
           scripts/render-selftest.sh
-
-      # Issue #2238: keep the interactive design prototype's journey proof
-      # executable. The prototype is docs-only, but its acceptance criteria
-      # include stateful interactions that a static link check cannot cover.
-      - name: Work-first UX mockup smoke test (issue #2238)
-        run: |
-          chmod +x \
-            scripts/test-ux-redesign-2238.sh \
-            scripts/test-ux-redesign-2238-fake-browser.py \
-            scripts/test-ux-redesign-2238-timeouts-selftest.sh
-          scripts/test-ux-redesign-2238-timeouts-selftest.sh
-          scripts/test-ux-redesign-2238.sh
 
       # Issue #657/#1857 (F4): test-validity guard. Flags the highest-signal
       # test anti-patterns the #657 audit catalogued — chiefly an IME/keyboard/

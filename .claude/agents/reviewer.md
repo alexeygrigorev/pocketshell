@@ -128,7 +128,7 @@ infra is fixed). Never downgrade a BLOCKED to APPROVED on a JVM proxy.
      hold the implementer responsible for it.
 
    **For UI/design issues**: ALSO run `scripts/render.sh` as a fast first
-   visual check and compare the render PNG to the mockup (`docs/mockups/`) —
+   visual check and compare the render PNG to any issue-linked design reference —
    but this does NOT replace the emulator validation above. The JVM render is
    seconds; the emulator is the acceptance check. Do both. (#555)
 

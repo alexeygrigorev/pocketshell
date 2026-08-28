@@ -24,10 +24,9 @@ import com.pocketshell.uikit.theme.PocketShellColors
 private val TrackRadius = 4.dp
 
 /**
- * Slim progress bar used by the usage panel cards. Matches
- * `.progress-track` / `.progress-fill` in `docs/mockups/styles.css`.
+ * Slim progress bar used by the usage panel cards.
  *
- * Visual recipe per the CSS:
+ * Visual recipe:
  * - Track: 6dp tall, `surface-elev` background, 4dp corner radius
  * - Fill: full-height, accent colour by default, 4dp corner radius
  *

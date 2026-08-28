@@ -275,7 +275,6 @@ full   app/*.pro                     R8/ProGuard rules change every release-vari
 # ---------------------------------------------------------------------------
 noop   *.md                          prose; no test reads a markdown file at runtime
 noop   docs/*                        planning docs and mockups
-noop   mockups/*                     static HTML mockups
 noop   .claude/*                     agent role prompts
 noop   .gitignore                    ignore rules
 

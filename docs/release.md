@@ -2,23 +2,23 @@
 
 This is how PocketShell ships a version.
 
-`main` keeps moving. Other people merge there. We do **not** freeze `main`
-and we do **not** tag whatever `origin/main` happens to be after a long
-stabilize fight, and the root checkout never switches off `main` to do this
-work (locked, see `process.md`).
+`main` keeps moving; other people merge there. We don't freeze `main` and
+don't tag whatever `origin/main` happens to be after a long stabilize fight,
+and the root checkout never switches off `main` to do this work (locked,
+see `process.md`).
 
-We **copy** a SHA of `main` onto a release-candidate branch, checked out in
-its own **worktree**, make *that* branch stable, tag *that* SHA, then merge
-the candidate back to `main`. All of this is done by a dispatched
-**release-owner** agent (see `.claude/agents/release-owner.md`), never by
-switching the root checkout's branch.
+We copy a SHA of `main` onto a release-candidate branch, checked out in its
+own worktree, make that branch stable, tag that SHA, then merge the
+candidate back to `main`. A dispatched release-owner agent (see
+`.claude/agents/release-owner.md`) does all of this — it never switches the
+root checkout's branch.
 
 Copy, not move: anything already on `main` (CI cadence, flake quarantine,
 product fixes) stays on `main`. The candidate starts as a copy of that
-`main`. Extra fixes for this version are committed on the candidate and
-later merged back.
+`main`; extra fixes for this version are committed on the candidate and
+merged back later.
 
-Version numbers come from the git tag (`scripts/derive-version.sh`). There
+Version numbers come from the git tag (`scripts/derive-version.sh`); there
 is no version-bump PR.
 
 ## Process (do these in order, from inside the worktree)
@@ -30,9 +30,9 @@ git fetch origin main
 git rev-parse origin/main
 ```
 
-Record that SHA. It is the cut point. You are allowed to cut even if Tests
-on `main` is messy — the remaining red is what you will fix **on the
-candidate**, not by racing more merges onto `main`.
+Record that SHA — it's the cut point. You can cut even if Tests on `main`
+is messy; the remaining red gets fixed on the candidate, not by racing more
+merges onto `main`.
 
 ### 2. Create the candidate branch in its own worktree
 
@@ -51,9 +51,9 @@ All remaining commands run from inside `.worktrees/release-v0.4.45/`. The
 root checkout stays on `main`, untouched, for the whole release.
 
 If `release/v0.4.45` already exists (as a remote branch or a prior
-worktree) and `main` has since gained commits you want in this cut, **copy**
-them onto the candidate with a fast-forward from inside the worktree. Do
-**not** revert those commits on `main` to "move" them:
+worktree) and `main` has since gained commits you want in this cut, copy
+them onto the candidate with a fast-forward from inside the worktree — don't
+revert those commits on `main` to "move" them:
 
 ```bash
 cd .worktrees/release-v0.4.45
@@ -63,14 +63,14 @@ git push origin release/v0.4.45
 
 ### 3. Stabilize the candidate until it is actually stable
 
-All remaining product fixes for this version are committed **inside the
-worktree**, on `release/vX.Y.Z` only. Unrelated work stays on `main` and is
+All remaining product fixes for this version are committed inside the
+worktree, on `release/vX.Y.Z` only. Unrelated work stays on `main` and is
 not merged into the candidate until after the tag (step 5).
 
-Green means, for **this candidate SHA**:
+Green means, for this candidate SHA:
 
-- Tests workflow required jobs completed `success` (not cancelled). Push
-  to `main` does not run this branch. Start the full suite with:
+- Tests workflow required jobs completed `success` (not cancelled). Push to
+  `main` does not run this branch. Start the full suite with:
 
   ```bash
   gh workflow run tests.yml --ref release/v0.4.45
@@ -80,12 +80,11 @@ Green means, for **this candidate SHA**:
   summary whose `Commit SHA` is exactly this SHA and `Automated status: PASS`.
 - Visual-audit screenshots were inspected.
 
-Do not fake a PASS. Do not treat a cancelled or in-progress Tests run as
-green.
+Don't fake a PASS. Don't treat a cancelled or in-progress Tests run as green.
 
 ### 4. Make the release (tag the candidate SHA)
 
-The GitHub Release APK comes from the **tag-triggered** Build workflow. From
+The GitHub Release APK comes from the tag-triggered Build workflow. From
 inside the worktree, tag the candidate SHA `vX.Y.Z`:
 
 ```bash
@@ -105,7 +104,7 @@ Automated status: PASS
 ```
 
 Watch Build. Confirm `gh release view v0.4.45` is not a draft and has a
-downloadable APK. Do not retag an older version. Do not publish a
+downloadable APK. Don't retag an older version or publish a
 `workflow_dispatch` APK as the release.
 
 ### 5. Merge the candidate back to `main`, then remove the worktree
@@ -128,13 +127,13 @@ Later `main` work was never blocked.
 | Place | Role |
 |---|---|
 | Root checkout, `main` | Daily development. Other engineers keep merging. Not the freeze line. Never switches branch for a release. |
-| `.worktrees/release-vX.Y.Z/` on `release/vX.Y.Z` | The freeze line. Copy of a `main` SHA plus only this version's remaining fixes. Where the release-owner agent does all of its work. |
+| `.worktrees/release-vX.Y.Z/` on `release/vX.Y.Z` | The freeze line — a copy of a `main` SHA plus only this version's remaining fixes. Where the release-owner agent does all its work. |
 | Tag `vX.Y.Z` | The published APK. Must point at the candidate SHA that passed Tests + emulator validation. |
 
 ## Tag helper
 
-`scripts/push-release-tag.sh` may be run from the `release/vX.Y.Z` worktree
-or from root `main`. `HEAD` must match the remote of **that** branch, and
-the summary `Commit SHA` must equal `HEAD`. If you tagged from the
-candidate worktree, step 5 still merges that same SHA (or a merge commit
-that contains it) back to `main`.
+`scripts/push-release-tag.sh` may run from the `release/vX.Y.Z` worktree or
+from root `main`. `HEAD` must match the remote of that branch, and the
+summary `Commit SHA` must equal `HEAD`. If you tagged from the candidate
+worktree, step 5 still merges that same SHA (or a merge commit containing
+it) back to `main`.

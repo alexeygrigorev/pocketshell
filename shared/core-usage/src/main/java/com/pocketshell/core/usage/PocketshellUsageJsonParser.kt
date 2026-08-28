@@ -9,12 +9,11 @@ import java.time.Instant
  *
  * `pocketshell usage` flattens quse's provider-keyed `--json` document into
  * newline-delimited JSON — ONE object per line per provider. The pinned PyPI
- * quse 0.0.14 wheel is the five-provider legacy `short_term` /
- * `long_term` producer; the host boundary translates it and this parser
- * consumes only the resulting canonical PocketShell wire shape. A separate
- * canonical producer contract may add providers such as OpenCode Go. The
- * parser does NOT re-derive windows / resets / percentages. Each record has
- * this shape:
+ * quse 0.0.15 wheel (issue #2293) is the six-provider CANONICAL producer —
+ * `claude`, `codex`, `copilot`, `go` (OpenCode Go), `grok`, `zai` — whose
+ * records already carry the top-level `windows` map, so the host boundary only
+ * injects the provider key. The parser does NOT re-derive windows / resets /
+ * percentages. Each record has this shape:
  *
  * ```json
  * {
@@ -182,9 +181,9 @@ public class PocketshellUsageJsonParser {
      * The per-window `rolling: bool` (only the `5h` entry carries it) has no
      * counterpart in the [UsageWindow] model and is deliberately ignored.
      *
-     * The host producer requires either canonical `windows` or at least one
-     * legacy `short_term` / `long_term` field, so a producer record missing
-     * both never reaches this parser. For defensive compatibility, this parser
+     * The host producer requires a canonical `windows` map, so a producer
+     * record missing it never reaches this parser. For defensive
+     * compatibility, this parser
      * returns an empty list when the canonical map is absent / null. THROWS
      * fail-loud (issue #1318) when `windows` is present but not an object,
      * when an entry is present but not an object, or when `percent_remaining`

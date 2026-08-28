@@ -41,10 +41,10 @@ class UsageWindowLabelTest {
 
     @Test
     fun canonicalProducerWindowKeys_allRenderLabeled() {
-        // Issue #2274: canonical producer-owned keys must render precise
-        // labels, never a raw key dump. This is separate from the pinned PyPI
-        // quse 0.0.14 five-provider fixture; a canonical Go producer uses the
-        // same 5h/7d/monthly keys as other canonical providers.
+        // Issue #2274/#2293: canonical producer-owned keys must render precise
+        // labels, never a raw key dump. The pinned PyPI quse 0.0.15 wheel emits
+        // exactly these three keys for EVERY provider, `go` (OpenCode Go)
+        // included.
         assertEquals("5h window", windowLabel("5h"))
         assertEquals("7d window", windowLabel("7d"))
         assertEquals("Monthly limit", windowLabel("monthly"))

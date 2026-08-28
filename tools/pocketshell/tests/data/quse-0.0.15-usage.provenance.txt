@@ -1,0 +1,32 @@
+Fixture provenance for quse==0.0.15 (issue #2293)
+
+Source package: the PyPI wheel quse-0.0.15-py3-none-any.whl
+PyPI upload: 2026-08-28T12:09:07Z
+Wheel SHA-256: a9138ed2e4f12a01812103332fe27b94de9f96a2413212c59558052481815793
+Upstream commit: a86959edeef1c78a2a0084d3488fca487135b1b0
+  ("Add unified Go and quota output" — the unified `windows` map + the `go`
+  provider). 0.0.14 predates it; see issue #2274 / #2283 for the interim
+  translate-at-the-boundary design this release retires.
+
+Capture command (using the published wheel, not a checkout):
+  PYTHONPATH=<unpacked quse-0.0.15 wheel> <python> -c \
+    'from quse.cli import main; raise SystemExit(main(["--json"]))'
+Captured: 2026-08-28 on the maintainer's dev box (real live provider data).
+
+Observed published contract:
+  providers: claude, codex, copilot, go, grok, zai
+  record fields: details, error, status, windows
+  every record carries the canonical top-level `windows` map keyed by
+  quse.usage.CANONICAL_WINDOWS = ("5h", "7d", "monthly"); the `5h` entry also
+  carries `rolling: bool`. A span that does not apply to a provider is present
+  with `percent_remaining: null` rather than omitted.
+  no `short_term` / `long_term` fields on any record
+
+Because 0.0.15 IS the canonical producer, `pocketshell usage --json` performs no
+schema translation any more: `_canonicalize_quse_record` injects the provider
+key and forwards the record verbatim. The sibling file
+`quse-0.0.15-usage.ndjson` is the EXACT output of
+`normalize_usage_stdout(quse-0.0.15-usage.json)` and is byte-compared against
+the producer in tests/test_usage.py, and mirrored into
+shared/core-usage/src/test/resources/ so the Android parser test consumes the
+real producer bytes rather than a Kotlin re-implementation.

@@ -65,17 +65,23 @@ import java.util.Locale
  * transport is canned, which is not what #1318 changed. There is no
  * `*StandIn` / `*Proxy` for the panel under test.
  *
- * ## Red → green (published quse 0.0.14 / issue #2274)
+ * ## Red → green (published quse 0.0.15 / issue #2293)
  *
- * The fixture is the REAL captured provider-keyed output from the published
- * quse 0.0.14 wheel (old `short_term` / `long_term` schema). The canonical
- * five-provider NDJSON below is the exact producer-boundary translation into
- * PocketShell's app wire shape, then runs through the hard-cut parser. The
- * green case asserts all FIVE published provider cards plus
- * `5 providers · 1 hosts` and NO `Refresh usage failed`. The companion case
- * reproduces the exact v0.4.24 broken panel through the real render path so a
- * regression to silent-wrong / non-loud handling of an un-flattened blob is
- * caught. The unreleased a86959e six-provider producer is not used.
+ * The NDJSON below is the REAL `pocketshell usage --json` output for the
+ * captured published quse 0.0.15 wheel — byte-identical to
+ * `tools/pocketshell/tests/data/quse-0.0.15-usage.ndjson`, which
+ * `test_kotlin_androidtest_literal_matches_the_python_producer_fixture`
+ * (tools/pocketshell/tests/test_usage.py) keeps in lock-step with the real
+ * producer. 0.0.15 is the canonical producer, so no translation happens: the
+ * host injects the provider key and forwards the record.
+ *
+ * The green case asserts all SIX published provider cards — including
+ * **OpenCode Go**, the card the maintainer actually wanted (#2293: the 0.0.14
+ * pin answered `Unknown provider 'go'`, so no `go` record existed and no card
+ * could render) — plus `6 providers · 1 hosts` and NO `Refresh usage failed`.
+ * The companion case reproduces the exact v0.4.24 broken panel through the
+ * real render path so a regression to silent-wrong / non-loud handling of an
+ * un-flattened blob is caught.
  *
  * Pure Compose-rule UI test (like [UsageGlancePillE2eTest]): no Docker fixture,
  * no SSH/tmux/toxiproxy, deterministic on the CI swiftshader AVD, and it does
@@ -88,24 +94,31 @@ class Usage1318StrictSchemaRenderE2eTest {
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
 
-    // A fixed "now" so the per-window reset foot is deterministic; the label
-    // assertions below do not depend on it.
-    private val now: Instant = Instant.parse("2026-08-26T20:00:00Z")
+    // A fixed "now" for the credit/reset case. Chosen so the codex 7d reset
+    // (2026-09-03T16:26:48Z) lands in the SUB-24h countdown bucket, which is
+    // zone-independent by construction.
+    private val now: Instant = Instant.parse("2026-09-03T09:00:00Z")
+
+    // The instant the 0.0.15 fixture was captured, used for the six-card
+    // acceptance so every card renders the panel the maintainer would have
+    // seen on the dev box at capture time.
+    private val captureNow: Instant = Instant.parse("2026-08-28T13:00:00Z")
 
     /**
-     * GREEN acceptance: the authoritative published quse-0.0.14 output,
-     * translated by `pocketshell usage --json` into canonical per-provider
-     * NDJSON, renders all five provider cards with producer-owned labels.
+     * GREEN acceptance: the authoritative published quse-0.0.15 output,
+     * forwarded by `pocketshell usage --json` as canonical per-provider
+     * NDJSON, renders all SIX provider cards — OpenCode Go included — with
+     * producer-owned window labels.
      */
     @Test
-    fun flattenedQuse0014Ndjson_rendersAllFivePublishedProviderCards() {
-        val state = renderStateFor(stdout = FLATTENED_QUSE_0014_NDJSON, exitCode = 0)
+    fun flattenedQuse0015Ndjson_rendersAllSixPublishedProviderCardsIncludingOpenCodeGo() {
+        val state = renderStateFor(stdout = FLATTENED_QUSE_0015_NDJSON, exitCode = 0)
 
-        // The real fetch → strict parse produced 5 published provider records.
+        // The real fetch → strict parse produced 6 published provider records.
         assertTrue(
-            "expected the real UsageRemoteSource to parse 5 provider records, " +
+            "expected the real UsageRemoteSource to parse 6 provider records, " +
                 "got ${state.providerCount} on ${state.hostCount} host(s)",
-            state.providerCount == 5 && state.hostCount == 1,
+            state.providerCount == 6 && state.hostCount == 1,
         )
         assertTrue(
             "expected no failed host on the authoritative flattened NDJSON, " +
@@ -113,9 +126,9 @@ class Usage1318StrictSchemaRenderE2eTest {
             state.failedHosts.isEmpty(),
         )
 
-        setUsageScreen(state)
+        setUsageScreen(state, screenNow = captureNow)
 
-        // All five published provider cards render (display names). This is the symptom
+        // All six published provider cards render (display names). This is the symptom
         // gone: cards, not `0 providers` / a raw dump.
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("Claude Code", useUnmergedTree = true)
@@ -127,22 +140,30 @@ class Usage1318StrictSchemaRenderE2eTest {
         compose.onNodeWithText("Grok Build", useUnmergedTree = true).assertExists()
         compose.onNodeWithText("Zai", useUnmergedTree = true).assertExists()
 
-        // Load-bearing producer-wire labels. A parser that drops the
-        // canonical windows map renders zero windows and these labels vanish.
-        // The published fixture has one real monthly window (Copilot); assert
-        // exact cardinality so a parser/UI that invents an extra label fails.
-        compose.onAllNodesWithText("Monthly limit", useUnmergedTree = true)
-            .assertCountEquals(1)
-        compose.onAllNodesWithText("5h window", useUnmergedTree = true).fetchSemanticsNodes()
-            .isNotEmpty().let { assertTrue("expected a 5h window label", it) }
-        compose.onAllNodesWithText("7d window", useUnmergedTree = true).fetchSemanticsNodes()
-            .isNotEmpty().let { assertTrue("expected a 7d window label", it) }
-        compose.onAllNodesWithText("Weekly limit", useUnmergedTree = true).fetchSemanticsNodes()
-            .isNotEmpty().let { assertTrue("expected a weekly window label", it) }
+        // THE #2293 acceptance: the OpenCode Go card. On the 0.0.14 pin quse
+        // reported no `go` provider at all, so this node could not exist.
+        compose.onNodeWithText(OPENCODE_GO_CARD_TITLE, useUnmergedTree = true)
+            .performScrollTo()
+            .assertExists()
+
+        // Load-bearing producer-wire labels with EXACT cardinality so a parser
+        // or UI that drops / invents a window row fails. On this capture:
+        //   5h      → claude, go, zai            (3)
+        //   7d      → claude, codex, go, grok, zai (5)
+        //   monthly → copilot, go                (2)
+        // Every one of those `go` rows is new with the 0.0.15 pin.
+        compose.onAllNodesWithText("5h window", useUnmergedTree = true).assertCountEquals(3)
+        compose.onAllNodesWithText("7d window", useUnmergedTree = true).assertCountEquals(5)
+        compose.onAllNodesWithText("Monthly limit", useUnmergedTree = true).assertCountEquals(2)
+
+        // The go card's own numbers reach the screen: 36% remaining → 64% used,
+        // and the 5h reset foot is 36m26s out from the capture instant.
+        compose.onNodeWithText(GO_5H_USED_PERCENT, useUnmergedTree = true).assertExists()
+        compose.onNodeWithText(GO_5H_RESET_FOOT, useUnmergedTree = true).assertExists()
 
         // The screen-level meta row reads the populated provider/host counts —
         // NOT the reported `0 providers · 0 hosts`.
-        compose.onNodeWithText("5 providers · 1 hosts", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("6 providers · 1 hosts", useUnmergedTree = true).assertExists()
 
         // The reported failure band must be ABSENT (no "Refresh usage failed").
         assertTrue(
@@ -159,7 +180,7 @@ class Usage1318StrictSchemaRenderE2eTest {
     }
 
     /**
-     * Issue #1789 reproduce-first RED, published 0.0.14 fixture: the codex payload's
+     * Issue #1789 reproduce-first RED, published 0.0.15 fixture: the codex payload's
      * available reset credits keep their source titles (duplicates included)
      * and distinct expiry instants through the production fetch/parser/screen
      * path. Keep the quota reset and credit expiry assertions together: a
@@ -168,8 +189,8 @@ class Usage1318StrictSchemaRenderE2eTest {
      * resume work.
      */
     @Test
-    fun flattenedQuse0014Ndjson_rendersAvailableCreditsAsExpiryNotQuotaReset() {
-        val state = renderStateFor(stdout = FLATTENED_QUSE_0014_NDJSON, exitCode = 0)
+    fun flattenedQuse0015Ndjson_rendersAvailableCreditsAsExpiryNotQuotaReset() {
+        val state = renderStateFor(stdout = FLATTENED_QUSE_0015_NDJSON, exitCode = 0)
         setUsageScreen(state)
 
         compose.waitUntil(timeoutMillis = 10_000) {
@@ -208,9 +229,9 @@ class Usage1318StrictSchemaRenderE2eTest {
 
         // The normalized Codex quota reset remains present and uses the
         // existing reset vocabulary at the same time as credit expiry rows
-        // (codex 7d resets 2026-08-27T03:30:22Z, i.e. in 7h 31m from `now`;
+        // (codex 7d resets 2026-09-03T16:26:48Z, i.e. in 7h 27m from `now`;
         // sub-24h bucket, zone-independent by construction).
-        compose.onAllNodesWithText("resets in 7h 31m", useUnmergedTree = true)
+        compose.onAllNodesWithText("resets in 7h 27m", useUnmergedTree = true)
             .fetchSemanticsNodes().isNotEmpty()
             .let { assertTrue("expected the codex 7d reset foot", it) }
         compose.onNodeWithText(
@@ -292,7 +313,7 @@ class Usage1318StrictSchemaRenderE2eTest {
         }
     }
 
-    private fun setUsageScreen(state: UsageScreenState) {
+    private fun setUsageScreen(state: UsageScreenState, screenNow: Instant = now) {
         compose.setContent {
             PocketShellTheme {
                 Column(modifier = Modifier.fillMaxSize().background(PocketShellColors.Background)) {
@@ -300,7 +321,7 @@ class Usage1318StrictSchemaRenderE2eTest {
                         state = state,
                         onBack = {},
                         onRefresh = {},
-                        now = now,
+                        now = screenNow,
                     )
                 }
             }
@@ -312,9 +333,12 @@ class Usage1318StrictSchemaRenderE2eTest {
         instrumentation.waitForIdleSync()
         val semantics = compose.onRoot(useUnmergedTree = true).printToString(maxDepth = 100)
         assertTrue(
-            "authoritative semantics must prove the populated Usage screen",
-            semantics.contains("5 providers · 1 hosts") &&
+            "authoritative semantics must prove the populated Usage screen, " +
+                "including the #2293 OpenCode Go card",
+            semantics.contains("6 providers · 1 hosts") &&
                 semantics.contains("GitHub Copilot") &&
+                semantics.contains(OPENCODE_GO_CARD_TITLE) &&
+                semantics.contains(GO_5H_USED_PERCENT) &&
                 semantics.contains("Monthly limit"),
         )
 
@@ -370,18 +394,31 @@ class Usage1318StrictSchemaRenderE2eTest {
     private companion object {
         /**
          * The authoritative per-provider NDJSON `pocketshell usage --json`
-         * emits — the exact producer-boundary translation of the published
-         * quse-0.0.14 capture. Five providers: claude, codex, copilot, grok,
-         * zai. The top-level details blobs remain provider-owned and are
-         * ignored by the app except for Codex reset-credit inventory.
+         * emits for the published quse-0.0.15 capture — byte-identical to
+         * `tools/pocketshell/tests/data/quse-0.0.15-usage.ndjson`, kept in
+         * lock-step by
+         * `test_kotlin_androidtest_literal_matches_the_python_producer_fixture`.
+         * SIX providers: claude, codex, copilot, go, grok, zai. The top-level
+         * details blobs remain provider-owned and are ignored by the app
+         * except for Codex reset-credit inventory.
          */
-        val FLATTENED_QUSE_0014_NDJSON: String = listOf(
-            """{"details":{"limit_reached":false,"subscription":null,"windows":{"five_hour":{"reset_at":"2026-08-22T15:49:59Z","used_percent":1.0},"seven_day":{"reset_at":"2026-08-27T14:59:59Z","used_percent":7.0}}},"error":null,"provider":"claude","status":"ok","windows":{"5h":{"percent_remaining":99.0,"reset_at":"2026-08-22T15:49:59Z"},"7d":{"percent_remaining":93.0,"reset_at":"2026-08-27T14:59:59Z"}}}""",
-            """{"details":{"limit_reached":false,"reset_credits":[{"expires_at":"2026-09-21T00:13:17Z","status":"available","title":"Full reset"}],"reset_credits_available":1,"reset_credits_error":null,"windows":{"primary_window":{"limit_window_seconds":604800,"present":true,"reset_at":"2026-08-27T03:30:22Z","used_percent":44.0},"secondary_window":{"limit_window_seconds":null,"present":false,"reset_at":null,"used_percent":0.0}}},"error":null,"provider":"codex","status":"ok","windows":{"7d":{"percent_remaining":56.0,"reset_at":"2026-08-27T03:30:22Z"}}}""",
-            """{"details":{"limit_reached":false,"premium_entitlement":1500,"premium_percent_remaining":100.0,"premium_remaining":1500},"error":null,"provider":"copilot","status":"ok","windows":{"monthly":{"percent_remaining":100.0,"reset_at":"2026-09-01T00:00:00Z"},"short_term":{"percent_remaining":100.0,"reset_at":null}}}""",
-            """{"details":{"has_grok_code_access":true,"is_unified_billing_user":true,"limit_reached":true,"on_demand_cap":0.0,"on_demand_used":0.0,"prepaid_balance":0.0,"product_usage":[{"product":"GrokBuild","usage_percent":100.0}],"resets":[{"expires_at":"2026-09-12T18:49:00Z","token_id":"restok_vpYDqo"}],"resets_available":1,"resets_error":null,"subscription":"SuperGrokPlus","windows":{"monthly":{"limit":null,"present":false,"reset_at":null,"used":null,"used_percent":null},"weekly":{"limit":0.0,"present":true,"reset_at":"2026-08-25T00:08:17Z","used":0.0,"used_percent":100.0}}},"error":null,"provider":"grok","status":"ok","windows":{"weekly":{"percent_remaining":0.0,"reset_at":"2026-08-25T00:08:17Z"}}}""",
-            """{"details":{"limit_reached":true,"max_used_percent":100.0,"windows":{"five_hour":{"limit":null,"remaining":null,"reset_at":null,"used_percent":0.0,"window_hours":5},"monthly_web_search":{"limit":4000,"remaining":3971,"reset_at":"2026-08-27T14:04:58Z","used_percent":1.0,"window_hours":5},"weekly":{"limit":null,"remaining":null,"reset_at":"2026-08-24T14:04:58Z","used_percent":100.0,"window_hours":null}}},"error":null,"provider":"zai","status":"ok","windows":{"5h":{"percent_remaining":100.0,"reset_at":null},"weekly":{"percent_remaining":0.0,"reset_at":"2026-08-24T14:04:58Z"}}}""",
+        val FLATTENED_QUSE_0015_NDJSON: String = listOf(
+            """{"details": {"limit_reached": false, "subscription": null, "windows": {"five_hour": {"reset_at": "2026-08-28T16:20:00Z", "used_percent": 6.0}, "seven_day": {"reset_at": "2026-09-03T15:00:00Z", "used_percent": 10.0}}}, "error": null, "provider": "claude", "status": "ok", "windows": {"5h": {"percent_remaining": 94.0, "reset_at": "2026-08-28T16:20:00Z", "rolling": false}, "7d": {"percent_remaining": 90.0, "reset_at": "2026-09-03T15:00:00Z"}, "monthly": {"percent_remaining": null, "reset_at": null}}}""",
+            """{"details": {"limit_reached": false, "reset_credits": [{"expires_at": "2026-09-21T00:13:17Z", "status": "available", "title": "Full reset"}], "reset_credits_available": 1, "reset_credits_error": null, "windows": {"primary_window": {"limit_window_seconds": 604800, "present": true, "reset_at": "2026-09-03T16:26:48Z", "used_percent": 13.0}, "secondary_window": {"limit_window_seconds": null, "present": false, "reset_at": null, "used_percent": 0.0}}}, "error": null, "provider": "codex", "status": "ok", "windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, "7d": {"percent_remaining": 87.0, "reset_at": "2026-09-03T16:26:48Z"}, "monthly": {"percent_remaining": null, "reset_at": null}}}""",
+            """{"details": {"limit_reached": true, "premium_entitlement": 1500, "premium_percent_remaining": 0.0, "premium_remaining": -1}, "error": null, "provider": "copilot", "status": "ok", "windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, "7d": {"percent_remaining": null, "reset_at": null}, "monthly": {"percent_remaining": 0.0, "reset_at": "2026-09-01T00:00:00Z"}}}""",
+            """{"details": {"limit_reached": false, "max_used_percent": 64.0}, "error": null, "provider": "go", "status": "ok", "windows": {"5h": {"percent_remaining": 36.0, "reset_at": "2026-08-28T13:36:26Z", "rolling": true}, "7d": {"percent_remaining": 74.0, "reset_at": "2026-08-31T00:00:00Z"}, "monthly": {"percent_remaining": 86.0, "reset_at": "2026-09-22T06:20:28Z"}}}""",
+            """{"details": {"has_grok_code_access": true, "is_unified_billing_user": true, "limit_reached": true, "on_demand_cap": 0.0, "on_demand_used": 0.0, "prepaid_balance": 0.0, "product_usage": [{"product": "GrokBuild", "usage_percent": 100.0}], "resets": [{"expires_at": "2026-09-12T18:49:00Z", "token_id": "restok_vpYDqo"}], "resets_available": 1, "resets_error": null, "windows": {"monthly": {"limit": null, "present": false, "reset_at": null, "used": null, "used_percent": null}, "weekly": {"limit": 0.0, "present": true, "reset_at": "2026-09-01T00:08:17Z", "used": 0.0, "used_percent": 100.0}}}, "error": null, "provider": "grok", "status": "ok", "windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, "7d": {"percent_remaining": 0.0, "reset_at": "2026-09-01T00:08:17Z"}, "monthly": {"percent_remaining": null, "reset_at": null}}}""",
+            """{"details": {"limit_reached": false, "max_used_percent": 45.0, "windows": {"five_hour": {"limit": null, "present": true, "remaining": null, "reset_at": null, "used_percent": 1.0, "window_hours": 5}, "weekly": {"limit": null, "present": true, "remaining": null, "reset_at": "2026-09-03T14:04:58Z", "used_percent": 45.0, "window_hours": null}}}, "error": null, "provider": "zai", "status": "ok", "windows": {"5h": {"percent_remaining": 99.0, "reset_at": null, "rolling": true}, "7d": {"percent_remaining": 55.0, "reset_at": "2026-09-03T14:04:58Z"}, "monthly": {"percent_remaining": null, "reset_at": null}}}""",
         ).joinToString("\n")
+
+        /** #2293: the OpenCode Go card title (UsageProviderRecord.displayName). */
+        const val OPENCODE_GO_CARD_TITLE: String = "OpenCode Go"
+
+        /** go 5h: 36% remaining on the capture → 64% used. */
+        const val GO_5H_USED_PERCENT: String = "64% used"
+
+        /** go 5h resets 2026-08-28T13:36:26Z, 36m26s after [captureNow]. */
+        const val GO_5H_RESET_FOOT: String = "resets in 37m"
 
         const val RESET_CREDITS_HEADER: String = "Reset credits · 1 available"
         const val DUPLICATE_CREDIT_TITLE: String = "Full reset"
@@ -404,8 +441,11 @@ class Usage1318StrictSchemaRenderE2eTest {
               "claude": {
                 "error": null,
                 "status": "ok",
-                "short_term": {"percent_remaining": 99.0, "reset_at": "2026-08-22T15:49:59Z", "window": "5h"},
-                "long_term": {"percent_remaining": 93.0, "reset_at": "2026-08-27T14:59:59Z", "window": "7d"}
+                "windows": {
+                  "5h": {"percent_remaining": 94.0, "reset_at": "2026-08-28T16:20:00Z", "rolling": false},
+                  "7d": {"percent_remaining": 90.0, "reset_at": "2026-09-03T15:00:00Z"},
+                  "monthly": {"percent_remaining": null, "reset_at": null}
+                }
               }
             }
         """.trimIndent()

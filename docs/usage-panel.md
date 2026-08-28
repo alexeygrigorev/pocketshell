@@ -58,16 +58,17 @@ NAME each record carries drives the label:
 | anything else (`short_term` / `long_term` / unknown) | humanized (`Short term` / `Long term` / `Custom span`, #522) |
 
 The window NAME comes STRAIGHT from the canonical `windows` map key — the
-producer is the single source of truth for the span (issue #1318). For the
-pinned PyPI quse 0.0.14 wheel, the host maps each legacy `window` value into
-that key and falls back to `short_term` or `long_term` when the legacy value is
-null. The two main coding-agent providers — **Codex and Claude Code** — both
+producer is the single source of truth for the span (issue #1318). The pinned
+PyPI quse 0.0.15 wheel emits that map itself, keyed `5h` / `7d` / `monthly`
+for every provider, so the host forwards the keys untouched. The two main
+coding-agent providers — **Codex and Claude Code** — both
 use the same 5h + 7d windows, so they render the identical concrete `5h
 window` / `7d window` labels. **Monthly-cadence providers keep their real
 cadence**: GitHub Copilot's long-term quota carries `monthly` and renders
 `Monthly limit`, NOT a 7d window. A source span with
-`percent_remaining: null` does not apply to that provider and is omitted at the
-host boundary. There is no downstream re-derivation of the span from
+`percent_remaining: null` does not apply to that provider; the host forwards it
+verbatim and the Android parser omits the non-renderable row. There is no
+downstream re-derivation of the span from
 `details`. The app ignores `details` for quota windows; the one narrow
 exception is Codex reset-credit inventory described below.
 
@@ -172,27 +173,33 @@ schema.
 
 ## Expected JSON Schema
 
-The pinned PyPI `quse==0.0.14` backend is the source for the published usage
-values (issue #1318). Its `--json` output is a **provider-keyed object** with
-five providers and legacy `short_term` / `long_term` records. The host helper
-flattens that object into newline-delimited JSON (NDJSON), injects the provider
-name from the key, and translates the two legacy records into the canonical
-`windows` map. It does not re-derive windows, resets, percentages, or provider
-details (hard-cut, D22). The published raw shape looks like this:
+The pinned PyPI `quse==0.0.15` backend is the source for the published usage
+values (issues #1318, #2293). Its `--json` output is a **provider-keyed object**
+with six providers, each record already carrying the canonical top-level
+`windows` map keyed `5h` / `7d` / `monthly`. The host helper flattens that
+object into newline-delimited JSON (NDJSON) and injects the provider name from
+the key — nothing else. It does not re-derive windows, resets, percentages, or
+provider details (hard-cut, D22). The published raw shape looks like this:
 
 ```json
 {
   "codex": {
     "status": "ok",
-    "short_term": {"percent_remaining": null, "reset_at": null, "window": null},
-    "long_term": {"percent_remaining": 56.0, "reset_at": "2026-08-27T03:30:22Z", "window": "7d"},
+    "windows": {
+      "5h": {"percent_remaining": null, "reset_at": null, "rolling": false},
+      "7d": {"percent_remaining": 87.0, "reset_at": "2026-09-03T16:26:48Z"},
+      "monthly": {"percent_remaining": null, "reset_at": null}
+    },
     "error": null,
     "details": { ... extra fields; Codex reset-credit inventory is the sole app exception ... }
   },
-  "claude": {
+  "go": {
     "status": "ok",
-    "short_term": {"percent_remaining": 99.0, "reset_at": "2026-08-22T15:49:59Z", "window": "5h"},
-    "long_term": {"percent_remaining": 93.0, "reset_at": "2026-08-27T14:59:59Z", "window": "7d"},
+    "windows": {
+      "5h": {"percent_remaining": 36.0, "reset_at": "2026-08-28T13:36:26Z", "rolling": true},
+      "7d": {"percent_remaining": 74.0, "reset_at": "2026-08-31T00:00:00Z"},
+      "monthly": {"percent_remaining": 86.0, "reset_at": "2026-09-22T06:20:28Z"}
+    },
     "error": null,
     "details": { ... }
   }
@@ -202,18 +209,17 @@ details (hard-cut, D22). The published raw shape looks like this:
 which `pocketshell usage --json` flattens to one record per line:
 
 ```json
-{"provider":"codex","status":"ok","windows":{"7d":{"percent_remaining":56.0,"reset_at":"2026-08-27T03:30:22Z"}},"error":null,"details":{...}}
-{"provider":"claude","status":"ok","windows":{"5h":{"percent_remaining":99.0,"reset_at":"2026-08-22T15:49:59Z"},"7d":{"percent_remaining":93.0,"reset_at":"2026-08-27T14:59:59Z"}},"error":null,"details":{...}}
+{"details": {...}, "error": null, "provider": "codex", "status": "ok", "windows": {"5h": {"percent_remaining": null, "reset_at": null, "rolling": false}, "7d": {"percent_remaining": 87.0, "reset_at": "2026-09-03T16:26:48Z"}, "monthly": {"percent_remaining": null, "reset_at": null}}}
+{"details": {...}, "error": null, "provider": "go", "status": "ok", "windows": {"5h": {"percent_remaining": 36.0, "reset_at": "2026-08-28T13:36:26Z", "rolling": true}, "7d": {"percent_remaining": 74.0, "reset_at": "2026-08-31T00:00:00Z"}, "monthly": {"percent_remaining": 86.0, "reset_at": "2026-09-22T06:20:28Z"}}}
 ```
 
 The app reads `provider`, `status`, canonical top-level `windows`, and `error`.
-The host producer requires each input provider record to contain either
-canonical `windows` or at least one legacy `short_term` / `long_term` field;
-missing all three is a schema error and fails loudly. Legacy records may carry
-both fields with null values; the host then emits `windows: {}`. Canonical
-producers should emit the empty map explicitly when no span is renderable.
-The Android parser defensively treats an absent or null map as zero renderable
-windows, but `pocketshell usage --json` does not emit that incomplete shape.
+The host producer requires each input provider record to contain a canonical
+`windows` object; a missing or non-object map is a schema error and fails
+loudly. A producer with no renderable span should emit the empty map
+explicitly. The Android parser defensively treats an absent or null map as zero
+renderable windows, but `pocketshell usage --json` does not emit that
+incomplete shape.
 
 `reset_at`, when present, is canonical ISO-8601 UTC; an absent or null value
 means that no reset time is available. Each window label comes straight from
@@ -223,18 +229,21 @@ a schema error. The app ignores `details` except for Codex's strict
 reset-credit inventory fields documented above; it never reads
 `details.windows` or re-derives quota state from details.
 
-Boundary compatibility contract (issue #2274): the pinned PyPI wheel uses the
-legacy producer fields above, while newer or custom producers may send
-canonical top-level `windows` records directly. The host helper handles both
-forms and emits only canonical NDJSON. The legacy bridge is covered by the
-published five-provider fixture tests. Canonical OpenCode Go support is covered
-by separate contract tests; the pinned wheel does not publish a `go` provider.
+Producer boundary (issues #2274 → #2293): #2283's `short_term` / `long_term`
+translation existed only while the published wheel lagged quse HEAD. The pin is
+now 0.0.15, which IS the canonical producer, so that translation is hard-cut
+(D22) — a legacy-shaped record fails loudly instead of being re-shaped. The
+passthrough is covered by the real published six-provider capture in
+`tools/pocketshell/tests/data/quse-0.0.15-usage.json`, whose exact producer
+output (`…-usage.ndjson`) is also what the Android parser test and the
+`Usage1318StrictSchemaRenderE2eTest` connected journey consume.
 
-The pinned wheel provides `codex`, `claude`, `copilot`, `grok` (Grok Build; alias
-`grok-build`), and `zai`. The canonical app wire also supports `go` (OpenCode
-Go) when a canonical producer supplies it. `gemini` is accepted but reports
-`status: "unsupported"` because Gemini does not currently expose a usage
-endpoint.
+The pinned wheel provides `codex`, `claude`, `copilot`, `go` (OpenCode Go),
+`grok` (Grok Build; alias `grok-build`), and `zai`. `pocketshell usage` keeps no
+provider allowlist of its own — the positional provider argument is forwarded
+verbatim to the pinned quse, which owns validation. `gemini` is accepted but
+reports `status: "unsupported"` because Gemini does not currently expose a
+usage endpoint.
 
 `status` values:
 

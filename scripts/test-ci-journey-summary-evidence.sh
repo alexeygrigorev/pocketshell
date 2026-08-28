@@ -308,7 +308,8 @@ classify_expressions() {
   "steps.journey_retry_budget.outputs.retry_required_ms": "3028613",
   "steps.journey_retry_budget.outputs.retry_cost_model": "measured_first_attempt",
   "steps.journey_retry_budget.outputs.retry_shortfall_ms": "0",
-  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "0"
+  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "0",
+  "steps.journey_retry_budget.outputs.retry_denial_class": "none"
 }
 JSONEOF
 }
@@ -592,7 +593,16 @@ for entry in "${CORE_TERMINAL_PROOFS[@]}"; do
   summary="$ws/artifacts/ci-journey/summary.md"
   grep -qE 'Failed BOTH attempts' "$summary" \
     || { cat "$summary"; fail "(b/$status_var) no failed-both section was written for a proof that reddened the suite (issue #1827)"; }
-  mapfile -t bullets < <(awk '/Failed BOTH attempts/{f=1; next} f && /^- /{print}' "$summary")
+  # Issue #2374: terminate the scan at the section end, exactly as the
+  # production scans now do (scripts/ci-journey-genuine-journey-failure.sh).
+  # `summary.md` keeps writing after `Failed BOTH attempts` — #2355's quarantine
+  # section and #2143's wedged-fixture section both follow it with bullets — so
+  # an unterminated scan runs to EOF and this array silently annexes them,
+  # drifting the "exactly ONE bullet" assertion below for a reason unrelated to
+  # the proof under test.
+  mapfile -t bullets < <(awk '/Failed BOTH attempts/ { f = 1; next }
+                              f && !/^- / && NF       { f = 0 }
+                              f && /^- /              { print }' "$summary")
   # The issue's exact scenario is ONE proof failing twice — if the fixture
   # reddened several, "a section was written" would not be attributable to the
   # proof under test (G6).

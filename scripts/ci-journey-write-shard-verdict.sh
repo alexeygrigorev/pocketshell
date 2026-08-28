@@ -76,6 +76,42 @@
 # start, before any budget decision exists), which is honest — at that point the
 # shard has not yet asked.
 #
+# Issue #2374 (WHICH denial): `retry_affordable=false` alone proved too coarse.
+# On run 33181062826 all six shards carried it and the batch was triaged as a
+# recurrence of #1833's capacity loss — but every one of those shards had
+# already failed journeys, so its own suite is what consumed the wall. The token
+# now also carries `retry_denial_class`:
+#
+#   gate_capacity                   #1833/#1850's condition — the shard failed
+#                                   no journey and still could not retry.
+#   journey_failure_inflated_suite  the shard's own failing classes doubled its
+#                                   suite; the budget is not the lever.
+#   none                            the retry was affordable.
+#   unknown                         no usable reading (also the value on a token
+#                                   written before this stamp existed).
+#
+# Same discipline as the reason and the affordability stamp: it NEVER changes
+# line 1, and a malformed value degrades to `unknown` instead of costing the run
+# its token.
+#
+# Issue #2374 (BUILD ATTRIBUTION, carried separately from the reason): #1814's
+# aggregate rollup ("includes a cold-BUILD-phase timeout") is derived from
+# `verdict_reason`. Once a build attribution may no longer outrank a genuine
+# journey failure it does not name, a shard that has BOTH — the run-33157272170
+# shape this issue is about — writes `verdict_reason=first_attempt_journey_failure`
+# and the build-cost evidence would DISAPPEAR from the aggregate rollup and the
+# step summary, i.e. from the artifact a release owner actually reads, while
+# surviving only in that one shard's job log. So the build attribution now rides
+# its own field:
+#
+#   none                 no build-phase / build-level attempt evidence.
+#   cold_build_timeout   #1814: an attempt was cut by the per-class wall cap
+#                        while Gradle was still BUILDING.
+#   build_level_failure  #1840: an attempt died at the Gradle BUILD level.
+#
+# It is INDEPENDENT of `verdict_reason` (a shard can carry both), it never
+# changes line 1 or any severity, and an unrecognised value degrades to `none`.
+#
 # Usage:
 #   ci-journey-write-shard-verdict.sh <CLEAN|INFRA|RED> [REASON]
 # Env:
@@ -87,6 +123,22 @@
 #                                          `unknown`
 #   SHARD_RETRY_DENIED_REASON              the budget helper's `retry_reason`
 #   SHARD_RETRY_SHORTFALL_MS               required-minus-remaining, in ms
+#   SHARD_RETRY_DENIAL_CLASS               the budget helper's
+#                                          `retry_denial_class` (issue #2374);
+#                                          any unrecognised value records
+#                                          `unknown`
+#   SHARD_BUILD_ATTRIBUTION                `cold_build_timeout` |
+#                                          `build_level_failure` (issue #2374);
+#                                          any unrecognised value, including
+#                                          unset, records `none`. DIAGNOSTIC,
+#                                          not a verdict: the classify step
+#                                          computes it before every branch from
+#                                          the PRESERVED attempt-1 tree, so a
+#                                          CLEAN shard whose retry recovered
+#                                          still carries it. Consumers must gate
+#                                          on the verdict token, not on this
+#                                          stamp alone — see the #1814 rollup in
+#                                          scripts/ci-journey-aggregate-verdict.sh.
 #   POCKETSHELL_JOURNEY_CI_SHARD_INDEX     shard index (set by the matrix)
 #   GITHUB_RUN_ID / GITHUB_RUN_ATTEMPT     provenance (set by Actions)
 #   GITHUB_OUTPUT                          when set, also exports
@@ -130,6 +182,22 @@ retry_denied_reason="${SHARD_RETRY_DENIED_REASON:-unspecified}"
 [[ "$retry_denied_reason" =~ ^[a-z][a-z0-9_]{0,63}$ ]] || retry_denied_reason="unspecified"
 retry_shortfall_ms="${SHARD_RETRY_SHORTFALL_MS:-0}"
 [[ "$retry_shortfall_ms" =~ ^[0-9]{1,18}$ ]] || retry_shortfall_ms=0
+# Issue #2374: a CLOSED set, not a free-form label. A denial class the aggregate
+# does not know how to act on is worse than none, because it would be reported
+# with the confidence of a classification.
+retry_denial_class="${SHARD_RETRY_DENIAL_CLASS:-}"
+case "$retry_denial_class" in
+  none | gate_capacity | journey_failure_inflated_suite) ;;
+  *) retry_denial_class="unknown" ;;
+esac
+# Issue #2374: likewise a CLOSED set. Fails soft to `none` — "no build evidence"
+# is the safe default because it only ever SUPPRESSES an advisory rollup notice;
+# it can never soften a verdict.
+build_attribution="${SHARD_BUILD_ATTRIBUTION:-}"
+case "$build_attribution" in
+  none | cold_build_timeout | build_level_failure) ;;
+  *) build_attribution="none" ;;
+esac
 
 if ! {
   printf '%s\n' "$verdict"
@@ -140,15 +208,17 @@ if ! {
   printf 'retry_affordable=%s\n' "$retry_affordable"
   printf 'retry_denied_reason=%s\n' "$retry_denied_reason"
   printf 'retry_shortfall_ms=%s\n' "$retry_shortfall_ms"
+  printf 'retry_denial_class=%s\n' "$retry_denial_class"
+  printf 'build_attribution=%s\n' "$build_attribution"
   printf 'written_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 } > "$out"; then
   echo "ci-journey-write-shard-verdict.sh: cannot write $out" >&2
   exit 1
 fi
 
-echo "SHARD_VERDICT=$verdict (shard $shard, run $run_id attempt $run_attempt, reason $reason, retry_affordable $retry_affordable)"
+echo "SHARD_VERDICT=$verdict (shard $shard, run $run_id attempt $run_attempt, reason $reason, retry_affordable $retry_affordable, build_attribution $build_attribution)"
 if [[ "$retry_affordable" == "false" ]]; then
-  echo "SHARD_RETRY_UNAFFORDABLE: this shard reached its verdict on ONE attempt — a cold-boot retry did not fit (${retry_denied_reason}, short by ${retry_shortfall_ms}ms) (issue #1833)"
+  echo "SHARD_RETRY_UNAFFORDABLE: this shard reached its verdict on ONE attempt — a cold-boot retry did not fit (${retry_denied_reason}, short by ${retry_shortfall_ms}ms, class ${retry_denial_class}) (issues #1833, #2374)"
 fi
 
 if [[ -n "${GITHUB_OUTPUT:-}" ]]; then

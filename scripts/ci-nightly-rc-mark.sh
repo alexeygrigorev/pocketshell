@@ -59,6 +59,32 @@ if ! git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
   exit 1
 fi
 
+# Issue #2374: an ANNOTATED tag is a tag OBJECT, so git needs a tagger identity
+# to write one. A GitHub hosted runner has none: actions/checkout does not set
+# `user.name`/`user.email`, and git's auto-detection produces
+# `runner@fv-az…-….(none)`, which it rejects outright:
+#
+#   fatal: unable to auto-detect email address (got 'runner@host.(none)')
+#
+# So `git tag -f -a validated-rc` below would have failed on EVERY nightly run,
+# and #2356's marker could never have been created even once the scheduled
+# full-suite went green. It has in fact never been created. Nothing caught it
+# because the only exercise of this script is a self-test that ran on a
+# developer machine, where an ambient `~/.gitconfig` identity always existed —
+# and it was never wired into a CI job at all.
+#
+# Fail-safe and narrow: `git var GIT_COMMITTER_IDENT` is git's own answer to
+# "can you form an identity right now?". When it succeeds we change NOTHING, so
+# a local run still tags as the maintainer. Only when git says it cannot do we
+# supply one, and we supply it through the COMMITTER env vars rather than
+# `-c user.email`, because env beats config — `-c` would not override a caller
+# whose identity is unusable because the env vars themselves are empty.
+if ! git var GIT_COMMITTER_IDENT >/dev/null 2>&1; then
+  echo "git has no usable committer identity; tagging as the CI bot (issue #2374)"
+  export GIT_COMMITTER_NAME="pocketshell-ci"
+  export GIT_COMMITTER_EMAIL="pocketshell-ci@users.noreply.github.com"
+fi
+
 TIMESTAMP="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
 
 TAG_MESSAGE="$(

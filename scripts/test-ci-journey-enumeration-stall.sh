@@ -370,7 +370,8 @@ CLASSIFY_EXPRESSIONS='{
   "steps.journey_retry_budget.outputs.retry_required_ms": "${CLASSIFY_steps_journey_retry_budget_outputs_retry_required_ms:-}",
   "steps.journey_retry_budget.outputs.retry_cost_model": "${CLASSIFY_steps_journey_retry_budget_outputs_retry_cost_model:-}",
   "steps.journey_retry_budget.outputs.retry_shortfall_ms": "${CLASSIFY_steps_journey_retry_budget_outputs_retry_shortfall_ms:-}",
-  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "${CLASSIFY_steps_journey_retry_budget_outputs_retry_warm_build_deducted_ms:-}"
+  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "${CLASSIFY_steps_journey_retry_budget_outputs_retry_warm_build_deducted_ms:-}",
+  "steps.journey_retry_budget.outputs.retry_denial_class": "${CLASSIFY_steps_journey_retry_budget_outputs_retry_denial_class:-unknown}"
 }'
 
 make_workflow_fixture() {
@@ -434,6 +435,9 @@ prepare_workflow_scripts() {
     "$SCRIPT_DIR/ci-journey-infra-signature.sh" \
     "$SCRIPT_DIR/ci-journey-infra-signature.py" \
     "$SCRIPT_DIR/ci-journey-write-shard-verdict.sh" \
+    "$SCRIPT_DIR/ci-journey-retry-denial-notice.sh" \
+    "$SCRIPT_DIR/ci-journey-build-attribution-notice.sh" \
+    "$SCRIPT_DIR/ci-journey-genuine-journey-failure.sh" \
     "$root/scripts/"
   chmod +x "$root/scripts/"*.sh
 }

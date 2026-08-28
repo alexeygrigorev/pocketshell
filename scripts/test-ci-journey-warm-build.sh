@@ -538,8 +538,13 @@ write_token() {
     bash "$WRITER" "$token" "$reason" > /dev/null \
     || fail "writer refused $token/$reason for shard $idx"
 }
+# AGG_STEP_SUMMARY (optional): where the reducer should write its
+# $GITHUB_STEP_SUMMARY block, for the cases that assert on it. Threaded through
+# this ONE helper rather than a second inline invocation, so the sandbox keeps a
+# single hardcoded shard total (scripts/check-journey-shard-literals.sh).
+AGG_STEP_SUMMARY=""
 run_agg() {
-  AGG_OUT="$(EXPECTED_SHARDS=3 GITHUB_STEP_SUMMARY="" GITHUB_RUN_ATTEMPT=1 \
+  AGG_OUT="$(EXPECTED_SHARDS=3 GITHUB_STEP_SUMMARY="$AGG_STEP_SUMMARY" GITHUB_RUN_ATTEMPT=1 \
     bash "$AGG" "$1" 2>&1)"
   AGG_RC=$?
   AGG_VERDICT="$(sed -n 's/^AGGREGATE_VERDICT=//p' <<<"$AGG_OUT" | tail -n 1)"
@@ -704,6 +709,9 @@ setup_classify_dir() {
   mkdir -p "$CLASSIFY_DIR/scripts" "$CLASSIFY_DIR/artifacts/ci-journey"
   cp "$WRITER" "$BUILD_PHASE" "$BUILD_FAILURE" \
     "$SCRIPT_DIR/ci-journey-enumeration-stall.sh" \
+    "$SCRIPT_DIR/ci-journey-retry-denial-notice.sh" \
+    "$SCRIPT_DIR/ci-journey-build-attribution-notice.sh" \
+    "$SCRIPT_DIR/ci-journey-genuine-journey-failure.sh" \
     "$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh" \
     "$SCRIPT_DIR/ci-journey-infra-signature.sh" "$SCRIPT_DIR/ci-journey-infra-signature.py" \
     "$CLASSIFY_DIR/scripts/"
@@ -715,6 +723,16 @@ seed_build_phase_manifest() {
   local dir="$CLASSIFY_DIR/artifacts/ci-journey/class-attempts/app/Wedge--0123456789abcdef/attempt-1"
   mkdir -p "$dir"
   printf 'class=com.pocketshell.app.proof.MultiSessionSwitchJourneyE2eTest\nprimary_classification=outer_timeout\nraw_junit_count=0\nouter_timeout_phase=build\n' \
+    > "$dir/manifest.txt"
+}
+
+# Issue #1840's sibling shape, needed by the #2374 precedence cases below: an
+# attempt whose Gradle BUILD died outright (`attempt_failure_phase=build`) rather
+# than being cut by the wall cap mid-build.
+seed_build_failure_manifest() {
+  local dir="$CLASSIFY_DIR/artifacts/ci-journey/class-attempts/app/Wedge--0123456789abcdef/attempt-2"
+  mkdir -p "$dir"
+  printf 'class=com.pocketshell.app.proof.MultiSessionSwitchJourneyE2eTest\nprimary_classification=failure\nraw_junit_count=0\nattempt_failure_phase=build\n' \
     > "$dir/manifest.txt"
 }
 
@@ -753,10 +771,16 @@ run_classify() {
       bash "$CLASSIFY_BODY" 2>&1
   )"
   CLASSIFY_RC=$?
-  if grep -Fq 'ci-journey-build-phase-failure.sh: No such file or directory' \
-      <<<"$CLASSIFY_OUT"; then
+  # Issue #2374: this used to name ONE helper. The classify step's inline shell
+  # keeps being extracted into scripts/ (that is check-file-size-hygiene.sh's
+  # prescribed remedy for the workflow headroom), and a helper this sandbox does
+  # not copy then fails with a bare "No such file or directory" that this runner
+  # does NOT propagate — the body has no `-e`. So the guard now catches ANY
+  # missing scripts/ helper, not a hardcoded list that goes stale on the next
+  # extraction.
+  if grep -Eq 'scripts/[A-Za-z0-9._-]+: No such file or directory' <<<"$CLASSIFY_OUT"; then
     printf '%s\n' "$CLASSIFY_OUT"
-    fail "(x) extracted classify body could not run the production build-phase-failure helper"
+    fail "(x) the extracted classify body could not run a production scripts/ helper — add it to setup_classify_dir's copy list"
   fi
   CLASSIFY_TOKEN="$(sed -n 's/^shard_verdict=//p' "$gh")"
   CLASSIFY_REASON="$(sed -n 's/^shard_verdict_reason=//p' "$gh")"
@@ -884,6 +908,398 @@ expect_classify "cold build + budget timeout" RED cold_build_timeout 1 failure f
 setup_classify_dir; seed_summary "${CLEAN_SUMMARY[@]}"; seed_build_phase_manifest
 expect_classify "cold build + clean pass"     CLEAN passed_first_attempt 0 success '' success '' false false true
 pass "(x2) build-phase evidence renames the CAUSE of a red shard without changing its severity, and never touches a CLEAN one"
+
+# (x3) ISSUE #2374 — a build attribution may only speak for the classes it
+# NAMES. Every (x2) case above is the COHERENT shape: the one class listed under
+# `Failed BOTH attempts` IS the build-phase victim, so `cold_build_timeout` is
+# the whole truth and stays. The scheduled full-suite run 33157272170 shard 2 was
+# the incoherent shape: EIGHT unrelated journey classes failed both attempts and
+# the LAST class's attempts were cut mid-Gradle-build with 289s of budget left.
+# The shard reported `cold_build_timeout` — "investigate the build, not the
+# journey" — while eight genuine product failures sat in the same summary, and
+# the batch was triaged as a recurrence of #1814.
+BUILD_VICTIM='com.pocketshell.app.proof.MultiSessionSwitchJourneyE2eTest'
+UNRELATED_FAILURE='com.pocketshell.app.proof.ColdRestoreGoneSessionNoResurrectE2eTest'
+setup_classify_dir
+seed_summary \
+  '# Per-push CI journey suite — summary' \
+  'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
+  "- \`$UNRELATED_FAILURE\`" \
+  "- \`$BUILD_VICTIM\`"
+seed_build_phase_manifest
+expect_classify "#2374 build phase + unrelated genuine failure" \
+  RED first_attempt_journey_failure 1 failure failure failure failure false true true
+expect_classify "#2374 build phase + unrelated failed both" \
+  RED journey_failure_both_attempts 1 failure failure failure failure false false true
+# The build annotation must STILL fire — the fix changes who speaks for the
+# shard's reason, never whether the build artefact is reported at all.
+grep -q 'an attempt was cut during the Gradle BUILD phase' <<<"$CLASSIFY_OUT" \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(x3) the build-phase annotation stopped firing; #1814's evidence must survive the #2374 precedence change"; }
+grep -q "genuine_journey_failure_classes=$UNRELATED_FAILURE" <<<"$CLASSIFY_OUT" \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(x3) the classify step does not name which failed-both class the build attribution failed to explain"; }
+pass "(x3) #2374: a build-phase artefact no longer speaks for unrelated genuine failures, and its own annotation still fires"
+
+# (x4) THE #1840 CONTROL, and the reason the test is set SUBTRACTION rather than
+# "does the summary have a failed-both section". A class whose Gradle BUILD DIED
+# is itself listed under `Failed BOTH attempts` — that IS #1840. If the shard's
+# only failed-both class is the build victim, `build_level_failure` must survive.
+setup_classify_dir
+seed_summary \
+  '# Per-push CI journey suite — summary' \
+  'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
+  "- \`$BUILD_VICTIM\`"
+seed_build_failure_manifest
+expect_classify "#1840 preserved: only the build victim failed both" \
+  RED build_level_failure 1 failure failure failure failure false false true
+pass "(x4) #1840 preserved: a shard whose only failed-both class IS the build victim still reports build_level_failure"
+
+# (x5) ...and the same shard PLUS one unrelated genuine failure must flip, or
+# (x4) would be satisfied by simply never applying the #2374 subtraction.
+setup_classify_dir
+seed_summary \
+  '# Per-push CI journey suite — summary' \
+  'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
+  "- \`$BUILD_VICTIM\`" \
+  "- \`$UNRELATED_FAILURE\`"
+seed_build_failure_manifest
+expect_classify "#2374 build level + unrelated genuine failure" \
+  RED journey_failure_both_attempts 1 failure failure failure failure false false true
+grep -q 'an attempt died at the Gradle BUILD level' <<<"$CLASSIFY_OUT" \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(x5) #1840's annotation stopped firing"; }
+pass "(x5) the subtraction is live for #1840 too: one unrelated genuine failure flips the reason while the annotation stays"
+
+# ---------------------------------------------------------------------------
+# (x6)/(x7) ISSUE #2374, ROUND 2 — the discriminator must read the failed-both
+# SECTION, not "every `- ` bullet to EOF".
+#
+# THE DEFECT THIS CLOSES. summary.md keeps writing after the failed-both
+# section: #2355's `Quarantined failures (non-blocking …)` and #2143's
+# `Shared SSH/tmux fixture was WEDGED during these classes …`, both with `- `
+# bullets. An unterminated scan reads them as failed-both classes, so a
+# QUARANTINED failure — which #2355 deliberately keeps OUT of the blocking
+# section, and which is live on `main` today — subtracts to a "genuine journey
+# failure" and flips `build_level_failure`/`cold_build_timeout` back to a
+# product-defect reason. That is #1840's own bug returning through the very
+# change that exists to preserve it, and it re-couples this classifier to the
+# section #2355 decoupled it from.
+#
+# THE FIXTURES ARE PRODUCED BY THE REAL SUMMARY WRITER, not hand-typed: a
+# handwritten section header drifts silently from
+# ci-journey-summary-functions.sh and the guard then proves nothing. Same
+# standalone-driver method as scripts/test-journey-quarantine-non-blocking.sh.
+SUMMARY_FN="$SCRIPT_DIR/ci-journey-summary-functions.sh"
+CORE_TERMINAL_FN="$SCRIPT_DIR/ci-journey-core-terminal-functions.sh"
+for required in "$SUMMARY_FN" "$CORE_TERMINAL_FN" "$SCRIPT_DIR/lib/journey-quarantine.sh"; do
+  [[ -f "$required" ]] || fail "(x6) missing required file: $required"
+done
+
+# real_summary <out.md> <quarantine-file-content|""> <wedged-csv|"">
+#              <failed-class>...
+real_summary() {
+  local out="$1" quarantine="$2" wedged_csv="$3"; shift 3
+  local -a failed=("$@") wedged=()
+  [[ -z "$wedged_csv" ]] || IFS=',' read -r -a wedged <<<"$wedged_csv"
+  local d; d="$(mktemp -d "$SANDBOX/realsummary-XXXXXX")"
+  mkdir -p "$d/artifacts/ci-journey"
+  local qfile="$d/journey-quarantine.txt"
+  printf '%s' "$quarantine" > "$qfile"
+  [[ -s "$qfile" ]] || rm -f "$qfile"
+  {
+    echo "source '$CORE_TERMINAL_FN'"
+    echo "source '$SUMMARY_FN'"
+    echo "REPO_ROOT='$REPO_ROOT'"
+    echo "POCKETSHELL_JOURNEY_QUARANTINE_FILE='$qfile'"
+    echo "SUITE_START=0; STEP_TIMEOUT_HIT=0"
+    echo "RECOVERED_CLASSES=(); PASSED_FIRST_TRY=()"
+    echo "BUDGET_TIMEOUT_CLASSES=(); BUILD_PHASE_TIMEOUT_ATTEMPTS=(); BUILD_PHASE_FAILURE_ATTEMPTS=()"
+    printf 'FIXTURE_WEDGED_CLASSES=(%s)\n' "${wedged[*]@Q}"
+    echo "EFFECTIVE_JOURNEY_CLASSES=(${failed[*]@Q})"
+    printf 'FAILED_CLASSES=(%s)\n' "${failed[*]@Q}"
+    echo "JOURNEY_CI_SHARD_INDEX=2; JOURNEY_CI_SHARD_TOTAL=$SHARD_TOTAL"
+    echo "JOURNEY_WARM_BUILD_STATUS=ok; JOURNEY_WARM_BUILD_ELAPSED=1"
+    echo "JOURNEY_STEP_BUDGET_SECS=4200"
+    echo "SUMMARY='$d/artifacts/ci-journey/summary.md'"
+    echo "ARTIFACT_DIR='$d/artifacts/ci-journey'"
+    echo "finish_ci_journey_suite"
+  } > "$d/driver.sh"
+  bash "$d/driver.sh" > "$d/run.log" 2>&1
+  [[ -f "$d/artifacts/ci-journey/summary.md" ]] \
+    || { cat "$d/run.log"; fail "(x6) the real summary writer produced no summary.md"; }
+  cp "$d/artifacts/ci-journey/summary.md" "$out"
+}
+
+QUARANTINED_CLASS='com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest'
+QUARANTINE_ROW="$(printf '%s\t#2391\t2026-08-28\t2099-01-01\ttimes out on the CI AVD\n' "$QUARANTINED_CLASS")"
+
+# (x6) build victim failed both + a QUARANTINED class also failed both.
+REAL_QUARANTINE_SUMMARY="$SANDBOX/real-summary-quarantine.md"
+real_summary "$REAL_QUARANTINE_SUMMARY" "$QUARANTINE_ROW" "" \
+  "$BUILD_VICTIM" "$QUARANTINED_CLASS"
+# Non-vacuity: the fixture MUST actually contain both sections, or (x6) would
+# pass by simply never exercising the bug.
+grep -q '^Failed BOTH attempts' "$REAL_QUARANTINE_SUMMARY" \
+  || { cat "$REAL_QUARANTINE_SUMMARY"; fail "(x6) fixture has no failed-both section"; }
+grep -q '^Quarantined failures' "$REAL_QUARANTINE_SUMMARY" \
+  || { cat "$REAL_QUARANTINE_SUMMARY"; fail "(x6) fixture has no #2355 quarantine section — it cannot reproduce the defect"; }
+grep -q -- "- \`$QUARANTINED_CLASS\` (tracked:" "$REAL_QUARANTINE_SUMMARY" \
+  || { cat "$REAL_QUARANTINE_SUMMARY"; fail "(x6) the quarantine bullet is not in the real writer's shape"; }
+
+# The helper, driven directly: the quarantined bullet must not be read at all.
+GENUINE_OUT="$(bash "$SCRIPT_DIR/ci-journey-genuine-journey-failure.sh" \
+  "$REAL_QUARANTINE_SUMMARY" "" "$BUILD_VICTIM" 2>&1)"
+grep -qx 'genuine_journey_failure=false' <<<"$GENUINE_OUT" \
+  || { printf '%s\n' "$GENUINE_OUT"; fail "(x6) a QUARANTINED failure was read as a genuine journey failure — the scan is not terminated at the section end"; }
+grep -qx 'genuine_journey_failure_classes=' <<<"$GENUINE_OUT" \
+  || { printf '%s\n' "$GENUINE_OUT"; fail "(x6) the quarantine section leaked into genuine_journey_failure_classes"; }
+
+# ...and through the REAL classify body: #1840's and #1814's reasons survive.
+setup_classify_dir
+cp "$REAL_QUARANTINE_SUMMARY" "$CLASSIFY_DIR/artifacts/ci-journey/summary.md"
+seed_build_failure_manifest
+expect_classify "#2374 build level + quarantined failure" \
+  RED build_level_failure 1 failure failure failure failure false false true
+# The failed-both branch's OWN `Failing class(es):` annotation reads the same
+# section with the same awk. It must not name the quarantined class either —
+# that would print a deliberately non-blocking class as this shard's cause.
+grep -q 'genuine test failure' <<<"$CLASSIFY_OUT" \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(x6) the failed-both annotation did not fire, so its class list is untested"; }
+if grep -q "$QUARANTINED_CLASS" <<<"$CLASSIFY_OUT"; then
+  printf '%s\n' "$CLASSIFY_OUT"
+  fail "(x6) the classify step's 'Failing class(es)' annotation names a QUARANTINED class as the genuine cause"
+fi
+setup_classify_dir
+cp "$REAL_QUARANTINE_SUMMARY" "$CLASSIFY_DIR/artifacts/ci-journey/summary.md"
+seed_build_phase_manifest
+expect_classify "#2374 build phase + quarantined failure" \
+  RED cold_build_timeout 1 failure failure failure failure false true true
+pass "(x6) #2374: a QUARANTINED failing class (live on main today) never counts as a genuine journey failure — #1814/#1840 attribution preserved"
+
+# (x7) the same for #2143's fixture-wedged section, which also follows the
+# failed-both section with `- ` bullets. The wedged class here is NOT the build
+# victim, so an unterminated scan would leak it as an unrelated genuine failure.
+WEDGED_ONLY_CLASS='com.pocketshell.app.tmux.TmuxWedgeVictimDockerTest'
+REAL_WEDGED_SUMMARY="$SANDBOX/real-summary-wedged.md"
+real_summary "$REAL_WEDGED_SUMMARY" "" "$WEDGED_ONLY_CLASS" "$BUILD_VICTIM"
+grep -q '^Shared SSH/tmux fixture was WEDGED during these classes' "$REAL_WEDGED_SUMMARY" \
+  || { cat "$REAL_WEDGED_SUMMARY"; fail "(x7) fixture has no #2143 wedged section — it cannot reproduce the defect"; }
+GENUINE_OUT="$(bash "$SCRIPT_DIR/ci-journey-genuine-journey-failure.sh" \
+  "$REAL_WEDGED_SUMMARY" "" "$BUILD_VICTIM" 2>&1)"
+grep -qx 'genuine_journey_failure=false' <<<"$GENUINE_OUT" \
+  || { printf '%s\n' "$GENUINE_OUT"; fail "(x7) #2143's wedged section was read as a genuine journey failure"; }
+setup_classify_dir
+cp "$REAL_WEDGED_SUMMARY" "$CLASSIFY_DIR/artifacts/ci-journey/summary.md"
+seed_build_failure_manifest
+expect_classify "#2374 build level + #2143 wedged section" \
+  RED build_level_failure 1 failure failure failure failure false false true
+pass "(x7) #2374: #2143's wedged section never counts as a genuine journey failure either — the class is closed, not the one instance"
+
+# (x8) THE NON-VACUITY CONTROL for (x6)/(x7): the terminator must not have been
+# implemented by simply never reading anything. A REAL summary whose failed-both
+# section names an unrelated class the build attribution does not explain must
+# still flip the reason — and the class it reports must be a bare FQCN, not a
+# bullet's trailing metadata.
+REAL_MIXED_SUMMARY="$SANDBOX/real-summary-mixed.md"
+real_summary "$REAL_MIXED_SUMMARY" "$QUARANTINE_ROW" "" \
+  "$BUILD_VICTIM" "$UNRELATED_FAILURE" "$QUARANTINED_CLASS"
+GENUINE_OUT="$(bash "$SCRIPT_DIR/ci-journey-genuine-journey-failure.sh" \
+  "$REAL_MIXED_SUMMARY" "" "$BUILD_VICTIM" 2>&1)"
+grep -qx 'genuine_journey_failure=true' <<<"$GENUINE_OUT" \
+  || { printf '%s\n' "$GENUINE_OUT"; fail "(x8) the terminator swallowed a real unrelated failure — the fix would be vacuous"; }
+grep -qx "genuine_journey_failure_classes=$UNRELATED_FAILURE" <<<"$GENUINE_OUT" \
+  || { printf '%s\n' "$GENUINE_OUT"; fail "(x8) genuine_journey_failure_classes is not exactly the one unrelated FQCN"; }
+setup_classify_dir
+cp "$REAL_MIXED_SUMMARY" "$CLASSIFY_DIR/artifacts/ci-journey/summary.md"
+seed_build_failure_manifest
+expect_classify "#2374 build level + quarantined + one unrelated failure" \
+  RED journey_failure_both_attempts 1 failure failure failure failure false false true
+pass "(x8) with a quarantined class AND an unrelated genuine failure in the same real summary, only the unrelated FQCN is reported and the reason still flips"
+
+# (x9) #1827's core-terminal bullets carry `(<label> — status <X>)` after the
+# class. They belong to the failed-both section and must still count, but what
+# is REPORTED must be the FQCN alone — the set subtraction below is a name
+# comparison and a bullet's metadata can never match a build attribution's CSV.
+CORE_BULLET_SUMMARY="$SANDBOX/core-bullet-summary.md"
+{
+  echo '# Per-push CI journey suite — summary'
+  echo
+  echo 'Failed BOTH attempts (`JOURNEY_FAILED` — job red):'
+  echo "- \`$BUILD_VICTIM\` (surface repaint proof — status FAIL)"
+} > "$CORE_BULLET_SUMMARY"
+GENUINE_OUT="$(bash "$SCRIPT_DIR/ci-journey-genuine-journey-failure.sh" \
+  "$CORE_BULLET_SUMMARY" "" "$BUILD_VICTIM" 2>&1)"
+grep -qx 'genuine_journey_failure=false' <<<"$GENUINE_OUT" \
+  || { printf '%s\n' "$GENUINE_OUT"; fail "(x9) a bullet's trailing metadata defeated the #1814/#1840 name subtraction"; }
+pass "(x9) a failed-both bullet is reduced to its FQCN, so the #1814/#1840 subtraction still matches"
+
+# ---------------------------------------------------------------------------
+# (c5) ISSUE #2374 — #1814's AGGREGATE rollup must survive the precedence change.
+#
+# `verdict_reason_for`'s output IS the token's `verdict_reason`, and (c1) shows
+# the aggregate derives its cold-build rollup from that field. So the moment a
+# build attribution stops outranking an unrelated genuine failure, the mixed
+# shard writes `verdict_reason=first_attempt_journey_failure` and #1814's
+# evidence VANISHES from the aggregate and the step summary — the artifact a
+# release owner reads — surviving only in that one shard's job log. The
+# attribution therefore rides its own `build_attribution` token field.
+echo
+echo "== #2374 the build attribution survives in the aggregate (issue #1814 rollup) =="
+
+# End to end: the token used here is the one the REAL classify body just wrote
+# for the mixed shape, not a hand-written one.
+setup_classify_dir
+seed_summary \
+  '# Per-push CI journey suite — summary' \
+  'Failed BOTH attempts (`JOURNEY_FAILED` — job red):' \
+  "- \`$UNRELATED_FAILURE\`" \
+  "- \`$BUILD_VICTIM\`"
+seed_build_phase_manifest
+expect_classify "#2374 mixed shard for the aggregate" \
+  RED first_attempt_journey_failure 1 failure failure failure failure false true true
+grep -qx 'build_attribution=cold_build_timeout' "$CLASSIFY_DIR/shard-verdict.txt" \
+  || { cat "$CLASSIFY_DIR/shard-verdict.txt"; fail "(c5) the mixed shard's token does not carry the build attribution separately"; }
+d="$SANDBOX/verdicts-mixed"; rm -rf "$d"; mkdir -p "$d/emulator-journey-verdict-shard-2"
+cp "$CLASSIFY_DIR/shard-verdict.txt" "$d/emulator-journey-verdict-shard-2/shard-verdict.txt"
+write_token "$d" 0 CLEAN passed_first_attempt
+write_token "$d" 1 CLEAN passed_first_attempt
+STEP_SUMMARY_FILE="$SANDBOX/step-summary-mixed.md"; : > "$STEP_SUMMARY_FILE"
+AGG_STEP_SUMMARY="$STEP_SUMMARY_FILE"
+run_agg "$d"
+AGG_STEP_SUMMARY=""
+[[ "$AGG_VERDICT" == "RED" && "$AGG_RC" -eq 1 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(c5) the mixed shape must stay RED/exit1, got $AGG_VERDICT/exit$AGG_RC"; }
+COLD_NOTICES="$(grep -c 'includes a cold-BUILD-phase timeout' <<<"$AGG_OUT")"
+[[ "$COLD_NOTICES" -eq 1 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(c5) build-phase evidence + an unrelated genuine failure produced $COLD_NOTICES #1814 rollup notice(s), expected 1 — the release owner's artifact lost the build-cost evidence"; }
+grep -q 'Cold-build-phase timeout (issue #1814)' "$STEP_SUMMARY_FILE" \
+  || { cat "$STEP_SUMMARY_FILE"; fail "(c5) the STEP SUMMARY lost the #1814 line for the mixed shape"; }
+# The reason is still the genuine failure — the fix restores the evidence, it
+# does not restore the misattribution.
+grep -q 'shard 2: RED .*reason first_attempt_journey_failure' <<<"$AGG_OUT" \
+  || { printf '%s\n' "$AGG_OUT"; fail "(c5) the aggregate no longer reports the genuine-failure reason"; }
+pass "(c5) #2374: a mixed build-artefact + genuine-failure shard keeps BOTH — #1814's rollup notice and step-summary line survive, and the verdict reason still names the real failure"
+
+# (c6) ...and the notice is still MEANINGFUL: a shard with no build evidence at
+# all must not acquire one. (c2) pins the legacy/unstamped path; this pins the
+# explicitly-stamped `none`.
+d="$SANDBOX/verdicts-no-build"; rm -rf "$d"; mkdir -p "$d/emulator-journey-verdict-shard-2"
+setup_classify_dir; seed_summary "${FAILED_BOTH_SUMMARY[@]}"
+expect_classify "#2374 no build evidence at all" \
+  RED first_attempt_journey_failure 1 failure failure failure failure false true true
+grep -qx 'build_attribution=none' "$CLASSIFY_DIR/shard-verdict.txt" \
+  || { cat "$CLASSIFY_DIR/shard-verdict.txt"; fail "(c6) a shard with no build evidence must stamp build_attribution=none"; }
+cp "$CLASSIFY_DIR/shard-verdict.txt" "$d/emulator-journey-verdict-shard-2/shard-verdict.txt"
+write_token "$d" 0 CLEAN passed_first_attempt
+write_token "$d" 1 CLEAN passed_first_attempt
+run_agg "$d"
+if grep -q 'includes a cold-BUILD-phase timeout' <<<"$AGG_OUT"; then
+  printf '%s\n' "$AGG_OUT"
+  fail "(c6) the #1814 rollup fired for a shard with no build evidence — the label would be meaningless"
+fi
+[[ "$AGG_VERDICT" == "RED" && "$AGG_RC" -eq 1 ]] \
+  || fail "(c6) severity changed: got $AGG_VERDICT/exit$AGG_RC"
+pass "(c6) the rollup stays meaningful: an explicitly stamped build_attribution=none never produces the #1814 notice"
+
+# (c7) the new field fails SOFT, exactly like the reason and the denial class: a
+# malformed stamp degrades to `none` and never costs the shard its token.
+d="$SANDBOX/verdicts-bad-attribution"; rm -rf "$d"; mkdir -p "$d/out"
+SHARD_VERDICT_FILE="$d/out/shard-verdict.txt" POCKETSHELL_JOURNEY_CI_SHARD_INDEX=0 \
+  GITHUB_RUN_ID=1 GITHUB_RUN_ATTEMPT=1 GITHUB_OUTPUT="$d/out/gh.txt" \
+  SHARD_BUILD_ATTRIBUTION='Not A Class!' \
+  bash "$WRITER" RED first_attempt_journey_failure > /dev/null \
+  || fail "(c7) a malformed build attribution must not fail the write"
+grep -qx 'build_attribution=none' "$d/out/shard-verdict.txt" \
+  || fail "(c7) a malformed build attribution must degrade to 'none'"
+grep -qx 'shard_verdict=RED' "$d/out/gh.txt" \
+  || fail "(c7) the RED gate output must survive a malformed build attribution"
+[[ "$(head -n1 "$d/out/shard-verdict.txt")" == "RED" ]] \
+  || fail "(c7) line 1 must stay the bare verdict token"
+pass "(c7) a malformed build_attribution degrades to 'none' and never costs the token"
+
+# (c8) ISSUE #2374 — the rollup must not leak onto a GREEN run.
+#
+# `SHARD_BUILD_ATTRIBUTION` is computed and exported BEFORE every write_verdict
+# branch, and scripts/ci-journey-build-phase-timeout.sh deliberately reads the
+# PRESERVED first-attempt tree so a retry cannot hide what happened on attempt 1.
+# Both are correct on their own — but together they mean a shard whose attempt 1
+# was cut mid-Gradle-build and whose RETRY THEN PASSED writes
+# `CLEAN` + `build_attribution=cold_build_timeout`. If the rollup keys on the
+# attribution alone, that green shard puts an "#1814 … Investigate the build
+# cost" heading into the aggregate and into the step summary a release owner
+# reads before tagging `validated-rc` — a fresh instance of exactly the misread
+# this issue exists to remove, on the good case.
+#
+# The attribution is DIAGNOSTIC, not a verdict: a shard that self-healed via its
+# retry succeeded. So the rollup fires only where the build cost actually
+# contributed to a RED outcome. The evidence is not lost — the shard's own
+# `::warning … (#1814)` from ci-journey-build-attribution-notice.sh still fires
+# on its own evidence, unconditionally, in that shard's job log.
+d="$SANDBOX/verdicts-clean-recovered"; rm -rf "$d"
+mkdir -p "$d/emulator-journey-verdict-shard-2"
+setup_classify_dir
+seed_summary "${CLEAN_SUMMARY[@]}"
+seed_build_phase_manifest
+expect_classify "#2374 build-phase evidence on attempt 1, retry PASSED" \
+  CLEAN infra_flake_recovered 0 failure success failure success false false true
+# Non-vacuity: this case is worthless unless the token really does carry the
+# attribution on a CLEAN verdict. Assert the shape before asserting the rollup.
+grep -qx 'build_attribution=cold_build_timeout' "$CLASSIFY_DIR/shard-verdict.txt" \
+  || { cat "$CLASSIFY_DIR/shard-verdict.txt"; fail "(c8) the fixture does not reproduce the scenario — a recovered shard's token carries no build attribution, so this case proves nothing"; }
+cp "$CLASSIFY_DIR/shard-verdict.txt" "$d/emulator-journey-verdict-shard-2/shard-verdict.txt"
+write_token "$d" 0 CLEAN passed_first_attempt
+write_token "$d" 1 CLEAN passed_first_attempt
+STEP_SUMMARY_FILE="$SANDBOX/step-summary-clean-recovered.md"; : > "$STEP_SUMMARY_FILE"
+AGG_STEP_SUMMARY="$STEP_SUMMARY_FILE"
+run_agg "$d"
+AGG_STEP_SUMMARY=""
+[[ "$AGG_VERDICT" == "CLEAN" && "$AGG_RC" -eq 0 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(c8) a recovered shard must keep the aggregate CLEAN/exit0, got $AGG_VERDICT/exit$AGG_RC"; }
+COLD_NOTICES="$(grep -c 'includes a cold-BUILD-phase timeout' <<<"$AGG_OUT")"
+[[ "$COLD_NOTICES" -eq 0 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(c8) a CLEAN shard whose retry recovered fired $COLD_NOTICES #1814 rollup notice(s), expected 0 — a GREEN run's aggregate now carries an 'investigate the build cost' heading"; }
+if grep -q 'Cold-build-phase timeout (issue #1814)' "$STEP_SUMMARY_FILE"; then
+  cat "$STEP_SUMMARY_FILE"
+  fail "(c8) the GREEN run's STEP SUMMARY — the artifact a release owner reads before tagging validated-rc — gained an #1814 build-cost heading"
+fi
+pass "(c8) #2374: a shard whose attempt-1 build hiccup was RECOVERED by its retry never puts an #1814 rollup on the GREEN aggregate"
+
+# (c9) the (c8) gate must be the VERDICT, not the absence of evidence: an INFRA
+# shard carrying the same attribution is also not a build-cost RED and must stay
+# silent, while (c5)'s RED shape — re-asserted here from an independently written
+# token — still fires. Without this pair, (c8) could be satisfied by deleting the
+# rollup outright and (c5) alone would not notice the difference between "fires
+# on RED" and "fires on anything not CLEAN".
+d="$SANDBOX/verdicts-infra-attribution"; rm -rf "$d"; mkdir -p "$d/out"
+SHARD_VERDICT_FILE="$d/out/shard-verdict.txt" POCKETSHELL_JOURNEY_CI_SHARD_INDEX=2 \
+  GITHUB_RUN_ID=30323508796 GITHUB_RUN_ATTEMPT=1 GITHUB_OUTPUT="" \
+  SHARD_BUILD_ATTRIBUTION=cold_build_timeout \
+  bash "$WRITER" INFRA attempt_cancelled > /dev/null \
+  || fail "(c9) the writer refused an INFRA token carrying a build attribution"
+mkdir -p "$d/emulator-journey-verdict-shard-2"
+cp "$d/out/shard-verdict.txt" "$d/emulator-journey-verdict-shard-2/shard-verdict.txt"
+write_token "$d" 0 CLEAN passed_first_attempt
+write_token "$d" 1 CLEAN passed_first_attempt
+run_agg "$d"
+[[ "$AGG_VERDICT" == "RE-RUN" && "$AGG_RC" -eq 0 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(c9) an INFRA shard must stay RE-RUN/exit0, got $AGG_VERDICT/exit$AGG_RC"; }
+if grep -q 'includes a cold-BUILD-phase timeout' <<<"$AGG_OUT"; then
+  printf '%s\n' "$AGG_OUT"
+  fail "(c9) an environmental INFRA shard fired the #1814 build-cost rollup — that verdict is a re-run signal, not a build-cost failure"
+fi
+d="$SANDBOX/verdicts-red-attribution"; rm -rf "$d"; mkdir -p "$d/out"
+SHARD_VERDICT_FILE="$d/out/shard-verdict.txt" POCKETSHELL_JOURNEY_CI_SHARD_INDEX=2 \
+  GITHUB_RUN_ID=30323508796 GITHUB_RUN_ATTEMPT=1 GITHUB_OUTPUT="" \
+  SHARD_BUILD_ATTRIBUTION=cold_build_timeout \
+  bash "$WRITER" RED first_attempt_journey_failure > /dev/null \
+  || fail "(c9) the writer refused a RED token carrying a build attribution"
+mkdir -p "$d/emulator-journey-verdict-shard-2"
+cp "$d/out/shard-verdict.txt" "$d/emulator-journey-verdict-shard-2/shard-verdict.txt"
+write_token "$d" 0 CLEAN passed_first_attempt
+write_token "$d" 1 CLEAN passed_first_attempt
+run_agg "$d"
+COLD_NOTICES="$(grep -c 'includes a cold-BUILD-phase timeout' <<<"$AGG_OUT")"
+[[ "$COLD_NOTICES" -eq 1 ]] \
+  || { printf '%s\n' "$AGG_OUT"; fail "(c9) a RED shard carrying the attribution produced $COLD_NOTICES #1814 notice(s), expected 1 — (c8)'s gate deleted the rollup instead of scoping it"; }
+pass "(c9) the #1814 rollup keys on a genuinely RED verdict: INFRA stays silent, RED still fires"
 
 echo
 echo "ALL TESTS PASSED: scripts/test-ci-journey-warm-build.sh"

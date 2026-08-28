@@ -883,7 +883,11 @@ echo
 echo "== #1833 a shard that cannot afford its retry SAYS SO =="
 
 # classify_expressions <journey-outcome> <first_timeout> <first_failure>
-#                      <retry_allowed> <retry_reason> <shortfall>
+#                      <retry_allowed> <retry_reason> <shortfall> [denial_class]
+#
+# Issue #2374: `denial_class` defaults to `unknown` — the value a shard whose
+# budget step could not classify the denial reports — so every pre-existing
+# caller keeps its exact meaning while the new cases pass a real class.
 classify_expressions() {
   cat <<JSONEOF
 {
@@ -900,7 +904,8 @@ classify_expressions() {
   "steps.journey_retry_budget.outputs.retry_required_ms": "3240868",
   "steps.journey_retry_budget.outputs.retry_cost_model": "measured_first_attempt",
   "steps.journey_retry_budget.outputs.retry_shortfall_ms": "$6",
-  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "0"
+  "steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms": "0",
+  "steps.journey_retry_budget.outputs.retry_denial_class": "${7:-unknown}"
 }
 JSONEOF
 }
@@ -911,6 +916,9 @@ run_classify_step() {
   local ws="$1" idx="$2" expressions="$3" body="$ws/classify-step.sh"
   mkdir -p "$ws/scripts"
   cp "$WRITER" "$SCRIPT_DIR/ci-journey-build-phase-timeout.sh" \
+     "$SCRIPT_DIR/ci-journey-retry-denial-notice.sh" \
+     "$SCRIPT_DIR/ci-journey-build-attribution-notice.sh" \
+     "$SCRIPT_DIR/ci-journey-genuine-journey-failure.sh" \
      "$SCRIPT_DIR/ci-journey-enumeration-stall.sh" \
      "$SCRIPT_DIR/ci-journey-shard-signature-verdict.sh" \
      "$SCRIPT_DIR/ci-journey-infra-signature.sh" "$SCRIPT_DIR/ci-journey-infra-signature.py" \
@@ -1382,6 +1390,308 @@ LOAD_MUTANT_MIN="$(load_model_min_margin_ms "$LOAD_MUTANT_TOTAL")"
 (( LOAD_MUTANT_MIN <= TWICE_FAILING_CLASS_MS )) \
   || fail "(aa5) G6 is not live: a tests.yml whose emulator-journey matrix is [0, 1, 2] still clears AC2 (min ${LOAD_MUTANT_MIN}ms) — (aa2) would not redden if the matrix still over-loaded a shard"
 pass "(aa5) G6: collapsing the workflow matrix to [0, 1, 2] makes shard-count return 3 and AC2 fail (min ${LOAD_MUTANT_MIN}ms)"
+
+echo
+echo "== #2374 a DENIED retry must name WHY: gate capacity vs a suite the shard's own failures inflated =="
+
+# THE RECURRENCE. On 2026-08-28 all six emulator-journey shards on `main`
+# reported `insufficient_remaining_budget` and the run was triaged as a
+# recurrence of #1833/#1850 — the gate losing its cold-boot retry to per-shard
+# LOAD. It was not. Every one of those shards had already written a
+# `Failed BOTH attempts` summary: 4-11 journey classes per shard genuinely
+# failing, each paying TWO full 420s per-class attempts, so the shard's own
+# failures are what pushed suite elapsed to 2674-4206s and consumed the wall the
+# budget model then could not find.
+#
+# The two conditions demand OPPOSITE responses — change the matrix / the
+# estimate, versus fix the failing classes and change nothing here — and until
+# this section existed the gate emitted the SAME `retry_reason` token, the same
+# ONE-SHOT warning and the same aggregate notice for both. #1833 shipped
+# `retry_shortfall_ms` so an operator could tell them apart by eye; nothing
+# CLASSIFIED on it, so the recurrence was read as its own cause. That is the
+# narrower-case-than-the-class miss D31 asks about, and this section closes it.
+#
+# The scale, for anyone tempted to tune a constant here again: the six-shard
+# matrix #1850/#2060 sized was projected to run ~1800-2300s suites. It ran
+# 2674-4206s — LONGER than the three-shard suites (1867-3017s) whose load #1850
+# diagnosed, on HALF the classes per leg. No budget constant moved. The extra
+# time is failing classes, and no shard count makes a broken product fit.
+#
+# run 33181062826 (`main` @ 9b1d784e), every shard, from its own job log:
+#   shard | remaining | required | suite s | warm s | boot ms | shortfall
+RECURRENCE_SHARDS=(
+  "0|1660148|4377400|3795|367|62200|2717252"
+  "1|2838368|3056582|2674|420|52394|218214"
+  "2|1292550|4750886|4204|405|50662|3458336"
+  "3|1316931|4789581|4205|398|60627|3472650"
+  "4|1220845|4846102|4205|339|57834|3625257"
+  "5|1272713|4792262|4206|413|66654|3519549"
+)
+
+# (ab) Every shard of the recurrence, driven through the UNCHANGED production
+#      helper, must reproduce its published remaining/required to the
+#      millisecond (so this fixture cannot quietly stop describing the run) and
+#      must classify the denial as caused by the shard's own failing classes.
+recurrence_rows=0
+for rec_row in "${RECURRENCE_SHARDS[@]}"; do
+  IFS='|' read -r rec_idx rec_remaining rec_required rec_suite rec_warm rec_boot rec_short \
+    <<<"$rec_row"
+  rec_now="$(reconstruct_now "$rec_remaining")"
+  rec_start="$(reconstruct_attempt_start "$rec_now" "$rec_suite" "$rec_boot")"
+  run_budget "$fixture_job_start" "$rec_now" "$rec_start" "$rec_suite" "$rec_warm" true
+  [[ "$(budget_field retry_remaining_ms)" == "$rec_remaining" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab/shard $rec_idx) reconstruction gives remaining=$(budget_field retry_remaining_ms), run 33181062826 logged $rec_remaining"; }
+  [[ "$(budget_field retry_required_ms)" == "$rec_required" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab/shard $rec_idx) the production model gives required=$(budget_field retry_required_ms), run 33181062826 logged $rec_required — this fixture no longer describes the recurrence"; }
+  [[ "$(budget_field retry_shortfall_ms)" == "$rec_short" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab/shard $rec_idx) shortfall=$(budget_field retry_shortfall_ms), logged $rec_short"; }
+  [[ "$(budget_field retry_reason)" == "insufficient_remaining_budget" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab/shard $rec_idx) expected the recurrence's insufficient_remaining_budget reason"; }
+  [[ "$(budget_field retry_denial_class)" == "journey_failure_inflated_suite" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab/shard $rec_idx) denial class is '$(budget_field retry_denial_class)'; a shard whose first attempt already failed journeys must not present as the #1833/#1850 capacity condition"; }
+  recurrence_rows=$((recurrence_rows + 1))
+done
+(( recurrence_rows == 6 )) || fail "(ab) drove $recurrence_rows of 6 recurrence shards"
+pass "(ab) all 6 shards of run 33181062826 reproduce their logged budget figures and classify as journey_failure_inflated_suite"
+
+# (ab2) THE CONTROL, and the non-vacuity proof. #1833's own run 30383504733 is
+#       the genuine capacity condition: shards 0 and 2 PASSED their journeys and
+#       were still denied a retry. Those must classify `gate_capacity`. Without
+#       this the classifier could answer "inflated" unconditionally and (ab)
+#       would still be green.
+CAPACITY_SHARDS=(
+  "0|2992443|2512|464|51212"
+  "2|2976238|2531|489|52256"
+)
+for cap_row in "${CAPACITY_SHARDS[@]}"; do
+  IFS='|' read -r cap_idx cap_remaining cap_suite _cap_warm cap_boot <<<"$cap_row"
+  cap_now="$(reconstruct_now "$cap_remaining")"
+  cap_start="$(reconstruct_attempt_start "$cap_now" "$cap_suite" "$cap_boot")"
+  # #1833's correction restores these two, so deny them the deduction to hold
+  # them in the denied state this case is about (that is the #1800 model, which
+  # is what actually ran on run 30383504733's own job).
+  run_budget "$fixture_job_start" "$cap_now" "$cap_start" "$cap_suite" "" false
+  [[ "$(budget_field retry_allowed)" == "false" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab2/shard $cap_idx) run 30383504733's #1800 decision was a denial"; }
+  [[ "$(budget_field retry_denial_class)" == "gate_capacity" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab2/shard $cap_idx) denial class is '$(budget_field retry_denial_class)'; a shard that failed NO journey and still cannot retry is exactly #1833's capacity loss and must stay loud"; }
+done
+pass "(ab2) run 30383504733's passing-but-denied shards still classify as gate_capacity — the two conditions are distinguishable, not one label"
+
+# (ab3) An ALLOWED retry has no denial to classify.
+run_budget "$fixture_job_start" "$((fixture_job_start + JOB_CAP_MS - 5400000))" "" "" "" true
+[[ "$(budget_field retry_allowed)" == "true" && "$(budget_field retry_denial_class)" == "none" ]] \
+  || { printf '%s\n' "$BUDGET_OUT"; fail "(ab3) an allowed retry must report retry_denial_class=none, got '$(budget_field retry_denial_class)'"; }
+pass "(ab3) an allowed retry reports retry_denial_class=none"
+
+# (ab4) FAIL-SAFE. An absent or malformed first-attempt-failure reading must
+#       report `unknown` — never guess a class. Guessing `gate_capacity` would
+#       re-file the recurrence as #1833; guessing `journey_failure_inflated_suite`
+#       would silence a real capacity loss.
+for bad_flag in "" "TRUE" "yes" "1" "maybe"; do
+  run_budget "$fixture_job_start" "$rec_now" "$rec_start" "$rec_suite" "$rec_warm" "$bad_flag"
+  [[ "$(budget_field retry_denial_class)" == "unknown" ]] \
+    || { printf '%s\n' "$BUDGET_OUT"; fail "(ab4) first-attempt-failure reading '$bad_flag' produced class '$(budget_field retry_denial_class)'; an unusable reading must be unknown"; }
+done
+# ...and an unusable reading must change NOTHING else about the decision.
+run_budget "$fixture_job_start" "$rec_now" "$rec_start" "$rec_suite" "$rec_warm"
+unflagged_out="$(grep -v '^retry_denial_class=' <<<"$BUDGET_OUT")"
+run_budget "$fixture_job_start" "$rec_now" "$rec_start" "$rec_suite" "$rec_warm" true
+[[ "$(grep -v '^retry_denial_class=' <<<"$BUDGET_OUT")" == "$unflagged_out" ]] \
+  || { printf '%s\n' "$BUDGET_OUT"; fail "(ab4) classifying the denial changed the decision itself; this is reporting only"; }
+pass "(ab4) an absent/malformed reading is unknown, and classification never alters the decision"
+
+# (ab5) THE WIRING. The workflow must hand the budget step the first-attempt
+#       failure evidence it already computes, or the classification is dead code
+#       that always reads `unknown` in CI while every case above stays green.
+grep -q 'steps.journey_summary.outputs.first_failure' "$WORKFLOW" \
+  || fail "(ab5) the workflow does not reference first_failure at all"
+awk '
+  /^      - name: Check remaining job wall before journey retry$/ { in_step = 1 }
+  in_step && /steps\.journey_summary\.outputs\.first_failure/     { found = 1 }
+  in_step && /^      - name: /                                    { if (++seen > 1) in_step = 0 }
+  END { exit(found ? 0 : 1) }
+' "$WORKFLOW" \
+  || fail "(ab5) the retry-budget step does not forward steps.journey_summary.outputs.first_failure — retry_denial_class would be 'unknown' on every real shard"
+pass "(ab5) the retry-budget step forwards the first attempt's genuine-failure evidence"
+
+# (ab6) END TO END through the real classify step and the real aggregate: the
+#       six-shard recurrence must not be reported as the #1833 capacity signal.
+ws="$warm_ws/classify-inflated"
+mkdir -p "$ws/artifacts/ci-journey"
+write_real_summary "$ws" 3795 ok 367 "com.pocketshell.app.proof.BackgroundGraceReconnectE2eTest"
+run_classify_step "$ws" 0 "$(classify_expressions failure false true false \
+  insufficient_remaining_budget 2717252 journey_failure_inflated_suite)"
+[[ "$CLASSIFY_TOKEN" == "RED" && "$CLASSIFY_RC" -ne 0 ]] \
+  || { printf '%s\n' "$CLASSIFY_OUT"; fail "(ab6) a genuine journey failure must stay RED/exit non-zero, got $CLASSIFY_TOKEN/exit$CLASSIFY_RC — classifying a denial never softens a verdict"; }
+grep -q '^retry_denial_class=journey_failure_inflated_suite$' "$CLASSIFY_TOKEN_FILE" \
+  || { cat "$CLASSIFY_TOKEN_FILE"; fail "(ab6) the shard token does not carry the denial class, so the aggregate cannot tell the two conditions apart"; }
+pass "(ab6) the real classify step stamps the denial class on the shard token and the verdict stays RED"
+
+# The aggregate's EXPECTED_SHARDS is DERIVED from the tokens each case actually
+# seeded, never written as a literal: these are self-contained sandboxes, and a
+# literal here would be one more place the shipped shard total could drift to
+# (scripts/check-journey-shard-literals.sh, issue #2060).
+seeded_shard_count() { find "$agg_dir" -name shard-verdict.txt | wc -l; }
+
+seed_class_token() {
+  local idx="$1" token="$2" affordable="$3" shortfall="$4" denial_class="$5"
+  local sub="$agg_dir/emulator-journey-verdict-shard-$idx"
+  mkdir -p "$sub"
+  SHARD_VERDICT_FILE="$sub/shard-verdict.txt" \
+    POCKETSHELL_JOURNEY_CI_SHARD_INDEX="$idx" \
+    GITHUB_RUN_ID=33181062826 GITHUB_RUN_ATTEMPT=1 GITHUB_OUTPUT="" \
+    SHARD_RETRY_AFFORDABLE="$affordable" \
+    SHARD_RETRY_DENIED_REASON=insufficient_remaining_budget \
+    SHARD_RETRY_SHORTFALL_MS="$shortfall" \
+    SHARD_RETRY_DENIAL_CLASS="$denial_class" \
+    bash "$WRITER" "$token" first_attempt_journey_failure >/dev/null \
+    || fail "(ab7) writer refused a $token token for shard $idx"
+}
+
+# (ab7) The whole recurrence: six RED, one-shot, all inflated. The aggregate
+#       must say plainly that NO shard lost its retry to gate capacity, so the
+#       next reader does not re-file #1833/#1850.
+rm -rf "$agg_dir"; mkdir -p "$agg_dir"
+rec_shard_idx=0
+for rec_row in "${RECURRENCE_SHARDS[@]}"; do
+  IFS='|' read -r rec_idx _r _q _s _w _b rec_short <<<"$rec_row"
+  seed_class_token "$rec_idx" RED false "$rec_short" journey_failure_inflated_suite
+  rec_shard_idx=$((rec_shard_idx + 1))
+done
+agg_rc=0
+agg_out="$(EXPECTED_SHARDS="$(seeded_shard_count)" GITHUB_RUN_ATTEMPT=1 \
+  GITHUB_STEP_SUMMARY="$agg_dir/step-summary.md" \
+  bash "$AGG" "$agg_dir" 2>&1)" || agg_rc=$?
+[[ "$agg_rc" -eq 1 ]] && grep -q '^AGGREGATE_VERDICT=RED$' <<<"$agg_out" \
+  || { printf '%s\n' "$agg_out"; fail "(ab7) six RED shards must still aggregate RED/exit1"; }
+grep -q 'journey_failure_inflated_suite' <<<"$agg_out" \
+  || { printf '%s\n' "$agg_out"; fail "(ab7) the aggregate does not name the denial class; the recurrence still reads as #1833"; }
+grep -qi 'not a .*#1833' <<<"$agg_out" \
+  || { printf '%s\n' "$agg_out"; fail "(ab7) with zero gate-capacity denials the aggregate must say so explicitly — that missing sentence is what made run 33181062826 get triaged as a recurrence of #1833/#1850"; }
+grep -q 'journey_failure_inflated_suite' "$agg_dir/step-summary.md" \
+  || { cat "$agg_dir/step-summary.md"; fail "(ab7) the step summary does not carry the denial class"; }
+pass "(ab7) six inflated one-shot shards aggregate RED and are explicitly reported as NOT the #1833 capacity condition"
+
+# (ab8) The control at aggregate level: one genuine capacity denial in the batch
+#       must still raise the #1833 signal. Otherwise (ab7) could be satisfied by
+#       simply deleting the capacity alarm.
+rm -rf "$agg_dir"; mkdir -p "$agg_dir"
+seed_class_token 0 CLEAN false 224393 gate_capacity
+seed_class_token 1 RED   false 2717252 journey_failure_inflated_suite
+seed_class_token 2 CLEAN true  0 none
+agg_rc=0
+agg_out="$(EXPECTED_SHARDS="$(seeded_shard_count)" GITHUB_RUN_ATTEMPT=1 \
+  GITHUB_STEP_SUMMARY="$agg_dir/step-summary.md" \
+  bash "$AGG" "$agg_dir" 2>&1)" || agg_rc=$?
+[[ "$agg_rc" -eq 1 ]] \
+  || { printf '%s\n' "$agg_out"; fail "(ab8) a RED shard must still turn the aggregate red"; }
+grep -q 'gate_capacity' <<<"$agg_out" \
+  || { printf '%s\n' "$agg_out"; fail "(ab8) a genuine capacity denial must still be named — this is #1833's own alarm and it must not be lost"; }
+grep -qi 'not a .*#1833' <<<"$agg_out" \
+  && { printf '%s\n' "$agg_out"; fail "(ab8) the aggregate cleared #1833 while a shard HAD lost its retry to capacity"; }
+pass "(ab8) a batch containing one gate_capacity denial still raises the #1833 signal"
+
+# (ab9) A token written before this stamp existed must read `unknown` and be
+#       reported as neither condition — never silently bucketed into one.
+rm -rf "$agg_dir"; mkdir -p "$agg_dir/emulator-journey-verdict-shard-0"
+printf 'RED\nshard=0\nrun_id=33181062826\nrun_attempt=1\nverdict_reason=first_attempt_journey_failure\nretry_affordable=false\nretry_denied_reason=insufficient_remaining_budget\nretry_shortfall_ms=2717252\n' \
+  > "$agg_dir/emulator-journey-verdict-shard-0/shard-verdict.txt"
+agg_rc=0
+agg_out="$(EXPECTED_SHARDS="$(seeded_shard_count)" GITHUB_RUN_ATTEMPT=1 GITHUB_STEP_SUMMARY="" \
+  bash "$AGG" "$agg_dir" 2>&1)" || agg_rc=$?
+[[ "$agg_rc" -eq 1 ]] \
+  || { printf '%s\n' "$agg_out"; fail "(ab9) an unstamped RED token must still aggregate RED/exit1"; }
+grep -q 'ran ONE-SHOT' <<<"$agg_out" \
+  || { printf '%s\n' "$agg_out"; fail "(ab9) an unstamped one-shot token must still be reported as one-shot (#1833 behaviour is unchanged for old tokens)"; }
+grep -qi 'not a .*#1833' <<<"$agg_out" \
+  && { printf '%s\n' "$agg_out"; fail "(ab9) an UNCLASSIFIED denial must not be read as proof that #1833 is cleared"; }
+pass "(ab9) a token without the #2374 stamp stays one-shot, unclassified, and never clears the #1833 signal"
+
+echo
+echo "== #2374 how much of the recurrence #1850's per-shard bar actually covers =="
+
+# (ac) D31 asks whether the earlier fix covered the class or only one instance.
+#      This is the measured answer, and it has two parts.
+#
+#      PART 1 — the units. #1850 records that a shard's retry margin decays at
+#      ~2100ms per SECOND of suite growth (remaining falls 1000ms while required
+#      rises 1100ms). So a margin of N ms does NOT absorb N ms of extra suite; it
+#      absorbs N/2100 SECONDS of it. Case (aa2)'s bar compares a margin in ms
+#      against 420000 (a twice-failing class expressed as ms of CLASS time), so
+#      "every leg clears 420000ms" reads as "every leg survives one twice-failing
+#      class" while actually meaning it survives ~200s of suite growth. That is
+#      not a new defect introduced here and it is NOT fixed here — changing that
+#      bar is a matrix-sizing decision that belongs to #1850, and tightening it
+#      unilaterally would redden this guard on the shipped configuration. It is
+#      MEASURED and PINNED so it cannot stay invisible.
+#
+#      PART 2 — the conclusion #2374 needs. Whatever the bar reads as, the
+#      shipped matrix's tightest leg absorbs FAR less suite growth than the
+#      recurrence's shards carried (4 to 11 twice-failing classes each,
+#      1680-4620s). No shard count in reach closes that gap, so run 33181062826
+#      was never a per-shard-load problem and re-deriving the matrix would not
+#      have prevented it. If a future matrix ever DOES absorb the recurrence's
+#      own load, this case reddens deliberately: that conclusion would have
+#      changed and must be re-derived, not inherited.
+load_model_margin_with_extra_ms() {
+  local total="$1" idx="$2" extra_secs="$3" instr suite_secs now_ms attempt_start
+  instr="$(load_instrumentation_secs "$total" "$idx")"
+  suite_secs=$((instr + LOAD_WARM_SECS + extra_secs))
+  now_ms=$((fixture_job_start + LOAD_PRE_SUITE_MS + suite_secs * 1000))
+  attempt_start=$((now_ms - suite_secs * 1000 - LOAD_BOOT_MS))
+  run_budget "$fixture_job_start" "$now_ms" "$attempt_start" "$suite_secs" "$LOAD_WARM_SECS"
+  printf '%s' "$(( $(budget_field retry_remaining_ms) - $(budget_field retry_required_ms) ))"
+}
+
+# The tightest shipped leg, found by driving the production model — never named.
+ac_tightest_idx=0
+ac_tightest_margin=""
+for (( load_idx = 0; load_idx < LOAD_SHIPPED; load_idx++ )); do
+  load_margin="$(load_model_margin_ms "$LOAD_SHIPPED" "$load_idx")"
+  if [[ -z "$ac_tightest_margin" ]] || (( load_margin < ac_tightest_margin )); then
+    ac_tightest_margin="$load_margin"; ac_tightest_idx="$load_idx"
+  fi
+done
+
+# Binary-search the largest suite growth that leg still survives, by driving the
+# REAL helper at each candidate — nothing here assumes the decay rate.
+ac_lo=0; ac_hi=4200
+while (( ac_lo < ac_hi )); do
+  ac_mid=$(( (ac_lo + ac_hi + 1) / 2 ))
+  if (( $(load_model_margin_with_extra_ms "$LOAD_SHIPPED" "$ac_tightest_idx" "$ac_mid") > 0 )); then
+    ac_lo="$ac_mid"
+  else
+    ac_hi=$((ac_mid - 1))
+  fi
+done
+ac_absorbs_secs="$ac_lo"
+(( ac_absorbs_secs > 0 )) \
+  || fail "(ac) the shipped total=$LOAD_SHIPPED matrix's tightest leg (shard $ac_tightest_idx) absorbs no suite growth at all — it is already at its affordability crossing, which contradicts (aa2)"
+# The boundary must be live in BOTH directions, or the search proved nothing.
+(( $(load_model_margin_with_extra_ms "$LOAD_SHIPPED" "$ac_tightest_idx" "$ac_absorbs_secs") > 0 )) \
+  || fail "(ac) the located boundary ${ac_absorbs_secs}s does not actually survive — the search is not driving the production helper"
+(( $(load_model_margin_with_extra_ms "$LOAD_SHIPPED" "$ac_tightest_idx" "$((ac_absorbs_secs + 1))") <= 0 )) \
+  || fail "(ac) one second past the located boundary still survives — the boundary is not a boundary"
+
+# PART 1: the ms margin buys ~1/2100th of itself in seconds. Pinned as a band so
+# an arithmetic change in the production model surfaces here rather than silently
+# re-scaling what (aa2)'s bar means.
+ac_decay_ms_per_sec=$(( ac_tightest_margin / ac_absorbs_secs ))
+echo "  shipped total=$LOAD_SHIPPED tightest leg=$ac_tightest_idx margin=${ac_tightest_margin}ms"
+echo "    absorbs ${ac_absorbs_secs}s of suite growth (${ac_decay_ms_per_sec}ms of margin per second)"
+(( ac_decay_ms_per_sec >= 1900 && ac_decay_ms_per_sec <= 2300 )) \
+  || fail "(ac) margin decays at ${ac_decay_ms_per_sec}ms per second of suite growth; #1850 derived ~2100. The production cost model changed — re-derive #1850's headroom conclusions and (aa2)'s bar before trusting either."
+pass "(ac) the tightest shipped leg absorbs ${ac_absorbs_secs}s of suite growth; (aa2)'s ${TWICE_FAILING_CLASS_MS}ms bar is ${ac_decay_ms_per_sec}ms-per-second of margin, i.e. ~$((TWICE_FAILING_CLASS_MS / ac_decay_ms_per_sec))s of drift, not ${TWICE_FAILING_CLASS_MS}ms of it (#1850 sizing note, not changed here)"
+
+# PART 2: the recurrence's own load. Its LIGHTEST shard carried four classes
+# failing both in-suite attempts; each pays a second attempt up to the 420s
+# per-class cap.
+RECURRENCE_MIN_TWICE_FAILING_CLASSES=4
+ac_recurrence_secs=$(( RECURRENCE_MIN_TWICE_FAILING_CLASSES * (TWICE_FAILING_CLASS_MS / 1000) ))
+(( ac_absorbs_secs < ac_recurrence_secs )) \
+  || fail "(ac) the tightest shipped leg now absorbs ${ac_absorbs_secs}s, at or past the ${ac_recurrence_secs}s the recurrence's LIGHTEST shard carried. #2374's conclusion — that run 33181062826 was a product failure, not a per-shard-load failure — no longer follows from the shipped matrix and must be re-derived. If it became true by RAISING a budget rather than by re-sharding, that is exactly the constant-chasing #1833/#1850 forbid."
+pass "(ac) the shipped matrix absorbs ${ac_absorbs_secs}s of drift against the ${ac_recurrence_secs}s+ the recurrence's lightest shard carried (heaviest ~$((11 * (TWICE_FAILING_CLASS_MS / 1000)))s) — a $((ac_recurrence_secs / ac_absorbs_secs))x+ gap, so no reachable shard count would have prevented it; the lever is the failing classes"
 
 echo
 echo "ALL TESTS PASSED: scripts/test-ci-journey-retry-budget.sh"

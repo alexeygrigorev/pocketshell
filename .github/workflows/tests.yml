@@ -677,6 +677,14 @@ jobs:
             scripts/test-ci-journey-retry-budget.sh
           scripts/test-ci-journey-retry-budget.sh
 
+      # Issue #2374: #2356's validated-RC self-tests ran in NO gate, hiding a
+      # hosted-runner "git has no tagger identity" break in the marker script.
+      - name: Nightly validated-RC marker guards (issues #2356, #2374)
+        run: |
+          scripts/test-ci-nightly-rc-mark.sh
+          scripts/test-ci-nightly-rc-consecutive-check.sh
+          scripts/test-ci-nightly-rc-issue.sh
+
       # Issues #1800/#1919: the failure-SIGNATURE classifier that types the CI
       # swiftshader "real system input-method window never became visible"
       # PRECONDITION as INFRA (-> RE-RUN) while keeping every genuine journey
@@ -1718,20 +1726,19 @@ jobs:
         if: always()
         run: |
           chmod +x scripts/ci-journey-retry-budget.sh
-          # Issue #1800: pass this job's own measurements (first-attempt start
-          # epoch + the suite's measured elapsed) so the requirement reflects
-          # what redoing the observed work costs. Missing/invalid measurements
-          # fall back to the unchanged flat worst case inside the helper.
-          # Issue #1833: also pass the measured cold build (#1814) so the suite
-          # cost is priced as the WARM retry it actually is, instead of charging
-          # a build the retry never repeats a second time. Missing/invalid warm
-          # measurement falls back to #1800's model, unchanged.
+          # This job's own measurements: the first-attempt start epoch (#1800),
+          # the suite's measured elapsed (#1800), the measured cold build
+          # (#1833) and whether the first attempt already failed journeys
+          # (#2374). Each is optional and each degrades to the previous model
+          # inside the helper — scripts/ci-journey-retry-budget.sh's header
+          # carries the full rationale for all four.
           scripts/ci-journey-retry-budget.sh \
             "${JOURNEY_JOB_START_EPOCH_MS:-}" \
             "$(date +%s%3N)" \
             "${JOURNEY_FIRST_ATTEMPT_START_EPOCH_MS:-}" \
             "${{ steps.journey_summary.outputs.first_suite_elapsed_secs }}" \
             "${{ steps.journey_summary.outputs.first_warm_build_secs }}" \
+            "${{ steps.journey_summary.outputs.first_failure }}" \
             | tee -a "$GITHUB_OUTPUT"
 
       # Infra-retry-once: runs if the first bringup failed with a boot/adb abort
@@ -1820,6 +1827,7 @@ jobs:
           retry_cost_model="${{ steps.journey_retry_budget.outputs.retry_cost_model }}"
           retry_shortfall_ms="${{ steps.journey_retry_budget.outputs.retry_shortfall_ms }}"
           retry_warm_build_deducted_ms="${{ steps.journey_retry_budget.outputs.retry_warm_build_deducted_ms }}"
+          retry_denial_class="${{ steps.journey_retry_budget.outputs.retry_denial_class }}"
           summary="artifacts/ci-journey/summary.md"
           # Issue #1458: record this shard's verdict token for the aggregation
           # job. CLEAN = passed; INFRA = environmental (#470 cancel / #771
@@ -1833,54 +1841,59 @@ jobs:
           # branch below passes a short machine reason; the aggregation job
           # prints it per shard. The reason NEVER changes severity.
           write_verdict() { bash scripts/ci-journey-write-shard-verdict.sh "$1" "${2:-unspecified}"; }
-          # Issue #1814: an attempt cut by its per-class wall cap while Gradle
-          # was still BUILDING writes `exit 124 / outer_timeout / raw-junit
-          # count=0` — byte-for-byte what a killed mid-journey runner writes. On
-          # run 30323508796 shard 2 that ambiguity sent an investigation after a
-          # healthy journey class. Read the suite's own per-attempt manifests so
-          # this shard's verdict can NAME the build-cost case instead of leaving
-          # it looking like a product defect. Reporting only: the verdict's
-          # severity is unchanged (a build that outgrows its bound is a real
-          # problem and must stay visible — softening it would be #1458-style
-          # masking in reverse).
+          # Issues #1814/#1840: read the suite's own per-attempt manifests so
+          # this shard can NAME a Gradle-BUILD-phase artefact instead of leaving
+          # it looking like a product defect. Rationale + annotation text:
+          # scripts/ci-journey-build-attribution-notice.sh (reporting only).
           build_phase_out="$(bash scripts/ci-journey-build-phase-timeout.sh artifacts 2>&1 || true)"
           printf '%s\n' "$build_phase_out" | sed 's/^/journey build-phase timeout: /'
           build_phase_attempts="$(sed -n 's/^build_phase_timeout_attempts=//p' <<<"$build_phase_out" | tail -n 1)"
           [[ "$build_phase_attempts" =~ ^[0-9]+$ ]] || build_phase_attempts=0
           build_phase_classes="$(sed -n 's/^build_phase_timeout_classes=//p' <<<"$build_phase_out" | tail -n 1)"
-          if (( build_phase_attempts > 0 )); then
-            echo "::warning title=Emulator journey — an attempt was cut during the Gradle BUILD phase (#1814)::${build_phase_attempts} attempt(s) on this shard hit their per-class wall cap while Gradle was still BUILDING: ${build_phase_classes:-<unnamed>}. Instrumentation never started, so there is no JUnit XML and the zero-test outer timeout is a BUILD-COST artefact — it is NOT evidence that the named journey is broken. The cold build is paid up front by the suite's warm-build step, so a recurrence means the build outgrew its bound; investigate the build, not the journey."
-          fi
-          # Issue #1840: the #1814 sibling one step over. A retry whose GRADLE
-          # BUILD died never started instrumentation and produced NO journey
-          # verdict, yet on run 30339688411 shard 0 it was reported as the class
-          # "failing twice" — the suite's own post-timeout `gradlew --stop`
-          # cleanup left an orphaned build process writing
-          # `kotlin-classes/debugAndroidTest`, the retry's
-          # `compileDebugAndroidTestKotlin` died clearing that directory, and a
-          # self-inflicted infra cascade was typed as a product defect. Read the
-          # suite's own per-attempt manifests so the verdict can NAME it.
-          # Reporting only: severity is unchanged (a build that cannot run is a
-          # real problem and must stay visible).
+          bash scripts/ci-journey-build-attribution-notice.sh phase \
+            "$build_phase_attempts" "$build_phase_classes"
           build_fail_out="$(bash scripts/ci-journey-build-phase-failure.sh artifacts 2>&1 || true)"
           printf '%s\n' "$build_fail_out" | sed 's/^/journey build-phase failure: /'
           build_fail_attempts="$(sed -n 's/^build_phase_failure_attempts=//p' <<<"$build_fail_out" | tail -n 1)"
           [[ "$build_fail_attempts" =~ ^[0-9]+$ ]] || build_fail_attempts=0
           build_fail_classes="$(sed -n 's/^build_phase_failure_classes=//p' <<<"$build_fail_out" | tail -n 1)"
+          bash scripts/ci-journey-build-attribution-notice.sh failure \
+            "$build_fail_attempts" "$build_fail_classes"
+          # Issue #2374: a build attribution may only speak for the classes it
+          # explains. scripts/ci-journey-genuine-journey-failure.sh's header has
+          # the run-33157272170 evidence and the #1840-preserving set subtraction.
+          genuine_out="$(bash scripts/ci-journey-genuine-journey-failure.sh \
+            "$summary" "$build_phase_classes" "$build_fail_classes" 2>&1 || true)"
+          printf '%s\n' "$genuine_out" | sed 's/^/journey genuine failure: /'
+          genuine_failure="$(sed -n 's/^genuine_journey_failure=//p' <<<"$genuine_out" | tail -n 1)"
+          [[ "$genuine_failure" == "true" ]] || genuine_failure=false
+          # Issue #2374: carry the build attribution on the token in its OWN
+          # field, INDEPENDENT of the verdict reason. Once a build attribution no
+          # longer outranks a genuine journey failure it does not name, the mixed
+          # shard writes reason=first_attempt_journey_failure — and #1814's
+          # aggregate rollup (derived from the reason) would lose the build-cost
+          # evidence entirely, leaving it only in this one shard's job log. Same
+          # precedence as verdict_reason_for: build-level subsumes build-phase.
+          SHARD_BUILD_ATTRIBUTION=none
           if (( build_fail_attempts > 0 )); then
-            echo "::warning title=Emulator journey — an attempt died at the Gradle BUILD level (#1840)::${build_fail_attempts} attempt(s) on this shard failed while Gradle was still BUILDING: ${build_fail_classes:-<unnamed>}. Instrumentation never started, so there is no JUnit XML and this attempt produced NO journey verdict — it is NOT evidence that the named journey is broken. Check the inter-attempt cleanup (an orphaned build process still writing the module build outputs makes the next build die clearing them) and the build itself, not the listed journey."
+            SHARD_BUILD_ATTRIBUTION=build_level_failure
+          elif (( build_phase_attempts > 0 )); then
+            SHARD_BUILD_ATTRIBUTION=cold_build_timeout
           fi
+          export SHARD_BUILD_ATTRIBUTION
+          echo "build attribution carried on the token: $SHARD_BUILD_ATTRIBUTION (issue #2374)"
           # verdict_reason_for <fallback> — prefer the most specific attribution
           # this shard carries, else the branch's own reason. A build-level
           # failure is checked FIRST because it explains why the shard has no
           # journey verdict at all, which subsumes a cold-build timeout earlier
-          # in the same class.
+          # in the same class — but neither build branch may outrank a genuine
+          # journey failure it does not name (#2374).
           # Issue #2143: a failure seen while the shared fixture was wedged is a
           # SETUP failure. Verdict stays RED; only the attribution changes.
           verdict_reason_for() {
-            if (( build_fail_attempts > 0 )); then
+            if (( build_fail_attempts > 0 )) && [[ "$genuine_failure" != "true" ]]; then
               printf 'build_level_failure\n'
-            elif (( build_phase_attempts > 0 )); then
+            elif (( build_phase_attempts > 0 )) && [[ "$genuine_failure" != "true" ]]; then
               printf 'cold_build_timeout\n'
             elif [[ -f "$summary" ]] && grep -q 'JOURNEY_FIXTURE_SETUP_FAILURE' "$summary"; then
               printf 'shared_fixture_setup_failure\n'
@@ -1900,27 +1913,25 @@ jobs:
           echo "cold-boot retry remaining/required: ${retry_remaining_ms:-0}/${retry_required_ms:-5400000}ms"
           echo "cold-boot retry cost model: ${retry_cost_model:-worst_case} (issue #1800)"
           echo "cold-boot retry warm-build deducted: ${retry_warm_build_deducted_ms:-0}ms (issue #1833)"
-          # Issue #1833: a shard that reaches its verdict UNABLE to start a
-          # cold-boot retry ran ONE-SHOT — half the gate's resilience is gone and
-          # a single #788-class swiftshader flake reddens `main` outright instead
-          # of recovering. On run 30383504733 all three shards were in that state
-          # and every one still reported a plain CLEAN/RED: a gate that had lost
-          # its retry looked identical to one that had not. Same principle as
-          # #1814's `outer_timeout_phase` and #1827's registry — a condition that
-          # changes what the gate CAN DO must appear in the gate's own evidence.
-          # This is REPORTING only: it never changes a verdict or an exit code,
-          # and it is stamped on the token in EVERY branch below, including the
-          # CLEAN one (where the loss is otherwise completely invisible).
+          # Issues #1833/#2374: stamp the one-shot condition on this shard's
+          # token and annotate it. Both the rationale and the annotation text
+          # live in scripts/ci-journey-retry-denial-notice.sh (reporting only —
+          # it changes no verdict, token or exit code, and always exits 0).
           [[ "$retry_shortfall_ms" =~ ^[0-9]+$ ]] || retry_shortfall_ms=0
+          SHARD_RETRY_AFFORDABLE="false"
           if [[ "${retry_allowed:-false}" == "true" ]]; then
             SHARD_RETRY_AFFORDABLE="true"
-          else
-            SHARD_RETRY_AFFORDABLE="false"
-            echo "::warning title=Emulator journey shard ran ONE-SHOT — no cold-boot retry was affordable (#1833)::This shard reached its verdict unable to start a second cold boot (reason=${retry_reason:-missing_decision}, remaining=${retry_remaining_ms:-0}ms, required=${retry_required_ms:-5400000}ms, short by ${retry_shortfall_ms}ms, cost model=${retry_cost_model:-worst_case}). The verdict below is from ONE attempt: a #788-class environmental flake here reddens the aggregate instead of flake-recovering. Reported so a gate running at half resilience is never invisible (issue #1833)."
           fi
           SHARD_RETRY_DENIED_REASON="${retry_reason:-missing_decision}"
           SHARD_RETRY_SHORTFALL_MS="$retry_shortfall_ms"
-          export SHARD_RETRY_AFFORDABLE SHARD_RETRY_DENIED_REASON SHARD_RETRY_SHORTFALL_MS
+          SHARD_RETRY_DENIAL_CLASS="${retry_denial_class:-unknown}"
+          export SHARD_RETRY_AFFORDABLE SHARD_RETRY_DENIED_REASON \
+            SHARD_RETRY_SHORTFALL_MS SHARD_RETRY_DENIAL_CLASS
+          bash scripts/ci-journey-retry-denial-notice.sh \
+            "$SHARD_RETRY_AFFORDABLE" "$SHARD_RETRY_DENIED_REASON" \
+            "$SHARD_RETRY_DENIAL_CLASS" "$SHARD_RETRY_SHORTFALL_MS" \
+            "${retry_remaining_ms:-0}" "${retry_required_ms:-5400000}" \
+            "${retry_cost_model:-worst_case}"
           # #2095: only captured provider failures with zero journeys are INFRA.
           if [[ "$first" == "skipped" ]]; then
             setup_out="$(scripts/ci-journey-fixture-retry.sh --classify artifacts/ci-journey-setup artifacts/ci-journey 2>&1 || true)"
@@ -2019,7 +2030,12 @@ jobs:
             # The emulator booted and the suite ran to a verdict: a journey class
             # failed twice. This is a GENUINE test failure (app-code regression),
             # NOT the #771 emulator-infra abort.
-            failed_classes="$(awk '/Failed BOTH attempts/{f=1; next} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
+            # Issue #2374: the same section terminator the genuine-failure
+            # helper uses. Without `f=0` at the next header this annotation
+            # reads #2355's quarantined bullets and #2143's wedged bullets as
+            # "genuine test failure" classes, i.e. names a deliberately
+            # non-blocking class as the shard's cause.
+            failed_classes="$(awk '/Failed BOTH attempts/{f=1; next} f && !/^- / && NF{f=0} f && /^- /{gsub(/`/,""); sub(/^- /,"    "); print}' "$summary" || true)"
             echo "::error title=Emulator journey FAILED — genuine test failure::A load-bearing journey class failed on BOTH cold-boot attempts AFTER the emulator booted and the suite ran to a verdict. This is a real test regression (NOT a #771 emulator-infra abort). Failing class(es):"
             [[ -n "$failed_classes" ]] && printf '%s\n' "$failed_classes"
             write_verdict RED "$(verdict_reason_for journey_failure_both_attempts)"

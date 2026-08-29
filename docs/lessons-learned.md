@@ -77,20 +77,11 @@ check and only the new check.
   missing. Read/Edit/Write aren't hook-gated, so they can recreate a
   fail-open stub (exit 0 on any internal error) at that path if it happens;
   then tell the maintainer to restore the original.
-- A "Blocked: force push detected... explicitly confirm" refusal on
-  `git push --force`/`--force-with-lease` is a harness-level safety gate,
-  separate from `check_destructive.py` (whose own regex only fires on bare
-  `--force`/`-f`, not `--force-with-lease` — confirmed by reading the
-  script). It has no known text/flag bypass. Before ever reaching for
-  force: check whether the divergence is a patch-equivalent commit (e.g.
-  the branch was rebased/squashed remotely) via
-  `git cherry <upstream-branch> HEAD` — a leading `-` means that local
-  commit's content already exists upstream. If so, `git rebase
-  <upstream-branch>` auto-drops the duplicate ("skipped previously applied
-  commit") and replays only the genuinely new commits, turning the push
-  back into an ordinary fast-forward with no confirmation needed. Reserve
-  actual force-pushing for cases where history was genuinely rewritten
-  (not just re-hashed) and the maintainer has confirmed it live.
+- Don't force-push. A blocked force-push almost always means a local
+  branch diverged from a patch-equivalent remote commit (e.g. rebased/
+  squashed remotely) — `git rebase <upstream-branch>` drops the duplicate
+  and turns the push back into a normal fast-forward. Find a way around it
+  rather than forcing.
 
 ## Process discipline
 

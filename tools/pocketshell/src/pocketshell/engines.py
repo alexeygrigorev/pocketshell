@@ -8,6 +8,10 @@ enable, or disable entries without a Kotlin change.
 Registry ids are intentionally open.  ``family`` is the closed detection
 projection used by the client (for example, ``godex`` can use the ``codex``
 family), while ``id`` is the durable value recorded as ``@ps_agent_kind``.
+
+Availability (issue #2276) is an observation this module makes at manifest
+build time, never a config bit: see :func:`resolve_harnesses`.  The single
+deliberate escape hatch is ``force_available:`` in ``engines.yaml``.
 """
 
 from __future__ import annotations
@@ -16,7 +20,10 @@ import json
 import os
 import re
 import shutil
+import signal
+import subprocess
 from dataclasses import dataclass, replace
+from glob import glob
 from pathlib import Path
 from typing import Mapping, Optional
 
@@ -157,7 +164,15 @@ class LaunchSpec:
 
 @dataclass(frozen=True)
 class EngineManifest:
-    """One host registry entry, including current availability/config state."""
+    """One host registry entry, including current availability/config state.
+
+    ``available`` is an OBSERVATION (see :func:`resolve_harnesses`), never an
+    input the config can go stale on.  ``force_available`` is the deliberate
+    escape hatch: an ``engines.yaml`` entry may set it to pin availability on
+    a host whose layout the resolver cannot anticipate.  ``force_available``
+    is deliberately a different key from the ``available`` output field so a
+    copied/stale manifest row can never be mistaken for that intent.
+    """
 
     id: str
     family: str
@@ -169,7 +184,11 @@ class EngineManifest:
     enabled: bool = True
     available: bool = True
     unavailable_reason: Optional[str] = None
-    availability_overridden: bool = False
+    # Explicit `force_available:` from engines.yaml. None = probe decides.
+    force_available: Optional[bool] = None
+    # Explicit `unavailable_reason:` from engines.yaml, kept so the probe
+    # cannot silently discard a host-authored explanation.
+    configured_unavailable_reason: Optional[str] = None
 
     @property
     def available_for_create(self) -> bool:
@@ -206,11 +225,246 @@ class EngineManifest:
             "available": self.available,
             "available_for_create": self.available_for_create,
             "unavailable_reason": self.unavailable_reason,
+            "force_available": self.force_available,
             "launch": launch,
         }
 
 
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+DISABLED_ENGINE_REASON = "disabled in the host registry"
+FORCED_UNAVAILABLE_REASON = "pinned unavailable by `force_available: false`"
+
+
+def _missing_harness_reason(item: EngineManifest) -> str:
+    return f"`{item.harness}` is not installed on this host (not on PATH)."
+
+
+def _availability_reason(item: EngineManifest, available: bool) -> Optional[str]:
+    """Derive the user-facing reason for a non-createable engine.
+
+    A disabled engine whose harness is ALSO missing used to report only the
+    disablement, which silently lost the more actionable half of the state.
+    Both halves are reported when both apply.
+    """
+    if item.enabled and available:
+        return None
+    if not available and item.force_available is False:
+        return FORCED_UNAVAILABLE_REASON
+    if not available and not item.enabled:
+        return (
+            f"`{item.harness}` is not installed on this host (not on PATH) "
+            f"and is {DISABLED_ENGINE_REASON}."
+        )
+    if not available:
+        return _missing_harness_reason(item)
+    return DISABLED_ENGINE_REASON
+
+
+def _effective_reason(item: EngineManifest, available: bool) -> Optional[str]:
+    """Prefer a host-authored reason over the derived one when unavailable."""
+    if item.enabled and available:
+        return None
+    if item.configured_unavailable_reason:
+        return item.configured_unavailable_reason
+    return _availability_reason(item, available)
+
+
+# ---------------------------------------------------------------------------
+# Harness resolution (issue #2276)
+# ---------------------------------------------------------------------------
+#
+# The manifest is built over the app's NON-interactive SSH `exec` channel
+# (`PocketshellCommand.wrap` -> `pocketshell engines list --json`), but the
+# harness itself is launched by `send-keys` into a tmux pane, i.e. from a
+# LOGIN shell.  Those two environments have different PATHs whenever a
+# harness is installed by a version manager: on the maintainer's host
+# `codex`/`opencode` live in `~/.nvm/versions/node/v24.13.1/bin`, which the
+# exec channel never sees, so a plain `shutil.which` reported two installed
+# engines as "not installed" and the picker hid them.
+#
+# This is the same defect class #484/#490 fixed for the `pocketshell` binary
+# itself, one level down.  The ladder below mirrors that fix: resolve the way
+# the harness will actually be launched (login shell), then fall back to the
+# absolute install locations a login shell can still miss (#484 rejected the
+# login shell as a SOLE mechanism because a `~/.bashrc`-only PATH export never
+# runs for a non-interactive login shell).
+#
+# Cost stays "one cheap manifest-time observation" per the issue's non-goals:
+# the plain-PATH lookup answers the happy path with zero subprocesses, and the
+# login shell is consulted at most once per manifest build (cached per env),
+# only when at least one harness is still unresolved.
+
+LOGIN_SHELL_PATH_TIMEOUT_S = 5.0
+# Kill switch for hosts where spawning a login shell is undesirable.
+LOGIN_SHELL_PROBE_KILL = "POCKETSHELL_ENGINE_LOGIN_SHELL_PROBE"
+#: How the login shell is asked for its PATH, most portable form first.
+#: `printenv PATH` is shell-agnostic; fish, for example, expands `"$PATH"` to a
+#: SPACE-separated list, so the POSIX `printf` form is only the fallback for a
+#: host without `printenv`.
+LOGIN_SHELL_PATH_COMMANDS: tuple[str, ...] = (
+    "printenv PATH",
+    'printf %s "$PATH"',
+)
+
+#: Absolute install locations probed when neither the exec `PATH` nor the
+#: login shell resolves a harness.  Globs are expanded (newest match first);
+#: `$HOME`-relative patterns are skipped when the environment has no `HOME`.
+LAUNCH_PATH_PATTERNS: tuple[str, ...] = (
+    # Plain per-user/system bin dirs (mirrors PocketshellCommand.PATH_PREFIX_DIRS).
+    "$HOME/.local/bin",
+    "$HOME/bin",
+    "$HOME/.cargo/bin",
+    "$HOME/.pixi/bin",
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    # Node version managers — every agent harness in the registry today ships
+    # as an npm package, so this is where they usually land.
+    "$HOME/.nvm/versions/node/*/bin",
+    "$HOME/.local/share/fnm/node-versions/*/installation/bin",
+    "$HOME/.volta/bin",
+    "$HOME/.bun/bin",
+    "$HOME/.deno/bin",
+    "$HOME/.npm-global/bin",
+    "$HOME/.npm-packages/bin",
+    "$HOME/.yarn/bin",
+    "$HOME/.config/yarn/global/node_modules/.bin",
+    # Generic language/tool version managers.
+    "$HOME/.asdf/shims",
+    "$HOME/.asdf/installs/*/*/bin",
+    "$HOME/.local/share/mise/shims",
+    "$HOME/.rye/shims",
+    "$HOME/go/bin",
+)
+
+_LOGIN_SHELL_PATH_CACHE: dict[tuple[str, str, str], tuple[str, ...]] = {}
+
+# Snapshot Popen (same rationale as aplexer._Popen): helper tests that patch
+# ``subprocess.Popen`` to block a launched child must not swallow — or crash —
+# this read-only PATH observation.
+_Popen = subprocess.Popen
+_TimeoutExpired = subprocess.TimeoutExpired
+
+
+def _run_capture(argv: list[str], env: dict[str, str]) -> Optional[str]:
+    """Run ``argv`` and return stdout, or None on any failure/timeout."""
+    try:
+        proc = _Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            env=env,
+            start_new_session=True,
+        )
+        try:
+            stdout, _stderr = proc.communicate(timeout=LOGIN_SHELL_PATH_TIMEOUT_S)
+        except _TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                proc.kill()
+            proc.communicate()
+            return None
+    except (OSError, ValueError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return stdout
+
+
+def clear_resolution_cache() -> None:
+    """Drop the memoised login-shell PATH (used by tests and long-lived procs)."""
+    _LOGIN_SHELL_PATH_CACHE.clear()
+
+
+def _login_shell_dirs(source: Mapping[str, str]) -> tuple[str, ...]:
+    """Return the PATH entries a LOGIN shell exports, memoised per environment.
+
+    This is the environment the harness is actually launched in (tmux runs the
+    user's shell as a login shell, and the create flow `send-keys`-types the
+    wrapper into that pane).  Failures are silent: the caller still has the
+    absolute-candidate ladder below.
+    """
+    if source.get(LOGIN_SHELL_PROBE_KILL) == "0":
+        return ()
+    shells = tuple(
+        dict.fromkeys(shell for shell in (source.get("SHELL"), "/bin/sh") if shell)
+    )
+    key = (shells[0], source.get("HOME", ""), source.get("PATH", ""))
+    cached = _LOGIN_SHELL_PATH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    env = {str(name): str(value) for name, value in source.items()}
+    dirs: tuple[str, ...] = ()
+    for shell in shells:
+        for command in LOGIN_SHELL_PATH_COMMANDS:
+            stdout = _run_capture([shell, "-lc", command], env)
+            if stdout is None:
+                continue
+            dirs = tuple(
+                dict.fromkeys(
+                    entry
+                    for entry in stdout.strip().split(os.pathsep)
+                    if entry.strip()
+                )
+            )
+            if dirs:
+                break
+        if dirs:
+            break
+    _LOGIN_SHELL_PATH_CACHE[key] = dirs
+    return dirs
+
+
+def _launch_candidate_dirs(source: Mapping[str, str]) -> tuple[str, ...]:
+    """Expand :data:`LAUNCH_PATH_PATTERNS` to existing directories."""
+    home = source.get("HOME")
+    found: list[str] = []
+    for pattern in LAUNCH_PATH_PATTERNS:
+        expanded = pattern
+        if expanded.startswith("$HOME"):
+            if not home:
+                continue
+            expanded = f"{home}{expanded[len('$HOME'):]}"
+        if any(ch in expanded for ch in "*?["):
+            # Newest version directory first for `.../node/*/bin`-style layouts.
+            matches = sorted(glob(expanded), reverse=True)
+        else:
+            matches = [expanded]
+        found.extend(match for match in matches if os.path.isdir(match))
+    return tuple(dict.fromkeys(found))
+
+
+def resolve_harnesses(
+    harnesses: tuple[str, ...],
+    source: Mapping[str, str],
+) -> dict[str, Optional[str]]:
+    """Resolve every harness the way it will be LAUNCHED, not merely exec'd.
+
+    Returns ``{harness: absolute path or None}``.  The ladder is
+    ``PATH`` -> login-shell ``PATH`` -> absolute candidate directories, and
+    each rung only runs for the harnesses still unresolved, so a host whose
+    engines are all on ``PATH`` spawns no subprocess at all.
+    """
+    ordered = tuple(dict.fromkeys(harnesses))
+    resolved: dict[str, Optional[str]] = {
+        name: shutil.which(name, path=source.get("PATH")) for name in ordered
+    }
+    missing = [name for name in ordered if resolved[name] is None]
+    if not missing:
+        return resolved
+    for extra_dirs in (_login_shell_dirs(source), _launch_candidate_dirs(source)):
+        if not extra_dirs:
+            continue
+        search = os.pathsep.join(extra_dirs)
+        for name in tuple(missing):
+            found = shutil.which(name, path=search)
+            if found is not None:
+                resolved[name] = found
+        missing = [name for name in missing if resolved[name] is None]
+        if not missing:
+            break
+    return resolved
 
 
 def _profile(
@@ -397,6 +651,31 @@ def _launch_from_mapping(
     )
 
 
+def _force_available(
+    raw: Mapping[str, object],
+    base: Optional[EngineManifest],
+) -> Optional[bool]:
+    """Read the explicit `force_available:` escape hatch (booleans only).
+
+    The `available:` key is NOT accepted as an override: it is an output field
+    of `pocketshell engines list --json`, so honouring it as input made a
+    stale/copied value hide an installed engine forever (#2276 round 3).
+    """
+    value = raw.get("force_available")
+    if isinstance(value, bool):
+        return value
+    return base.force_available if base is not None else None
+
+
+def _configured_reason(
+    raw: Mapping[str, object],
+    base: Optional[EngineManifest],
+) -> Optional[str]:
+    if raw.get("unavailable_reason") is not None:
+        return str(raw["unavailable_reason"])
+    return base.configured_unavailable_reason if base is not None else None
+
+
 def _manifest_from_mapping(
     raw: Mapping[str, object],
     base: Optional[EngineManifest],
@@ -431,7 +710,8 @@ def _manifest_from_mapping(
                 if raw.get("unavailable_reason") is not None
                 else None
             ),
-            availability_overridden="available" in raw,
+            force_available=_force_available(raw, None),
+            configured_unavailable_reason=_configured_reason(raw, None),
         )
 
     return replace(
@@ -453,9 +733,8 @@ def _manifest_from_mapping(
             if raw.get("unavailable_reason") is not None
             else base.unavailable_reason
         ),
-        availability_overridden=(
-            "available" in raw or base.availability_overridden
-        ),
+        force_available=_force_available(raw, base),
+        configured_unavailable_reason=_configured_reason(raw, base),
     )
 
 
@@ -475,19 +754,19 @@ def _aplexer_engine_rows(
 def _overlay_aplexer_engines(
     manifests: dict[str, EngineManifest],
     env: Optional[Mapping[str, str]] = None,
-) -> set[str]:
-    """Overlay argv / env_unset / available from ``a engines --json``.
+) -> None:
+    """Overlay argv / env_unset from ``a engines --json``.
 
     Presentation fields (label, family, provider_mark, skip_permissions_argv)
     stay PocketShell's. Unknown aplexer engines (``shell``, ``gemini`` unless
-    already in this registry) are not added. Returns ids that aplexer
-    already availability-probed so ``load_registry`` can skip a second PATH
-    check.
+    already in this registry) are not added. aplexer's own ``available`` bit is
+    deliberately NOT read: availability is this host's own resolution of the
+    harness (:func:`resolve_harnesses`), and inheriting a second tool's cached
+    answer is exactly what hid an installed engine in #2276.
     """
     rows = _aplexer_engine_rows(env)
     if rows is None:
-        return set()
-    overlayed: set[str] = set()
+        return
     for row in rows:
         name = row.get("name")
         if not isinstance(name, str) or name in _HIDDEN_APLEXER_ENGINES:
@@ -515,23 +794,7 @@ def _overlay_aplexer_engines(
             profile_env=item.launch.profile_env,
             profile=item.launch.profile,
         )
-        available = row.get("available")
-        if isinstance(available, bool) and not item.availability_overridden:
-            item = replace(
-                item,
-                launch=launch,
-                available=available,
-                unavailable_reason=(
-                    None
-                    if available
-                    else f"`{item.harness}` is not installed on this host (not on PATH)."
-                ),
-            )
-            overlayed.add(name)
-        else:
-            item = replace(item, launch=launch)
-        manifests[name] = item
-    return overlayed
+        manifests[name] = replace(item, launch=launch)
 
 
 def load_registry(
@@ -541,14 +804,24 @@ def load_registry(
 ) -> list[EngineManifest]:
     """Load built-ins plus declarative overrides/additions.
 
-    Availability is a host observation: unless an entry explicitly supplies
-    ``available``, the configured harness is checked once with ``PATH``.  The
-    CLI emits the full registry, including disabled/unavailable entries, so
-    the picker can hide only entries that are not createable while existing
+    Availability is a host observation, not config state: when probing is
+    enabled every configured harness is resolved once through
+    :func:`resolve_harnesses`, which searches the exec ``PATH``, then the
+    LOGIN shell's ``PATH`` (the environment the harness is really launched
+    in), then the known absolute install locations. A stale configured or
+    aplexer availability bit cannot override that observation.
+
+    The one deliberate override is ``force_available:`` in ``engines.yaml``:
+    an explicit boolean there pins availability for a host layout the resolver
+    cannot anticipate, in either direction. It is intentionally NOT the
+    ``available`` output key.
+
+    The CLI emits the full registry, including disabled/unavailable entries,
+    so the picker can hide only entries that are not createable while existing
     sessions continue to render from their recorded identity.
 
-    When ``a`` is present, argv / env_unset / available for matching ids come
-    from ``a engines --json`` (Phase A2). ``engines.yaml`` still wins on
+    When ``a`` is present, argv / env_unset for matching ids come from
+    ``a engines --json`` (Phase A2). ``engines.yaml`` still wins on
     presentation and can add engines aplexer does not know.
     """
     manifests: dict[str, EngineManifest] = {
@@ -557,7 +830,7 @@ def load_registry(
     order = list(manifests)
     # Aplexer supplies argv/env_unset/available for known ids; user yaml
     # still wins if it then overrides the same id.
-    overlayed = _overlay_aplexer_engines(manifests, env)
+    _overlay_aplexer_engines(manifests, env)
     for raw in _read_config(env):
         item = _manifest_from_mapping(raw, manifests.get(str(raw.get("id", "")).lower()))
         if item is None:
@@ -565,28 +838,30 @@ def load_registry(
         if item.id not in manifests:
             order.append(item.id)
         manifests[item.id] = item
-        overlayed.discard(item.id)
 
     source = os.environ if env is None else env
+    items = [manifests[engine_id] for engine_id in order]
+    resolved: dict[str, Optional[str]] = {}
+    if probe:
+        resolved = resolve_harnesses(
+            tuple(item.harness for item in items),
+            source,
+        )
     out: list[EngineManifest] = []
-    for engine_id in order:
-        item = manifests[engine_id]
-        if (
-            probe
-            and not item.availability_overridden
-            and engine_id not in overlayed
-        ):
-            found = shutil.which(item.harness, path=source.get("PATH"))
-            item = replace(
+    for item in items:
+        if item.force_available is not None:
+            available = item.force_available
+        elif probe:
+            available = resolved.get(item.harness) is not None
+        else:
+            available = item.available
+        out.append(
+            replace(
                 item,
-                available=found is not None,
-                unavailable_reason=(
-                    None
-                    if found is not None
-                    else f"`{item.harness}` is not installed on this host (not on PATH)."
-                ),
+                available=available,
+                unavailable_reason=_effective_reason(item, available),
             )
-        out.append(item)
+        )
     return out
 
 
@@ -646,4 +921,8 @@ def engines_list(as_json: bool) -> None:
         state = "enabled" if item.enabled else "disabled"
         if not item.available:
             state = f"{state}, unavailable"
+        if item.force_available is not None:
+            state = f"{state}, force_available={str(item.force_available).lower()}"
+        if item.unavailable_reason:
+            state = f"{state} ({item.unavailable_reason})"
         click.echo(f"{item.id}\t{item.label}\t{state}")

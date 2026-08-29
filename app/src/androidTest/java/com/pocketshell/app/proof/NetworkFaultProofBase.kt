@@ -268,7 +268,18 @@ abstract class NetworkFaultProofBase {
      * Splits out of [attachToSession] so multi-session switch proofs can open a
      * second session without re-navigating from the host list.
      */
-    protected fun openSessionFromList(hostName: String, sessionName: String) {
+    protected fun openSessionFromList(
+        hostName: String,
+        sessionName: String,
+        /**
+         * Issue #2409 — run right before the session row is tapped, i.e. with
+         * the picker fully settled and the ATTACH about to start. Lets a proof
+         * scope a fault to the attach phase alone (raising link severity here
+         * leaves the dial/enumeration at their own, separately-budgeted
+         * severity). Default no-op, so every existing caller is unchanged.
+         */
+        beforeSessionRowTap: () -> Unit = {},
+    ) {
         val pickerTimeoutMs = TerminalTestTimeouts.terminalVisibilityTimeoutMs()
         waitUntilWithDiagnostics(
             label = "host-detail folder list for $hostName",
@@ -290,6 +301,7 @@ abstract class NetworkFaultProofBase {
             timeoutMillis = pickerTimeoutMs,
         )
         val sessionRowTag = folderDetailRowTestTag(folderPath, sessionName)
+        beforeSessionRowTap()
         compose.onNodeWithTag(sessionRowTag, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -974,8 +986,54 @@ abstract class NetworkFaultProofBase {
     private suspend fun capturePane(client: TmuxClient): CommandResponse =
         client.sendCommand("capture-pane -p")
 
+    /**
+     * Issue #2409 — wait for the attach to actually reach a live TerminalView.
+     *
+     * This used to be a bare `compose.waitUntil(timeoutMillis = 30_000)`. Two
+     * things were wrong with that, and together they hid a real app defect for
+     * nine consecutive nightly runs:
+     *
+     *  1. **The ceiling sat AT the app's own contract, not above it.** 30 s is
+     *     exactly `SshConnection.DEFAULT_TIMEOUT_MS` — the budget for the dial
+     *     ALONE — with nothing left for the tmux `-CC` attach, the
+     *     [ATTACH_PANES_READY_TIMEOUT_MS] panes-ready reconcile, or the
+     *     swiftshader compose of the terminal surface. A harness must never be
+     *     the first thing to give up; if it is, it converts every app-side
+     *     result into the same opaque timeout.
+     *  2. **It threw a bare `ComposeTimeoutException`.** The nightly artifact
+     *     said only "Condition still not satisfied after 30000 ms" while the
+     *     app had already logged `Attaching -> Unreachable`. The verdict the
+     *     gate needed was in logcat, not in the failure.
+     *
+     * The budget is now the cohort's [TERMINAL_ATTACH_BUDGET_MS] (comfortably
+     * above the app's whole dial + attach contract, still far under the 300 s
+     * per-test watchdog, and early-exiting the instant the view attaches), and
+     * a miss reports the VM's real [TmuxSessionViewModel.ConnectionStatus] —
+     * so "the app surrendered" and "the app is still working" can never again
+     * look identical in the artifact.
+     */
     private fun waitForTerminalViewAttached() {
-        compose.waitUntil(timeoutMillis = 30_000) { terminalViewAttached() }
+        val attached = runCatching {
+            compose.waitUntil(timeoutMillis = TERMINAL_ATTACH_BUDGET_MS) { terminalViewAttached() }
+            true
+        }.getOrDefault(false)
+        if (attached) return
+        val status = currentConnectionStatusName()
+        val diagnostics = buildString {
+            appendLine("terminal_attached=false")
+            appendLine("budget_ms=$TERMINAL_ATTACH_BUDGET_MS")
+            appendLine("vm_connection_status=$status")
+            appendLine("disconnect_bands=${disconnectBandCount()}")
+            appendLine("attaching_hold=${hasTag(TMUX_SWITCHING_LOADING_TAG)}")
+            appendLine("connecting_progress_row=${hasTag(TMUX_CONNECTING_PROGRESS_TAG)}")
+        }
+        artifactFile("failure-terminal-attach.txt").writeText(diagnostics)
+        throw AssertionError(
+            "the terminal never attached within ${TERMINAL_ATTACH_BUDGET_MS}ms. The app's own " +
+                "connection status was '$status' — a give-up status (Unreachable/Gone/Failed) " +
+                "means the APP abandoned the attach, not that the harness was impatient " +
+                "(#2409). See failure-terminal-attach.txt:\n$diagnostics",
+        )
     }
 
     private fun terminalViewAttached(): Boolean {
@@ -1206,6 +1264,28 @@ abstract class NetworkFaultProofBase {
          * ladder auto-recovery on the slow emulator, under the 300s watchdog.
          */
         const val TERMINAL_INPUT_READY_TIMEOUT_MS: Long = 90_000L
+
+        /**
+         * Issue #2409 — budget for the tmux attach to reach a live TerminalView
+         * on the fault-proof lane (see [waitForTerminalViewAttached]).
+         *
+         * This MUST stay above the app's own end-to-end attach contract, or the
+         * harness gives up first and every app-side outcome — succeeded slowly,
+         * surrendered to Unreachable, wedged — collapses into one opaque
+         * timeout. The app's contract on this path is the dial
+         * (`SshConnection.DEFAULT_TIMEOUT_MS` 30s / `SshLeaseManager.
+         * DEFAULT_CONNECT_TIMEOUT_MILLIS` 35s) plus the panes-ready reconcile
+         * (`ATTACH_PANES_READY_TIMEOUT_MS`, ~19s) plus the swiftshader compose
+         * of the terminal surface. The superseded value was a flat 30s — the
+         * DIAL budget alone, with nothing left over — which is why #2409's real
+         * `Attaching -> Unreachable` defect surfaced as a bare
+         * `ComposeTimeoutException` for nine nightly runs.
+         *
+         * 90s matches this cohort's other #1676 slow-link budgets and early-exits
+         * the instant the view attaches, so a healthy attach pays nothing; it
+         * stays well under the 300s per-test ci-journey watchdog.
+         */
+        const val TERMINAL_ATTACH_BUDGET_MS: Long = 90_000L
 
         /** Issue #1681 — the un-proxied sentinel exec-ping cadence. */
         const val SENTINEL_INTERVAL_MS: Long = 3_000L

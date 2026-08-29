@@ -474,6 +474,25 @@ case "${1:-}" in
     '
     exit 0
     ;;
+  engines)
+    # Issue #2276: the availability journey must exercise the REAL host
+    # registry, not a shell re-implementation of it. The bug being regressed
+    # lives inside `pocketshell.engines.resolve_harnesses` (a harness that is
+    # installed and launchable from the pane's LOGIN shell but invisible to
+    # this NON-interactive SSH `exec` channel), so a `command -v` mimicry here
+    # would prove nothing about the fix. Delegate to the repository's real
+    # implementation (same idiom as the `send` arm, issue #2240) and let it
+    # observe this container's genuinely off-PATH harnesses.
+    #
+    # Dockerfile.agents seeds ~/.config/pocketshell/engines.yaml with five
+    # fixture rows (missing / disabled / nvm-only / login-only / forced) on top
+    # of the built-in claude/codex/opencode/grok.
+    if [ ! -d /opt/pocketshell-real/src ]; then
+      printf 'pocketshell engines fixture needs /opt/pocketshell-real/src\n' >&2
+      exit 64
+    fi
+    exec /usr/local/bin/pocketshell-real-send "$@"
+    ;;
   usage)
     shift
     if [ "${1:-}" = "--json" ]; then
@@ -1277,5 +1296,5 @@ case "${1:-}" in
     ;;
 esac
 
-printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, agents kind, tree get|upsert|reconcile\n' >&2
+printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log, profiles list, engines list --json, agents kind, tree get|upsert|reconcile\n' >&2
 exit 64

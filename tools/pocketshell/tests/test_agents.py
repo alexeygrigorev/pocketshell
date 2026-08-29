@@ -1175,6 +1175,54 @@ def test_cli_agent_missing_binary_exits_127(tmp_path, monkeypatch, capsys):
     assert "not installed" in stderr
 
 
+def test_registry_launch_keeps_missing_binary_race_backstop(
+    tmp_path, monkeypatch, capsys
+):
+    """A binary may disappear after the manifest probe and still gets a clear error."""
+    config_dir = tmp_path / "config" / "pocketshell"
+    config_dir.mkdir(parents=True)
+    (config_dir / "engines.yaml").write_text(
+        """
+engines:
+  - id: race-engine
+    family: codex
+    harness: race-agent
+    label: Race Engine
+    enabled: true
+    launch:
+      argv: [race-agent]
+""".lstrip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+
+    race_probe_calls = 0
+
+    def disappearing_which(name, *args, **kwargs):
+        nonlocal race_probe_calls
+        if name == "race-agent":
+            race_probe_calls += 1
+            return "/fixture/race-agent" if race_probe_calls == 1 else None
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(agents.shutil, "which", disappearing_which)
+    with pytest.raises(click.exceptions.Exit) as exc:
+        agents.launch_agent(
+            _FakeCtx(),
+            "race-engine",
+            str(tmp_path),
+            skip_permissions=True,
+            config_dir=None,
+            execvpe=lambda *args: pytest.fail(
+                "race backstop must stop before exec"
+            ),
+        )
+
+    assert exc.value.exit_code == 127
+    assert race_probe_calls == 2
+    assert "`race-engine` is not installed on this host" in capsys.readouterr().err
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring end-to-end (exec stubbed out)
 # ---------------------------------------------------------------------------

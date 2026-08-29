@@ -153,6 +153,8 @@ JOURNEY_CLASSES=(
   "com.pocketshell.app.share.SharePassphraseDialogE2eTest"
   "com.pocketshell.app.projects.ProfileDiscoveryPickerDockerTest"  # #732 Finding B): the host server-PROFILE discovery journey. The p…
   "com.pocketshell.app.projects.SessionTypeProfilePickerUiTest"  # #1875: production host sheet retries profile discovery, renders Z.AI, and launches with --profile; also runs the existing picker class coverage.
+  "com.pocketshell.app.projects.EngineAvailabilityPickerUiTest"  # #2276: host availability/disablement rows are hidden from create choices.
+  "com.pocketshell.app.projects.EngineAvailabilityPickerDockerTest"  # #2276: production SshEnginesGateway manifest reaches the real picker against Docker.
   "com.pocketshell.app.projects.RootProjectAddSheetKeyboardLayoutTest"  # #1742 deterministic modal-root IME layout proof
   "com.pocketshell.app.tmux.TmuxInSessionNewSessionCollisionDockerTest"  # #898 reviewer Blocker B): the in-session + New session rich-sheet
   "com.pocketshell.app.tmux.TmuxCreateAfterAttachFailureDockerTest"  # #1832 failed attach then Create must fail visibly, never silently create nothing

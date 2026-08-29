@@ -9,8 +9,13 @@ FROM alpine:latest
 # GNU nano, unable to save/exit from PocketShell). The connected nano save/exit
 # journey (`TmuxKeyBarCtrlComboE2eTest`) opens a real nano buffer and drives
 # `^O`/`^X` from the hotkeys panel, so the fixture must ship a real `nano`.
+# Issue #2276: `py3-yaml` is required because the fixture's `engines list
+# --json` arm delegates to the REPOSITORY's real `pocketshell.engines`
+# registry (see agent-bin/pocketshell), which reads
+# ~/.config/pocketshell/engines.yaml. Without PyYAML the registry silently
+# ignores the fixture's engine rows.
 RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite git nano \
-    python3 py3-click \
+    python3 py3-click py3-yaml \
     && mv /usr/bin/tmux /usr/bin/tmux.real \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
@@ -67,6 +72,66 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && ln -sf /usr/local/bin/tmux /usr/bin/tmux \
     && printf '%s\n' "0.0.0-dev" > /opt/pocketshell-agent-fixture-version \
     && chown -R testuser:testuser /home/testuser/.ssh
+
+# Issue #2276: the engine-availability journey needs the state the maintainer
+# actually hit, which lives BETWEEN "on the PATH" and "absent everywhere": a
+# harness that is installed and launchable from the tmux pane's LOGIN shell but
+# invisible to the app's NON-interactive SSH `exec` channel. Two such rows are
+# installed here, one per resolution rung:
+#
+#   * `nvm-only-agent`  -> ~/.nvm/versions/node/v24.13.1/bin, exactly where the
+#     maintainer's `codex`/`opencode` live. No shell config mentions it, so
+#     ONLY the absolute-candidate rung can find it.
+#   * `login-only-agent` -> /opt/site-agents/bin, exported from ~/.profile,
+#     which a login shell reads and a non-interactive `exec` never does (the
+#     same shape as the ~/.bashrc interactive early-return guard behind #484).
+#
+# `fixture-missing-engine` stays genuinely absent everywhere (the negative
+# control), `codex-disabled` is present-but-disabled, and `forced-engine` has
+# no binary at all but pins itself with the `force_available:` escape hatch.
+RUN install -d -o testuser -g testuser \
+        /home/testuser/.nvm/versions/node/v24.13.1/bin \
+        /home/testuser/.config/pocketshell \
+    && install -d /opt/site-agents/bin \
+    && printf '#!/bin/sh\nprintf "nvm-only fixture harness\\n"\nexec sleep 3600\n' \
+        > /home/testuser/.nvm/versions/node/v24.13.1/bin/nvm-only-agent \
+    && printf '#!/bin/sh\nprintf "login-only fixture harness\\n"\nexec sleep 3600\n' \
+        > /opt/site-agents/bin/login-only-agent \
+    && chmod +x /home/testuser/.nvm/versions/node/v24.13.1/bin/nvm-only-agent \
+        /opt/site-agents/bin/login-only-agent \
+    && printf '%s\n' \
+        '# Login shells only (issue #2276 fixture): a non-interactive SSH' \
+        '# `exec` channel never sources this file, so /opt/site-agents/bin is' \
+        '# reachable from a tmux pane but not from the manifest command.' \
+        'export PATH="/opt/site-agents/bin:$PATH"' \
+        > /home/testuser/.profile \
+    && printf '%s\n' \
+        'engines:' \
+        '  - id: fixture-missing-engine' \
+        '    family: codex' \
+        '    harness: fixture-missing-engine' \
+        '    label: Missing fixture engine' \
+        '  - id: codex-disabled' \
+        '    family: codex' \
+        '    harness: codex' \
+        '    label: Disabled Codex fixture' \
+        '    enabled: false' \
+        '  - id: nvm-only-engine' \
+        '    family: codex' \
+        '    harness: nvm-only-agent' \
+        '    label: Nvm-only fixture engine' \
+        '  - id: login-only-engine' \
+        '    family: codex' \
+        '    harness: login-only-agent' \
+        '    label: Login-only fixture engine' \
+        '  - id: forced-engine' \
+        '    family: codex' \
+        '    harness: never-installed-agent' \
+        '    label: Forced fixture engine' \
+        '    force_available: true' \
+        > /home/testuser/.config/pocketshell/engines.yaml \
+    && chown -R testuser:testuser /home/testuser/.nvm /home/testuser/.config \
+        /home/testuser/.profile
 
 EXPOSE 22
 

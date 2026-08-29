@@ -1,5 +1,7 @@
 package com.pocketshell.app.proof
 
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -58,6 +60,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume
 import org.junit.Rule
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -407,18 +410,20 @@ abstract class NetworkFaultProofBase {
                 "recoveryInProgress=$showsRecoveryInProgress"
     }
 
-    /** The current [TmuxSessionViewModel.ConnectionStatus] simple name (VM real state). */
-    protected fun currentConnectionStatusName(): String {
-        var name = "unknown"
+    /** The current network-fault VM, including its diagnostic test seams. */
+    protected fun currentNetworkFaultViewModel(): TmuxSessionViewModel {
+        var viewModel: TmuxSessionViewModel? = null
         launchedActivity?.onActivity { activity ->
-            name = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
-                .connectionStatus
-                .value::class
-                .simpleName
-                ?: "null"
+            viewModel = ViewModelProvider(activity)[TmuxSessionViewModel::class.java]
         }
-        return name
+        return requireNotNull(viewModel) {
+            "TmuxSessionViewModel is unavailable without a live activity"
+        }
     }
+
+    /** The current [TmuxSessionViewModel.ConnectionStatus] simple name (VM real state). */
+    protected fun currentConnectionStatusName(): String =
+        currentNetworkFaultViewModel().connectionStatus.value::class.simpleName ?: "null"
 
     protected fun sampleRecovery(startedAt: Long): RecoverySnapshot = RecoverySnapshot(
         elapsedMs = SystemClock.elapsedRealtime() - startedAt,
@@ -1053,6 +1058,54 @@ abstract class NetworkFaultProofBase {
         }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         return requireNotNull(connection) { "TerminalView did not create an InputConnection" }
+    }
+
+    /**
+     * Capture the authoritative rendered TerminalView and its transcript from the
+     * same activity/view in this test run. A Compose tree dump is not sufficient
+     * evidence for the terminal journey: the reviewer needs the pixels the user
+     * could see and the text the terminal surface actually held.
+     */
+    protected fun captureAuthoritativeTerminalViewport(name: String): String {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(150)
+
+        var bitmap: Bitmap? = null
+        var visibleText = ""
+        launchedActivity?.onActivity { activity ->
+            val terminalView = requireNotNull(activity.window.decorView.findTerminalView()) {
+                "TerminalView was not found while capturing $name"
+            }
+            check(terminalView.width > 0 && terminalView.height > 0) {
+                "TerminalView had no measurable viewport while capturing $name: " +
+                    "${terminalView.width}x${terminalView.height}"
+            }
+            bitmap = Bitmap.createBitmap(
+                terminalView.width,
+                terminalView.height,
+                Bitmap.Config.ARGB_8888,
+            ).also { rendered -> terminalView.draw(Canvas(rendered)) }
+            visibleText = terminalView.currentSession?.emulator?.screen?.transcriptText.orEmpty()
+        }
+
+        val rendered = requireNotNull(bitmap) { "No viewport bitmap was captured for $name" }
+        val png = artifactFile("$name-viewport.png")
+        val text = artifactFile("$name-visible-terminal.txt")
+        try {
+            FileOutputStream(png).use { output ->
+                check(rendered.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                    "TerminalView PNG compression failed for $name"
+                }
+            }
+            text.writeText(visibleText)
+            check(visibleText.isNotBlank()) {
+                "Rendered TerminalView transcript was blank while capturing $name"
+            }
+        } finally {
+            rendered.recycle()
+        }
+        return visibleText
     }
 
     private fun visibleTerminalText(): String {

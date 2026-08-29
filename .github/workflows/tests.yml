@@ -277,6 +277,21 @@ jobs:
           scripts/check-tests-referenced.sh --self-test
           scripts/check-tests-referenced.sh
 
+      # Issue #1678/#1751/#2141: the nightly phase-2 fault verdict is only as
+      # honest as the exact-method guards that compute it — a class-level phase
+      # greens vacuously when a required method is skipped, renamed, or reports a
+      # timeline that claims nothing. Those guards run inside the nightly job, so
+      # nothing per-push proved they still go RED on a vacuous artifact. This runs
+      # their mutation self-test (skipped method, wrong method, forbidden typed
+      # event in the snapshot AND in the timeline, unfired positive-control
+      # observer, blocked/unrecovered same-connection sentinel, malformed
+      # authoritative viewport PNG) every push. Pure shell: no emulator, no
+      # Docker, no Gradle.
+      - name: "Nightly exact-method guard self-test (issue #1678/#1751)"
+        run: |
+          bash scripts/lib/nightly-exact-method-guard.sh --self-test
+          bash scripts/lib/nightly-phase-reports.sh --self-test
+
       # Issue #1355: MainDispatcherRule owns the global Dispatchers.Main reset.
       # Any standalone TmuxSessionViewModel test that leaves an unregistered VM
       # can race that reset from a still-unwinding coroutine and fail an

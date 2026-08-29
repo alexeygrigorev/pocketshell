@@ -204,6 +204,64 @@ internal open class FakeTmuxClient(
 
     var suspendForeverOnBestEffortCommandPrefix: String? = null
 
+    // ---- Issue #2409: slow-but-ALIVE link fixture ---------------------------
+    //
+    // The nightly bufferbloat fault (350ms±200 latency + a 120 KB/s cap) makes
+    // every attach round-trip take SECONDS while the transport stays perfectly
+    // healthy. A test double that answers instantly can never reproduce a
+    // budget-nesting defect, because no inner ceiling is ever reached — which is
+    // exactly why the #2409 attach-budget inversion survived every JVM test and
+    // only surfaced on the toxiproxy nightly. These seams let a unit test spend
+    // the REAL inner budgets on the virtual clock.
+
+    /**
+     * Issue #2409: wall time each [listPanesViaExec] round-trip costs before it
+     * answers. Bounded by the caller's `timeoutMs` exactly like the real exec
+     * lane: a latency at or above the ceiling burns the ceiling and throws the
+     * real client's timeout [TmuxClientException] instead of answering.
+     */
+    @Volatile
+    var listPanesViaExecLatencyMs: Long = 0L
+
+    /**
+     * Issue #2409: wall time each [captureWithCursor] seed/heal round-trip costs.
+     * Modelled on `RealTmuxClient.captureWithCursor`: the exec lane is bounded by
+     * the caller's short seed ceiling (`SEED_CAPTURE_TIMEOUT_MS`), and a
+     * round-trip that outlasts it burns the full ceiling and throws
+     * `TmuxClientException("tmux capture-pane (exec heal lane) timed out …")`.
+     */
+    @Volatile
+    var captureWithCursorLatencyMs: Long = 0L
+
+    /**
+     * Issue #2409: every [captureWithCursor] the slow-link fixture served, as
+     * `"<paneId>@<timeoutMs>"`, so a test can hard-assert the seed really did
+     * pay its bounded retries (never a vacuous pass where the capture was
+     * skipped and the attach "succeeded" for the wrong reason).
+     */
+    val slowLinkCaptureAttempts: MutableList<String> = mutableListOf()
+
+    /** Issue #2409: [listPanesViaExec] round-trips the slow-link fixture served. */
+    val slowLinkListPanesAttempts: MutableList<String> = mutableListOf()
+
+    private val defaultExecLaneCeilingMs: Long = 10_000L
+
+    /**
+     * Mirror of `RealTmuxClient`'s bounded exec lane: burn `min(latency, ceiling)`
+     * of the (virtual) clock, then report a timeout when the latency reached the
+     * ceiling. Returns `true` when the round-trip completed inside its bound.
+     */
+    private suspend fun runFakeBoundedExecLane(latencyMs: Long, timeoutMs: Long?): Boolean {
+        val ceiling = timeoutMs?.coerceIn(1L, defaultExecLaneCeilingMs) ?: defaultExecLaneCeilingMs
+        if (latencyMs <= 0L) return true
+        if (latencyMs < ceiling) {
+            delay(latencyMs)
+            return true
+        }
+        delay(ceiling)
+        return false
+    }
+
     /**
      * Issue #1533: the #927 "busy ≠ dead" reader-activity clock the restore
      * ride-through vouch reads. Default [Long.MAX_VALUE] = no reader activity known
@@ -356,6 +414,17 @@ internal open class FakeTmuxClient(
     ): com.pocketshell.core.tmux.CaptureWithCursor {
         lastCaptureThreadName = Thread.currentThread().name
         lastCaptureTimeoutMs = timeoutMs
+        // Issue #2409: the slow-but-alive link. Pay the round-trip on the clock
+        // and, when it outlasts the caller's short seed ceiling, throw exactly
+        // what the real exec lane throws.
+        if (captureWithCursorLatencyMs > 0L) {
+            slowLinkCaptureAttempts += "$paneId@$timeoutMs"
+            if (!runFakeBoundedExecLane(captureWithCursorLatencyMs, timeoutMs)) {
+                throw TmuxClientException(
+                    "tmux capture-pane (exec heal lane) timed out after ${timeoutMs}ms",
+                )
+            }
+        }
         val parkedOnGate = captureWithCursorGate
         parkedOnGate?.await()
         if (parkedOnGate != null) {
@@ -391,6 +460,28 @@ internal open class FakeTmuxClient(
             lastListPanesThreadName = Thread.currentThread().name
         }
         return handleCommand(cmd, bestEffort = false)
+    }
+
+    /**
+     * Issue #2409: the attach/switch reconcile's dedicated exec lane. The
+     * interface default delegates to `sendCommand`, which answers instantly;
+     * this override lets a test spend [listPanesViaExecLatencyMs] of the caller's
+     * `timeoutMs` budget the way a congested link does, while keeping the
+     * existing canned-[responses] plumbing for the rows themselves.
+     */
+    override suspend fun listPanesViaExec(
+        listPanesCommand: String,
+        timeoutMs: Long?,
+    ): CommandResponse {
+        if (listPanesViaExecLatencyMs > 0L) {
+            slowLinkListPanesAttempts += "$listPanesCommand@$timeoutMs"
+            if (!runFakeBoundedExecLane(listPanesViaExecLatencyMs, timeoutMs)) {
+                throw TmuxClientException(
+                    "tmux list-panes (exec lane) timed out after ${timeoutMs}ms",
+                )
+            }
+        }
+        return sendCommand(listPanesCommand)
     }
 
     /**

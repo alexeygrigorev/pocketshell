@@ -149,6 +149,20 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
         // robust, authoritative auto-recovery signal.)
         waitForConnected("after severed-mapping recovery", timeoutMs = RECOVERY_CONNECTED_TIMEOUT_MS)
         waitForClientCountAtMost(key, sessionName, max = 1, label = "post-recovery clean reconnect")
+        // Issue #2389: the VM reaches Connected BEFORE the surface releases its
+        // recovery hold and re-mounts the Termux AndroidView, and the raw-view
+        // capture below never drove the Compose frame clock, so it photographed a
+        // still-held surface (`Recomposer state=PendingWork` for 16s in the
+        // instrumented run) and reported the `#2135` `viewFound=false`. Wait for the
+        // viewport to come BACK through the Compose-synced path — bounded and
+        // hard-failing, so a surface that never re-mounts still reds as #2135
+        // intends. See [RecoveredTerminalViewport] for the full measurement.
+        val restoredMs = RecoveredTerminalViewport.awaitRestored(
+            compose = compose,
+            scenario = launchedActivity,
+            label = "post_recovery",
+            recordTiming = ::recordTiming,
+        )
         captureViewport("issue1063-recover-02-recovered")
 
         assertTrue(
@@ -166,7 +180,8 @@ class NatIdleMappingSurvivalE2eTest : NetworkFaultProofBase() {
                 "keepalive_override=${RECOVERY_KEEPALIVE_INTERVAL_MS}ms x $KEEPALIVE_COUNT_MAX (SHORT)",
                 "keepalive_death_budget_ms=$KEEPALIVE_DEATH_BUDGET_MS",
                 "detect_ms=$detectMs",
-                "expectation=keepalive detects half-open within budget => Reconnecting band => auto-recover (VM Connected, <=1 client)",
+                "post_recovery_viewport_restored_ms=$restoredMs",
+                "expectation=keepalive detects half-open within budget => Reconnecting band => auto-recover (VM Connected, <=1 client, terminal viewport back)",
             ),
         )
     } }

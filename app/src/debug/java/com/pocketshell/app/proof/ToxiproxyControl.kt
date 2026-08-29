@@ -203,33 +203,6 @@ class ToxiproxyControl(
         )
     }
 
-    /**
-     * Issue #2409 — RETUNE the already-installed latency toxic IN PLACE via
-     * toxiproxy's per-toxic update endpoint.
-     *
-     * [addJitterLatency] / [addSymmetricLatency] pin fixed toxic names, so a
-     * second `add` is a 409, and
-     * `clearToxics()` + re-add leaves the link briefly CLEAN — long enough on a
-     * fast box for the very round-trip under test to slip through unimpeded,
-     * which is precisely the vacuous pass a severity-change fixture must not
-     * have. Updating in place changes the delay applied to the ESTABLISHED
-     * connection with no clean window at all.
-     *
-     * Used by the #2409 cold-attach proof to raise severity for the ATTACH phase
-     * only, leaving the dial/enumeration at the benign [WIFI_ONE_WAY_LATENCY_MS]
-     * baseline so neither the app's separate 30/35 s dial budget nor the
-     * `FolderListGateway` 3.5 s bounded-exec budget is the thing under test.
-     */
-    fun updateJitterLatency(latencyMs: Int, jitterMs: Int) {
-        listOf("latency_upstream", "latency_downstream").forEach { name ->
-            transport.request(
-                "POST",
-                "/proxies/$PROXY_NAME/toxics/$name",
-                """{"attributes":{"latency":$latencyMs,"jitter":$jitterMs}}""",
-            )
-        }
-    }
-
     fun clearToxics() {
         KNOWN_TOXICS.forEach { name ->
             runCatching { transport.request("DELETE", "/proxies/$PROXY_NAME/toxics/$name", null) }

@@ -79,14 +79,7 @@ class Issue2160LocaleProofEnumerationTest {
      * state and would prove nothing.
      */
     private class NonUtf8EnumerationSession : SshSession {
-        // Issue #2409: SYNCHRONIZED — since #2348 the lease path overlaps the
-        // pocketshell JSON enumerator with the required landing batch, so `exec`
-        // is called from two `Dispatchers.IO` threads at once and a bare
-        // `ArrayList` silently drops one of the racing adds (that lost entry is
-        // what the assertions below read). Same sweep #2348 already applied to
-        // `FolderListGatewaySshLeaseTest`/`Issue2348FolderListListPathHopTest`.
-        val execCommands: MutableList<String> =
-            java.util.Collections.synchronizedList(mutableListOf())
+        val execCommands: MutableList<String> = mutableListOf()
         override val isConnected: Boolean = true
 
         override suspend fun exec(command: String): ExecResult {

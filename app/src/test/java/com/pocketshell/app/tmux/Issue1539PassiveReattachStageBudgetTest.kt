@@ -143,9 +143,7 @@ class Issue1539PassiveReattachStageBudgetTest : TmuxSessionViewModelTestBase() {
             f.dialDelayMs = 1_000L
             // The attach stage (`list-panes` / panes-ready) is the slow one this time — same
             // class of defect, different stage. The attach path's OWN designed budget is
-            // ATTACH_PANES_READY_TIMEOUT_MS; the passive-grace wrapper cut it at 5s. (#2409
-            // derived that budget from the stages it wraps instead of a flat literal, so this
-            // 6s delay stays comfortably inside it.)
+            // ATTACH_PANES_READY_TIMEOUT_MS (12s); the passive-grace wrapper cut it at 5s.
             f.firstFreshClientListPanesDelayMs = 6_000L
             f.start()
             f.dropControlChannelPassively()
@@ -358,13 +356,6 @@ class Issue1539PassiveReattachStageBudgetTest : TmuxSessionViewModelTestBase() {
             // Transports never vouched alive, so every cycle genuinely fails to recover (the pure
             // non-converging flap) rather than settling via the keep-and-retry path.
             f.freshSessionsAreDead = true
-            // Issue #2409: the observation window must cover at least ONE WHOLE rung (the dial
-            // plus the rung's attach budget) or the loop is still mid-attach when the window
-            // closes and this test measures the WINDOW, not the counter feed it is about. The
-            // default 20s window was silently calibrated to a flat 10s attach budget; derive it
-            // from the budgets so it can never drift out of range again.
-            f.graceMs = f.dialDelayMs + PASSIVE_REATTACH_ATTACH_TIMEOUT_MS +
-                PASSIVE_DISCONNECT_SILENT_REATTACH_RETRY_MS * 4
             // The PRODUCTION ladder — see [Fixture.autoReconnectDelaysOverride].
             f.autoReconnectDelaysOverride = null
             f.start()

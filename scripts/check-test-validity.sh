@@ -263,7 +263,6 @@ A5_BASELINE=(
 # tracking issue after `|`; stale/malformed entries hard-fail.
 # --------------------------------------------------------------------------
 A5_LITERAL_BASELINE=(
-  "app/src/androidTest/java/com/pocketshell/app/proof/RideThroughInterruptionE2eTest.kt:61|#1678"
 )
 
 # --------------------------------------------------------------------------

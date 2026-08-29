@@ -277,6 +277,12 @@ jobs:
           scripts/check-tests-referenced.sh --self-test
           scripts/check-tests-referenced.sh
 
+      # Issue #1678/#1751/#2141: per-push mutation self-test for the nightly
+      # exact-method guards. Rationale lives in the script (this workflow is at
+      # its file-size-hygiene cap, so the comments move with the code).
+      - name: "Nightly exact-method guard self-test (issue #1678/#1751)"
+        run: bash scripts/run-nightly-guard-selftests.sh
+
       # Issue #1355: MainDispatcherRule owns the global Dispatchers.Main reset.
       # Any standalone TmuxSessionViewModel test that leaves an unregistered VM
       # can race that reset from a still-unwinding coroutine and fail an

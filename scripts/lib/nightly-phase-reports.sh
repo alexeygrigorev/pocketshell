@@ -48,6 +48,19 @@ _PHASE_REPORT_SUBPATHS=(
   "outputs/connected_android_test_additional_output"
 )
 
+# Set by preserve_phase_reports so a caller can distinguish a fresh empty
+# snapshot from a successfully copied snapshot.  The manifest is deliberately
+# inside the phase directory: if clearing/copying fails, a later verdict must
+# not mistake an older XML tree for this run's evidence.
+PHASE_REPORT_SNAPSHOT_STATUS="unknown"
+
+phase_report_snapshot_status() {
+  local phase_dir="${1:-}"
+  local manifest="$phase_dir/phase-report-manifest.txt"
+  [[ -f "$manifest" ]] || return 1
+  sed -n 's/^snapshot_status=//p' "$manifest" | head -1
+}
+
 # ---------------------------------------------------------------------------
 # preserve_phase_reports <phase_slug> [module_build_dir] [dest_root]
 #
@@ -71,13 +84,22 @@ preserve_phase_reports() {
   local phase_slug="${1:-}"
   local module_build_dir="${2:-${REPO_ROOT:+$REPO_ROOT/}app/build}"
   local dest_root="${3:-${REPO_ROOT:+$REPO_ROOT/}artifacts/nightly-extensive/phase-reports}"
+  local phase_dir snapshot_status=complete
+
+  PHASE_REPORT_SNAPSHOT_STATUS="failed"
 
   if [[ -z "$phase_slug" ]]; then
     echo "preserve_phase_reports: missing phase slug (skipping)" >&2
     return 0
   fi
 
-  local phase_dir="$dest_root/$phase_slug"
+  phase_dir="$dest_root/$phase_slug"
+  # A rerun may reuse the same artifact root. Clear this phase's prior snapshot
+  # so a missing current report cannot masquerade as preserved green evidence.
+  if ! rm -rf "$phase_dir" 2>/dev/null; then
+    echo "preserve_phase_reports[$phase_slug]: FAILED to clear stale snapshot" >&2
+    return 0
+  fi
   mkdir -p "$phase_dir" 2>/dev/null || {
     echo "preserve_phase_reports[$phase_slug]: could not create $phase_dir (skipping)" >&2
     return 0
@@ -98,11 +120,25 @@ preserve_phase_reports() {
         copied=$((copied + 1))
       else
         echo "preserve_phase_reports[$phase_slug]: FAILED to copy $src (skipping)" >&2
+        snapshot_status=failed
       fi
     else
       echo "preserve_phase_reports[$phase_slug]: no report at $src (skipped)"
     fi
   done
+
+  if [[ "$copied" -eq 0 && "$snapshot_status" == complete ]]; then
+    snapshot_status=empty
+  fi
+  if ! {
+    printf 'phase=%s\n' "$phase_slug"
+    printf 'source_build_dir=%s\n' "$module_build_dir"
+    printf 'copied_report_trees=%s\n' "$copied"
+    printf 'snapshot_status=%s\n' "$snapshot_status"
+  } > "$phase_dir/phase-report-manifest.txt"; then
+    snapshot_status=failed
+  fi
+  PHASE_REPORT_SNAPSHOT_STATUS="$snapshot_status"
 
   echo "preserve_phase_reports[$phase_slug]: preserved $copied report tree(s) to $phase_dir"
   return 0
@@ -149,6 +185,12 @@ _phase_reports_self_test() {
   echo "--- phase A writes its reports, then we preserve them ---"
   _write_fake_reports "PHASE_A_MARKER"
   preserve_phase_reports "phase-a" "$build_dir" "$dest_root"
+  if [[ "$(phase_report_snapshot_status "$dest_root/phase-a")" == complete ]]; then
+    echo "ok   [manifest] phase-a snapshot is marked complete"
+  else
+    echo "FAIL [manifest] phase-a snapshot is not marked complete"
+    failures=$((failures + 1))
+  fi
 
   echo
   echo "--- phase B OVERWRITES the same build dir (the real clobber), then we preserve ---"
@@ -159,6 +201,12 @@ _phase_reports_self_test() {
   rm -rf "$build_dir/outputs/connected_android_test_additional_output"
   _write_fake_reports "PHASE_B_MARKER"
   preserve_phase_reports "phase-b" "$build_dir" "$dest_root"
+  if [[ "$(phase_report_snapshot_status "$dest_root/phase-b")" == complete ]]; then
+    echo "ok   [manifest] phase-b snapshot is marked complete"
+  else
+    echo "FAIL [manifest] phase-b snapshot is not marked complete"
+    failures=$((failures + 1))
+  fi
 
   echo
   echo "--- assert BOTH phases survived to distinct, non-colliding paths ---"
@@ -185,10 +233,29 @@ _phase_reports_self_test() {
   fi
 
   echo
+  echo "--- absent current source removes stale evidence for the same phase ---"
+  rm -rf "$build_dir"
+  preserve_phase_reports "phase-b" "$build_dir" "$dest_root"
+  if find "$dest_root/phase-b" -type f ! -name phase-report-manifest.txt -print -quit | grep -q .; then
+    echo "FAIL [stale] missing current reports retained a stale phase-b file"
+    failures=$((failures + 1))
+  elif [[ "$(phase_report_snapshot_status "$dest_root/phase-b")" != empty ]]; then
+    echo "FAIL [stale] missing current reports were not marked empty"
+    failures=$((failures + 1))
+  else
+    echo "ok   [stale] missing current reports cannot masquerade as preserved evidence"
+  fi
+
+  echo
   echo "--- missing-report phase is a clean no-op (no crash, returns 0) ---"
   rm -rf "$build_dir"
   if preserve_phase_reports "phase-empty" "$build_dir" "$dest_root"; then
-    echo "ok   [empty] preserve_phase_reports returned 0 with no reports present"
+    if [[ "$PHASE_REPORT_SNAPSHOT_STATUS" == empty ]]; then
+      echo "ok   [empty] preserve_phase_reports returned 0 and marked the snapshot empty"
+    else
+      echo "FAIL [empty] missing-report phase was not marked empty"
+      failures=$((failures + 1))
+    fi
   else
     echo "FAIL [empty] preserve_phase_reports returned non-zero for a missing-report phase"
     failures=$((failures + 1))

@@ -690,7 +690,6 @@ assert_report present "A5LBadParenAwareLiteralTrueTest.kt" "A5L — NEW" "A5L ma
 assert_report present "A5LBadBlockCommentCalleeTriviaTest.kt" "A5L — NEW" "A5L matches legal block-comment trivia between the callee and opening parenthesis"
 assert_report present "A5LBadNewlineCommentCalleeTriviaTest.kt" "A5L — NEW" "A5L matches legal newline/comment trivia between the callee and opening parenthesis"
 assert_report absent  "A5LGoodDynamicAndDecoyTest.kt" "A5L — NEW" "A5L spares nested dynamic booleans and string/comment decoys"
-assert_report present "RideThroughInterruptionE2eTest.kt:61" "A5L — KNOWN" "A5L inventories the sole #1678 tracked survivor"
 assert_report absent  "A5GoodSdkGuardTest.kt" "A5 — NEW" "A5 spares a Build.VERSION SDK guard"
 # A5 bad + C1 GOOD-only present here -> A5 is a hard-fail category.
 assert_exit 1 "A5 unjustified IME skip hard-fails the guard"

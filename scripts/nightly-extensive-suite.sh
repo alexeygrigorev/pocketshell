@@ -392,12 +392,16 @@ NETWORK_FAULT_CLASS_ARG="$(join_by , "${NETWORK_FAULT_CLASSES[@]}")"
 EXPECTED_FAIL_CLASS_ARG="$(join_by , "${EXPECTED_FAIL_CLASSES[@]}")"
 JOURNEY_NOTCLASS_ARG="$(join_by , "${JOURNEY_EXCLUDED_CLASSES[@]}")"
 
-# Issue #1751: a class-level phase can green vacuously if the sustained method is
-# renamed/removed while the class's intentionally skipped brief method remains.
-# Pin the exact successful release-gating method and its positive-band artifact
-# before computing the fault verdict.
+# Issues #1751/#1678: a class-level phase can green vacuously if a required
+# method is renamed or skipped while another method in its class remains. Pin
+# the sustained method as before, and add the brief/control artifact guards
+# without duplicating #2141's phase coverage accounting.
 REQUIRED_SUSTAINED_FAULT_CLASS="$FQCN_PREFIX.RideThroughInterruptionE2eTest"
 REQUIRED_SUSTAINED_FAULT_METHOD="sustainedLinkCutReconnectsCleanlyWithoutHang"
+REQUIRED_BRIEF_FAULT_CLASS="$FQCN_PREFIX.RideThroughInterruptionE2eTest"
+REQUIRED_BRIEF_FAULT_METHOD="briefLinkCutRidesThroughWithoutDisconnectOrTeardown"
+REQUIRED_CONTROL_FAULT_CLASS="$FQCN_PREFIX.RideThroughInterruptionE2eTest"
+REQUIRED_CONTROL_FAULT_METHOD="cleanCloseControlSurfacesHonestRecoveryToTheSameObserver"
 # shellcheck source=scripts/lib/nightly-exact-method-guard.sh
 source "$REPO_ROOT/scripts/lib/nightly-exact-method-guard.sh"
 
@@ -609,20 +613,45 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
   NETWORK_FAULT_EXIT=$?
   echo "phase 2 (network-fault proofs) exit code: $NETWORK_FAULT_EXIT"
 
+  # Preserve phase 2 immediately, before exact artifact guards or phase 2b can
+  # touch the shared Gradle output tree. All #1678/#1751 guards consume this
+  # immutable per-phase snapshot, while #2141 consumes the same snapshot for
+  # skipped/unreached class coverage.
+  preserve_phase_reports "phase2-network-fault" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+  if [[ "$(phase_report_snapshot_status "$PHASE_REPORTS_DIR/phase2-network-fault")" != complete ]]; then
+    NETWORK_FAULT_EXIT=1
+    echo "phase 2 (network-fault proofs) forced RED: phase report snapshot is not complete (status=${PHASE_REPORT_SNAPSHOT_STATUS:-unknown})"
+  fi
+  PHASE2_RESULTS_ROOT="$PHASE_REPORTS_DIR/phase2-network-fault/outputs/androidTest-results/connected"
+  PHASE2_ARTIFACTS_ROOT="$PHASE_REPORTS_DIR/phase2-network-fault/outputs/connected_android_test_additional_output"
+
   if ! require_exact_junit_method \
-    "$APP_BUILD_DIR/outputs/androidTest-results/connected" \
-    "$APP_BUILD_DIR/outputs/connected_android_test_additional_output" \
+    "$PHASE2_RESULTS_ROOT" \
+    "$PHASE2_ARTIFACTS_ROOT" \
     "$REQUIRED_SUSTAINED_FAULT_CLASS" \
     "$REQUIRED_SUSTAINED_FAULT_METHOD"; then
     NETWORK_FAULT_EXIT=1
-    echo "phase 2 (network-fault proofs) forced RED by exact-method guard"
+    echo "phase 2 (network-fault proofs) forced RED by sustained exact-method guard"
   fi
 
-  # Snapshot phase 2's report BEFORE the phase-2b gradle invocation overwrites
-  # it (issue #1293). THIS is the release-GATING report whose overwrite made the
-  # DisconnectBlackhole / NatIdle failing assertions unrecoverable. Observability
-  # only — never affects NETWORK_FAULT_EXIT.
-  preserve_phase_reports "phase2-network-fault" "$APP_BUILD_DIR" "$PHASE_REPORTS_DIR"
+  if ! require_exact_brief_ride_through_method \
+    "$PHASE2_RESULTS_ROOT" \
+    "$PHASE2_ARTIFACTS_ROOT" \
+    "$REQUIRED_BRIEF_FAULT_CLASS" \
+    "$REQUIRED_BRIEF_FAULT_METHOD"; then
+    NETWORK_FAULT_EXIT=1
+    echo "phase 2 (network-fault proofs) forced RED by brief exact-method/timeline guard"
+  fi
+
+  if ! require_exact_clean_close_control_method \
+    "$PHASE2_RESULTS_ROOT" \
+    "$PHASE2_ARTIFACTS_ROOT" \
+    "$REQUIRED_CONTROL_FAULT_CLASS" \
+    "$REQUIRED_CONTROL_FAULT_METHOD"; then
+    NETWORK_FAULT_EXIT=1
+    echo "phase 2 (network-fault proofs) forced RED by clean-close positive-control guard"
+  fi
+
   # Issue #2141: compare the preserved phase-2 JUnit XML to NETWORK_FAULT_CLASSES
   # AFTER the snapshot (later phases overwrite app/build). A skipped method or
   # a truncated class set is recorded here and refuses fault_verdict=PASS.

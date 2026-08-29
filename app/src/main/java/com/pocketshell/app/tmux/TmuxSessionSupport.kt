@@ -433,71 +433,25 @@ internal const val MaxAgentEvents: Int = 500
  */
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
+// Issue #1316: the OUTER attach-reveal ceiling. Was 30 s — the maintainer's
+// "it took forever to attach / wouldn't let me touch" felt-freeze while the
+// `list-panes` reconcile head-of-line-blocked behind a busy sibling's `-CC`
+// burst. With the reconcile now on the dedicated exec lane it returns in ms, so
+// this bound only ever fires on a genuinely stuck attach; a much shorter
+// ceiling turns that into a fast user-visible "Tap Reconnect to retry" escape
+// (→ evict lease → fresh-transport runConnect) instead of a tens-of-seconds
+// input-gated overlay. The reconcile itself is separately bounded by
+// [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS].
+internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 12_000L
+internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 
 // Issue #1316: per-reconcile exec ceiling for the attach/switch/refresh
 // `list-panes` on the dedicated exec lane. Healthy reconciles return in
 // milliseconds; this is the safety bound so a genuinely wedged/half-open
 // transport surfaces a `Failed` fast (→ retryable attach error) rather than
-// parking the reveal. Strictly smaller than the outer
-// [ATTACH_PANES_READY_TIMEOUT_MS] (which is DERIVED from it below) so the
-// reconcile-level escape fires first.
+// parking the reveal. Well under the outer [ATTACH_PANES_READY_TIMEOUT_MS] so
+// the reconcile-level escape fires first.
 internal const val RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS: Long = 6_000L
-
-/**
- * Issue #2409: worst-case wall time of the SYNCHRONOUS active-pane seed that
- * `TmuxSessionViewModel.preloadVisibleContentForNewPanes` runs INSIDE every
- * attach `reconcilePanes()` — `SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS` bounded
- * `capture-pane` round-trips (each capped at [SEED_CAPTURE_TIMEOUT_MS]) with a
- * [SEED_CAPTURE_EMPTY_RETRY_DELAY_MS] backoff between them. Every one of those
- * ceilings is genuinely reachable on a slow-but-progressing link, so this is
- * real budgeted work the outer attach ceiling has to be able to wait out — not
- * a pathological case.
- */
-internal const val ATTACH_ACTIVE_PANE_SEED_WORST_CASE_MS: Long =
-    SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS * SEED_CAPTURE_TIMEOUT_MS +
-        (SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS - 1) * SEED_CAPTURE_EMPTY_RETRY_DELAY_MS
-
-/**
- * Issue #2409: headroom over [ATTACH_PANES_READY_TIMEOUT_MS]'s derived inner
- * worst case, covering the dispatcher hops (`seedIoDispatcher` →
- * `applyOnMain`), the `list-panes` row parse/apply, and the
- * [ATTACH_PANES_READY_RETRY_MS] poll cadence. Small on purpose: the outer
- * ceiling stays a backstop, not a second budget.
- */
-internal const val ATTACH_PANES_READY_HEADROOM_MS: Long = 3_000L
-
-/**
- * The OUTER attach-reveal ceiling (`awaitPanesReadyForAttach`).
- *
- * Issue #1316 replaced a flat 30 s with a flat 12 s: the maintainer's "it took
- * forever to attach / wouldn't let me touch" felt-freeze came from the
- * `list-panes` reconcile head-of-line-blocking behind a busy sibling's `-CC`
- * burst, and a short ceiling turned that into a fast user-visible "Tap
- * Reconnect to retry" escape instead of a tens-of-seconds input-gated overlay.
- *
- * Issue #2409 — that flat 12 s was SMALLER THAN THE BOUNDED WORK IT WRAPS.
- * One `reconcilePanes()` legitimately costs up to
- * [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS] (6 s `list-panes` on the exec lane)
- * PLUS [ATTACH_ACTIVE_PANE_SEED_WORST_CASE_MS] (≈10.4 s of seed-before-reveal
- * `capture-pane` retries) = ≈16.4 s. On a slow-but-progressing link — a
- * congested cellular connection, or the nightly's bufferbloat fault fixture —
- * every inner ceiling is actually reached, so the outer bound killed the very
- * first reconcile MID-FLIGHT and the app surrendered a perfectly healthy attach
- * to `Unreachable` ("Tap Reconnect to retry"). That is the opposite of #1316's
- * intent: the escape hatch fired on a link that was merely slow, never on a
- * stuck one.
- *
- * The ceiling is therefore DERIVED from the stages it wraps rather than picked
- * independently, so shrinking an inner bound shrinks this one with it and no
- * future tuning can silently re-invert the nesting.
- * `Issue2409AttachBudgetNestingTest` is the durable guard.
- */
-internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long =
-    RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS +
-        ATTACH_ACTIVE_PANE_SEED_WORST_CASE_MS +
-        ATTACH_PANES_READY_HEADROOM_MS
-
-internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 
 /**
  * Issue #552 / #685 (Bug A): a passive tmux reader EOF during a brief foreground
@@ -545,30 +499,11 @@ internal val PASSIVE_DISCONNECT_GRACE_MS: Long = SshLeaseManager.DEFAULT_IDLE_TT
 internal const val PASSIVE_REATTACH_DIAL_HANDSHAKE_TIMEOUT_MS: Long = 15_000L
 
 /**
- * Issue #2409: headroom the passive rung's attach wrapper needs ON TOP of the
- * [ATTACH_PANES_READY_TIMEOUT_MS] call it wraps — the observer-job
- * `cancelAndJoin`s, the stale/replacement client swap, `replacement.connect()`
- * (a `-CC` attach round-trip of its own on the same slow link) and the
- * pane-producer rebind all run INSIDE the same `withTimeoutOrNull(attachMs)`.
- */
-internal const val PASSIVE_REATTACH_ATTACH_HEADROOM_MS: Long = 5_000L
-
-/**
  * Issue #1539/#1331: the ATTACH + PANES-READY budget for one rung, applied to an ALREADY-
  * HANDSHAKEN transport. A completed SSH handshake is proof the link is up, so a slow attach is
  * a reason to RETRY THE ATTACH over the same transport — never to close it and redial.
- *
- * Issue #2409 — this was a flat 10 s while the `awaitPanesReadyForAttach` call it
- * wraps owns [ATTACH_PANES_READY_TIMEOUT_MS]. An outer wrapper smaller than the
- * inner budget it wraps can NEVER let that inner stage finish: on a slow-but-
- * progressing link the rung failed at 10 s every cycle, forever, which is the
- * exact "constant budget against constant latency fails identically forever"
- * pathology #1610/#1539 diagnosed for the superseded all-inclusive 5 s clock —
- * just one nesting level up. Derived, so the two budgets can no longer drift
- * back into an inverted nesting (`Issue2409AttachBudgetNestingTest`).
  */
-internal const val PASSIVE_REATTACH_ATTACH_TIMEOUT_MS: Long =
-    ATTACH_PANES_READY_TIMEOUT_MS + PASSIVE_REATTACH_ATTACH_HEADROOM_MS
+internal const val PASSIVE_REATTACH_ATTACH_TIMEOUT_MS: Long = 10_000L
 
 /**
  * Issue #1539/#1353: the RESEED budget — and, critically, reseed is NOT part of the readiness
@@ -716,9 +651,8 @@ internal fun passiveReattachStageBudgets(
  * #1539 wired this into the rung's `!ready` exit ONLY, and #1652's storm journey proved the
  * result RED on `main` with the whole #1610 wave landed: **a fully-handshaken, provably-live
  * transport still died for a slow tail.** A stalled tail does not politely return null. The
- * `tmux has-session` preflight's INNER sshj timeout (10s) beat the rung's OUTER
- * `withTimeoutOrNull(attachMs)` (10s at the time; #2409 derived it upward, which only widens
- * the window in which the throw wins), so the identical event — a tail stage failing on a
+ * `tmux has-session` preflight's INNER sshj timeout (10s) beats the rung's OUTER
+ * `withTimeoutOrNull(attachMs)` (also 10s), so the identical event — a tail stage failing on a
  * link the handshake already proved up — is delivered as a THROWN `TmuxClientException` instead
  * of as `ready == false`. That landed in an unguarded `catch` that evicted unconditionally
  * (`evictedLease = true`, hard-coded), and the evicted lease is the SHARED per-host transport,

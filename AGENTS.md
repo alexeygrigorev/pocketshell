@@ -59,6 +59,8 @@ Full mechanics for all of these are in process.md; this is the one-line index.
 
 "Hetzner" (or "my server") is the maintainer's dev box, hostname RMTHZ (`alexey@135.181.114.209`, SSH alias `hetzner`). The orchestrator runs ON this box - `pwd` showing `/home/alexey/git/pocketshell` means we are already on it, not connecting to it. The phone's PocketShell app connects to this same box for daily use. Agent JSONL logs live in `~/.claude/projects/-home-alexey-git-pocketshell/`. Files shared from the phone via the PocketShell share-target land in `~/inbox/pocketshell/` - when asked to process the inbox, read, act, then `rm` (the maintainer wants it emptied, not archived).
 
+`~/git/aplexer` (agent multiplexer, Rust) exists solely to serve pocketshell - no separate stakeholders, no external users to protect. Once work there is reviewed/approved the same way as pocketshell code, commit and push straight to its `main` without the pocketshell PR/CI flow (it has no equivalent gate); free to make further changes there as needed without checking back first.
+
 Android SDK paths (may not be on PATH): `adb` at `/home/alexey/Android/Sdk/platform-tools/adb`, `emulator` at `/home/alexey/Android/Sdk/emulator/emulator`, SDK root `/home/alexey/Android/Sdk`, local AVD named `test`. Try these explicit paths before reporting emulator work as blocked. JVM unit tests: `scripts/full-jvm-gate.py`. Connected/emulator tests: `scripts/connected-test.sh --suffix i<issue>`. Docker/port/runbook detail: [docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md).
 
 The orchestrator's shell often lacks active `kvm` group membership, so booting an emulator directly can fail on `/dev/kvm` permissions - start one with `AVD_HOLD=1 scripts/start-local-avd.sh` instead, and never kill a pre-existing running emulator to "clean up" (it may not be re-bootable from this context).
@@ -79,7 +81,7 @@ Research/Explore agents (and any agent without an explicit worktree) see the roo
 
 ## Maintainer working style
 
-Decide-and-proceed autonomy: the maintainer wants calls made and recorded, not blocking questions - the bar for asking is genuinely irreversible + expensive + ambiguous. This is within the process (file the issue and proceed), not a license to skip it.
+Decide-and-proceed autonomy: the maintainer wants calls made and recorded, not blocking questions - the bar for asking is genuinely irreversible + expensive + ambiguous. This is within the process (file the issue and proceed), not a license to skip it. Pushing/merging work that is already reviewer-`APPROVED` or otherwise fully authorized by process.md is not itself an ask-first case (2026-08-28: asked before pushing an already-approved fix and an already-approved sibling-repo commit; the maintainer's answer was "just do it" - a routine push of finished, authorized work doesn't clear the ask bar even when it hits an unfamiliar git hiccup like a force-push block, see [docs/lessons-learned.md](docs/lessons-learned.md)).
 
 Avoid startup jargon ("dogfood" - say "install and test it"); prefer plain, concrete wording.
 

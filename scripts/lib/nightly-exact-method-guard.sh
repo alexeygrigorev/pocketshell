@@ -256,13 +256,18 @@ clean_close_control_artifact_is_valid() {
     grep -qx 'failure=none' "$file"
 }
 
-authoritative_terminal_viewport_png_is_valid() {
+# Portable PNG contract: signature, chunk framing/CRC, zlib stream, and decoded
+# scanline length, without trusting the filename or byte count. Split out of
+# authoritative_terminal_viewport_png_is_valid so the self-test can assert this
+# path DIRECTLY: on a host that ships ImageMagick, an `identify` rejection would
+# otherwise mask a vacuous Python path, which is exactly how the missing
+# exit-status check below survived (the `identify` call is optional, so its
+# absent-branch status 0 became the function's return value and every existing
+# file read as a valid PNG on ImageMagick-less hosts, i.e. on CI).
+authoritative_terminal_viewport_png_decodes_in_python() {
   local file="$1"
   [[ -f "$file" ]] || return 1
 
-  # Check the PNG signature, chunk framing/CRC, zlib stream, and decoded
-  # scanline length without trusting the filename or byte count. This keeps
-  # the guard useful on hosts that do not ship ImageMagick.
   python3 - "$file" <<'PY'
 import pathlib
 import struct
@@ -334,13 +339,34 @@ except (OSError, IndexError, struct.error, ValueError, zlib.error):
     sys.exit(1)
 sys.exit(0)
 PY
+}
 
-  # Use a full image decoder as an additional check when present. The Python
-  # path above remains the portable contract for CI/minimal review hosts.
-  if command -v identify >/dev/null 2>&1; then
+# ImageMagick is optional and is NOT installed on the CI static-guard runner, so
+# "identify is absent" is the configuration that actually ships. Route the probe
+# through one overridable seam so the self-test can exercise that configuration
+# on a developer host that does ship ImageMagick — otherwise a locally-green
+# self-test says nothing about the only host the guard really runs on.
+nightly_guard_identify_is_available() {
+  if [[ "${NIGHTLY_GUARD_FORCE_NO_IDENTIFY:-0}" == "1" ]]; then
+    return 1
+  fi
+  command -v identify >/dev/null 2>&1
+}
+
+authoritative_terminal_viewport_png_is_valid() {
+  local file="$1"
+  [[ -f "$file" ]] || return 1
+
+  # The Python decoder is the portable contract for CI/minimal review hosts, so
+  # its exit status is load-bearing and must be checked explicitly.
+  authoritative_terminal_viewport_png_decodes_in_python "$file" || return 1
+
+  # Use a full image decoder as an additional check when present.
+  if nightly_guard_identify_is_available; then
     identify -quiet -format '%m %w %h' "$file" 2>/dev/null \
       | grep -Eq '^PNG [1-9][0-9]* [1-9][0-9]*$' || return 1
   fi
+  return 0
 }
 
 authoritative_terminal_artifact_pair_is_valid() {
@@ -425,6 +451,75 @@ require_exact_clean_close_control_method() {
   fi
   echo "PASS: exact clean-close positive control executed once, unskipped, successful, with an observer that demonstrably fired: $class_name#$method_name"
   return 0
+}
+
+# Self-test helper: derive a deterministic malformed PNG from a valid one.
+# Each mode targets a distinct branch of the portable decoder so a single
+# lenient branch cannot make the whole PNG check vacuous.
+nightly_guard_selftest_mutate_png() {
+  local source_png="$1" target_png="$2" mode="$3"
+  python3 - "$source_png" "$target_png" "$mode" <<'PY'
+import pathlib
+import struct
+import sys
+import zlib
+
+source, target, mode = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+data = bytearray(source.read_bytes())
+
+
+def first_idat():
+    pos = 8
+    while pos + 12 <= len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        if data[pos + 4:pos + 8] == b"IDAT" and length:
+            return pos, length
+        pos += 12 + length
+    raise SystemExit("missing IDAT in valid PNG self-test fixture")
+
+
+def rewrite_idat(payload):
+    pos, length = first_idat()
+    chunk = struct.pack(">I", len(payload)) + b"IDAT" + payload
+    chunk += struct.pack(">I", zlib.crc32(b"IDAT" + payload) & 0xffffffff)
+    return data[:pos] + bytearray(chunk) + data[pos + 12 + length:]
+
+
+if mode == "idat-crc-only":
+    # Payload and zlib stream stay valid; only the stored CRC is wrong, so the
+    # CRC branch is the ONLY branch that can reject this one.
+    pos, length = first_idat()
+    data[pos + 8 + length] ^= 0xff
+elif mode == "idat-bitflip":
+    # Corrupt the payload and deliberately leave the stored CRC stale.
+    pos, _ = first_idat()
+    data[pos + 8] ^= 0xff
+elif mode == "idat-bitflip-crc-fixed":
+    # Corrupt the zlib stream but repair the CRC, so only the decompress
+    # branch can reject it.
+    pos, length = first_idat()
+    payload = bytearray(data[pos + 8:pos + 8 + length])
+    payload[0] ^= 0xff
+    data = rewrite_idat(bytes(payload))
+elif mode == "idat-truncated-scanline":
+    # Valid CRC and valid zlib stream, but one byte short of the declared
+    # scanline geometry, so only the decoded-length branch can reject it.
+    data = rewrite_idat(zlib.compress(b"\x00" * 1))
+elif mode == "signature":
+    data[1] ^= 0xff
+elif mode == "truncated":
+    data = data[:len(data) - 5]
+elif mode == "trailing-garbage":
+    data.extend(b"pocketshell-trailing-bytes")
+elif mode == "text":
+    data = bytearray(b"not a png, just a text artifact\n")
+elif mode == "empty":
+    data = bytearray()
+else:
+    raise SystemExit("unknown PNG mutation mode: " + mode)
+
+target.write_bytes(bytes(data))
+PY
 }
 
 nightly_exact_method_guard_self_test() {
@@ -584,32 +679,71 @@ EOF
   echo "ok   [typed timeline mutation] forbidden event is rejected"
 
   local malformed_png="$artifacts_root/device/issue342-network-faults/brief-post-restore-viewport.png"
+  local png_mutation png_mutation_mode png_mutation_label png_identify_mode
   cp "$malformed_png" "$malformed_png.orig"
-  python3 - "$malformed_png" <<'PY'
-import pathlib
-import struct
-import sys
-
-path = pathlib.Path(sys.argv[1])
-data = bytearray(path.read_bytes())
-pos = 8
-while pos + 12 <= len(data):
-    length = struct.unpack(">I", data[pos:pos + 4])[0]
-    chunk_type = data[pos + 4:pos + 8]
-    if chunk_type == b"IDAT" and length:
-        data[pos + 8] ^= 0xff
-        path.write_bytes(data)
-        break
-    pos += 12 + length
-else:
-    raise SystemExit("missing IDAT in valid PNG self-test fixture")
-PY
-  if authoritative_terminal_viewport_png_is_valid "$malformed_png"; then
-    echo "SELF-TEST FAIL: malformed PNG mutation passed the decoder" >&2
+  # The valid fixture must be accepted first, otherwise every rejection below
+  # could be a false negative from a broken fixture. Check both host shapes:
+  # with ImageMagick (developer boxes) and without it (the CI runner).
+  authoritative_terminal_viewport_png_decodes_in_python "$malformed_png.orig" || {
+    echo "SELF-TEST FAIL: valid viewport PNG rejected by the portable decoder" >&2
     return 1
-  fi
+  }
+  for png_identify_mode in 0 1; do
+    export NIGHTLY_GUARD_FORCE_NO_IDENTIFY="$png_identify_mode"
+    authoritative_terminal_viewport_png_is_valid "$malformed_png.orig" || {
+      echo "SELF-TEST FAIL: valid viewport PNG rejected by the decoder (force_no_identify=$png_identify_mode)" >&2
+      return 1
+    }
+    authoritative_terminal_artifact_pair_is_valid "$artifacts_root" brief-post-restore || {
+      echo "SELF-TEST FAIL: valid viewport pair rejected (force_no_identify=$png_identify_mode)" >&2
+      return 1
+    }
+  done
+  export NIGHTLY_GUARD_FORCE_NO_IDENTIFY=0
+  for png_mutation in \
+    'idat-crc-only|wrong IDAT chunk CRC over an intact payload' \
+    'idat-bitflip|stale IDAT chunk CRC' \
+    'idat-bitflip-crc-fixed|corrupt IDAT zlib stream with a recomputed CRC' \
+    'idat-truncated-scanline|short decoded scanline with a recomputed CRC' \
+    'signature|corrupt PNG signature' \
+    'truncated|truncated chunk stream' \
+    'trailing-garbage|bytes appended after IEND' \
+    'text|plain text with a .png name' \
+    'empty|empty file'; do
+    png_mutation_mode="${png_mutation%%|*}"
+    png_mutation_label="${png_mutation##*|}"
+    nightly_guard_selftest_mutate_png \
+      "$malformed_png.orig" "$malformed_png" "$png_mutation_mode" || {
+      echo "SELF-TEST FAIL: could not build PNG mutant: $png_mutation_label" >&2
+      return 1
+    }
+    # Assert the portable Python decoder DIRECTLY, not only through the wrapper:
+    # it is the only decoder present on the CI runner.
+    if authoritative_terminal_viewport_png_decodes_in_python "$malformed_png"; then
+      echo "SELF-TEST FAIL: malformed PNG mutation passed the portable decoder: $png_mutation_label" >&2
+      return 1
+    fi
+    # Then assert the wrapper and the pair check under BOTH host shapes. The
+    # force_no_identify=1 pass is the load-bearing one: it is the CI runner's
+    # configuration, and it is where an unchecked Python exit status turns the
+    # whole PNG check vacuous while an ImageMagick-equipped host stays green.
+    for png_identify_mode in 0 1; do
+      export NIGHTLY_GUARD_FORCE_NO_IDENTIFY="$png_identify_mode"
+      if authoritative_terminal_viewport_png_is_valid "$malformed_png"; then
+        echo "SELF-TEST FAIL: malformed PNG mutation passed the decoder (force_no_identify=$png_identify_mode): $png_mutation_label" >&2
+        return 1
+      fi
+      if authoritative_terminal_artifact_pair_is_valid "$artifacts_root" brief-post-restore; then
+        echo "SELF-TEST FAIL: malformed PNG mutation passed the artifact pair check (force_no_identify=$png_identify_mode): $png_mutation_label" >&2
+        return 1
+      fi
+    done
+    export NIGHTLY_GUARD_FORCE_NO_IDENTIFY=0
+    cp "$malformed_png.orig" "$malformed_png"
+  done
   mv "$malformed_png.orig" "$malformed_png"
-  echo "ok   [PNG mutation] malformed authoritative viewport is rejected"
+  unset NIGHTLY_GUARD_FORCE_NO_IDENTIFY
+  echo "ok   [PNG mutation] malformed authoritative viewport is rejected on hosts with and without ImageMagick"
 
   rm "$artifacts_root/device/issue342-network-faults/brief-post-restore-viewport.png"
   if require_exact_brief_ride_through_method \

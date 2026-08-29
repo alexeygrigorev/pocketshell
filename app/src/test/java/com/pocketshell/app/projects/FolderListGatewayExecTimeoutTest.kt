@@ -25,6 +25,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.io.InputStream
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+/**
+ * `execSections` appends the marker to each section command. The two stable
+ * enumeration command heads therefore disambiguate the required landing batch
+ * from optional sectioned probes while the marker remains the selection anchor.
+ */
+private fun isRequiredLandingEnumeration(command: String): Boolean =
+    command.contains(SshFolderListGateway.ENUMERATION_MARKER) &&
+        command.contains(SshFolderListGateway.LIST_SESSIONS_COMMAND.substringBefore(" -F")) &&
+        command.contains(SshFolderListGateway.LIST_PANES_COMMAND.substringBefore(" -F"))
 
 /**
  * Issue #470: a session-enumeration SSH-exec probe whose output read never
@@ -75,7 +87,7 @@ class FolderListGatewayExecTimeoutTest {
             cause is FolderListExecTimeoutException,
         )
         // The gateway returned without blocking on the still-wedged read.
-        assertTrue("first exec was attempted", session.firstExecStarted.isCompleted)
+        assertTrue("the wedged exec was attempted", session.wedgedExecStarted.isCompleted)
         // Issue #1641 (D22 hard-cut): this test used to ALSO assert the gateway
         // CLOSED the wedged session here, "so no orphaned exec channel / blocking
         // read thread outlives the failed probe (cancellation alone can't
@@ -195,7 +207,14 @@ class FolderListGatewayExecTimeoutTest {
      */
     @Test
     fun wedgedExecStillEvictsAndRetriesOnAFreshTransport() = runBlocking {
-        val wedged = WedgingSshSession(wedgeFirstExec = true)
+        // Issue #2359: #2348 starts the optional pocketshell enumerator in
+        // parallel with the required landing batch. Wedge the required
+        // command by its marker, not whichever concurrent child happens to
+        // reach the fake first.
+        val wedged = WedgingSshSession(
+            wedgeRequiredEnumeration = true,
+            releaseRequiredEnumerationAfterOptional = true,
+        )
         val healthy = WedgingSshSession(wedgeFirstExec = false)
         val connector = SequenceConnector(listOf(wedged, healthy))
         val gateway = SshFolderListGateway(
@@ -213,7 +232,35 @@ class FolderListGatewayExecTimeoutTest {
             watchedRoots = WATCHED_ROOTS,
         )
 
-        assertTrue("the wedged exec must have been attempted", wedged.firstExecStarted.isCompleted)
+        assertTrue("the wedged exec must have been attempted", wedged.wedgedExecStarted.isCompleted)
+        val observedCommands = wedged.snapshotExecCommands()
+        val requiredEnumerationCommands = observedCommands.filter(::isRequiredLandingEnumeration)
+        assertEquals(
+            "the fake must observe one required landing enumeration; " +
+                "observed exec commands=$observedCommands",
+            1,
+            requiredEnumerationCommands.size,
+        )
+        val optionalEnumeratorIndex = observedCommands.indexOfFirst { command ->
+            command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND)
+        }
+        val requiredEnumerationIndex = observedCommands.indexOfFirst { command ->
+            command.contains(SshFolderListGateway.ENUMERATION_MARKER)
+        }
+        assertTrue(
+            "the deterministic fixture must record the concurrent optional JSON " +
+                "exec before the required landing exec; observed exec commands=$observedCommands",
+            optionalEnumeratorIndex >= 0 &&
+                requiredEnumerationIndex >= 0 &&
+                optionalEnumeratorIndex < requiredEnumerationIndex,
+        )
+        assertEquals(
+            "the required landing enumeration, not the optional concurrent " +
+                "pocketshell enumerator, must be the wedged command; " +
+                "observed exec commands=$observedCommands",
+            requiredEnumerationCommands.single(),
+            wedged.wedgedCommand,
+        )
         assertEquals(
             "a wedged bounded exec must still EVICT the poisoned lease and re-dial " +
                 "a FRESH transport — recovery must not be over-guarded away (#1641 G6)",
@@ -286,7 +333,7 @@ class FolderListGatewayExecTimeoutTest {
                 watchedRoots = WATCHED_ROOTS,
             )
 
-            assertTrue("the wedged poll exec must have been attempted", shared.firstExecStarted.isCompleted)
+            assertTrue("the wedged poll exec must have been attempted", shared.wedgedExecStarted.isCompleted)
             assertFalse(
                 "a wedged POLL exec must NOT close a shared transport an ACTIVE session " +
                     "still holds — that yank is the #1610 storm entry trigger (#1641/#758)",
@@ -337,14 +384,18 @@ class FolderListGatewayExecTimeoutTest {
     }
 
     /**
-     * Fake session whose FIRST `exec` (the `tmux list-sessions` probe) can
-     * be made to wedge forever via [awaitCancellation] — simulating a read
-     * that never reaches EOF. Connect/auth "succeeded" (isConnected=true),
-     * exactly the #470 failure shape. Subsequent execs return empty success
-     * so the healthy path enumerates to a `Sessions` result.
+     * Fake session whose selected `exec` can wedge forever via
+     * [awaitCancellation] — simulating a read that never reaches EOF.
+     * Connect/auth "succeeded" (isConnected=true), exactly the #470 failure
+     * shape. [wedgeFirstExec] preserves the original single-threaded fixture;
+     * [wedgeRequiredEnumeration] is the deterministic #2359 variant because
+     * #2348 now starts an optional enumerator concurrently with the required
+     * landing batch. The marker selection is one-shot and atomic, so command
+     * scheduling cannot change which required exec is wedged. Subsequent execs
+     * return empty success so the healthy path enumerates to a `Sessions` result.
      */
     private class WedgingSshSession(
-        private val wedgeFirstExec: Boolean,
+        private val wedgeFirstExec: Boolean = false,
         /**
          * Issue #1641: wedge EVERY exec, not just the first — a PERSISTENTLY
          * unresponsive host. Needed now that a bounded-exec timeout is a
@@ -353,31 +404,64 @@ class FolderListGatewayExecTimeoutTest {
          * express "this host stays wedged".
          */
         private val wedgeEveryExec: Boolean = false,
+        /**
+         * Issue #2359: wedge the required landing enumeration by its stable
+         * section marker. The optional `pocketshell sessions --json` exec is
+         * launched concurrently, so call order is not a valid fixture oracle.
+         */
+        private val wedgeRequiredEnumeration: Boolean = false,
+        /**
+         * Test-only barrier that records the optional JSON command before the
+         * required command proceeds. This makes the old first-call mutant
+         * deterministically select the wrong concurrent command without a
+         * sleep or scheduler-dependent assertion.
+         */
+        private val releaseRequiredEnumerationAfterOptional: Boolean = false,
     ) : SshSession {
         val execCommands: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf<String>())
-        val firstExecStarted = CompletableDeferred<Unit>()
+        val wedgedExecStarted = CompletableDeferred<Unit>()
+        private val markerWedgeSelected = AtomicBoolean(false)
+        private val selectedWedgeCommand = AtomicReference<String?>(null)
+        private val optionalEnumeratorStarted = CompletableDeferred<Unit>()
+        val wedgedCommand: String?
+            get() = selectedWedgeCommand.get()
         @Volatile
         var closed: Boolean = false
         private val execCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        fun snapshotExecCommands(): List<String> = synchronized(execCommands) { execCommands.toList() }
 
         override val isConnected: Boolean
             get() = !closed
 
         override suspend fun exec(command: String): ExecResult {
+            val isRequiredEnumeration = isRequiredLandingEnumeration(command)
+            val isOptionalEnumerator = command.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND)
+            if (releaseRequiredEnumerationAfterOptional && isRequiredEnumeration) {
+                // The real gateway launches this optional JSON exec before
+                // entering the required batch. Wait for that command to be
+                // recorded so this fixture exercises both concurrent paths
+                // without a sleep or scheduler-dependent ordering.
+                optionalEnumeratorStarted.await()
+            }
             val index = execCount.getAndIncrement()
             execCommands += command
-            if (wedgeEveryExec) {
-                firstExecStarted.complete(Unit)
-                awaitCancellation()
+            if (releaseRequiredEnumerationAfterOptional && isOptionalEnumerator) {
+                optionalEnumeratorStarted.complete(Unit)
             }
-            if (index == 0) {
-                firstExecStarted.complete(Unit)
-                if (wedgeFirstExec) {
-                    // Never returns — the read is wedged. The gateway's
-                    // bounded timeout must abandon this and surface the
-                    // failure rather than hang.
-                    awaitCancellation()
-                }
+            val selectedByRequiredMarker = wedgeRequiredEnumeration &&
+                isRequiredEnumeration &&
+                markerWedgeSelected.compareAndSet(false, true)
+            val shouldWedge = wedgeEveryExec ||
+                (index == 0 && wedgeFirstExec) ||
+                selectedByRequiredMarker
+            if (shouldWedge) {
+                selectedWedgeCommand.compareAndSet(null, command)
+                wedgedExecStarted.complete(Unit)
+                // Never returns — the read is wedged. The gateway's
+                // bounded timeout must abandon this and surface the
+                // failure rather than hang.
+                awaitCancellation()
             }
             return ExecResult(stdout = "", stderr = "", exitCode = 0)
         }

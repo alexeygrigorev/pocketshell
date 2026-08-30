@@ -4,10 +4,12 @@ import android.os.SystemClock
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.projects.FOLDER_LIST_CONTENT_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_RETRY_TAG
 import kotlinx.coroutines.runBlocking
@@ -93,11 +95,28 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
         // The cold dial: host-row tap -> folder/session enumeration -> tmux attach,
-        // every connect riding the degraded link. attachToSession throws if the
+        // every connect riding the degraded link. openSessionFromList throws if the
         // picker wedges (session row never lists) or the terminal never attaches
         // (dial aborted) — so a green attach IS the within-budget proof.
+        //
+        // Issue #2409 (round 2): this used to call attachToSession(), whose
+        // enumeration wait has no tolerance for the app's OWN retryable
+        // folder-list panel. Reproduced on this box: at this severity (350 ±200 ms
+        // one-way, RTT 0.7–1.1 s) the FolderListGateway bounded exec — a hard
+        // 3.5 s TOTAL budget for ~2–3 round-trips — sits ON its cliff, so the
+        // enumeration intermittently lands on "Couldn't refresh the project tree —
+        // tap to retry" and this DIAL proof died in setup with
+        // `folder-list:content=0`, never reaching the thing it asserts. That is a
+        // second, distinct #2409 recurrence mechanism for this same class. The
+        // enumeration is not what #1064 proves, so heal it through the app's own
+        // Retry affordance and RECORD the taps (see [settleFolderListToleratingRetry]).
         val dialStart = SystemClock.elapsedRealtime()
-        attachToSession(hostRowTag, hostName, sessionName)
+        waitForHostRow(hostRowTag)
+        compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        val folderListRetryTaps = settleFolderListToleratingRetry()
+        recordTiming("cold_dial_folder_list_retry_taps", folderListRetryTaps.toLong())
+        openSessionFromList(hostName, sessionName)
         val coldDialMs = SystemClock.elapsedRealtime() - dialStart
         recordTiming("cold_dial_attach_ms", coldDialMs)
 
@@ -147,9 +166,140 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
                 "toxics=latency ${COLD_DIAL_LATENCY_MS}ms +/-${COLD_DIAL_JITTER_MS}ms both dirs, " +
                     "bandwidth ${COLD_DIAL_BANDWIDTH_KBPS}KB/s downstream",
                 "cold_dial_attach_ms=$coldDialMs",
+                "cold_dial_folder_list_retry_taps=$folderListRetryTaps",
                 "budget=SshConnection.DEFAULT_TIMEOUT_MS=30000ms, " +
                     "SshLeaseManager.DEFAULT_CONNECT_TIMEOUT_MILLIS=35000ms",
                 "expectation=slow-but-progressing cold dial completes within budget, no Disconnected band, usable",
+            ),
+        )
+        Unit
+    } }
+
+    /**
+     * (1b) Issue #2409 — the SEED-LADDER-SATURATED cold attach.
+     *
+     * [coldDialUnderBufferbloatCompletesWithinBudget] above reproduced the
+     * defect on the nightly emulator but PASSED on a fast dev box, because at
+     * its severity the pre-reveal seed ladder happened to land its `capture-pane`
+     * on the 3rd of 4 attempts (measured locally: panes-ready in 10.07 s against
+     * the then-12 s ceiling — 84 % of budget, i.e. green by 1.9 s of luck). A
+     * proof whose verdict depends on which host runs it is not a proof; per
+     * D32-G10 the fixture that creates the non-happy state has to be part of it.
+     *
+     * So this case PINS the state instead of hoping for it. The dial and folder
+     * enumeration ride the WiFi-baseline severity ([SETUP_ONE_WAY_LATENCY_MS],
+     * RTT ≈ 150 ms — that constant's KDoc explains why it is NOT the cold-dial
+     * severity), and the link is retuned IN PLACE to [ATTACH_SEED_LATENCY_MS] at
+     * the last possible moment — after the picker has settled, immediately before
+     * the session row is tapped. At that severity an exec-lane round-trip costs
+     * ≈4 s, which is deterministically:
+     *
+     *  - ABOVE the seed `capture-pane` ceiling (`SEED_CAPTURE_TIMEOUT_MS`, 2.5 s),
+     *    so EVERY seed attempt times out; and
+     *  - BELOW the reconcile ceiling (`RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS`, 6 s),
+     *    so `list-panes` still SUCCEEDS and the link is genuinely
+     *    slow-but-progressing, never wedged.
+     *
+     * Before the fix the pre-reveal seed took the FULL
+     * `SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS` force-heal ladder, so one
+     * `reconcilePanes()` cost ≈14 s of honest, budgeted work inside a flat 12 s
+     * `ATTACH_PANES_READY_TIMEOUT_MS`: the app cancelled it mid-flight and went
+     * `Attaching -> Unreachable` with "Tap Reconnect to retry" — the exact
+     * nightly failure. With the pre-reveal seed bounded to
+     * `ATTACH_ACTIVE_PANE_SEED_ATTEMPTS` (and the ceiling now DERIVED from that,
+     * still 12 s), the same attach fits and completes — while the never-reveal-
+     * black gate and the #662 blank-pane net keep healing the pane afterwards,
+     * outside the ceiling.
+     *
+     * The elapsed-time assertion below is the anti-vacuous pin: the attach still
+     * has to take longer than a clean-link attach possibly could, so a fixture
+     * that stopped applying its severity fails here rather than passing for the
+     * wrong reason.
+     */
+    @Test
+    fun coldAttachWhoseSeedLadderIsSaturatedStillCompletesInsteadOfSurrendering() { runBlocking {
+        assumeNetworkFaultProofsEnabled()
+
+        val key = readFixtureKey()
+        val marker = "cq${System.currentTimeMillis().toString(36).takeLast(5)}"
+        val sessionName = "issue2409-seed-$marker"
+        val hostName = "Issue2409 Seed $marker"
+
+        prepareProxyAndRemoteSession(
+            key = key,
+            sessionName = sessionName,
+            readyText = "ISSUE2409-SEED-READY-$marker",
+        )
+        val hostRowTag = seedNetworkFaultHost(key, hostName)
+
+        // SETUP severity — see [SETUP_ONE_WAY_LATENCY_MS]. A toxic IS installed
+        // (so the attach-phase retune below is an in-place update on the live
+        // link, never a clean window), but at the WiFi baseline, which is the
+        // documented ZERO-bounded-exec-overrun extreme.
+        val proxy = toxiproxy()
+        proxy.addSymmetricLatency(oneWayMs = SETUP_ONE_WAY_LATENCY_MS)
+        recordTiming("setup_one_way_latency_ms", SETUP_ONE_WAY_LATENCY_MS.toLong())
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        waitForHostRow(hostRowTag)
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+
+        // Settle the enumeration BEFORE the attach severity is raised, healing a
+        // retryable folder-list failure through the app's own Retry affordance
+        // (see [settleFolderListToleratingRetry]). Recorded, never silent.
+        val folderListRetryTaps = settleFolderListToleratingRetry()
+        recordTiming("folder_list_retry_taps", folderListRetryTaps.toLong())
+
+        val attachStart = SystemClock.elapsedRealtime()
+        var attachSeverityAppliedAtMs = 0L
+        openSessionFromList(hostName, sessionName) {
+            // The fixture: retune the LIVE toxic in place (no clean window) so the
+            // attach — and only the attach — rides the seed-saturating severity.
+            proxy.updateJitterLatency(latencyMs = ATTACH_SEED_LATENCY_MS, jitterMs = 0)
+            attachSeverityAppliedAtMs = SystemClock.elapsedRealtime()
+            recordTiming("attach_seed_latency_ms", ATTACH_SEED_LATENCY_MS.toLong())
+        }
+        val attachMs = SystemClock.elapsedRealtime() - attachSeverityAppliedAtMs
+        recordTiming("saturated_seed_attach_ms", attachMs)
+        recordTiming("saturated_seed_total_ms", SystemClock.elapsedRealtime() - attachStart)
+
+        // LOAD-BEARING: the app must not surrender a healthy attach. openSessionFromList
+        // throws with the VM's real connection status if the terminal never attached
+        // (#2409's harness fix), and a settled Failed band is the rendered form of the
+        // same give-up.
+        assertNoDisconnectBand("cold-attach-with-saturated-seed-ladder")
+
+        // Anti-vacuous: the retune genuinely engaged. At ${ATTACH_SEED_LATENCY_MS}ms
+        // one way an exec round-trip costs ≈4s, and the attach pays several of them
+        // (-CC connect, list-panes, the seed capture that must time out, the reveal
+        // gate's re-captures). A clean-link attach here is ~1s, so a value under
+        // this floor means the toxic never applied — the exact way the sibling above
+        // passed on a fast box while failing nine nightly runs.
+        assertTrue(
+            "expected the ${ATTACH_SEED_LATENCY_MS}ms one-way retune to make the attach take at " +
+                "least ${SATURATED_ATTACH_MIN_EXPECTED_MS}ms (that is what makes this a " +
+                "regression pin rather than a clean-link attach); attach took ${attachMs}ms",
+            attachMs >= SATURATED_ATTACH_MIN_EXPECTED_MS,
+        )
+
+        waitForClientCountAtMost(key, sessionName, max = 1, label = "saturated-seed live session")
+
+        writeSummary(
+            testName = "ColdDialUnderBandwidthLimitE2eTest#saturatedSeedLadder",
+            lines = listOf(
+                "session=$sessionName",
+                "marker=$marker",
+                "scenario=dial + enumeration at the WiFi baseline " +
+                    "(${SETUP_ONE_WAY_LATENCY_MS}ms one-way), then retune the " +
+                    "LIVE toxic to ${ATTACH_SEED_LATENCY_MS}ms one-way immediately before the " +
+                    "session-row tap so every seed capture-pane exceeds its 2.5s ceiling while " +
+                    "list-panes stays under its 6s ceiling",
+                "setup_one_way_latency_ms=$SETUP_ONE_WAY_LATENCY_MS",
+                "folder_list_retry_taps=$folderListRetryTaps",
+                "saturated_seed_attach_ms=$attachMs",
+                "expectation=the attach completes; the app must NOT go Attaching -> Unreachable " +
+                    "on a link that is merely slow (#2409)",
             ),
         )
         Unit
@@ -226,6 +376,48 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
         Unit
     } }
 
+    /**
+     * Issue #2409 (round 2) — settle the host-detail folder list to CONTENT,
+     * healing a RETRYABLE enumeration failure through the app's own Retry
+     * affordance, and report how many taps that took.
+     *
+     * The enumeration is explicitly NOT what this case proves (the attach is),
+     * and `FolderListGateway`'s bounded exec is a hard 3.5 s TOTAL budget
+     * (`BoundedSessionExec.execBounded`, #1641) with NO auto-retry behind it:
+     * once it abandons, the picker parks on [FOLDER_LIST_ERROR_TAG] until a
+     * human (or this helper) taps Retry. On a contended emulator the cold-start
+     * JIT/first-compose of `FolderListScreen` can starve that read's IO worker
+     * long enough to blow the budget on its own — which reddens the ATTACH proof
+     * in its SETUP, producing an artifact indistinguishable from a fixture
+     * outage. Healing it here keeps the failure signal of this test attributable
+     * to the attach.
+     *
+     * This tolerates only the app's OWN advertised recovery path, bounded to
+     * [FOLDER_LIST_MAX_RETRY_TAPS] taps, and the count is recorded as
+     * `folder_list_retry_taps` in the timings + summary — so a fixture that
+     * starts needing retries is VISIBLE in the artifact rather than silently
+     * masked. The retryability of that panel is itself owned (and asserted) by
+     * [stalledColdDialFailsCleanlyToRetryablePickerWithoutWedge] below.
+     */
+    private fun settleFolderListToleratingRetry(): Int {
+        var retryTaps = 0
+        val deadline = SystemClock.elapsedRealtime() + FOLDER_LIST_SETTLE_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (hasTag(FOLDER_LIST_CONTENT_TAG)) return retryTaps
+            if (hasTag(FOLDER_LIST_ERROR_TAG) && retryTaps < FOLDER_LIST_MAX_RETRY_TAPS) {
+                compose.onNodeWithTag(FOLDER_LIST_RETRY_TAG, useUnmergedTree = true).performClick()
+                retryTaps++
+            }
+            SystemClock.sleep(FOLDER_LIST_SETTLE_POLL_MS)
+        }
+        // Deliberately NOT an assertion: openSessionFromList's own diagnostic
+        // wait runs next and produces the richer failure report (tag/text probes).
+        return retryTaps
+    }
+
+    private fun hasTag(tag: String): Boolean =
+        compose.onAllNodesWithTag(tag, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+
     private fun waitForHostRow(hostRowTag: String) {
         compose.waitUntil(timeoutMillis = TerminalTestTimeouts.screenRenderPresenceTimeoutMs()) {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
@@ -258,5 +450,100 @@ class ColdDialUnderBandwidthLimitE2eTest : NetworkFaultProofBase() {
         // out and surfaced its clean failure, but well under the 300s per-test
         // ci-journey watchdog.
         const val STALL_FAIL_TIMEOUT_MS: Long = 60_000L
+
+        /**
+         * Issue #2409 — one-way latency applied to the ATTACH phase only (see
+         * [coldAttachWhoseSeedLadderIsSaturatedStillCompletesInsteadOfSurrendering]).
+         *
+         * An exec-lane round-trip is roughly `3 x RTT + fixed` = `6 x latency +
+         * ~0.4s`. Measured at the cold-dial 350ms severity a seed capture costs
+         * ≈2.5s — right ON the seed ceiling, which is exactly why the outcome
+         * flipped with the host. 600ms puts it at ≈4s: unambiguously ABOVE the
+         * 2.5s seed ceiling (every seed attempt times out) and unambiguously
+         * BELOW the 6s reconcile ceiling (`list-panes` still succeeds, so the
+         * link is slow, not wedged). Jitter is 0 on purpose — this fixture must
+         * be deterministic, not realistic; the sibling case above owns realism.
+         */
+        const val ATTACH_SEED_LATENCY_MS: Int = 600
+
+        /**
+         * Issue #2409 (round 2) — the SETUP-phase one-way latency for
+         * [coldAttachWhoseSeedLadderIsSaturatedStillCompletesInsteadOfSurrendering],
+         * i.e. why its dial + enumeration run at the WiFi baseline rather than at
+         * the cold-dial severity.
+         *
+         * Round 1 applied `addJitterLatency(350ms ±200ms)` before the activity
+         * launch, mirroring the sibling. That made the case ~57 % red on the
+         * emulator — and every failure was in SETUP, in the folder/session
+         * enumeration, before the fault under test was applied:
+         *
+         * ```
+         * W/PsFolderProbe: folder-list SSH exec read made no progress within 3500ms; ABANDONING
+         * AssertionError: Timed out ... waiting for host-detail folder list ... folder-list:content=0
+         * ```
+         *
+         * `FolderListGateway.execBounded` is a 3.5 s TOTAL budget for a
+         * channel-open + exec + read, i.e. ~2–3 round-trips plus fixed cost —
+         * `ToxiproxyControl.addMobileProfile`'s KDoc pins exactly this
+         * arithmetic. At 350 ±200 ms one-way the RTT is 0.7–1.1 s, so that exec
+         * costs ~2.5–3.5 s: sitting ON the cliff, with the cold-start
+         * JIT/first-compose of `FolderListScreen` (13 MB of compiler allocation
+         * in the failing logcat) enough to tip it over. The setup severity was
+         * therefore an undeclared second fault, racing a budget this case does
+         * not test.
+         *
+         * [ToxiproxyControl.WIFI_ONE_WAY_LATENCY_MS] is the documented
+         * under-threshold extreme of that same variable (RTT ≈ 150 ms, "a
+         * classify at this RTT never overruns the 3.5 s bound"): the enumeration
+         * exec costs a few hundred ms against a 3.5 s budget, ~10× of margin. A
+         * toxic is still INSTALLED, which matters — the attach-phase
+         * `updateJitterLatency` retunes it IN PLACE on the established link, so
+         * there is still no clean window for the round-trip under test to slip
+         * through (that was round 1's reason for the in-place update, and it is
+         * preserved).
+         *
+         * Dropping the setup toxic to zero would have been the other option; a
+         * live-but-benign toxic keeps the in-place-retune property and is
+         * strictly closer to the original intent.
+         */
+        const val SETUP_ONE_WAY_LATENCY_MS: Int = ToxiproxyControl.WIFI_ONE_WAY_LATENCY_MS
+
+        /**
+         * Issue #2409 (round 2) — bound for [settleFolderListToleratingRetry].
+         * Comfortably covers two 3.5 s bounded-exec attempts plus the app's own
+         * evict-and-retry, and stays well under the 300 s per-test ci-journey
+         * watchdog. Matches the picker budget `openSessionFromList` uses next.
+         */
+        const val FOLDER_LIST_SETTLE_TIMEOUT_MS: Long = 60_000L
+
+        /** Poll cadence for [settleFolderListToleratingRetry]. */
+        const val FOLDER_LIST_SETTLE_POLL_MS: Long = 250L
+
+        /**
+         * At most two taps on the app's own Retry affordance. Enough to absorb a
+         * cold-start stall; too few to hide a genuinely broken enumeration (which
+         * would exhaust them and fall through to `openSessionFromList`'s
+         * diagnostic failure).
+         */
+        const val FOLDER_LIST_MAX_RETRY_TAPS: Int = 2
+
+        /**
+         * Issue #2409 — anti-vacuous floor for the saturated-seed case: the
+         * attach phase measured from the in-place toxic retune.
+         *
+         * At [ATTACH_SEED_LATENCY_MS] one-way an exec-lane round-trip costs ≈4 s
+         * and the attach pays several serially (`-CC` connect, `list-panes`, the
+         * seed capture that must reach its 2.5 s ceiling, then the reveal gate's
+         * re-captures), so it cannot come in near a clean-link attach (~1 s here)
+         * unless the toxic silently failed to apply. Measured 15–40 s on the
+         * emulator with the fix in place, so this floor has real margin and is a
+         * fixture-engagement check, not a timing race.
+         *
+         * It is deliberately NOT "the attach must exceed the old 12 s ceiling":
+         * the fix SHRINKS the pre-reveal seed, so the panes-ready stage now
+         * finishes well inside that ceiling. Asserting the old shape would pin the
+         * defect, not the fix.
+         */
+        const val SATURATED_ATTACH_MIN_EXPECTED_MS: Long = 12_000L
     }
 }

@@ -6,6 +6,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
@@ -17,6 +18,7 @@ import java.io.File
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.EmptyCoroutineContext
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainDispatcherRuleTest {
@@ -173,6 +175,61 @@ class MainDispatcherRuleTest {
                     assertion,
                     Description.createTestDescription(javaClass, "foreign-main-construction-$iteration"),
                 ).evaluate()
+            }
+        }
+    }
+
+    @Test
+    fun teardownLeavesMainDispatchableSoAStragglerCannotPoisonASibling() {
+        // Issue #2413: `Dispatchers.resetMain()` leaves Main *missing* in a
+        // looper-less JVM test, so a continuation that captured Main before
+        // teardown throws when it resumes — an uncaught coroutine exception
+        // kotlinx-coroutines-test then replays against an arbitrary innocent
+        // sibling as `UncaughtExceptionsBeforeTest`.
+        MainDispatcherTestIsolation.withOwnership {
+            MainDispatcherStragglers.drain()
+            try {
+                MainDispatcherRule(StandardTestDispatcher(TestCoroutineScheduler())).apply(
+                    object : Statement() {
+                        override fun evaluate() = Unit
+                    },
+                    Description.createTestDescription(javaClass, "post-teardown-owner"),
+                ).evaluate()
+
+                var executed = false
+                val dispatchFailure = runCatching {
+                    Dispatchers.Main.dispatch(EmptyCoroutineContext) { executed = true }
+                }.exceptionOrNull()
+
+                assertNull(
+                    "resuming on Main after teardown must not throw: " +
+                        dispatchFailure?.stackTraceToString(),
+                    dispatchFailure,
+                )
+                assertFalse(
+                    "a straggler is recorded and dropped, never executed inside another test",
+                    executed,
+                )
+                val recorded = MainDispatcherStragglers.drain()
+                assertEquals("the straggler must be recorded: $recorded", 1, recorded.size)
+                assertTrue(
+                    "the straggler must name the test that owned Main: $recorded",
+                    recorded.single().owner.startsWith("post-teardown-owner"),
+                )
+
+                // ...while a NEW `viewModelScope` must still see a missing Main,
+                // exactly as after a plain `Dispatchers.resetMain()`. Without
+                // this, looper-less ViewModel tests that never install a Main
+                // silently rebind onto it instead of falling back to
+                // `EmptyCoroutineContext`.
+                assertTrue(
+                    "Dispatchers.Main.immediate must stay unavailable between tests",
+                    runCatching { Dispatchers.Main.immediate }
+                        .exceptionOrNull() is IllegalStateException,
+                )
+            } finally {
+                Dispatchers.resetMain()
+                MainDispatcherStragglers.drain()
             }
         }
     }

@@ -22,7 +22,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
@@ -425,10 +424,8 @@ class RepoBrowserViewModelTest {
         val callsBefore = fixture.session.recordedCommands.size
 
         viewModel.refresh()
-        withContext(Dispatchers.Default.limitedParallelism(1)) {
-            withTimeout(2_000L) {
-                while (fixture.session.localListCount < 2) delay(1L)
-            }
+        withTimeout(2_000L) {
+            while (fixture.session.localListCount < 2) delay(1L)
         }
         mainDispatcherRule.runCurrent()
 
@@ -449,11 +446,17 @@ class RepoBrowserViewModelTest {
                 connectTimeoutContext = Dispatchers.Unconfined,
             ),
         )
+        // Issue #2413: confine the view model's `withContext` hop to this test's
+        // scheduler. On the real `Dispatchers.IO` the load runs on a physical
+        // thread pool the test cannot await, so a test could finish with the hop
+        // still in flight; its resume then landed after `MainDispatcherRule`
+        // teardown and poisoned an arbitrary later `runTest` with
+        // `UncaughtExceptionsBeforeTest`. Confined, the load shares one virtual
+        // clock with the test and cannot outlive it.
+        viewModel.ioDispatcher = testDispatcher
         viewModel.bind(testCredentials())
-        val ready = withContext(Dispatchers.Default.limitedParallelism(1)) {
-            withTimeoutOrNull(2_000L) {
-                viewModel.state.filterIsInstance<RepoBrowserUiState.Ready>().first()
-            }
+        val ready = withTimeoutOrNull(2_000L) {
+            viewModel.state.filterIsInstance<RepoBrowserUiState.Ready>().first()
         }
         check(ready != null) {
             "repo browser did not load: state=${viewModel.state.value}, " +

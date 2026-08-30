@@ -13,6 +13,7 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshSession
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -224,6 +225,23 @@ class RepoBrowserViewModel @Inject constructor(
     private var actionJob: Job? = null
 
     /**
+     * Dispatcher the blocking SSH enumeration / clone work hops onto.
+     *
+     * A test seam, not a product knob (which is why it is a `var` rather than a
+     * Hilt-injected constructor parameter — `@HiltViewModel` cannot honour a
+     * default argument). Issue #2413: `viewModelScope` is
+     * `Dispatchers.Main.immediate`, so `withContext(Dispatchers.IO)` below is a
+     * hop OFF the test scheduler and back ONTO test-controlled Main. A JVM unit
+     * test that finishes while that hop is in flight leaves the resume to land
+     * after its `MainDispatcherRule` teardown, which used to surface as an
+     * uncaught `IllegalStateException` on an IO worker and then as
+     * `UncaughtExceptionsBeforeTest` against an arbitrary innocent sibling test.
+     * Pointing this at the test scheduler keeps the whole load on one virtual
+     * clock, so the load cannot outlive the test that started it.
+     */
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+
+    /**
      * Bind to a host and kick the initial list. Re-binding with the same
      * credentials is a no-op so a recomposition does not blow away the
      * visible list or an in-flight clone.
@@ -248,7 +266,7 @@ class RepoBrowserViewModel @Inject constructor(
             _state.value = RepoBrowserUiState.Loading
         }
         loadJob = viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { runLoad(creds) }
+            val result = withContext(ioDispatcher) { runLoad(creds) }
             val query = (_state.value as? RepoBrowserUiState.Ready)?.query ?: queryAtStart
             _state.value = if (result is RepoBrowserUiState.Ready) {
                 result.copy(query = query)
@@ -299,7 +317,7 @@ class RepoBrowserViewModel @Inject constructor(
             .copy(pendingFullName = row.fullName, actionError = null)
         actionJob?.cancel()
         actionJob = viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { runAction(creds, row) }
+            val result = withContext(ioDispatcher) { runAction(creds, row) }
             when (result) {
                 is RepoPathResult.Success -> {
                     onResolved(result.path)

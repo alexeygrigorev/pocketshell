@@ -39,6 +39,45 @@ private const val RECORDED_SESSION_TARGET: String = "$3"
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentConversationRepositoryTest {
     @Test
+    fun boundAtCap_discardsTrailingToolsAndPreservesAllMessages() {
+        val messages = (0 until 5).map { index ->
+            ConversationEvent.Message(
+                id = "m$index", agent = AgentKind.Codex,
+                role = ConversationRole.Assistant, text = "message $index",
+            )
+        }
+        val tools = (0 until 5).map { index ->
+            ConversationEvent.ToolResult(
+                id = "t$index", agent = AgentKind.Codex, output = "tool $index",
+            )
+        }
+
+        val bounded = reconcileAgentEvents(messages + tools, maxEvents = 5)
+
+        assertEquals(messages, bounded)
+    }
+
+    @Test
+    fun overCapMessages_keepsNewestMessagesInDocumentOrderAcrossInterleavedTools() {
+        val events = (0 until 7).flatMap { index ->
+            listOf(
+                ConversationEvent.Message(
+                    id = "m$index", agent = AgentKind.Codex,
+                    role = ConversationRole.User, text = "message $index",
+                ),
+                ConversationEvent.ToolCall(
+                    id = "t$index", agent = AgentKind.Codex, name = "shell", input = "$index",
+                ),
+            )
+        }
+
+        val bounded = reconcileAgentEvents(events, maxEvents = 5)
+
+        assertEquals(listOf("m2", "m3", "m4", "m5", "m6"), bounded.map { it.id })
+        assertTrue(bounded.all { it is ConversationEvent.Message })
+    }
+
+    @Test
     fun codexReadInitialEventsUsesAgentLogJsonEnvelope() = runTest {
         val codexLines = listOf(
             """{"type":"session_meta","payload":{"id":"pocketshell-codex","cwd":"/workspace/pocketshell"}}""",

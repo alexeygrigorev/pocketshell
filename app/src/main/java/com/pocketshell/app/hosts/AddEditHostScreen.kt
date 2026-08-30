@@ -117,6 +117,7 @@ private const val PORT_SUPPORTING_TEXT = "Default: 22"
 @Composable
 fun AddEditHostScreen(
     hostId: Long?,
+    entryId: Long = 0L,
     onDone: () -> Unit,
     onScanQr: (() -> Unit)? = null,
     firstRunGuided: Boolean = false,
@@ -130,8 +131,8 @@ fun AddEditHostScreen(
     val sshKeys by viewModel.sshKeys.collectAsState()
     var selectedTab by remember { mutableStateOf(AddEditHostTab.Details) }
 
-    LaunchedEffect(hostId) {
-        if (hostId != null) viewModel.loadHost(hostId)
+    LaunchedEffect(hostId, entryId) {
+        viewModel.bind(hostId, entryId)
     }
     LaunchedEffect(state.saved) {
         if (state.saved) {

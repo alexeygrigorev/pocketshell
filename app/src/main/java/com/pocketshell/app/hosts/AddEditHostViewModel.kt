@@ -125,6 +125,7 @@ class AddEditHostViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
 
     private var editingHostId: Long? = null
+    private var boundEntryId: Long? = null
 
     /**
      * Baseline form snapshot used by [isDirty] to detect unsaved changes.
@@ -154,16 +155,25 @@ class AddEditHostViewModel @Inject constructor(
      * Load an existing host into the form. Idempotent — calling twice
      * with the same id is a no-op the second time.
      */
-    fun loadHost(hostId: Long) {
+    fun bind(hostId: Long?, entryId: Long = 0L) {
         // #1829: guard-return on the bound identity, then install it — the same
         // binding-seam shape as RepoBrowserViewModel.bind. Off Main the second
         // caller can slip past the guard and double-load the form, clobbering
         // the dirty-state `baseline`.
-        requireMainThread("AddEditHostViewModel.loadHost")
-        if (editingHostId == hostId) return
+        requireMainThread("AddEditHostViewModel.bind")
+        if (boundEntryId == entryId && editingHostId == hostId) return
+        boundEntryId = entryId
         editingHostId = hostId
+        if (hostId == null) {
+            val empty = HostFormState()
+            _state.value = empty
+            baseline = empty
+            return
+        }
+        val requestedEntryId = entryId
         viewModelScope.launch {
             val host = hostDao.getById(hostId) ?: return@launch
+            if (editingHostId != hostId || boundEntryId != requestedEntryId) return@launch
             val loaded = _state.value.copy(
                 name = host.name,
                 hostname = host.hostname,

@@ -32,6 +32,7 @@ class BoundedImageDecoderTest {
         assertEquals(4, BoundedImageDecoder.calculateInSampleSize(1_600, 1_200, 120_000))
         assertEquals(8, BoundedImageDecoder.calculateInSampleSize(1_601, 1_201, 120_000))
         assertEquals(8, BoundedImageDecoder.calculateInSampleSize(4_000, 3_000, 250_000))
+        assertEquals(64, BoundedImageDecoder.calculateInSampleSize(50_000, 50_000, 2_000_000))
     }
 
     @Test
@@ -74,6 +75,31 @@ class BoundedImageDecoderTest {
         assertEquals(2, openCount)
         assertTrue(decoded.width * decoded.height <= maxPixels)
         decoded.recycle()
+    }
+
+    @Test
+    fun conversationByteArrayDecodeSamplesExtremeDimensionsWithoutIntOverflow() {
+        val samples = mutableListOf<Int>()
+        val codec = ByteArrayBitmapCodec { _, options ->
+            if (options.inJustDecodeBounds) {
+                options.outWidth = 50_000
+                options.outHeight = 50_000
+                null
+            } else {
+                samples += options.inSampleSize
+                Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+            }
+        }
+
+        val decoded = BoundedImageDecoder.decodeByteArray(
+            bytes = byteArrayOf(0x42, 0x4d),
+            maxPixels = 2_000_000,
+            codec = codec,
+        )
+
+        assertNotNull(decoded)
+        assertEquals(listOf(64), samples)
+        decoded?.recycle()
     }
 
     private fun writePng(name: String, color: Int): File {

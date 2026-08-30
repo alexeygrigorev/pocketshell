@@ -18,6 +18,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -58,7 +63,7 @@ fun Breadcrumb(
             .padding(start = PocketShellSpacing.xs, end = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        IconButton(label = "‹", onClick = onBack)
+        LabeledGlyphButton(glyph = "‹", contentDescription = "Back", onClick = onBack)
 
         if (liveDot) {
             Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
@@ -113,28 +118,40 @@ fun Breadcrumb(
             }
         }
 
-        IconButton(label = "⋮", onClick = onMore)
+        LabeledGlyphButton(glyph = "⋮", contentDescription = "More options", onClick = onMore)
     }
 }
 
 /**
- * 36dp circular tap target with a single glyph. Used for the back and
- * "more" affordances. Kept private — these are exactly the visual
- * recipe in the mockup (`.breadcrumb .back` / `.breadcrumb .more`) and
- * not a general primitive yet.
+ * Shared 48dp semantic glyph control for breadcrumb and drawer chrome.
+ * The visible glyph stays decorative; assistive technology receives the
+ * explicit [contentDescription] and button action instead of punctuation.
  */
 @Composable
-private fun IconButton(label: String, onClick: () -> Unit) {
+fun LabeledGlyphButton(
+    glyph: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Box(
-        modifier = Modifier
-            .size(36.dp)
+        modifier = modifier
+            .size(48.dp)
             .background(color = PocketShellColors.Background, shape = CircleShape)
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClickLabel = contentDescription, onClick = onClick)
+            .clearAndSetSemantics {
+                this.contentDescription = contentDescription
+                role = Role.Button
+                onClick(label = contentDescription) {
+                    onClick()
+                    true
+                }
+            }
             .padding(PaddingValues(0.dp)),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = label,
+            text = glyph,
             color = PocketShellColors.TextSecondary,
             fontSize = 20.sp,
         )

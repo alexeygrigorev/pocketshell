@@ -40,6 +40,7 @@ import androidx.core.view.WindowCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
@@ -135,6 +136,7 @@ class MainActivity : FragmentActivity() {
     // The tmux session VM stays activity-scoped: we only have one live
     // session at a time today; multi-pane lifecycle arrives with #22.
     private val tmuxSessionViewModel: TmuxSessionViewModel by viewModels()
+    private val navigationState: RetainedNavigationState by viewModels()
     private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
 
     /**
@@ -243,7 +245,8 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var sshKeyDao: SshKeyDao
 
-    /** Issue #177: the navigator's current top destination, persisted on stop. */
+    /** Issue #177: the navigator's current top destination, reported up by
+     * [AppNavigator] so `onStop` can persist it. */
     private var currentTopDestination: AppDestination = AppDestination.HostList
     private var restoredTmuxDestination: AppDestination.TmuxSession? = null
 
@@ -254,7 +257,6 @@ class MainActivity : FragmentActivity() {
      */
     @VisibleForTesting
     internal fun currentDestinationForTest(): AppDestination = currentTopDestination
-
 
     /**
      * Issue #560: remote attachment path(s) handed in by the share-into-
@@ -464,13 +466,18 @@ class MainActivity : FragmentActivity() {
                         startDirectoryAutocomplete = startDirectoryAutocomplete,
                         hostDetailViewMode = settings.hostDetailViewMode,
                         requestedDestination = requestedDestination,
+                        retainedNavigationState = navigationState,
                         pendingImportPayload = pendingImportPayload,
                         onImportPayloadConsumed = { pendingImportPayload = null },
                         // Issue #177: the navigator reports its current top
                         // destination so `onStop` can persist the in-session
                         // view for fast resume.
-                        onCurrentDestinationChanged = { dest ->
+                        onCurrentDestinationCaptured = { dest ->
                             currentTopDestination = dest
+                            NavigationCallbackProbe.onCaptured?.invoke(dest)
+                        },
+                        onCurrentDestinationChanged = { dest ->
+                            NavigationCallbackProbe.onReported?.invoke(dest)
                             // Issue #698: opening a host (folder list / session)
                             // is one of the maintainer's main entry points and
                             // they skip the home screen, so fire the throttled
@@ -793,6 +800,38 @@ class MainActivity : FragmentActivity() {
 }
 
 /**
+ * Credential-bearing navigation state retained only in memory across Activity
+ * configuration recreation. It intentionally has no SavedStateHandle: process
+ * death must not serialize decrypted passphrases into an Android state bundle.
+ */
+internal class RetainedNavigationState : ViewModel() {
+    var current: AppDestination? = null
+    val backStack: MutableList<AppDestination> = mutableListOf()
+    var entryId: Long = 0L
+    private var reported: AppDestination? = null
+
+    fun markReported(destination: AppDestination): Boolean {
+        if (reported == destination) return false
+        reported = destination
+        return true
+    }
+}
+
+/** Instrumentation observer for the real Activity -> navigator callback boundary. */
+internal object NavigationCallbackProbe {
+    @Volatile
+    var onReported: ((AppDestination) -> Unit)? = null
+
+    @Volatile
+    var onCaptured: ((AppDestination) -> Unit)? = null
+
+    fun reset() {
+        onReported = null
+        onCaptured = null
+    }
+}
+
+/**
  * Issue #859 (Slice D): the parsed request carried by an agent-card push
  * notification tap — the tmux session to open and the best-effort host hostname
  * to resolve it against.
@@ -824,8 +863,8 @@ private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
  * Sealed-class destination state machine. The back-stack is a `List<AppDestination>`
  * we push / pop; rendering branches on the head.
  *
- * Saveable: we deliberately do NOT persist the back stack across process
- * death or a configuration change. Every destination carries the host's SSH
+ * The stack is retained in memory across configuration changes but deliberately
+ * is NOT persisted across process death. Every destination carries the host's SSH
  * connection tuple including a decrypted `CharArray?` passphrase, and a
  * `rememberSaveable` stack would write that secret into the saved-state bundle
  * the system spills to disk.
@@ -842,11 +881,13 @@ private fun AppNavigator(
     startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource,
     hostDetailViewMode: HostDetailViewMode,
     requestedDestination: AppDestination,
+    retainedNavigationState: RetainedNavigationState = RetainedNavigationState(),
     pendingImportPayload: String? = null,
     onImportPayloadConsumed: () -> Unit = {},
     // Issue #177: report the current top destination so `onStop` can persist
     // the in-session view for fast resume.
     onCurrentDestinationChanged: (AppDestination) -> Unit = {},
+    onCurrentDestinationCaptured: (AppDestination) -> Unit = {},
     // Issue #560: staged remote attachment path(s) from a share-into-session
     // launch. Seeded into the session composer as #544 chips with the
     // composer opened + focused. Consumed once; cleared via
@@ -899,8 +940,8 @@ private fun AppNavigator(
     // safe by resolving the current destination's PARENT when there is nothing
     // to pop, so a back gesture from a restored session reaches that host's
     // sessions screen rather than the host list.
-    var current: AppDestination by remember {
-        mutableStateOf(requestedDestination)
+    var current: AppDestination by remember(retainedNavigationState) {
+        mutableStateOf(retainedNavigationState.current ?: requestedDestination)
     }
     LaunchedEffect(Unit) {
         StartupTiming.markOnce(
@@ -926,21 +967,25 @@ private fun AppNavigator(
         (current as? AppDestination.TmuxSession)?.let { lastTmuxDestination = it }
     }
 
-    // Issue #177: report the current top destination up to the activity
-    // so `onStop` can persist the in-session view. Fires on every
-    // navigation, including the initial restored destination.
-    LaunchedEffect(current) {
-        StartupTiming.mark("app-navigator-current", "destination" to current.timingName())
-        CrashReporter.updateContext(current.crashReportContext())
+    fun reportDestination(dest: AppDestination) {
+        if (!retainedNavigationState.markReported(dest)) return
+        StartupTiming.mark("app-navigator-current", "destination" to dest.timingName())
+        CrashReporter.updateContext(dest.crashReportContext())
         DiagnosticEvents.record(
             "navigation",
             "route_changed",
-            "route" to current.diagnosticRouteName(),
+            "route" to dest.diagnosticRouteName(),
         )
-        onCurrentDestinationChanged(current)
+        onCurrentDestinationChanged(dest)
     }
 
-    val backStack = remember { mutableListOf<AppDestination>() }
+    LaunchedEffect(Unit) {
+        retainedNavigationState.current = current
+        onCurrentDestinationCaptured(current)
+        reportDestination(current)
+    }
+
+    val backStack = remember(retainedNavigationState) { retainedNavigationState.backStack }
 
     fun setCurrentDestination(dest: AppDestination) {
         // Capture synchronously with navigation. A stale-session signal can be
@@ -949,7 +994,10 @@ private fun AppNavigator(
         // though the cold-restore route already identifies this host.
         (dest as? AppDestination.TmuxSession)?.let { lastTmuxDestination = it }
         current = dest
-        onCurrentDestinationChanged(dest)
+        retainedNavigationState.entryId += 1L
+        retainedNavigationState.current = dest
+        onCurrentDestinationCaptured(dest)
+        reportDestination(dest)
     }
 
     LaunchedEffect(requestedDestination) {
@@ -1157,12 +1205,14 @@ private fun AppNavigator(
 
         AppDestination.AddHost -> AddEditHostScreen(
             hostId = null,
+            entryId = retainedNavigationState.entryId,
             onDone = ::back,
             onScanQr = { navigate(AppDestination.Scan) },
         )
 
         AppDestination.AddFirstHost -> AddEditHostScreen(
             hostId = null,
+            entryId = retainedNavigationState.entryId,
             onDone = ::back,
             onScanQr = { navigate(AppDestination.Scan) },
             firstRunGuided = true,
@@ -1190,6 +1240,7 @@ private fun AppNavigator(
 
         is AppDestination.EditFirstHost -> AddEditHostScreen(
             hostId = dest.hostId,
+            entryId = retainedNavigationState.entryId,
             onDone = { replace(AppDestination.FirstHostTestConnect(dest.hostId)) },
             firstRunGuided = true,
             onFirstRunHostSaved = { hostId -> replace(AppDestination.FirstHostTestConnect(hostId)) },
@@ -1197,6 +1248,7 @@ private fun AppNavigator(
 
         is AppDestination.EditHost -> AddEditHostScreen(
             hostId = dest.hostId,
+            entryId = retainedNavigationState.entryId,
             onDone = ::back,
         )
 

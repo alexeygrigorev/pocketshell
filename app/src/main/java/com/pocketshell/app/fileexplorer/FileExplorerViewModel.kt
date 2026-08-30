@@ -139,6 +139,7 @@ class FileExplorerViewModel @Inject constructor(
     val sort: StateFlow<SortMode> = _sort.asStateFlow()
 
     private var request: Request? = null
+    private var requestGeneration: Long = 0L
     private var loadJob: Job? = null
     private var transferJob: Job? = null
 
@@ -172,6 +173,10 @@ class FileExplorerViewModel @Inject constructor(
         // LinkedHashMap (not thread-safe) cleared inside the same window.
         requireMainThread("FileExplorerViewModel.start")
         if (this.request == request) return
+        requestGeneration += 1
+        transferJob?.cancel()
+        transferJob = null
+        _transfer.value = FileTransferState.Idle
         this.request = request
         currentDir = ""
         listingCache.clear()
@@ -261,6 +266,7 @@ class FileExplorerViewModel @Inject constructor(
      */
     fun uploadFile(displayName: String, length: Long, openStream: () -> InputStream?) {
         val req = request ?: return
+        val generation = requestGeneration
         val dir = currentDir
         if (dir.isBlank()) return
         if (_transfer.value is FileTransferState.InProgress) return
@@ -288,7 +294,8 @@ class FileExplorerViewModel @Inject constructor(
                 }
             }
             result.fold(
-                onSuccess = { written ->
+                onSuccess = success@ { written ->
+                    if (request !== req || requestGeneration != generation) return@success
                     _transfer.value = FileTransferState.Success(
                         "Uploaded $safeName to ${displayPath(written)}",
                     )
@@ -298,8 +305,9 @@ class FileExplorerViewModel @Inject constructor(
                     listingCache.remove(dir)
                     navigateTo(dir, resolveSymbolic = false)
                 },
-                onFailure = { t ->
+                onFailure = failure@ { t ->
                     if (t is CancellationException) throw t
+                    if (request !== req || requestGeneration != generation) return@failure
                     _transfer.value = FileTransferState.Failure(
                         "Upload failed: ${transferErrorText(t)}",
                     )
@@ -320,6 +328,7 @@ class FileExplorerViewModel @Inject constructor(
      */
     fun downloadFile(entry: RemoteEntry, writeBytes: (ByteArray) -> Unit) {
         val req = request ?: return
+        val generation = requestGeneration
         val dir = currentDir
         if (dir.isBlank()) return
         if (_transfer.value is FileTransferState.InProgress) return
@@ -339,19 +348,19 @@ class FileExplorerViewModel @Inject constructor(
                     val remotePath = joinPath(dir, entry.name)
                     live.downloadFile(remotePath, MAX_DOWNLOAD_BYTES)
                 }
-                downloaded.mapCatching { bytes ->
-                    writeBytes(bytes)
-                    bytes.size
-                }
+                downloaded
             }
             result.fold(
-                onSuccess = { written ->
+                onSuccess = success@ { bytes ->
+                    if (request !== req || requestGeneration != generation) return@success
+                    writeBytes(bytes)
                     _transfer.value = FileTransferState.Success(
-                        "Downloaded ${entry.name} (${formatSize(written.toLong())})",
+                        "Downloaded ${entry.name} (${formatSize(bytes.size.toLong())})",
                     )
                 },
-                onFailure = { t ->
+                onFailure = failure@ { t ->
                     if (t is CancellationException) throw t
+                    if (request !== req || requestGeneration != generation) return@failure
                     _transfer.value = FileTransferState.Failure(
                         "Download failed: ${transferErrorText(t)}",
                     )

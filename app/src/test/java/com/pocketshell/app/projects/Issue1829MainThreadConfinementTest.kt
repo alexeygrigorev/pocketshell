@@ -488,7 +488,7 @@ class Issue1829MainThreadConfinementTest {
             "FirstHostTestConnectViewModel.start" to {
                 firstHostTestConnectViewModel.start(HOST.id)
             },
-            "AddEditHostViewModel.loadHost" to { addEditHostViewModel.loadHost(HOST.id) },
+            "AddEditHostViewModel.bind" to { addEditHostViewModel.bind(HOST.id) },
             "AddEditHostViewModel.consumeFirstInvalidField" to {
                 addEditHostViewModel.consumeFirstInvalidField()
             },

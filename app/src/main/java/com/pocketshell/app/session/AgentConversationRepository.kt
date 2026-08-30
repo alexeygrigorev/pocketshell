@@ -274,9 +274,14 @@ private fun List<ConversationEvent>.takeLastPreservingMessages(
     if (size <= maxEvents) return this
     val messageCount = count { it is ConversationEvent.Message }
     if (messageCount >= maxEvents) {
-        // Even the prose alone overflows the budget: fall back to the
-        // most recent [maxEvents] events regardless of type.
-        return subList(size - maxEvents, size)
+        // Prose alone fills the budget: discard every tool/system event and
+        // retain the newest messages in their original document order.
+        return asReversed()
+            .asSequence()
+            .filterIsInstance<ConversationEvent.Message>()
+            .take(maxEvents)
+            .toList()
+            .asReversed()
     }
     // Drop the oldest non-message events until we fit. We have room for
     // (maxEvents - messageCount) non-message events; keep the newest of

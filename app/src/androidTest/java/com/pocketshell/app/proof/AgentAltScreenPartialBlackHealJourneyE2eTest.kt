@@ -28,6 +28,8 @@ import com.pocketshell.app.tmux.HealAttemptResult
 import com.pocketshell.app.tmux.HealOutcome
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.app.tmux.ActivePaneRenderOwnerSnapshotForTest
+import com.pocketshell.app.tmux.activePaneRenderOwnerSnapshotForTest
+import com.pocketshell.app.tmux.appendToActivePaneRenderModelForTest
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey

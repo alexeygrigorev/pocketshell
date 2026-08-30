@@ -36,6 +36,9 @@ import com.pocketshell.app.tmux.StaleRenderHealProofStepForTest
 import com.pocketshell.app.tmux.StaleRenderOwnerChangedForTest
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.app.tmux.ActivePaneRenderOwnerSnapshotForTest
+import com.pocketshell.app.tmux.activePaneRenderOwnerSnapshotForTest
+import com.pocketshell.app.tmux.appendToActivePaneRenderModelForTest
+import com.pocketshell.app.tmux.healActivePaneIfStaleRenderResultForTest
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey

@@ -24,6 +24,7 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SWITCHING_LOADING_TAG
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.tmux.activePaneRenderOwnerSnapshotForTest
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey

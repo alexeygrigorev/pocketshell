@@ -77,6 +77,10 @@ internal open class FakeTmuxClient(
         }
     }
 
+    val structuralOverflowGenerationSignal = MutableStateFlow(0L)
+    override val structuralEventOverflowGeneration: Flow<Long> =
+        structuralOverflowGenerationSignal
+
     var decoupleOutputForFromEvents: Boolean = false
 
     val emittedPaneOutputs: MutableSharedFlow<ControlEvent.Output> = MutableSharedFlow(
@@ -728,9 +732,12 @@ internal open class FakeTmuxClient(
 
     private fun closeWithEvent(event: TmuxDisconnectEvent) {
         closed = true
+        closeSignal.complete(Unit)
         disconnectEventSignal.value = event
         disconnectedSignal.value = true
     }
+
+    val closeSignal: CompletableDeferred<Unit> = CompletableDeferred()
 
     /**
      * Issue #215: record-and-tear-down test double for the production

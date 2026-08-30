@@ -5,9 +5,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -57,10 +59,37 @@ class CloseCachedRuntimeBoundedTest {
     }
 
     @Test(timeout = 30_000)
-    fun closeCachedRuntimeReturnsWithinBudgetWhenAgentJobIsWedged() {
+    fun closeCachedRuntimeReturnsWithinBudgetWhenSeedRecoveryJobIsWedged() {
         assertReturnsWithinBudget { stuckJob ->
-            cachedRuntimeWithJobs(agentJobs = mapOf("%0" to stuckJob))
+            cachedRuntimeWithJobs(seedRecoveryJobs = mapOf("%0" to stuckJob))
         }
+    }
+
+    @Test(timeout = 30_000)
+    fun oneWedgedRuntimeCannotPreventLaterRuntimeCleanup() = runBlocking {
+        val neverDetach = CompletableDeferred<Unit>()
+        val wedged = cachedRuntimeWithJobs().also {
+            (it.client as FakeTmuxClient).detachCleanlyGate = neverDetach
+        }
+        val later = cachedRuntimeWithJobs()
+        val laterClient = later.client as FakeTmuxClient
+
+        val batch = async {
+            closeCachedRuntimesConcurrently(
+                runtimes = listOf(wedged, later),
+                detachTimeoutMs = 1_000L,
+            )
+        }
+
+        // Load-bearing ownership oracle: later cleanup must finish while the
+        // first runtime is still parked, not merely after its timeout. A serial
+        // forEach mutant times out here before it ever reaches [later].
+        withTimeout(250L) { laterClient.closeSignal.await() }
+        batch.await()
+
+        assertTrue("later runtime must reach detach", laterClient.detachCleanlyCalled)
+        assertTrue("later runtime must close", laterClient.closed)
+        assertTrue("wedged runtime still reaches forced close", (wedged.client as FakeTmuxClient).closed)
     }
 
     @Test(timeout = 30_000)
@@ -145,7 +174,7 @@ class CloseCachedRuntimeBoundedTest {
     private fun cachedRuntimeWithJobs(
         producerJobs: Map<String, Job> = emptyMap(),
         inputJobs: Map<String, Job> = emptyMap(),
-        agentJobs: Map<String, Job> = emptyMap(),
+        seedRecoveryJobs: Map<String, Job> = emptyMap(),
     ): CachedTmuxRuntime =
         CachedTmuxRuntime(
             key = TmuxRuntimeKey(
@@ -165,7 +194,7 @@ class CloseCachedRuntimeBoundedTest {
             paneProducerJobs = producerJobs,
             paneInputQueues = emptyMap(),
             paneInputJobs = inputJobs,
-            paneAgentJobs = agentJobs,
+            paneSeedRecoveryJobs = seedRecoveryJobs,
             paneAgentInputs = emptyMap(),
             agentConversations = emptyMap(),
             remoteColumns = 0,

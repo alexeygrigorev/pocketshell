@@ -17,6 +17,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
@@ -76,6 +77,36 @@ class TmuxClientTest {
     fun tearDown() {
         TmuxClientDiagnostics.install(TmuxClientDiagnosticSink.Noop)
         scope.cancel()
+    }
+
+    @Test
+    fun `structural overflow is retained for authoritative repair`() = runBlocking {
+        val shell = FakeShell()
+        val client = RealTmuxClient(FakeSession(shell), scope, structuralEventBufferCapacity = 1)
+        val firstReceived = CompletableDeferred<Unit>()
+        val releaseCollector = CompletableDeferred<Unit>()
+        try {
+            client.connect()
+            val collector = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                client.events.collect {
+                    firstReceived.complete(Unit)
+                    releaseCollector.await()
+                }
+            }
+            shell.feed("%window-add @0\n")
+            withTimeout(ASYNC_AWAIT_TIMEOUT_MS) { firstReceived.await() }
+            shell.feed("%window-add @1\n%window-add @2\n%window-add @3\n")
+
+            val generation = withTimeout(ASYNC_AWAIT_TIMEOUT_MS) {
+                client.structuralEventOverflowGeneration.first { it > 0L }
+            }
+            assertTrue(generation > 0L)
+            releaseCollector.complete(Unit)
+            collector.cancelAndJoin()
+        } finally {
+            releaseCollector.complete(Unit)
+            client.close()
+        }
     }
 
     @Test

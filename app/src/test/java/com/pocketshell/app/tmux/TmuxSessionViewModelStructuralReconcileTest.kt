@@ -20,6 +20,41 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TmuxSessionViewModelStructuralReconcileTest : TmuxSessionViewModelTestBase() {
+    @Test
+    fun structuralOverflowSchedulesCoalescedAuthoritativeRepair() = runTest(scheduler) {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tshell\t0",
+                    "%1\t@0\t\$0\twork\teditor\t1",
+                ),
+                isError = false,
+            ),
+        )
+        repeat(2) {
+            client.capturePaneResponses.addLast(
+                CommandResponse(number = 2L, output = listOf("seed"), isError = false),
+            )
+            client.cursorQueryResponses.addLast(
+                CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
+            )
+        }
+
+        vm.attachClientForTest(client)
+        runCurrent()
+        client.structuralOverflowGenerationSignal.value = 1L
+        advanceUntilIdle()
+
+        assertEquals(listOf("%0", "%1"), vm.panes.value.map { it.paneId })
+        assertEquals(
+            1,
+            client.sentCommands.count { it.startsWith("list-panes") },
+        )
+    }
+
     /**
      * Issue #576 (Slice A of #792): MAIN-THREAD RESPONSIVENESS under a Codex
      * `%layout-change` storm — the on-device ANR reproduced through the REAL

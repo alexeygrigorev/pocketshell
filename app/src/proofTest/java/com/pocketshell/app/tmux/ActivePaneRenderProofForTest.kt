@@ -1,5 +1,7 @@
 package com.pocketshell.app.tmux
 
+import java.util.concurrent.atomic.AtomicLong
+
 /** Named settlement/owner predicates used by the #2321 mutation matrix. */
 internal enum class SettledObservationGuardForTest {
     COHERENT,
@@ -413,4 +415,133 @@ internal data class FullFrameHealProofForTest(
             !visiblePartiallyBlank &&
             visibleFrameMarker &&
             visibleFrameRows >= minimumFrameRows
+}
+
+
+private fun ActivePaneRenderDiagnostics.toProofSnapshot(): ActivePaneRenderOwnerSnapshotForTest =
+    ActivePaneRenderOwnerSnapshotForTest(
+        paneId = paneId,
+        windowId = windowId,
+        sessionId = sessionId,
+        targetSessionName = targetSessionName,
+        connectGeneration = connectGeneration,
+        clientIdentity = clientIdentity,
+        stateIdentity = stateIdentity,
+        terminalSessionIdentity = terminalSessionIdentity,
+        emulatorIdentity = emulatorIdentity,
+        modelMutationEpoch = modelMutationEpoch,
+        modelDrainBacklogged = modelDrainBacklogged,
+        seedOperationInFlight = seedOperationInFlight,
+        sizeOperationsInFlight = sizeOperationsInFlight,
+        automaticHealOperationsInFlight = automaticHealOperationsInFlight,
+        automaticHealActivityEpoch = automaticHealActivityEpoch,
+        controlSizeGeneration = controlSizeGeneration,
+        effectiveColumns = effectiveColumns,
+        effectiveRows = effectiveRows,
+        appliedColumns = appliedColumns,
+        appliedRows = appliedRows,
+        lastSeedAtMs = lastSeedAtMs,
+        renderedNonBlankChars = renderedNonBlankChars,
+        partiallyBlank = partiallyBlank,
+        renderLooksSuspect = renderLooksSuspect,
+        coherent = coherent,
+    )
+
+internal fun TmuxSessionViewModel.activePaneRenderOwnerSnapshotForTest():
+    ActivePaneRenderOwnerSnapshotForTest = activePaneRenderDiagnosticsForTest().toProofSnapshot()
+
+internal fun TmuxSessionViewModel.appendToActivePaneRenderModelForTest(
+    bytes: ByteArray,
+    expectedOwner: ActivePaneRenderOwnerSnapshotForTest,
+    afterAppendBeforeSnapshotForTest: (() -> Unit)? = null,
+): ActivePaneRenderOwnerSnapshotForTest {
+    val before = activePaneRenderOwnerSnapshotForTest()
+    check(expectedOwner.attachResizeSeedSettled) { "expected owner was not settled: $expectedOwner" }
+    check(before.coherent && before.sameOwnerAs(expectedOwner)) {
+        "active render owner changed before injection: expected=$expectedOwner actual=$before"
+    }
+    check(before.modelMutationEpoch == expectedOwner.modelMutationEpoch) {
+        "active render model mutated before injection: expected=$expectedOwner actual=$before"
+    }
+    check(
+        before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
+            before.sizeOperationsInFlight == 0 &&
+            before.automaticHealOperationsInFlight == 0 &&
+            before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch &&
+            before.appliedColumns == expectedOwner.appliedColumns &&
+            before.appliedRows == expectedOwner.appliedRows,
+    ) {
+        "attach/resize owner changed before injection: expected=$expectedOwner actual=$before"
+    }
+    val activeVisiblePane = javaClass.getDeclaredMethod("activeVisiblePane").apply {
+        isAccessible = true
+    }
+    val pane = checkNotNull(activeVisiblePane.invoke(this) as? TmuxPaneState)
+    pane.terminalState.appendToRenderModelForProof(bytes)
+    afterAppendBeforeSnapshotForTest?.invoke()
+    val after = activePaneRenderDiagnosticsForTest().toProofSnapshot()
+    check(after.coherent && after.sameOwnerAs(expectedOwner)) {
+        "active render owner changed during injection: expected=$expectedOwner actual=$after"
+    }
+    check(after.modelMutationEpoch == expectedOwner.modelMutationEpoch + 1L) {
+        "unexpected concurrent model mutation during injection: expected=$expectedOwner actual=$after"
+    }
+    check(
+        after.automaticHealOperationsInFlight == 0 &&
+            after.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch,
+    ) {
+        "automatic render heal raced injection: expected=$expectedOwner actual=$after"
+    }
+    return after
+}
+
+/**
+ * Test-only mutation of the exact model bound to [TerminalSurfaceState]. Production deliberately
+ * exposes only immutable owner diagnostics; connected proof injection stays in the proof source
+ * set and reaches the already-bound emulator without adding a production control seam.
+ */
+private fun com.pocketshell.core.terminal.ui.TerminalSurfaceState.appendToRenderModelForProof(
+    bytes: ByteArray,
+) {
+    val activeBridge = readPrivateField("bridge")
+    val activeSession = activeBridge?.readPrivateField("session")
+        ?: readPrivateField("_session")
+    val emulator = activeBridge?.readPrivateField("emulator")
+        ?: activeSession?.readPrivateField("emulator")
+        ?: error("no active emulator model")
+    val append = emulator.javaClass.getMethod(
+        "append",
+        ByteArray::class.java,
+        Int::class.javaPrimitiveType,
+    )
+    append.invoke(emulator, bytes, bytes.size)
+    val mutationEpoch = checkNotNull(
+        readPrivateField("renderModelMutationEpoch") as? AtomicLong,
+    )
+    mutationEpoch.incrementAndGet()
+}
+
+private fun Any.readPrivateField(name: String): Any? =
+    javaClass.getDeclaredField(name).run {
+        isAccessible = true
+        get(this@readPrivateField)
+    }
+
+internal suspend fun TmuxSessionViewModel.healActivePaneIfStaleRenderResultForTest(
+    expectedOwner: ActivePaneRenderOwnerSnapshotForTest,
+): HealAttemptResult {
+    val before = activePaneRenderOwnerSnapshotForTest()
+    check(before.coherent && before.sameOwnerAs(expectedOwner)) {
+        "active render owner changed before manual heal: expected=$expectedOwner actual=$before"
+    }
+    check(
+        before.modelMutationEpoch == expectedOwner.modelMutationEpoch &&
+            before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
+            before.sizeOperationsInFlight == 0 &&
+            before.automaticHealOperationsInFlight == 0 &&
+            before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch,
+    ) {
+        "active render model/resize changed before manual heal: expected=$expectedOwner actual=$before"
+    }
+    return healActivePaneIfStaleRenderResultForTest()
 }

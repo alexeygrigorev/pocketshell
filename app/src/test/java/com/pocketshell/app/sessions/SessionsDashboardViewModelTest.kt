@@ -1211,6 +1211,7 @@ class SessionsDashboardViewModelTest {
         override val disconnected = delegate.disconnected
         override val disconnectEvent = delegate.disconnectEvent
         override val outputBacklogOverflows = delegate.outputBacklogOverflows
+        override val structuralEventOverflowGeneration = delegate.structuralEventOverflowGeneration
         val sentCommands: MutableList<String> get() = delegate.sentCommands
         override suspend fun connect() = delegate.connect()
         override suspend fun sendCommand(cmd: String): CommandResponse {

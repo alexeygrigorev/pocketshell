@@ -173,12 +173,17 @@ public class LayoutChangeCoalescer(
      */
     public fun offer(event: ControlEvent): Boolean {
         if (!isStructural(event)) return false
+        offerAuthoritativeRepair()
+        return true
+    }
+
+    /** Schedule a repair when the triggering structural event itself was dropped. */
+    public fun offerAuthoritativeRepair() {
         hasPending = true
         // CONFLATED + DROP_OLDEST: trySend always succeeds and the channel
         // holds at most one pending trigger, so a storm of offers does not
         // queue N reconciles.
         triggers.trySend(Unit)
-        return true
     }
 
     /** Stop the drain loop. Safe to call multiple times. */

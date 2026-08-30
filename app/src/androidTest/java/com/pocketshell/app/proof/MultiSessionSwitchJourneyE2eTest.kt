@@ -669,7 +669,6 @@ class MultiSessionSwitchJourneyE2eTest {
             paneProducerJobs = emptyMap(),
             paneInputQueues = emptyMap(),
             paneInputJobs = emptyMap(),
-            paneAgentJobs = emptyMap(),
             paneAgentInputs = generation1.paneAgentInputs,
             agentConversations = generation1.agentConversations,
             remoteColumns = generation1.remoteColumns,

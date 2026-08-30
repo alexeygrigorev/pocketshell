@@ -175,4 +175,37 @@ class GraceEffectsRecoveryOwnershipTest {
             effects.recoveryWasSuperseded(claim),
         )
     }
+
+    @Test
+    fun `rearming the identical claim retains ownership of its active heal`() {
+        val claim = WithinGraceRecoveryClaim(SessionId("work"), GraceClientId(1))
+        val activeHeal = Job()
+        effects.beginWithinGraceRecovery(claim)
+        effects.trackRecoveryJob(activeHeal)
+
+        effects.beginWithinGraceRecovery(claim)
+        effects.retireForSupersedingOwner()
+
+        assertTrue(
+            "same-claim foreground re-arm must retain the heal so a later owner can cancel it",
+            activeHeal.isCancelled,
+        )
+    }
+
+    @Test
+    fun `replacing a different claim cancels every job owned by the prior claim`() {
+        val first = WithinGraceRecoveryClaim(SessionId("work"), GraceClientId(1))
+        val successor = WithinGraceRecoveryClaim(SessionId("other"), GraceClientId(2))
+        val holdTimer = Job()
+        val activeHeal = Job()
+        effects.beginWithinGraceRecovery(first)
+        effects.trackRecoveryJob(holdTimer)
+        effects.trackRecoveryJob(activeHeal)
+
+        effects.beginWithinGraceRecovery(successor)
+
+        assertTrue(holdTimer.isCancelled)
+        assertTrue(activeHeal.isCancelled)
+        assertTrue(effects.ownsRecovery(successor.targetId, successor.clientId!!))
+    }
 }

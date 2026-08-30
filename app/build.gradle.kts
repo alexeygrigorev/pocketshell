@@ -226,9 +226,11 @@ android {
     sourceSets {
         getByName("androidTest") {
             assets.srcDir(rootProject.file("tests/docker"))
+            java.srcDir("src/proofTest/java")
         }
         getByName("test") {
             java.srcDir("src/integrationTest/java")
+            java.srcDir("src/proofTest/java")
         }
     }
 

@@ -10,7 +10,9 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.LinkedHashMap
@@ -343,7 +345,6 @@ internal data class CachedTmuxRuntime(
     // a promoted-but-still-parked recovery job is cancelled on cache eviction /
     // deactivate (closeCachedRuntime) instead of leaking until whole-VM teardown.
     val paneSeedRecoveryJobs: Map<String, Job> = emptyMap(),
-    val paneAgentJobs: Map<String, Job>,
     val paneAgentInputs: Map<String, Triple<String, String, String>>,
     val agentConversations: Map<String, com.pocketshell.app.session.AgentConversationUiState>,
     val remoteColumns: Int,
@@ -372,13 +373,11 @@ internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
     // `cancelAndJoin()` or `NonCancellable` `lease.release()` would otherwise
     // keep teardown alive indefinitely and stall lifecycle cleanup.
     //
-    // Bound only the steps that can suspend forever: the three cancel/join
-    // sweeps and the `lease.release()`. Each gets its own [detachTimeoutMs]
-    // budget so the normal clean-close path (every step finishes in low
-    // single-digit millis) is unaffected, while a single wedged job/lease can't
-    // consume another step's budget. After a timeout we abandon the stuck
-    // jobs/lease to the grace TTL / GC and return. `detachCleanly` is already
-    // internally bounded and stays as-is.
+    // Cancel every owned job first, then give this runtime one total
+    // [detachTimeoutMs] deadline spanning joins, detach, and lease release.
+    // Runtime batches close concurrently, so a wedged runtime cannot consume
+    // another runtime's cleanup budget. After a timeout we abandon the stuck
+    // jobs/lease to the grace TTL / GC and return.
     //
     // If a join times out we stop joining and fall through to the non-suspending
     // cleanup (queue close, producer detach, client close) so those still run.
@@ -386,17 +385,19 @@ internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
     // prewarmed pane whose capture stayed empty parks on `outputFor().first()`).
     // `cancel()` (not `cancelAndJoin`) — the parked flow-collect returns
     // promptly on cancel and we must never block the bounded teardown on it.
-    paneSeedRecoveryJobs.values.forEach { it.cancel() }
-    withTimeoutOrNull(detachTimeoutMs) {
-        paneProducerJobs.values.forEach { it.cancelAndJoin() }
-        paneInputJobs.values.forEach { it.cancelAndJoin() }
-        paneAgentJobs.values.forEach { it.cancelAndJoin() }
+    cancelCachedRuntimeJobs()
+    val deadlineNanos = System.nanoTime() + detachTimeoutMs * 1_000_000L
+    withTimeoutOrNull(remainingCleanupMillis(deadlineNanos)) {
+        (paneProducerJobs.values + paneInputJobs.values + paneSeedRecoveryJobs.values).joinAll()
     }
     paneInputQueues.values.forEach { runCatching { it.close() } }
     panes.forEach { pane ->
         runCatching { pane.terminalState.detachExternalProducer() }
     }
-    runCatching { client.detachCleanly(timeoutMs = detachTimeoutMs) }
+    val detachBudgetMs = remainingCleanupMillis(deadlineNanos)
+    withTimeoutOrNull(detachBudgetMs) {
+        runCatching { client.detachCleanly(timeoutMs = detachBudgetMs) }
+    }
     runCatching { client.close() }
     withContext(NonCancellable) {
         // A wedged `lease.release()` (e.g. a transport stuck in a blocking
@@ -404,8 +405,32 @@ internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
         // scope can move on. The abandoned lease falls to the grace TTL / GC.
         // NonCancellable keeps the release itself from being cancelled by the
         // caller's scope; withTimeoutOrNull adds the wall-clock ceiling.
-        withTimeoutOrNull(detachTimeoutMs) {
+        withTimeoutOrNull(remainingCleanupMillis(deadlineNanos)) {
             runCatching { lease?.release() }
         }
+    }
+}
+
+private fun CachedTmuxRuntime.cancelCachedRuntimeJobs() {
+    paneSeedRecoveryJobs.values.forEach { it.cancel() }
+    paneProducerJobs.values.forEach { it.cancel() }
+    paneInputJobs.values.forEach { it.cancel() }
+}
+
+private fun remainingCleanupMillis(deadlineNanos: Long): Long =
+    ((deadlineNanos - System.nanoTime()).coerceAtLeast(0L) / 1_000_000L).coerceAtLeast(1L)
+
+/** Close every runtime independently so one wedged runtime cannot starve later owners. */
+internal suspend fun closeCachedRuntimesConcurrently(
+    runtimes: List<CachedTmuxRuntime>,
+    detachTimeoutMs: Long,
+) {
+    // Cancellation ownership is transferred for the whole batch before any
+    // join/detach can suspend.
+    runtimes.forEach { it.cancelCachedRuntimeJobs() }
+    coroutineScope {
+        runtimes.map { runtime ->
+            launch { runtime.closeCachedRuntime(detachTimeoutMs) }
+        }.joinAll()
     }
 }

@@ -2022,6 +2022,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var layoutCoalescerScope: CoroutineScope? = null
 
     private var outputOverflowJob: Job? = null
+    private var structuralOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
     private var passiveDisconnectGraceJob: Job? = null
     private var lifecycleReattachNetworkCoalesce: LifecycleReattachNetworkCoalesce? = null
@@ -4782,7 +4783,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 // cancelled on cache eviction / deactivate rather than leaking
                 // until whole-VM `bridgeScope` teardown.
                 paneSeedRecoveryJobs = panes.paneSeedRecoveryJobs,
-                paneAgentJobs = emptyMap(),
                 paneAgentInputs = emptyMap(),
                 agentConversations = emptyMap(),
                 remoteColumns = remoteColumns,
@@ -5894,7 +5894,9 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: return emptyList()
         val client = clientRef ?: return emptyList()
         eventsJob?.cancel()
+        structuralOverflowJob?.cancel()
         eventsJob = null
+        structuralOverflowJob = null
         outputOverflowJob?.cancel()
         outputOverflowJob = null
         passiveDisconnectGraceJob?.cancel()
@@ -5915,7 +5917,6 @@ public class TmuxSessionViewModel @Inject constructor(
             paneProducerJobs = paneProducerJobs.toMap(),
             paneInputQueues = paneInputQueues.toMap(),
             paneInputJobs = paneInputJobs.toMap(),
-            paneAgentJobs = paneAgentJobs.toMap(),
             paneAgentInputs = paneAgentInputs.toMap(),
             agentConversations = _agentConversations.value,
             remoteColumns = remoteColumns,
@@ -6055,14 +6056,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // coroutine timeout cannot interrupt, the real Main park was the SUM of
         // the N per-runtime ceilings (a multi-second / ANR-class freeze on a
         // wedged transport). [closeCachedRuntime] still bounds its own suspending
-        // steps at SYNC_DETACH_TIMEOUT_MS; the outer ceiling here is a
-        // belt-and-suspenders guard that scales with the runtime count.
+        // steps at SYNC_DETACH_TIMEOUT_MS. Close all owners concurrently so a
+        // wedged first runtime cannot consume a batch-wide sequential ceiling
+        // before later runtimes close their clients and release their leases.
         runCatching {
-            withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS * runtimes.size) {
-                runtimes.forEach { runtime ->
-                    runtime.closeCachedRuntime(detachTimeoutMs = SYNC_DETACH_TIMEOUT_MS)
-                }
-            }
+            closeCachedRuntimesConcurrently(runtimes, SYNC_DETACH_TIMEOUT_MS)
         }
     }
 
@@ -7841,6 +7839,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Cancel any previous subscription before re-binding (idempotency
         // for tests that swap clients on the same ViewModel instance).
         eventsJob?.cancel()
+        structuralOverflowJob?.cancel()
 
         // Issue #576 (Slice A of #792): stand up a fresh coalescer + its
         // off-main drain scope for this client. Structural control events
@@ -7894,6 +7893,13 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
         eventsJob = job
+        structuralOverflowJob = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            client.structuralEventOverflowGeneration.collect { generation ->
+                if (generation > 0L && clientRef === client) {
+                    coalescer.offerAuthoritativeRepair()
+                }
+            }
+        }
         outputOverflowJob?.cancel()
         outputOverflowJob = bridgeScope.launch {
             client.outputBacklogOverflows.collect { overflow ->
@@ -8366,6 +8372,8 @@ public class TmuxSessionViewModel @Inject constructor(
             val ready = withTimeoutOrNull(budgets.attachMs) {
                 eventsJob?.cancelAndJoin()
                 eventsJob = null
+                structuralOverflowJob?.cancelAndJoin()
+                structuralOverflowJob = null
                 outputOverflowJob?.cancelAndJoin()
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
@@ -8609,6 +8617,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 replacement = newClient
                 eventsJob?.cancelAndJoin()
                 eventsJob = null
+                structuralOverflowJob?.cancelAndJoin()
+                structuralOverflowJob = null
                 outputOverflowJob?.cancelAndJoin()
                 outputOverflowJob = null
                 disconnectedJob?.cancelAndJoin()
@@ -11552,14 +11562,14 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     @androidx.annotation.VisibleForTesting
-    internal fun activePaneRenderOwnerSnapshotForTest(): ActivePaneRenderOwnerSnapshotForTest {
+    internal fun activePaneRenderDiagnosticsForTest(): ActivePaneRenderDiagnostics {
         val pane = checkNotNull(activeVisiblePane()) { "active visible pane is missing" }
         val ownerBefore = pane.terminalState.renderModelOwnerSnapshotForTesting()
         val rendered = pane.terminalState.renderedNonBlankCharCount(); val partial =
             pane.terminalState.visibleScreenIsPartiallyBlank(); val suspect = pane.terminalState.renderLooksSuspect()
         val ownerAfter = pane.terminalState.renderModelOwnerSnapshotForTesting(); val automaticHeal =
             automaticRenderHealTracker.snapshot()
-        return ActivePaneRenderOwnerSnapshotForTest(
+        return ActivePaneRenderDiagnostics(
             paneId = pane.paneId, windowId = pane.windowId, sessionId = pane.sessionId,
             targetSessionName = activeTarget?.sessionName, connectGeneration = connectGeneration,
             clientIdentity = clientRef?.let(System::identityHashCode),
@@ -11575,52 +11585,6 @@ public class TmuxSessionViewModel @Inject constructor(
             lastSeedAtMs = paneLastSeedAtMs[pane.paneId], renderedNonBlankChars = rendered,
             partiallyBlank = partial, renderLooksSuspect = suspect, coherent = ownerBefore == ownerAfter,
         )
-    }
-    @androidx.annotation.VisibleForTesting
-    internal fun appendToActivePaneRenderModelForTest(bytes: ByteArray, expectedOwner: ActivePaneRenderOwnerSnapshotForTest, afterAppendBeforeSnapshotForTest: (() -> Unit)? = null):
-        ActivePaneRenderOwnerSnapshotForTest {
-        val before = activePaneRenderOwnerSnapshotForTest()
-        check(expectedOwner.attachResizeSeedSettled) { "expected owner was not settled: $expectedOwner" }
-        check(before.coherent && before.sameOwnerAs(expectedOwner)) {
-            "active render owner changed before injection: expected=$expectedOwner actual=$before"
-        }
-        check(before.modelMutationEpoch == expectedOwner.modelMutationEpoch) {
-            "active render model mutated before injection: expected=$expectedOwner actual=$before"
-        }
-        check(before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
-            before.sizeOperationsInFlight == 0 && before.automaticHealOperationsInFlight == 0 &&
-                before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch &&
-            before.appliedColumns == expectedOwner.appliedColumns &&
-            before.appliedRows == expectedOwner.appliedRows
-        ) {
-            "attach/resize owner changed before injection: expected=$expectedOwner actual=$before"
-        }
-        val pane = checkNotNull(activeVisiblePane())
-        pane.terminalState.appendDirectlyToRenderModelForTesting(bytes)
-        afterAppendBeforeSnapshotForTest?.invoke()
-        val after = activePaneRenderOwnerSnapshotForTest()
-        check(after.coherent && after.sameOwnerAs(expectedOwner)) {
-            "active render owner changed during injection: expected=$expectedOwner actual=$after" }
-        check(after.modelMutationEpoch == expectedOwner.modelMutationEpoch + 1L) {
-            "unexpected concurrent model mutation during injection: expected=$expectedOwner actual=$after" }
-        check(after.automaticHealOperationsInFlight == 0 && after.automaticHealActivityEpoch ==
-            expectedOwner.automaticHealActivityEpoch) {
-            "automatic render heal raced injection: expected=$expectedOwner actual=$after" }
-        return after
-    }
-    @androidx.annotation.VisibleForTesting
-    internal suspend fun healActivePaneIfStaleRenderResultForTest(expectedOwner: ActivePaneRenderOwnerSnapshotForTest):
-        HealAttemptResult {
-        val before = activePaneRenderOwnerSnapshotForTest()
-        check(before.coherent && before.sameOwnerAs(expectedOwner)) {
-            "active render owner changed before manual heal: expected=$expectedOwner actual=$before" }
-        check(before.modelMutationEpoch == expectedOwner.modelMutationEpoch &&
-            before.controlSizeGeneration == expectedOwner.controlSizeGeneration &&
-            before.sizeOperationsInFlight == 0 && before.automaticHealOperationsInFlight == 0 &&
-                before.automaticHealActivityEpoch == expectedOwner.automaticHealActivityEpoch
-        ) {
-            "active render model/resize changed before manual heal: expected=$expectedOwner actual=$before" }
-        return healActivePaneIfStaleRenderResultForTest()
     }
     @androidx.annotation.VisibleForTesting internal fun completeAutomaticRenderHealActivityCycleForTest() =
         automaticRenderHealTracker.begin().also(automaticRenderHealTracker::complete)
@@ -16956,6 +16920,8 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
+        structuralOverflowJob?.cancelAndJoin()
+        structuralOverflowJob = null
         layoutChangeCoalescer?.stop()
         layoutChangeCoalescer = null
         layoutCoalescerScope?.cancel()
@@ -17111,6 +17077,8 @@ public class TmuxSessionViewModel @Inject constructor(
         passiveDisconnectGraceJob = null
         eventsJob?.cancel()
         eventsJob = null
+        structuralOverflowJob?.cancel()
+        structuralOverflowJob = null
         // Issue #576 (Slice A of #792): tear down the layout-change coalescer +
         // its off-main drain scope with the rest of the per-connection state.
         layoutChangeCoalescer?.stop()

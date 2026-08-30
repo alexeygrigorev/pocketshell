@@ -1040,6 +1040,7 @@ class ForwardingNotificationE2eTest {
         private val disconnectEventState = MutableStateFlow<TmuxDisconnectEvent?>(null)
 
         override val events: Flow<ControlEvent> = emptyFlow()
+        override val structuralEventOverflowGeneration: StateFlow<Long> = MutableStateFlow(0L)
         override val disconnected: StateFlow<Boolean> = disconnectedState.asStateFlow()
         override val disconnectEvent: StateFlow<TmuxDisconnectEvent?> = disconnectEventState.asStateFlow()
         override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> = emptyFlow()

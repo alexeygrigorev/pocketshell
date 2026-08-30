@@ -306,6 +306,10 @@ class App : Application() {
     private val terminalLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         when (event) {
             Lifecycle.Event.ON_STOP -> {
+                // Issue #2309: D21 hard gate for parked-runtime TTL clocks. Cache
+                // age remains absolute, but no expiry scheduler or cleanup work
+                // runs while the process is backgrounded.
+                tmuxRuntimeCache.onProcessBackgrounded()
                 val terminalGraceMillis = BackgroundGraceTestOverride.currentOr(
                     settingsRepository.settings.value.backgroundGraceMillis,
                 )
@@ -329,6 +333,9 @@ class App : Application() {
                 )
             }
             Lifecycle.Event.ON_START -> {
+                // Synchronously claim already-due generations before a returning
+                // screen can reactivate them, then arm foreground-only one-shots.
+                tmuxRuntimeCache.onProcessForegrounded()
                 terminalNetworkLifecycleGate.onForegroundResumeStarted()
                 DiagnosticEvents.record(
                     "app",

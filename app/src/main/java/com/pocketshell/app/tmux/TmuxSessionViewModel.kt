@@ -5486,6 +5486,18 @@ public class TmuxSessionViewModel @Inject constructor(
         onDeath = ::onParkedRuntimeDeath,
     )
 
+    init {
+        // Issue #2309: expiry cleanup is process-owned and can outlive this
+        // screen, while the exact parked-health binding is VM-owned. Clear the
+        // binding as soon as the cache wins the serialized expiry claim; when
+        // this VM is already gone its scope has already cancelled every binding.
+        viewModelScope.launch {
+            runtimeCache.expiryClaims.collect { claim ->
+                parkedRuntimeHealthEffects.onEvicted(claim.healthBinding)
+            }
+        }
+    }
+
     /**
      * Issue #1533: cross-episode amortization for the SAME-IDENTITY network-restore
      * redial (the "V2" busy-session flap) — the #928/#1522 debounce shape, distinct

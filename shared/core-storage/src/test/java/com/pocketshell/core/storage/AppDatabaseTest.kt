@@ -1138,6 +1138,7 @@ class AppDatabaseTest {
             assertEquals("prod-v8", hosts[0].name)
             assertEquals("v8.example.com", hosts[0].hostname)
             assertEquals(true, hosts[0].enabled)
+            assertTrue(hosts[0].treeIdentity.matches(Regex("[0-9a-f]{32}")))
             assertEquals("pocketshell usage --json", hosts[0].usageCommandOverride)
             assertNull(hosts[0].pocketshellCliVersion)
             assertNull(hosts[0].pocketshellExpectedCliVersion)

@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import android.os.SystemClock
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -54,12 +55,15 @@ internal interface TreeSyncRemote {
 
     suspend fun getTree(binding: TreeSyncBinding): TreeRemoteSource.TreeResult
 
+    suspend fun migrateLegacyTree(binding: TreeSyncBinding) = Unit
+
     suspend fun reconcileTree(binding: TreeSyncBinding): TreeRemoteSource.ReconcileDelta?
 
     suspend fun upsertTree(
         binding: TreeSyncBinding,
         nodes: List<TreeRemoteSource.TreeNode>,
-    ): Boolean
+        expectedVersion: Long,
+    ): TreeRemoteSource.UpsertResult
 
     suspend fun acquireSessionForUpgrade(binding: TreeSyncBinding): com.pocketshell.core.ssh.SshSession?
 
@@ -112,7 +116,8 @@ internal class TreeSyncCoordinator(
     private val cache: TreeSyncCache?,
     private val processStarted: StateFlow<Boolean>,
     private val dispatcher: () -> CoroutineDispatcher,
-    private val clock: () -> Long = System::currentTimeMillis,
+    private val persistenceOwner: TreePersistenceOwner,
+    private val clock: () -> Long = SystemClock::elapsedRealtime,
     val policy: TreeSyncPolicy = TreeSyncPolicy(),
     private val awaitBeforeFullReconcile: suspend (BoundParams) -> Unit = {},
     private val listener: Listener,
@@ -327,7 +332,7 @@ internal class TreeSyncCoordinator(
 
     private fun hydrateFromClientCache(binding: TreeSyncBinding): Boolean {
         val params = binding.params
-        val cached = cache?.peek(params.hostName) ?: return false
+        val cached = cache?.peek(params.hostId) ?: return false
         if (cached.isEmpty) return false
         if (!applyCachedTree(cached)) return false
         listener.onTreeChanged(synchronous = true)
@@ -339,7 +344,8 @@ internal class TreeSyncCoordinator(
         val cache = cache ?: return
         cacheSeedJob?.cancel()
         cacheSeedJob = scope.launch(dispatcher()) {
-            val cached = runCatching { cache.read(params.hostName) }
+            runCatching { cache.migrateLegacy(params.hostId, params.hostName) }
+            val cached = runCatching { cache.read(params.hostId) }
                 .getOrDefault(TreeClientCache.CachedTree(nodes = emptyList()))
             // Resume on the coordinator's owning scope after the injected
             // dispatcher finishes the blocking cache read.  Hard-coding
@@ -376,11 +382,18 @@ internal class TreeSyncCoordinator(
             }
             var cancelled = false
             try {
+                withTimeoutOrNull(policy.hydrateTimeoutMs) {
+                    remote.migrateLegacyTree(binding)
+                }
+                if (!isCurrent(binding)) return@launch
                 val result = withTimeoutOrNull(policy.hydrateTimeoutMs) {
                     async(dispatcher()) { remote.getTree(binding) }.await()
-                } ?: TreeRemoteSource.TreeResult.Empty
+                } ?: TreeRemoteSource.TreeResult.Unavailable
                 if (!isCurrent(binding)) return@launch
                 result.cliVersion?.let(listener::onPayloadCliVersion)
+                if (result is TreeRemoteSource.TreeResult.Available) {
+                    persistenceOwner.observeRemoteVersion(params.hostId, result.version)
+                }
                 if (result.nodes.isNotEmpty()) {
                     tree.hydrate(result.nodes.map { it.toHydratedNode() })
                     listener.onTreeChanged()
@@ -596,15 +609,6 @@ internal class TreeSyncCoordinator(
     private fun persist(binding: TreeSyncBinding) {
         val params = binding.params
         val nodes = tree.exportNodes().map { it.toTreeNode() }
-        if (nodes.isNotEmpty()) {
-            scope.launch {
-                if (!isCurrent(binding)) return@launch
-                withTimeoutOrNull(policy.hydrateTimeoutMs) {
-                    runCatching { remote.upsertTree(binding, nodes) }
-                }
-            }
-        }
-        val cache = cache ?: return
         val structure = tree.exportStructure()
         val cached = TreeClientCache.CachedTree(
             nodes = nodes,
@@ -613,11 +617,19 @@ internal class TreeSyncCoordinator(
             scannedProjectFoldersByRoot = structure.scannedProjectFoldersByRoot,
             historyProjectFoldersByRoot = structure.historyProjectFoldersByRoot,
         )
-        scope.launch(dispatcher()) {
-            if (isCurrent(binding)) {
-                runCatching { cache.write(params.hostName, cached) }
-            }
-        }
+        persistenceOwner.persist(
+            TreePersistenceOwner.Request(
+                hostId = params.hostId,
+                binding = binding,
+                nodes = nodes,
+                cached = cached,
+                cache = cache,
+                remote = remote,
+                dispatcher = dispatcher,
+                timeoutMs = policy.hydrateTimeoutMs,
+                isCurrent = { isCurrent(binding) },
+            ),
+        )
     }
 
     private fun scheduleWarmRelease() {

@@ -579,7 +579,7 @@ class Issue1829MainThreadConfinementTest {
         )
 
     private fun writeNodes(cache: TreeClientCache, vararg nodes: TreeRemoteSource.TreeNode) {
-        cache.write(HOST.name, TreeClientCache.CachedTree(nodes = nodes.toList()))
+        cache.write(HOST.id, 1L, TreeClientCache.CachedTree(nodes = nodes.toList()))
     }
 
     private fun sessionRow(name: String): FolderSessionRow =

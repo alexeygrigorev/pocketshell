@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import java.util.UUID
 
 /**
  * A configured SSH host. Owns connection metadata + auto-forward defaults.
@@ -96,4 +97,6 @@ data class HostEntity(
     val pocketshellDaemonRunning: Boolean? = null,
     val pocketshellDaemonEnabled: Boolean? = null,
     val usageCommandOverride: String? = null,
+    /** Stable opaque owner for host-side durable state; display-name edits never change it. */
+    val treeIdentity: String = UUID.randomUUID().toString(),
 )

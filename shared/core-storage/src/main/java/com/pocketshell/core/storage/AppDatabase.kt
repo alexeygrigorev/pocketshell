@@ -23,7 +23,7 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 17
+const val APP_DATABASE_SCHEMA_VERSION = 18
 
 /**
  * The PocketShell Room database.
@@ -265,6 +265,16 @@ val MIGRATION_16_17: Migration = object : Migration(16, 17) {
     }
 }
 
+/** Issue #2243: give every saved host a stable opaque remote tree owner. */
+val MIGRATION_17_18: Migration = object : Migration(17, 18) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN treeIdentity TEXT NOT NULL DEFAULT ''")
+        db.execSQL(
+            "UPDATE hosts SET treeIdentity = lower(hex(randomblob(16))) WHERE treeIdentity = ''",
+        )
+    }
+}
+
 val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_1_8,
     MIGRATION_2_8,
@@ -282,6 +292,7 @@ val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
     MIGRATION_14_15,
     MIGRATION_15_16,
     MIGRATION_16_17,
+    MIGRATION_17_18,
 )
 
 private fun legacyMigrationToVersionEight(startVersion: Int): Migration =

@@ -89,12 +89,81 @@ public class TreeRemoteSource @Inject constructor() {
      * the payload carries (issue #885). [cliVersion] is `null` when an old CLI
      * omits it (no passive signal).
      */
-    public data class TreeResult(
-        val nodes: List<TreeNode>,
-        val cliVersion: String? = null,
-    ) {
+    public sealed interface TreeResult {
+        public val nodes: List<TreeNode>
+        public val version: Long
+        public val cliVersion: String?
+
+        public data class Available(
+            override val nodes: List<TreeNode>,
+            override val version: Long = 0L,
+            override val cliVersion: String? = null,
+        ) : TreeResult
+
+        public data object Unavailable : TreeResult {
+            override val nodes: List<TreeNode> = emptyList()
+            override val version: Long = 0L
+            override val cliVersion: String? = null
+        }
+
         public companion object {
-            public val Empty: TreeResult = TreeResult(nodes = emptyList(), cliVersion = null)
+            public val Empty: TreeResult = Available(nodes = emptyList())
+        }
+    }
+
+    public sealed interface UpsertResult {
+        public data class Applied(val version: Long) : UpsertResult
+        public data class Conflict(val version: Long) : UpsertResult
+        public data object Unavailable : UpsertResult
+    }
+
+    internal enum class LegacyMigrationResult {
+        NothingToMigrate,
+        Migrated,
+        StableOwnerPreserved,
+        Unavailable,
+    }
+
+    /**
+     * Copy the pre-#2243 display-name owner to the opaque stable owner, then
+     * clear the legacy key. Copy-before-clear makes interruption retryable and
+     * never strands the only durable tree. If an opaque owner already exists,
+     * it is newer authority and is preserved; the duplicate legacy key is then
+     * deliberately cleared rather than merged.
+     */
+    internal suspend fun migrateLegacyTree(
+        session: SshSession,
+        legacyHost: String,
+        stableHost: String,
+    ): LegacyMigrationResult {
+        if (legacyHost == stableHost) return LegacyMigrationResult.NothingToMigrate
+        val stable = getTree(session, stableHost)
+        val legacy = getTree(session, legacyHost)
+        if (stable !is TreeResult.Available || legacy !is TreeResult.Available) {
+            return LegacyMigrationResult.Unavailable
+        }
+        if (legacy.nodes.isEmpty() && legacy.version == 0L) {
+            return LegacyMigrationResult.NothingToMigrate
+        }
+
+        val stableAlreadyOwned = stable.version > 0L || stable.nodes.isNotEmpty()
+        if (!stableAlreadyOwned) {
+            when (upsertTree(session, stableHost, legacy.nodes, expectedVersion = 0L)) {
+                is UpsertResult.Applied -> Unit
+                is UpsertResult.Conflict -> {
+                    // Another process established the stable owner first. It
+                    // wins; never merge the legacy tree over it.
+                }
+                UpsertResult.Unavailable -> return LegacyMigrationResult.Unavailable
+            }
+        }
+        return when (upsertTree(session, legacyHost, emptyList(), legacy.version)) {
+            is UpsertResult.Applied -> if (stableAlreadyOwned) {
+                LegacyMigrationResult.StableOwnerPreserved
+            } else {
+                LegacyMigrationResult.Migrated
+            }
+            is UpsertResult.Conflict, UpsertResult.Unavailable -> LegacyMigrationResult.Unavailable
         }
     }
 
@@ -102,19 +171,19 @@ public class TreeRemoteSource @Inject constructor() {
      * Fetch the persisted node list for [host] (the cold-start HYDRATE read),
      * plus the server CLI version stamped into the payload (issue #885 — the
      * passive version-mismatch signal). An empty node list (no registry yet) is
-     * a valid fresh-seed state. Returns [TreeResult.Empty] on any failure.
+     * a valid fresh-seed state. Returns [TreeResult.Unavailable] on transport or parse failure.
      */
     public suspend fun getTree(session: SshSession, host: String): TreeResult {
         return try {
             val request = JSONObject().put("host", host).toString()
             val command = pipeJsonToWrapped(request, "tree get")
-            val result = session.execTreeRpcBounded(command) ?: return TreeResult.Empty
-            if (result.exitCode != 0) return TreeResult.Empty
+            val result = session.execTreeRpcBounded(command) ?: return TreeResult.Unavailable
+            if (result.exitCode != 0) return TreeResult.Unavailable
             parseTreeResult(result.stdout)
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
-            TreeResult.Empty
+            TreeResult.Unavailable
         }
     }
 
@@ -128,18 +197,26 @@ public class TreeRemoteSource @Inject constructor() {
         session: SshSession,
         host: String,
         nodes: List<TreeNode>,
-    ): Boolean {
+        expectedVersion: Long,
+    ): UpsertResult {
         return try {
-            val request = buildUpsertRequest(host, nodes)
+            val request = buildUpsertRequest(host, nodes, expectedVersion)
             val command = pipeJsonToWrapped(request, "tree upsert")
-            val result = session.execTreeRpcBounded(command) ?: return false
-            if (result.exitCode != 0) return false
-            val root = runCatching { JSONObject(result.stdout.trim()) }.getOrNull() ?: return false
-            root.optString("status") == "ok"
+            val result = session.execTreeRpcBounded(command) ?: return UpsertResult.Unavailable
+            if (result.exitCode != 0) return UpsertResult.Unavailable
+            val root = runCatching { JSONObject(result.stdout.trim()) }.getOrNull()
+                ?: return UpsertResult.Unavailable
+            val version = root.optLong("version", -1L).takeIf { it >= 0L }
+                ?: return UpsertResult.Unavailable
+            when (root.optString("status")) {
+                "ok" -> UpsertResult.Applied(version)
+                "conflict" -> UpsertResult.Conflict(version)
+                else -> UpsertResult.Unavailable
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
-            false
+            UpsertResult.Unavailable
         }
     }
 
@@ -163,7 +240,7 @@ public class TreeRemoteSource @Inject constructor() {
         }
     }
 
-    private fun buildUpsertRequest(host: String, nodes: List<TreeNode>): String {
+    private fun buildUpsertRequest(host: String, nodes: List<TreeNode>, expectedVersion: Long): String {
         val nodesArray = JSONArray()
         nodes.forEach { node ->
             val obj = JSONObject()
@@ -182,15 +259,19 @@ public class TreeRemoteSource @Inject constructor() {
             }
             nodesArray.put(obj)
         }
-        return JSONObject().put("host", host).put("nodes", nodesArray).toString()
+        return JSONObject()
+            .put("host", host)
+            .put("expected_version", expectedVersion)
+            .put("nodes", nodesArray)
+            .toString()
     }
 
     private fun parseTreeResult(stdout: String): TreeResult {
-        val trimmed = stdout.trim().ifBlank { return TreeResult.Empty }
-        val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return TreeResult.Empty
+        val trimmed = stdout.trim().ifBlank { return TreeResult.Unavailable }
+        val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return TreeResult.Unavailable
         val cliVersion = root.optString("cli_version", "").takeIf { it.isNotBlank() }
-        val nodes = root.optJSONArray("nodes")
-            ?: return TreeResult(nodes = emptyList(), cliVersion = cliVersion)
+        val version = root.optLong("version", 0L).coerceAtLeast(0L)
+        val nodes = root.optJSONArray("nodes") ?: return TreeResult.Unavailable
         val out = ArrayList<TreeNode>(nodes.length())
         for (i in 0 until nodes.length()) {
             val row = nodes.optJSONObject(i) ?: continue
@@ -212,7 +293,11 @@ public class TreeRemoteSource @Inject constructor() {
             )
         }
         // Stable display order: honour the persisted `order` field.
-        return TreeResult(nodes = out.sortedBy { it.order }, cliVersion = cliVersion)
+        return TreeResult.Available(
+            nodes = out.sortedBy { it.order },
+            version = version,
+            cliVersion = cliVersion,
+        )
     }
 
     private fun parseReconcile(stdout: String): ReconcileDelta? {

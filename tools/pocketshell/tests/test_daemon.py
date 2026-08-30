@@ -1057,7 +1057,9 @@ def test_tree_upsert_invalidates_tree_get_cache(tmp_path: Path) -> None:
     assert cached["cached"] is True
 
     mutation = _dispatch_in_memory(
-        daemon, "tree.upsert", {"host": "h1", "nodes": [{"session": "a"}]}
+        daemon,
+        "tree.upsert",
+        {"host": "h1", "expected_version": 0, "nodes": [{"session": "a"}]},
     )
     assert mutation["result"]["status"] == "ok"
 

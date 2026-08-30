@@ -971,9 +971,9 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
     private fun assertFixtureCacheDoesNotReuseLegacyExactGeneration() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val cache = TreeClientCache(context)
-        val legacyHostName = LEGACY_HOST_NAME
         cache.write(
-            legacyHostName,
+            21240L,
+            1L,
             TreeClientCache.CachedTree(
                 nodes = listOf(
                     TreeRemoteSource.TreeNode(
@@ -991,11 +991,11 @@ class Issue2124HostAckDeliveryJourneyE2eTest {
             assertNull(
                 "the #2240 fixture host must not hydrate the legacy shared-name " +
                     "exact generation; hostName=$fixtureHostName",
-                cache.peek(fixtureHostName),
+                cache.peek(21241L),
             )
         } finally {
-            cache.write(legacyHostName, TreeClientCache.CachedTree(nodes = emptyList()))
-            cache.write(fixtureHostName, TreeClientCache.CachedTree(nodes = emptyList()))
+            cache.write(21240L, 2L, TreeClientCache.CachedTree(nodes = emptyList()))
+            cache.write(21241L, 2L, TreeClientCache.CachedTree(nodes = emptyList()))
         }
     }
 

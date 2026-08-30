@@ -91,7 +91,7 @@ class FolderListScaleAnrStrictModeDockerTest {
     fun tearDown() {
         DiagnosticEvents.install(DiagnosticEventSink.Noop)
         viewModelStore.clear()
-        runCatching { cache.write(HOST_NAME, TreeClientCache.CachedTree(nodes = emptyList())) }
+        runCatching { cache.write(HOST_ID, Long.MAX_VALUE, TreeClientCache.CachedTree(nodes = emptyList())) }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
     }
@@ -117,7 +117,8 @@ class FolderListScaleAnrStrictModeDockerTest {
             )
         }
         cache.write(
-            HOST_NAME,
+            HOST_ID,
+            1L,
             TreeClientCache.CachedTree(
                 nodes = nodes,
                 watchedFolders = listOf(ProjectRootEntity(hostId = 0L, label = "git", path = gitRoot)),
@@ -133,6 +134,7 @@ class FolderListScaleAnrStrictModeDockerTest {
         val hostId = runBlocking {
             db.hostDao().insert(
                 HostEntity(
+                    id = HOST_ID,
                     name = HOST_NAME,
                     // A host that won't connect — the load-bearing assertion is the
                     // Main-thread cache read during bind(), before any network.
@@ -210,6 +212,7 @@ class FolderListScaleAnrStrictModeDockerTest {
     }
 
     private companion object {
+        const val HOST_ID: Long = 965L
         const val HOST_NAME: String = "issue965-hetzner"
     }
 }

@@ -1,6 +1,7 @@
 package com.pocketshell.app.projects
 
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
@@ -10,6 +11,7 @@ import com.pocketshell.core.ssh.SshShell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.awaitCancellation
@@ -25,6 +27,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -45,6 +48,7 @@ import java.lang.reflect.Proxy
  * removing the outer timeout, converting cancellation to failure, or allowing
  * concurrent triggers would make the corresponding assertion fail.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class TreeSyncCoordinatorTest {
 
     private val coordinators = mutableListOf<TreeSyncCoordinator>()
@@ -80,10 +84,110 @@ class TreeSyncCoordinatorTest {
     }
 
     @Test
+    fun authoritativeEmptySnapshotIsPersistedLocallyAndRemotely() = runTest {
+        val remote = FakeRemote(
+            fullResults = ArrayDeque(
+                listOf(
+                    TreeSyncRemote.FullResult.Sessions(
+                        FolderListResult.Sessions(rows = emptyList()),
+                    ),
+                ),
+            ),
+        )
+        val cache = FakeCache()
+        val coordinator = newCoordinator(remote, RecordingListener(), cache)
+
+        coordinator.bind(PARAMS, flowOf(emptyList()))
+        advanceUntilIdle()
+
+        assertEquals(listOf(emptyList<TreeRemoteSource.TreeNode>()), remote.upsertNodes)
+        assertEquals(emptyList<TreeRemoteSource.TreeNode>(), cache.writes.single().second.nodes)
+    }
+
+    @Test
+    fun delayedOlderPersistenceFinishesBeforeLatestSnapshotIsWritten() = runTest {
+        val firstStarted = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val remote = FakeRemote(
+            fullResults = ArrayDeque(listOf(success("old"), success("latest"))),
+            firstUpsertStarted = firstStarted,
+            releaseFirstUpsert = releaseFirst,
+        )
+        val coordinator = newCoordinator(remote, RecordingListener())
+
+        coordinator.bind(PARAMS, flowOf(emptyList()))
+        firstStarted.await()
+        coordinator.requestReconcile()
+        runCurrent()
+        releaseFirst.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(listOf(listOf("old"), listOf("latest")), remote.upsertNodes.map { nodes ->
+            nodes.map { it.session }
+        })
+        assertEquals(listOf(0L, 0L), remote.upsertExpectedVersions)
+    }
+
+    @Test
+    fun twoCoordinatorsCannotRetryOlderSnapshotOverNewerDurableTree() = runTest {
+        val olderStarted = CompletableDeferred<Unit>()
+        val releaseOlder = CompletableDeferred<Unit>()
+        val newerApplied = CompletableDeferred<Unit>()
+        val durable = SharedDurableTree()
+        val olderRemote = SharedCasRemote(
+            durable = durable,
+            fullResult = success("older"),
+            delaySession = "older",
+            delayedStarted = olderStarted,
+            releaseDelayed = releaseOlder,
+        )
+        val newerRemote = SharedCasRemote(
+            durable = durable,
+            fullResult = success("newer"),
+            applied = newerApplied,
+        )
+        val cache = FakeCache()
+        val persistenceOwner = TreePersistenceOwner(
+            CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+        )
+        val older = newCoordinator(
+            olderRemote,
+            RecordingListener(),
+            cache,
+            persistenceOwner = persistenceOwner,
+        )
+        val newer = newCoordinator(
+            newerRemote,
+            RecordingListener(),
+            cache,
+            persistenceOwner = persistenceOwner,
+        )
+
+        older.bind(PARAMS, flowOf(emptyList()))
+        olderStarted.await()
+        newer.bind(PARAMS, flowOf(emptyList()))
+        newerApplied.await()
+        assertEquals(listOf("newer"), durable.nodes.map { it.session })
+
+        releaseOlder.complete(Unit)
+        advanceUntilIdle()
+
+        // Pre-fix both coordinator instances own revision/version state. The
+        // delayed older writer loses expected_version=0, reloads version 1,
+        // and retries its stale nodes because its instance-local pending slot
+        // is empty. The process-scoped owner must recognize it as revision N
+        // after N+1 already committed and suppress that retry.
+        assertEquals(listOf("newer"), durable.nodes.map { it.session })
+        assertEquals(1L, durable.version)
+        assertEquals(listOf(1L, 2L), cache.writes.map { it.first })
+        assertEquals("newer", cache.writes.last().second.nodes.single().session)
+    }
+
+    @Test
     fun durableCacheHydrateIsAdvisoryAndFullProbeStillWins() = runTest {
         val remote = FakeRemote(
             fullResults = ArrayDeque(listOf(success("live"))),
-            treeResult = TreeRemoteSource.TreeResult(
+            treeResult = TreeRemoteSource.TreeResult.Available(
                 nodes = listOf(
                     TreeRemoteSource.TreeNode(
                         session = "cached",
@@ -274,7 +378,7 @@ class TreeSyncCoordinatorTest {
         }
         val remote = FolderListTreeSyncRemote(
             gateway = unusedProxy(),
-            hostDao = unusedProxy(),
+            hostDao = hostDaoFor(PARAMS, OTHER_PARAMS),
             treeRemoteSource = treeSource,
             sshLeaseManager = leaseManager,
             activeTmuxClients = null,
@@ -297,6 +401,7 @@ class TreeSyncCoordinatorTest {
         // previous host; the connector then records only the first dial.
         assertEquals(listOf(PARAMS.hostname, OTHER_PARAMS.hostname), connector.requestedHosts)
         assertEquals("second-host", tree.nodes.single().session)
+        assertTrue(secondHostSession.execCommands.single().contains("tree-2"))
         assertSame(secondHostSession, upgradeSession)
         assertTrue(firstHostSession.closed)
     }
@@ -330,7 +435,7 @@ class TreeSyncCoordinatorTest {
         // isCurrent(binding) check at its remote-call boundary invokes
         // upsertTree(A) here.  This assertion therefore cannot be laundered by
         // a remote double that independently rejects stale bindings.
-        assertTrue(remote.upsertBindings.isEmpty())
+        assertTrue(remote.upsertBindings.none { it.params == PARAMS })
         assertTrue(remote.upgradeBindings.isEmpty())
         assertNull(upgradeResult.await())
         assertEquals(OTHER_PARAMS, remote.currentBinding?.params)
@@ -388,6 +493,7 @@ class TreeSyncCoordinatorTest {
                         collapsed = false,
                     ),
                 ),
+                expectedVersion = 0L,
             )
         }
         aConnectStarted.await()
@@ -427,6 +533,9 @@ class TreeSyncCoordinatorTest {
         listener: RecordingListener,
         cache: TreeSyncCache? = null,
         policy: TreeSyncPolicy = TreeSyncPolicy(periodicEnabled = false),
+        persistenceOwner: TreePersistenceOwner = TreePersistenceOwner(
+            CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler)),
+        ),
     ): TreeSyncCoordinator {
         val dispatcher = StandardTestDispatcher(testScheduler)
         return TreeSyncCoordinator(
@@ -435,6 +544,7 @@ class TreeSyncCoordinatorTest {
             cache = cache,
             processStarted = MutableStateFlow(true),
             dispatcher = { dispatcher },
+            persistenceOwner = persistenceOwner,
             clock = { 10_000L },
             policy = policy,
             listener = listener,
@@ -479,6 +589,8 @@ class TreeSyncCoordinatorTest {
         private val wedgeFull: Boolean = false,
         private val firstCallStarted: CompletableDeferred<Unit>? = null,
         private val wedgeFirstFull: Boolean = false,
+        private val firstUpsertStarted: CompletableDeferred<Unit>? = null,
+        private val releaseFirstUpsert: CompletableDeferred<Unit>? = null,
     ) : TreeSyncRemote {
         val eventFlow = MutableSharedFlow<TreeSyncEvent>(extraBufferCapacity = 8)
         var fullCalls = 0
@@ -492,6 +604,8 @@ class TreeSyncCoordinatorTest {
         var firstFullCancelled = false
             private set
         val upsertBindings = mutableListOf<TreeSyncBinding>()
+        val upsertNodes = mutableListOf<List<TreeRemoteSource.TreeNode>>()
+        val upsertExpectedVersions = mutableListOf<Long>()
         val upgradeBindings = mutableListOf<TreeSyncBinding>()
         var currentBinding: TreeSyncBinding? = null
             private set
@@ -542,15 +656,79 @@ class TreeSyncCoordinatorTest {
         override suspend fun upsertTree(
             binding: TreeSyncBinding,
             nodes: List<TreeRemoteSource.TreeNode>,
-        ): Boolean {
+            expectedVersion: Long,
+        ): TreeRemoteSource.UpsertResult {
             upsertBindings += binding
-            return true
+            upsertNodes += nodes
+            upsertExpectedVersions += expectedVersion
+            if (upsertBindings.size == 1) {
+                firstUpsertStarted?.complete(Unit)
+                releaseFirstUpsert?.await()
+            }
+            return TreeRemoteSource.UpsertResult.Applied(expectedVersion + 1L)
         }
 
         override suspend fun acquireSessionForUpgrade(binding: TreeSyncBinding): SshSession? {
             upgradeBindings += binding
             return null
         }
+
+        override suspend fun releaseWarm() = Unit
+    }
+
+    private class SharedDurableTree {
+        var version: Long = 0L
+        var nodes: List<TreeRemoteSource.TreeNode> = emptyList()
+    }
+
+    private class SharedCasRemote(
+        private val durable: SharedDurableTree,
+        private val fullResult: TreeSyncRemote.FullResult,
+        private val delaySession: String? = null,
+        private val delayedStarted: CompletableDeferred<Unit>? = null,
+        private val releaseDelayed: CompletableDeferred<Unit>? = null,
+        private val applied: CompletableDeferred<Unit>? = null,
+    ) : TreeSyncRemote {
+        override val hasDurableTree: Boolean = true
+
+        override fun events(binding: TreeSyncBinding): Flow<TreeSyncEvent> = emptyFlow()
+
+        override suspend fun ensureWarmConnected(binding: TreeSyncBinding) = Unit
+
+        override suspend fun fullReconcile(
+            binding: TreeSyncBinding,
+            watchedFolders: List<ProjectRootEntity>,
+        ): TreeSyncRemote.FullResult = fullResult
+
+        override suspend fun getTree(binding: TreeSyncBinding): TreeRemoteSource.TreeResult =
+            TreeRemoteSource.TreeResult.Available(
+                nodes = durable.nodes,
+                version = durable.version,
+            )
+
+        override suspend fun reconcileTree(
+            binding: TreeSyncBinding,
+        ): TreeRemoteSource.ReconcileDelta? = null
+
+        override suspend fun upsertTree(
+            binding: TreeSyncBinding,
+            nodes: List<TreeRemoteSource.TreeNode>,
+            expectedVersion: Long,
+        ): TreeRemoteSource.UpsertResult {
+            if (nodes.singleOrNull()?.session == delaySession) {
+                delayedStarted?.complete(Unit)
+                releaseDelayed?.await()
+            }
+            if (expectedVersion != durable.version) {
+                return TreeRemoteSource.UpsertResult.Conflict(durable.version)
+            }
+            durable.nodes = nodes
+            durable.version += 1L
+            applied?.complete(Unit)
+            return TreeRemoteSource.UpsertResult.Applied(durable.version)
+        }
+
+        override suspend fun acquireSessionForUpgrade(binding: TreeSyncBinding): SshSession? = null
 
         override suspend fun releaseWarm() = Unit
     }
@@ -637,13 +815,38 @@ class TreeSyncCoordinatorTest {
         error("${method.name} must not be called by this test")
     } as T
 
-    private class FakeCache : TreeSyncCache {
-        override fun peek(host: String): TreeClientCache.CachedTree? = null
+    @Suppress("UNCHECKED_CAST")
+    private fun hostDaoFor(vararg params: BoundParams): HostDao = Proxy.newProxyInstance(
+        HostDao::class.java.classLoader,
+        arrayOf(HostDao::class.java),
+    ) { _, method, args ->
+        when (method.name) {
+            "getById" -> params.firstOrNull { it.hostId == args?.firstOrNull() }?.let {
+                com.pocketshell.core.storage.entity.HostEntity(
+                    id = it.hostId,
+                    name = it.hostName,
+                    hostname = it.hostname,
+                    port = it.port,
+                    username = it.username,
+                    keyId = 1L,
+                    treeIdentity = "tree-${it.hostId}",
+                )
+            }
+            else -> error("${method.name} must not be called by this test")
+        }
+    } as HostDao
 
-        override fun read(host: String): TreeClientCache.CachedTree =
+    private class FakeCache : TreeSyncCache {
+        val writes = mutableListOf<Pair<Long, TreeClientCache.CachedTree>>()
+
+        override fun peek(hostId: Long): TreeClientCache.CachedTree? = null
+
+        override fun read(hostId: Long): TreeClientCache.CachedTree =
             TreeClientCache.CachedTree(emptyList())
 
-        override fun write(host: String, tree: TreeClientCache.CachedTree) = Unit
+        override fun write(hostId: Long, revision: Long, tree: TreeClientCache.CachedTree) {
+            writes += revision to tree
+        }
     }
 
     private fun success(name: String): TreeSyncRemote.FullResult.Sessions =
@@ -672,7 +875,8 @@ class TreeSyncCoordinatorTest {
         )
         val OTHER_PARAMS = PARAMS.copy(
             hostId = 2L,
-            hostName = "other-host",
+            // Same display name is valid; stable IDs/opaque tree identities separate it.
+            hostName = "test-host",
             hostname = "192.0.2.2",
         )
     }

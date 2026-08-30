@@ -88,6 +88,7 @@ class FolderListClientCacheInstantRenderDockerTest {
     private val viewModelStore = ViewModelStore()
     private var nextViewModelKey: Int = 0
     private val createdSessions = mutableListOf<String>()
+    private val daemonCreatedSessions = mutableListOf<String>()
     private val fixturePort: Int get() = DEFAULT_PORT
 
     @Before
@@ -136,9 +137,27 @@ class FolderListClientCacheInstantRenderDockerTest {
                 }
             }
         }
+        if (daemonCreatedSessions.isNotEmpty()) {
+            runCatching {
+                withTimeout(15_000) {
+                    SshConnection.connect(
+                        host = DEFAULT_HOST,
+                        port = DAEMON_PORT,
+                        user = DEFAULT_USER,
+                        key = sshKey,
+                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        timeoutMs = 10_000,
+                    ).getOrNull()?.use { session ->
+                        for (name in daemonCreatedSessions) {
+                            runCatching { session.exec("tmux kill-session -t $name 2>/dev/null || true") }
+                        }
+                    }
+                }
+            }
+        }
         runCatching { db.close() }
         runCatching { keyFile.delete() }
-        runCatching { cache.write(HOST_NAME, TreeClientCache.CachedTree(nodes = emptyList())) }
+        runCatching { cache.write(HOST_ID, Long.MAX_VALUE, TreeClientCache.CachedTree(nodes = emptyList())) }
     } }
 
     @Test
@@ -175,7 +194,8 @@ class FolderListClientCacheInstantRenderDockerTest {
         val watchRoot = FolderListViewModel.canonicalisePath("/tmp")
         val canonicalFolder = FolderListViewModel.canonicalisePath(folder)
         cache.write(
-            HOST_NAME,
+            HOST_ID,
+            1L,
             TreeClientCache.CachedTree(
                 nodes = listOf(
                     TreeRemoteSource.TreeNode(
@@ -196,7 +216,8 @@ class FolderListClientCacheInstantRenderDockerTest {
             SshKeyEntity(name = "issue867-key", privateKeyPath = keyFile.absolutePath),
         )
         val hostId = db.hostDao().insert(
-            HostEntity(
+                HostEntity(
+                    id = HOST_ID,
                 name = HOST_NAME,
                 hostname = DEFAULT_HOST,
                 port = fixturePort,
@@ -308,24 +329,255 @@ class FolderListClientCacheInstantRenderDockerTest {
         )
     } }
 
-    private fun newViewModel(): FolderListViewModel {
+    @Test
+    fun lastSessionEmptySurvivesColdOwnerRecreationBeforeUnavailableReconcile() {
+        runBlocking {
+            waitForSshFixtureReady(sshKey, port = DAEMON_PORT)
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val sessionName = "issue2243-last-$suffix"
+        val folder = "/tmp/$sessionName"
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "issue2243-key", privateKeyPath = keyFile.absolutePath),
+        )
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                id = HOST_ID,
+                name = "issue2243-$suffix",
+                hostname = DEFAULT_HOST,
+                port = DAEMON_PORT,
+                username = DEFAULT_USER,
+                keyId = keyId,
+            ),
+        )
+        val host = requireNotNull(db.hostDao().getById(hostId))
+        val node = TreeRemoteSource.TreeNode(
+            session = sessionName,
+            order = 0,
+            folderPath = folder,
+            collapsed = false,
+        )
+        val remoteSource = TreeRemoteSource()
+        val persistenceOwner = TreePersistenceOwner()
+
+        withTimeout(20_000L) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DAEMON_PORT,
+                user = DEFAULT_USER,
+                key = sshKey,
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 10_000,
+            ).getOrThrow().use { session ->
+                session.exec("mkdir -p $folder")
+                session.exec("tmux new-session -d -s $sessionName -c $folder")
+                daemonCreatedSessions += sessionName
+                val seed = remoteSource.upsertTree(
+                        session,
+                        host.treeIdentity,
+                        listOf(node),
+                        expectedVersion = 0L,
+                    )
+                assertTrue(
+                    "real agents-daemon tree seed must apply, got $seed",
+                    seed is TreeRemoteSource.UpsertResult.Applied,
+                )
+            }
+        }
+        cache.write(HOST_ID, 1L, TreeClientCache.CachedTree(nodes = listOf(node)))
+        // Model the actual cold-process boundary: persisted revision numbers
+        // belong to the dead process, while the new process-scoped writer starts
+        // its own monotonic sequence and a fresh cache instance warms the file.
+        cache = TreeClientCache(InstrumentationRegistry.getInstrumentation().targetContext)
+        cache.warmAll()
+
+        // An unavailable authoritative enumeration must not erase the prior
+        // non-empty local or remote tree. This drives the real VM/hydrate path;
+        // only the enumeration result is fault-injected.
+        val unavailable = newViewModel(
+            gateway = UnavailableEnumerationGateway(SshFolderListGateway()),
+            remoteSource = remoteSource,
+            persistenceOwner = persistenceOwner,
+        )
+        unavailable.setProcessStartedForTest(true)
+        bindOnMain(unavailable, host)
+        withTimeout(20_000L) {
+            while (true) {
+                val state = unavailable.state.value
+                if (state is FolderListUiState.Ready &&
+                    state.flatSessions.any { it.sessionName == sessionName } &&
+                    !state.isRefreshing
+                ) break
+                delay(100L)
+            }
+        }
+        assertEquals(sessionName, cache.peek(HOST_ID)?.nodes?.single()?.session)
+        assertRemoteSessions(remoteSource, host, listOf(sessionName))
+
+        viewModelStore.clear()
+        withTimeout(20_000L) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DAEMON_PORT,
+                user = DEFAULT_USER,
+                key = sshKey,
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 10_000,
+            ).getOrThrow().use { session ->
+                session.exec("tmux kill-session -t $sessionName")
+            }
+        }
+        daemonCreatedSessions.remove(sessionName)
+
+        // The real SSH/tmux enumeration is filtered to this isolated journey's
+        // session. After its real kill the authoritative result is nodes=[], and
+        // that empty snapshot must replace both prior durable owners.
+        val live = newViewModel(
+            gateway = JourneySessionGateway(SshFolderListGateway(), sessionName),
+            remoteSource = remoteSource,
+            persistenceOwner = persistenceOwner,
+        )
+        live.setProcessStartedForTest(true)
+        bindOnMain(live, host)
+        withTimeout(30_000L) {
+            while (true) {
+                val state = live.state.value
+                if (state is FolderListUiState.Ready &&
+                    state.flatSessions.none { it.sessionName == sessionName } &&
+                    !state.isRefreshing &&
+                    cache.peek(HOST_ID)?.nodes?.isEmpty() == true
+                ) break
+                delay(100L)
+            }
+        }
+        assertRemoteSessions(remoteSource, host, emptyList())
+
+        // Recreate the screen owner before another reconcile. The very first
+        // Main-thread state must not resurrect the deleted last row from local
+        // storage; the subsequent unavailable enumeration must not recreate it
+        // or rewrite the already-authoritative remote empty snapshot.
+        viewModelStore.clear()
+        val cold = newViewModel(
+            gateway = UnavailableEnumerationGateway(SshFolderListGateway()),
+            remoteSource = remoteSource,
+            persistenceOwner = persistenceOwner,
+        )
+        cold.setProcessStartedForTest(true)
+        val first = bindOnMain(cold, host)
+        assertFalse(
+            "cold owner recreation before reconcile must never render the deleted last row: $first",
+            first is FolderListUiState.Ready &&
+                first.flatSessions.any { it.sessionName == sessionName },
+        )
+        withTimeout(20_000L) {
+            while (cold.state.value is FolderListUiState.Loading) delay(100L)
+        }
+        val afterUnavailable = cold.state.value
+        assertFalse(
+            "unavailable enumeration must not resurrect stale last-session state: $afterUnavailable",
+            afterUnavailable is FolderListUiState.Ready &&
+                afterUnavailable.flatSessions.any { it.sessionName == sessionName },
+        )
+        assertTrue(cache.peek(HOST_ID)?.nodes?.isEmpty() == true)
+            assertRemoteSessions(remoteSource, host, emptyList())
+        }
+    }
+
+    private fun newViewModel(
+        gateway: FolderListGateway = SshFolderListGateway(),
+        remoteSource: TreeRemoteSource? = null,
+        persistenceOwner: TreePersistenceOwner = TreePersistenceOwner(),
+    ): FolderListViewModel {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         return FolderListViewModel(
-            gateway = SshFolderListGateway(),
+            gateway = gateway,
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
             forwardingController = ForwardingController(context),
             // No daemon registry: this exercises the CLIENT cache path against the
             // live host (the durable-daemon path is covered separately).
-            treeRemoteSource = null,
+            treeRemoteSource = remoteSource,
             treeClientCache = cache,
+            treePersistenceOwner = persistenceOwner,
             attachLifecycle = false,
         ).also { vm ->
             viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", vm)
         }
     }
 
+    private fun bindOnMain(vm: FolderListViewModel, host: HostEntity): FolderListUiState {
+        val captured = arrayOfNulls<FolderListUiState>(1)
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            vm.bind(
+                hostId = host.id,
+                hostName = host.name,
+                hostname = host.hostname,
+                port = host.port,
+                username = host.username,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+            )
+            captured[0] = vm.state.value
+        }
+        return requireNotNull(captured[0])
+    }
+
+    private suspend fun assertRemoteSessions(
+        source: TreeRemoteSource,
+        host: HostEntity,
+        expected: List<String>,
+    ) {
+        withTimeout(20_000L) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = host.port,
+                user = DEFAULT_USER,
+                key = sshKey,
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 10_000,
+            ).getOrThrow().use { session ->
+                val result = source.getTree(session, host.treeIdentity)
+                assertTrue(
+                    "remote tree unavailable for ${host.treeIdentity}",
+                    result is TreeRemoteSource.TreeResult.Available,
+                )
+                assertEquals(expected, result.nodes.map { it.session })
+            }
+        }
+    }
+
+    private class JourneySessionGateway(
+        private val delegate: FolderListGateway,
+        private val sessionName: String,
+    ) : FolderListGateway by delegate {
+        override suspend fun listSessionsWithFolder(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            watchedRoots: List<ProjectRootEntity>,
+        ): FolderListResult = when (
+            val result = delegate.listSessionsWithFolder(host, keyPath, passphrase, watchedRoots)
+        ) {
+            is FolderListResult.Sessions -> result.copy(
+                rows = result.rows.filter { it.sessionName == sessionName },
+            )
+            else -> result
+        }
+    }
+
+    private class UnavailableEnumerationGateway(
+        private val delegate: FolderListGateway,
+    ) : FolderListGateway by delegate {
+        override suspend fun listSessionsWithFolder(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            watchedRoots: List<ProjectRootEntity>,
+        ): FolderListResult = FolderListResult.Failed("injected enumeration unavailable")
+    }
+
     private companion object {
+        const val HOST_ID: Long = 867L
         const val HOST_NAME: String = "issue867-host"
+        const val DAEMON_PORT: Int = 2239
     }
 }

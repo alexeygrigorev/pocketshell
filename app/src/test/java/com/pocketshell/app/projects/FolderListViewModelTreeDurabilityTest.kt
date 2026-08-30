@@ -17,6 +17,8 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -64,10 +66,12 @@ class FolderListViewModelTreeDurabilityTest {
 
     private val viewModelStore = ViewModelStore()
     private var nextViewModelKey: Int = 0
+    private var persistenceOwner: TreePersistenceOwner? = null
 
     @After
     fun tearDown() {
         viewModelStore.clear()
+        persistenceOwner = null
     }
 
     // ---- (b) RESTART: collapse + order survive an app kill + relaunch -------
@@ -89,8 +93,8 @@ class FolderListViewModelTreeDurabilityTest {
         advanceUntilIdle()
         assertFalse("alpha collapses on tap", alphaFolder in expandedPaths(vm1))
         // The collapse was persisted host-side.
-        assertTrue("collapse persisted to the daemon registry", daemon.hasHost(HOST.name))
-        assertTrue(daemon.collapsedFolders(HOST.name).contains(alphaFolder))
+        assertTrue("collapse persisted to the daemon registry", daemon.hasHost(HOST.treeIdentity))
+        assertTrue(daemon.collapsedFolders(HOST.treeIdentity).contains(alphaFolder))
 
         // ---- "App restart": a brand-new VM, SAME daemon registry. ----
         val vm2 = newViewModel(gateway, daemon)
@@ -142,7 +146,7 @@ class FolderListViewModelTreeDurabilityTest {
         val daemon = FakeTreeDaemon()
         // Seed the daemon registry as if a prior session persisted two sessions.
         daemon.seed(
-            HOST.name,
+            HOST.treeIdentity,
             listOf(
                 FakeTreeDaemon.Node("beta", 0, folderPath("beta"), false),
                 FakeTreeDaemon.Node("alpha", 1, folderPath("alpha"), false),
@@ -159,7 +163,7 @@ class FolderListViewModelTreeDurabilityTest {
         // `alpha` is killed out-of-band: the daemon's live enumeration now omits
         // it. A name-only gone hint is escalated to the authoritative gateway
         // probe so a same-name successor cannot be pruned by the hint.
-        daemon.setLive(HOST.name, setOf("beta"))
+        daemon.setLive(HOST.treeIdentity, setOf("beta"))
         val gatewayProbesBeforeResume = gateway.probeCount
         gateway.rows = listOf(sessionRow("beta"))
 
@@ -206,7 +210,7 @@ class FolderListViewModelTreeDurabilityTest {
     fun wedgedResumeTreeReconcileFallsBackToFullGatewayProbe() = runTest {
         val daemon = FakeTreeDaemon()
         daemon.seed(
-            HOST.name,
+            HOST.treeIdentity,
             listOf(
                 FakeTreeDaemon.Node("beta", 0, folderPath("beta"), false),
                 FakeTreeDaemon.Node("alpha", 1, folderPath("alpha"), false),
@@ -296,6 +300,10 @@ class FolderListViewModelTreeDurabilityTest {
         treeRemoteExecTimeoutMs: Long = 12_000L,
     ): FolderListViewModel {
         val dispatcher = StandardTestDispatcher(testScheduler)
+        val sharedPersistenceOwner = persistenceOwner
+            ?: TreePersistenceOwner(CoroutineScope(SupervisorJob() + dispatcher)).also {
+                persistenceOwner = it
+            }
         Dispatchers.setMain(dispatcher)
         val session = RoutingTreeSshSession(
             daemon = daemon,
@@ -319,6 +327,7 @@ class FolderListViewModelTreeDurabilityTest {
                 remoteExecTimeoutMs = treeRemoteExecTimeoutMs
                 remoteExecDispatcher = dispatcher
             },
+            treePersistenceOwner = sharedPersistenceOwner,
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher
@@ -339,6 +348,7 @@ class FolderListViewModelTreeDurabilityTest {
         )
 
         private val nodesByHost = LinkedHashMap<String, MutableList<Node>>()
+        private val versionsByHost = LinkedHashMap<String, Long>()
         private val liveByHost = LinkedHashMap<String, Set<String>>()
 
         fun hasHost(host: String): Boolean = nodesByHost.containsKey(host)
@@ -348,6 +358,7 @@ class FolderListViewModelTreeDurabilityTest {
 
         fun seed(host: String, nodes: List<Node>) {
             nodesByHost[host] = nodes.toMutableList()
+            versionsByHost[host] = versionsByHost.getOrDefault(host, 0L) + 1L
         }
 
         fun setLive(host: String, names: Set<String>) {
@@ -367,11 +378,15 @@ class FolderListViewModelTreeDurabilityTest {
                 if (n.foreignKind != null) o.put("foreign_kind", n.foreignKind)
                 arr.put(o)
             }
-            return JSONObject().put("nodes", arr).put("version", nodes.size)
+            return JSONObject().put("nodes", arr).put("version", versionsByHost.getOrDefault(host, 0L))
         }
 
         @Synchronized
         fun upsert(host: String, request: JSONObject): JSONObject {
+            val currentVersion = versionsByHost.getOrDefault(host, 0L)
+            if (request.optLong("expected_version", -1L) != currentVersion) {
+                return JSONObject().put("status", "conflict").put("version", currentVersion)
+            }
             val arr = request.optJSONArray("nodes") ?: JSONArray()
             val parsed = ArrayList<Node>(arr.length())
             for (i in 0 until arr.length()) {
@@ -388,7 +403,9 @@ class FolderListViewModelTreeDurabilityTest {
                 )
             }
             nodesByHost[host] = parsed
-            return JSONObject().put("status", "ok").put("version", parsed.size)
+            val nextVersion = currentVersion + 1L
+            versionsByHost[host] = nextVersion
+            return JSONObject().put("status", "ok").put("version", nextVersion)
         }
 
         @Synchronized
@@ -408,6 +425,9 @@ class FolderListViewModelTreeDurabilityTest {
             val added = live.filter { it !in registryNames }
             // Prune gone from the registry (deltas only).
             nodesByHost[host] = nodes.filter { it.session in live }.toMutableList()
+            if (gone.isNotEmpty()) {
+                versionsByHost[host] = versionsByHost.getOrDefault(host, 0L) + 1L
+            }
             return JSONObject()
                 .put("alive", JSONArray(alive))
                 .put("gone", JSONArray(gone))

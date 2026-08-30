@@ -148,9 +148,10 @@ class TreeRemoteSourceTest {
                     sessionCreated = 1_710_000_000L,
                 ),
             ),
+            expectedVersion = 3L,
         )
 
-        assertTrue(ok)
+        assertEquals(TreeRemoteSource.UpsertResult.Applied(4L), ok)
         val sent = session.recorded.single()
         assertTrue(sent, sent.contains("tree upsert"))
         // The request JSON carries the nodes, collapse state, and the
@@ -160,13 +161,99 @@ class TreeRemoteSourceTest {
         assertTrue(sent, sent.contains("\"foreign_kind\":\"claude\""))
         assertTrue(sent, sent.contains("\"tmux_session_id\":\"\$4\""))
         assertTrue(sent, sent.contains("\"session_created\":1710000000"))
+        assertTrue(sent, sent.contains("\"expected_version\":3"))
         assertFalse("must not write a confirmed kind copy", sent.contains("\"kind\""))
     }
 
     @Test
     fun upsertTree_nonZeroExitReturnsFalse() = runTest {
         val session = treeSession(upsertResult = ExecResult("", "no", 1))
-        assertFalse(source.upsertTree(session, host = "h", nodes = emptyList()))
+        assertEquals(
+            TreeRemoteSource.UpsertResult.Unavailable,
+            source.upsertTree(session, host = "h", nodes = emptyList(), expectedVersion = 0L),
+        )
+    }
+
+    @Test
+    fun upsertTree_typedConflictCarriesAuthoritativeVersion() = runTest {
+        val session = treeSession(upsertStdout = """{"status":"conflict","version":9}""")
+        assertEquals(
+            TreeRemoteSource.UpsertResult.Conflict(9L),
+            source.upsertTree(session, host = "opaque", nodes = emptyList(), expectedVersion = 8L),
+        )
+    }
+
+    @Test
+    fun getTree_distinguishesAuthoritativeEmptyFromUnavailable() = runTest {
+        val empty = source.getTree(
+            treeSession(getStdout = """{"nodes":[],"version":7}"""),
+            host = "opaque",
+        )
+        val unavailable = source.getTree(treeSession(getStdout = "not-json"), host = "opaque")
+        assertTrue(empty is TreeRemoteSource.TreeResult.Available)
+        assertEquals(7L, empty.version)
+        assertTrue(unavailable is TreeRemoteSource.TreeResult.Unavailable)
+    }
+
+    @Test
+    fun legacyRemoteOwnerCopiesToOpaqueIdentityBeforeItIsCleared() = runTest {
+        val session = SequencedTreeSession(
+            gets = ArrayDeque(
+                listOf(
+                    ExecResult("""{"nodes":[],"version":0}""", "", 0),
+                    ExecResult(
+                        """{"nodes":[{"session":"kept","order":0,"folder_path":"/kept","collapsed":true}],"version":4}""",
+                        "",
+                        0,
+                    ),
+                ),
+            ),
+            upserts = ArrayDeque(
+                listOf(
+                    ExecResult("""{"status":"ok","version":1}""", "", 0),
+                    ExecResult("""{"status":"ok","version":5}""", "", 0),
+                ),
+            ),
+        )
+
+        val result = source.migrateLegacyTree(session, "old name", "opaque-id")
+
+        assertEquals(TreeRemoteSource.LegacyMigrationResult.Migrated, result)
+        assertEquals(listOf("get", "get", "upsert", "upsert"), session.verbs)
+        assertTrue(session.recorded[2].contains("kept"))
+        assertTrue(session.recorded[3].contains("\"nodes\":[]"))
+        assertTrue(session.recorded[3].contains("\"expected_version\":4"))
+    }
+
+    @Test
+    fun opaqueRemoteOwnerWinsWithoutMergingLegacyCollision() = runTest {
+        val session = SequencedTreeSession(
+            gets = ArrayDeque(
+                listOf(
+                    ExecResult(
+                        """{"nodes":[{"session":"stable","order":0,"folder_path":"/stable","collapsed":false}],"version":2}""",
+                        "",
+                        0,
+                    ),
+                    ExecResult(
+                        """{"nodes":[{"session":"legacy","order":0,"folder_path":"/legacy","collapsed":false}],"version":7}""",
+                        "",
+                        0,
+                    ),
+                ),
+            ),
+            upserts = ArrayDeque(
+                listOf(ExecResult("""{"status":"ok","version":8}""", "", 0)),
+            ),
+        )
+
+        val result = source.migrateLegacyTree(session, "collision", "opaque-id")
+
+        assertEquals(TreeRemoteSource.LegacyMigrationResult.StableOwnerPreserved, result)
+        assertEquals(listOf("get", "get", "upsert"), session.verbs)
+        assertTrue(session.recorded.last().contains("\"nodes\":[]"))
+        assertFalse(session.recorded.last().contains("stable"))
+        assertFalse(session.recorded.last().contains("legacy"))
     }
 
     @Test
@@ -230,11 +317,13 @@ class TreeRemoteSourceTest {
         assertTrue(getSession.recorded.single().contains("tree get"))
 
         val upsertSession = WedgingSshSession()
-        assertFalse(
+        assertEquals(
+            TreeRemoteSource.UpsertResult.Unavailable,
             timeoutSource.upsertTree(
                 upsertSession,
                 host = "h",
                 nodes = listOf(TreeRemoteSource.TreeNode("a", 0, "/p/a", collapsed = false)),
+                expectedVersion = 0L,
             ),
         )
         assertFalse(
@@ -310,6 +399,43 @@ class TreeRemoteSourceTest {
                 command.contains("tree upsert") -> upsertResult
                 command.contains("tree reconcile") -> reconcileResult
                 else -> ExecResult("", "no route for $command", 127)
+            }
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job = error("unused")
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("unused")
+        override fun startShell(): SshShell = error("unused")
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String = error("unused")
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("unused")
+        override fun close() = Unit
+    }
+
+    private class SequencedTreeSession(
+        private val gets: ArrayDeque<ExecResult>,
+        private val upserts: ArrayDeque<ExecResult>,
+    ) : SshSession {
+        val recorded = mutableListOf<String>()
+        val verbs = mutableListOf<String>()
+        override val isConnected: Boolean = true
+
+        override suspend fun exec(command: String): ExecResult {
+            recorded += command
+            return when {
+                command.contains("tree get") -> {
+                    verbs += "get"
+                    gets.removeFirst()
+                }
+                command.contains("tree upsert") -> {
+                    verbs += "upsert"
+                    upserts.removeFirst()
+                }
+                else -> ExecResult("", "no route", 127)
             }
         }
 

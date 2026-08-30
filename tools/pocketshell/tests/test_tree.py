@@ -21,6 +21,9 @@ Coverage:
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import threading
 from pathlib import Path
 
 from click.testing import CliRunner
@@ -31,6 +34,36 @@ from pocketshell.cli import cli
 
 def _paths(tmp_path: Path) -> tree_mod.TreePaths:
     return tree_mod.TreePaths(tree_dir=tmp_path / "pocketshell" / "tree")
+
+
+def _upsert_tree(params: dict, *, paths: tree_mod.TreePaths) -> dict:
+    request = dict(params)
+    request.setdefault(
+        "expected_version",
+        tree_mod.get_tree({"host": request["host"]}, paths=paths)["version"],
+    )
+    return tree_mod.upsert_tree(request, paths=paths)
+
+
+_READ_BARRIER = None
+_REAL_READ_REGISTRY = tree_mod._read_registry
+
+
+def _barrier_registry_read(paths: tree_mod.TreePaths) -> dict:
+    doc = _REAL_READ_REGISTRY(paths)
+    try:
+        _READ_BARRIER.wait(timeout=0.2)
+    except threading.BrokenBarrierError:
+        pass
+    return doc
+
+
+def _concurrent_tree_writer(tree_dir: str, host: str, session: str) -> None:
+    paths = tree_mod.TreePaths(tree_dir=Path(tree_dir))
+    tree_mod.upsert_tree(
+        {"host": host, "expected_version": 0, "nodes": [{"session": session}]},
+        paths=paths,
+    )
 
 
 # ----- resolve_paths -------------------------------------------------
@@ -74,7 +107,7 @@ def test_reconcile_envelope_carries_cli_version(tmp_path: Path, monkeypatch) -> 
     from pocketshell import __version__
 
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree({"host": "h1", "nodes": [{"session": "a"}]}, paths=paths)
+    _upsert_tree({"host": "h1", "nodes": [{"session": "a"}]}, paths=paths)
     # With a live enumeration containing the session, it reports alive + version.
     result = tree_mod.reconcile_tree(
         {"host": "h1"}, paths=paths, live_names={"a"}
@@ -102,7 +135,7 @@ def test_get_returns_persisted_nodes_after_upsert(tmp_path: Path) -> None:
         {"session": "git-a", "order": 0, "folder_path": "/p/a", "collapsed": True},
         {"session": "git-b", "order": 1, "folder_path": "/p/b", "collapsed": False},
     ]
-    tree_mod.upsert_tree({"host": "h1", "nodes": nodes}, paths=paths)
+    _upsert_tree({"host": "h1", "nodes": nodes}, paths=paths)
 
     got = tree_mod.get_tree({"host": "h1"}, paths=paths)
     assert got["version"] == 1
@@ -114,7 +147,7 @@ def test_get_returns_persisted_nodes_after_upsert(tmp_path: Path) -> None:
 
 def test_get_preserves_exact_tmux_generation(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {
             "host": "h1",
             "nodes": [
@@ -135,10 +168,10 @@ def test_get_preserves_exact_tmux_generation(tmp_path: Path) -> None:
 
 def test_get_is_host_scoped(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h1", "nodes": [{"session": "a"}]}, paths=paths
     )
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h2", "nodes": [{"session": "b"}]}, paths=paths
     )
     assert [n["session"] for n in tree_mod.get_tree({"host": "h1"}, paths=paths)["nodes"]] == ["a"]
@@ -150,7 +183,7 @@ def test_get_is_host_scoped(tmp_path: Path) -> None:
 
 def test_upsert_persists_atomically_with_0600(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree({"host": "h1", "nodes": [{"session": "a"}]}, paths=paths)
+    _upsert_tree({"host": "h1", "nodes": [{"session": "a"}]}, paths=paths)
 
     assert paths.registry_file.exists()
     mode = paths.registry_file.stat().st_mode & 0o777
@@ -161,16 +194,111 @@ def test_upsert_persists_atomically_with_0600(tmp_path: Path) -> None:
 
 def test_upsert_bumps_version_monotonically(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    r1 = tree_mod.upsert_tree({"host": "h1", "nodes": []}, paths=paths)
-    r2 = tree_mod.upsert_tree({"host": "h1", "nodes": []}, paths=paths)
-    r3 = tree_mod.upsert_tree({"host": "h1", "nodes": []}, paths=paths)
+    r1 = _upsert_tree({"host": "h1", "nodes": []}, paths=paths)
+    r2 = _upsert_tree({"host": "h1", "nodes": []}, paths=paths)
+    r3 = _upsert_tree({"host": "h1", "nodes": []}, paths=paths)
     assert (r1["version"], r2["version"], r3["version"]) == (1, 2, 3)
     assert r3["status"] == "ok"
 
 
+def test_upsert_rejects_stale_expected_version(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    first = _upsert_tree(
+        {"host": "opaque-a", "expected_version": 0, "nodes": [{"session": "new"}]},
+        paths=paths,
+    )
+    stale = _upsert_tree(
+        {"host": "opaque-a", "expected_version": 0, "nodes": [{"session": "old"}]},
+        paths=paths,
+    )
+    assert first == {"status": "ok", "version": 1}
+    assert stale == {"status": "conflict", "version": 1}
+    assert [n["session"] for n in tree_mod.get_tree({"host": "opaque-a"}, paths=paths)["nodes"]] == ["new"]
+
+
+def test_concurrent_process_writers_for_different_hosts_lose_neither(
+    tmp_path: Path, monkeypatch
+) -> None:
+    global _READ_BARRIER
+    paths = _paths(tmp_path)
+    ctx = multiprocessing.get_context("fork")
+    _READ_BARRIER = ctx.Barrier(2)
+    # Without the production flock, both children deterministically read the
+    # same empty document before either writes. With the flock, the first
+    # barrier wait times out while the second blocks on the lock; the second
+    # then reads the first writer's complete document and preserves both hosts.
+    monkeypatch.setattr(tree_mod, "_read_registry", _barrier_registry_read)
+    writers = [
+        ctx.Process(target=_concurrent_tree_writer, args=(str(paths.tree_dir), "opaque-a", "a")),
+        ctx.Process(target=_concurrent_tree_writer, args=(str(paths.tree_dir), "opaque-b", "b")),
+    ]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join(10)
+        assert writer.exitcode == 0
+    monkeypatch.setattr(tree_mod, "_read_registry", _REAL_READ_REGISTRY)
+    assert [n["session"] for n in tree_mod.get_tree({"host": "opaque-a"}, paths=paths)["nodes"]] == ["a"]
+    assert [n["session"] for n in tree_mod.get_tree({"host": "opaque-b"}, paths=paths)["nodes"]] == ["b"]
+
+
+def test_atomic_writer_uses_unique_temp_and_fsyncs_file_then_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _paths(tmp_path)
+    fsync_targets: list[str] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        fsync_targets.append(os.readlink(f"/proc/self/fd/{fd}"))
+        real_fsync(fd)
+
+    monkeypatch.setattr(tree_mod.os, "fsync", recording_fsync)
+    _upsert_tree(
+        {"host": "opaque-a", "expected_version": 0, "nodes": [{"session": "a"}]},
+        paths=paths,
+    )
+    assert len(fsync_targets) >= 2
+    assert fsync_targets[0] != str(paths.tree_dir)
+    assert fsync_targets[-1] == str(paths.tree_dir)
+    assert not list(paths.tree_dir.glob("registry.json.*.tmp"))
+
+
+def test_atomic_writer_replace_failure_keeps_old_document_and_cleans_temp(
+    tmp_path: Path, monkeypatch
+) -> None:
+    paths = _paths(tmp_path)
+    _upsert_tree(
+        {"host": "opaque-a", "expected_version": 0, "nodes": [{"session": "old"}]},
+        paths=paths,
+    )
+
+    def crash_cut(_source: Path, _target: Path) -> None:
+        raise OSError("simulated crash before rename")
+
+    monkeypatch.setattr(tree_mod.os, "replace", crash_cut)
+    try:
+        tree_mod.upsert_tree(
+            {
+                "host": "opaque-a",
+                "expected_version": 1,
+                "nodes": [{"session": "partial-new"}],
+            },
+            paths=paths,
+        )
+    except OSError:
+        pass
+    else:
+        raise AssertionError("expected simulated replace failure")
+
+    persisted = json.loads(paths.registry_file.read_text())
+    assert persisted["hosts"]["opaque-a"]["nodes"][0]["session"] == "old"
+    assert not list(paths.tree_dir.glob("registry.json.*.tmp"))
+
+
 def test_upsert_skips_malformed_nodes_without_sinking_batch(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {
             "host": "h1",
             "nodes": [
@@ -191,7 +319,7 @@ def test_upsert_persists_foreign_guess_cache_but_no_kind(tmp_path: Path) -> None
     """The optional foreign-GUESS cache survives; there is NO confirmed-kind
     field — confirmed kind lives in `@ps_agent_kind`, not this registry."""
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {
             "host": "h1",
             "nodes": [
@@ -208,17 +336,17 @@ def test_upsert_persists_foreign_guess_cache_but_no_kind(tmp_path: Path) -> None
 
 def test_upsert_accepts_single_node(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree({"host": "h1", "node": {"session": "solo"}}, paths=paths)
+    _upsert_tree({"host": "h1", "node": {"session": "solo"}}, paths=paths)
     got = tree_mod.get_tree({"host": "h1"}, paths=paths)
     assert [n["session"] for n in got["nodes"]] == ["solo"]
 
 
 def test_upsert_overwrites_node_set(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h1", "nodes": [{"session": "a"}, {"session": "b"}]}, paths=paths
     )
-    tree_mod.upsert_tree({"host": "h1", "nodes": [{"session": "c"}]}, paths=paths)
+    _upsert_tree({"host": "h1", "nodes": [{"session": "c"}]}, paths=paths)
     got = tree_mod.get_tree({"host": "h1"}, paths=paths)
     assert [n["session"] for n in got["nodes"]] == ["c"]
 
@@ -228,7 +356,7 @@ def test_upsert_overwrites_node_set(tmp_path: Path) -> None:
 
 def test_reconcile_returns_deltas_alive_gone_added(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h1", "nodes": [{"session": "alive"}, {"session": "dead"}]},
         paths=paths,
     )
@@ -245,7 +373,7 @@ def test_reconcile_returns_deltas_alive_gone_added(tmp_path: Path) -> None:
 
 def test_reconcile_prunes_gone_sessions_from_registry(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h1", "nodes": [{"session": "alive"}, {"session": "dead"}]},
         paths=paths,
     )
@@ -262,7 +390,7 @@ def test_reconcile_spares_node_within_optimistic_grace(tmp_path: Path) -> None:
     """A just-upserted node the live probe has not yet observed is NOT pruned
     while inside the optimistic-grace window (mirror OPTIMISTIC_GRACE_MS)."""
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {
             "host": "h1",
             "nodes": [
@@ -283,7 +411,7 @@ def test_reconcile_spares_node_within_optimistic_grace(tmp_path: Path) -> None:
 
 def test_reconcile_prunes_node_past_optimistic_grace(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {
             "host": "h1",
             "nodes": [{"session": "stale", "optimistic_since": 1000.0}],
@@ -304,7 +432,7 @@ def test_reconcile_does_not_prune_when_enumeration_unavailable(
     """A tmuxctl miss (`_live_session_names()` -> None) must NOT wipe the held
     tree — report everything alive and prune nothing."""
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h1", "nodes": [{"session": "a"}, {"session": "b"}]}, paths=paths
     )
     # Simulate `tmuxctl` missing / a non-zero exit: the live enumeration is
@@ -386,7 +514,7 @@ def test_cli_tree_get_round_trips_via_in_process(
     runner.invoke(
         cli,
         ["tree", "upsert"],
-        input=json.dumps({"host": "h1", "nodes": [{"session": "a", "collapsed": True}]}),
+        input=json.dumps({"host": "h1", "expected_version": 0, "nodes": [{"session": "a", "collapsed": True}]}),
     )
     result = runner.invoke(cli, ["tree", "get"], input=json.dumps({"host": "h1"}))
     assert result.exit_code == 0, result.output
@@ -406,7 +534,7 @@ def test_cli_tree_reconcile_emits_deltas(tmp_path: Path, monkeypatch) -> None:
     runner.invoke(
         cli,
         ["tree", "upsert"],
-        input=json.dumps({"host": "h1", "nodes": [{"session": "keep"}, {"session": "drop"}]}),
+        input=json.dumps({"host": "h1", "expected_version": 0, "nodes": [{"session": "keep"}, {"session": "drop"}]}),
     )
     result = runner.invoke(cli, ["tree", "reconcile"], input=json.dumps({"host": "h1"}))
     assert result.exit_code == 0, result.output
@@ -569,7 +697,7 @@ def test_workspace_survives_tree_upsert_and_pruning_reconcile(tmp_path: Path) ->
         },
         paths=paths,
     )
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h1", "nodes": [{"session": "alive"}, {"session": "dead"}]},
         paths=paths,
     )
@@ -586,7 +714,7 @@ def test_workspace_survives_tree_upsert_and_pruning_reconcile(tmp_path: Path) ->
 def test_tree_survives_workspace_upsert(tmp_path: Path) -> None:
     """A workspace writer must not erase hosts."""
     paths = _paths(tmp_path)
-    tree_mod.upsert_tree(
+    _upsert_tree(
         {"host": "h1", "nodes": [{"session": "keep-session"}]},
         paths=paths,
     )

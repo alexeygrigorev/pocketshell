@@ -1,11 +1,17 @@
 package com.pocketshell.app.projects
 
 import android.content.Context
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.flow.first
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.channels.FileChannel
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -66,8 +72,8 @@ import javax.inject.Singleton
  *
  * ## Storage
  *
- * One small JSON file per host under `<filesDir>/tree-cache/`, keyed by a
- * sanitised host name. Synchronous, tiny reads/writes on a background
+ * One small JSON file per host under `<filesDir>/tree-cache/`, keyed by the
+ * stable local Room host ID. Synchronous, tiny reads/writes on a background
  * dispatcher; any IO failure degrades to "no cache" (the screen falls back to
  * the brief Loading exactly as before) and is never surfaced to the user.
  *
@@ -79,7 +85,7 @@ import javax.inject.Singleton
  * Main-thread `disk_read` that produced the #965 folder-list ANR at scale (71
  * projects / 12 sessions). The two are reconciled by DECOUPLING the parse from the
  * hydrate: every persisted snapshot is also held PARSED in an in-memory map, keyed
- * by the same sanitised host. [peek] reads that map SYNCHRONOUSLY with NO disk I/O —
+ * by the same stable host ID. [peek] reads that map SYNCHRONOUSLY with NO disk I/O —
  * so `bind` hydrates instantly and Main never reads the file. The map is populated
  * OFF Main by [warmAll] (the cold-start pre-warm) and synchronously by [write]
  * (which already holds the parsed tree, so the just-rendered snapshot is hot for the
@@ -91,20 +97,26 @@ import javax.inject.Singleton
 @Singleton
 public class TreeClientCache @Inject constructor(
     @ApplicationContext private val context: Context,
+    private val hostDao: HostDao? = null,
 ) : TreeSyncCache {
+
+    /** Test-only crash cut after durable temp flush and before atomic replace. */
+    internal var beforeAtomicReplaceForTest: (() -> Unit)? = null
 
     private val cacheDir: File by lazy {
         File(context.filesDir, CACHE_DIR_NAME).apply { mkdirs() }
     }
 
     /**
-     * Issue #1109: the in-memory PARSED snapshot per host (keyed by the sanitised
-     * host name, the same key the file uses). [peek] returns from here SYNCHRONOUSLY
+     * Issue #1109: the in-memory PARSED snapshot per host (keyed by the stable
+     * local host ID, the same key the file uses). [peek] returns from here SYNCHRONOUSLY
      * with no disk I/O; [write] keeps it hot; [warmAll]/[read] populate it OFF Main.
      * Concurrent because the off-Main warm/read and the on-Main `peek` touch it from
      * different threads.
      */
-    private val parsed = ConcurrentHashMap<String, CachedTree>()
+    private val parsed = ConcurrentHashMap<Long, CachedTree>()
+    private val revisions = ConcurrentHashMap<Long, Long>()
+    private val writeLocks = ConcurrentHashMap<Long, Any>()
 
     /**
      * The full advisory presentation snapshot persisted for one host: the
@@ -129,7 +141,54 @@ public class TreeClientCache @Inject constructor(
      * back to the brief Loading and read OFF Main via [read]. Safe to call on the
      * Main thread: it only touches the in-memory map.
      */
-    override fun peek(host: String): CachedTree? = parsed[sanitise(host)]
+    override fun peek(hostId: Long): CachedTree? = parsed[hostId]
+
+    /**
+     * Move the pre-#2243 display-name file to its stable Room-host owner.
+     * Sanitised legacy names could collide (`dev/a` and `dev?a` both became
+     * `dev_a.json`), so exactly one deterministic claimant owns the old file:
+     * the lowest stable host ID among every current host with that legacy key.
+     * Losers never read, merge, or delete the ambiguous state. The winner moves
+     * it atomically; if a stable file already exists, that newer stable owner is
+     * authoritative and the legacy duplicate is deliberately removed.
+     */
+    override suspend fun migrateLegacy(hostId: Long, legacyHostName: String) {
+        val legacyKey = legacySanitise(legacyHostName)
+        if (CACHE_FILE_REGEX.matches("$legacyKey.json")) return
+        val legacy = File(cacheDir, "$legacyKey.json")
+        if (!legacy.exists()) return
+        val hosts = hostDao?.getAll()?.first().orEmpty()
+        val winner = hosts
+            .filter { legacySanitise(it.name) == legacyKey }
+            .minByOrNull { it.id }
+            ?.id
+            ?: hostId
+        if (winner != hostId) return
+
+        synchronized(writeLocks.computeIfAbsent(hostId) { Any() }) {
+            if (!legacy.exists()) return@synchronized
+            val stable = fileFor(hostId)
+            try {
+                if (stable.exists()) {
+                    legacy.delete()
+                } else {
+                    java.nio.file.Files.move(
+                        legacy.toPath(),
+                        stable.toPath(),
+                        StandardCopyOption.ATOMIC_MOVE,
+                    )
+                }
+                runCatching {
+                    FileChannel.open(cacheDir.toPath(), StandardOpenOption.READ).use { it.force(true) }
+                }
+                val (_, tree) = parse(stable.readText())
+                parsed[hostId] = tree
+            } catch (_: Throwable) {
+                // A failed move leaves the legacy source in place for the next
+                // cold bind; never delete first and risk stranding the tree.
+            }
+        }
+    }
 
     /**
      * Read the cached snapshot for [host] (the OFF-Main cold-miss / warm read).
@@ -138,17 +197,16 @@ public class TreeClientCache @Inject constructor(
      * any IO/parse failure. This DOES touch disk on a miss, so it must run off the
      * Main thread; the Main-thread seed uses [peek] instead (issue #1109 / #965).
      */
-    override fun read(host: String): CachedTree {
-        val key = sanitise(host)
-        parsed[key]?.let { return it }
-        val file = fileFor(host)
+    override fun read(hostId: Long): CachedTree {
+        parsed[hostId]?.let { return it }
+        val file = fileFor(hostId)
         if (!file.exists()) return EMPTY
         return try {
-            val tree = parse(file.readText(), hostId = host)
+            val (revision, tree) = parse(file.readText())
             // Cache the parse, but never clobber a snapshot a concurrent [write]
             // already landed (the write is the authoritative just-rendered tree).
-            if (!tree.isEmpty) parsed.putIfAbsent(key, tree)
-            parsed[key] ?: tree
+            parsed.putIfAbsent(hostId, tree)
+            parsed[hostId] ?: tree
         } catch (_: Throwable) {
             EMPTY
         }
@@ -164,52 +222,64 @@ public class TreeClientCache @Inject constructor(
         val files = runCatching { cacheDir.listFiles() }.getOrNull() ?: return
         for (file in files) {
             if (!file.isFile || !file.name.endsWith(".json")) continue
-            val key = file.name.removeSuffix(".json")
-            if (parsed.containsKey(key)) continue
-            val tree = runCatching { parse(file.readText(), hostId = key) }.getOrNull() ?: continue
-            if (!tree.isEmpty) parsed.putIfAbsent(key, tree)
+            val match = CACHE_FILE_REGEX.matchEntire(file.name)
+            if (match == null) {
+                // A pre-#2243 name-keyed file is migrated only after Room can
+                // resolve its deterministic stable-host claimant. Do not erase
+                // it during process pre-warm.
+                continue
+            }
+            val hostId = match.groupValues[1].toLongOrNull() ?: continue
+            if (parsed.containsKey(hostId)) continue
+            val (revision, tree) = runCatching { parse(file.readText()) }.getOrNull() ?: continue
+            parsed.putIfAbsent(hostId, tree)
         }
     }
 
     /**
      * Write [tree] as the new cached snapshot for [host] (called after a
      * successful reconcile / mutation so the NEXT cold start seeds the
-     * just-rendered tree, grouping and all). An empty node list deletes the
-     * cache file. Any IO failure is swallowed (the tree is still correct in
-     * memory; the next write re-persists).
+     * just-rendered tree, grouping and all). An empty node list replaces the
+     * prior file with an empty authoritative snapshot. Any IO failure is swallowed (the tree is still correct in
+     * memory; the next write re-persists). Empty is an authoritative snapshot
+     * and is persisted like every other revision.
      */
-    override fun write(host: String, tree: CachedTree) {
-        val key = sanitise(host)
-        // Issue #1109: keep the in-memory parsed snapshot hot with the just-rendered
-        // tree so the NEXT cold connect of this host in the same process [peek]s it
-        // synchronously (no Main-thread re-read). An empty tree evicts the entry.
-        if (tree.isEmpty) {
-            parsed.remove(key)
-        } else {
-            parsed[key] = tree
-        }
-        val file = fileFor(host)
-        try {
-            if (tree.isEmpty) {
-                file.delete()
-                return
+    override fun write(hostId: Long, revision: Long, tree: CachedTree) {
+        synchronized(writeLocks.computeIfAbsent(hostId) { Any() }) {
+            if (revision <= revisions.getOrDefault(hostId, Long.MIN_VALUE)) return
+            revisions[hostId] = revision
+            parsed[hostId] = tree
+            val file = fileFor(hostId)
+            val tmp = File.createTempFile(file.name + ".", ".tmp", cacheDir)
+            try {
+                FileOutputStream(tmp).use { output ->
+                    output.write(serialise(revision, tree).toByteArray(Charsets.UTF_8))
+                    output.flush()
+                    output.fd.sync()
+                }
+                beforeAtomicReplaceForTest?.invoke()
+                java.nio.file.Files.move(
+                    tmp.toPath(),
+                    file.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+                runCatching {
+                    FileChannel.open(cacheDir.toPath(), StandardOpenOption.READ).use { it.force(true) }
+                }
+            } catch (_: Throwable) {
+                tmp.delete()
             }
-            file.writeText(serialise(tree))
-        } catch (_: Throwable) {
-            // Best-effort cache; a failed write is a no-op (the in-memory snapshot
-            // above is still correct; the next write re-persists).
         }
     }
 
-    private fun fileFor(host: String): File = File(cacheDir, "${sanitise(host)}.json")
+    private fun fileFor(hostId: Long): File = File(cacheDir, "host-$hostId.json")
 
-    private fun sanitise(host: String): String =
+    private fun legacySanitise(host: String): String =
         host.map { ch -> if (ch.isLetterOrDigit() || ch == '-' || ch == '_') ch else '_' }
             .joinToString("")
-            .ifBlank { "_" }
-            .take(120)
 
-    private fun serialise(tree: CachedTree): String {
+    private fun serialise(revision: Long, tree: CachedTree): String {
         val nodesArray = JSONArray()
         tree.nodes.forEach { node ->
             val obj = JSONObject()
@@ -235,6 +305,7 @@ public class TreeClientCache @Inject constructor(
             )
         }
         return JSONObject()
+            .put(KEY_REVISION, revision)
             .put(KEY_NODES, nodesArray)
             .put(KEY_WATCHED_FOLDERS, watchedArray)
             .put(KEY_RESOLVED_ROOTS, stringMapToJson(tree.resolvedWatchedRootPaths))
@@ -243,9 +314,10 @@ public class TreeClientCache @Inject constructor(
             .toString()
     }
 
-    private fun parse(text: String, hostId: String): CachedTree {
+    private fun parse(text: String): Pair<Long, CachedTree> {
         val root = JSONObject(text)
-        val nodesJson = root.optJSONArray(KEY_NODES) ?: return EMPTY
+        val revision = root.optLong(KEY_REVISION, 0L)
+        val nodesJson = root.optJSONArray(KEY_NODES) ?: return revision to EMPTY
         val nodes = ArrayList<TreeRemoteSource.TreeNode>(nodesJson.length())
         for (i in 0 until nodesJson.length()) {
             val obj = nodesJson.optJSONObject(i) ?: continue
@@ -266,7 +338,6 @@ public class TreeClientCache @Inject constructor(
                 ),
             )
         }
-        if (nodes.isEmpty()) return EMPTY
         val watchedFolders = ArrayList<ProjectRootEntity>()
         root.optJSONArray(KEY_WATCHED_FOLDERS)?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -281,7 +352,7 @@ public class TreeClientCache @Inject constructor(
                 )
             }
         }
-        return CachedTree(
+        return revision to CachedTree(
             nodes = nodes,
             watchedFolders = watchedFolders,
             resolvedWatchedRootPaths = jsonToStringMap(root.optJSONObject(KEY_RESOLVED_ROOTS)),
@@ -325,6 +396,8 @@ public class TreeClientCache @Inject constructor(
 
     private companion object {
         const val CACHE_DIR_NAME: String = "tree-cache"
+        val CACHE_FILE_REGEX = Regex("host-([1-9][0-9]*)\\.json")
+        const val KEY_REVISION: String = "revision"
         const val KEY_NODES: String = "nodes"
         const val KEY_SESSION: String = "session"
         const val KEY_ORDER: String = "order"

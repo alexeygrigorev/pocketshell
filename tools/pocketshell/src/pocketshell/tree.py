@@ -50,11 +50,14 @@ write-whole semantics match the per-open ``tree.get`` + per-mutation
 from __future__ import annotations
 
 import json
+import fcntl
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -90,6 +93,10 @@ class TreePaths:
     @property
     def registry_file(self) -> Path:
         return self.tree_dir / REGISTRY_FILENAME
+
+    @property
+    def lock_file(self) -> Path:
+        return self.tree_dir / (REGISTRY_FILENAME + ".lock")
 
 
 def resolve_paths(
@@ -135,22 +142,42 @@ def _write_private(path: Path, text: str) -> None:
     :func:`pocketshell.usage_capture._write_private`.
     """
     _ensure_dir(path.parent)
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, NEW_FILE_MODE)
+    fd, raw_tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(raw_tmp)
+    os.fchmod(fd, NEW_FILE_MODE)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
-    except BaseException:
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, NEW_FILE_MODE)
+        except FileNotFoundError:
+            pass
+        directory_fd = os.open(str(path.parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
         try:
             os.unlink(tmp)
         except FileNotFoundError:
             pass
-        raise
-    os.replace(tmp, path)
+
+
+@contextmanager
+def _registry_lock(paths: TreePaths, *, exclusive: bool):
+    """One cross-process lock shared by daemon and CLI fallback writers."""
+    _ensure_dir(paths.tree_dir)
+    fd = os.open(str(paths.lock_file), os.O_RDWR | os.O_CREAT, NEW_FILE_MODE)
     try:
-        os.chmod(path, NEW_FILE_MODE)
-    except FileNotFoundError:
-        pass
+        fcntl.flock(fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _read_registry(paths: TreePaths) -> dict[str, Any]:
@@ -359,7 +386,8 @@ def get_tree(
     host = _require_host(params)
     if paths is None:
         paths = resolve_paths()
-    doc = _read_registry(paths)
+    with _registry_lock(paths, exclusive=False):
+        doc = _read_registry(paths)
     return {
         "nodes": _host_nodes(doc, host),
         "version": _host_version(doc, host),
@@ -399,14 +427,22 @@ def upsert_tree(
         if node is not None:
             nodes.append(node)
 
-    doc = _read_registry(paths)
-    hosts = doc.setdefault("hosts", {})
-    if not isinstance(hosts, dict):
-        hosts = {}
-        doc["hosts"] = hosts
-    version = _host_version(doc, host) + 1
-    hosts[host] = {"nodes": nodes, "version": version}
-    _write_registry(paths, doc)
+    expected_raw = params.get("expected_version")
+    if not isinstance(expected_raw, int) or isinstance(expected_raw, bool) or expected_raw < 0:
+        raise ValueError("tree.upsert: `expected_version` must be a non-negative integer")
+
+    with _registry_lock(paths, exclusive=True):
+        doc = _read_registry(paths)
+        current_version = _host_version(doc, host)
+        if expected_raw != current_version:
+            return {"status": "conflict", "version": current_version}
+        hosts = doc.setdefault("hosts", {})
+        if not isinstance(hosts, dict):
+            hosts = {}
+            doc["hosts"] = hosts
+        version = current_version + 1
+        hosts[host] = {"nodes": nodes, "version": version}
+        _write_registry(paths, doc)
     return {"status": "ok", "version": version}
 
 
@@ -442,12 +478,12 @@ def reconcile_tree(
     if now is None:
         now = time.time()
 
-    doc = _read_registry(paths)
-    nodes = _host_nodes(doc, host)
-    registry_names = [node["session"] for node in nodes]
-
     resolved_live = live_names if live_names is not None else _live_session_names()
     if resolved_live is None:
+        with _registry_lock(paths, exclusive=False):
+            doc = _read_registry(paths)
+            nodes = _host_nodes(doc, host)
+        registry_names = [node["session"] for node in nodes]
         # Enumeration unavailable — do NOT prune. Report everything alive.
         return {
             "alive": list(registry_names),
@@ -456,39 +492,35 @@ def reconcile_tree(
             "cli_version": _cli_version(),
         }
 
-    alive: list[str] = []
-    gone: list[str] = []
-    kept_nodes: list[dict[str, Any]] = []
-    for node in nodes:
-        name = node["session"]
-        if name in resolved_live:
-            alive.append(name)
-            kept_nodes.append(node)
-            continue
-        # Absent from the live enumeration — prune UNLESS still within the
-        # optimistic grace window (a just-upserted node the probe has not yet
-        # observed). Mirrors HostTreeModel.reconcile + OPTIMISTIC_GRACE_MS.
-        since = node.get("optimistic_since")
-        if isinstance(since, (int, float)) and (now - since) < OPTIMISTIC_GRACE_SECS:
-            # Spared this round; keep it but DO NOT list it gone yet, and treat
-            # it as still alive for the client's purposes.
-            alive.append(name)
-            kept_nodes.append(node)
-            continue
-        gone.append(name)
+    with _registry_lock(paths, exclusive=True):
+        doc = _read_registry(paths)
+        nodes = _host_nodes(doc, host)
+        registry_names = [node["session"] for node in nodes]
+        alive: list[str] = []
+        gone: list[str] = []
+        kept_nodes: list[dict[str, Any]] = []
+        for node in nodes:
+            name = node["session"]
+            if name in resolved_live:
+                alive.append(name)
+                kept_nodes.append(node)
+                continue
+            since = node.get("optimistic_since")
+            if isinstance(since, (int, float)) and (now - since) < OPTIMISTIC_GRACE_SECS:
+                alive.append(name)
+                kept_nodes.append(node)
+                continue
+            gone.append(name)
 
-    added = [name for name in resolved_live if name not in registry_names]
-
-    # Persist the prune (deltas only — we rewrite the registry without the gone
-    # nodes). Skip the write when nothing was pruned to avoid needless churn.
-    if gone:
-        hosts = doc.setdefault("hosts", {})
-        if not isinstance(hosts, dict):
-            hosts = {}
-            doc["hosts"] = hosts
-        version = _host_version(doc, host) + 1
-        hosts[host] = {"nodes": kept_nodes, "version": version}
-        _write_registry(paths, doc)
+        added = [name for name in resolved_live if name not in registry_names]
+        if gone:
+            hosts = doc.setdefault("hosts", {})
+            if not isinstance(hosts, dict):
+                hosts = {}
+                doc["hosts"] = hosts
+            version = _host_version(doc, host) + 1
+            hosts[host] = {"nodes": kept_nodes, "version": version}
+            _write_registry(paths, doc)
 
     return {
         "alive": alive,
@@ -595,7 +627,8 @@ def get_workspace(
     """Handle ``tree.workspace.get`` — the host file-workspace hydrate read."""
     if paths is None:
         paths = resolve_paths()
-    doc = _read_registry(paths)
+    with _registry_lock(paths, exclusive=False):
+        doc = _read_registry(paths)
     workspaces = doc.get("file_workspaces")
     raw: Any = None
     if isinstance(workspaces, Mapping):
@@ -625,16 +658,17 @@ def upsert_workspace(
         params.get("active_path"),
         now_ms=now_ms,
     )
-    doc = _read_registry(paths)
-    workspaces = doc.setdefault("file_workspaces", {})
-    if not isinstance(workspaces, dict):
-        workspaces = {}
-        doc["file_workspaces"] = workspaces
-    workspaces[WORKSPACE_KEY] = {
-        "tabs": reduced["tabs"],
-        "active_path": reduced["active_path"],
-    }
-    _write_registry(paths, doc)
+    with _registry_lock(paths, exclusive=True):
+        doc = _read_registry(paths)
+        workspaces = doc.setdefault("file_workspaces", {})
+        if not isinstance(workspaces, dict):
+            workspaces = {}
+            doc["file_workspaces"] = workspaces
+        workspaces[WORKSPACE_KEY] = {
+            "tabs": reduced["tabs"],
+            "active_path": reduced["active_path"],
+        }
+        _write_registry(paths, doc)
     return {"status": "ok", **reduced}
 
 

@@ -435,25 +435,100 @@ internal const val MaxAgentEvents: Int = 500
  */
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
-// Issue #1316: the OUTER attach-reveal ceiling. Was 30 s — the maintainer's
-// "it took forever to attach / wouldn't let me touch" felt-freeze while the
-// `list-panes` reconcile head-of-line-blocked behind a busy sibling's `-CC`
-// burst. With the reconcile now on the dedicated exec lane it returns in ms, so
-// this bound only ever fires on a genuinely stuck attach; a much shorter
-// ceiling turns that into a fast user-visible "Tap Reconnect to retry" escape
-// (→ evict lease → fresh-transport runConnect) instead of a tens-of-seconds
-// input-gated overlay. The reconcile itself is separately bounded by
-// [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS].
-internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 12_000L
-internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 
 // Issue #1316: per-reconcile exec ceiling for the attach/switch/refresh
 // `list-panes` on the dedicated exec lane. Healthy reconciles return in
 // milliseconds; this is the safety bound so a genuinely wedged/half-open
 // transport surfaces a `Failed` fast (→ retryable attach error) rather than
-// parking the reveal. Well under the outer [ATTACH_PANES_READY_TIMEOUT_MS] so
-// the reconcile-level escape fires first.
+// parking the reveal. Strictly smaller than the outer
+// [ATTACH_PANES_READY_TIMEOUT_MS] (which is DERIVED from it below) so the
+// reconcile-level escape fires first.
 internal const val RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS: Long = 6_000L
+
+/**
+ * Issue #2409: how many `capture-pane` attempts the **synchronous, pre-reveal**
+ * active-pane seed gets — the one
+ * `TmuxSessionViewModel.preloadVisibleContentForNewPanes` runs INSIDE every
+ * attach `reconcilePanes()`, i.e. INSIDE [ATTACH_PANES_READY_TIMEOUT_MS].
+ *
+ * ## What went wrong without this bound
+ *
+ * That seed used the general force-heal ladder:
+ * [SEED_CAPTURE_EMPTY_RETRY_ATTEMPTS] round-trips, each capped at
+ * [SEED_CAPTURE_TIMEOUT_MS], spaced by [SEED_CAPTURE_EMPTY_RETRY_DELAY_MS] —
+ * ≈10.4 s worst case. Put the [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS]
+ * `list-panes` in front of it and ONE reconcile legitimately cost ≈16.4 s while
+ * the outer ceiling wrapping it was a flat 12 s. On a slow-but-PROGRESSING link
+ * (congested cellular, or the nightly's bufferbloat fixture) every inner ceiling
+ * is genuinely reached, so the outer bound cancelled the very first reconcile
+ * MID-FLIGHT and the app surrendered a perfectly healthy attach to "Tap
+ * Reconnect to retry" — the exact opposite of what #1316's short ceiling was
+ * for.
+ *
+ * ## Why SHRINK the inner stage rather than GROW the ceiling
+ *
+ * Nothing is lost by retrying less HERE, because the retries are duplicated
+ * immediately afterwards OUTSIDE the ceiling: `awaitActivePaneSeededOrLoading`
+ * — the #693/#661 never-reveal-black gate that runs between panes-ready and the
+ * surface flip — re-captures this same pane up to
+ * [ACTIVE_PANE_REVEAL_SEED_ATTEMPTS] more times while it still reads blank, and
+ * after reveal the #662 blank-pane net (`reseedBlankVisiblePanes`) and the
+ * render-heal watchdog keep their FULL unshortened ladder. The active pane
+ * therefore still gets 1 + [ACTIVE_PANE_REVEAL_SEED_ATTEMPTS] pre-reveal
+ * captures; only the first one is charged to the attach ceiling. Off-screen
+ * panes are unaffected (they are background-seeded with the full ladder).
+ *
+ * Growing [ATTACH_PANES_READY_TIMEOUT_MS] to ≈19 s instead was tried and
+ * reverted: it moved back toward the tens-of-seconds input-gated overlay #1316
+ * deleted, and it stretched every rung of the reconnect ladder
+ * `ReconnectStormLivelockE2eTest` walks past that proof's 300 s watchdog (4/4
+ * red). Shrinking here keeps both ceilings — and so that ladder's wall time —
+ * byte-for-byte what they were.
+ */
+internal const val ATTACH_ACTIVE_PANE_SEED_ATTEMPTS: Int = 1
+
+/**
+ * Issue #2409: worst-case wall time of the pre-reveal active-pane seed —
+ * [ATTACH_ACTIVE_PANE_SEED_ATTEMPTS] captures at the [SEED_CAPTURE_TIMEOUT_MS]
+ * ceiling with a [SEED_CAPTURE_EMPTY_RETRY_DELAY_MS] backoff between them. Every
+ * one of those ceilings is reachable on a slow-but-progressing link, so this is
+ * real budgeted work the outer attach ceiling must be able to wait out — not a
+ * pathological case.
+ */
+internal const val ATTACH_ACTIVE_PANE_SEED_WORST_CASE_MS: Long =
+    ATTACH_ACTIVE_PANE_SEED_ATTEMPTS * SEED_CAPTURE_TIMEOUT_MS +
+        (ATTACH_ACTIVE_PANE_SEED_ATTEMPTS - 1) * SEED_CAPTURE_EMPTY_RETRY_DELAY_MS
+
+/**
+ * Issue #2409: headroom the outer attach ceiling keeps ON TOP of the inner
+ * stages it wraps — the `seedIoDispatcher` → `applyOnMain` dispatcher hops, the
+ * `list-panes` row parse/apply, the [ATTACH_PANES_READY_RETRY_MS] poll cadence,
+ * and a contended emulator's coroutine-dispatch overhead.
+ */
+internal const val ATTACH_PANES_READY_HEADROOM_MS: Long = 3_500L
+
+/**
+ * The OUTER attach-reveal ceiling (`awaitPanesReadyForAttach`).
+ *
+ * Issue #1316 replaced a flat 30 s with a flat 12 s: the maintainer's "it took
+ * forever to attach / wouldn't let me touch" felt-freeze came from the
+ * `list-panes` reconcile head-of-line-blocking behind a busy sibling's `-CC`
+ * burst, and a short ceiling turns that into a fast user-visible "Tap Reconnect
+ * to retry" escape (→ evict lease → fresh-transport runConnect) instead of a
+ * tens-of-seconds input-gated overlay.
+ *
+ * Issue #2409 keeps that 12 s **value** but stops it being an independently
+ * tuned literal: it is now DERIVED from the stages it wraps, so it can never
+ * again end up smaller than its own bounded inner work (see
+ * [ATTACH_ACTIVE_PANE_SEED_ATTEMPTS] for the full failure story), and shrinking
+ * an inner bound shrinks this one with it.
+ */
+internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long =
+    RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS +
+        ATTACH_ACTIVE_PANE_SEED_WORST_CASE_MS +
+        ATTACH_PANES_READY_HEADROOM_MS
+
+internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 
 /**
  * Issue #552 / #685 (Bug A): a passive tmux reader EOF during a brief foreground
@@ -504,6 +579,31 @@ internal const val PASSIVE_REATTACH_DIAL_HANDSHAKE_TIMEOUT_MS: Long = 15_000L
  * Issue #1539/#1331: the ATTACH + PANES-READY budget for one rung, applied to an ALREADY-
  * HANDSHAKEN transport. A completed SSH handshake is proof the link is up, so a slow attach is
  * a reason to RETRY THE ATTACH over the same transport — never to close it and redial.
+ *
+ * ## Issue #2409 — why this stays BELOW [ATTACH_PANES_READY_TIMEOUT_MS], deliberately
+ *
+ * This wraps an `awaitPanesReadyForAttach` whose own ceiling is 12 s, so at 10 s it is the
+ * bound that actually fires on a slow rung. That looks like the same inverted nesting #2409
+ * fixed for the cold attach, and it is NOT, because the two exits mean opposite things:
+ *
+ *  - the COLD attach's ceiling firing is TERMINAL — it throws
+ *    `TmuxAttachPanesReadyException`, the user gets "Tap Reconnect to retry", and the attach
+ *    is abandoned. An outer bound smaller than the work it wraps therefore DESTROYS a healthy
+ *    attach, which is exactly the defect #2409 reports.
+ *  - this rung's ceiling firing is a RETRY — `ready == false` routes through
+ *    [shouldEvictTransportAfterStageFailure], which KEEPS a vouched-alive transport (#1539/
+ *    #1653) and lets the grace loop run the next rung over it. A shorter leash here means
+ *    "re-attempt sooner", not "give up".
+ *
+ * The rung's reachable inner work is also much smaller than the cold attach's: a passive
+ * reattach re-lists panes that ALREADY EXIST in `paneRows`, so `applyParsedPanes` reports no
+ * new panes and the pre-reveal seed ([ATTACH_ACTIVE_PANE_SEED_ATTEMPTS]) does not run at all —
+ * the stage is the `-CC` `connect()` plus one
+ * [RECONCILE_LIST_PANES_EXEC_TIMEOUT_MS]-bounded `list-panes`.
+ *
+ * Widening this to sit above the cold-attach ceiling was tried in #2411 (10 s → 24.36 s) and
+ * reverted: it multiplied every failing rung of the reconnect ladder that
+ * `ReconnectStormLivelockE2eTest` walks and blew that proof's 300 s watchdog 4/4.
  */
 internal const val PASSIVE_REATTACH_ATTACH_TIMEOUT_MS: Long = 10_000L
 

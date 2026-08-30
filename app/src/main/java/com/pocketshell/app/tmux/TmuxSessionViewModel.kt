@@ -10851,10 +10851,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // The active pane is the head of the reconciled list (panes are sorted
         // by window index, so the lowest-window pane is page 0 — what the screen
         // renders first). Seed it synchronously here so the #640 seed-before-
-        // reveal contract still holds for the pane the user actually sees:
-        // [awaitPanesReadyForAttach] only returns (and the caller reveals) after
-        // this function returns, so the active pane's capture has landed before
-        // the first painted frame.
+        // reveal contract holds for the pane the user sees. Issue #2409 bounds
+        // it to [ATTACH_ACTIVE_PANE_SEED_ATTEMPTS]: the full ladder outlasts
+        // the attach ceiling wrapping it, and the never-reveal-black gate
+        // re-tries this same pane outside that ceiling.
         //
         // The remaining (off-screen / other-window) panes are background-seeded
         // in [bridgeScope] AFTER reveal — the user can't see them yet, and the
@@ -10869,10 +10869,10 @@ public class TmuxSessionViewModel @Inject constructor(
             } else if (
                 healActivePaneIfStaleRender(
                     client, activePane, refreshGuard, force = true, recordMilestone = true,
+                    maxAttempts = ATTACH_ACTIVE_PANE_SEED_ATTEMPTS,
                 ) != HealOutcome.Healed
             ) {
-                // Issue #468: a failed/empty active-pane capture must still open
-                // the seed gate so buffered live %output flushes in order.
+                // Issue #468: a failed/empty capture still opens the seed gate.
                 activePane.terminalState.openSeedGateWithoutSeed()
             }
         } catch (t: Throwable) {

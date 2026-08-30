@@ -1,5 +1,7 @@
 package com.pocketshell.app.projects
 
+import com.pocketshell.app.diagnostics.DiagnosticEventSink
+import com.pocketshell.app.diagnostics.DiagnosticEvents
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -54,11 +56,18 @@ import java.nio.file.Paths
  * ## The load-bearing assertion (G6)
  *
  * [reconcileChainFitsTheProductionReconcileBoundOnAMobileLink] measures the
- * WALL CLOCK of one real `listSessionsWithFolder` over the shaped transport and
- * asserts it against the PRODUCTION bound the view model actually enforces. That
- * is the symptom-defining signal — not "a seam fired", not "N execs were
- * issued". It is RED on the pre-fix serial chain and GREEN once the independent
- * probes are issued concurrently.
+ * WALL CLOCK of real `listSessionsWithFolder` calls over the shaped transport and
+ * asserts against the PRODUCTION bound the view model actually enforces. That is
+ * the symptom-defining signal — not "a seam fired", not "N execs were issued". It
+ * is RED on the pre-fix serial chain and GREEN once the independent probes are
+ * issued concurrently.
+ *
+ * Issue #2422 made that measurement a SAMPLE SET rather than a single reading,
+ * and added the two arms that keep it honest: `mutationADoubledChainIsRejectedByTheSameBudget`
+ * (the budget must still fail closed on a genuinely slower chain) and
+ * [aTransientlySlowRequiredExecCostsNoFreshDialAndKeepsTheTree] (a required exec
+ * that over-runs its per-exec bound must not cost a fresh SSH dial). See
+ * [CHAIN_SAMPLES] and [CHAIN_BUDGET_MS] for the recorded distribution behind both.
  *
  * [theReconcileStillReturnsTheFullTreeUnderTheSameMobileProfile] is the G6
  * negative: a chain can always be made fast by doing LESS work, so the same run
@@ -135,6 +144,93 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
          * widening the production timeout.
          */
         private const val SLOW_LOGS_SECONDS = "4"
+
+        /**
+         * Flag file that arms one slow `tmux list-sessions`.
+         *
+         * It lives in the user's home, not the sticky `/tmp`, so the shim — which
+         * runs as `testuser` while the test writes the flag over `su` — can delete
+         * it after consuming it.
+         */
+        private const val TMUX_ONCE_DELAY_FLAG = "/home/testuser/.ps2422-list-sessions-delay"
+
+        /**
+         * Where the fixture's `tmux` actually lives. `Dockerfile.agents` moves
+         * Alpine's real binary to `/usr/bin/tmux.real` and installs the shared
+         * fault-injection shim at `/usr/local/bin/tmux`, which is what the
+         * production `PATH` resolves. `/usr/bin/tmux` does not exist.
+         */
+        private const val TMUX_SHIM_PATH = "/usr/local/bin/tmux"
+
+        /** Where this test's wrapper moves the fixture shim before delegating. */
+        private const val TMUX_DELEGATE_PATH = "/usr/local/bin/tmux.issue2422"
+
+        /**
+         * Seconds the armed `tmux list-sessions` sleeps. Must exceed
+         * [SshFolderListGateway.EXEC_READ_TIMEOUT_MS] (3.5 s) so the required
+         * landing batch is ABANDONED, which is the state under test.
+         */
+        private const val SLOW_LIST_SESSIONS_SECONDS = "5"
+
+        /**
+         * How many reconciles each timing assertion measures — issue #2422.
+         *
+         * One wall-clock sample over a shaped, lossy link is not a measurement of
+         * the chain: TCP loss recovery (RTO, with exponential backoff on a lost
+         * retransmit) and shared-runner CPU steal are STRICTLY ADDITIVE, so a
+         * sample is `structural cost + non-negative noise`. Nothing makes a
+         * reconcile finish faster than its structure allows. That makes
+         * [minElapsedMs] the natural estimator of the structural cost, and the
+         * single-sample assertion this test used to carry a coin flip: on the
+         * scheduled run that filed this issue it read `elapsedMs=12545` against a
+         * hard 12 000 ms bound while the very next measurement in the SAME JVM,
+         * container and shaper read 6 496 ms.
+         */
+        private const val CHAIN_SAMPLES = 5
+
+        /**
+         * Samples for the slow-host-CLI arm. Each one carries a real 4 s host
+         * probe, so it is the most expensive arm to repeat; 3 is enough for a
+         * minimum that is not a single unlucky draw.
+         */
+        private const val SLOW_CLI_SAMPLES = 3
+
+        /**
+         * The measured budget for the un-amplified chain, in milliseconds.
+         *
+         * Recorded distribution of `listSessionsWithFolder` over this fixture
+         * (18 sessions, 3 watched roots, ~400 ms RTT, 5 % loss), warm lease:
+         *
+         * ```text
+         * local, 25 consecutive samples : min 5787  p50 6854  max 8273
+         * local, 6 consecutive samples  : min 6195  p50 6845  max 7658
+         * GitHub-hosted runner          : 6353, 6496, 7309, 7441   (un-amplified)
+         * GitHub-hosted runner          : 12545                    (amplified, see below)
+         * ```
+         *
+         * The base cost is RTT-bound, not CPU-bound, which is why the hosted
+         * runner and this workstation agree to within ~10 % despite very different
+         * machines. 9 000 ms sits ~9 % above the slowest un-amplified sample ever
+         * recorded on either machine and ~30 % above the median, and it is applied
+         * to the MINIMUM of [CHAIN_SAMPLES], which lands near the median.
+         *
+         * It is deliberately TIGHTER than the 12 000 ms production bound: this
+         * assertion's job is to catch a STRUCTURAL regression (#1876's pre-fix
+         * serial chain measured 11.2-14.1 s here), and a bound that only trips at
+         * 12 s cannot see a 1.5x re-serialisation. `mutationADoubledChainIsRejected`
+         * pins that the budget still fails closed.
+         *
+         * The 12 545 ms outlier is not ordinary runner noise. Forcing a required
+         * landing exec to lose its race against the 3.5 s per-exec bound (see
+         * [aTransientlySlowRequiredExecCostsNoFreshDialAndKeepsTheTree]) moves the
+         * chain into a separate 12.3-13.5 s band with no overlap against the
+         * 5.8-8.5 s un-amplified band — and 12 545 ms sits in the first one, while
+         * the very next measurement on the same commit, JVM and shaper read
+         * 6 496 ms. So the outlier is a distinct MODE, not a tail, which is
+         * precisely why one sample is not a measurement and the minimum of
+         * [CHAIN_SAMPLES] is.
+         */
+        private const val CHAIN_BUDGET_MS = 9_000L
 
         private val projectRoot: Path by lazy { findProjectRoot() }
 
@@ -249,6 +345,7 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
             )
             check(mkdirs.exitCode == 0) { "Failed to seed watched roots: ${mkdirs.stderr}" }
             installHostCliCostShim(container)
+            installOneShotSlowListSessionsShim(container)
         }
 
         /**
@@ -292,6 +389,97 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
                 "host-CLI cost shim did not preserve the fixture CLI: " +
                     "rc=${verify.exitCode} out=${verify.stdout} err=${verify.stderr}"
             }
+        }
+
+        /**
+         * Issue #2422 (G10 — "add the fixture that reproduces it"): wrap the
+         * fixture's `tmux` so the NEXT `list-sessions` — and only that one —
+         * sleeps, deterministically pushing the REQUIRED landing batch past
+         * [SshFolderListGateway.EXEC_READ_TIMEOUT_MS].
+         *
+         * That is the exact non-happy host state the flake needs and no happy
+         * fixture can enter: on the shaped mobile link 1-3 execs per reconcile
+         * already run into their 3.5 s bound, and which one loses is luck. The
+         * required batch losing is the expensive case, so it has to be forced
+         * rather than waited for.
+         *
+         * The delay is armed by writing [TMUX_ONCE_DELAY_FLAG] and is consumed by
+         * the FIRST matching invocation, so a single reconcile pays it once. The
+         * flag lives in the user's home rather than the sticky `/tmp` so the shim
+         * (running as `testuser`) can delete it.
+         *
+         * Scoped to THIS test's own container — the shared `agent-bin/tmux`
+         * fault-injection shim and every sibling suite are untouched.
+         */
+        private fun installOneShotSlowListSessionsShim(container: GenericContainer<*>) {
+            val shim = """
+                set -e
+                test -x $TMUX_SHIM_PATH
+                mv $TMUX_SHIM_PATH $TMUX_DELEGATE_PATH
+                cat > $TMUX_SHIM_PATH <<'SHIM'
+                #!/bin/sh
+                if [ -f "$TMUX_ONCE_DELAY_FLAG" ]; then
+                  case " ${'$'}* " in
+                    *@ps_agent_state_updated_at*)
+                      ps2422_delay="${'$'}(cat "$TMUX_ONCE_DELAY_FLAG" 2>/dev/null || echo 0)"
+                      rm -f "$TMUX_ONCE_DELAY_FLAG"
+                      sleep "${'$'}ps2422_delay"
+                      ;;
+                  esac
+                fi
+                exec $TMUX_DELEGATE_PATH "${'$'}@"
+                SHIM
+                sed -i 's/^                //' $TMUX_SHIM_PATH
+                chmod +x $TMUX_SHIM_PATH
+            """.trimIndent()
+            val result = container.execInContainer("sh", "-c", shim)
+            check(result.exitCode == 0) {
+                "Failed to install the one-shot slow list-sessions shim: " +
+                    "${result.stdout}${result.stderr}"
+            }
+            // The wrapper is only useful if it sits on the path the PRODUCTION
+            // command actually resolves. The reconcile runs `/bin/sh -lc 'PATH=…;
+            // tmux …'` as `testuser`, so resolve `tmux` exactly that way and
+            // require it to BE the wrapper — the first draft of this fixture
+            // wrapped /usr/bin/tmux, which the fixture image does not even ship,
+            // so the injection silently did nothing and the arm passed vacuously.
+            val resolved = container.execInContainer(
+                "su", "testuser", "-c",
+                "sh -lc 'PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; command -v tmux'",
+            )
+            check(resolved.exitCode == 0 && resolved.stdout.trim() == TMUX_SHIM_PATH) {
+                "the production PATH must resolve tmux to the issue #2422 wrapper, got " +
+                    "'${resolved.stdout.trim()}' (rc=${resolved.exitCode} ${resolved.stderr})"
+            }
+            val verify = container.execInContainer("su", "testuser", "-c", "tmux list-sessions")
+            check(verify.exitCode == 0 && verify.stdout.contains("s1")) {
+                "one-shot tmux shim did not preserve the fixture tmux: " +
+                    "rc=${verify.exitCode} out=${verify.stdout} err=${verify.stderr}"
+            }
+        }
+
+        /**
+         * Arm the one-shot required-exec over-run. [seconds] must exceed
+         * [SshFolderListGateway.EXEC_READ_TIMEOUT_MS] so the required batch is
+         * abandoned rather than merely slow.
+         */
+        private fun armOneShotSlowListSessions(seconds: String) {
+            val result = agents!!.execInContainer(
+                "su", "testuser", "-c",
+                "printf '%s' '$seconds' > $TMUX_ONCE_DELAY_FLAG",
+            )
+            check(result.exitCode == 0) {
+                "Failed to arm the one-shot slow list-sessions: ${result.stderr}"
+            }
+        }
+
+        /**
+         * Disarm, so an armed-but-unconsumed delay can never leak into a sibling
+         * test in this class (JUnit method order is not guaranteed, and every
+         * other arm measures wall clock).
+         */
+        private fun disarmSlowListSessions() {
+            agents!!.execInContainer("su", "testuser", "-c", "rm -f $TMUX_ONCE_DELAY_FLAG")
         }
 
         /** Charge `pocketshell logs …` an extra [seconds] on the fixture host. */
@@ -346,13 +534,16 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
             ProjectRootEntity(id = index + 1L, hostId = 1L, label = "root$index", path = path)
         }
 
-    private fun newGateway(leaseManager: SshLeaseManager): SshFolderListGateway =
+    private fun newGateway(
+        leaseManager: SshLeaseManager,
+        execReadTimeoutMs: Long = SshFolderListGateway.EXEC_READ_TIMEOUT_MS,
+    ): SshFolderListGateway =
         SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
             activeTmuxClients = ActiveTmuxClients(),
             sshLeaseManager = leaseManager,
             sessionListParser = HostTmuxSessionListParser(),
-            execReadTimeoutMs = SshFolderListGateway.EXEC_READ_TIMEOUT_MS,
+            execReadTimeoutMs = execReadTimeoutMs,
         )
 
     /**
@@ -407,34 +598,263 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
     }
 
     /**
+     * Measure [count] consecutive reconciles over ONE warm lease — issue #2422.
+     *
+     * This mirrors production: the folder screen POLLS over a lease that stays
+     * warm, so consecutive measurements are the real unit of observation, and a
+     * single one is a sample from a heavy-tailed distribution rather than "the"
+     * chain duration (see [CHAIN_SAMPLES]).
+     *
+     * [beforeEachSample] runs on the fixture host between measurements, which is
+     * how the one-shot required-exec over-run is re-armed per sample.
+     * [reconcilesPerSample] > 1 measures that many BACK-TO-BACK reconciles as a
+     * single sample — the deliberately-slowed chain the mutation proof feeds to
+     * the same evaluator.
+     */
+    private fun measureWarmReconcileSamples(
+        count: Int,
+        reconcilesPerSample: Int = 1,
+        beforeEachSample: () -> Unit = {},
+    ): List<WarmReconcile> {
+        val leaseManager = SshLeaseManager(
+            connector = SshLeaseConnector { target -> DefaultSshLeaseConnector().connect(target) },
+        )
+        return leaseManager.use {
+            runBlocking {
+                val gateway = newGateway(leaseManager)
+                val host = shapedHost()
+                suspend fun reconcile(): FolderListResult = gateway.listSessionsWithFolder(
+                    host = host,
+                    keyPath = privateKeyFile.absolutePath,
+                    passphrase = null,
+                    watchedRoots = watchedRoots(),
+                )
+                // Warm-up: dials the transport + primes the fixture's page cache.
+                // Untimed by design — the cold dial is NOT inside the reconcile
+                // window in production either.
+                reconcile()
+                (1..count).map {
+                    beforeEachSample()
+                    val loginsBefore = sshLoginCount()
+                    val startedAt = System.nanoTime()
+                    var result = reconcile()
+                    repeat(reconcilesPerSample - 1) { result = reconcile() }
+                    val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
+                    WarmReconcile(
+                        elapsedMs = elapsedMs,
+                        result = result,
+                        extraSshLogins = sshLoginCount() - loginsBefore,
+                    )
+                }
+            }
+        }
+    }
+
+    private fun List<WarmReconcile>.minElapsedMs(): Long = minOf { it.elapsedMs }
+
+    private fun List<WarmReconcile>.medianElapsedMs(): Long =
+        map { it.elapsedMs }.sorted()[size / 2]
+
+    private fun List<WarmReconcile>.report(label: String): String =
+        "$label profile=${DELAY_MS}ms+-${JITTER_MS}ms/loss=$LOSS_RATE " +
+            "(rtt~${2 * DELAY_MS}ms) roots=${WATCHED_ROOT_PATHS.size} " +
+            "samples=${map { it.elapsedMs }} logins=${map { it.extraSshLogins }} " +
+            "minMs=${minElapsedMs()} medianMs=${medianElapsedMs()} " +
+            "budget=$CHAIN_BUDGET_MS bound=${FolderListViewModel.RECONCILE_TIMEOUT_MS}"
+
+    /**
+     * THE assertion, shared by the real measurement and the mutation proof so the
+     * mutation cannot drift away from what production is judged by.
+     *
+     * Three things must hold, and each fails closed:
+     *  1. EVERY sample returns a real tree — a `ConnectFailed`/`Failed` reconcile
+     *     is the user-visible defect itself, and no statistic tolerates one.
+     *  2. The MINIMUM sample fits [CHAIN_BUDGET_MS] — the structural-cost estimate
+     *     (noise on this link is strictly additive, see [CHAIN_SAMPLES]).
+     *  3. The MEDIAN fits the PRODUCTION [FolderListViewModel.RECONCILE_TIMEOUT_MS]
+     *     — the user-visible bound whose breach becomes the "Couldn't refresh the
+     *     project tree" panel, kept in the assertion set rather than replaced by
+     *     the tighter internal budget.
+     */
+    private fun assertChainSamplesFitTheBudget(samples: List<WarmReconcile>, label: String) {
+        val detail = samples.report(label)
+        samples.forEachIndexed { index, sample ->
+            assertTrue(
+                "sample $index must return a real tree, got ${sample.result}; $detail",
+                sample.result is FolderListResult.Sessions,
+            )
+        }
+        assertTrue(
+            "Issue #1876/#2422: the folder-tree reconcile's structural cost " +
+                "(min of ${samples.size} samples) is ${samples.minElapsedMs()}ms over a " +
+                "~${2 * DELAY_MS}ms-RTT / $LOSS_RATE-loss link, past the measured " +
+                "${CHAIN_BUDGET_MS}ms budget. On the device a chain this serial is the " +
+                "ConnectError panel whose Retry re-runs the same chain. $detail",
+            samples.minElapsedMs() < CHAIN_BUDGET_MS,
+        )
+        assertTrue(
+            "Issue #1876: the median reconcile is ${samples.medianElapsedMs()}ms against " +
+                "the production ${FolderListViewModel.RECONCILE_TIMEOUT_MS}ms " +
+                "RECONCILE_TIMEOUT_MS. $detail",
+            samples.medianElapsedMs() < FolderListViewModel.RECONCILE_TIMEOUT_MS,
+        )
+    }
+
+    /**
      * THE reproduction. RED on the pre-fix serial chain, GREEN with the fix.
      *
-     * The bound asserted is the PRODUCTION one
-     * ([FolderListViewModel.RECONCILE_TIMEOUT_MS]); exceeding it is exactly what
-     * turns into `FolderReconcileTimeoutException` -> `ConnectFailed` -> the
-     * "Couldn't refresh the project tree — tap to retry" panel, whose Retry
-     * re-runs the identical chain under the identical bound and therefore fails
-     * forever on a stable mobile link.
+     * Issue #2422 replaced the single wall-clock sample with [CHAIN_SAMPLES]
+     * measurements judged by [assertChainSamplesFitTheBudget]: the structural
+     * cost (the minimum) against the measured [CHAIN_BUDGET_MS], and the median
+     * against the PRODUCTION [FolderListViewModel.RECONCILE_TIMEOUT_MS] —
+     * exceeding which is exactly what turns into
+     * `FolderReconcileTimeoutException` -> `ConnectFailed` -> the "Couldn't
+     * refresh the project tree — tap to retry" panel, whose Retry re-runs the
+     * identical chain under the identical bound and therefore fails forever on a
+     * stable mobile link.
      */
     @Test(timeout = 600_000)
     fun reconcileChainFitsTheProductionReconcileBoundOnAMobileLink() {
-        val (elapsedMs, result) = measureWarmReconcile()
+        val samples = measureWarmReconcileSamples(CHAIN_SAMPLES)
+        println(samples.report("ISSUE1876_RECONCILE_CHAIN"))
+        assertChainSamplesFitTheBudget(samples, "ISSUE1876_RECONCILE_CHAIN")
+    }
+
+    /**
+     * Issue #2422 — the mutation proof that [assertChainSamplesFitTheBudget] is
+     * not vacuous.
+     *
+     * A budget applied to the MINIMUM of N samples is only worth having if a
+     * genuinely slower chain still fails it. The mutation is measured on the SAME
+     * real transport rather than modelled: each sample times TWO back-to-back
+     * reconciles, i.e. a chain with twice the serial round-trip depth — precisely
+     * the #1876 regression shape (its pre-fix serial chain measured 11.2-14.1 s
+     * here) and precisely what a future re-serialisation would look like.
+     *
+     * The same evaluator the real assertion uses must REJECT those samples.
+     */
+    @Test(timeout = 600_000)
+    fun mutationADoubledChainIsRejectedByTheSameBudget() {
+        val doubled = measureWarmReconcileSamples(count = 3, reconcilesPerSample = 2)
+        println(doubled.report("ISSUE2422_MUTATION_DOUBLED_CHAIN"))
+        val verdict = runCatching {
+            assertChainSamplesFitTheBudget(doubled, "ISSUE2422_MUTATION_DOUBLED_CHAIN")
+        }
+        val failure = verdict.exceptionOrNull()
+        assertTrue(
+            "a chain with twice the serial depth must FAIL the budget, otherwise the " +
+                "green in reconcileChainFitsTheProductionReconcileBoundOnAMobileLink " +
+                "proves nothing; got $failure; " +
+                doubled.report("ISSUE2422_MUTATION_DOUBLED_CHAIN"),
+            failure is AssertionError,
+        )
+        assertTrue(
+            "it must be the STRUCTURAL-COST budget that rejects the doubled chain, not " +
+                "an incidental failure of one of the other assertions — otherwise the " +
+                "mutation proves the wrong thing (G6); got ${failure?.message}",
+            failure?.message.orEmpty().contains("past the measured ${CHAIN_BUDGET_MS}ms budget"),
+        )
+    }
+
+    /**
+     * Issue #2422 — a transiently slow REQUIRED landing exec must not cost a
+     * fresh SSH dial.
+     *
+     * This is the real-transport half of the class regression, and the direct
+     * reproduction of the scheduled-CI failure this issue was filed for
+     * (`ISSUE1876_RECONCILE_CHAIN … elapsedMs=12545 bound=12000`, a run that
+     * still returned a COMPLETE tree). At ~400 ms RTT with 5 % loss, 1-3 execs
+     * per reconcile already run into their 3.5 s bound; every one of them is
+     * fail-soft EXCEPT the required landing batch, whose over-run used to be
+     * classified as a poisoned transport — evicting the warm lease, paying a
+     * brand-new TCP+SSH handshake and re-running the whole chain. Measured on
+     * this fixture with the required exec forced to lose, that cost 11.9-16.9 s
+     * against the 12 s bound with 1-2 extra sshd logins.
+     *
+     * [armOneShotSlowListSessions] forces exactly that loss per sample, so the
+     * load-bearing assertion is the SERVER-side login delta — a binary,
+     * timing-free oracle read from sshd itself, not from an app seam.
+     *
+     * The injection is also PROVED to have landed rather than assumed: every
+     * sample must carry the production `folder_list_required_exec_retry`
+     * breadcrumb. Without that check the arm passes vacuously the moment the
+     * fixture stops reaching the required exec — which is exactly what the first
+     * draft of this fixture did (it wrapped a `/usr/bin/tmux` the image does not
+     * ship, so nothing was ever slowed and the samples were indistinguishable
+     * from an un-injected run).
+     */
+    @Test(timeout = 600_000)
+    fun aTransientlySlowRequiredExecCostsNoFreshDialAndKeepsTheTree() {
+        val retries = java.util.concurrent.CopyOnWriteArrayList<Int>()
+        val perSampleRetries = java.util.concurrent.atomic.AtomicInteger(0)
+        DiagnosticEvents.install(
+            object : DiagnosticEventSink {
+                override fun record(category: String, event: String, fields: Map<String, Any?>) {
+                    if (fields["stage"] == FolderListRequiredExec.TRAIL_STAGE_REQUIRED_EXEC_RETRY) {
+                        perSampleRetries.incrementAndGet()
+                    }
+                }
+            },
+        )
+        val samples = try {
+            measureWarmReconcileSamples(count = 3) {
+                retries += perSampleRetries.getAndSet(0)
+                armOneShotSlowListSessions(SLOW_LIST_SESSIONS_SECONDS)
+            }
+        } finally {
+            retries += perSampleRetries.get()
+            DiagnosticEvents.install(DiagnosticEventSink.Noop)
+            disarmSlowListSessions()
+        }
+        // `retries[i]` is the count observed BEFORE sample i was armed, i.e. the
+        // retries of sample i-1; the trailing entry closes the last sample.
+        val retriesPerSample = retries.drop(1)
         println(
-            "ISSUE1876_RECONCILE_CHAIN profile=${DELAY_MS}ms+-${JITTER_MS}ms/loss=$LOSS_RATE " +
-                "(rtt~${2 * DELAY_MS}ms) roots=${WATCHED_ROOT_PATHS.size} " +
-                "elapsedMs=$elapsedMs bound=${FolderListViewModel.RECONCILE_TIMEOUT_MS}",
+            samples.report("ISSUE2422_SLOW_REQUIRED_EXEC") +
+                " slowListSessions=${SLOW_LIST_SESSIONS_SECONDS}s " +
+                "requiredExecRetries=$retriesPerSample",
         )
-        assertTrue(
-            "The reconcile must not have failed outright: $result",
-            result is FolderListResult.Sessions,
-        )
-        assertTrue(
-            "Issue #1876: the folder-tree reconcile chain took ${elapsedMs}ms over a " +
-                "~${2 * DELAY_MS}ms-RTT / $LOSS_RATE-loss link, against the production " +
-                "${FolderListViewModel.RECONCILE_TIMEOUT_MS}ms RECONCILE_TIMEOUT_MS. On the " +
-                "device that is the ConnectError panel whose Retry re-runs the same chain.",
-            elapsedMs < FolderListViewModel.RECONCILE_TIMEOUT_MS,
-        )
+        retriesPerSample.forEachIndexed { index, count ->
+            assertTrue(
+                "sample $index: the fixture must actually have pushed the REQUIRED landing " +
+                    "batch past its ${SshFolderListGateway.EXEC_READ_TIMEOUT_MS}ms bound — no " +
+                    "`${FolderListRequiredExec.TRAIL_STAGE_REQUIRED_EXEC_RETRY}` breadcrumb means " +
+                    "nothing was slowed and this arm proves nothing. " +
+                    "requiredExecRetries=$retriesPerSample",
+                count >= 1,
+            )
+        }
+        samples.forEachIndexed { index, sample ->
+            assertEquals(
+                "sample $index: a required landing exec that over-ran its " +
+                    "${SshFolderListGateway.EXEC_READ_TIMEOUT_MS}ms bound on a link that was " +
+                    "ALIVE the whole time must be retried on the SAME warm lease. Evicting it " +
+                    "and re-dialling re-runs the entire reconcile and is what pushed a healthy " +
+                    "6.5s chain to 12.5s — the #1870/#1876 'Couldn't refresh the project tree' " +
+                    "panel on mobile. ${samples.report("ISSUE2422_SLOW_REQUIRED_EXEC")}",
+                0,
+                sample.extraSshLogins,
+            )
+            val sessions = sample.result as? FolderListResult.Sessions
+                ?: error("sample $index: a slow required exec must still land a tree, got ${sample.result}")
+            val names = sessions.rows.map { it.sessionName }.toSet()
+            assertTrue(
+                "sample $index: the retried required batch must still enumerate every " +
+                    "seeded session; names=$names seeded=$SEEDED_SESSIONS",
+                names.containsAll(SEEDED_SESSIONS.toSet()),
+            )
+        }
+        // Deliberately NO wall-clock assertion here, and the measurement says why:
+        // a reconcile that abandons its required batch measures 12.3-13.2 s with
+        // this fix and 12.5-13.5 s without it, because the wasted
+        // EXEC_READ_TIMEOUT_MS plus the retried batch plus the remaining kind and
+        // decoration work does not fit 12 s either way. Removing the re-dial is
+        // worth ~1-2 s and one SSH handshake; it does NOT make an over-run fit the
+        // user-visible bound. That residue is #1876's unfinished scope item —
+        // render the tree from cache and reconcile in the background so no
+        // user-visible action is gated on the chain at all — and belongs to its own
+        // issue, not to a wall-clock assertion here that would only encode the
+        // current cost as if it were acceptable.
     }
 
     /**
@@ -493,36 +913,44 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
      * contains that optional failure, so the load-bearing assertions are BOTH
      * the extra login count (read from sshd itself, not from an app seam) and
      * the reconcile still landing inside its production bound with a real tree.
+     *
+     * Issue #2422: the timing half is measured over [SLOW_CLI_SAMPLES] samples
+     * for the same reason as [reconcileChainFitsTheProductionReconcileBoundOnAMobileLink]
+     * — this arm carried the least headroom of the three (10 467 ms against 12 000
+     * ms locally). The per-sample login and content assertions stay per-sample:
+     * they are binary, not timing-derived, and no sample may violate them.
      */
     @Test(timeout = 600_000)
     fun aSlowButAliveHostCliDoesNotCostAFreshDialOrTheWholeTree() {
         setSlowLogsDelay(SLOW_LOGS_SECONDS)
         try {
-            val run = measureWarmReconcileWithLogins()
+            val samples = measureWarmReconcileSamples(SLOW_CLI_SAMPLES)
             println(
-                "ISSUE1876_SLOW_HOST_CLI slowLogs=${SLOW_LOGS_SECONDS}s " +
-                    "elapsedMs=${run.elapsedMs} extraSshLogins=${run.extraSshLogins} " +
-                    "bound=${FolderListViewModel.RECONCILE_TIMEOUT_MS}",
+                samples.report("ISSUE1876_SLOW_HOST_CLI") +
+                    " slowLogs=${SLOW_LOGS_SECONDS}s",
             )
-            assertEquals(
-                "a slow-but-alive host CLI must NOT cost a fresh SSH dial — the warm " +
-                    "lease was still connected, and re-dialling is what turned 'slow' " +
-                    "into 'cannot connect' (#1870)",
-                0,
-                run.extraSshLogins,
-            )
-            val sessions = run.result as? FolderListResult.Sessions
-                ?: error("a slow optional probe must not fail the reconcile, got ${run.result}")
-            val names = sessions.rows.map { it.sessionName }.toSet()
-            assertTrue(
-                "the tree must still contain every seeded session despite the slow probe; " +
-                    "names=$names seeded=$SEEDED_SESSIONS",
-                names.containsAll(SEEDED_SESSIONS.toSet()),
-            )
+            samples.forEachIndexed { index, run ->
+                assertEquals(
+                    "sample $index: a slow-but-alive host CLI must NOT cost a fresh SSH " +
+                        "dial — the warm lease was still connected, and re-dialling is what " +
+                        "turned 'slow' into 'cannot connect' (#1870)",
+                    0,
+                    run.extraSshLogins,
+                )
+                val sessions = run.result as? FolderListResult.Sessions
+                    ?: error("a slow optional probe must not fail the reconcile, got ${run.result}")
+                val names = sessions.rows.map { it.sessionName }.toSet()
+                assertTrue(
+                    "sample $index: the tree must still contain every seeded session despite " +
+                        "the slow probe; names=$names seeded=$SEEDED_SESSIONS",
+                    names.containsAll(SEEDED_SESSIONS.toSet()),
+                )
+            }
             assertTrue(
                 "the reconcile must still fit ${FolderListViewModel.RECONCILE_TIMEOUT_MS}ms " +
-                    "with one ${SLOW_LOGS_SECONDS}s host-CLI probe in it, got ${run.elapsedMs}ms",
-                run.elapsedMs < FolderListViewModel.RECONCILE_TIMEOUT_MS,
+                    "with one ${SLOW_LOGS_SECONDS}s host-CLI probe in it. " +
+                    samples.report("ISSUE1876_SLOW_HOST_CLI"),
+                samples.minElapsedMs() < FolderListViewModel.RECONCILE_TIMEOUT_MS,
             )
         } finally {
             setSlowLogsDelay("0")

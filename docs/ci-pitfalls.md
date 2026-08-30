@@ -263,6 +263,33 @@ the recovered/CLEAN ones — and diff the notice count against the pre-change
 script for each; "the case I built it for changed and nothing else did" is a
 claim that needs the table, not an assumption.
 
+## One wall-clock sample against a hard bound is a coin flip, and hides a mode
+
+A timing assertion of the form "this run took N ms, N must be under BOUND" is
+only a measurement when the quantity has a light tail. Over a shaped/lossy link
+(or on a shared runner) the noise is STRICTLY ADDITIVE — TCP loss recovery with
+exponential backoff, CPU steal, a retry the code takes internally — so a sample
+is `structural cost + non-negative noise`, and one sample says almost nothing
+about the structure it claims to constrain. Issue #2422's chain measured 12 545 ms
+against a hard 12 000 ms bound on a scheduled run, then 6 496 ms on the very next
+measurement of the SAME commit, JVM, container and shaper.
+
+Two lessons, and the second matters more:
+
+- Judge such an assertion on the MINIMUM of N samples (the maximum-likelihood
+  estimate of a cost with one-sided noise), record the observed distribution next
+  to the constant, and add a mutation arm proving a genuinely slower run still
+  fails. A budget applied to the minimum can then be TIGHTER than the production
+  bound — strictly stronger than the single-sample form it replaces, not a
+  widened band.
+- Before re-baselining, check whether the outlier is a TAIL or a separate MODE.
+  #2422's was a mode: forcing the failing condition put the chain in a
+  15.2-17.0 s band with no overlap against the 5.9-8.5 s healthy band, because
+  one over-run exec made production evict a warm SSH lease and re-run the whole
+  chain on a fresh dial. "Flaky test, widen the bound" would have closed the
+  issue and kept shipping the defect. If the outlier band is disjoint from the
+  healthy band, you have a bug, not noise.
+
 See also [worktrees.md](worktrees.md) for merge-mechanics pitfalls and
 [review-standards.md](review-standards.md) for reviewer-side acceptance
 bars this catalogue feeds into.

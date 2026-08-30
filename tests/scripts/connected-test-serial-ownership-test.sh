@@ -147,6 +147,19 @@ serial_lock_fds_in_group() {
   done < <(ps -eo pid=,pgid= | awk -v pgid="$process_group" '$2 == pgid { print $1 }')
 }
 
+# The ONLY reclaim oracle in this harness (issue #2421). Never probe a serial
+# lock with a bare one-shot `flock -n`: `connected-test.sh` re-asserts ownership
+# every 50ms by forking `( flock -n 9 ) {FD}>&- 9>"$lock"`, so at the instant a
+# wrapper is SIGKILLed an already-forked probe legitimately acquires the
+# just-released lock for a few scheduler turns. A zero-tolerance instantaneous
+# probe reads that transient as an inherited-FD leak and reddens the harness
+# (#2421: reproduced 3/300 under CPU contention with the exact
+# "left its serial flock in a descendant" message).
+#
+# The property under test is steady state: a descendant that truly INHERITED the
+# wrapper's continuous FD holds the lock forever, so it never becomes free and
+# this helper still fails closed after its bounded window — proven by
+# `retained_descendant_flock_fails_the_reclaim_oracle` below.
 wait_for_serial_flock_reclaim() {
   local lock_file="$1" process_group="$2" timeout="${3:-3}"
   local waited=0 limit=$((timeout * 100))
@@ -366,6 +379,35 @@ inject_agents_fork_pause() {
       _pocketshell_agents_run_without_avd_lock_fd sleep 0.02\
     done\
   fi' "$root/scripts/lib/agents-pool.sh"
+}
+
+# Issue #2421 mutation. Re-inject the exact #1737 defect into ONE sandbox's
+# private copy of the helper: drop the close-on-creation redirection that keeps
+# the device-mutating child off the wrapper's continuous flock FD, so the child
+# genuinely INHERITS it. Used to prove the bounded-retry reclaim oracle still
+# fails closed on a retained FD rather than degrading into "wait until free".
+inject_inherited_lock_fd_leak() {
+  local root="$1"
+  local target="$root/scripts/lib/avd-lock.sh"
+  # Both literals are the sandbox file's exact bytes; nothing expands here.
+  # shellcheck disable=SC2016
+  local original='    "$@" {POCKETSHELL_AVD_LOCK_FD}>&- &'
+  # shellcheck disable=SC2016
+  local leaked='    "$@" &'
+  local before after
+  before="$(grep -cFx "$original" "$target" || true)"
+  (( before == 1 )) \
+    || fail "inherited-FD mutation target moved: expected exactly 1 close-on-creation line in $target, found $before"
+  awk -v original="$original" -v leaked="$leaked" '
+    $0 == original && replaced == 0 { print leaked; replaced = 1; next }
+    { print }
+  ' "$target" > "$target.mutated"
+  mv "$target.mutated" "$target"
+  after="$(grep -cFx "$original" "$target" || true)"
+  (( after == 0 )) \
+    || fail "inherited-FD mutation was a no-op: $target still closes the wrapper FD on child creation"
+  grep -qFx "$leaked" "$target" \
+    || fail "inherited-FD mutation did not install the leaking child-start line in $target"
 }
 
 make_fake_gradle() {
@@ -783,15 +825,39 @@ lost_holder_fails_closed_and_stale_lock_recovers() {
       lock_file="$POCKETSHELL_AVD_LOCK_FILE"
       holder="$POCKETSHELL_POOL_HOLDER_PID"
       kill "$holder"
-      wait "$holder" 2>/dev/null || true
+      # `pocketshell_claim_pool_serial` starts the holder inside a command
+      # substitution, so it is orphaned to ppid 1 and `wait` returns 127
+      # ("not a child of this shell") instantly -- `kill` alone is NOT a
+      # synchronisation point (issue #2421, same defect family as the
+      # single-shot flock probes). Poll for the holder to actually die, or the
+      # ownership assertion below sees a still-live holder, passes, and reddens
+      # this case for a scheduling reason rather than a behavioural one.
+      waited=0
+      while kill -0 "$holder" 2>/dev/null; do
+        if (( waited++ >= 500 )); then
+          echo "holder-outlived-kill" > "$3"
+          exit 1
+        fi
+        sleep 0.01
+      done
       if pocketshell_assert_avd_lock_owned "$lock_file" >/dev/null 2>"$2"; then
         echo "assert-succeeded" > "$3"
         exit 1
       fi
-      flock -n "$lock_file" true
+      # Bounded retry, never a single shot (issue #2421): the recoverable-lock
+      # property is steady state. A lock genuinely retained by a surviving FD
+      # never frees, so this still fails closed after its window.
+      waited=0
+      until flock -n "$lock_file" true; do
+        if (( waited++ >= 300 )); then
+          echo "stale-lock-not-recoverable" > "$3"
+          exit 1
+        fi
+        sleep 0.01
+      done
       echo "lost-holder-rejected-and-lock-recoverable" > "$3"
     ' bash "$sandbox/pool-root" "$sandbox/lost-holder.err" "$result" \
-    || fail "lost-holder ownership check or stale-lock recovery failed"
+    || fail "lost-holder ownership check or stale-lock recovery failed (result=$(cat "$result" 2>/dev/null || true); stderr=$(cat "$sandbox/lost-holder.err" 2>/dev/null || true))"
 
   [[ "$(<"$result")" == "lost-holder-rejected-and-lock-recoverable" ]] \
     || fail "lost ownership did not fail closed"
@@ -866,7 +932,7 @@ holder_loss_at_gradle_boundary_fails_before_mutation() {
     || fail "ownership-loss correction allowed overlapping mutation"
 
   local serial_lock="$sandbox/locks/avd-lock-emulator-5554"
-  flock -n "$serial_lock" true \
+  wait_for_serial_flock_reclaim "$serial_lock" "$first_pid" 3 \
     || fail "ownership-loss correction left a stale flock behind"
 }
 
@@ -936,7 +1002,7 @@ assert_holder_loss_at_cleanup_boundary_fails_closed() {
     || { kill_group "$contender_pid"; fail "contender failed after cleanup ownership loss"; }
   [[ ! -e "$sandbox/device-state/overlap" ]] \
     || fail "cleanup ownership loss allowed overlapping mutation"
-  flock -n "$sandbox/locks/avd-lock-emulator-5554" true \
+  wait_for_serial_flock_reclaim "$sandbox/locks/avd-lock-emulator-5554" "$cleanup_pid" 3 \
     || fail "cleanup ownership loss left a stale flock"
 }
 
@@ -1100,7 +1166,7 @@ hard_killed_pool_setup_leaves_no_descendant_flock() {
   done
   (( live_descendant == 1 )) \
     || fail "pool-setup proof lost every descendant instead of exercising orphan FD behavior"
-  flock -n "$serial_lock" true \
+  wait_for_serial_flock_reclaim "$serial_lock" "$wrapper_pid" 3 \
     || fail "SIGKILLed pool wrapper left its serial flock in the agents-port setup tree"
   [[ ! -e "$sandbox/device-state/poolsetup.started" ]] \
     || fail "pool wrapper reached emulator mutation before the setup crash proof"
@@ -1144,7 +1210,7 @@ assert_hard_killed_docker_phase_reclaims_serial() {
   done
   (( live_descendant == 1 )) \
     || fail "Docker $phase proof lost all descendants after wrapper SIGKILL"
-  flock -n "$serial_lock" true \
+  wait_for_serial_flock_reclaim "$serial_lock" "$wrapper_pid" 3 \
     || fail "SIGKILLed pool wrapper left its serial flock in Docker $phase setup"
   [[ ! -e "$sandbox/device-state/pooldocker.started" ]] \
     || fail "pool wrapper reached emulator mutation during Docker $phase crash proof"
@@ -1198,12 +1264,74 @@ hard_killed_toxiproxy_holder_leaves_no_descendant_flock() {
   done
   (( live_descendant == 1 )) \
     || fail "toxiproxy proof lost all descendants after wrapper SIGKILL"
-  flock -n "$serial_lock" true \
+  wait_for_serial_flock_reclaim "$serial_lock" "$wrapper_pid" 3 \
     || fail "SIGKILLed network-fault wrapper left its serial flock in a descendant"
   [[ ! -e "$sandbox/device-state/toxcrash.started" ]] \
     || fail "network-fault wrapper mutated before the crash proof"
 
   kill_group "$wrapper_pid"
+}
+
+# Issue #2421 regression proof for the bounded-retry reclaim oracle itself.
+# Retrying `flock -n` tolerates the microseconds a SIGKILLed wrapper's already-
+# forked ownership probe needs to drain — it must NOT tolerate the defect those
+# probes are mistaken for. A descendant that truly inherited the wrapper's
+# continuous FD keeps the open file description alive, so the kernel never frees
+# the lock and the oracle must still go red. Without this case, replacing the
+# one-shot probes with a retry loop would be indistinguishable from deleting
+# the assertion.
+retained_descendant_flock_fails_the_reclaim_oracle() {
+  local sandbox="$1"
+  make_sandbox "$sandbox"
+  inject_inherited_lock_fd_leak "$sandbox/pool-root"
+
+  local wrapper_pid
+  FAKE_PAUSE_BEFORE_MUTATION_RUN_ID=leakcrash \
+    start_wrapper "$sandbox" pool leakcrash i2421leak
+  wrapper_pid="$WRAPPER_PID"
+  wait_for_file "$sandbox/device-state/leakcrash.pre-mutation-paused" 10 \
+    || { kill_group "$wrapper_pid"; fail "inherited-FD case never reached the pre-mutation pause"; }
+
+  local serial_lock="$sandbox/locks/avd-lock-emulator-5554"
+  local descendants=()
+  mapfile -t descendants < <(descendant_pids "$wrapper_pid")
+  (( ${#descendants[@]} >= 2 )) \
+    || fail "inherited-FD case did not expose the async shell and mutation child"
+
+  # The mutation must be LIVE. A no-op mutation would leave this case asserting
+  # nothing about the oracle while still exiting 0 — the mutation-testing
+  # failure mode this repo rejects.
+  local pid fd target leaked_pid=""
+  for pid in "${descendants[@]}"; do
+    for fd in "/proc/$pid/fd/"*; do
+      [[ -e "$fd" ]] || continue
+      target="$(readlink -f "$fd" 2>/dev/null || true)"
+      [[ "$target" == "$serial_lock" ]] || continue
+      leaked_pid="$pid"
+    done
+  done
+  [[ -n "$leaked_pid" ]] \
+    || fail "inherited-FD mutation is not live: no descendant holds the continuous serial flock FD, so this case cannot exercise the reclaim oracle"
+
+  kill -KILL "$wrapper_pid"
+  wait "$wrapper_pid" 2>/dev/null || true
+  kill -0 "$leaked_pid" 2>/dev/null \
+    || fail "the FD-inheriting descendant $leaked_pid died with the wrapper instead of retaining the lock"
+
+  local reclaim_err="$sandbox/leakcrash.reclaim-err"
+  if wait_for_serial_flock_reclaim "$serial_lock" "$wrapper_pid" 1 2>"$reclaim_err"; then
+    fail "reclaim oracle PASSED while descendant $leaked_pid still held the inherited serial flock -- the bounded retry masks a real #1737 leak"
+  fi
+  grep -q "lock-fd: resource=$serial_lock process_group=$wrapper_pid pid=$leaked_pid " \
+    "$reclaim_err" \
+    || { cat "$reclaim_err" >&2; fail "reclaim failure did not diagnose the FD-inheriting descendant $leaked_pid"; }
+
+  # ...and the oracle is live rather than permanently red: the same probe
+  # succeeds once the leaking tree is gone.
+  kill_group "$wrapper_pid" \
+    || fail "inherited-FD case could not tear down its invocation process group"
+  wait_for_serial_flock_reclaim "$serial_lock" "$wrapper_pid" 3 \
+    || fail "serial flock stayed held after the FD-inheriting process group was torn down"
 }
 
 term_after_lock_records_lifecycle_and_preserves_rc143() {
@@ -1392,12 +1520,13 @@ CASES=(
   hard_killed_agents_docker_up_leaves_no_descendant_flock
   hard_killed_agents_docker_health_leaves_no_descendant_flock
   hard_killed_toxiproxy_holder_leaves_no_descendant_flock
+  retained_descendant_flock_fails_the_reclaim_oracle
   term_after_lock_records_lifecycle_and_preserves_rc143
 )
 # Issue #2113: the full-suite size, hardcoded so that DELETING an entry from the
 # CASES array above reddens this harness on its own — comparing the loop counter
 # with `${#CASES[@]}` would only ever compare the loop with itself.
-EXPECTED_FULL_CASES=18
+EXPECTED_FULL_CASES=19
 FILTERED=0
 if [[ $# -gt 0 ]]; then
   CASES=("$@")

@@ -86,8 +86,88 @@ class AvdLockScriptTest {
     fun connectedTestPoolAndLegacyWrappersCannotMutateOneSerialConcurrently() {
         runShellHarness(
             "tests/scripts/connected-test-serial-ownership-test.sh",
-            expectedPassLine = "PASS: connected-test per-serial ownership (issue #1737) (18 cases)",
+            expectedPassLine = "PASS: connected-test per-serial ownership (issue #1737) (19 cases)",
             timeoutSeconds = 180,
+        )
+    }
+
+    /**
+     * #2421 STRUCTURAL GUARD, and the reason it lives in this class rather than
+     * in the workflow: `tests.yml` is at its file-size-hygiene cap (a new step
+     * pushes it under the required 1 KiB headroom and reddens
+     * `scripts/check-file-size-hygiene.sh`), so the guard is wired into
+     * `./gradlew test` — the same `Unit tests` required check `guards-static`
+     * feeds — next to the harness it protects.
+     *
+     * WHAT IT PROTECTS. Every "the serial lock became free again" assertion in
+     * `connected-test-serial-ownership-test.sh` must go through the bounded-retry
+     * `wait_for_serial_flock_reclaim` oracle. Written as a single instantaneous
+     * `flock -n "$serial_lock" true`, it loses a race against the SIGKILLed
+     * wrapper's already-forked ownership probe and reddens CI for a scheduling
+     * reason (#2421). #2085 converted ONE such site and left five behind — those
+     * five became #2421 — so prose plainly does not hold this line. A seventh
+     * SIGKILL case written with a bare one-shot probe now fails here, by file,
+     * line and enclosing function.
+     *
+     * The guard's own `--self-test` mutates a COPY of the real harness 20 ways
+     * (revert a converted site, add a new bare-probe case, degrade a retry into
+     * an unbounded wait, delete an assertion, smuggle in an extra fixture probe,
+     * delete the harness) and requires each mutant red — so this assertion is
+     * about detection, not about a script that prints PASS unconditionally.
+     *
+     * Six of those mutants exist because the guard classifies FAIL-CLOSED: the
+     * banned probe has more than one spelling, and a scanner that shrugs at what
+     * it cannot parse reports "0 bare one-shot probe(s)" over a live regression.
+     * `flock -nx` (bundled short options), `flock -w 0` (a zero-second wait) and
+     * `flock --nonblo` (an abbreviation of the undocumented `--nonblocking`
+     * alias) are all the same instantaneous probe as `flock -n` — each verified
+     * against util-linux 2.39.3 to return rc=1 in 0.00s on a held lock — and are
+     * rejected as such. A literal `flock -w <n>`, n > 0, stays allowed and is
+     * named positively in the pass line. An unknown/ambiguous option, or a
+     * `-w "$var"` timeout the guard cannot prove is non-zero, is a rejection
+     * rather than a silent skip. The 20th mutant pins the exemption table:
+     * one entry exempts exactly one probe, so a copy of the exempt line inside
+     * its own function cannot ride the same key.
+     *
+     * The check count is asserted on both sides on purpose — the shell
+     * `EXPECTED_SELFTEST_CHECKS` and this string must move together, and this
+     * assertion is what catches a bump applied to only one of them.
+     */
+    @Test
+    fun serialFlockReclaimAssertionsCannotRegressToSingleShotProbes() {
+        val guardOutput = runShellHarness(
+            "scripts/check-serial-flock-reclaim-probe.sh",
+            expectedPassLine = "PASS: serial-flock reclaim-probe guard (#2421)",
+            timeoutSeconds = 120,
+        )
+        // The two intentional lookalikes must be positively CLASSIFIED as
+        // allowed, not merely unnoticed by the scan: `make_fake_flock`'s fake
+        // `flock` payload, and the deliberately instantaneous negative
+        // "the in-flight probe still HOLDS this serial" assertion (#2085).
+        // "0 unclassifiable" is the fail-closed receipt: it says every flock
+        // invocation in the harness was positively bucketed, not that the
+        // scanner found nothing it recognised and called that a pass.
+        listOf(
+            "1 fixture probe(s)",
+            "1 exempted negative held-lock assertion(s)",
+            "0 unclassifiable flock invocation(s)",
+            "0 bare one-shot probe(s)",
+        ).forEach { fragment ->
+            assertTrue(
+                "reclaim-probe guard did not account for: $fragment\n$guardOutput",
+                guardOutput.contains(fragment),
+            )
+        }
+
+        runShellHarness(
+            "scripts/check-serial-flock-reclaim-probe.sh",
+            // The check count is pinned for the #2113 reason: an early `exit 0`
+            // in the self-test reads exactly like a full mutation sweep.
+            expectedPassLine =
+                "PASS: #2421 serial-flock reclaim-probe guard self-test rejects " +
+                    "every one-shot regression shape (20 checks)",
+            timeoutSeconds = 300,
+            arguments = listOf("--self-test"),
         )
     }
 

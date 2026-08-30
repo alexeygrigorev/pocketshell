@@ -3,8 +3,10 @@ package com.pocketshell.app.tmux
 import android.os.Build
 import android.util.Log
 import com.pocketshell.app.diagnostics.DiagnosticEvents
+import com.pocketshell.app.diagnostics.ReconnectCauseTrail
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionTarget
+import com.pocketshell.app.tmux.connection.GraceEffects
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionState
@@ -728,6 +730,49 @@ internal fun recordPassiveReattachSuccess(
         "clientHash" to clientHash,
         "elapsedMs" to elapsedMs,
         *shortAppSwitchFields,
+    )
+}
+
+/**
+ * Issue #2415 (the #928/#1539 VM-shrink pattern): retire a bounded within-grace recovery claim
+ * that belongs to a session OTHER than the one [target] names, and leave the device trail for it.
+ *
+ * The whole decision lives with its owner ([GraceEffects.retireIfOwnedByOtherSession]); this is
+ * the VM-facing one-liner every accepted connect calls, so `TmuxSessionViewModel` gains a call
+ * and not a body. [target] is the SUPERSEDING session — the one the user just opened — so the
+ * breadcrumb reads "who took the channel over", matching the #822 manual-reconnect retirement it
+ * mirrors.
+ */
+internal fun GraceEffects.retireRecoveryOfSupersededSession(
+    targetId: SessionId,
+    target: ConnectionTarget,
+    generation: Long,
+) {
+    if (!retireIfOwnedByOtherSession(targetId)) return
+    Log.i(
+        ISSUE_145_RECONNECT_TAG,
+        "tmux-grace-recovery-retired-for-superseding-session " +
+            "supersedingSession=${target.sessionName} " + targetLogFields(target),
+    )
+    ReconnectCauseTrail.record(
+        stage = "within_grace_recovery",
+        outcome = "retired_for_superseding_session",
+        cause = "user_opened_another_session",
+        trigger = TmuxConnectTrigger.UserTap.logValue,
+        "hostId" to target.hostId,
+        "supersedingSession" to target.sessionName,
+        "generation" to generation,
+    )
+    DiagnosticEvents.record(
+        "connection",
+        "within_grace_recovery_retired",
+        "cause" to "superseded_by_other_session",
+        "hostId" to target.hostId,
+        "host" to target.host,
+        "port" to target.port,
+        "user" to target.user,
+        "session" to target.sessionName,
+        "generation" to generation,
     )
 }
 

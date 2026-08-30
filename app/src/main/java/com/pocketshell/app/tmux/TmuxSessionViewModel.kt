@@ -2668,6 +2668,7 @@ public class TmuxSessionViewModel @Inject constructor(
             tmuxSessionId = tmuxSessionId,
             sessionCreated = sessionCreated,
         )
+        graceEffects.retireRecoveryOfSupersededSession(controllerSessionId(target), target, connectGeneration)
         // Issue #1072: an EXPLICIT manual Reconnect must be able to PREEMPT an
         // in-flight connect to the same target, never be deduped into a no-op. If a
         // prior connect attempt ever wedged (the upload-teardown race, now fixed by
@@ -6867,6 +6868,9 @@ public class TmuxSessionViewModel @Inject constructor(
         // Cancel any in-flight connect so the preflight owns the decision, then
         // gate every downstream attach behind it. Mirrors the teardown the
         // normal connect entry does for its early state.
+        // Issue #2415: including the within-grace recovery owner (a ColdRestore reaches here
+        // BEFORE `connect()`'s own retire call, so the abandoned claim would survive the probe).
+        graceEffects.retireRecoveryOfSupersededSession(controllerSessionId(target), target, connectGeneration)
         passiveDisconnectGraceJob?.cancel()
         passiveDisconnectGraceJob = null
         pausedAutoReconnect = null
@@ -7331,7 +7335,7 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         Log.w(
             ISSUE_145_RECONNECT_TAG,
-            attachMilestoneMessage(
+            tmuxAttachMilestoneMessage(
                 attempt = attempt,
                 target = target,
                 startedAtMs = startedAtMs,
@@ -7720,7 +7724,7 @@ public class TmuxSessionViewModel @Inject constructor(
     ) {
         Log.i(
             ISSUE_145_RECONNECT_TAG,
-            attachMilestoneMessage(
+            tmuxAttachMilestoneMessage(
                 attempt = attempt,
                 target = target,
                 startedAtMs = startedAtMs,
@@ -7781,22 +7785,6 @@ public class TmuxSessionViewModel @Inject constructor(
             detail = detail,
         )
     }
-
-    private fun attachMilestoneMessage(
-        attempt: Int,
-        target: ConnectionTarget,
-        startedAtMs: Long,
-        event: String,
-        trigger: TmuxConnectTrigger,
-        detail: String = "",
-    ): String = tmuxAttachMilestoneMessage(
-        attempt = attempt,
-        target = target,
-        startedAtMs = startedAtMs,
-        event = event,
-        trigger = trigger,
-        detail = detail,
-    )
 
     // Issue #1224: fed by the per-pane [TmuxClient.outputFor] tap
     // ([recordVisiblePaneOutput]), NOT by `%output` on the structural

@@ -69,15 +69,68 @@ class GraceEffects(private val io: GraceIo) {
      */
     private var recoveryJobs: List<Job> = emptyList()
 
+    /**
+     * Issue #2415: the claim most recently taken away by [retireForSupersedingOwner], so a stale
+     * coroutine belonging to it can be told "you were superseded" even though the window is now
+     * [GraceRecoveryOwnership.Idle] rather than owned by a visible successor.
+     *
+     * Without it [recoveryWasSuperseded] answers `false` for a RETIRED claim (Idle is not "someone
+     * else owns it"), and the abandoned heal's grace-expiry handoff would be safe only by
+     * construction — it relies on [retireForSupersedingOwner] having cancelled the tracked job and
+     * on both operations sharing `Main.immediate`. That is true today, but it makes a
+     * *cancellation* detail load-bearing for a *policy* decision ("may this claim install a
+     * reconnect ladder?"). Recording the retirement makes the answer explicit.
+     *
+     * Deliberately NOT set by [endWithinGraceRecovery]: a claim whose own bounded timer expired was
+     * not superseded, and it MUST still hand off to the loud auto-reconnect ladder — the hold-release
+     * timer and the heal retry loop both end at `passiveDisconnectGraceMs`, so at legitimate
+     * exhaustion the window is Idle too, and conflating the two states would silently delete the
+     * beyond-grace reconnect.
+     */
+    private var retiredClaim: WithinGraceRecoveryClaim? = null
+
     /** Claim the bounded recovery window before either the reseed or dead-socket arm starts. */
     fun beginWithinGraceRecovery(claim: WithinGraceRecoveryClaim) {
         recoveryOwnership = GraceRecoveryOwnership.WithinGrace(claim)
         recoveryJobs = emptyList()
+        retiredClaim = null
     }
 
     /** Register a coroutine owned by the current bounded claim. */
     fun trackRecoveryJob(job: Job) {
         recoveryJobs = recoveryJobs + job
+    }
+
+    /**
+     * Issue #2415: an accepted connect to a DIFFERENT session retires the bounded within-grace
+     * recovery owner. Returns true when a claim for another session was actually retired (so the
+     * caller can record the breadcrumb), false when the window is idle or already owned by
+     * [targetId].
+     *
+     * `TmuxSessionViewModel.connect()` already cancels every OTHER competing recovery owner
+     * before accepting a new target — the passive-grace job, the paused ladder, the
+     * auto-reconnect ladder, the lifecycle/network coalesce. This claim was the one hole, and it
+     * is the loudest one because it owns a 60 s retry loop over the SHARED per-host transport.
+     * Left running for a session the user has left, it
+     *
+     *  1. re-dials and then `ExplicitDisconnect`-tears-down that shared transport every 250 ms
+     *     (~190 iterations in the reported logcat), which closes the newly-opened session's `-CC`
+     *     channel between its `panes-ready` and its reveal — `control channel closed before the
+     *     connect could reveal session `codex` as live`, the reveal guard correctly refusing to
+     *     publish `Live` over the corpse — and
+     *  2. on grace expiry hands off `scheduleAutoReconnect(target = <the abandoned session>)`,
+     *     so the abandoned session's terminal "Session “…” has ended." lands on the screen the
+     *     user opened for a DIFFERENT, live session and drops them to the folder list.
+     *
+     * Guarded on session identity, never unconditional: a SAME-session re-entry must keep its own
+     * claim or the #1538/#754/#1954 within-grace ride-through regresses. No new recovery writer —
+     * [retireForSupersedingOwner] simply gains its second, symmetric caller (D28).
+     */
+    fun retireIfOwnedByOtherSession(targetId: SessionId): Boolean {
+        val owned = (recoveryOwnership as? GraceRecoveryOwnership.WithinGrace)?.claim ?: return false
+        if (owned.targetId == targetId) return false
+        retireForSupersedingOwner()
+        return true
     }
 
     /**
@@ -92,8 +145,12 @@ class GraceEffects(private val io: GraceIo) {
      * claim AND cancelling its coroutines makes the manual reconnect the single owner (D28);
      * the hold-release job's own guarded completion handler restores the reveal projection,
      * so the honest "Attaching…" for the user's explicit retry is not suppressed.
+     *
+     * Issue #2415: an accepted connect to a DIFFERENT session is the second superseding owner,
+     * and #822 only wired the first. Both now route here — see [retireIfOwnedByOtherSession].
      */
     fun retireForSupersedingOwner() {
+        retiredClaim = (recoveryOwnership as? GraceRecoveryOwnership.WithinGrace)?.claim ?: retiredClaim
         recoveryOwnership = GraceRecoveryOwnership.Idle
         val jobs = recoveryJobs
         recoveryJobs = emptyList()
@@ -116,8 +173,15 @@ class GraceEffects(private val io: GraceIo) {
     fun isWithinGraceRecoveryActive(): Boolean =
         recoveryOwnership is GraceRecoveryOwnership.WithinGrace
 
+    /**
+     * True when [claim] no longer authorises the bounded owner's grace-expiry handoff to the loud
+     * auto-reconnect ladder — either a DIFFERENT claim now owns the window, or (issue #2415) this
+     * claim was explicitly retired by a superseding owner. False for a claim that simply ran its
+     * bounded window out, which is the case that MUST still hand off.
+     */
     fun recoveryWasSuperseded(claim: WithinGraceRecoveryClaim): Boolean =
-        (recoveryOwnership as? GraceRecoveryOwnership.WithinGrace)?.claim?.let { it != claim } == true
+        retiredClaim == claim ||
+            (recoveryOwnership as? GraceRecoveryOwnership.WithinGrace)?.claim?.let { it != claim } == true
 
     /** Retry only while this exact claim remains the single bounded recovery owner. */
     suspend fun retryWithinGraceRecovery(

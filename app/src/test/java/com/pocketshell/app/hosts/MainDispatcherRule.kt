@@ -1,5 +1,6 @@
 package com.pocketshell.app.hosts
 
+import android.os.Looper
 import com.pocketshell.app.tmux.LivenessProbeTestOverride
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -32,6 +33,18 @@ import org.junit.runner.Description
  * guards against reading `Main` while another thread is swapping it. Hold a
  * shared lock across the whole test statement so every test using this rule
  * sees a stable Main dispatcher until its `@After` cleanup has finished.
+ *
+ * Teardown must never hand Main back in a state where dispatching throws
+ * (issue #2413). Under Robolectric a real main looper exists, so it calls plain
+ * `Dispatchers.resetMain()`. In a looper-less JVM unit test resetting leaves
+ * Main *missing*, so a coroutine that escaped this test and later resumes on
+ * Main throws on its own worker thread; that throw is an uncaught coroutine
+ * exception, which `kotlinx-coroutines-test` replays against an arbitrary
+ * innocent sibling `runTest` as `UncaughtExceptionsBeforeTest`. There it
+ * installs a [PostTestMainDispatcher] instead, which records the late dispatch
+ * against the test that leaked it, so the leak fails loudly with attribution
+ * instead of reddening a random unrelated class. See
+ * [MainDispatcherStragglers].
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainDispatcherRule(
@@ -48,6 +61,12 @@ class MainDispatcherRule(
         object : Statement() {
             override fun evaluate() {
                 MainDispatcherTestIsolation.withOwnership {
+                    // Issue #2413: a coroutine that escaped an EARLIER test onto
+                    // Main is that test's bug. Report it here, attributed to its
+                    // owner, before this test can be blamed for it.
+                    MainDispatcherStragglers.failIfAnyRecorded(
+                        "entry of ${description.displayName}",
+                    )
                     Dispatchers.setMain(dispatcher)
                     // EPIC #792 Slice D: the LivenessProbe is an infinite periodic
                     // `delay` loop. Under `runTest` + the virtual-clock Main set above,
@@ -75,13 +94,42 @@ class MainDispatcherRule(
                         }
                         beforeResetMain.clear()
                         try {
-                            Dispatchers.resetMain()
+                            // Issue #2413: never hand Main back in a state where
+                            // dispatching THROWS. Under Robolectric there is a
+                            // real main looper, so `resetMain()` returns a
+                            // working platform dispatcher and nothing changes.
+                            // In a looper-less JVM unit test it returns the
+                            // MISSING dispatcher, and a coroutine that escaped
+                            // this test then throws on its own worker thread —
+                            // an uncaught coroutine exception that
+                            // kotlinx-coroutines-test replays against an
+                            // arbitrary innocent sibling `runTest` as
+                            // `UncaughtExceptionsBeforeTest`. See
+                            // [MainDispatcherStragglers].
+                            if (Looper.getMainLooper() != null) {
+                                Dispatchers.resetMain()
+                            } else {
+                                Dispatchers.setMain(
+                                    PostTestMainDispatcher(description.displayName),
+                                )
+                            }
                         } catch (failure: Throwable) {
                             val firstFailure = cleanupFailure
                             if (firstFailure == null) {
                                 cleanupFailure = failure
                             } else if (firstFailure !== failure) {
                                 firstFailure.addSuppressed(failure)
+                            }
+                        }
+                        if (cleanupFailure == null) {
+                            // Only when the test itself is otherwise clean: a
+                            // straggler report must never mask the real failure.
+                            try {
+                                MainDispatcherStragglers.failIfAnyRecorded(
+                                    "exit of ${description.displayName}",
+                                )
+                            } catch (failure: Throwable) {
+                                cleanupFailure = failure
                             }
                         }
                         cleanupFailure?.let { throw it }

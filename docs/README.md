@@ -27,6 +27,7 @@ context; the README and current feature docs track released behavior.
 | [tmux-socket-recovery.md](tmux-socket-recovery.md) | Default tmux socket split-brain detection, safe recovery, and automation namespace guardrails |
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
 | [audit-2026-08-23-comprehensive-session-management.md](audit-2026-08-23-comprehensive-session-management.md) | Session-tree/connection audit and issue plan — delete once #2222, #2241–#2243, #2247, #2264, #2295 all close; no unique content will remain |
+| [audit-2026-08-30-code-quality.md](audit-2026-08-30-code-quality.md) | Five-reviewer whole-codebase audit of correctness, inefficiency, duplication, dead code, and simplification — delete when its retained findings are tracked and resolved or superseded |
 | [worktrees.md](worktrees.md) | Agent worktree layout, creation, and merge-back mechanics |
 | [ci-pitfalls.md](ci-pitfalls.md) | Catalogue of ways a CI/gate run can look green while proving nothing — check before trusting a result |
 | [review-standards.md](review-standards.md) | Reviewer acceptance bars for terminal/session/visual/journey work |

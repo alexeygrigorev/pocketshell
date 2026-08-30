@@ -10,7 +10,6 @@ import com.pocketshell.core.storage.dao.ForwardingIntentDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
-import com.pocketshell.core.storage.dao.PortUsageDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -64,7 +63,6 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun forwardingIntentDao(): ForwardingIntentDao
     abstract fun sshKeyDao(): SshKeyDao
     abstract fun portRemappingDao(): PortRemappingDao
-    abstract fun portUsageDao(): PortUsageDao
     abstract fun projectRootDao(): ProjectRootDao
     abstract fun snippetDao(): SnippetDao
     abstract fun aiApiCallLogDao(): AiApiCallLogDao

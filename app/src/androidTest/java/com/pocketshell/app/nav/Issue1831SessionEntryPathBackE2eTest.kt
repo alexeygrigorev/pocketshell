@@ -167,7 +167,6 @@ class Issue1831SessionEntryPathBackE2eTest {
                 keyPath = keyPathForSeededHost(),
                 sessionName = SEEDED_SESSION,
                 startDirectory = null,
-                composerDraft = "",
                 savedAtMillis = System.currentTimeMillis(),
             ),
         )

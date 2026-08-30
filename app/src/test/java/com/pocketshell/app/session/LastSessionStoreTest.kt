@@ -37,7 +37,6 @@ class LastSessionStoreTest {
 
     private fun sample(
         savedAtMillis: Long = 1_000L,
-        draft: String = "deploy the thing",
         startDirectory: String? = "/home/me/project",
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
@@ -52,7 +51,6 @@ class LastSessionStoreTest {
         startDirectory = startDirectory,
         tmuxSessionId = tmuxSessionId,
         sessionCreated = sessionCreated,
-        composerDraft = draft,
         savedAtMillis = savedAtMillis,
     )
 
@@ -84,7 +82,6 @@ class LastSessionStoreTest {
         assertEquals("/home/me/project", read.startDirectory)
         assertNull(read.tmuxSessionId)
         assertNull(read.sessionCreated)
-        assertEquals("deploy the thing", read.composerDraft)
         assertEquals(1_000L, read.savedAtMillis)
     }
 
@@ -213,15 +210,6 @@ class LastSessionStoreTest {
     }
 
     @Test
-    fun `empty draft round-trips`() {
-        val store = LastSessionStore(context)
-        store.save(sample(draft = ""))
-        val read = store.read(nowMillis = 1_500L)
-        assertNotNull(read)
-        assertEquals("", read!!.composerDraft)
-    }
-
-    @Test
     fun `snapshot older than max age is not restored`() {
         val store = LastSessionStore(context)
         // Use a non-zero base; `savedAt <= 0` is the "nothing saved"
@@ -318,14 +306,13 @@ class LastSessionStoreTest {
     @Test
     fun `latest save overwrites the previous snapshot`() {
         val store = LastSessionStore(context)
-        store.save(sample(savedAtMillis = 1_000L, draft = "first"))
+        store.save(sample(savedAtMillis = 1_000L))
         store.save(
-            sample(savedAtMillis = 2_000L, draft = "second").copyWith(sessionName = "codex"),
+            sample(savedAtMillis = 2_000L).copyWith(sessionName = "codex"),
         )
         val read = store.read(nowMillis = 2_500L)
         assertNotNull(read)
-        assertEquals("second", read!!.composerDraft)
-        assertEquals("codex", read.sessionName)
+        assertEquals("codex", read!!.sessionName)
         assertEquals(2_000L, read.savedAtMillis)
     }
 
@@ -361,7 +348,6 @@ class LastSessionStoreTest {
         val session = resolveLastSessionForStop(
             currentDestination = staleRoute,
             tmuxIntent = intended,
-            composerDraft = "draft while switching",
             savedAtMillis = 5_000L,
         )
         assertNotNull(session)
@@ -374,7 +360,6 @@ class LastSessionStoreTest {
         assertEquals("/home/me/project-b", restored.startDirectory)
         assertEquals("\$4", restored.tmuxSessionId)
         assertEquals(1700000004L, restored.sessionCreated)
-        assertEquals("draft while switching", restored.composerDraft)
         assertEquals(5_000L, restored.savedAtMillis)
     }
 
@@ -397,7 +382,6 @@ class LastSessionStoreTest {
         val session = resolveLastSessionForStop(
             currentDestination = route,
             tmuxIntent = null,
-            composerDraft = "draft",
             savedAtMillis = 5_000L,
         )
 
@@ -406,7 +390,6 @@ class LastSessionStoreTest {
         assertEquals("session-a", session.sessionName)
         assertEquals("\$7", session.tmuxSessionId)
         assertEquals(1700000007L, session.sessionCreated)
-        assertEquals("draft", session.composerDraft)
     }
 
     @Test
@@ -425,7 +408,6 @@ class LastSessionStoreTest {
                 trigger = TmuxConnectTrigger.UserTap,
                 generation = 42L,
             ),
-            composerDraft = "draft",
             savedAtMillis = 5_000L,
         )
 

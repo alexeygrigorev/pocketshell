@@ -1169,9 +1169,7 @@ class AppDatabaseTest {
             assertEquals(1, remappings.size)
             assertEquals(4000, remappings[0].remotePort)
 
-            val usage = migratedDb.portUsageDao().getByHostId(1).first()
-            assertEquals(1, usage.size)
-            assertEquals(84L, usage[0].totalBytes)
+            assertHistoricalPortUsageRow(migratedDb, expectedTotalBytes = 84L)
 
             assertColumnMissing(databaseName, "hosts", "pathOverride")
         } finally {
@@ -1220,9 +1218,7 @@ class AppDatabaseTest {
             assertEquals(1, remappings.size)
             assertEquals(3000, remappings[0].remotePort)
 
-            val usage = migratedDb.portUsageDao().getByHostId(1).first()
-            assertEquals(1, usage.size)
-            assertEquals(42L, usage[0].totalBytes)
+            assertHistoricalPortUsageRow(migratedDb, expectedTotalBytes = 42L)
         } finally {
             migratedDb.close()
         }
@@ -2151,6 +2147,24 @@ class AppDatabaseTest {
 
     private fun currentRoomSchemaVersion(): Int =
         APP_DATABASE_SCHEMA_VERSION
+
+    /**
+     * Port usage has no live DAO, but its shipped table remains schema state
+     * that upgrades must preserve. Query SQLite directly so migration coverage
+     * does not resurrect the obsolete production accessor.
+     */
+    private fun assertHistoricalPortUsageRow(
+        database: AppDatabase,
+        expectedTotalBytes: Long,
+    ) {
+        database.openHelper.writableDatabase.query(
+            "SELECT totalBytes FROM port_usage WHERE hostId = 1",
+        ).use { cursor ->
+            assertEquals(1, cursor.count)
+            assertTrue(cursor.moveToFirst())
+            assertEquals(expectedTotalBytes, cursor.getLong(0))
+        }
+    }
 
     private companion object {
         const val LEGACY_CRASH_SCHEMA_VERSION = 1

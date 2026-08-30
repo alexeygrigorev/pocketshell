@@ -268,7 +268,6 @@ write_last_session_snapshot() {
     printf "    <string name=\"key_path\">%s</string>\n" "$(xml_escape "$TMUX_KEY_DEVICE_PATH")"
     printf "    <string name=\"session_name\">%s</string>\n" "$(xml_escape "$TMUX_SESSION")"
     printf "    <string name=\"start_dir\">%s</string>\n" "$(xml_escape "$TMUX_START_DIR")"
-    printf "    <string name=\"composer_draft\"></string>\n"
     printf "    <long name=\"saved_at\" value=\"%s\" />\n" "$saved_at_ms"
     printf "</map>\n"
   } >"$snapshot"

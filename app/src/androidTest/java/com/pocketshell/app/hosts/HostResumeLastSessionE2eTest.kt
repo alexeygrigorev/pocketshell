@@ -101,7 +101,6 @@ class HostResumeLastSessionE2eTest {
                 keyPath = "/data/local/tmp/no-such-key-$nonce",
                 sessionName = "resume-session-$nonce",
                 startDirectory = null,
-                composerDraft = "",
                 savedAtMillis = System.currentTimeMillis(),
             ),
         )

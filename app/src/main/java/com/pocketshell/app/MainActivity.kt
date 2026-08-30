@@ -243,14 +243,8 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var sshKeyDao: SshKeyDao
 
-    /**
-     * Issue #177: the navigator's current top destination, reported up by
-     * [AppNavigator] so `onStop` can persist it. The session screen also
-     * reports its current composer draft here so the restored view comes
-     * back with the user's half-typed message intact.
-     */
+    /** Issue #177: the navigator's current top destination, persisted on stop. */
     private var currentTopDestination: AppDestination = AppDestination.HostList
-    private var currentComposerDraft: String = ""
     private var restoredTmuxDestination: AppDestination.TmuxSession? = null
 
     /**
@@ -261,14 +255,6 @@ class MainActivity : FragmentActivity() {
     @VisibleForTesting
     internal fun currentDestinationForTest(): AppDestination = currentTopDestination
 
-
-    /**
-     * Issue #177: the composer draft restored alongside a recent
-     * persisted session, handed to the session screen so the user's
-     * half-typed message comes back. Consumed once by the navigator;
-     * cleared after the restored destination has been seeded.
-     */
-    private var restoredComposerDraft by mutableStateOf("")
 
     /**
      * Issue #560: remote attachment path(s) handed in by the share-into-
@@ -402,11 +388,6 @@ class MainActivity : FragmentActivity() {
             "defaultHostLaunchPending" to resolveDefaultHostOnLaunch,
         )
         restoredTmuxDestination = requestedDestination as? AppDestination.TmuxSession
-        restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
-            restored?.composerDraft.orEmpty()
-        } else {
-            ""
-        }
         pendingImportPayload = importPayload
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(DarkSystemBarColor))
         window.decorView.setBackgroundColor(DarkSystemBarColor)
@@ -486,10 +467,8 @@ class MainActivity : FragmentActivity() {
                         pendingImportPayload = pendingImportPayload,
                         onImportPayloadConsumed = { pendingImportPayload = null },
                         // Issue #177: the navigator reports its current top
-                        // destination + composer draft so `onStop` can
-                        // persist the in-session view for fast resume; the
-                        // restored draft flows the other way so the session
-                        // comes back with the user's half-typed message.
+                        // destination so `onStop` can persist the in-session
+                        // view for fast resume.
                         onCurrentDestinationChanged = { dest ->
                             currentTopDestination = dest
                             // Issue #698: opening a host (folder list / session)
@@ -518,9 +497,6 @@ class MainActivity : FragmentActivity() {
                                 }
                             }
                         },
-                        onComposerDraftChanged = { draft -> currentComposerDraft = draft },
-                        initialComposerDraft = restoredComposerDraft,
-                        onInitialComposerDraftConsumed = { restoredComposerDraft = "" },
                         initialComposerAttachments = pendingComposerAttachments,
                         onInitialComposerAttachmentsConsumed = {
                             pendingComposerAttachments = emptyList()
@@ -745,7 +721,7 @@ class MainActivity : FragmentActivity() {
      * Issue #177: persist the last in-session view on the way out (D21 —
      * persistence happens at `onStop` time, nothing runs while
      * backgrounded). When the user is sitting on a tmux session we record
-     * the destination + draft so the next foreground restores it; when
+     * the destination so the next foreground restores it; when
      * they are anywhere else we clear the snapshot so a stale session is
      * never silently restored after the user navigated away on purpose.
      */
@@ -753,7 +729,6 @@ class MainActivity : FragmentActivity() {
         val session = resolveLastSessionForStop(
             currentDestination = currentTopDestination,
             tmuxIntent = tmuxSessionViewModel.latestRestoreIntentSnapshot(),
-            composerDraft = currentComposerDraft,
             savedAtMillis = System.currentTimeMillis(),
         )
         if (session != null) {
@@ -869,17 +844,9 @@ private fun AppNavigator(
     requestedDestination: AppDestination,
     pendingImportPayload: String? = null,
     onImportPayloadConsumed: () -> Unit = {},
-    // Issue #177: report the current top destination + the active session
-    // composer draft up to the activity so `onStop` can persist the
-    // in-session view for fast resume.
+    // Issue #177: report the current top destination so `onStop` can persist
+    // the in-session view for fast resume.
     onCurrentDestinationChanged: (AppDestination) -> Unit = {},
-    onComposerDraftChanged: (String) -> Unit = {},
-    // Issue #177: the composer draft restored from the persisted session,
-    // seeded into the session screen on the restore path. Consumed once;
-    // [onInitialComposerDraftConsumed] clears it so a later in-session
-    // navigation does not re-seed a stale draft.
-    initialComposerDraft: String = "",
-    onInitialComposerDraftConsumed: () -> Unit = {},
     // Issue #560: staged remote attachment path(s) from a share-into-session
     // launch. Seeded into the session composer as #544 chips with the
     // composer opened + focused. Consumed once; cleared via
@@ -1880,12 +1847,6 @@ private fun AppNavigator(
                     ),
                 )
             },
-            // Issue #177: seed the restored composer draft into the agent
-            // composer so a fast-resumed session comes back with the
-            // user's half-typed message, and report draft edits up so the
-            // next `onStop` persists them.
-            initialComposerDraft = initialComposerDraft,
-            onInitialComposerDraftConsumed = onInitialComposerDraftConsumed,
             // Issue #560: seed the share-staged attachment(s) into the
             // session composer as #544 chips and open the composer focused.
             initialComposerAttachments = initialComposerAttachments,
@@ -1894,7 +1855,6 @@ private fun AppNavigator(
             // "Attach to current session" action into the composer draft.
             initialComposerPrompt = initialComposerPrompt,
             onInitialComposerPromptConsumed = onInitialComposerPromptConsumed,
-            onComposerDraftChanged = onComposerDraftChanged,
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
                     target = StartDirectoryAutocompleteTarget(
@@ -2177,7 +2137,6 @@ internal fun shouldTrapSystemBack(destination: AppDestination): Boolean =
 internal fun resolveLastSessionForStop(
     currentDestination: AppDestination,
     tmuxIntent: TmuxRestoreIntentSnapshot?,
-    composerDraft: String,
     savedAtMillis: Long,
 ): LastSessionStore.LastSession? {
     val routeDestination = currentDestination as? AppDestination.TmuxSession ?: return null
@@ -2205,7 +2164,6 @@ internal fun resolveLastSessionForStop(
             startDirectory = source.startDirectory,
             tmuxSessionId = source.tmuxSessionId,
             sessionCreated = source.sessionCreated,
-            composerDraft = composerDraft,
             savedAtMillis = savedAtMillis,
         )
     } else {
@@ -2220,7 +2178,6 @@ internal fun resolveLastSessionForStop(
             startDirectory = routeDestination.startDirectory,
             tmuxSessionId = routeDestination.tmuxSessionId,
             sessionCreated = routeDestination.sessionCreated,
-            composerDraft = composerDraft,
             savedAtMillis = savedAtMillis,
         )
     }

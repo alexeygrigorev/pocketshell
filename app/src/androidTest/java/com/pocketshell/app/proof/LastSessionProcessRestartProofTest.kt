@@ -74,7 +74,6 @@ class LastSessionProcessRestartProofTest {
             resolveLastSessionForStop(
                 currentDestination = predecessorRoute,
                 tmuxIntent = null,
-                composerDraft = "predecessor",
                 savedAtMillis = System.currentTimeMillis(),
             ),
         )
@@ -101,7 +100,6 @@ class LastSessionProcessRestartProofTest {
                     trigger = TmuxConnectTrigger.UserTap,
                     generation = 1L,
                 ),
-                composerDraft = "successor",
                 savedAtMillis = System.currentTimeMillis(),
             ),
         )

@@ -420,7 +420,6 @@ class HostListViewModelTest {
                 keyPath = "/data/keys/id_ed25519",
                 sessionName = sessionName,
                 startDirectory = "/home/alex/project",
-                composerDraft = "",
                 savedAtMillis = savedAtMillis,
             ),
         )

@@ -132,6 +132,44 @@ check_gradle_matches_script() {
   return 0
 }
 
+# F5 / issue #2430: drive the real Gradle helper with a derivation child that
+# emits more than a pipe buffer to stderr, prints plausible values, and never
+# exits. Configuration must return the safe fallback after its own timeout.
+check_gradle_timeout_fallback() {
+  local repo_root="$1"
+  local tmp fake start end elapsed gradle_out gradle_lines
+  tmp="$(mktemp -d)"
+  fake="$tmp/never-exits.sh"
+  cat > "$fake" <<'FAKE'
+#!/usr/bin/env bash
+printf 'VERSION_CODE=999\nVERSION_NAME=9.9.9\n'
+head -c 1048576 /dev/zero >&2
+exec sleep 300
+FAKE
+  chmod +x "$fake"
+
+  start="$(date +%s)"
+  if ! gradle_out="$(cd "$repo_root" && timeout 35s ./gradlew -q \
+      --no-configuration-cache \
+      -PpocketshellVersionDeriveScript="$fake" \
+      :app:printPocketshellVersion 2>&1)"; then
+    rm -rf "$tmp"
+    fail "Gradle did not return the safe fallback within the outer 35s guard:"
+    printf '%s\n' "$gradle_out" >&2
+    return 1
+  fi
+  end="$(date +%s)"
+  elapsed=$((end - start))
+  rm -rf "$tmp"
+
+  gradle_lines="$(printf '%s\n' "$gradle_out" | grep -E '^VERSION_(CODE|NAME)=')"
+  if [[ "$gradle_lines" != $'VERSION_CODE=1\nVERSION_NAME=0.0.0-dev' ]]; then
+    fail "hung/noisy derivation did not resolve to the safe fallback: $gradle_lines"
+    return 1
+  fi
+  printf 'OK: hung/noisy derivation returned fallback in %ss (outer limit 35s).\n' "$elapsed"
+}
+
 # Step 3: every consumer references the script by path (grep-based single-
 # source-of-truth check — catches an independently-reimplemented derivation).
 check_single_source_reference() {
@@ -267,6 +305,7 @@ main() {
 
   if [[ "$skip_gradle" -eq 0 ]]; then
     check_gradle_matches_script "$ROOT_DIR" "$ROOT_DIR/$DERIVE_SCRIPT_REL" || ok=0
+    check_gradle_timeout_fallback "$ROOT_DIR" || ok=0
   else
     printf 'SKIPPED: Gradle-resolved-version cross-check (--skip-gradle)\n'
   fi

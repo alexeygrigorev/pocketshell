@@ -27,9 +27,10 @@ bash scripts/test-reuse-ci-unit-evidence.sh
 # the result line, per-step wall clock, validated APK digest).
 bash scripts/test-release-gate-summary.sh
 
-# docs/release.md cuts a release on a release/vX.Y.Z branch in its own
-# worktree. Both release gates must accept that line without opening up to any
-# branch, and must bind their evidence to the candidate's own SHA.
+# docs/release.md stabilizes a release/vX.Y.Z branch in its own worktree.
+# Validation may run on the pushed candidate, but publication must fast-forward that exact SHA to main, push main, then tag from main.
+# The tag helper accepts only pushed main; both gates bind evidence to the
+# exact SHA they validate or publish.
 bash scripts/test-release-branch-guard.sh
 
 # Same worktree flow, one layer down: the pre-release gate's "isolated" copy

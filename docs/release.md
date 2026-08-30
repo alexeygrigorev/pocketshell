@@ -85,8 +85,13 @@ Check it before cutting a new candidate branch:
 
 ```bash
 git fetch origin --tags
-git show validated-rc --quiet   # SHA, run URL, and timestamp are in the tag message
+git show validated-rc --quiet   # SHA, both run URLs, and timestamp are in the tag message
 ```
+
+The marker labels the two provenance links separately: `Release validation run`
+is the workflow containing the emulator summary/artifacts, while
+`Triggering Tests run` is the upstream scheduled full-suite signal. Do not use
+the Tests link to look for release-validation artifacts.
 
 If a `validated-rc` tag exists, is recent (rule of thumb: less than 24h old
 — check the timestamp in the tag message), and its SHA is at or ahead of
@@ -109,9 +114,9 @@ Use this when the fast path above isn't available. We copy a SHA of `main`
 onto a release-candidate branch, checked out in its own worktree, make that
 branch stable, merge it back to `main`, then tag the merged SHA from `main`.
 A dispatched release-owner agent (see `.claude/agents/release-owner.md`)
-does all of this — it never switches the root checkout's branch except for
-the final merge and tag steps, which run from the root checkout by design
-(see [Tag the release](#tag-the-release)).
+does all of this without ever switching the root checkout off `main`; the final
+fast-forward and tag commands run there by design (see
+[Tag the release](#tag-the-release)).
 
 Copy, not move: anything already on `main` (CI cadence, flake quarantine,
 product fixes) stays on `main`. The candidate starts as a copy of that

@@ -14,7 +14,7 @@
 # release-validation infra health, not a `main` regression).
 #
 # USAGE
-#   ci-nightly-rc-issue.sh --repo OWNER/NAME --run-url URL --sha SHA [--gh PATH]
+#   ci-nightly-rc-issue.sh --repo OWNER/NAME --run-url URL --trigger-run-url URL --sha SHA [--gh PATH]
 #
 # Self-test: scripts/test-ci-nightly-rc-issue.sh
 #
@@ -28,6 +28,7 @@ MARKER="pocketshell-nightly-rc-red-marker"
 
 REPO=""
 RUN_URL=""
+TRIGGER_RUN_URL=""
 SHA=""
 GH_BIN="${POCKETSHELL_GH_BIN:-gh}"
 
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) REPO="$2"; shift 2 ;;
     --run-url) RUN_URL="$2"; shift 2 ;;
+    --trigger-run-url) TRIGGER_RUN_URL="$2"; shift 2 ;;
     --sha) SHA="$2"; shift 2 ;;
     --gh) GH_BIN="$2"; shift 2 ;;
     -h|--help)
@@ -45,8 +47,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$REPO" || -z "$RUN_URL" || -z "$SHA" ]]; then
-  echo "usage: $0 --repo OWNER/NAME --run-url URL --sha SHA [--gh PATH]" >&2
+if [[ -z "$REPO" || -z "$RUN_URL" || -z "$TRIGGER_RUN_URL" || -z "$SHA" ]]; then
+  echo "usage: $0 --repo OWNER/NAME --run-url URL --trigger-run-url URL --sha SHA [--gh PATH]" >&2
   exit 2
 fi
 
@@ -66,7 +68,8 @@ Marker: $MARKER
 
 ## Latest failing streak
 
-- Latest run: $RUN_URL
+- Release Emulator Validation run: $RUN_URL
+- Triggering Tests run: $TRIGGER_RUN_URL
 - Commit under validation: \`$SHA\`
 
 This means \`main\` currently has NO validated-RC candidate newer than the

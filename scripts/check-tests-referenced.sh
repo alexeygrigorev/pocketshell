@@ -22,7 +22,8 @@
 #
 # WHAT IT CHECKS
 #
-# Every git-tracked file under tests/ must be REACHABLE from executable text:
+# Every git-tracked file under tests/, plus every top-level scripts/test-*.sh
+# and scripts/*mutation*.sh proof, must be REACHABLE from executable text:
 #
 #   1. Roots  — a file named by non-comment code outside tests/ (workflow,
 #      Gradle script, shell script, Kotlin source), or by a command/code block
@@ -344,6 +345,65 @@ collect_unreferenced() {
   return 0
 }
 
+# Top-level test/mutation proofs are not under tests/, so the original
+# inventory missed them entirely. These are entrypoints rather than fixture
+# graphs: each needs a direct executable caller outside itself.
+collect_unreferenced_top_level_script_tests() {
+  local root="$1"
+  cd "$root" || return 1
+  REFERENCE_TEXT_CACHE=()
+  REFERENCE_TEXT_CACHE_NEXT=0
+  REFERENCE_TEXT_CACHE_DIR="$(mktemp -d)"
+
+  local -a listed assets=()
+  mapfile -t listed < <(
+    git ls-files --cached --others --exclude-standard -- \
+      'scripts/test-*.sh' 'scripts/*mutation*.sh' | sort -u
+  )
+  local asset suffix candidate
+  for asset in "${listed[@]}"; do
+    [[ -e "$asset" ]] && assets+=("$asset")
+  done
+
+  for asset in "${assets[@]}"; do
+    local reachable=0
+    while read -r suffix; do
+      local -a matching_candidates=()
+      mapfile -t matching_candidates < <(
+        git grep --untracked -F -l -I -- "$suffix" -- ":!$asset" 2>/dev/null
+      )
+      for candidate in "${matching_candidates[@]}"; do
+        [[ "$candidate" == "scripts/check-tests-referenced.sh" ]] && continue
+        if file_has_reference "$candidate" "$suffix"; then
+          reachable=1
+          break
+        fi
+      done
+      [[ "$reachable" -eq 1 ]] && break
+    done < <(path_suffixes "$asset")
+    [[ "$reachable" -eq 0 ]] && printf '%s\n' "$asset"
+  done
+  rm -rf "$REFERENCE_TEXT_CACHE_DIR"
+}
+
+run_top_level_script_check() {
+  local root="$1"
+  local -a dead filtered=()
+  mapfile -t dead < <(collect_unreferenced_top_level_script_tests "$root")
+  local entry
+  for entry in "${dead[@]:-}"; do
+    [[ -n "$entry" ]] && filtered+=("$entry")
+  done
+  if [[ "${#filtered[@]}" -eq 0 ]]; then
+    printf 'OK: every top-level test/mutation script has an executable caller.\n'
+    return 0
+  fi
+  printf '::error title=Unreferenced top-level test::%d script(s) have no executable caller.\n' \
+    "${#filtered[@]}" >&2
+  printf '  %s\n' "${filtered[@]}" >&2
+  return 1
+}
+
 run_check() {
   local root="$1" tests_dir="$2"
   local -a dead
@@ -526,6 +586,28 @@ SELF_GUARD
     failures=$((failures + 1))
   fi
 
+  printf 'echo top-level dead proof\n' > "$repo/scripts/test-top-level-dead.sh"
+  git -C "$repo" add -A
+  git -C "$repo" commit -qm top-level-dead
+  printf '== self-test: uncalled top-level test script (expect DEAD) ==\n'
+  if report="$(run_top_level_script_check "$repo" 2>&1)"; then
+    printf '   -> UNEXPECTED PASS: top-level dead proof was not inventoried\n\n' >&2
+    failures=$((failures + 1))
+  elif grep -Fq 'scripts/test-top-level-dead.sh' <<< "$report"; then
+    printf '   -> FAIL as expected, naming the top-level proof\n\n'
+  else
+    printf '   -> UNEXPECTED: top-level proof failed without naming the asset\n%s\n\n' "$report" >&2
+    failures=$((failures + 1))
+  fi
+  printf '      - run: bash scripts/test-top-level-dead.sh\n' >> "$repo/.github/workflows/tests.yml"
+  printf '== self-test: top-level test script invoked (expect PASS) ==\n'
+  if run_top_level_script_check "$repo" >/dev/null 2>&1; then
+    printf '   -> PASS as expected once the workflow invokes it\n\n'
+  else
+    printf '   -> UNEXPECTED FAIL after wiring the top-level proof\n\n' >&2
+    failures=$((failures + 1))
+  fi
+
   printf '== self-test: uncommitted D22 deletion is no longer an asset (expect PASS) ==\n'
   mv \
     "$repo/tests/scripts/dead-harness-test.sh" \
@@ -621,8 +703,10 @@ main() {
       exit $?
       ;;
     "")
-      run_check "$REPO_ROOT" "$TESTS_DIR"
-      exit $?
+      rc=0
+      run_check "$REPO_ROOT" "$TESTS_DIR" || rc=1
+      run_top_level_script_check "$REPO_ROOT" || rc=1
+      exit "$rc"
       ;;
     *)
       usage >&2

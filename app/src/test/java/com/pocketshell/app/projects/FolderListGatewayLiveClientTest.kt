@@ -235,12 +235,62 @@ class FolderListGatewayLiveClientTest {
             // matching when the read moved to the locale-proof `tmux -u` client.
             leaseSession.execCommands.any { it.contains(LIST_SESSIONS_HEAD) },
         )
+        // Issue #2409: the fall-through lease issues the #2348 JSON enumerator
+        // and the landing enumeration batch CONCURRENTLY on this one session.
+        // Pinning BOTH keeps the recorder honest — when the recorder lost one of
+        // the two racing `add`s (CI run 33245201414) the assertion above failed
+        // as a phantom "never fell through to the lease".
+        assertTrue(
+            "the concurrent pocketshell JSON enumerator probe must be recorded too; " +
+                "got ${leaseSession.execCommands}",
+            leaseSession.execCommands.any {
+                it.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_JSON_COMMAND)
+            },
+        )
         // The result is a bounded FolderListResult (NOT a permanent Loading
         // hang). With the empty-success lease there are no live sessions, so an
         // empty Sessions list is the expected populated-but-empty picker state.
         assertTrue(
             "wedged live path must surface a bounded result, got $result",
             result is FolderListResult.Sessions,
+        )
+    }
+
+    @Test
+    fun leaseExecRecorderLosesNoConcurrentExec() {
+        // Issue #2409 (CI regression guard). The defect that reddened
+        // `wedgedLiveClientEnumerationFallsThroughToLeaseInsteadOfHanging` on CI
+        // run 33245201414 was NOT in the gateway: it was this file's own
+        // [RecordingSshSession] recording into a bare `ArrayList` while the
+        // production lease path (#2348) runs two `session.exec` calls
+        // concurrently on two `Dispatchers.IO` threads. A lost `add` silently
+        // deletes the very command the behavioural assertion reads, so the test
+        // reports "the gateway never fell through to the lease" when it did.
+        //
+        // This hammers the recorder the way a loaded CI runner does. On a bare
+        // `mutableListOf()` it fails deterministically (lost updates, or an
+        // ArrayIndexOutOfBounds from a torn grow); on the synchronized list
+        // every command survives.
+        val session = RecordingSshSession()
+        val threads = 4
+        val perThread = 20_000
+        val start = java.util.concurrent.CountDownLatch(1)
+        val workers = (0 until threads).map { worker ->
+            Thread {
+                start.await()
+                repeat(perThread) { i ->
+                    runBlocking { session.exec("probe-$worker-$i") }
+                }
+            }.also { it.start() }
+        }
+        start.countDown()
+        workers.forEach { it.join() }
+
+        assertEquals(
+            "every concurrently issued exec must be recorded — a lost one turns a " +
+                "behavioural assertion into a phantom failure",
+            threads * perThread,
+            session.execCommands.size,
         )
     }
 
@@ -410,7 +460,37 @@ class FolderListGatewayLiveClientTest {
         }
 
         private val resultForCommand: (String) -> ExecResult
-        val execCommands: MutableList<String> = mutableListOf()
+
+        /**
+         * Issue #2409 (CI regression): SYNCHRONIZED, not a bare `ArrayList`.
+         *
+         * Since #2348 the lease path deliberately overlaps two probes on the
+         * SAME shared [SshSession] — `fetchPocketshellEnumerator` is launched in
+         * an `async` and the required landing batch (`list-sessions` +
+         * `list-panes`) starts immediately after it, and both run their exec
+         * inside `BoundedSessionExec.execBounded`'s `withContext(Dispatchers.IO)
+         * { async { session.exec(...) } }`. So `exec` is genuinely called from
+         * two different dispatcher threads a few milliseconds apart.
+         *
+         * A plain `mutableListOf()` recorder makes those two `add`s a data
+         * race: both threads read `size == 0`, both write index 0, and ONE
+         * COMMAND IS SILENTLY LOST. That is not a cosmetic recorder bug — the
+         * lost entry is what
+         * [wedgedLiveClientEnumerationFallsThroughToLeaseInsteadOfHanging]
+         * asserts on, so the race turns a passing behavioural assertion into a
+         * phantom "the gateway never fell through to the lease" failure. It hit
+         * exactly that way on CI run 33245201414 (4 commands recorded instead
+         * of 5, the landing enumeration batch missing, while the test's own
+         * 0.256 s wall time proves no exec ever timed out).
+         *
+         * #2348 already swept the sibling doubles
+         * (`FolderListGatewaySshLeaseTest`, `Issue2348FolderListListPathHopTest`,
+         * `FolderListGatewayExecTimeoutTest`) onto a synchronized list; this
+         * double was missed. `leaseExecRecorderLosesNoConcurrentExec` is the
+         * durable guard.
+         */
+        val execCommands: MutableList<String> =
+            java.util.Collections.synchronizedList(mutableListOf())
         override val isConnected: Boolean = true
         override suspend fun exec(command: String): ExecResult {
             execCommands += command

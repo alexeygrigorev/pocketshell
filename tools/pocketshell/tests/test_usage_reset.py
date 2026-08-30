@@ -39,6 +39,7 @@ def _cache(
     percent: float | None = 40.0,
     reset_at: str | None = "2026-06-11T15:00:00Z",
     window: str = "5h",
+    rolling: bool = False,
 ) -> dict:
     # quse 0.0.15 unified windows (issues #2274/#2293): the map key IS the label.
     return {
@@ -48,7 +49,11 @@ def _cache(
                 "provider": provider,
                 "status": "ok",
                 "windows": {
-                    window: {"percent_remaining": percent, "reset_at": reset_at},
+                    window: {
+                        "percent_remaining": percent,
+                        "reset_at": reset_at,
+                        "rolling": rolling,
+                    },
                 },
             }
         ],
@@ -102,6 +107,24 @@ def test_reset_detected_on_new_window_boundary() -> None:
     assert "window_rolled" in events[0]["signals"]
 
 
+def test_future_deadline_revision_before_expiry_is_not_a_reset() -> None:
+    previous = _cache("2026-06-11T10:00:00Z", percent=70.0, reset_at="2026-06-11T15:00:00Z")
+    current = _cache("2026-06-11T11:00:00Z", percent=69.0, reset_at="2026-06-11T16:00:00Z")
+    assert detect_resets(previous, current) == []
+
+
+def test_rolling_deadline_advancement_is_not_a_boundary_reset() -> None:
+    previous = _cache(
+        "2026-06-11T15:05:00Z", percent=70.0,
+        reset_at="2026-06-11T15:00:00Z", rolling=True,
+    )
+    current = _cache(
+        "2026-06-11T16:05:00Z", percent=69.0,
+        reset_at="2026-06-11T16:00:00Z", rolling=True,
+    )
+    assert detect_resets(previous, current) == []
+
+
 def test_early_reset_flagged_when_before_stated_time() -> None:
     # Previous reading stated reset at 15:00; reset detected at 14:30 (early).
     previous = _cache("2026-06-11T14:00:00Z", percent=5.0, reset_at="2026-06-11T15:00:00Z")
@@ -113,6 +136,7 @@ def test_early_reset_flagged_when_before_stated_time() -> None:
     assert event["minutes_early"] == 30
     assert event["stated_reset_at"] == "2026-06-11T15:00:00Z"
     assert event["detected_at"] == "2026-06-11T14:30:00Z"
+    assert event["signals"] == ["recovery"]
 
 
 def test_on_or_after_stated_when_reset_at_expected_time() -> None:

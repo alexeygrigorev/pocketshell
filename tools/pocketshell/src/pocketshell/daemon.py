@@ -56,6 +56,7 @@ versions when available) without RPC parameters or command output.
 from __future__ import annotations
 
 import json
+import fcntl
 import logging
 import os
 import re
@@ -354,6 +355,13 @@ def resolve_pid_path(socket_path: Optional[Path] = None) -> Path:
     if socket_path is None:
         socket_path = resolve_socket_path()
     return socket_path.with_suffix(".pid")
+
+
+def resolve_lock_path(socket_path: Optional[Path] = None) -> Path:
+    """Return the lifetime-ownership lock beside the daemon socket."""
+    if socket_path is None:
+        socket_path = resolve_socket_path()
+    return socket_path.with_suffix(".lock")
 
 
 def _ensure_socket_dir(socket_path: Path) -> None:
@@ -890,6 +898,10 @@ class _RpcError(Exception):
         self.data = data
 
 
+class _DaemonAlreadyOwned(Exception):
+    """Another daemon holds the socket's lifetime lock."""
+
+
 class Daemon:
     """Unix-socket JSON-RPC 2.0 server for ``pocketshell`` subcommands.
 
@@ -922,6 +934,7 @@ class Daemon:
         self._cache = _Cache(clock=clock)
         self._clock = clock
         self._server_sock: Optional[socket.socket] = None
+        self._lifecycle_lock: Optional[Any] = None
         self._stop_event = threading.Event()
         self._last_activity = self._clock()
 
@@ -934,9 +947,17 @@ class Daemon:
 
     def _bind(self) -> socket.socket:
         _ensure_socket_dir(self.socket_path)
-        # Always unlink first. If a previous daemon crashed without
-        # cleanup the path is a dead file; bind() would fail with
-        # EADDRINUSE. Recreating cleanly is the documented self-heal.
+        lock_path = resolve_lock_path(self.socket_path)
+        lock_fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        lock = os.fdopen(lock_fd, "a+")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            raise _DaemonAlreadyOwned
+        self._lifecycle_lock = lock
+
+        # Only the lifetime-lock owner may replace a proven stale endpoint.
         try:
             os.unlink(self.socket_path)
         except FileNotFoundError:
@@ -948,9 +969,14 @@ class Daemon:
         # process umask (no fchmod hook on AF_UNIX at bind time).
         old_umask = os.umask(0o077)
         try:
-            sock.bind(str(self.socket_path))
-        finally:
-            os.umask(old_umask)
+            try:
+                sock.bind(str(self.socket_path))
+            finally:
+                os.umask(old_umask)
+        except BaseException:
+            sock.close()
+            self._release_lifecycle_lock()
+            raise
         sock.listen(8)
         # Defence in depth: chmod the socket explicitly in case some
         # platform ignored the umask.
@@ -994,7 +1020,10 @@ class Daemon:
         Idle timeout 0 disables the idle exit (used by future systemd
         ``Type=simple`` always-on mode).
         """
-        self._server_sock = self._bind()
+        try:
+            self._server_sock = self._bind()
+        except _DaemonAlreadyOwned:
+            return
         self._write_pid_file()
         self._last_activity = self._clock()
         # Trap SIGTERM so `daemon stop` (and systemd Stop) shuts us
@@ -1057,6 +1086,17 @@ class Daemon:
             self._server_sock = None
         self._remove_socket_file()
         self._remove_pid_file()
+        self._release_lifecycle_lock()
+
+    def _release_lifecycle_lock(self) -> None:
+        lock = self._lifecycle_lock
+        if lock is None:
+            return
+        self._lifecycle_lock = None
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        finally:
+            lock.close()
 
     # -- request handling ------------------------------------------------
 
@@ -1647,15 +1687,10 @@ def stop_daemon(
 ) -> bool:
     """Stop a running daemon and remove its socket.
 
-    Strategy:
-
-    1. If a PID file exists, ``os.kill(pid, SIGTERM)`` — clean shutdown
-       via the signal handler.
-    2. Wait up to ``timeout`` seconds for the socket file to disappear.
-    3. Fall through to the RPC ``daemon.shutdown`` method if the PID
-       file is missing (legacy or test-spawned daemons).
-    4. Always remove a stale socket file at the end so the next start
-       has a clean slate.
+    A responsive socket proves daemon identity, so shutdown always goes over
+    RPC. A numeric PID file alone is never trusted: the OS may have reused a
+    stale PID for an unrelated process. Stale paths are removed only while
+    holding the same exclusive lifetime lock used by startup.
 
     Returns ``True`` if a daemon was running and is now stopped,
     ``False`` if no daemon was running.
@@ -1663,41 +1698,45 @@ def stop_daemon(
     socket_path = socket_path or resolve_socket_path()
     pid_path = resolve_pid_path(socket_path)
 
-    pid = read_pid(pid_path)
     was_running = is_daemon_running(socket_path)
 
-    if pid is not None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pid = None
-        except PermissionError:
-            pid = None
-
-    if was_running and pid is None:
-        # No PID file or kill failed; try the RPC shutdown instead.
+    if was_running:
         try:
             call("daemon.shutdown", socket_path=socket_path, timeout=timeout)
         except (DaemonClientError, RuntimeError, OSError):
             pass
 
-    # Wait for the socket file to disappear.
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not socket_path.exists():
-            break
-        time.sleep(0.05)
+    if was_running:
+        # Give the proven daemon time to remove its owned paths. A stale,
+        # unresponsive socket has nobody to wait for and proceeds directly to
+        # ownership-locked cleanup below.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not socket_path.exists():
+                break
+            time.sleep(0.05)
 
-    # Final cleanup: remove the socket if the daemon did not clean up
-    # itself (SIGKILL recovery).
+    # Clean stale metadata only if no daemon owns the lifecycle lock. Re-probe
+    # after acquiring it so a concurrent startup cannot be mistaken for stale.
+    _ensure_socket_dir(socket_path)
+    lock_fd = os.open(str(resolve_lock_path(socket_path)), os.O_RDWR | os.O_CREAT, 0o600)
+    lock = os.fdopen(lock_fd, "a+")
     try:
-        os.unlink(socket_path)
-    except FileNotFoundError:
-        pass
-    try:
-        pid_path.unlink()
-    except FileNotFoundError:
-        pass
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return was_running
+        if not is_daemon_running(socket_path):
+            try:
+                os.unlink(socket_path)
+            except FileNotFoundError:
+                pass
+            try:
+                pid_path.unlink()
+            except FileNotFoundError:
+                pass
+    finally:
+        lock.close()
 
     return was_running
 

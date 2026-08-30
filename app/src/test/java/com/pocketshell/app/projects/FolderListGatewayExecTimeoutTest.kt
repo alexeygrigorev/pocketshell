@@ -25,7 +25,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.io.InputStream
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -58,12 +57,16 @@ class FolderListGatewayExecTimeoutTest {
      * The host is PERSISTENTLY wedged (every exec parks), so the #680 heal +
      * retry cannot rescue it and the bounded [FolderListResult.ConnectFailed]
      * must still surface rather than the screen hanging in `Loading` forever.
-     * The bound now costs two attempts instead of one — still bounded, which is
-     * the property #470 actually guarantees.
+     * The bound costs several attempts instead of one — #1641's evict-and-re-dial
+     * heal, and now #2422's same-transport retry inside each lease attempt — but it
+     * is still a fixed multiple of [SshFolderListGateway.EXEC_READ_TIMEOUT_MS],
+     * which is the property #470 actually guarantees.
      *
      * The single-transient-wedge case now HEALS instead of surfacing a scary
-     * banner (that is #680's design, and #1641 made the exec timeout reach it);
-     * see `wedgedExecStillEvictsAndRetriesOnAFreshTransport`.
+     * banner (that is #680's design, #1641 made the exec timeout reach it, and
+     * #2422 made it heal without a fresh dial); see
+     * `transientlyWedgedRequiredExecHealsOnTheSameWarmTransportWithoutAReDial` and
+     * `persistentlyWedgedRequiredExecStillEvictsAndRetriesOnAFreshTransport`.
      */
     @Test
     fun persistentlyWedgedListSessionsReadStillSurfacesBoundedConnectFailed() = runBlocking {
@@ -204,15 +207,23 @@ class FolderListGatewayExecTimeoutTest {
      * the first one wedged. Unlike the deleted `close()`, that eviction goes
      * through `evictIdle`, which is refcount-aware and leaves a transport an
      * ACTIVE session VM still holds alone (#758).
+     *
+     * Issue #2422 narrows WHEN that heal fires: the required landing batch is now
+     * retried once on the SAME warm transport first, so reaching the re-dial takes
+     * a PERSISTENTLY unresponsive required probe ([requiredEnumerationWedges] = 2),
+     * not a single transient over-run. This is the load-bearing negative of #2422 —
+     * over-guarding the retry (never re-dialling) would strand a genuinely dead
+     * transport, which is strictly worse than the doubled reconcile it removed.
      */
     @Test
-    fun wedgedExecStillEvictsAndRetriesOnAFreshTransport() = runBlocking {
+    fun persistentlyWedgedRequiredExecStillEvictsAndRetriesOnAFreshTransport() = runBlocking {
         // Issue #2359: #2348 starts the optional pocketshell enumerator in
         // parallel with the required landing batch. Wedge the required
         // command by its marker, not whichever concurrent child happens to
         // reach the fake first.
         val wedged = WedgingSshSession(
             wedgeRequiredEnumeration = true,
+            requiredEnumerationWedges = 2,
             releaseRequiredEnumerationAfterOptional = true,
         )
         val healthy = WedgingSshSession(wedgeFirstExec = false)
@@ -236,9 +247,10 @@ class FolderListGatewayExecTimeoutTest {
         val observedCommands = wedged.snapshotExecCommands()
         val requiredEnumerationCommands = observedCommands.filter(::isRequiredLandingEnumeration)
         assertEquals(
-            "the fake must observe one required landing enumeration; " +
-                "observed exec commands=$observedCommands",
-            1,
+            "issue #2422: the poisoned transport must see the required landing " +
+                "enumeration TWICE — one over-run plus the same-transport retry — " +
+                "before the lease heal re-dials; observed exec commands=$observedCommands",
+            2,
             requiredEnumerationCommands.size,
         )
         val optionalEnumeratorIndex = observedCommands.indexOfFirst { command ->
@@ -258,7 +270,7 @@ class FolderListGatewayExecTimeoutTest {
             "the required landing enumeration, not the optional concurrent " +
                 "pocketshell enumerator, must be the wedged command; " +
                 "observed exec commands=$observedCommands",
-            requiredEnumerationCommands.single(),
+            requiredEnumerationCommands.first(),
             wedged.wedgedCommand,
         )
         assertEquals(
@@ -277,6 +289,83 @@ class FolderListGatewayExecTimeoutTest {
         // only ever takes a lease at refCount == 0. That guard is pinned by
         // `wedgedExecMustNotYankATransportAnActiveConsumerHolds` below, which is
         // the case the deleted raw `close()` violated.
+    }
+
+    /**
+     * Issue #2422 — a TRANSIENT required-exec over-run must heal on the SAME warm
+     * transport, with NO fresh dial and NO second full chain.
+     *
+     * This is the JVM half of the class regression. On a mobile link the required
+     * landing batch losing its race against [SshFolderListGateway.EXEC_READ_TIMEOUT_MS]
+     * is routine (the netem reproduction records 1-3 abandoned execs per reconcile
+     * at ~400 ms RTT / 5 % loss). Before this fix that over-run was answered by
+     * evicting the warm lease, paying a brand-new TCP+SSH handshake and re-running
+     * every probe — measured on the netem fixture at 15.2-17.0 s with one extra
+     * sshd login, versus 12.3-13.2 s and zero extra logins once the batch is
+     * retried in place, against a 12 s user-visible `RECONCILE_TIMEOUT_MS` and an
+     * un-amplified chain of 5.9-8.5 s. That is the "Couldn't refresh the project
+     * tree" panel on a link that was working the whole time, and the
+     * scheduled-CI failure (`elapsedMs=12545 bound=12000`) this issue was filed
+     * for.
+     *
+     * The fixture wedges the required landing enumeration EXACTLY ONCE, so the
+     * distinguishing observation is the DIAL COUNT: one dial (retry on the warm
+     * transport) versus two (evict + fresh transport). Both variants return
+     * `Sessions`, so the result type alone cannot tell them apart — the dial count
+     * is the load-bearing assertion (G6).
+     */
+    @Test
+    fun transientlyWedgedRequiredExecHealsOnTheSameWarmTransportWithoutAReDial() = runBlocking {
+        val wedged = WedgingSshSession(
+            wedgeRequiredEnumeration = true,
+            requiredEnumerationWedges = 1,
+            releaseRequiredEnumerationAfterOptional = true,
+        )
+        val fresh = WedgingSshSession(wedgeFirstExec = false)
+        val connector = SequenceConnector(listOf(wedged, fresh))
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = ActiveTmuxClients(),
+            sshLeaseManager = SshLeaseManager(connector = connector, idleTtlMillis = 0L),
+            sessionListParser = com.pocketshell.app.sessions.HostTmuxSessionListParser(),
+            execReadTimeoutMs = 250L,
+        )
+
+        val result = gateway.listSessionsWithFolder(
+            host = HOST,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            watchedRoots = WATCHED_ROOTS,
+        )
+
+        assertTrue("the required exec must have wedged once", wedged.wedgedExecStarted.isCompleted)
+        assertEquals(
+            "issue #2422: a transient required-exec over-run must be retried on the " +
+                "SAME warm transport — evicting it and re-dialling is what doubled the " +
+                "reconcile past its 12s bound on a link that was alive the whole time",
+            1,
+            connector.dialCount,
+        )
+        assertEquals(
+            "the same warm transport must have carried BOTH the over-run and the retry; " +
+                "observed exec commands=${wedged.snapshotExecCommands()}",
+            2,
+            wedged.snapshotExecCommands().count(::isRequiredLandingEnumeration),
+        )
+        assertTrue(
+            "no work may be re-run on a fresh transport; the second session must be " +
+                "untouched, observed=${fresh.snapshotExecCommands()}",
+            fresh.execCommands.isEmpty(),
+        )
+        assertTrue(
+            "the reconcile must still land a complete Sessions result, got $result",
+            result is FolderListResult.Sessions,
+        )
+        // NOTE: `wedged.closed` is not asserted here. This lease manager runs with
+        // `idleTtlMillis = 0`, so the pool legitimately closes the transport as
+        // soon as the reconcile releases it — that is lease-pool lifecycle, not the
+        // retry. "A slow exec must not close a transport a consumer holds" is
+        // pinned by `wedgedExecMustNotYankATransportAnActiveConsumerHolds`.
     }
 
     /**
@@ -411,6 +500,14 @@ class FolderListGatewayExecTimeoutTest {
          */
         private val wedgeRequiredEnumeration: Boolean = false,
         /**
+         * Issue #2422: how many required landing enumerations wedge before the
+         * fake starts answering. The required batch is now retried ONCE on the
+         * SAME warm transport before the lease-level evict-and-re-dial heal, so
+         * `1` is a TRANSIENT over-run (must heal in place, no re-dial) and `2` is
+         * a PERSISTENTLY unresponsive required probe (must still reach the heal).
+         */
+        private val requiredEnumerationWedges: Int = 1,
+        /**
          * Test-only barrier that records the optional JSON command before the
          * required command proceeds. This makes the old first-call mutant
          * deterministically select the wrong concurrent command without a
@@ -420,7 +517,7 @@ class FolderListGatewayExecTimeoutTest {
     ) : SshSession {
         val execCommands: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf<String>())
         val wedgedExecStarted = CompletableDeferred<Unit>()
-        private val markerWedgeSelected = AtomicBoolean(false)
+        private val requiredEnumerationWedgeCount = java.util.concurrent.atomic.AtomicInteger(0)
         private val selectedWedgeCommand = AtomicReference<String?>(null)
         private val optionalEnumeratorStarted = CompletableDeferred<Unit>()
         val wedgedCommand: String?
@@ -451,7 +548,7 @@ class FolderListGatewayExecTimeoutTest {
             }
             val selectedByRequiredMarker = wedgeRequiredEnumeration &&
                 isRequiredEnumeration &&
-                markerWedgeSelected.compareAndSet(false, true)
+                requiredEnumerationWedgeCount.getAndIncrement() < requiredEnumerationWedges
             val shouldWedge = wedgeEveryExec ||
                 (index == 0 && wedgeFirstExec) ||
                 selectedByRequiredMarker

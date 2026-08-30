@@ -626,7 +626,8 @@ class SshFolderListGateway internal constructor(
                         val required = landingProbeOwner.executeRequired(
                             watchedRoots = watchedRoots,
                             includeEnumeration = false,
-                            exec = { command -> session.execBounded(pathAware(command)) },
+                            // #2422: the ONE exec whose over-run escapes.
+                            exec = { command -> session.execRequiredBounded(pathAware(command)) },
                         )
                         val ports = async { PortScanner.scan(session) }
                         val expansion = async {
@@ -655,7 +656,8 @@ class SshFolderListGateway internal constructor(
                         val required = landingProbeOwner.executeRequired(
                             watchedRoots = watchedRoots,
                             includeEnumeration = true,
-                            exec = { command -> session.execBounded(pathAware(command)) },
+                            // #2422: the ONE exec whose over-run escapes.
+                            exec = { command -> session.execRequiredBounded(pathAware(command)) },
                         )
                         val ports = async { PortScanner.scan(session) }
                         val expansion = async {
@@ -786,6 +788,17 @@ class SshFolderListGateway internal constructor(
         // while never killing a slow-but-alive one.
         throw FolderListExecTimeoutException(command, execReadTimeoutMs)
     }
+
+    /**
+     * Issue #2422 — the REQUIRED landing batch's exec: over-running its bound on a
+     * still-connected transport is answered by ONE retry in place, not by evicting
+     * the warm lease and re-running the whole reconcile on a fresh dial. Rationale,
+     * measurements and the load-bearing negative live in [execRequiredLandingBounded].
+     */
+    private suspend fun SshSession.execRequiredBounded(command: String): ExecResult =
+        execRequiredLandingBounded(command, execReadTimeoutMs) { retried ->
+            execBounded(retried)
+        }
 
     private suspend fun <T> withLeaseSession(
         host: HostEntity,
@@ -1008,7 +1021,8 @@ class SshFolderListGateway internal constructor(
         val required = landingProbeOwner.executeRequired(
             watchedRoots = watchedRoots,
             includeEnumeration = false,
-            exec = { command -> session.execBounded(pathAware(command)) },
+            // Same required batch, same #2422 policy as production.
+            exec = { command -> session.execRequiredBounded(pathAware(command)) },
         )
         ReconcileSideProbes(
             expansion = async {

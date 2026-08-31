@@ -51,6 +51,37 @@ class RegistryDrivenSessionTypePickerTest {
     }
 
     @Test
+    fun hostAvailabilityAndDisabledReasonReachTheCreateProjection() {
+        val rows = SshEnginesGateway.parseEnginesPayload(
+            """
+            {"engines": [
+              {"id":"available","family":"codex","label":"Available",
+               "enabled":true,"available":true,"available_for_create":true},
+              {"id":"missing","family":"codex","label":"Missing",
+               "enabled":true,"available":false,"available_for_create":false,
+               "unavailable_reason":"`codex` is not installed on this host (not on PATH)."},
+              {"id":"disabled","family":"codex","label":"Disabled",
+               "enabled":false,"available":true,"available_for_create":false,
+               "unavailable_reason":"disabled in the host registry"}
+            ]}
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf("available"),
+            availableEnginesForCreate(rows).map { it.id },
+        )
+        assertEquals(
+            "`codex` is not installed on this host (not on PATH).",
+            rows.first { it.id == "missing" }.unavailableReason,
+        )
+        assertEquals(
+            "disabled in the host registry",
+            rows.first { it.id == "disabled" }.unavailableReason,
+        )
+    }
+
+    @Test
     fun customRawIdLaunchesThroughWrapperAndKeepsClosedFamilyForTree() {
         val choice = SessionTypeChoice(
             type = SessionType.Agent,

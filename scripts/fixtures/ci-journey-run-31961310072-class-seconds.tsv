@@ -292,3 +292,19 @@ com.pocketshell.app.proof.Issue2338SecondLaunchTerminalAttachJourneyE2eTest	64
 # not yet a GitHub Actions run; refresh with a real CI attempt-1 elapsed time
 # once this class has run there, same convention as the Issue2338 row above.
 com.pocketshell.app.proof.FolderSessionRowNavigatorTest	39
+# #2276: com.pocketshell.app.projects.EngineAvailabilityPickerUiTest and
+# EngineAvailabilityPickerDockerTest measured individually (one class per
+# `scripts/connected-test.sh --suffix i2276tsv` invocation, matching the
+# Issue2338/#2380 local-dev-box convention above) on 2026-08-31, both rc=0:
+#   EngineAvailabilityPickerUiTest: BUILD SUCCESSFUL in 31s, 1/1 executed, 0
+#     failed.
+#   EngineAvailabilityPickerDockerTest: BUILD SUCCESSFUL in 36s, 1/1 executed,
+#     0 failed (JUnit suite time 8.741s against the real Docker agents
+#     fixture over SshLeaseManager; the wrapper wall time, not the in-suite
+#     JUnit time, is used per the JOURNEY_PASS convention).
+# Neither class has run on GitHub Actions CI yet (this repo's per-PR runs
+# skip the Emulator journey subset job entirely, per this repo's G7 policy —
+# see the PR #2441 CI-harness-guards follow-up); refresh both rows with a
+# real CI attempt-1 elapsed time once they have run there.
+com.pocketshell.app.projects.EngineAvailabilityPickerUiTest	31
+com.pocketshell.app.projects.EngineAvailabilityPickerDockerTest	36

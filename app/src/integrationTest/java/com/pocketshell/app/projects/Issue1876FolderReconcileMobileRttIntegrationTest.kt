@@ -7,8 +7,12 @@ import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.core.ssh.DefaultSshLeaseConnector
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.UnknownHostKeyException
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.runBlocking
@@ -234,6 +238,17 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
 
         private val projectRoot: Path by lazy { findProjectRoot() }
 
+        /**
+         * Issue #2444 — the SHAPED fixture's real SSH host-key fingerprint,
+         * captured once in [setUp] after the shaper starts. See
+         * [captureShapedHostKeyFingerprint] for why this capture step exists at
+         * all (an adjacent gap left by "Enforce SSH host key trust and rekey
+         * flows", 4b5be0d8, which reached the app's other Docker/E2E fixtures
+         * but not this class).
+         */
+        @Volatile
+        private var expectedHostKeySha256: String? = null
+
         @Volatile
         private var network: Network? = null
 
@@ -299,6 +314,7 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
                 .withExposedPorts(SHAPER_PORT)
             shaperContainer.start()
             shaper = shaperContainer
+            captureShapedHostKeyFingerprint(shaperContainer)
         }
 
         @AfterClass
@@ -310,6 +326,58 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
             shaper = null
             agents = null
             network = null
+            expectedHostKeySha256 = null
+        }
+
+        /**
+         * Issue #2444 — this class drives the PRODUCTION [SshFolderListGateway]
+         * over a real [HostEntity], and `HostEntity.hostKeyTrustBinding()`
+         * (`app/src/main/java/com/pocketshell/app/ssh/HostKeyTrust.kt`) maps a
+         * `null` `trustedHostKeySha256` to `KnownHostsPolicy.VerifiedFingerprint(null)`
+         * — which `VerifiedFingerprintHostKeyVerifier` throws
+         * [UnknownHostKeyException] on UNCONDITIONALLY (never a permissive
+         * default), so [shapedHost] cannot leave the fingerprint unset the way a
+         * raw out-of-band `SshConnection.connect(..., knownHosts =
+         * TEST_ACCEPT_ALL_HOST_KEYS)` seed/teardown call elsewhere does.
+         *
+         * This mirrors the app's OWN established capture-then-trust pattern
+         * (`AndroidSshTestFixtures.waitForSshFixtureReady`, and the real
+         * onboarding flow's first-connect confirmation step): probe with
+         * `VerifiedFingerprint(null)`, which deliberately throws carrying the
+         * server's REAL presented fingerprint on [UnknownHostKeyException],
+         * then trust exactly that value for the rest of the class. A JVM-local
+         * equivalent because this class runs under Robolectric/JUnit, not
+         * instrumentation, so `AndroidSshTestFixtures` (an `androidTest`-only
+         * file) is not on this source set's classpath.
+         */
+        private fun captureShapedHostKeyFingerprint(shaperContainer: GenericContainer<*>) {
+            val host = shaperContainer.host
+            val port = shaperContainer.getMappedPort(SHAPER_PORT)
+            val key = SshKey.Path(projectRoot.resolve("tests/docker/test_key").toFile())
+            var lastFailure: Throwable? = null
+            repeat(30) {
+                val probe = runBlocking {
+                    SshConnection.connect(
+                        host = host,
+                        port = port,
+                        user = "testuser",
+                        key = key,
+                        knownHosts = KnownHostsPolicy.VerifiedFingerprint(null),
+                        timeoutMs = 5_000,
+                    )
+                }
+                val failure = probe.exceptionOrNull()
+                if (failure is UnknownHostKeyException) {
+                    expectedHostKeySha256 = failure.presentedSha256
+                    return
+                }
+                lastFailure = failure
+                Thread.sleep(500)
+            }
+            error(
+                "could not capture the shaped fixture's real SSH host-key fingerprint " +
+                    "(issue #2444): $lastFailure",
+            )
         }
 
         private fun buildImage(tag: String, dockerfile: String, context: String) {
@@ -527,6 +595,13 @@ class Issue1876FolderReconcileMobileRttIntegrationTest {
         port = shaper!!.getMappedPort(SHAPER_PORT),
         username = "testuser",
         keyId = 1L,
+        // Issue #2444: without an explicit trusted fingerprint the production
+        // gateway's host-key verifier throws UnknownHostKeyException on every
+        // connect (see captureShapedHostKeyFingerprint's doc for why).
+        trustedHostKeySha256 = requireNotNull(expectedHostKeySha256) {
+            "captureShapedHostKeyFingerprint must run in @BeforeClass before any " +
+                "reconcile connects"
+        },
     )
 
     private fun watchedRoots(): List<ProjectRootEntity> =

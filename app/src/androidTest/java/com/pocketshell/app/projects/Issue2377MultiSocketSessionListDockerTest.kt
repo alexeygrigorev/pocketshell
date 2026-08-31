@@ -18,7 +18,6 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.SshHostTmuxSessionsGateway
-import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
@@ -656,7 +655,7 @@ class Issue2377MultiSocketSessionListDockerTest {
             port = DEFAULT_PORT,
             user = DEFAULT_USER,
             key = sshKey,
-            knownHosts = KnownHostsPolicy.AcceptAll,
+            knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = timeoutMs,
         ).getOrThrow()
 

@@ -173,6 +173,37 @@ class TmuxSessionRuntimeCacheTest {
     }
 
     @Test
+    fun trustMismatchRemovalCancelsArmedExpiryWithoutLaterCleanup() = runTest {
+        val cache = scheduledCache(ttlMs = 100L)
+        val oldTrustRuntime = cachedRuntime(
+            "work",
+            trustedHostKeySha256 = "SHA256:old",
+        )
+
+        cache.onProcessForegrounded()
+        cache.put(oldTrustRuntime)
+        val expiryJob = backgroundScope.coroutineContext[Job]!!.children.single()
+        assertTrue("the parked runtime must have an armed expiry owner", expiryJob.isActive)
+
+        assertEquals(
+            listOf(oldTrustRuntime),
+            cache.removeHostTrustMismatches(1L, "SHA256:new"),
+        )
+
+        assertTrue(
+            "trust-mismatch removal must cancel the expiry job whose owner left the cache",
+            expiryJob.isCancelled,
+        )
+        advanceTimeBy(100L)
+        runCurrent()
+        assertFalse(
+            "the returned runtime remains caller-owned until normal teardown",
+            (oldTrustRuntime.client as FakeTmuxClient).closed,
+        )
+        assertEquals(0, cache.diagnosticSnapshot().cleanupInFlightCount)
+    }
+
+    @Test
     fun removeExactStaleBindingCannotRemoveSameSessionReplacement() {
         val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
         val old = cachedRuntime("work")

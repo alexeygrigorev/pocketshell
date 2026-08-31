@@ -37,6 +37,47 @@ import java.io.InputStream
 @OptIn(ExperimentalCoroutinesApi::class)
 class TmuxPersistedTrustBeforeCacheTest : TmuxSessionViewModelTestBase() {
     @Test
+    fun persistedTrustResolutionFailureUsesControllerOwnedTerminalState() = runTest(scheduler) {
+        val hostDao = SingleHostDao(
+            host = host(fingerprint = VERIFIED_FINGERPRINT),
+            lookupFailure = IllegalStateException("trust store unavailable"),
+        )
+        val delegate = RecordingConnector { Result.success(TestSshSession()) }
+        val manager = testLeaseManager(
+            AuthoritativeSshLeaseConnector(delegate, hostDao, HostKeyTrustPromptRouter()),
+            this,
+            idleTtlMillis = 60_000L,
+        )
+        val vm = newVm(sshLeaseManager = manager, hostDao = hostDao)
+
+        vm.connect(
+            hostId = HOST_ID,
+            hostName = "alpha",
+            host = HOSTNAME,
+            port = PORT,
+            user = USER,
+            keyPath = KEY_PATH,
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "a pre-cache trust failure must project the controller's terminal state",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "connect failed: trust store unavailable",
+            (vm.connectionStatus.value as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+        )
+        assertTrue(
+            "trust resolution failure must not reach the physical connector",
+            delegate.targets.isEmpty(),
+        )
+        assertEquals("work", vm.connectingTarget?.sessionName)
+    }
+
+    @Test
     fun replacingTrustForTheActiveTargetForcesTeardownAndRedial() = runTest(scheduler) {
         val hostDao = SingleHostDao(host(fingerprint = VERIFIED_FINGERPRINT))
         val delegate = RecordingConnector { Result.success(TestSshSession()) }
@@ -389,13 +430,19 @@ class TmuxPersistedTrustBeforeCacheTest : TmuxSessionViewModelTestBase() {
         }
     }
 
-    private class SingleHostDao(private var host: HostEntity) : HostDao {
+    private class SingleHostDao(
+        private var host: HostEntity,
+        private val lookupFailure: Throwable? = null,
+    ) : HostDao {
         fun replace(replacement: HostEntity) {
             host = replacement
         }
 
         override fun getAll(): Flow<List<HostEntity>> = flowOf(listOf(host))
-        override suspend fun getById(id: Long): HostEntity? = host.takeIf { it.id == id }
+        override suspend fun getById(id: Long): HostEntity? {
+            lookupFailure?.let { throw it }
+            return host.takeIf { it.id == id }
+        }
         override fun getEnabled(): Flow<List<HostEntity>> = flowOf(listOf(host))
         override suspend fun insert(host: HostEntity): Long = host.id
         override suspend fun update(host: HostEntity) = Unit

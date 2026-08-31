@@ -326,6 +326,7 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
                 entry.key.trustedHostKeySha256 != trustedHostKeySha256
             ) {
                 iterator.remove()
+                entry.value.expiryJob?.cancel()
                 removed += entry.value.runtime
             }
         }

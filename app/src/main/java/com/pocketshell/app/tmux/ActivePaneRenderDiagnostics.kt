@@ -34,4 +34,3 @@ internal data class ActivePaneRenderDiagnostics(
     val renderLooksSuspect: Boolean,
     val coherent: Boolean,
 )
-

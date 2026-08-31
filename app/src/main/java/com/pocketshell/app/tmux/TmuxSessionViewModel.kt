@@ -1084,8 +1084,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * (and there is no point probing before any session is attached anyway).
      *
      * The probe loop runs in [viewModelScope] (Main): its gate-checks +
-     * confirmed-drop effects touch Main-thread VM state (the controller and the
-     * per-connection coroutines), so it MUST share the
+     * confirmed-drop effects touch Main-thread VM state (controller + per-connection coroutines), so it MUST share the
      * Main dispatcher in production + on the emulator. JVM unit tests
      * (`runTest` + the virtual-clock Main) would otherwise hang — the infinite
      * `delay(interval)` → `probe` → `delay` loop self-reschedules so
@@ -2687,8 +2686,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     if (resolutionGeneration != trustResolutionGeneration) return@launch
                     connectingTarget = target
                     refreshReconnectAvailability()
-                    setConnectionState(
-                        ConnectionState.Unreachable("connect failed: ${failure.message}"),
+                    // Trust resolution happens before connectResolved submits the normal open
+                    // intent. Establish this exact target in the controller first so its typed
+                    // give-up transition is authoritative even for a cold VM still in Idle.
+                    submitControllerOpen(target)
+                    surfaceControllerUnreachable(
+                        target = target,
+                        failureMessage = "connect failed: ${failure.message}",
                     )
                     return@launch
                 }

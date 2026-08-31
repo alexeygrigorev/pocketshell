@@ -141,13 +141,15 @@ CORE_TERMINAL_PROOFS=(
 # THE WASTE THIS REMOVES
 # ----------------------
 # Every one of these proofs used to run on EVERY matrix leg. The stated reason
-# was "a regression in any of them is caught on every leg" — but all six legs
+# was "a regression in any of them is caught on every leg" — but all legs
 # run the SAME COMMIT, and these are device-independent in-process Compose /
-# TerminalView tests with no Docker fixture and no cross-shard state. Six
-# identical verdicts on one commit is one verdict plus five copies: ~20-35
-# runner-minutes and 4-7 minutes of wall clock on five legs, buying zero
-# additional signal. (The measured suite is 206 of ~269 runner-min per push and
-# roughly half of that is work repeated six times — see _docs/2026-08-13-test-suite-audit.md §4.)
+# TerminalView tests with no Docker fixture and no cross-shard state. N
+# identical verdicts on one commit is one verdict plus N-1 copies: at the
+# six-shard matrix measured then, ~20-35 runner-minutes and 4-7 minutes of wall
+# clock on five legs, buying zero additional signal, and the waste grows with
+# the total (the matrix is 9 since #2377). (The measured suite is 206 of ~269
+# runner-min per push and roughly half of that is work repeated once per leg —
+# see _docs/2026-08-13-test-suite-audit.md §4.)
 #
 # THE MECHANISM AND WHY THIS SHAPE
 # --------------------------------

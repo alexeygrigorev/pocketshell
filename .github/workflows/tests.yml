@@ -1218,8 +1218,8 @@ jobs:
     # the ~39-min Unit job finished though they share nothing with it but the
     # checkout. That gate was NOT pointless: it stopped a red commit burning one
     # emulator runner per shard for ~40 min each against a 20-concurrent-job
-    # ceiling (process.md). Peak `main`-push concurrency goes ~3 -> ~10 (unit +
-    # both guard jobs + integration overlapping the 6 shards); a PR runs no
+    # ceiling (process.md). Peak `main`-push concurrency goes ~3 -> ~13 (unit +
+    # both guard jobs + integration overlapping the 9 shards); a PR runs no
     # shards, so its peak is the 6-job unit lane.
     #
     # Option (a) was to drop `needs:` and accept the emulator spend on red runs.
@@ -1249,8 +1249,8 @@ jobs:
     #
     # Issue #2110: the core-terminal proofs are sharded by the same #1862 hash
     # now. They used to run on EVERY leg "so a regression in any of them is caught
-    # on every leg", but all six legs run the SAME COMMIT and those proofs are
-    # device-independent in-process tests — five of every six verdicts were
+    # on every leg", but all legs run the SAME COMMIT and those proofs are
+    # device-independent in-process tests — all but one of every N verdicts were
     # copies. Each proof now runs on exactly one leg per push; the union over the
     # matrix is still the whole registry, asserted mechanically by
     # scripts/test-ci-journey-budget.sh rather than by inspection.
@@ -1264,13 +1264,29 @@ jobs:
     # Sharding changes only WHICH runner a class lands on: membership is by
     # class-name hash (#1862), every class still runs on every push.
     #
-    # SIX is chosen on #1850's OWN bar — every leg's drift headroom must exceed
-    # one twice-failing class (~420s) — not on "affordable on a clean run". Five
-    # leaves three legs under that bar and its tightest hosts the 330s
-    # ReconnectStormLivelockE2eTest; six gives every leg >= 488s. Six is the
-    # FIRST total clearing it, NOT the fastest — 8/9 beat it by ~1.4 min for +2/3
-    # runners. Tables/headroom/flakes: scripts/ci-journey-shard-count.sh, which
-    # owns this number. The three places that must agree on it — matrix.shard,
+    # Issue #2377/#2387: 6 -> 9 shards, re-derived a second time. #2060's own
+    # closing line — "growth headroom at 6 is ~488s on the tightest leg; that is
+    # the number to watch as the registry grows" — came due: the registry grew to
+    # 226 classes and shard 3's #1850 margin fell to 319257ms, under the ~420s
+    # twice-failing-class bar. Membership is by class-name hash (#1862), which
+    # forbids gaming the balance by rename/reorder, so the total is the only
+    # lever. Re-driving the PRODUCTION selector + the PRODUCTION
+    # scripts/ci-journey-retry-budget.sh over the current registry at each
+    # candidate total, against BOTH shipped-configuration guards (#1850's
+    # >420000ms time margin and #835's 125% class-count balance cap):
+    #
+    #   total  min #1850 margin  worst leg  worst count / cap  verdict
+    #     6      319257ms         1926s      43 / 48           FAIL time
+    #     7      142857ms         2010s      50 / 41           FAIL both
+    #     8      947157ms         1627s      38 / 36           FAIL count
+    #     9     1539357ms         1345s      28 / 32           PASS
+    #
+    # Eight is the same trap #2060 already named: green on the retry budget, red
+    # on the balance cap. Nine is the FIRST total clearing both — NOT the
+    # fastest (10 fails the count cap again, 11 also clears both but is not
+    # first) — and it is chosen on that rule alone. Tables/headroom/flakes:
+    # scripts/ci-journey-shard-count.sh, which owns this number. The three
+    # places that must agree on it — matrix.shard,
     # POCKETSHELL_JOURNEY_CI_SHARD_TOTAL and the aggregation job's
     # EXPECTED_SHARDS — were "keep in sync" comments; they are now cross-checked
     # from the matrix by that helper, and check-journey-shard-literals.sh is a
@@ -1278,16 +1294,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8]
     env:
       # Set by the matrix; the suite partitions JOURNEY_CLASSES by class-name
       # hash into (index % total). _TOTAL must equal len(matrix.shard).
       POCKETSHELL_JOURNEY_CI_SHARD_INDEX: ${{ matrix.shard }}
-      POCKETSHELL_JOURNEY_CI_SHARD_TOTAL: 6
+      POCKETSHELL_JOURNEY_CI_SHARD_TOTAL: 9
       POCKETSHELL_JOURNEY_SCOPED: ${{needs.sg.outputs.c}}
     # Issue #835 (REOPENED, RIGHT-SIZE): raised 45 -> 95 originally so the FULL
     # serial selection could finish; with sharding each leg runs ~1/N the classes
-    # (#2060: ~38 min modelled worst leg at 6) and finishes well under this cap.
+    # (#2377: ~37 min modelled worst leg at 9) and finishes well under this cap.
     # `timeout-minutes` is a CAP, not a fixed
     # duration: the job ENDS when the suite ends (early on a healthy run), so this
     # only bounds the absolute worst case. The suite owns its OWN 4200s budget and
@@ -2225,7 +2241,7 @@ jobs:
           # #2060 replaced the "keep in sync" honour system with a machine
           # cross-check: test-ci-journey-aggregate-verdict.sh (w9) derives the
           # matrix length via ci-journey-shard-count.sh and fails on disagreement.
-          EXPECTED_SHARDS: 6
+          EXPECTED_SHARDS: 9
           # Issue #1913: a failed matrix with no RED token means the classifier
           # lost a commit-bound failure. Genuine typed INFRA shards finish green,
           # so their matrix result is success and remains neutral RE-RUN.

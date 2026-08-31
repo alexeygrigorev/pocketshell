@@ -2,7 +2,7 @@
 # scripts/ci-skip-check.sh — issue #2353
 #
 # Decides whether the ~8h scheduled full-suite run (.github/workflows/tests.yml
-# `schedule:` trigger) should actually pay for the full 6-shard emulator-journey
+# `schedule:` trigger) should actually pay for the full 9-shard emulator-journey
 # + Docker integration + both unit variants + guards, or SKIP because `main`
 # HEAD has not moved since the last GREEN scheduled run. Avoids spend when
 # nothing landed between cadence ticks; never a correctness gate.

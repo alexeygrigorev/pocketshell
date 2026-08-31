@@ -600,8 +600,8 @@ source "$CI_JOURNEY_CORE_TERMINAL_HELPER"
 
 # Issue #2110: partition the core-terminal proofs across the CI matrix by the
 # same #1862 name hash the journey classes use, so each proof runs on exactly ONE
-# leg per push instead of all six. Six legs of the same commit re-running the
-# same device-independent in-process proof produced one verdict and five copies.
+# leg per push instead of all of them. N legs of the same commit re-running the
+# same device-independent in-process proof produced one verdict and N-1 copies.
 # A proof this leg does not own is marked OTHER_SHARD before its block below and
 # skipped there; see the helper for why OTHER_SHARD is neither a pass nor a skip.
 # Unsharded runs (no matrix vars) select every proof, unchanged.

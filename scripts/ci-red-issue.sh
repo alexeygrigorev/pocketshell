@@ -81,7 +81,7 @@ declare -a failed=()
 [[ "$UNIT_GATE" == "failure" ]] && failed+=("Unit tests")
 [[ "$PYTHON_R" == "failure" ]] && failed+=("Python utility tests (pocketshell)")
 [[ "$INTEGRATION_R" == "failure" ]] && failed+=("Integration tests (Docker)")
-[[ "$JOURNEY_R" == "failure" ]] && failed+=("Emulator journey aggregate verdict (one or more of the 6 shards; see the run for which)")
+[[ "$JOURNEY_R" == "failure" ]] && failed+=("Emulator journey aggregate verdict (one or more of the 9 shards; see the run for which)")
 failure_summary="$(printf '%s; ' "${failed[@]:-}")"
 failure_summary="${failure_summary%; }"
 [[ -n "$failure_summary" ]] || failure_summary="(no job reported failure=true; check the run directly)"

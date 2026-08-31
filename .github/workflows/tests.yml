@@ -1265,32 +1265,17 @@ jobs:
     # class-name hash (#1862), every class still runs on every push.
     #
     # Issue #2377/#2387: 6 -> 9 shards, re-derived a second time. #2060's own
-    # closing line — "growth headroom at 6 is ~488s on the tightest leg; that is
-    # the number to watch as the registry grows" — came due: the registry grew to
-    # 226 classes and shard 3's #1850 margin fell to 319257ms, under the ~420s
-    # twice-failing-class bar. Membership is by class-name hash (#1862), which
-    # forbids gaming the balance by rename/reorder, so the total is the only
-    # lever. Re-driving the PRODUCTION selector + the PRODUCTION
-    # scripts/ci-journey-retry-budget.sh over the current registry at each
-    # candidate total, against BOTH shipped-configuration guards (#1850's
-    # >420000ms time margin and #835's 125% class-count balance cap):
-    #
-    #   total  min #1850 margin  worst leg  worst count / cap  verdict
-    #     6      319257ms         1926s      43 / 48           FAIL time
-    #     7      142857ms         2010s      50 / 41           FAIL both
-    #     8      947157ms         1627s      38 / 36           FAIL count
-    #     9     1539357ms         1345s      28 / 32           PASS
-    #
-    # Eight is the same trap #2060 already named: green on the retry budget, red
-    # on the balance cap. Nine is the FIRST total clearing both — NOT the
-    # fastest (10 fails the count cap again, 11 also clears both but is not
-    # first) — and it is chosen on that rule alone. Tables/headroom/flakes:
-    # scripts/ci-journey-shard-count.sh, which owns this number. The three
-    # places that must agree on it — matrix.shard,
-    # POCKETSHELL_JOURNEY_CI_SHARD_TOTAL and the aggregation job's
-    # EXPECTED_SHARDS — were "keep in sync" comments; they are now cross-checked
-    # from the matrix by that helper, and check-journey-shard-literals.sh is a
-    # downward-only ratchet over three shapes a new hardcoded total takes.
+    # closing line — growth headroom at 6 is ~488s on the tightest leg, watch it
+    # as the registry grows — came due: registry grew to 226 classes and shard
+    # 3's #1850 margin fell to 319257ms, under the ~420s twice-failing-class bar.
+    # Hash membership (#1862) forbids gaming by rename/reorder, so the total is
+    # the only lever. NINE is the FIRST total clearing BOTH shipped guards
+    # (#1850's >420000ms margin, #835's 125% count cap); 8 repeats #2060's trap
+    # (margin green, count red); 10/11 clear too but aren't first. Full table:
+    # scripts/ci-journey-shard-count.sh section (2), which owns this number. The
+    # three agreement sites — matrix.shard, POCKETSHELL_JOURNEY_CI_SHARD_TOTAL,
+    # aggregation's EXPECTED_SHARDS — cross-check from it, and
+    # check-journey-shard-literals.sh ratchets against new hardcoded totals.
     strategy:
       fail-fast: false
       matrix:

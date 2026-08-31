@@ -17,8 +17,10 @@ import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
@@ -63,6 +65,18 @@ class FolderListViewModelClientCacheTest {
 
     private val viewModelStore = ViewModelStore()
     private var nextViewModelKey: Int = 0
+
+    // Issue: TreePersistenceOwner's production default constructs its own
+    // real-Dispatchers.IO-backed scope, so its `scope.launch(...).start()` runs
+    // on a genuine background thread OUTSIDE the test's virtual-time control —
+    // `runCurrent()` cannot guarantee the persist has landed before the test's
+    // `cache.read(...)` assertion runs (a real, CI-observed flake:
+    // reconcilePersistsFreshenedTreeToClientCache FAILED on a green local run).
+    // Every `newViewModel` in this suite must share ONE `TreePersistenceOwner`
+    // built on the SAME `StandardTestDispatcher`, mirroring the sibling
+    // `FolderListViewModelTreeDurabilityTest`/`TreeSyncCoordinatorTest` pattern,
+    // so `runCurrent()` deterministically drains the persist.
+    private var persistenceOwner: TreePersistenceOwner? = null
 
     // Issue #1155 (blocker 1): a PER-TEST isolated on-disk cache directory so the
     // client-cache tests never share `filesDir`/`tree-cache` state across methods.
@@ -693,6 +707,10 @@ class FolderListViewModelClientCacheTest {
         watchedRoots: List<ProjectRootEntity> = emptyList(),
     ): FolderListViewModel {
         val dispatcher = StandardTestDispatcher(testScheduler)
+        val sharedPersistenceOwner = persistenceOwner
+            ?: TreePersistenceOwner(CoroutineScope(SupervisorJob() + dispatcher)).also {
+                persistenceOwner = it
+            }
         Dispatchers.setMain(dispatcher)
         val session = NoopTreeSshSession()
         val manager = SshLeaseManager(
@@ -712,6 +730,7 @@ class FolderListViewModelClientCacheTest {
             // isolation (the daemon registry is covered by the durability suite).
             treeRemoteSource = null,
             treeClientCache = cache,
+            treePersistenceOwner = sharedPersistenceOwner,
             attachLifecycle = false,
         ).also {
             it.ioDispatcher = dispatcher

@@ -82,8 +82,13 @@ class Issue2433HostKeyTrustSourceGuardTest {
         )
 
         assertTrue(requestOwner.contains("sshLeaseManager.resolveTarget(target.toSshLeaseTarget())"))
+        assertTrue(requestOwner.contains("runtimeCache.removeHostTrustMismatches("))
         assertTrue(requestOwner.contains("connectResolved(resolvedTarget"))
-        assertFalse(requestOwner.contains("runtimeCache."))
+        assertTrue(
+            requestOwner.indexOf("runtimeCache.removeHostTrustMismatches(") <
+                requestOwner.indexOf("connectResolved(resolvedTarget"),
+        )
+        assertEquals(1, Regex("runtimeCache\\.").findAll(requestOwner).count())
         assertTrue(resolvedOwner.contains("runtimeCache.contains(target.toRuntimeKey())"))
         assertTrue(resolvedOwner.contains("takeCachedRuntimeForActivation("))
         assertTrue(resolvedOwner.contains("isSameHost(previousActiveTarget, target)"))
@@ -96,6 +101,7 @@ class Issue2433HostKeyTrustSourceGuardTest {
     fun tmuxTargetIdentityAndEverySharedDedupePredicateIncludeTheResolvedFingerprint() {
         val models = source("app/src/main/java/com/pocketshell/app/tmux/TmuxSessionRuntimeModels.kt")
         val vm = source("app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt")
+        val cache = source("app/src/main/java/com/pocketshell/app/tmux/TmuxSessionRuntimeCache.kt")
         val equalityOwner = models.substring(
             models.indexOf("internal fun connectionTargetIdentityEquals("),
             models.indexOf("internal fun connectionTargetIdentityHashCode("),
@@ -122,6 +128,27 @@ class Issue2433HostKeyTrustSourceGuardTest {
             2,
             Regex("return sameSessionIdentity\\(active, originTarget\\)")
                 .findAll(attachmentOwner)
+                .count(),
+        )
+        val nameOnlyPromotion = cache.substring(
+            cache.indexOf("private fun removeNameOnlyPrewarmLocked("),
+            cache.indexOf("internal fun contains(key:"),
+        )
+        val nameOnlyContains = cache.substring(
+            cache.indexOf("internal fun containsSession("),
+            cache.indexOf("internal fun containsExact("),
+        )
+        assertTrue(
+            nameOnlyPromotion.contains(
+                "candidate.key.trustedHostKeySha256 == key.trustedHostKeySha256",
+            ),
+        )
+        assertTrue(nameOnlyContains.contains("it.trustedHostKeySha256 == trustedHostKeySha256"))
+        assertTrue(cache.contains("internal fun removeHostTrustMismatches("))
+        assertEquals(
+            2,
+            Regex("containsSession\\([\\s\\S]*?trustedHostKeySha256")
+                .findAll(vm.substring(vm.indexOf("public fun prewarmLikelySwitchTargets(")))
                 .count(),
         )
     }

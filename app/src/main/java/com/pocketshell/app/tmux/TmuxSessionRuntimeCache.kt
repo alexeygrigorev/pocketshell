@@ -126,6 +126,7 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
 
     private fun TmuxRuntimeKey.isSameRuntimeSessionAs(other: TmuxRuntimeKey): Boolean {
         if (hostId != other.hostId) return false
+        if (trustedHostKeySha256 != other.trustedHostKeySha256) return false
         val leftDurable = durableSessionKey?.trim()?.takeIf { it.isNotEmpty() }
         val rightDurable = other.durableSessionKey?.trim()?.takeIf { it.isNotEmpty() }
         if (leftDurable != null && rightDurable != null) {
@@ -169,14 +170,17 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
      * the selected row subsequently supplies that identity, promote the single
      * name-only prewarm instead of opening a second control client. Never fall
      * back to another non-null durable identity: a killed/recreated same-name
-     * session must remain a cache miss.
+     * session must remain a cache miss. The verified fingerprint must also
+     * match: a name-only runtime authenticated before rekey is not promotable
+     * into a target resolved under the replacement key.
      */
     private fun removeNameOnlyPrewarmLocked(key: TmuxRuntimeKey): CachedTmuxRuntime? {
         if (key.durableSessionKey == null) return null
         val entry = runtimes.entries.firstOrNull { candidate ->
             candidate.key.hostId == key.hostId &&
                 candidate.key.sessionName == key.sessionName &&
-                candidate.key.durableSessionKey == null
+                candidate.key.durableSessionKey == null &&
+                candidate.key.trustedHostKeySha256 == key.trustedHostKeySha256
         } ?: return null
         runtimes.remove(entry.key)?.expiryJob?.cancel()
         return entry.value.runtime
@@ -188,11 +192,20 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
 
     /**
      * Session-picker prewarm receives only a host-scoped tmux session name, not
-     * the durable tmux identity. Match that deliberately narrower namespace so
-     * a parked runtime with a durable key is not prewarmed a second time.
+     * the durable tmux identity. Match that deliberately narrower namespace,
+     * but never cross the verified host-key boundary, so a parked runtime with
+     * a durable key is not prewarmed twice and stale trust is never reused.
      */
-    internal fun containsSession(hostId: Long, sessionName: String): Boolean = synchronized(this) {
-        runtimes.keys.any { it.hostId == hostId && it.sessionName == sessionName }
+    internal fun containsSession(
+        hostId: Long,
+        sessionName: String,
+        trustedHostKeySha256: String?,
+    ): Boolean = synchronized(this) {
+        runtimes.keys.any {
+            it.hostId == hostId &&
+                it.sessionName == sessionName &&
+                it.trustedHostKeySha256 == trustedHostKeySha256
+        }
     }
 
     internal fun containsExact(binding: RuntimeHealthBinding): Boolean = synchronized(this) {
@@ -289,6 +302,30 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
             if (entry.key.hostId == hostId) {
                 iterator.remove()
                 entry.value.expiryJob?.cancel()
+                removed += entry.value.runtime
+            }
+        }
+        removed
+    }
+
+    /**
+     * Atomically retire cached owners authenticated under a different host key.
+     * Called after authoritative Room trust resolution and before any cache
+     * observation, so stale runtimes cannot influence navigation or promotion.
+     */
+    internal fun removeHostTrustMismatches(
+        hostId: Long,
+        trustedHostKeySha256: String?,
+    ): List<CachedTmuxRuntime> = synchronized(this) {
+        val removed = mutableListOf<CachedTmuxRuntime>()
+        val iterator = runtimes.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (
+                entry.key.hostId == hostId &&
+                entry.key.trustedHostKeySha256 != trustedHostKeySha256
+            ) {
+                iterator.remove()
                 removed += entry.value.runtime
             }
         }

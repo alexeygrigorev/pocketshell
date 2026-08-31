@@ -2698,6 +2698,12 @@ public class TmuxSessionViewModel @Inject constructor(
             val resolvedTarget = target.copy(
                 trustedHostKeySha256 = verified.expectedSha256,
             )
+            closeCachedRuntimesAsync(
+                runtimeCache.removeHostTrustMismatches(
+                    resolvedTarget.hostId,
+                    resolvedTarget.trustedHostKeySha256,
+                ),
+            )
             connectResolved(resolvedTarget, trigger, skipExistencePreflight)
         }
     }
@@ -4813,7 +4819,9 @@ public class TmuxSessionViewModel @Inject constructor(
             .filter { it.isNotEmpty() && it != baseTarget.sessionName }
             .distinct()
             .map(baseTarget::toNameOnlyPrewarmTarget)
-            .filterNot { runtimeCache.containsSession(it.hostId, it.sessionName) }
+            .filterNot {
+                runtimeCache.containsSession(it.hostId, it.sessionName, it.trustedHostKeySha256)
+            }
             .take(TMUX_SESSION_PREWARM_MAX_TARGETS)
             .toList()
         if (targets.isEmpty()) return
@@ -4823,7 +4831,13 @@ public class TmuxSessionViewModel @Inject constructor(
             for (target in targets) {
                 if (!isActive) return@launch
                 if (activeTarget?.let { isSameHost(it, target) } != true) return@launch
-                if (runtimeCache.containsSession(target.hostId, target.sessionName)) continue
+                if (
+                    runtimeCache.containsSession(
+                        target.hostId,
+                        target.sessionName,
+                        target.trustedHostKeySha256,
+                    )
+                ) continue
                 prewarmRuntime(target, foregroundSession)
             }
         }

@@ -270,6 +270,8 @@ class TmuxPersistedTrustBeforeCacheTest : TmuxSessionViewModelTestBase() {
         assertEquals(HOST_ID, router.pendingHostId.value)
         assertTrue("stale runtime must remain unactivated", registry.clients.value[HOST_ID] == null)
         assertTrue("stale cached client must never be attached", !staleClient.connectCalled)
+        assertTrue("stale trust runtime must be atomically removed", cache.snapshotKeys().isEmpty())
+        assertTrue("removed stale runtime owner must be closed", staleClient.closed)
         val observedPolicy = delegate.targets.single().knownHosts as KnownHostsPolicy.VerifiedFingerprint
         assertEquals(persistedFingerprint, observedPolicy.expectedSha256)
     }

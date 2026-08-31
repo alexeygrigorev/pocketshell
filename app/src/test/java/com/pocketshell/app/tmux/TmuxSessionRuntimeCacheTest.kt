@@ -145,6 +145,34 @@ class TmuxSessionRuntimeCacheTest {
     }
 
     @Test
+    fun durableSelectionCannotPromoteNameOnlyPrewarmFromOldHostTrust() {
+        val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
+        val oldTrustPrewarm = cachedRuntime(
+            "work",
+            trustedHostKeySha256 = "SHA256:old",
+        )
+        val selectedAfterRekey = oldTrustPrewarm.key.copy(
+            durableSessionKey = "tmux:1:\$7:700",
+            trustedHostKeySha256 = "SHA256:new",
+        )
+
+        cache.put(oldTrustPrewarm)
+
+        assertFalse(cache.containsSession(1L, "work", "SHA256:new"))
+        assertTrue(cache.containsSession(1L, "work", "SHA256:old"))
+        assertEquals(
+            CacheActivation(runtime = null, evicted = emptyList()),
+            cache.activate(selectedAfterRekey),
+        )
+        assertEquals(listOf(oldTrustPrewarm.key), cache.snapshotKeys())
+        assertEquals(
+            listOf(oldTrustPrewarm),
+            cache.removeHostTrustMismatches(1L, "SHA256:new"),
+        )
+        assertEquals(emptyList<TmuxRuntimeKey>(), cache.snapshotKeys())
+    }
+
+    @Test
     fun removeExactStaleBindingCannotRemoveSameSessionReplacement() {
         val cache = TmuxSessionRuntimeCache(maxEntries = 4, nowMs = { 0L })
         val old = cachedRuntime("work")
@@ -449,6 +477,7 @@ class TmuxSessionRuntimeCacheTest {
         durableSessionKey: String? = null,
         paneProducerJobs: Map<String, kotlinx.coroutines.Job> = emptyMap(),
         lease: SshLease? = null,
+        trustedHostKeySha256: String? = null,
     ): CachedTmuxRuntime =
         CachedTmuxRuntime(
             key = TmuxRuntimeKey(
@@ -459,6 +488,7 @@ class TmuxSessionRuntimeCacheTest {
                 keyPath = "/keys/a",
                 sessionName = sessionName,
                 durableSessionKey = durableSessionKey,
+                trustedHostKeySha256 = trustedHostKeySha256,
             ),
             hostName = "alpha",
             startDirectory = null,

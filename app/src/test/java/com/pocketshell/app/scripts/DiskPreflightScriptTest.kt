@@ -54,13 +54,29 @@ class DiskPreflightScriptTest {
      * run: it creates an isolated source copy, two variant families, a private
      * Gradle home, and emulator/APK evidence. Issue #2055 reproduced ENOSPC
      * after the generic one-run floor had already let the release start.
+     *
+     * Issue #2435 added the other side of that retention contract: what the
+     * bounded cleanup must LEAVE BEHIND. The hosted workflow's #2082
+     * execution-ledger step runs after the generated worktree is removed, so a
+     * green release run that copies no JUnit XML out — or a presence check
+     * whose exit status is laundered by `pipefail` + `SIGPIPE` — fails the job
+     * on a genuine `Automated status: PASS` and makes the #2356 `validated-rc`
+     * marker unreachable. Those cases execute the real workflow step body.
+     *
+     * Round 2 of #2435 added four more that drive the REAL
+     * `check-test-execution-ledger.sh` rather than a stub: the earlier four
+     * stubbed it, which is exactly why "seven registered classes can never be
+     * credited by any CI lane" stayed invisible until the first two fixes made
+     * `--verify` execute for the first time. They walk the real tree's class
+     * registration, so they are slower than the pure-fixture cases — hence the
+     * larger timeout.
      */
     @Test
     fun releaseValidationRefusesLowDiskAndBoundsGeneratedOutputRetention() {
         runShellHarness(
             relativePath = "tests/scripts/release-validation-storage-test.sh",
-            expectedPassLine = "PASS: release-validation storage harness (16 cases)",
-            timeoutSeconds = 120,
+            expectedPassLine = "PASS: release-validation storage harness (24 cases)",
+            timeoutSeconds = 300,
         )
     }
 

@@ -429,6 +429,41 @@ real_agent_release_gate_instrumentation_log_has_success() {
     grep -q 'OK (' "$log_file"
 }
 
+# Issue #2435: the two release-only classes below run through a direct
+# `adb shell am instrument`, not Gradle's connectedAndroidTest task, so the
+# host never receives a JUnit XML for them. That is only an ACCOUNTING gap —
+# both genuinely execute on every release run — but the #2082 ledger step reads
+# JUnit XML and nothing else, so `--verify` reported them NEVER EXECUTED, the
+# job concluded `failure` on a green validation, and `record-validated-rc`
+# (gated on `result == 'success'`) was unreachable.
+#
+# Re-encode the runner's own INSTRUMENTATION_STATUS stream as JUnit XML under
+# `build/outputs/androidTest-results/`, which is exactly where Gradle would have
+# put it and which the release job's collector already scans. `--require-class`
+# means a run that selected nothing, or self-skipped, still produces no
+# evidence: the converter refuses, the ledger stays uncredited, and `--verify`
+# reddens. Nothing here is derived from an exit code.
+DETACHED_INSTRUMENTATION_RESULTS_DIR="${DETACHED_INSTRUMENTATION_RESULTS_DIR:-$ROOT_DIR/build/outputs/androidTest-results/detached-instrumentation}"
+
+record_detached_instrumentation_junit_xml() {
+  local test_class="$1" instrumentation_log="$2"
+  local out="$DETACHED_INSTRUMENTATION_RESULTS_DIR/TEST-$test_class.xml"
+  if bash "$ROOT_DIR/scripts/instrumentation-log-to-junit-xml.sh" \
+    --log "$instrumentation_log" \
+    --out "$out" \
+    --suite "$test_class" \
+    --require-class "$test_class"; then
+    return 0
+  fi
+  # Not fatal on its own: the release job's `--verify` is the backstop and will
+  # redden with "$test_class has NEVER executed". Turning a conversion hiccup
+  # into a second hard release blocker would add a failure mode without adding
+  # detection.
+  printf 'WARN: could not record ledger JUnit XML for %s from %s\n' \
+    "$test_class" "$instrumentation_log" >&2
+  return 0
+}
+
 real_agent_release_gate_instrumentation_log_has_failure_markers() {
   local log_file="$1"
   grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^INSTRUMENTATION_RESULT: shortMsg=Process crashed[.]|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])' "$log_file"
@@ -586,6 +621,8 @@ run_real_agent_release_gate_instrumentation() {
     print_failure_log_tail "$instrumentation_log"
     return 1
   fi
+  record_detached_instrumentation_junit_xml \
+    "$REAL_AGENT_RELEASE_GATE_TEST_CLASS" "$instrumentation_log"
   return 0
 }
 
@@ -801,6 +838,8 @@ run_long_running_session_instrumentation() {
     print_failure_log_tail "$instrumentation_log"
     return 1
   fi
+  record_detached_instrumentation_junit_xml \
+    "$LONG_RUNNING_TEST_CLASS" "$instrumentation_log"
   return 0
 }
 

@@ -242,19 +242,73 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
+          # Issue #2435: this step must NOT decide "did the run produce XML?"
+          # through a pipeline. The previous shape was
+          #   if ! find "$stage" -type f -name '*.xml' | grep -q .; then
+          # and `grep -q` exits on its FIRST match, so `find` — which by then
+          # has more than a pipe buffer of paths still to write — dies of
+          # SIGPIPE/EPIPE, and `set -o pipefail` propagates find's non-zero
+          # status. The check therefore reported "empty" EXACTLY when results
+          # were present: run 33339283443 concluded `failure` on a validation
+          # whose own summary.md said `Automated status: PASS`, which made the
+          # #2356 `Record validated-rc marker` job (gated on
+          # `result == 'success'`) unreachable. Count the staged files in the
+          # shell instead — no pipe, so no exit status to launder.
+          #
+          # The copy also preserves the source tree rather than flattening into
+          # one directory: `TEST-<class>.xml` is emitted per variant/module, and
+          # flattening silently overwrote same-named results before they could
+          # be counted. check-test-execution-ledger.sh --record walks the tree.
           stage="${RUNNER_TEMP}/release-ledger-results"
+          scan="${RUNNER_TEMP}/release-ledger-xml.list"
+          rm -rf -- "$stage"
           mkdir -p "$stage" build
+          # Scan to a file, not through a pipe, so `find`'s own exit status is
+          # observable rather than swallowed or laundered.
+          scan_status=0
           find . \( -path '*/build/test-results/*' -o -path '*/build/outputs/androidTest-results/*' \) \
-            -type f -name '*.xml' -print0 |
-            xargs -0 -r -I{} cp {} "$stage/"
-          if ! find "$stage" -type f -name '*.xml' | grep -q .; then
+            -type f -name '*.xml' -print0 > "$scan" || scan_status=$?
+          if [[ "$scan_status" -ne 0 ]]; then
+            # Not fatal by itself: an under-collected scan shows up downstream as
+            # classes the ledger cannot credit, and --verify is exactly the guard
+            # that fails on that. Say so loudly instead of inventing a second,
+            # hair-trigger release blocker.
+            echo "::warning title=Test-execution ledger (issue #2082)::the JUnit XML scan exited $scan_status; the staged result set may be incomplete and --verify below is the backstop"
+          fi
+          staged=0
+          while IFS= read -r -d '' xml; do
+            dest="$stage/${xml#./}"
+            mkdir -p "${dest%/*}"
+            cp -p -- "$xml" "$dest"
+            staged=$((staged + 1))
+          done < "$scan"
+          echo "staged $staged JUnit XML file(s) under $stage (scan exit $scan_status)"
+          if [[ "$staged" -eq 0 ]]; then
             echo "::error title=Test-execution ledger (issue #2082)::no JUnit XML from the release run — refusing to record or verify"
             exit 1
           fi
+          # --record is the CONTENT gate: it refuses a results root whose XML
+          # contains no testcases, so a non-empty-but-vacuous stage cannot pass
+          # for evidence just because files exist.
           scripts/check-test-execution-ledger.sh --record "$stage" --tier release
-          # unit+androidTest: integrationTest has its own #2094 execution guard
-          # and is not produced by this run or the rolling unit/nightly cache.
-          scripts/check-test-execution-ledger.sh --verify --max-age-days 7 --source-set unit,androidTest
+          # unit-debug,unit-release,androidTest: integrationTest has its own
+          # #2094 execution guard and is not produced by this run or the rolling
+          # unit/nightly cache.
+          #
+          # `unit-debug,unit-release` is the SAME class set as the plain `unit`
+          # token — is_unit_debug_source_set (test|testDebug) unioned with
+          # is_unit_release_source_set (test|testRelease) is exactly
+          # is_unit_source_set — MINUS `*RealLlmTest`, via the ledger's existing
+          # ordinary_unit_class_selected predicate. That subtraction is not a
+          # weakening: app/build.gradle.kts excludes `**/*RealLlmTest.class` from
+          # BOTH testDebugUnitTest and testReleaseUnitTest, and the only task
+          # that can emit them (:app:realLlmTest) needs real provider
+          # credentials from a repo-root .env that no runner has. Demanding a
+          # 7-day cadence for evidence CI structurally cannot produce made the
+          # release job unconditionally red on
+          # AssistantAgentLoopRealLlmTest (#2435). The class stays registered,
+          # and both unit lanes already apply this identical carve-out.
+          scripts/check-test-execution-ledger.sh --verify --max-age-days 7 --source-set unit-debug,unit-release,androidTest
 
       - name: Publish validation summary
         if: always()

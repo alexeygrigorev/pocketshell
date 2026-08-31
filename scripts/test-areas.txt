@@ -246,6 +246,20 @@ full   gradle.properties             daemon/heap/parallelism config changes ever
 full   cgroups.toml                  local run confinement used by the gates
 full   debug.keystore                signing input for every built APK
 full   shared/test-support/*         the ONE audited settle pump; every runTest consumer depends on it
+# `app/src/proofTest/*` (issue #966 tmux runtime ownership audit, commit
+# f1138533) is not a Gradle source-set NAME — `app/build.gradle.kts` adds it
+# as an EXTRA `java.srcDir` on BOTH the `test` AND `androidTest` source sets,
+# so its content is a shared proof/mutation-matrix fixture library (data
+# classes, enums, no `@Test` methods of its own) compiled into and reused by
+# both. `pocketshell_test_areas_is_test_path()` in scripts/lib/test-areas.sh
+# does not recognise `proofTest` as a test-source-set path segment, so an
+# unmapped `test`/`class` row here would never even be reached — the same
+# shape as shared/test-support/* above, and handled the same way: FULL,
+# rather than teaching the classifier a new source-set name whose files would
+# then be swept into scripts/check-test-execution-ledger.sh's registered-class
+# set as a `*Test.kt`-named file with zero `@Test` methods, which would fail
+# that guard's "never executed (#1851 class)" check on every push instead.
+full   app/src/proofTest/*           shared proof/mutation-matrix fixture library injected into both test and androidTest source sets
 full   app/src/main/java/com/pocketshell/app/di/*             the Hilt/DI graph wires every area together
 full   app/src/main/java/com/pocketshell/app/nav/*            the navigation graph reaches every screen
 full   app/src/main/java/com/pocketshell/app/startup/*        process startup ordering affects every surface

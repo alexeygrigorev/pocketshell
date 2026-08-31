@@ -1498,26 +1498,13 @@ jobs:
 
       - name: Start Docker fixture (network-fault-proxy, issue #1733)
         run: |
-          scripts/ci-journey-fixture-retry.sh network-fault-proxy -- docker compose -f tests/docker/docker-compose.yml up -d --no-deps network-fault-proxy
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent --show-error http://127.0.0.1:8474/version; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy
-          exit 1
+          chmod +x scripts/ci-start-network-fault-proxy-fixture.sh
+          scripts/ci-start-network-fault-proxy-fixture.sh
 
       - name: Verify agent SSH target tool surface
         run: |
-          chmod 600 tests/docker/test_key
-          ssh -i tests/docker/test_key -p 2222 \
-            -o BatchMode=yes \
-            -o ConnectTimeout=2 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            testuser@127.0.0.1 \
-            'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
+          chmod +x scripts/ci-verify-agent-ssh-tool-surface.sh
+          scripts/ci-verify-agent-ssh-tool-surface.sh
 
       # Issue #849 (epic #848): bring up the OLD-CLI fixture on host port 2238 so
       # the v0.4.10 connect-break regression tests
@@ -1544,14 +1531,8 @@ jobs:
       # fixture that silently accepted the new subcommand.
       - name: Verify agents-old-cli is a CLI mismatch (issue #849)
         run: |
-          chmod 600 tests/docker/test_key
-          ssh -i tests/docker/test_key -p 2238 \
-            -o BatchMode=yes \
-            -o ConnectTimeout=3 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            testuser@127.0.0.1 \
-            'pocketshell tree get </dev/null; rc=$?; if [ "$rc" -eq 0 ]; then echo "old-cli fixture unexpectedly accepted tree get (rc=0)" >&2; exit 1; fi; tmux -V >/dev/null && echo "old-cli mismatch confirmed: tree get rc=$rc, host still live"'
+          chmod +x scripts/ci-verify-agents-old-cli-mismatch.sh
+          scripts/ci-verify-agents-old-cli-mismatch.sh
 
       # Issue #839 (epic #821 workstream C): bring up the DAEMON fixture on host
       # port 2239 so the durable-tree journey (FolderListDurableTreeDaemonDockerTest)
@@ -1578,19 +1559,8 @@ jobs:
       # vacuously / self-skip. Mirrors the agents-old-cli mismatch sanity check.
       - name: Verify agents-daemon real `pocketshell tree` persists (issue #839)
         run: |
-          chmod 600 tests/docker/test_key
-          ssh -i tests/docker/test_key -p 2239 \
-            -o BatchMode=yes \
-            -o ConnectTimeout=3 \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            testuser@127.0.0.1 \
-            'set -e;
-             printf "%s" "{\"host\":\"ci\",\"expected_version\":0,\"nodes\":[{\"session\":\"s\",\"order\":0,\"folder_path\":\"/p\",\"collapsed\":true}]}" | pocketshell tree upsert >/dev/null;
-             got="$(printf "%s" "{\"host\":\"ci\"}" | pocketshell tree get)";
-             echo "$got" | grep -q "\"session\": \"s\"" || { echo "agents-daemon tree did NOT persist: $got" >&2; exit 1; };
-             echo "$got" | grep -q "\"collapsed\": true" || { echo "agents-daemon tree dropped the collapse: $got" >&2; exit 1; };
-             echo "agents-daemon real-tree persist confirmed: $got"'
+          chmod +x scripts/ci-verify-agents-daemon-tree-persists.sh
+          scripts/ci-verify-agents-daemon-tree-persists.sh
 
       # Issue #760: the journey job intermittently failed with
       # "WARNING | Failed to load snapshot 'default_boot'" followed by
@@ -2098,31 +2068,14 @@ jobs:
       - name: Collect Docker logs
         if: always()
         run: |
-          mkdir -p artifacts/docker
-          docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt
-          docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log 2>/dev/null || true
-          docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
-          docker compose -f tests/docker/docker-compose.yml logs --no-color network-fault-proxy > artifacts/docker/network-fault-proxy.log 2>/dev/null || true
-          docker inspect pocketshell-test-network-fault-proxy > artifacts/docker/network-fault-proxy-inspect.json 2>/dev/null || true
-          # Issue #849: also capture the old-CLI (2238) fixture diagnostics.
-          docker compose -f tests/docker/docker-compose.yml logs --no-color agents-old-cli > artifacts/docker/agents-old-cli.log 2>/dev/null || true
-          docker inspect pocketshell-test-agents-old-cli > artifacts/docker/agents-old-cli-inspect.json 2>/dev/null || true
-          # Issue #839: also capture the daemon (2239) fixture diagnostics.
-          docker compose -f tests/docker/docker-compose.yml logs --no-color agents-daemon > artifacts/docker/agents-daemon.log 2>/dev/null || true
-          docker inspect pocketshell-test-agents-daemon > artifacts/docker/agents-daemon-inspect.json 2>/dev/null || true
+          chmod +x scripts/ci-collect-docker-logs.sh
+          scripts/ci-collect-docker-logs.sh
 
       - name: Publish journey suite summary
         if: always()
         run: |
-          if [[ -f artifacts/ci-journey/summary.md ]]; then
-            cat artifacts/ci-journey/summary.md >> "$GITHUB_STEP_SUMMARY"
-          else
-            {
-              echo "# Per-push CI journey suite — summary"
-              echo
-              echo "No suite summary was written (the suite script may have aborted before writing it)."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
+          chmod +x scripts/ci-publish-journey-summary.sh
+          scripts/ci-publish-journey-summary.sh
 
       - name: Upload Android test reports
         if: always()

@@ -1586,7 +1586,7 @@ jobs:
             -o UserKnownHostsFile=/dev/null \
             testuser@127.0.0.1 \
             'set -e;
-             printf "%s" "{\"host\":\"ci\",\"nodes\":[{\"session\":\"s\",\"order\":0,\"folder_path\":\"/p\",\"collapsed\":true}]}" | pocketshell tree upsert >/dev/null;
+             printf "%s" "{\"host\":\"ci\",\"expected_version\":0,\"nodes\":[{\"session\":\"s\",\"order\":0,\"folder_path\":\"/p\",\"collapsed\":true}]}" | pocketshell tree upsert >/dev/null;
              got="$(printf "%s" "{\"host\":\"ci\"}" | pocketshell tree get)";
              echo "$got" | grep -q "\"session\": \"s\"" || { echo "agents-daemon tree did NOT persist: $got" >&2; exit 1; };
              echo "$got" | grep -q "\"collapsed\": true" || { echo "agents-daemon tree dropped the collapse: $got" >&2; exit 1; };

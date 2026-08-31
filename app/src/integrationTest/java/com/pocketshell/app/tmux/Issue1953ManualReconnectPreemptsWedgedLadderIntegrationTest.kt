@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.diagnostics.RecordingDiagnosticEventSink
 import com.pocketshell.app.diagnostics.installRecordingDiagnosticSink
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.testaccess.AuthoritativeSshLeaseConnector
 import com.pocketshell.core.connection.ConnectionController
 import com.pocketshell.core.connection.ConnectionState
 import com.pocketshell.core.connection.SessionSurfaceState
@@ -16,6 +17,9 @@ import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.UnknownHostKeyException
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientDiagnosticSink
 import com.pocketshell.core.tmux.TmuxClientDiagnostics
@@ -35,6 +39,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.setMain
@@ -146,9 +152,10 @@ class Issue1953ManualReconnectPreemptsWedgedLadderIntegrationTest {
         startDockerOrFail()
         val fixture = requireNotNull(container)
         val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val hostDao = trustedHostDao(fixture, hostId = HOST_ID, hostName = "issue1953-docker")
         val connector = SustainedOutageLeaseConnector(DefaultSshLeaseConnector())
         val leaseManager = SshLeaseManager(
-            connector = connector,
+            connector = AuthoritativeSshLeaseConnector(connector, hostDao, null),
             scope = ioScope,
             idleTtlMillis = 60_000L,
         )
@@ -161,6 +168,7 @@ class Issue1953ManualReconnectPreemptsWedgedLadderIntegrationTest {
                 tmuxClientFactory = TmuxClientFactory(ioScope),
                 activeTmuxClients = ActiveTmuxClients(),
                 sshLeaseManager = leaseManager,
+                hostDao = hostDao,
             )
             // HARNESS ARTIFACT, not a product behaviour (issue #1953 round 2). The #886
             // blank-pane watchdog surfaces `Unreachable` ("Session attach stalled") when the
@@ -595,6 +603,87 @@ class Issue1953ManualReconnectPreemptsWedgedLadderIntegrationTest {
             knownHosts = com.pocketshell.testssh.TEST_ACCEPT_ALL_HOST_KEYS,
             timeoutMs = 15_000,
         ).getOrThrow()
+    }
+
+    /**
+     * Issue #2449 root cause: `4b5be0d8` ("Enforce SSH host key trust and rekey flows")
+     * changed `TmuxSessionViewModel`'s production connect path to build
+     * `KnownHostsPolicy.VerifiedFingerprint(trustedHostKeySha256)`, which
+     * `VerifiedFingerprintHostKeyVerifier` throws [UnknownHostKeyException] on
+     * UNCONDITIONALLY whenever `trustedHostKeySha256` is `null` (this class's VM was
+     * constructed with no [HostDao], so it never had one). `connectFixture()`'s own raw
+     * `SshConnection.connect(..., TEST_ACCEPT_ALL_HOST_KEYS)` calls cover the test's OWN
+     * seed/cleanup probes, not the VM's `vm.connect()` -> `SshLeaseManager.acquire()` path
+     * this class exists to exercise — that path must go through the SAME
+     * `VerifiedFingerprintHostKeyVerifier` production uses, just with a TRUSTED
+     * fingerprint, or the D34 "real transport" proof is not real.
+     *
+     * This mirrors the app's established capture-then-trust pattern
+     * (`AndroidSshTestFixtures.waitForSshFixtureReady` for androidTest,
+     * `Issue1876FolderReconcileMobileRttIntegrationTest.captureShapedHostKeyFingerprint`
+     * for this same integrationTest scope): probe with `VerifiedFingerprint(null)`, which
+     * deliberately throws carrying the server's REAL presented fingerprint, then trust
+     * exactly that value via a [HostDao] fed to BOTH the VM's own trust resolution
+     * (`TmuxSessionViewModel.requestResolvedConnect` -> `sshLeaseManager.resolveTarget`)
+     * AND the lease manager's connector, wrapped in the SAME production
+     * [AuthoritativeSshLeaseConnector] real hosts use (it implements
+     * `SshLeaseTargetResolver.resolveTarget`, reading this [HostDao] and returning
+     * `HostEntity.hostKeyTrustBinding()`'s `VerifiedFingerprint(sha256)` before every
+     * dial — including every auto-reconnect ladder rung and manual reconnect, since
+     * `resolveTarget` runs at the top of every `SshLeaseManager.acquire`). Production
+     * ALWAYS wires the two together this way; a VM-only [HostDao] with a resolver-less
+     * connector resolves to nothing (`SshLeaseManager.resolveTarget` is a no-op unless
+     * the connector itself is a `SshLeaseTargetResolver`), so this class must wrap the
+     * fault-injecting connector, not bypass it.
+     */
+    private suspend fun trustedHostDao(
+        fixture: GenericContainer<*>,
+        hostId: Long,
+        hostName: String,
+    ): HostDao {
+        val host = fixture.host
+        val port = fixture.getMappedPort(SSH_PORT)
+        var lastFailure: Throwable? = null
+        repeat(20) {
+            val probe = SshConnection.connect(
+                host = host,
+                port = port,
+                user = SSH_USER,
+                key = SshKey.Path(privateKeyFile),
+                knownHosts = KnownHostsPolicy.VerifiedFingerprint(null),
+                timeoutMs = 5_000,
+            )
+            val failure = probe.exceptionOrNull()
+            if (failure is UnknownHostKeyException) {
+                return SingleHostDao(
+                    HostEntity(
+                        id = hostId,
+                        name = hostName,
+                        hostname = host,
+                        port = port,
+                        username = SSH_USER,
+                        keyId = 1L,
+                        trustedHostKeySha256 = failure.presentedSha256,
+                    ),
+                )
+            }
+            lastFailure = failure
+            delay(500L)
+        }
+        error(
+            "#2449 could not capture the Docker fixture's real SSH host-key fingerprint: $lastFailure",
+        )
+    }
+
+    /** Minimal [HostDao] fake — only [getById] is on the trust-backfill path this class exercises. */
+    private class SingleHostDao(private val host: HostEntity) : HostDao {
+        override fun getAll(): Flow<List<HostEntity>> = flowOf(listOf(host))
+        override suspend fun getById(id: Long): HostEntity? = host.takeIf { it.id == id }
+        override fun getEnabled(): Flow<List<HostEntity>> = flowOf(listOf(host))
+        override suspend fun insert(host: HostEntity): Long = host.id
+        override suspend fun update(host: HostEntity) = Unit
+        override suspend fun delete(host: HostEntity) = Unit
+        override suspend fun deleteById(id: Long) = Unit
     }
 
     /**

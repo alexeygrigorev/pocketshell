@@ -76,7 +76,11 @@ class SshEnginesGatewayTest {
         val first = gateway.listEngines(HOST, KEY_PATH, passphrase = null)
         val second = gateway.listEngines(HOST, KEY_PATH, passphrase = null)
 
-        assertEquals(2, calls)
+        // Issue #2439: a failed read with a good cache already on file gets ONE
+        // retry (call #3) before falling back — both attempts fail here (the
+        // fake keeps returning malformed JSON after the first call), so the
+        // fallback still serves the pre-failure cache, just one call later.
+        assertEquals(3, calls)
         assertTrue(first is EnginesResult.Engines && !(first as EnginesResult.Engines).fromCache)
         assertTrue(second is EnginesResult.Engines && (second as EnginesResult.Engines).fromCache)
         assertEquals(listOf("custom-codex"), gateway.cachedEngines(HOST.id).map { it.rawId })

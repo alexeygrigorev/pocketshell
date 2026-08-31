@@ -123,26 +123,33 @@ class SshEnginesGateway @Inject constructor(
         keyPath: String,
         passphrase: CharArray?,
     ): EnginesResult {
-        val fresh = withSession(host, keyPath, passphrase) { session ->
-            val result = BoundedSessionExec.execBounded(
-                session = session,
-                command = pathAware("engines list --json"),
-                timeoutMs = execReadTimeoutMs,
-                dispatcher = execDispatcher,
-                callerSite = "engines_registry",
-            )
-            when {
-                result == null -> EnginesResult.Failed(
-                    "pocketshell engines list timed out after ${execReadTimeoutMs}ms",
-                )
-                isToolMissing(result.exitCode, result.stderr) -> EnginesResult.ToolUnavailable
-                result.exitCode != 0 -> EnginesResult.Failed(
-                    errorMessage(result.stderr, result.stdout, result.exitCode),
-                )
-                else -> parseEnginesDocument(result.stdout)?.let { EnginesResult.Engines(it) }
-                    ?: EnginesResult.Failed("Malformed pocketshell engines payload")
-            }
-        }.getOrElse { EnginesResult.ConnectFailed(it) }
+        var fresh = attemptRead(host, keyPath, passphrase)
+
+        // Issue #2439 investigation (round 1) — a picker-open read that races
+        // a live host-side `pocketshell` deploy/upgrade can fail ONE
+        // transient exec while a GOOD cached registry from before the change
+        // still sits in [cacheByHost]. Falling straight back to that cache is
+        // silent and indistinguishable from a correct, current read, with no
+        // signal anything was stale. A single bounded retry turns a one-shot
+        // blip into a self-heal instead of a confidently-wrong render; it
+        // only fires when a cache exists to protect, so a genuinely fresh
+        // host (or a truly dead link) pays no extra cost beyond one more
+        // bounded exec.
+        //
+        // NOTE: this retry is real, independently-tested hardening for a
+        // transient-exec-during-deploy race, but it is NOT what fixed the
+        // maintainer's actual #2439 report (Codex missing from the New
+        // Session picker). The reviewer reproduced that symptom fresh, cold
+        // cache, against the real host, on top of this retry, and traced it
+        // to a different mechanism entirely: `codex` installed via nvm is
+        // invisible to the non-interactive SSH `exec` PATH this gateway
+        // always uses. That is fixed host-side in
+        // `tools/pocketshell/src/pocketshell/engines.py` (`resolve_harnesses`,
+        // issue #2276 / PR #2441), not here. See
+        // Issue2439EngineRegistryStaleCacheRetryTest for the full account.
+        if (fresh !is EnginesResult.Engines && cacheByHost.containsKey(host.id)) {
+            fresh = attemptRead(host, keyPath, passphrase)
+        }
 
         if (fresh is EnginesResult.Engines) {
             cacheByHost[host.id] = fresh.engines
@@ -150,6 +157,31 @@ class SshEnginesGateway @Inject constructor(
         }
         return cacheByHost[host.id]?.let { EnginesResult.Engines(it, fromCache = true) } ?: fresh
     }
+
+    private suspend fun attemptRead(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+    ): EnginesResult = withSession(host, keyPath, passphrase) { session ->
+        val result = BoundedSessionExec.execBounded(
+            session = session,
+            command = pathAware("engines list --json"),
+            timeoutMs = execReadTimeoutMs,
+            dispatcher = execDispatcher,
+            callerSite = "engines_registry",
+        )
+        when {
+            result == null -> EnginesResult.Failed(
+                "pocketshell engines list timed out after ${execReadTimeoutMs}ms",
+            )
+            isToolMissing(result.exitCode, result.stderr) -> EnginesResult.ToolUnavailable
+            result.exitCode != 0 -> EnginesResult.Failed(
+                errorMessage(result.stderr, result.stdout, result.exitCode),
+            )
+            else -> parseEnginesDocument(result.stdout)?.let { EnginesResult.Engines(it) }
+                ?: EnginesResult.Failed("Malformed pocketshell engines payload")
+        }
+    }.getOrElse { EnginesResult.ConnectFailed(it) }
 
     override fun cachedEngines(hostId: Long): List<RemoteEngine> = cacheByHost[hostId].orEmpty()
 

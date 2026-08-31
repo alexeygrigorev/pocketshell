@@ -305,8 +305,8 @@ pass_case "canonical instrumentation log did not contain final success"
 # `am instrument`, so Gradle never writes a JUnit XML for it and the #2063/#2082
 # execution ledger reported it NEVER EXECUTED — which is one of the seven
 # classes that made the release job conclude `failure` on a green validation and
-# kept `record-validated-rc` unreachable. A successful run must now leave XML
-# the REAL ledger script credits, and a run that only self-skipped must not.
+# kept `record-validated-rc` unreachable. A successful run must now leave
+# ledger-shaped XML naming the class, and a run that only self-skipped must not.
 long_running_junit="$DETACHED_INSTRUMENTATION_RESULTS_DIR/TEST-com.pocketshell.app.proof.LongRunningSessionStabilityTest.xml"
 [[ -s "$long_running_junit" ]] ||
   fail "a successful long-running run wrote no ledger JUnit XML at $long_running_junit (#2435)"
@@ -314,15 +314,10 @@ pass_case "a successful long-running run wrote ledger JUnit XML"
 grep -Fq 'classname="com.pocketshell.app.proof.LongRunningSessionStabilityTest"' "$long_running_junit" ||
   fail "the converted long-running JUnit XML does not name the test class (#2435)"
 pass_case "the converted long-running JUnit XML names the test class"
-long_running_ledger="$tmpdir/long-running-ledger.tsv"
-bash "$ROOT_DIR/scripts/check-test-execution-ledger.sh" \
-  --record "$DETACHED_INSTRUMENTATION_RESULTS_DIR" \
-  --ledger "$long_running_ledger" --tier release --now 1700000000 > /dev/null ||
-  fail "the real execution ledger refused the converted long-running results (#2435)"
-grep -Fq 'com.pocketshell.app.proof.LongRunningSessionStabilityTest	1700000000	release' \
-  "$long_running_ledger" ||
-  fail "the real execution ledger did not credit LongRunningSessionStabilityTest (#2435)"
-pass_case "the real execution ledger credits the converted long-running result"
+# Whether the REAL execution-ledger script credits that XML is proven in
+# tests/scripts/release-ledger-lane-coverage-test.sh, not here: this harness is
+# driven by ReleaseGateScriptTest, so running the #2063 selection guards from it
+# would put them back on the Unit critical path once per variant (#2067 C9).
 
 # Negative half: an all-skipped transcript (the class without its opt-in arg)
 # must produce NO evidence at all. --require-class is what stops a self-skip
@@ -399,5 +394,5 @@ pass_case "generic nonzero final log was not preserved"
 # Issue #2113: a harness that exits 0 having run nothing is the vacuous green
 # process.md catalogues. The count line is what makes the JVM assertion about
 # behaviour rather than about bash's exit status.
-(( CASES == 26 )) || fail "expected 26 cases to run, saw $CASES"
+(( CASES == 25 )) || fail "expected 25 cases to run, saw $CASES"
 printf 'PASS: long-running release gate retry helper (%s cases)\n' "$CASES"

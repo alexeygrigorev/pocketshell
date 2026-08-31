@@ -146,19 +146,24 @@ class ReleaseGateScriptTest {
     /**
      * The long-running release-gate hold's retry + evidence handling.
      *
-     * Issue #2435 added the ledger half: this class runs through a detached
+     * Issue #2435 added the accounting half: this class runs through a detached
      * `am instrument`, so Gradle writes no JUnit XML for it and the #2063/#2082
      * execution ledger reported it NEVER EXECUTED, which is one of the reasons
      * the release job could not conclude success. The helper now converts the
-     * runner's own transcript, and these cases require the REAL ledger script
-     * to credit it — while an all-skipped (opt-in absent) transcript still
+     * runner's own transcript, and these cases require a green run to leave XML
+     * naming the class — while an all-skipped (opt-in absent) transcript still
      * produces no evidence at all.
+     *
+     * Whether the REAL ledger script credits that XML is proven in
+     * `tests/scripts/release-ledger-lane-coverage-test.sh`, run by the blocking
+     * `guards-test-selection` job: #2067's C9 keeps the #2063 selection guards
+     * off the Gradle test graph, where they would be charged once per variant.
      */
     @Test
     fun longRunningReleaseGateRetryHandlesSuccessAndExhaustion() {
         runShellHarness(
             relativePath = "tests/scripts/long-running-release-gate-retry-test.sh",
-            expectedPassLine = "PASS: long-running release gate retry helper (26 cases)",
+            expectedPassLine = "PASS: long-running release gate retry helper (25 cases)",
             timeoutSeconds = 180,
         )
     }

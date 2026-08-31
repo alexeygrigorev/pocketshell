@@ -432,7 +432,7 @@ fi
 # success.
 #
 # Printed from the SAME arrays the phases run, right next to them, so the two
-# cannot drift; `tests/scripts/release-validation-storage-test.sh` unions this
+# cannot drift; `tests/scripts/release-ledger-lane-coverage-test.sh` unions this
 # with the unit/phase-1 selectors and the release gate's shared-module
 # connected suites and fails when any registered class is claimed by no lane.
 if [[ "${1:-}" == "--print-later-phase-classes" ]]; then

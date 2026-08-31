@@ -1,6 +1,7 @@
 package com.pocketshell.app.ssh
 
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -65,6 +66,64 @@ class Issue2433HostKeyTrustSourceGuardTest {
         assertTrue(navigator.contains("hostKeyTrustPromptRouter?.pendingHostId?.collect"))
         assertTrue(connector.contains("trustPromptRouter?.report(target.hostIdOrNull(), failure)"))
         assertTrue(portForwardConnector.contains("trustPromptRouter.report(host.id, failure)"))
+    }
+
+    @Test
+    fun tmuxResolvesPersistedTrustBeforeAnyWarmCacheOrFastSwitchDecision() {
+        val vm = source("app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt")
+        val manager = source("shared/core-ssh/src/main/java/com/pocketshell/core/ssh/SshLeaseManager.kt")
+        val requestOwner = vm.substring(
+            vm.indexOf("private fun requestResolvedConnect("),
+            vm.indexOf("private fun connectResolved("),
+        )
+        val resolvedOwner = vm.substring(
+            vm.indexOf("private fun connectResolved("),
+            vm.indexOf("private fun nextConnectGeneration("),
+        )
+
+        assertTrue(requestOwner.contains("sshLeaseManager.resolveTarget(target.toSshLeaseTarget())"))
+        assertTrue(requestOwner.contains("connectResolved(resolvedTarget"))
+        assertFalse(requestOwner.contains("runtimeCache."))
+        assertTrue(resolvedOwner.contains("runtimeCache.contains(target.toRuntimeKey())"))
+        assertTrue(resolvedOwner.contains("takeCachedRuntimeForActivation("))
+        assertTrue(resolvedOwner.contains("isSameHost(previousActiveTarget, target)"))
+        assertFalse(vm.contains("host-key:unconfirmed"))
+        assertTrue(manager.contains("public suspend fun resolveTarget("))
+        assertTrue(manager.contains("val target = resolveTarget(requestedTarget)"))
+    }
+
+    @Test
+    fun tmuxTargetIdentityAndEverySharedDedupePredicateIncludeTheResolvedFingerprint() {
+        val models = source("app/src/main/java/com/pocketshell/app/tmux/TmuxSessionRuntimeModels.kt")
+        val vm = source("app/src/main/java/com/pocketshell/app/tmux/TmuxSessionViewModel.kt")
+        val equalityOwner = models.substring(
+            models.indexOf("internal fun connectionTargetIdentityEquals("),
+            models.indexOf("internal fun connectionTargetIdentityHashCode("),
+        )
+        val hashOwner = models.substring(
+            models.indexOf("internal fun connectionTargetIdentityHashCode("),
+            models.indexOf("internal fun ConnectionTarget.hasSameHostAndCredential("),
+        )
+        val sharedDedupeOwner = models.substring(
+            models.indexOf("internal fun ConnectionTarget.hasSameHostAndCredential("),
+            models.indexOf("internal fun ConnectionTarget.durableSessionKey("),
+        )
+
+        assertTrue(equalityOwner.contains("target.trustedHostKeySha256 == other.trustedHostKeySha256"))
+        assertTrue(hashOwner.contains("target.trustedHostKeySha256?.hashCode()"))
+        assertTrue(sharedDedupeOwner.contains("trustedHostKeySha256 == other.trustedHostKeySha256"))
+        assertTrue(models.contains("if (!left.hasSameHostAndCredential(right)) return false"))
+        val attachmentOwner = vm.substring(
+            vm.indexOf("private fun isAttachmentOriginStillActive("),
+            vm.indexOf("public suspend fun uploadQueuedAttachmentSidecars("),
+        )
+        assertEquals(
+            "production attachment gate and its test mirror must both use fingerprint-aware identity",
+            2,
+            Regex("return sameSessionIdentity\\(active, originTarget\\)")
+                .findAll(attachmentOwner)
+                .count(),
+        )
     }
 
     private fun sourceDir(path: String): File = locate(path).also {

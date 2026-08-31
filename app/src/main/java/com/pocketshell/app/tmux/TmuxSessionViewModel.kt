@@ -2008,6 +2008,8 @@ public class TmuxSessionViewModel @Inject constructor(
     internal var activeTarget: ConnectionTarget? = null
     internal var connectingTarget: ConnectionTarget? = null
     internal var connectJob: Job? = null
+    private var trustResolutionJob: Job? = null
+    private var trustResolutionGeneration: Long = 0L
     internal var autoReconnectJob: Job? = null
 
     /**
@@ -2640,11 +2642,84 @@ public class TmuxSessionViewModel @Inject constructor(
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
-        // Issue #666 / #1155: internal guard so the existence preflight (below) can
-        // re-enter [connect] once it has confirmed the session is still alive
-        // without preflighting a second time. Never set by external callers.
-        skipExistencePreflight: Boolean = false,
     ) {
+        requestResolvedConnect(
+            target = ConnectionTarget(
+                hostId = hostId,
+                hostName = hostName,
+                host = host,
+                port = port,
+                user = user,
+                keyPath = keyPath,
+                passphrase = passphrase,
+                sessionName = sessionName,
+                startDirectory = startDirectory,
+                tmuxSessionId = tmuxSessionId,
+                sessionCreated = sessionCreated,
+            ),
+            trigger = trigger,
+            skipExistencePreflight = false,
+        )
+    }
+
+    /**
+     * Resolve Room-backed host trust before any runtime-cache or warm-lease observation.
+     *
+     * [SshLeaseManager.acquire] resolves again at its own pool boundary, but that is too late
+     * for this ViewModel: cache activation and the same-host fast-switch decision happen before
+     * acquire. Production always injects [hostDao], so the only synchronous bypass is the
+     * deliberately dependency-light unit-test construction path.
+     */
+    private fun requestResolvedConnect(
+        target: ConnectionTarget,
+        trigger: TmuxConnectTrigger,
+        skipExistencePreflight: Boolean,
+    ) {
+        if (hostDao == null) {
+            connectResolved(target, trigger, skipExistencePreflight)
+            return
+        }
+        val resolutionGeneration = ++trustResolutionGeneration
+        trustResolutionJob?.cancel()
+        trustResolutionJob = viewModelScope.launch {
+            val resolvedLeaseTarget = sshLeaseManager.resolveTarget(target.toSshLeaseTarget())
+                .getOrElse { failure ->
+                    if (resolutionGeneration != trustResolutionGeneration) return@launch
+                    connectingTarget = target
+                    refreshReconnectAvailability()
+                    setConnectionState(
+                        ConnectionState.Unreachable("connect failed: ${failure.message}"),
+                    )
+                    return@launch
+                }
+            if (resolutionGeneration != trustResolutionGeneration) return@launch
+            val verified = resolvedLeaseTarget.knownHosts as? KnownHostsPolicy.VerifiedFingerprint
+                ?: error("tmux production trust resolver must return a fingerprint policy")
+            val resolvedTarget = target.copy(
+                trustedHostKeySha256 = verified.expectedSha256,
+            )
+            connectResolved(resolvedTarget, trigger, skipExistencePreflight)
+        }
+    }
+
+    private fun connectResolved(
+        target: ConnectionTarget,
+        trigger: TmuxConnectTrigger,
+        // Issue #666 / #1155: internal guard so the existence preflight can re-enter
+        // after confirming the session without recursively probing it.
+        skipExistencePreflight: Boolean,
+    ) {
+        val hostId = target.hostId
+        val hostName = target.hostName
+        val host = target.host
+        val port = target.port
+        val user = target.user
+        val keyPath = target.keyPath
+        val passphrase = target.passphrase
+        val sessionName = target.sessionName
+        val startDirectory = target.startDirectory
+        val tmuxSessionId = target.tmuxSessionId
+        val sessionCreated = target.sessionCreated
         val testTransportAvailable =
             syntheticUnrecoverableHostAllowsTransportReuse(forceUnrecoverableHostForTest)
         // Issue #666: a foreground cold-restore must NOT resurrect a session
@@ -2660,17 +2735,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // determination).
         if (trigger == TmuxConnectTrigger.ColdRestore && !skipExistencePreflight && testTransportAvailable) {
             preflightSessionExistence(
-                hostId = hostId,
-                hostName = hostName,
-                host = host,
-                port = port,
-                user = user,
-                keyPath = keyPath,
-                passphrase = passphrase,
-                sessionName = sessionName,
-                startDirectory = startDirectory,
-                tmuxSessionId = tmuxSessionId,
-                sessionCreated = sessionCreated,
+                target = target,
                 originalTrigger = TmuxConnectTrigger.ColdRestore,
             )
             return
@@ -2682,19 +2747,6 @@ public class TmuxSessionViewModel @Inject constructor(
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         lifecycleReattachNetworkCoalesce = null
-        val target = ConnectionTarget(
-            hostId = hostId,
-            hostName = hostName,
-            host = host,
-            port = port,
-            user = user,
-            keyPath = keyPath,
-            passphrase = passphrase,
-            sessionName = sessionName,
-            startDirectory = startDirectory,
-            tmuxSessionId = tmuxSessionId,
-            sessionCreated = sessionCreated,
-        )
         graceEffects.retireRecoveryOfSupersededSession(controllerSessionId(target), target, connectGeneration)
         // Issue #1072: an EXPLICIT manual Reconnect must be able to PREEMPT an
         // in-flight connect to the same target, never be deduped into a no-op. If a
@@ -2742,17 +2794,7 @@ public class TmuxSessionViewModel @Inject constructor(
             !runtimeCache.contains(target.toRuntimeKey())
         ) {
             preflightSessionExistence(
-                hostId = target.hostId,
-                hostName = target.hostName,
-                host = target.host,
-                port = target.port,
-                user = target.user,
-                keyPath = target.keyPath,
-                passphrase = target.passphrase,
-                sessionName = target.sessionName,
-                startDirectory = target.startDirectory,
-                tmuxSessionId = target.tmuxSessionId,
-                sessionCreated = target.sessionCreated,
+                target = target,
                 originalTrigger = TmuxConnectTrigger.OpenExisting,
             )
             return
@@ -3406,6 +3448,9 @@ public class TmuxSessionViewModel @Inject constructor(
         pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
+        trustResolutionJob?.cancel()
+        trustResolutionJob = null
+        trustResolutionGeneration += 1L
         connectJob?.cancel()
         connectJob = null
         val cancelledTarget = connectingTarget ?: activeTarget
@@ -6388,7 +6433,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 user = user,
                 credentialId = "$hostId:$keyPath",
                 knownHostsId = trustedHostKeySha256?.let { "host-key:$it" }
-                    ?: "host-key:unconfirmed",
+                    ?: SshLeaseManager.UNCONFIRMED_HOST_KEY_ID,
             ),
             key = SshKey.Path(File(keyPath)),
             passphrase = passphrase?.copyOf(),
@@ -6396,7 +6441,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
 
     private suspend fun runConnect(
-        requestedTarget: ConnectionTarget,
+        target: ConnectionTarget,
         attempt: Int,
         trigger: TmuxConnectTrigger,
         // Issue #634: a "warm open" reuses an already-live pooled SSH lease,
@@ -6410,18 +6455,6 @@ public class TmuxSessionViewModel @Inject constructor(
         // is preserved unchanged.
         warmReveal: Boolean = false,
     ) {
-        val trustedHost = hostDao?.getById(requestedTarget.hostId)
-        val target = if (trustedHost != null &&
-            trustedHost.hostname.equals(requestedTarget.host, ignoreCase = true) &&
-            trustedHost.port == requestedTarget.port
-        ) {
-            requestedTarget.copy(
-                trustedHostKeyAlgorithm = trustedHost.trustedHostKeyAlgorithm,
-                trustedHostKeySha256 = trustedHost.trustedHostKeySha256,
-            )
-        } else {
-            requestedTarget
-        }
         val startedAtMs = SystemClock.elapsedRealtime()
         // Issue #440: a fresh attempt starts with no recorded failure so a
         // stale cause from a previous attempt never influences the retry
@@ -6893,17 +6926,7 @@ public class TmuxSessionViewModel @Inject constructor(
      *   [runConnect] preflight is the second line of defence there.
      */
     private fun preflightSessionExistence(
-        hostId: Long,
-        hostName: String,
-        host: String,
-        port: Int,
-        user: String,
-        keyPath: String,
-        passphrase: CharArray?,
-        sessionName: String,
-        startDirectory: String?,
-        tmuxSessionId: String?,
-        sessionCreated: Long?,
+        target: ConnectionTarget,
         // Issue #1155: the trigger to RE-ENTER connect with once the session is
         // confirmed alive (ColdRestore for the resume path, OpenExisting for a
         // normal tree-row tap). The GONE branch is identical for both:
@@ -6911,19 +6934,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // recreate prompt.
         originalTrigger: TmuxConnectTrigger,
     ) {
-        val target = ConnectionTarget(
-            hostId = hostId,
-            hostName = hostName,
-            host = host,
-            port = port,
-            user = user,
-            keyPath = keyPath,
-            passphrase = passphrase,
-            sessionName = sessionName,
-            startDirectory = startDirectory,
-            tmuxSessionId = tmuxSessionId,
-            sessionCreated = sessionCreated,
-        )
+        val hostId = target.hostId
+        val host = target.host
+        val port = target.port
+        val user = target.user
+        val sessionName = target.sessionName
         // Cancel any in-flight connect so the preflight owns the decision, then
         // gate every downstream attach behind it. Mirrors the teardown the
         // normal connect entry does for its early state.
@@ -6949,18 +6964,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 // early-return guard.
                 connectJob = null
                 connectingTarget = null
-                connect(
-                    hostId = hostId,
-                    hostName = hostName,
-                    host = host,
-                    port = port,
-                    user = user,
-                    keyPath = keyPath,
-                    passphrase = passphrase?.copyOf(),
-                    sessionName = sessionName,
-                    startDirectory = startDirectory,
-                    tmuxSessionId = tmuxSessionId,
-                    sessionCreated = sessionCreated,
+                requestResolvedConnect(
+                    target = target.copy(passphrase = target.passphrase?.copyOf()),
                     trigger = originalTrigger,
                     skipExistencePreflight = true,
                 )
@@ -9248,6 +9253,7 @@ public class TmuxSessionViewModel @Inject constructor(
         tmuxSessionId: String? = null,
         sessionCreated: Long? = null,
         lease: SshLease? = null,
+        trustedHostKeySha256: String? = null,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -9261,6 +9267,7 @@ public class TmuxSessionViewModel @Inject constructor(
             startDirectory = null,
             tmuxSessionId = tmuxSessionId,
             sessionCreated = sessionCreated,
+            trustedHostKeySha256 = trustedHostKeySha256,
         )
         // #1085: this synchronous test seam must close the replaced client before returning.
         closeCurrentConnection(deferTeardown = false)
@@ -13775,13 +13782,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * Issue #968: is the [originTarget] snapshotted when the user tapped attach
      * still the active session at upload-completion time?
      *
-     * The warm `-CC` SSH session is shared across every tmux session on a host
-     * (D21), so the session-identity discriminator is the tmux **session name**
-     * (plus host), NOT the SSH lease key (which is per-host). If the user
-     * switched tmux sessions (A->B) during the upload await, the active target
-     * is now B and delivering the bytes here would misroute them into B's scope
-     * + composer. This returns `false` in exactly that case so the caller
-     * surfaces an error instead of misrouting.
+     * The warm `-CC` SSH session is shared across tmux sessions on a verified
+     * host (D21), but attachment authority belongs to the complete originating
+     * session identity. That includes the verified host-key fingerprint: after
+     * rekey, work snapshotted under the old trust must not complete against the
+     * replacement connection even when hostId and sessionName are unchanged.
      *
      * A null origin (no target was active at tap) and a null active target both
      * resolve against the `"tmux-session"` fallback scope, so a null==null pair
@@ -13791,8 +13796,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val active = activeTarget
         if (originTarget == null) return active == null
         if (active == null) return false
-        return active.hostId == originTarget.hostId &&
-            active.sessionName == originTarget.sessionName
+        return sameSessionIdentity(active, originTarget)
     }
 
     /**
@@ -13807,13 +13811,12 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     @androidx.annotation.VisibleForTesting
     internal fun attachmentOriginStillActiveForTest(
-        originHostId: Long?,
-        originSessionName: String?,
+        originTarget: ConnectionTarget?,
     ): Boolean {
         val active = activeTarget
-        if (originHostId == null || originSessionName == null) return active == null
+        if (originTarget == null) return active == null
         if (active == null) return false
-        return active.hostId == originHostId && active.sessionName == originSessionName
+        return sameSessionIdentity(active, originTarget)
     }
 
     public suspend fun uploadQueuedAttachmentSidecars(
@@ -16829,6 +16832,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // probe tidy and ensures no late ping fires against a torn-down client.
         livenessProbe?.stop()
         connectionTmuxPort.setClient(null)
+        trustResolutionJob?.cancel()
+        trustResolutionJob = null
         connectJob?.cancel()
         connectJob = null
         assistant.dismiss()

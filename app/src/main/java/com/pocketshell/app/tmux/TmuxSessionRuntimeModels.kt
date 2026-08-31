@@ -18,7 +18,8 @@ internal fun isSameHost(previous: ConnectionTarget, target: ConnectionTarget): B
         previous.host == target.host &&
         previous.port == target.port &&
         previous.user == target.user &&
-        previous.keyPath == target.keyPath
+        previous.keyPath == target.keyPath &&
+        previous.trustedHostKeySha256 == target.trustedHostKeySha256
 
 internal fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget): Boolean {
     if (!left.hasSameHostAndCredential(right)) return false
@@ -55,7 +56,8 @@ internal fun connectionTargetIdentityEquals(target: ConnectionTarget, other: Any
         target.sessionName == other.sessionName &&
         target.startDirectory == other.startDirectory &&
         target.tmuxSessionId == other.tmuxSessionId &&
-        target.sessionCreated == other.sessionCreated
+        target.sessionCreated == other.sessionCreated &&
+        target.trustedHostKeySha256 == other.trustedHostKeySha256
 }
 
 internal fun connectionTargetIdentityHashCode(target: ConnectionTarget): Int {
@@ -69,6 +71,7 @@ internal fun connectionTargetIdentityHashCode(target: ConnectionTarget): Int {
     result = 31 * result + (target.startDirectory?.hashCode() ?: 0)
     result = 31 * result + (target.tmuxSessionId?.hashCode() ?: 0)
     result = 31 * result + (target.sessionCreated?.hashCode() ?: 0)
+    result = 31 * result + (target.trustedHostKeySha256?.hashCode() ?: 0)
     return result
 }
 
@@ -77,7 +80,8 @@ internal fun ConnectionTarget.hasSameHostAndCredential(other: ConnectionTarget):
         host == other.host &&
         port == other.port &&
         user == other.user &&
-        keyPath == other.keyPath
+        keyPath == other.keyPath &&
+        trustedHostKeySha256 == other.trustedHostKeySha256
 
 internal fun ConnectionTarget.durableSessionKey(): String? =
     durableTmuxSessionKey(hostId, tmuxSessionId, sessionCreated)

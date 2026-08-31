@@ -133,14 +133,25 @@ public class SshLeaseManager(
      */
     private fun SshSession.isLiveForLease(): Boolean = isConnected && !isCloseInitiated
 
-    public suspend fun acquire(requestedTarget: SshLeaseTarget): Result<SshLease> {
+    /**
+     * Resolve the caller's provisional target through the same authoritative owner that
+     * [acquire] uses before inspecting the pool.
+     *
+     * Runtime caches that sit above the lease pool must call this before deriving any warm
+     * identity. Otherwise a persisted verified fingerprint can be replaced by a provisional
+     * identity for the cache lookup even though [acquire] later corrects it before dialing.
+     */
+    public suspend fun resolveTarget(requestedTarget: SshLeaseTarget): Result<SshLeaseTarget> {
         val targetResolver = connector as? SshLeaseTargetResolver
-        val target = if (targetResolver != null) {
+        return if (targetResolver != null) {
             runCatching { targetResolver.resolveTarget(requestedTarget) }
-                .getOrElse { return Result.failure(it) }
         } else {
-            requestedTarget
+            Result.success(requestedTarget)
         }
+    }
+
+    public suspend fun acquire(requestedTarget: SshLeaseTarget): Result<SshLease> {
+        val target = resolveTarget(requestedTarget).getOrElse { return Result.failure(it) }
         val key = target.leaseKey
 
         // Decide our role under the lock: reuse a live entry, await an

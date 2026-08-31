@@ -1745,9 +1745,8 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Publish the controller's attach-ready edge after the final control-channel liveness
-     * check. This is separate from a non-empty content seed: status can be Connected while
-     * the reveal machine keeps a blank or capture-failed surface in its loading hold.
+     * Publish the controller's attach-ready edge after the final control-channel liveness check; it is separate from a non-empty content seed.
+     * Status can be Connected while the reveal machine keeps a blank or capture-failed surface in its loading hold.
      */
     private fun feedControllerAttachReady(
         client: TmuxClient,
@@ -2664,10 +2663,9 @@ public class TmuxSessionViewModel @Inject constructor(
     /**
      * Resolve Room-backed host trust before any runtime-cache or warm-lease observation.
      *
-     * [SshLeaseManager.acquire] resolves again at its own pool boundary, but that is too late
-     * for this ViewModel: cache activation and the same-host fast-switch decision happen before
-     * acquire. Production always injects [hostDao], so the only synchronous bypass is the
-     * deliberately dependency-light unit-test construction path.
+     * [SshLeaseManager.acquire] resolves again at its own pool boundary, but that is too late for this ViewModel;
+     * cache activation and the same-host fast-switch decision happen before acquire. Production always injects
+     * [hostDao]; only the deliberately dependency-light unit-test construction path bypasses it.
      */
     private fun requestResolvedConnect(
         target: ConnectionTarget,
@@ -2686,9 +2684,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     if (resolutionGeneration != trustResolutionGeneration) return@launch
                     connectingTarget = target
                     refreshReconnectAvailability()
-                    // Trust resolution happens before connectResolved submits the normal open
-                    // intent. Establish this exact target in the controller first so its typed
-                    // give-up transition is authoritative even for a cold VM still in Idle.
+                    // Surface trust failure through the controller, even from a cold VM.
                     submitControllerOpen(target)
                     surfaceControllerUnreachable(
                         target = target,
@@ -2715,8 +2711,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun connectResolved(
         target: ConnectionTarget,
         trigger: TmuxConnectTrigger,
-        // Issue #666 / #1155: internal guard so the existence preflight can re-enter
-        // after confirming the session without recursively probing it.
+        // Guard recursive existence preflight.
         skipExistencePreflight: Boolean,
     ) {
         val hostId = target.hostId

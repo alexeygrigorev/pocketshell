@@ -41,6 +41,7 @@ com.pocketshell.app.fileexplorer.FileExplorerRedesignScreenshotTest	local visual
 com.pocketshell.app.fileexplorer.FileExplorerRowIconRegressionTest	isolated component / instrumented unit; not load-bearing for the per-push subset
 com.pocketshell.app.fileviewer.FileViewerActOnFileScreenshotTest	local visual screenshot harness; not a per-push property
 com.pocketshell.app.fileviewer.FileViewerAnnotateScreenshotTest	local visual screenshot harness; not a per-push property
+com.pocketshell.app.fileviewer.FileViewerImageTransformStateTest	isolated component / instrumented unit (createComposeRule, no MainActivity launch); not load-bearing for the per-push subset
 com.pocketshell.app.fileviewer.FileViewerSaveMediaStoreTest	isolated component / instrumented unit; not load-bearing for the per-push subset
 com.pocketshell.app.fileviewer.FileViewerTypeIconTest	isolated component / instrumented unit; not load-bearing for the per-push subset
 com.pocketshell.app.fileviewer.FileViewerWrapMarkdownScreenshotTest	local visual screenshot harness; not a per-push property

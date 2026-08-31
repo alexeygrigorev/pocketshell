@@ -56,7 +56,8 @@ confirmed that the previously tracked durable-tree contract remains unresolved.
 - P1 lifecycle and cross-owner state: F11-F18.
 - P2 correctness hardening and CI reliability: F19-F25.
 - P3 deletion/simplification: F26-F30.
-- Deferred security: F6, per the maintainer's current priority.
+- F6 was deferred in the audit snapshot per the maintainer's priority, then
+  included in the remediation branch as a bounded trust-resolution slice.
 
 ## Findings
 
@@ -577,3 +578,47 @@ This is a point-in-time audit, not a permanent architecture specification. File
 issues or attach each accepted finding to an existing owner, then delete this
 document when every retained finding is closed, rejected with rationale, or
 superseded by a later audit. Git history is the archive.
+
+## Resolution ledger (verified 2026-08-31)
+
+All thirty retained findings are fixed on the `audit-fixes` remediation branch,
+rebased onto `origin/main` at `15aa079a`. The fixes were implemented in bounded
+slices and independently reviewed; the final rebase review was APPROVED after
+the controller, trust-cache, and expiry-ownership regressions were repaired.
+
+| Finding | Resolution | Reviewed change |
+| --- | --- | --- |
+| F1 | Reset Add/Edit identity on route binding and fence stale loads. | #2428 / `4856d290` |
+| F2 | Require release tags to point at the validated `main` head. | #2430 / `8acd25b1` |
+| F3 | Validate daemon ownership before signaling a stale PID. | #2429 / `13282cc5` |
+| F4 | Use overflow-safe image bounds and move decoding off the composition path. | #2428 / `4856d290` |
+| F5 | Bound version derivation while draining and terminating child processes. | #2430 / `8acd25b1` |
+| F6 | Add authoritative host-key trust resolution, prompt routing, and fingerprint-bound reuse. | #2433 / `4b5be0d8..5fb7bdd6` |
+| F7 | Persist authoritative empty revisions with stable identity and latest-wins writers. | #2243 / `0f710cbc` |
+| F8 | Replace lossy card filenames with reversible session identity encoding. | #2429 / `13282cc5` |
+| F9 | Serialize card mutations and use atomic, unique temporary writes. | #2429 / `13282cc5` |
+| F10 | Cancel and generation-fence File Explorer work on request changes. | #2428 / `4856d290` |
+| F11 | Bound teardown per runtime and preserve cleanup ownership. | #2431 / `f1138533` |
+| F12 | Make grace recovery claims idempotent and retire superseded jobs. | #2431 / `f1138533` |
+| F13 | Serialize daemon startup and protect socket/PID cleanup ownership. | #2429 / `13282cc5` |
+| F14 | Retain credential-free navigation across configuration recreation. | #2428 / `4856d290` |
+| F15 | Keep broadcast callbacks non-blocking while preference IO completes asynchronously. | #2428 / `4856d290` |
+| F16 | Key File Viewer transform state by the active image. | #2428 / `4856d290` |
+| F17 | Preserve document messages when bounding conversation history. | #2428 / `4856d290` |
+| F18 | Require an elapsed prior deadline before reporting a quota reset revision. | #2429 / `13282cc5` |
+| F19 | Schedule authoritative reconciliation after structural event overflow. | #2431 / `f1138533` |
+| F20 | Separate release-validation run provenance from the upstream Tests run. | #2430 / `8acd25b1` |
+| F21 | Pin CI to the committed Python lockfile and a fixed `uv` version. | #2430 / `8acd25b1` |
+| F22 | Wire the substantive usage mutation proof into the test lane. | #2430 / `8acd25b1` |
+| F23 | Remove the duplicate VM connection authority and project controller state only. | #766 / `a11a4d09` |
+| F24 | Add generation-keyed scheduled expiry and bounded teardown for parked runtimes. | #2309 / `092083dc` |
+| F25 | Isolate Python engine-registry tests from ambient XDG configuration. | #2429 / `13282cc5` |
+| F26 | Deduplicate navigation reporting while retaining synchronous target capture. | #2428 / `4856d290` |
+| F27 | Remove inert composer-draft state and persistence plumbing. | #2432 / `01d68357` |
+| F28 | Remove the unused `PortUsageDao` surface while retaining upgrade data. | #2432 / `01d68357` |
+| F29 | Use labeled, role-aware icon controls with compliant touch targets. | #2428 / `4856d290` |
+| F30 | Move pane-proof state machines out of production source. | #2431 / `f1138533` |
+
+The initial scope paragraph above describes the pre-remediation snapshot; the
+ledger records the subsequent code and test changes rather than rewriting that
+historical evidence.

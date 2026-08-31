@@ -1007,10 +1007,20 @@ scripts/select-test-areas-selftest.sh
 scripts/check-test-execution-ledger-selftest.sh
 scripts/check-test-execution-ledger-wiring.py --self-test
 scripts/dev-fast-gate-parity-selftest.sh
+tests/scripts/release-ledger-lane-coverage-test.sh
 ```
 
-Those five are exactly the steps of the **`guards-test-selection`** job in
-`.github/workflows/tests.yml` (#2067). The job is a dependency of the `unit-gate`
+Those are exactly the guard steps of the **`guards-test-selection`** job in
+`.github/workflows/tests.yml` (#2067), alongside the #2355 journey-quarantine
+checks the same job runs.
+
+The last one is #2435's: the release job's #2082 ledger step, and the
+lane-completeness property it depends on, driven against the REAL
+execution-ledger script (~19 s). It lives here rather than in
+`tests/scripts/release-validation-storage-test.sh`, where #2435 round 2 first
+put it, for exactly the reason below — that harness is driven by
+`DiskPreflightScriptTest`, so it is charged once per variant on the Unit
+critical path. The job is a dependency of the `unit-gate`
 aggregator, which carries the literal `Unit tests` check name branch protection
 requires — so these guards are **blocking on every push**, for the same reason
 `AvdLockScriptTest` exists: a guard no lane runs is not a guard. They are NOT a
@@ -1027,7 +1037,8 @@ same way it does not cover `check-file-size-hygiene.sh` or
 `check-test-validity.sh`. Run the five commands above directly when you touch the
 manifest, the classification engine, the journey registry, or `cli.py`.
 
-**Where its cost lands.** The five invocations take **~155–205 s**, now paid
+**Where its cost lands.** The selection invocations take **~155–205 s** (plus
+#2435's ~19 s ledger harness), now paid
 ONCE per push in a parallel job instead of once per Unit variant on the critical
 path. Four measurements, all at 46 cases except the first:
 

@@ -691,6 +691,19 @@ run_bash_step() {
   run_step "$name" bash -lc "$script"
 }
 
+# Issue #2435: this step now runs :shared:ui-kit:connectedDebugAndroidTest
+# alongside :shared:core-terminal's. It is the ONLY lane that can execute
+# UiKitPrimitivesTest — nightly phase 1 is :app:connectedDebugAndroidTest, and
+# the shared-module instrumented suites are already this gate's responsibility
+# (the 20 :shared:core-terminal instrumented classes are credited nowhere else
+# either). Until now UiKitPrimitivesTest executed on NO lane at all, so the
+# release job's own #2082 execution-ledger verify reported it NEVER EXECUTED
+# and the job could not conclude success, which kept the #2356 validated-rc
+# marker unreachable. Measured cost on a swiftshader AVD: 8 tests, 46 s.
+#
+# NOTE: the body below is an UNQUOTED heredoc, so $, backticks and \ are live.
+# Keep prose out of it — a stray backtick becomes a command substitution that
+# runs on the release gate.
 core_terminal_connected_input_script() {
   cat <<CORE_TERMINAL_SCRIPT
 set -euo pipefail
@@ -729,8 +742,9 @@ for attempt in \$(seq 1 '$CORE_TERMINAL_CONNECTED_ATTEMPTS'); do
   '$ADB' logcat -c >/dev/null 2>&1 || true
 
   set +e
+  # Issue #2435: shared:ui-kit joins this step (see the note above the function).
   '$ROOT_DIR/scripts/cgroup-run.sh' --unit "pocketshell-pre-release-core-terminal-\$attempt-$$" -- \
-    ./gradlew $GRADLE_FLAGS :shared:core-terminal:connectedDebugAndroidTest --stacktrace 2>&1 | tee "\$attempt_log"
+    ./gradlew $GRADLE_FLAGS :shared:core-terminal:connectedDebugAndroidTest :shared:ui-kit:connectedDebugAndroidTest --stacktrace 2>&1 | tee "\$attempt_log"
   status=\${PIPESTATUS[0]}
   set -e
 

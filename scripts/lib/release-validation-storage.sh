@@ -278,6 +278,17 @@ _pocketshell_release_remove_output() {
   }
 }
 
+# Copy the small JUnit XML out of the generated worktree before it is removed.
+#
+# Issue #2435: this is the ONLY surviving JUnit evidence once the copy is gone,
+# and .github/workflows/release-emulator-validation.yml's #2082 ledger step
+# runs AFTER this cleanup, from the outer checkout. So it must cover BOTH result
+# shapes the gate produces and that the ledger step looks for — plain unit
+# results under */build/test-results/ and connected results under
+# */build/outputs/androidTest-results/ (the gate runs
+# :shared:core-terminal:connectedDebugAndroidTest, whose XML lands in the
+# latter). The 5 MiB per-file bound keeps this a diagnostics copy, not a second
+# copy of the build.
 _pocketshell_release_package_test_results() {
   local worktree="$1"
   local run_dir="$2"
@@ -291,7 +302,8 @@ _pocketshell_release_package_test_results() {
     copied=$((copied + 1))
   done < <(
     find -P "$worktree" -xdev -type f \
-      -path '*/build/test-results/*' -name 'TEST-*.xml' -size -5120k -print0 \
+      \( -path '*/build/test-results/*' -o -path '*/build/outputs/androidTest-results/*' \) \
+      -name 'TEST-*.xml' -size -5120k -print0 \
       2>/dev/null
   )
   if (( copied > 0 )); then
@@ -299,10 +311,20 @@ _pocketshell_release_package_test_results() {
   fi
 }
 
-# Finish one run owned by the caller.  On failure, preserve small test XML in
-# addition to the summary + step logs already written outside the worktree.
-# The exact copied worktree is then removed.  This is idempotent so the outer
-# release wrapper can finish a run whose failing child already cleaned itself.
+# Finish one run owned by the caller.  Preserve small test XML in addition to
+# the summary + step logs already written outside the worktree.  The exact
+# copied worktree is then removed.  This is idempotent so the outer release
+# wrapper can finish a run whose failing child already cleaned itself.
+#
+# Issue #2435: the packaging used to be conditional on `result == failure`.
+# A GREEN release chain therefore deleted its 1354 MiB worktree — every
+# */build/test-results/ XML the gate produced with it — and copied nothing out,
+# so the #2082 ledger step that runs ~15 s later in the hosted workflow found
+# no evidence and failed the job on a genuine `Automated status: PASS`. That
+# made the #2356 `Record validated-rc marker` job, which needs
+# `needs.emulator-release-validation.result == 'success'`, permanently
+# unreachable. Success is exactly the outcome whose execution evidence the
+# release ledger has to record, so it is now packaged on every outcome.
 pocketshell_release_validation_finish_run() {
   local root run_id result run_dir worktree before_mb retention_file
   root="$(_pocketshell_release_storage_root "$1")" || return 1
@@ -323,10 +345,8 @@ pocketshell_release_validation_finish_run() {
   before_mb="$(pocketshell_release_validation_output_size_mb "$worktree")"
   [[ "$before_mb" =~ ^[0-9]+$ ]] || before_mb=0
   printf 'Generated isolated worktree before cleanup: %s MiB (%s)\n' "$before_mb" "$worktree"
-  if [[ "$result" == "failure" ]]; then
-    _pocketshell_release_package_test_results "$worktree" "$run_dir" ||
-      printf 'WARN: could not package retained test XML before generated-output cleanup\n' >&2
-  fi
+  _pocketshell_release_package_test_results "$worktree" "$run_dir" ||
+    printf 'WARN: could not package retained test XML before generated-output cleanup\n' >&2
   _pocketshell_release_remove_output "$root" "$worktree" || return 1
   # Keep the owner marker in place until packaging + removal are complete so a
   # concurrent manual cleanup/preflight cannot race the finishing owner.
@@ -342,7 +362,7 @@ pocketshell_release_validation_finish_run() {
   if [[ "$result" == "failure" ]]; then
     printf 'Retained failure diagnostics: %s (summary, step logs, and small test XML when present)\n' "$run_dir"
   else
-    printf 'Retained release diagnostics: %s\n' "$run_dir"
+    printf 'Retained release diagnostics: %s (summary, step logs, and small test XML when present)\n' "$run_dir"
   fi
   printf 'Safe cleanup command for older generated release scratch: scripts/disk-cleanup.sh --apply\n'
 }

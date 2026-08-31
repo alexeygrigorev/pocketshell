@@ -53,6 +53,16 @@
 # in the `guards-test-selection` job. C9 makes "do not put them back" mechanical
 # rather than a comment in a doc nobody re-reads.
 #
+# Issue #2435 found C9's blind spot the expensive way. A JVM test rarely shells
+# out to a guard directly here — it names a `tests/scripts/*.sh` harness, and
+# the HARNESS runs the guard. Scanning only test sources therefore saw a Kotlin
+# file naming a harness and nothing else, so four cases driving the real
+# `--record`/`--verify` rode back onto the Unit lane; C9 went red purely by
+# accident, on a KDoc paragraph that happened to spell one of the script names.
+# Deleting that word would have restored green over an unchanged regression.
+# C9 now scans one hop further, and the self-test pins both halves: a harness
+# no Gradle test drives stays green, the same harness named by a test goes red.
+#
 #   scripts/check-unit-gate-wiring.sh              # check the real workflow
 #   scripts/check-unit-gate-wiring.sh --self-test  # prove the checks can go red
 #
@@ -88,8 +98,11 @@ EXEMPT_JOBS=(
 )
 
 # C9: the #2063 coverage guards belong to `guards-test-selection`, never to a
-# Gradle test task. Matched against unit/instrumentation test sources and build
-# scripts — the two places from which a Gradle test could shell out to them.
+# Gradle test task. Matched against unit/instrumentation test sources, build
+# scripts, and (issue #2435) the shell harnesses those files name in a string
+# literal — `runShellHarness(relativePath = "tests/scripts/…")` is how a JVM
+# test actually shells out here, and scanning only the Kotlin side sees the
+# harness name, never the guard the harness runs.
 SELECTION_GUARD_SCRIPTS='select-test-areas\.sh|select-test-areas-selftest\.sh|check-test-execution-ledger\.sh|check-test-execution-ledger-selftest\.sh|check-test-execution-ledger-wiring\.py|ci-record-test-execution-ledger\.sh|ci-nightly-execution-ledger\.sh|dev-fast-gate-parity-selftest\.sh'
 
 fail() {
@@ -293,9 +306,45 @@ check_workflow() {
   # --- C9: the selection guards stay out of the Gradle test graph ----------
   local scan_root="${SCAN_ROOT:-$ROOT_DIR}"
   if [ -d "$scan_root/.git" ] || git -C "$scan_root" rev-parse --git-dir >/dev/null 2>&1; then
-    local candidates offenders
-    candidates="$(git -C "$scan_root" ls-files |
+    local tracked direct harnesses candidates offenders
+    tracked="$(git -C "$scan_root" ls-files)"
+    # Tier 1: the Gradle test graph itself.
+    direct="$(printf '%s\n' "$tracked" |
       grep -E '(/src/(test|androidTest)/|(^|/)build\.gradle(\.kts)?$)' || true)"
+    # Tier 2 (issue #2435): the scripts a Gradle test task shells OUT to. The
+    # JVM tests in app/src/test/.../scripts/ exist to run tests/scripts/*.sh
+    # harnesses through `runShellHarness(relativePath = "...")`, so a harness
+    # that invokes a selection guard puts it back on the Unit critical path just
+    # as surely as a Kotlin test invoking it directly — while tier 1's scan sees
+    # only the Kotlin file, which names the harness and not the guard. #2435
+    # round 2 landed exactly that: two tests/scripts/*.sh harnesses ran the real
+    # `--record`/`--verify`, and C9 caught it only by accident, through a KDoc
+    # paragraph that happened to spell one of the script names.
+    #
+    # The set is DERIVED from the paths those files actually name, not a blanket
+    # `tests/scripts/**` glob: a harness no Gradle test drives costs the Unit
+    # lane nothing, and must not be policed as if it did (that is what makes
+    # `guards-test-selection` a legitimate home rather than a rename away).
+    #
+    # TWO DELIBERATE BOUNDS, stated rather than pretended away:
+    #   * ONE HOP. A harness that sources a production script which merely
+    #     mentions a guard is not an invocation. A full transitive closure was
+    #     measured and reaches ordinary production code (nightly-extensive-suite,
+    #     journey-quarantine) that legitimately names these scripts — a guard
+    #     that cries wolf there gets disabled, which is worse than this bound.
+    #   * QUOTED STRING LITERALS ONLY. A path a test EXECUTES is a string
+    #     literal; a path a comment discusses is prose. Several androidTest
+    #     classes cite `scripts/nightly-extensive-suite.sh` in a comment
+    #     explaining which lane durably gates them, and that is documentation,
+    #     not a shell-out.
+    harnesses=""
+    if [ -n "$direct" ]; then
+      harnesses="$(cd "$scan_root" && printf '%s\n' "$direct" | tr '\n' '\0' |
+        xargs -0 -r grep -ohE '"(tests/)?scripts/[A-Za-z0-9._/-]+"' 2>/dev/null |
+        tr -d '"' | LC_ALL=C sort -u |
+        { grep -Fx -f <(printf '%s\n' "$tracked") || true; })"
+    fi
+    candidates="$(printf '%s\n%s\n' "$direct" "$harnesses" | sorted_unique)"
     offenders=""
     if [ -n "$candidates" ]; then
       offenders="$(cd "$scan_root" && printf '%s\n' "$candidates" |
@@ -307,7 +356,12 @@ $(printf '%s\n' "$offenders" | sed 's/^/  /')
 They belong to the \`guards-test-selection\` job (#2067). A test task runs per
 variant, so wiring them there charges the ~165 s suite TWICE per push on the Unit
 critical path for work that compiles nothing — the regression #2067 removed. Add
-a step to that job instead."
+a step to that job instead (scripts/ci-test-selection-guards.sh).
+
+This also covers a shell harness a JVM test drives via runShellHarness (#2435):
+move the guard-invoking cases into a harness \`guards-test-selection\` runs.
+Rewording a mention to dodge this grep without moving the invocation is guard
+laundering — the cost stays, the signal goes."
     fi
   else
     fail "C9: \`$scan_root\` is not a git checkout, so the Gradle-test-graph scan could not run. 'I could not check' is not 'I checked and it is fine'."
@@ -374,7 +428,7 @@ $out"
 # for the intended reason. The pass count is asserted at the end, so the
 # anti-vacuous guard cannot itself pass vacuously.
 
-SELFTEST_EXPECTED_CASES=16 # 12 + C11/C13 cases for #2187 (11, 12, 13, 14)
+SELFTEST_EXPECTED_CASES=18 # 12 + C11/C13 for #2187 (11-14) + C9 one-hop for #2435 (15, 16)
 selftest_passed=0
 selftest_failed=0
 # Overridden per case so C9's scan can be pointed at a sandbox checkout instead
@@ -558,6 +612,31 @@ self_test() {
     > "$scan_sandbox/app/src/test/java/com/pocketshell/app/scripts/SmartTestSelectionScriptTest.kt"
   git -C "$scan_sandbox" add -A
   expect_red "10 a Gradle test task reaching the guards again" "C9" "$src"
+  rm -f "$scan_sandbox/app/src/test/java/com/pocketshell/app/scripts/SmartTestSelectionScriptTest.kt"
+
+  # Cases 15 and 16 (issue #2435) — the ONE-HOP hole. #2435 round 2 put four
+  # cases that run the real `--record`/`--verify` into two tests/scripts/*.sh
+  # harnesses that JVM tests drive through `runShellHarness(relativePath = …)`.
+  # The Kotlin file names the HARNESS, not the guard, so tier 1's scan saw
+  # nothing; C9 only went red by accident, on a KDoc paragraph that happened to
+  # spell one of the script names. Deleting that word would have turned the
+  # guard green over an unchanged ~25 s/push regression — guard laundering.
+  mkdir -p "$scan_sandbox/tests/scripts"
+  printf 'bash "$ROOT_DIR/scripts/check-test-execution-ledger.sh" --record "$dir"\n' \
+    > "$scan_sandbox/tests/scripts/orphan-harness-test.sh"
+  git -C "$scan_sandbox" add -A
+  # 15 — CONTROL, and the reason tier 2 is derived from real references rather
+  # than a blanket `tests/scripts/**` glob: a harness no Gradle test drives
+  # costs the Unit lane nothing. Without this case, "move it to
+  # guards-test-selection" would be indistinguishable from "rename the file".
+  expect_green "15 a harness no Gradle test drives may reference the guards" "$src"
+
+  # 16 — the #2435 regression itself: the SAME harness, now named by a JVM test
+  # exactly the way DiskPreflightScriptTest names its own.
+  printf 'class LedgerHarnessTest { fun t() { runShellHarness(relativePath = "tests/scripts/orphan-harness-test.sh") } }\n' \
+    > "$scan_sandbox/app/src/test/java/com/pocketshell/app/scripts/LedgerHarnessTest.kt"
+  git -C "$scan_sandbox" add -A
+  expect_red "16 a JVM-driven shell harness reaching the guards (#2435)" "C9" "$src"
   EXPECT_SCAN_ROOT=""
 
   # Case 11 (issue #2187) — THE HEADLINE MUTATION: restore `if: always()`.

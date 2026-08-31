@@ -756,6 +756,13 @@ run_case non-writable-cleanup cleanup_handles_non_writable_generated_copy_and_pr
 run_case active-retention active_release_copy_is_never_reclaimed
 run_case reserved-run-id reserved_cleanup_names_cannot_be_run_ids_or_bypass_live_owner_protection
 
+# Issue #2435's #2082 execution-ledger cases are NOT here: they run the real
+# #2063 selection-guard scripts, and #2067's C9 keeps those off the Gradle test
+# graph — this harness is driven by DiskPreflightScriptTest, so it is charged
+# once per variant on the Unit critical path. They live in
+# tests/scripts/release-ledger-lane-coverage-test.sh, run by the blocking
+# `guards-test-selection` job instead.
+
 expected_cases=16
 if [[ -n "${POCKETSHELL_RELEASE_STORAGE_TEST_CASE:-}" ]]; then
   expected_cases=1

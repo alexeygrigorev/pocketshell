@@ -390,6 +390,39 @@ if grep -Fqx 'INSTRUMENTATION_CODE: -1' "$SCRATCH/evidence-baseline/phase-1-inst
   exit 1
 fi
 
+# Issue #2435: a green run must leave a JUnit XML the #2063/#2082 execution
+# ledger can credit. Without it this class runs every night in nightly phase 5
+# and still reports NEVER EXECUTED, which is what kept the release job's ledger
+# `--verify` red and `record-validated-rc` unreachable. Assert the artifact
+# exists, names the class, and is credited by the REAL ledger script — and that
+# the deliberately-interrupted phase 1 is NOT re-encoded as a fake failure.
+BASELINE_JUNIT="$SCRATCH/evidence-baseline/junit-results/TEST-com.pocketshell.app.proof.LastSessionProcessRestartProofTest.xml"
+if [[ ! -s "$BASELINE_JUNIT" ]]; then
+  echo "baseline run produced no ledger JUnit XML at $BASELINE_JUNIT (issue #2435)" >&2
+  ls -la "$SCRATCH/evidence-baseline/junit-results" >&2 || true
+  exit 1
+fi
+grep -Fq 'classname="com.pocketshell.app.proof.LastSessionProcessRestartProofTest"' "$BASELINE_JUNIT"
+grep -Fq 'name="phaseTwoRestoresExactSuccessorGeneration"' "$BASELINE_JUNIT"
+if grep -Fq 'phaseOnePersistsExactSuccessorGeneration' "$BASELINE_JUNIT"; then
+  echo 'the deliberately interrupted phase 1 leaked into the ledger JUnit XML (issue #2435)' >&2
+  exit 1
+fi
+if grep -Fq '<failure' "$BASELINE_JUNIT"; then
+  echo 'a green two-phase run emitted a JUnit <failure> (issue #2435)' >&2
+  exit 1
+fi
+BASELINE_LEDGER="$SCRATCH/baseline-ledger.tsv"
+bash "$ROOT_DIR/scripts/check-test-execution-ledger.sh" \
+  --record "$SCRATCH/evidence-baseline/junit-results" \
+  --ledger "$BASELINE_LEDGER" --tier nightly --now 1700000000 > /dev/null
+grep -Fq 'com.pocketshell.app.proof.LastSessionProcessRestartProofTest	1700000000	nightly' \
+  "$BASELINE_LEDGER" || {
+  echo 'the real execution ledger did not credit the converted two-phase result (issue #2435)' >&2
+  cat "$BASELINE_LEDGER" >&2 || true
+  exit 1
+}
+
 # Pair-difference control: a same-second recreation may legitimately retain
 # session_created while tmux advances the session id. The oracle must accept a
 # pair with one changed field; requiring both fields to change is the original

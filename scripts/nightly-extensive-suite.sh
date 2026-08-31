@@ -266,6 +266,19 @@ EXPECTED_FAIL_CLASSES=(
 # Run as a trimmed slice in its own phase; excluded from the journey phase so it
 # does not just self-skip there (the journey phase never passes the opt-in flag).
 BOOTSTRAP_TEST_CLASS="com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest"
+# Issue #2435: the two host-card instrumentation classes gate themselves on the
+# SAME `pocketshellBootstrapScenarios=true` opt-in and use the SAME already-up
+# fixtures (bootstrap-ready:2230, bootstrap-uv-install:2231). Phase 1 selected
+# them but passes no opt-in, so every one of their methods came back
+# `<skipped/>`: attendance stayed green (a skip is a result, not a truncation)
+# while the execution ledger correctly refused to credit an all-skipped class,
+# and both showed up as NEVER EXECUTED in the release gate's `--verify`. Move
+# them where the opt-in actually is, exactly as #2111 did for the bootstrap
+# suite itself.
+HOST_CARD_SCENARIO_CLASSES=(
+  "com.pocketshell.app.hosts.HostCardStatusChipTest"
+  "com.pocketshell.app.hosts.HostCardSetupBadgeTest"
+)
 NOTIFICATION_PERMISSION_TEST_CLASS="com.pocketshell.app.notifications.NoNotificationPromptOnAppOpenE2eTest"
 # Issue #2264: this class is deliberately excluded from the ordinary connected
 # suite. Its two methods only prove process death when the host runs them in two
@@ -353,22 +366,47 @@ BOOTSTRAP_METHODS=(
 )
 BOOTSTRAP_CLASS_ARG="$(printf "%s\n" "${BOOTSTRAP_METHODS[@]}" \
   | sed "s|^|$BOOTSTRAP_TEST_CLASS#|" | paste -sd, -)"
+# Issue #2435: the host-card classes join phase 3 WHOLESALE (no `#method`
+# selector) — they are small and every method needs the same opt-in.
+BOOTSTRAP_CLASS_ARG="$BOOTSTRAP_CLASS_ARG,$(printf '%s\n' "${HOST_CARD_SCENARIO_CLASSES[@]}" | paste -sd, -)"
 
 # Classes excluded from the journey/E2E phase: the network-fault proofs (run in
 # their own un-gated phase), the #822 expected-fail lane (run in its own
 # non-gating phase 2b), the opt-in-only release-gate classes that need extra
 # env/args, and the opt-in bootstrap scenario suite (run in its own phase with
 # the pocketshellBootstrapScenarios flag) — all would otherwise self-skip.
+#
+# Issue #2435 removed two `LongRunning*` entries from this list. Both were
+# excluded by NAME PREFIX rather than by behaviour, and neither actually
+# self-skips wholesale in phase 1:
+#
+#   * LongRunningSessionStabilityTest has TWO @Test methods. Only the
+#     ten-minute hold is behind `assumeLongRunningTestEnabled()`. The other,
+#     `steadyForegroundHoldDoesNotFlapTransportEveryTenSeconds` (#794), has NO
+#     assume at all and its own comment says the 90 s hold is "cheap enough for
+#     the regular connected suite (vs the opt-in 10-minute gate above)". The
+#     class-level exclusion is what stopped it running anywhere, so the #794
+#     transport-flap regression guard has never executed on any lane.
+#   * LongRunningInstrumentationHeartbeatTest is a plain JVM logic test of
+#     `LongRunningInstrumentationHeartbeat.sleepSliceMs` — no runner
+#     annotation, no device dependency, no opt-in. It just happens to live in
+#     app/src/androidTest next to its production helper.
+#
+# Both therefore RUN in phase 1 now, and the ledger can credit them. The
+# ten-minute hold still only runs under the release gate's explicit
+# `LONG_RUNNING_TEST=1`, and in phase 1 it is reported `<skipped/>`, which the
+# execution ledger deliberately does not count as coverage.
 JOURNEY_EXCLUDED_CLASSES=(
   "${NETWORK_FAULT_CLASSES[@]}"
   "${EXPECTED_FAIL_CLASSES[@]}"
-  "$FQCN_PREFIX.LongRunningSessionStabilityTest"
-  "$FQCN_PREFIX.LongRunningInstrumentationHeartbeatTest"
   # Issue #2111: still excluded from phase 1 (which passes no opt-in, so it would
   # only self-skip there); it now runs in its OWN phase 4 with the opt-in + the
   # real-agent:2240 fixture.
   "$REAL_AGENT_TEST_CLASS"
   "$BOOTSTRAP_TEST_CLASS"
+  # Issue #2435: same reason as $BOOTSTRAP_TEST_CLASS — opt-in-gated, so phase 1
+  # can only all-skip them. They run in phase 3, which passes the opt-in.
+  "${HOST_CARD_SCENARIO_CLASSES[@]}"
   "$NOTIFICATION_PERMISSION_TEST_CLASS"
   "$PROCESS_RESTART_TEST_CLASS"
 )
@@ -379,6 +417,35 @@ JOURNEY_EXCLUDED_CLASSES=(
 # to the array so the two cannot drift.
 if [[ "${1:-}" == "--print-phase1-exclusions" ]]; then
   printf '%s\n' "${JOURNEY_EXCLUDED_CLASSES[@]}"
+  exit 0
+fi
+
+# Issue #2435: the classes the LATER phases actually select, by FQCN.
+#
+# This is deliberately NOT the complement of phase 1. Being excluded from phase
+# 1 says only "phase 1 must not select it"; it does NOT say any other phase
+# does. `LongRunningSessionStabilityTest` and
+# `LongRunningInstrumentationHeartbeatTest` sat in that gap — excluded from
+# phase 1 by name prefix, named by no later phase, therefore executed on NO
+# lane at all — which is precisely why the release gate's #2082 ledger
+# `--verify` reported them NEVER EXECUTED and the job could never conclude
+# success.
+#
+# Printed from the SAME arrays the phases run, right next to them, so the two
+# cannot drift; `tests/scripts/release-ledger-lane-coverage-test.sh` unions this
+# with the unit/phase-1 selectors and the release gate's shared-module
+# connected suites and fails when any registered class is claimed by no lane.
+if [[ "${1:-}" == "--print-later-phase-classes" ]]; then
+  {
+    printf '%s\n' "${NETWORK_FAULT_CLASSES[@]}"    # phase 2
+    printf '%s\n' "${EXPECTED_FAIL_CLASSES[@]}"    # phase 2b
+    # phase 3 selects `Class#method` for the bootstrap suite and whole classes
+    # for the host-card scenarios; the ledger accounts per class either way.
+    printf '%s\n' "$BOOTSTRAP_CLASS_ARG" | tr ',' '\n' | sed 's/#.*$//'
+    printf '%s\n' "$REAL_AGENT_TEST_CLASS"                # phase 4
+    printf '%s\n' "$NOTIFICATION_PERMISSION_TEST_CLASS"    # phase 1b
+    printf '%s\n' "$PROCESS_RESTART_TEST_CLASS"            # phase 5
+  } | grep -E '^[a-z][A-Za-z0-9_.]*\.[A-Z][A-Za-z0-9_]*$' | LC_ALL=C sort -u
   exit 0
 fi
 
@@ -799,6 +866,22 @@ if [[ "$RUN_AUX_PHASES" == "yes" ]]; then
     "$REPO_ROOT/scripts/two-phase-android-instrumentation.sh"
   PROCESS_RESTART_EXIT=$?
   echo "phase 5 (external process restart) exit code: $PROCESS_RESTART_EXIT"
+
+  # Issue #2435: phase 5 runs its class through direct `am instrument`, so
+  # Gradle writes no JUnit XML and nothing under $PHASE_REPORTS_DIR — which is
+  # the ONLY tree ci-nightly-execution-ledger.sh --aggregate records from. The
+  # harness now converts phase 2's own runner transcript; publish it on the
+  # phase-reports path so the rolling ledger can credit the class. Missing XML
+  # is left to the ledger's own `--verify` to report; never fabricated here.
+  process_restart_junit_dest="$PHASE_REPORTS_DIR/phase5-process-restart/outputs/androidTest-results/connected"
+  if compgen -G "$process_restart_run_dir/junit-results/*.xml" > /dev/null; then
+    mkdir -p "$process_restart_junit_dest"
+    cp "$process_restart_run_dir"/junit-results/*.xml "$process_restart_junit_dest/" \
+      && echo "phase 5: published $PROCESS_RESTART_TEST_CLASS JUnit XML to $process_restart_junit_dest"
+  else
+    echo "phase 5: no JUnit XML under $process_restart_run_dir/junit-results (the execution ledger will report the class uncredited)" >&2
+  fi
+
   if [[ "$PROCESS_RESTART_EXIT" -eq 0 ]]; then
     process_restart_classification="PASS"
     process_restart_status="PASS"
@@ -881,7 +964,7 @@ fi
   echo "| Notification permission (NON-GATING) | dedicated unsharded $NOTIFICATION_PERMISSION_TEST_CLASS; executed=$notification_permission_executed | external revoke/verify before instrumentation; external grant/verify after | $NOTIFICATION_PERMISSION_EXIT | **$notification_permission_status** ($notification_permission_classification) |"
   echo "| Network-fault proofs (GATING) | ${#NETWORK_FAULT_CLASSES[@]} Toxiproxy-backed classes | \`pocketshellNetworkFaultProofs=true\` (no pocketshellCi) | $NETWORK_FAULT_EXIT | **$nf_status** ($nf_classification) |"
   echo "| Expected-fail lane (NON-GATING) | ${#EXPECTED_FAIL_CLASSES[@]} class(es): #822 Slice C/D TDD specs + the #2111 Conversation-open latency proof | \`pocketshellNetworkFaultProofs=true\` | $EXPECTED_FAIL_EXIT | **$expectedfail_status** ($expectedfail_classification) |"
-  echo "| Bootstrap setup scenarios (GATING) | ALL ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (issue #2111) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** ($bootstrap_classification) |"
+  echo "| Bootstrap setup scenarios (GATING) | ALL ${#BOOTSTRAP_METHODS[@]} HostBootstrapScenarioSuiteTest methods (issue #2111) + ${#HOST_CARD_SCENARIO_CLASSES[@]} host-card classes (issue #2435) | \`pocketshellBootstrapScenarios=true\` | $BOOTSTRAP_EXIT | **$bootstrap_status** ($bootstrap_classification) |"
   echo "| Real-agent CLI gate (issue #2111; in overall_status, NOT in the fault verdict) | $REAL_AGENT_TEST_CLASS against real-agents:2240 | \`pocketshellRealAgentReleaseGate=1\` | $REAL_AGENT_EXIT | **$real_agent_status** ($real_agent_classification) |"
   echo "| External process-restart persistence (#2264) | $PROCESS_RESTART_TEST_CLASS; one suffixed install and two direct runner processes | external force-stop; no state reset/reinstall between phases | $PROCESS_RESTART_EXIT | **$process_restart_status** ($process_restart_classification) |"
   echo

@@ -771,3 +771,26 @@ find "$RUN_DIR" -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
 
 printf 'Two-phase Android process-restart proof passed.\n'
 printf 'Evidence: %s\n' "$RUN_DIR"
+
+# Issue #2435: this harness runs $TEST_CLASS through direct `am instrument`
+# processes, so Gradle never writes a JUnit XML for it and the #2063/#2082
+# execution ledger reported the class NEVER EXECUTED — which is what kept the
+# release job's ledger `--verify` red and `record-validated-rc` unreachable,
+# even though this proof runs green every night in phase 5.
+#
+# Only PHASE 2's transcript is converted. Phase 1 is DELIBERATELY interrupted
+# by the external force-stop, so its transcript carries an
+# INSTRUMENTATION_STATUS_CODE: -1/-2 that is a designed outcome, not a test
+# failure; re-encoding that as a JUnit `<failure/>` would put a fake red into
+# the nightly's collected results. Phase 2 completes naturally with
+# `INSTRUMENTATION_CODE: -1` + `OK (1 test)` (already hard-asserted above by
+# validate_instrumentation_success), and one non-skipped case is all the
+# ledger needs to credit the class. `--require-class` keeps this honest: if
+# the runner selected nothing, no XML is written at all.
+if ! bash "$ROOT_DIR/scripts/instrumentation-log-to-junit-xml.sh" \
+  --log "$RUN_DIR/phase-2-instrumentation.log" \
+  --out "$RUN_DIR/junit-results/TEST-$TEST_CLASS.xml" \
+  --suite "$TEST_CLASS" \
+  --require-class "$TEST_CLASS"; then
+  printf 'WARN: could not write ledger JUnit XML for %s\n' "$TEST_CLASS" >&2
+fi

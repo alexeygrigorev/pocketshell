@@ -39,6 +39,11 @@ sleep() {
   :
 }
 
+# Issue #2435: the helper writes its ledger JUnit XML here instead of the repo
+# build tree, so the cases below can assert on it without touching real output.
+DETACHED_INSTRUMENTATION_RESULTS_DIR="$tmpdir/ledger-results"
+export DETACHED_INSTRUMENTATION_RESULTS_DIR
+
 # shellcheck source=/dev/null
 source "$helpers"
 
@@ -91,6 +96,7 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
       printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
       printf 'INSTRUMENTATION_STATUS: current=1\n'
       printf 'INSTRUMENTATION_STATUS: numtests=1\n'
+      printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
       printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
     } > "$device_log"
     printf '255\n' > "$device_status"
@@ -101,6 +107,7 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
   if [[ "$mode" == "delayed_success" ]]; then
     {
       printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+      printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
       printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
     } > "$device_log"
     exit 0
@@ -109,6 +116,7 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
   if [[ "$mode" == "timeout" ]]; then
     {
       printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+      printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
       printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
     } > "$device_log"
     exit 0
@@ -117,6 +125,7 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
   if [[ "$mode" == "missing_status" ]]; then
     {
       printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+      printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
       printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
       printf 'INSTRUMENTATION_RESULT: stream=\n'
       printf 'missing status fixture finished\n'
@@ -128,6 +137,7 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
   if [[ "$mode" == "corrupt_status" ]]; then
     {
       printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+      printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
       printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
       printf 'INSTRUMENTATION_RESULT: stream=\n'
       printf 'corrupt status fixture finished\n'
@@ -140,6 +150,7 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
   if [[ "$mode" == "generic_nonzero" ]]; then
     {
       printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+      printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
       printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
       printf 'INSTRUMENTATION_RESULT: stream=\n'
       printf 'generic nonzero fixture finished\n'
@@ -161,6 +172,8 @@ if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\
 
   {
     printf 'INSTRUMENTATION_STATUS: stream=LONG_RUNNING_HEARTBEAT elapsed_ms=15000 next_tick_index=1 label=hold\n'
+    printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+    printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
     printf 'INSTRUMENTATION_STATUS_CODE: 0\n'
     printf 'INSTRUMENTATION_CODE: -1\n'
     printf 'OK (1 test)\n'
@@ -179,6 +192,9 @@ if [[ "$*" == shell\ cat\ /data/local/tmp/pocketshell-long-running-*.log* ]]; th
       append_once \
         'LONG_RUNNING_HEARTBEAT elapsed_ms=15000' \
         'INSTRUMENTATION_STATUS: stream=LONG_RUNNING_HEARTBEAT elapsed_ms=15000 next_tick_index=1 label=hold'
+      append_once \
+        'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHold' \
+        'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth'
       append_once 'INSTRUMENTATION_STATUS_CODE: 0' 'INSTRUMENTATION_STATUS_CODE: 0'
     fi
     if (( poll >= 3 )); then
@@ -284,6 +300,45 @@ pass_case "status file did not record two instrumentation attempts"
 grep -q 'INSTRUMENTATION_CODE: -1' "$tmpdir/transport_then_success/instrumentation.log" ||
   fail "canonical instrumentation log did not contain final success"
 pass_case "canonical instrumentation log did not contain final success"
+
+# Issue #2435: the release gate runs this class through a DETACHED
+# `am instrument`, so Gradle never writes a JUnit XML for it and the #2063/#2082
+# execution ledger reported it NEVER EXECUTED — which is one of the seven
+# classes that made the release job conclude `failure` on a green validation and
+# kept `record-validated-rc` unreachable. A successful run must now leave
+# ledger-shaped XML naming the class, and a run that only self-skipped must not.
+long_running_junit="$DETACHED_INSTRUMENTATION_RESULTS_DIR/TEST-com.pocketshell.app.proof.LongRunningSessionStabilityTest.xml"
+[[ -s "$long_running_junit" ]] ||
+  fail "a successful long-running run wrote no ledger JUnit XML at $long_running_junit (#2435)"
+pass_case "a successful long-running run wrote ledger JUnit XML"
+grep -Fq 'classname="com.pocketshell.app.proof.LongRunningSessionStabilityTest"' "$long_running_junit" ||
+  fail "the converted long-running JUnit XML does not name the test class (#2435)"
+pass_case "the converted long-running JUnit XML names the test class"
+# Whether the REAL execution-ledger script credits that XML is proven in
+# tests/scripts/release-ledger-lane-coverage-test.sh, not here: this harness is
+# driven by ReleaseGateScriptTest, so running the #2063 selection guards from it
+# would put them back on the Unit critical path once per variant (#2067 C9).
+
+# Negative half: an all-skipped transcript (the class without its opt-in arg)
+# must produce NO evidence at all. --require-class is what stops a self-skip
+# being laundered into a ledger entry.
+skip_log="$tmpdir/long-running-selfskip.log"
+{
+  printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+  printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
+  printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
+  printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+  printf 'INSTRUMENTATION_STATUS: stack=org.junit.AssumptionViolatedException: opt-in absent\n'
+  printf 'INSTRUMENTATION_STATUS: test=tenMinuteForegroundHoldRetainsTmuxSessionWithoutReconnectsOrMemoryGrowth\n'
+  printf 'INSTRUMENTATION_STATUS_CODE: -4\n'
+  printf 'INSTRUMENTATION_CODE: -1\n'
+} > "$skip_log"
+DETACHED_INSTRUMENTATION_RESULTS_DIR="$tmpdir/ledger-results-selfskip" \
+  record_detached_instrumentation_junit_xml \
+  "com.pocketshell.app.proof.LongRunningSessionStabilityTest" "$skip_log" > /dev/null 2>&1
+[[ ! -e "$tmpdir/ledger-results-selfskip/TEST-com.pocketshell.app.proof.LongRunningSessionStabilityTest.xml" ]] ||
+  fail "an all-skipped detached run still produced ledger JUnit XML (#2435)"
+pass_case "an all-skipped detached run produces no ledger JUnit XML"
 [[ -s "$tmpdir/transport_then_success/instrumentation-attempt-1.log" ]] ||
   fail "first attempt instrumentation log was not preserved"
 pass_case "first attempt instrumentation log was not preserved"
@@ -339,5 +394,5 @@ pass_case "generic nonzero final log was not preserved"
 # Issue #2113: a harness that exits 0 having run nothing is the vacuous green
 # process.md catalogues. The count line is what makes the JVM assertion about
 # behaviour rather than about bash's exit status.
-(( CASES == 22 )) || fail "expected 22 cases to run, saw $CASES"
+(( CASES == 25 )) || fail "expected 25 cases to run, saw $CASES"
 printf 'PASS: long-running release gate retry helper (%s cases)\n' "$CASES"

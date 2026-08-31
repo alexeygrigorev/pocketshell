@@ -23,7 +23,8 @@
 # so a depth-1 checkout is enough (the guards never diff against a base ref; the
 # diff path is a different mode, and it fails safe to a full run anyway).
 #
-# BUDGET. ~165 s total, ~80% of it the selection self-test. Read the total as
+# BUDGET. ~185 s total (~165 s before #2435 added the ~19 s release-ledger
+# lane-coverage harness), ~70% of it the selection self-test. Read the total as
 # noise-dominated — four same-content observations spanned 154.2–205.3 s (33%).
 # The meaningful figure is structural: ~11.6 s per index-rebuilding mutation
 # case, ~2 cases of headroom before the dependency-index build must be shared.
@@ -114,6 +115,14 @@ run_guard "check-journey-quarantine-expiry" \
   bash scripts/check-journey-quarantine-expiry.sh
 run_guard "test-journey-quarantine-non-blocking" \
   bash scripts/test-journey-quarantine-non-blocking.sh
+
+# Issue #2435: the release job's #2082 ledger step, and the lane-completeness
+# property that step depends on, driven against the REAL ledger script. It runs
+# HERE and not from a JVM test for the same reason everything above does: a
+# Gradle test task runs both variants, so the real-tree registration walk would
+# be charged twice per push on the Unit critical path (#2067 C9). ~19 s.
+run_guard "release-ledger-lane-coverage" \
+  bash tests/scripts/release-ledger-lane-coverage-test.sh
 
 suite_end=$(date +%s)
 printf '%-46s %4ss\n' "TOTAL" "$((suite_end - suite_start))" >> "$TIMINGS"
